@@ -18,9 +18,13 @@
 //! - `ρ_acum` derivation walks the cascade in topological order summing
 //!   downstream equivalent productivities.
 
+use std::collections::HashMap;
+
 use cobre_core::{CascadeTopology, EntityId, Hydro, HydroGenerationModel};
-use cobre_io::HydroReferenceVolumeFractions;
+use cobre_io::{HydroGeometryRow, HydroReferenceVolumeFractions};
 use thiserror::Error;
+
+use crate::fpha_fitting::{ForebayTable, evaluate_losses, evaluate_tailrace};
 
 /// Per-`(hydro, stage)` scalars used for ENA / EARM accounting.
 ///
@@ -178,6 +182,24 @@ pub enum EnergyConversionError {
         /// Stored maximum turbined flow \[m³/s\].
         q_max: f64,
     },
+    /// FPHA equivalent head `h_eq = h_fore − h_tail − h_loss` is non-positive,
+    /// which would yield a non-physical `ρ_eq`.
+    #[error("hydro {hydro_id:?} has non-positive equivalent head h_eq={h_eq}")]
+    NonPositiveEquivalentHead {
+        /// Identifier of the offending hydro.
+        hydro_id: EntityId,
+        /// Computed equivalent head \[m\].
+        h_eq: f64,
+    },
+    /// Building a `ForebayTable` from the VHA rows failed validation.
+    #[error("hydro {hydro_id:?} forebay table construction failed: {message}")]
+    ForebayTableInvalid {
+        /// Identifier of the offending hydro.
+        hydro_id: EntityId,
+        /// Human-readable description of the underlying FPHA-fitting error.
+        /// The concrete error type is intentionally kept crate-private.
+        message: String,
+    },
 }
 
 /// Build the [`EnergyConversionSet`] for the case.
@@ -193,14 +215,18 @@ pub enum EnergyConversionError {
 /// # Errors
 ///
 /// Returns [`EnergyConversionError::InvalidStorageRange`] when a hydro has
-/// `max_storage_hm3 < min_storage_hm3`, and
-/// [`EnergyConversionError::NegativeMaxTurbined`] when `max_turbined_m3s < 0`.
+/// `max_storage_hm3 < min_storage_hm3`, [`EnergyConversionError::NegativeMaxTurbined`]
+/// when `max_turbined_m3s < 0`, [`EnergyConversionError::ForebayTableInvalid`]
+/// when VHA rows for an FPHA hydro do not form a valid forebay table, and
+/// [`EnergyConversionError::NonPositiveEquivalentHead`] when the derived
+/// `h_eq` for an FPHA hydro is non-positive.
 #[allow(clippy::missing_errors_doc, unused_variables)]
-pub fn build_energy_conversion_set(
+pub fn build_energy_conversion_set<S: std::hash::BuildHasher>(
     hydros: &[Hydro],
     n_stages: usize,
     cascade: &CascadeTopology,
     reference_volume_fractions: &HydroReferenceVolumeFractions,
+    vha_rows_by_hydro: &HashMap<EntityId, Vec<HydroGeometryRow>, S>,
 ) -> Result<EnergyConversionSet, EnergyConversionError> {
     let n_hydros = hydros.len();
 
@@ -225,10 +251,44 @@ pub fn build_energy_conversion_set(
             });
         }
 
+        // Build the ForebayTable once per hydro (independent of stage) so the
+        // per-stage loop only does lookups.
+        let forebay_table = if matches!(hydro.generation_model, HydroGenerationModel::Fpha) {
+            match (
+                vha_rows_by_hydro.get(&hydro.id),
+                hydro.specific_productivity_mw_per_m3s_per_m,
+            ) {
+                (Some(rows), Some(_)) => {
+                    Some(ForebayTable::new(rows, &hydro.name).map_err(|e| {
+                        EnergyConversionError::ForebayTableInvalid {
+                            hydro_id: hydro.id,
+                            message: e.to_string(),
+                        }
+                    })?)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
         let mut row: Vec<EnergyConversion> = Vec::with_capacity(n_stages);
         for stage in 0..n_stages {
             let fraction = reference_volume_fractions.get(hydro.id, stage);
-            let conversion = derive_conversion_for_hydro(hydro, fraction);
+            let mut conversion = derive_conversion_for_hydro(hydro, fraction);
+            if let (HydroGenerationModel::Fpha, Some(table), Some(rho_esp)) = (
+                &hydro.generation_model,
+                forebay_table.as_ref(),
+                hydro.specific_productivity_mw_per_m3s_per_m,
+            ) {
+                let h_eq = fpha_equivalent_head(
+                    hydro,
+                    conversion.reference_volume_hm3,
+                    conversion.reference_outflow_m3s,
+                    table,
+                )?;
+                conversion.equivalent_productivity_mw_per_m3s = rho_esp * h_eq;
+            }
             row.push(conversion);
         }
         per_hydro_stage.push(row);
@@ -247,8 +307,8 @@ pub fn build_energy_conversion_set(
 ///
 /// `fraction` is the resolved reference-volume fraction for the
 /// `(hydro, stage)` of interest, already obtained from the resolver. For FPHA
-/// hydros, `equivalent_productivity_mw_per_m3s` is left at `0.0` — populated
-/// by the FPHA-specific derivation in a later step.
+/// hydros, `equivalent_productivity_mw_per_m3s` is left at `0.0` here — it is
+/// filled in by the FPHA-specific derivation in `build_energy_conversion_set`.
 fn derive_conversion_for_hydro(hydro: &Hydro, fraction: f64) -> EnergyConversion {
     let v_min = hydro.min_storage_hm3;
     let v_max = hydro.max_storage_hm3;
@@ -270,6 +330,38 @@ fn derive_conversion_for_hydro(hydro: &Hydro, fraction: f64) -> EnergyConversion
     }
 }
 
+/// Compute the FPHA equivalent head `h_eq = h_fore(V_ref) − h_tail(Q_ref) − h_loss`.
+///
+/// `h_tail` is taken from `hydro.tailrace` when present (else 0.0), and
+/// `h_loss` from `hydro.hydraulic_losses` (matched explicitly so new variants
+/// trip the compiler). Returns [`EnergyConversionError::NonPositiveEquivalentHead`]
+/// when the result is `<= 0.0` (which would yield a non-physical `ρ_eq`).
+fn fpha_equivalent_head(
+    hydro: &Hydro,
+    v_ref: f64,
+    q_ref: f64,
+    table: &ForebayTable,
+) -> Result<f64, EnergyConversionError> {
+    let h_fore = table.height(v_ref);
+    let h_tail = hydro
+        .tailrace
+        .as_ref()
+        .map_or(0.0, |t| evaluate_tailrace(t, q_ref));
+    let gross_head = h_fore - h_tail;
+    let h_loss = hydro
+        .hydraulic_losses
+        .as_ref()
+        .map_or(0.0, |m| evaluate_losses(m, gross_head, q_ref));
+    let h_eq = h_fore - h_tail - h_loss;
+    if h_eq <= 0.0 {
+        return Err(EnergyConversionError::NonPositiveEquivalentHead {
+            hydro_id: hydro.id,
+            h_eq,
+        });
+    }
+    Ok(h_eq)
+}
+
 #[cfg(test)]
 #[allow(
     clippy::doc_markdown,
@@ -279,8 +371,13 @@ fn derive_conversion_for_hydro(hydro: &Hydro, fraction: f64) -> EnergyConversion
     clippy::unwrap_used
 )]
 mod tests {
-    use cobre_core::{CascadeTopology, EntityId, Hydro, HydroGenerationModel, HydroPenalties};
-    use cobre_io::{HydroReferenceVolumeFractions, build_hydro_reference_volume_fractions};
+    use cobre_core::{
+        CascadeTopology, EntityId, HydraulicLossesModel, Hydro, HydroGenerationModel,
+        HydroPenalties,
+    };
+    use cobre_io::{
+        HydroGeometryRow, HydroReferenceVolumeFractions, build_hydro_reference_volume_fractions,
+    };
 
     use super::*;
 
@@ -420,8 +517,8 @@ mod tests {
         let cascade = CascadeTopology::build(&hydros);
         let resolver = make_resolver(&hydros);
 
-        let set =
-            build_energy_conversion_set(&hydros, 2, &cascade, &resolver).expect("builder succeeds");
+        let set = build_energy_conversion_set(&hydros, 2, &cascade, &resolver, &HashMap::new())
+            .expect("builder succeeds");
 
         assert_eq!(set.n_hydros(), 2);
         assert_eq!(set.n_stages(), 2);
@@ -482,8 +579,8 @@ mod tests {
         let cascade = CascadeTopology::build(&hydros);
         let resolver = constant_resolver(&hydros, 0.65, 2);
 
-        let set =
-            build_energy_conversion_set(&hydros, 2, &cascade, &resolver).expect("builder succeeds");
+        let set = build_energy_conversion_set(&hydros, 2, &cascade, &resolver, &HashMap::new())
+            .expect("builder succeeds");
 
         let c = set.conversion(0, 0);
         assert_eq!(c.equivalent_productivity_mw_per_m3s, 0.9);
@@ -506,8 +603,8 @@ mod tests {
         let cascade = CascadeTopology::build(&hydros);
         let resolver = constant_resolver(&hydros, 0.5, 1);
 
-        let set =
-            build_energy_conversion_set(&hydros, 1, &cascade, &resolver).expect("builder succeeds");
+        let set = build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &HashMap::new())
+            .expect("builder succeeds");
 
         assert_eq!(set.conversion(0, 0).equivalent_productivity_mw_per_m3s, 1.2);
     }
@@ -528,7 +625,7 @@ mod tests {
 
         for f in [0.1_f64, 0.5, 1.0] {
             let resolver = constant_resolver(&hydros, f, 1);
-            let set = build_energy_conversion_set(&hydros, 1, &cascade, &resolver)
+            let set = build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &HashMap::new())
                 .expect("builder succeeds");
             let expected = 100.0 + f * (200.0 - 100.0);
             assert!(
@@ -569,8 +666,8 @@ mod tests {
         let resolver =
             build_hydro_reference_volume_fractions(rows, 0.65, &hydros, &stage_to_season)
                 .expect("resolver builds");
-        let set =
-            build_energy_conversion_set(&hydros, 4, &cascade, &resolver).expect("builder succeeds");
+        let set = build_energy_conversion_set(&hydros, 4, &cascade, &resolver, &HashMap::new())
+            .expect("builder succeeds");
 
         let expected = [150.0_f64, 170.0, 150.0, 170.0];
         for (s, want) in expected.iter().enumerate() {
@@ -598,7 +695,8 @@ mod tests {
         let cascade = CascadeTopology::build(&hydros);
         let resolver = constant_resolver(&hydros, 0.65, 1);
 
-        let err = build_energy_conversion_set(&hydros, 1, &cascade, &resolver).unwrap_err();
+        let err = build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &HashMap::new())
+            .unwrap_err();
         match err {
             EnergyConversionError::InvalidStorageRange { hydro_id, .. } => {
                 assert_eq!(hydro_id, hydros[0].id);
@@ -622,7 +720,8 @@ mod tests {
         let cascade = CascadeTopology::build(&hydros);
         let resolver = constant_resolver(&hydros, 0.65, 1);
 
-        let err = build_energy_conversion_set(&hydros, 1, &cascade, &resolver).unwrap_err();
+        let err = build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &HashMap::new())
+            .unwrap_err();
         match err {
             EnergyConversionError::NegativeMaxTurbined { hydro_id, q_max } => {
                 assert_eq!(hydro_id, hydros[0].id);
@@ -644,12 +743,203 @@ mod tests {
         )];
         let cascade = CascadeTopology::build(&hydros);
         let resolver = constant_resolver(&hydros, 0.5, 1);
-        let set = build_energy_conversion_set(&hydros, 1, &cascade, &resolver)
+        let set = build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &HashMap::new())
             .expect("builder succeeds for FPHA");
 
         let c = set.conversion(0, 0);
         assert_eq!(c.equivalent_productivity_mw_per_m3s, 0.0);
         assert_eq!(c.reference_volume_hm3, 150.0);
         assert_eq!(c.reference_outflow_m3s, 50.0);
+    }
+
+    // ── ticket-005 FPHA derivation tests ───────────────────────────────────
+
+    /// A VHA table designed so that `table.height(V_ref) = expected_h_fore`
+    /// for the V_ref produced by `make_hydro_with(...) + fraction=0.65`. The
+    /// linear interpolation between (V_min=100, h=300) and (V_max=200, h=465)
+    /// yields h(165) = 300 + 0.65 * (465 - 300) = 300 + 107.25 = 407.25, but
+    /// we want exactly 400.0 at V=165, so use:
+    /// (100, 360) and (200, 440) -> h(165) = 360 + 0.65 * 80 = 412.0 — also
+    /// not exact. To get exactly 400 at v=165, set h(100)=295 and h(200)=460:
+    /// h(165) = 295 + 0.65 * 165 = 295 + 107.25 = 402.25 — still off.
+    /// Easiest: use a flat table h(v) = 400 for all v (two points with same height).
+    fn vha_constant_height(hydro_id: EntityId, height: f64) -> (EntityId, Vec<HydroGeometryRow>) {
+        let rows = vec![
+            HydroGeometryRow {
+                hydro_id,
+                volume_hm3: 0.0,
+                height_m: height,
+                area_km2: 1.0,
+            },
+            HydroGeometryRow {
+                hydro_id,
+                volume_hm3: 1000.0,
+                height_m: height,
+                area_km2: 1.0,
+            },
+        ];
+        (hydro_id, rows)
+    }
+
+    fn fpha_hydro_for_tests(id: i32) -> Hydro {
+        make_hydro_with(
+            id,
+            HydroGenerationModel::Fpha,
+            100.0,
+            200.0,
+            50.0,
+            Some(0.0090),
+        )
+    }
+
+    #[test]
+    fn fpha_rho_eq_from_vha_no_tailrace_no_losses() {
+        let mut hydro = fpha_hydro_for_tests(7);
+        hydro.tailrace = None;
+        hydro.hydraulic_losses = None;
+        let hydros = vec![hydro];
+        let cascade = CascadeTopology::build(&hydros);
+        let resolver = constant_resolver(&hydros, 0.65, 1);
+        let (id, rows) = vha_constant_height(hydros[0].id, 400.0);
+        let mut map = HashMap::new();
+        map.insert(id, rows);
+
+        let set = build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &map)
+            .expect("builder succeeds");
+
+        let got = set.conversion(0, 0).equivalent_productivity_mw_per_m3s;
+        let expected = 0.0090 * 400.0;
+        assert!(
+            (got - expected).abs() < 1e-12,
+            "got {got}, expected {expected}"
+        );
+    }
+
+    #[test]
+    fn fpha_rho_eq_with_factor_losses() {
+        let mut hydro = fpha_hydro_for_tests(7);
+        hydro.tailrace = None;
+        hydro.hydraulic_losses = Some(HydraulicLossesModel::Factor { value: 0.05 });
+        let hydros = vec![hydro];
+        let cascade = CascadeTopology::build(&hydros);
+        let resolver = constant_resolver(&hydros, 0.65, 1);
+        let (id, rows) = vha_constant_height(hydros[0].id, 400.0);
+        let mut map = HashMap::new();
+        map.insert(id, rows);
+
+        let set = build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &map)
+            .expect("builder succeeds");
+
+        // h_eq = 400 - 0 - 0.05 * 400 = 380; rho_eq = 0.009 * 380 = 3.42
+        let got = set.conversion(0, 0).equivalent_productivity_mw_per_m3s;
+        let expected = 0.0090 * 380.0;
+        assert!(
+            (got - expected).abs() < 1e-12,
+            "got {got}, expected {expected}"
+        );
+    }
+
+    #[test]
+    fn fpha_rho_eq_with_constant_losses() {
+        let mut hydro = fpha_hydro_for_tests(7);
+        hydro.tailrace = None;
+        hydro.hydraulic_losses = Some(HydraulicLossesModel::Constant { value_m: 5.0 });
+        let hydros = vec![hydro];
+        let cascade = CascadeTopology::build(&hydros);
+        let resolver = constant_resolver(&hydros, 0.65, 1);
+        let (id, rows) = vha_constant_height(hydros[0].id, 400.0);
+        let mut map = HashMap::new();
+        map.insert(id, rows);
+
+        let set = build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &map)
+            .expect("builder succeeds");
+
+        // h_eq = 400 - 0 - 5 = 395; rho_eq = 0.009 * 395 = 3.555
+        let got = set.conversion(0, 0).equivalent_productivity_mw_per_m3s;
+        let expected = 0.0090 * 395.0;
+        assert!(
+            (got - expected).abs() < 1e-12,
+            "got {got}, expected {expected}"
+        );
+    }
+
+    #[test]
+    fn fpha_missing_rho_esp_yields_zero() {
+        let mut hydro = fpha_hydro_for_tests(7);
+        hydro.specific_productivity_mw_per_m3s_per_m = None;
+        hydro.tailrace = None;
+        hydro.hydraulic_losses = None;
+        let hydros = vec![hydro];
+        let cascade = CascadeTopology::build(&hydros);
+        let resolver = constant_resolver(&hydros, 0.65, 1);
+        let (id, rows) = vha_constant_height(hydros[0].id, 400.0);
+        let mut map = HashMap::new();
+        map.insert(id, rows);
+
+        let set = build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &map)
+            .expect("builder succeeds");
+
+        assert_eq!(set.conversion(0, 0).equivalent_productivity_mw_per_m3s, 0.0);
+    }
+
+    #[test]
+    fn fpha_missing_vha_yields_zero() {
+        let hydro = fpha_hydro_for_tests(7); // has rho_esp = Some(0.009)
+        let hydros = vec![hydro];
+        let cascade = CascadeTopology::build(&hydros);
+        let resolver = constant_resolver(&hydros, 0.65, 1);
+
+        let set = build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &HashMap::new())
+            .expect("builder succeeds");
+
+        assert_eq!(set.conversion(0, 0).equivalent_productivity_mw_per_m3s, 0.0);
+    }
+
+    #[test]
+    fn fpha_rejects_non_positive_h_eq() {
+        let mut hydro = fpha_hydro_for_tests(7);
+        hydro.tailrace = None;
+        // Constant loss equal to h_fore -> h_eq = 0 -> non-positive -> Err.
+        hydro.hydraulic_losses = Some(HydraulicLossesModel::Constant { value_m: 400.0 });
+        let hydros = vec![hydro];
+        let cascade = CascadeTopology::build(&hydros);
+        let resolver = constant_resolver(&hydros, 0.65, 1);
+        let (id, rows) = vha_constant_height(hydros[0].id, 400.0);
+        let mut map = HashMap::new();
+        map.insert(id, rows);
+
+        let err = build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &map).unwrap_err();
+        match err {
+            EnergyConversionError::NonPositiveEquivalentHead { hydro_id, h_eq } => {
+                assert_eq!(hydro_id, hydros[0].id);
+                assert!(h_eq <= 0.0);
+            }
+            other => panic!("expected NonPositiveEquivalentHead, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fpha_propagates_forebay_table_error() {
+        // 1-row VHA fails ForebayTable::new (InsufficientPoints).
+        let hydro = fpha_hydro_for_tests(7);
+        let hydros = vec![hydro];
+        let cascade = CascadeTopology::build(&hydros);
+        let resolver = constant_resolver(&hydros, 0.65, 1);
+        let rows = vec![HydroGeometryRow {
+            hydro_id: hydros[0].id,
+            volume_hm3: 0.0,
+            height_m: 400.0,
+            area_km2: 1.0,
+        }];
+        let mut map = HashMap::new();
+        map.insert(hydros[0].id, rows);
+
+        let err = build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &map).unwrap_err();
+        match err {
+            EnergyConversionError::ForebayTableInvalid { hydro_id, .. } => {
+                assert_eq!(hydro_id, hydros[0].id);
+            }
+            other => panic!("expected ForebayTableInvalid, got: {other:?}"),
+        }
     }
 }
