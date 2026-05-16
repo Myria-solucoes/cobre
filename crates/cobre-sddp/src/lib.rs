@@ -25,6 +25,7 @@ pub mod conversion;
 pub mod cut;
 pub mod cut_selection;
 pub mod cut_sync;
+pub mod energy_conversion;
 pub mod error;
 pub mod estimation;
 pub mod forward;

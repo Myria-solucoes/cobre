@@ -117,6 +117,9 @@ pub(crate) struct RawHydro {
     /// Reservoir filling configuration. Absent or null = no filling operation.
     #[serde(default)]
     filling: Option<RawFillingConfig>,
+    /// Specific productivity `ρ_esp` \[MW / ((m³/s) · m)\]. Absent or null = not specified.
+    #[serde(default)]
+    specific_productivity_mw_per_m3s_per_m: Option<f64>,
     /// Entity-level penalty overrides. Absent = all penalties use global defaults.
     #[serde(default)]
     penalties: Option<RawHydroPenaltyOverrides>,
@@ -721,6 +724,8 @@ fn convert_hydros(raw: RawHydroFile, global: &GlobalPenaltyDefaults) -> Vec<Hydr
                 generation_model,
                 min_turbined_m3s,
                 max_turbined_m3s,
+                specific_productivity_mw_per_m3s_per_m: raw_hydro
+                    .specific_productivity_mw_per_m3s_per_m,
                 min_generation_mw,
                 max_generation_mw,
                 tailrace,

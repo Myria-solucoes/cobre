@@ -339,6 +339,7 @@ mod tests {
             generation_model,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 500.0,
             tailrace: None,
@@ -520,6 +521,7 @@ mod tests {
             simulation: SimulationConfig::default(),
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
+            energy: crate::EnergyConfig::default(),
         };
 
         ParsedData {

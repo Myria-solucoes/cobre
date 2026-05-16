@@ -854,6 +854,7 @@ mod tests {
             },
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 250.0,
             tailrace: None,
@@ -1069,6 +1070,7 @@ mod tests {
             simulation: IoSimulationConfig::default(),
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
+            energy: cobre_io::EnergyConfig::default(),
         }
     }
 
@@ -1794,6 +1796,7 @@ mod tests {
             simulation: IoSimulationConfig::default(),
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
+            energy: cobre_io::EnergyConfig::default(),
         };
 
         let params = StudyParams::from_config(&config).expect("from_config");
@@ -1881,6 +1884,7 @@ mod tests {
             },
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
+            energy: cobre_io::EnergyConfig::default(),
         };
 
         let params = StudyParams::from_config(&config).expect("from_config");
@@ -1966,6 +1970,7 @@ mod tests {
             simulation: IoSimulationConfig::default(),
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
+            energy: cobre_io::EnergyConfig::default(),
         }
     }
 
@@ -2147,6 +2152,7 @@ mod tests {
             },
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 250.0,
             tailrace: None,
@@ -2487,6 +2493,7 @@ mod tests {
             },
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 250.0,
             tailrace: None,
@@ -3008,6 +3015,7 @@ mod tests {
             },
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 250.0,
             tailrace: None,
@@ -3282,6 +3290,7 @@ mod tests {
             },
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 250.0,
             tailrace: None,
@@ -3538,6 +3547,7 @@ mod tests {
             },
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 250.0,
             tailrace: None,
@@ -3812,6 +3822,7 @@ mod tests {
             },
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 250.0,
             tailrace: None,
@@ -4113,6 +4124,7 @@ mod tests {
             },
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 250.0,
             tailrace: None,

@@ -334,6 +334,7 @@ mod tests {
             },
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
+            energy: crate::EnergyConfig::default(),
         }
     }
 

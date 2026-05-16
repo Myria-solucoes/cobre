@@ -362,6 +362,7 @@ mod tests {
             simulation: IoSimulationConfig::default(),
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
+            energy: cobre_io::EnergyConfig::default(),
         }
     }
 
@@ -440,6 +441,7 @@ mod tests {
             simulation: IoSimulationConfig::default(),
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
+            energy: cobre_io::EnergyConfig::default(),
         }
     }
 

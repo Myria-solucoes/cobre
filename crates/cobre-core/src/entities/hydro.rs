@@ -213,6 +213,18 @@ pub struct Hydro {
     pub min_turbined_m3s: f64,
     /// Maximum turbined flow (installed turbine capacity) \[m³/s\].
     pub max_turbined_m3s: f64,
+    /// Specific productivity `ρ_esp` \[MW / ((m³/s) · m)\].
+    ///
+    /// Used to derive the equivalent productivity `ρ_eq` = `ρ_esp` · `h_eq(V_ref, Q_ref)`
+    /// for FPHA hydros during energy-conversion preprocessing. Non-FPHA hydros
+    /// (`ConstantProductivity`, `LinearizedHead`) ignore this field because their
+    /// productivity is already supplied as a scalar by the generation model.
+    ///
+    /// FPHA hydros may instead supply `ρ_eq` directly through
+    /// `system/hydro_energy_productivity.parquet`. If neither is supplied,
+    /// energy-conversion preprocessing rejects the case.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub specific_productivity_mw_per_m3s_per_m: Option<f64>,
     /// Minimum electrical generation \[MW\].
     pub min_generation_mw: f64,
     /// Maximum electrical generation (installed capacity) \[MW\].
@@ -279,6 +291,7 @@ mod tests {
             generation_model: model,
             min_turbined_m3s: 200.0,
             max_turbined_m3s: 12_600.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 14_000.0,
             tailrace: None,
@@ -350,6 +363,7 @@ mod tests {
             },
             min_turbined_m3s: 500.0,
             max_turbined_m3s: 22_500.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 8370.0,
             tailrace: Some(TailraceModel::Polynomial {
@@ -522,6 +536,7 @@ mod tests {
             },
             min_turbined_m3s: 500.0,
             max_turbined_m3s: 22_500.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 8370.0,
             tailrace: Some(TailraceModel::Polynomial {
@@ -593,5 +608,39 @@ mod tests {
         assert!(
             (hydro.evaporation_reference_volumes_hm3.unwrap()[5] - 9_500.0).abs() < f64::EPSILON
         );
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn specific_productivity_defaults_to_none_in_json() {
+        let hydro = minimal_hydro(HydroGenerationModel::ConstantProductivity {
+            productivity_mw_per_m3s: 0.8,
+        });
+        assert_eq!(hydro.specific_productivity_mw_per_m3s_per_m, None);
+
+        let json = serde_json::to_string(&hydro).expect("serialize");
+        let parsed: Hydro = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.specific_productivity_mw_per_m3s_per_m, None);
+
+        // Field is also `None` when the JSON omits the key entirely (serde(default)).
+        let json_without_key = json.replace(",\"specific_productivity_mw_per_m3s_per_m\":null", "");
+        let parsed_missing: Hydro =
+            serde_json::from_str(&json_without_key).expect("deserialize without key");
+        assert_eq!(parsed_missing.specific_productivity_mw_per_m3s_per_m, None);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn specific_productivity_round_trips_when_some() {
+        let mut hydro = minimal_hydro(HydroGenerationModel::ConstantProductivity {
+            productivity_mw_per_m3s: 0.8,
+        });
+        hydro.specific_productivity_mw_per_m3s_per_m = Some(0.0085);
+
+        let json = serde_json::to_string(&hydro).expect("serialize");
+        assert!(json.contains("specific_productivity_mw_per_m3s_per_m"));
+
+        let parsed: Hydro = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.specific_productivity_mw_per_m3s_per_m, Some(0.0085));
     }
 }

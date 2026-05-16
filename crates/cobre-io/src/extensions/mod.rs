@@ -27,10 +27,15 @@
 
 pub mod fpha_hyperplanes;
 pub mod hydro_geometry;
+pub mod hydro_reference_volumes;
 pub mod production_models;
 
 pub use fpha_hyperplanes::{FphaHyperplaneRow, parse_fpha_hyperplanes};
 pub use hydro_geometry::{HydroGeometryRow, parse_hydro_geometry};
+pub use hydro_reference_volumes::{
+    HydroReferenceVolumeFractionRow, HydroReferenceVolumeFractions,
+    build_hydro_reference_volume_fractions, parse_hydro_reference_volume_fractions,
+};
 pub use production_models::{
     FittingWindow, FphaColumnLayout, ProductionModelConfig, SeasonConfig, SelectionMode,
     StageRange, parse_production_models,
@@ -119,6 +124,22 @@ pub fn load_fpha_hyperplanes(path: Option<&Path>) -> Result<Vec<FphaHyperplaneRo
     match path {
         None => Ok(Vec::new()),
         Some(p) => parse_fpha_hyperplanes(p),
+    }
+}
+
+/// Load `system/hydro_reference_volume_fractions.parquet` when the path is
+/// known, or return an empty `Vec` when the file is absent (optional file).
+///
+/// # Errors
+///
+/// Propagates [`LoadError`] from
+/// [`parse_hydro_reference_volume_fractions`] when `path` is `Some`.
+pub fn load_hydro_reference_volume_fractions(
+    path: Option<&Path>,
+) -> Result<Vec<HydroReferenceVolumeFractionRow>, LoadError> {
+    match path {
+        None => Ok(Vec::new()),
+        Some(p) => parse_hydro_reference_volume_fractions(p),
     }
 }
 

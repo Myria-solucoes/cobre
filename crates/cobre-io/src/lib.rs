@@ -56,7 +56,8 @@ pub mod validation;
 
 pub use broadcast::{deserialize_system, serialize_system};
 pub use config::{
-    BoundaryPolicy, Config, EstimationConfig, OrderSelectionMethod, PolicyMode, parse_config,
+    BoundaryPolicy, Config, EnergyConfig, EstimationConfig, OrderSelectionMethod, PolicyMode,
+    parse_config,
 };
 pub use constraints::{
     BlockExchangeFactor, BusPenaltyOverrideRow, ContractBoundsRow, ExchangeFactorEntry,
@@ -73,9 +74,12 @@ pub use constraints::{
 };
 pub use error::LoadError;
 pub use extensions::{
-    FittingWindow, FphaColumnLayout, FphaHyperplaneRow, HydroGeometryRow, ProductionModelConfig,
-    SeasonConfig, SelectionMode, StageRange, load_fpha_hyperplanes, load_hydro_geometry,
-    load_production_models, parse_fpha_hyperplanes, parse_hydro_geometry, parse_production_models,
+    FittingWindow, FphaColumnLayout, FphaHyperplaneRow, HydroGeometryRow,
+    HydroReferenceVolumeFractionRow, HydroReferenceVolumeFractions, ProductionModelConfig,
+    SeasonConfig, SelectionMode, StageRange, build_hydro_reference_volume_fractions,
+    load_fpha_hyperplanes, load_hydro_geometry, load_hydro_reference_volume_fractions,
+    load_production_models, parse_fpha_hyperplanes, parse_hydro_geometry,
+    parse_hydro_reference_volume_fractions, parse_production_models,
 };
 pub use initial_conditions::parse_initial_conditions;
 pub use output::policy::{

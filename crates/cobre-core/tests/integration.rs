@@ -90,6 +90,7 @@ fn make_hydro(id: i32, bus_id: i32, downstream_id: Option<i32>) -> Hydro {
         },
         min_turbined_m3s: 0.0,
         max_turbined_m3s: 500.0,
+        specific_productivity_mw_per_m3s_per_m: None,
         min_generation_mw: 0.0,
         max_generation_mw: 450.0,
         tailrace: None,

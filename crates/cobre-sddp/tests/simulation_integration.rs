@@ -184,6 +184,7 @@ fn make_stochastic_context(n_stages: usize, n_openings: usize) -> StochasticCont
         },
         min_turbined_m3s: 0.0,
         max_turbined_m3s: 100.0,
+        specific_productivity_mw_per_m3s_per_m: None,
         min_generation_mw: 0.0,
         max_generation_mw: 100.0,
         tailrace: None,
@@ -414,6 +415,7 @@ fn make_config() -> Config {
         },
         exports: ExportsConfig::default(),
         estimation: cobre_io::EstimationConfig::default(),
+        energy: cobre_io::EnergyConfig::default(),
     }
 }
 
@@ -446,6 +448,7 @@ fn make_system() -> cobre_core::System {
         },
         min_turbined_m3s: 0.0,
         max_turbined_m3s: 100.0,
+        specific_productivity_mw_per_m3s_per_m: None,
         min_generation_mw: 0.0,
         max_generation_mw: 100.0,
         tailrace: None,
@@ -1017,6 +1020,7 @@ fn make_min_outflow_system() -> cobre_core::System {
         },
         min_turbined_m3s: 0.0,
         max_turbined_m3s: 100.0,
+        specific_productivity_mw_per_m3s_per_m: None,
         min_generation_mw: 0.0,
         max_generation_mw: 100.0,
         tailrace: None,

@@ -797,11 +797,9 @@ impl Default for CorrelationModel {
 mod tests {
     use std::collections::BTreeMap;
 
-    #[cfg(feature = "serde")]
-    use super::ScenarioSource;
     use super::{
         AnnualComponent, CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile,
-        CorrelationScheduleEntry, InflowModel, NcsModel, SamplingScheme,
+        CorrelationScheduleEntry, InflowModel, NcsModel, SamplingScheme, ScenarioSource,
     };
     use crate::EntityId;
 

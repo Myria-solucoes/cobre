@@ -1344,6 +1344,7 @@ mod tests {
             },
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 1.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 1.0,
             tailrace: None,

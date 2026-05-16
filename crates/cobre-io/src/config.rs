@@ -66,6 +66,10 @@ pub struct Config {
     /// Time series estimation settings for automatic model parameter fitting.
     #[serde(default)]
     pub estimation: EstimationConfig,
+
+    /// Energy conversion settings (reference volume fraction for FPHA hydros).
+    #[serde(default)]
+    pub energy: EnergyConfig,
 }
 
 /// Modeling options (`config.json → modeling`).
@@ -643,6 +647,31 @@ where
     Ok(value)
 }
 
+/// Energy conversion settings (`config.json → energy`).
+///
+/// Controls reservoir reference-volume computation for FPHA hydros.
+/// `V_ref = V_min + fraction · (V_max − V_min)` is the reference storage
+/// used to evaluate the equivalent head `h_eq` (and thereby `ρ_eq`).
+/// Per-plant per-season overrides are loaded from
+/// `system/hydro_reference_volume_fractions.parquet`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct EnergyConfig {
+    /// Case-wide default fraction in `(0.0, 1.0]` used when no per-`(hydro,
+    /// season)` override applies. `V_ref = V_min + fraction · (V_max − V_min)`.
+    /// Default 0.65 (NEWAVE convention).
+    pub reference_volume_fraction: f64,
+}
+
+impl Default for EnergyConfig {
+    fn default() -> Self {
+        Self {
+            reference_volume_fraction: 0.65,
+        }
+    }
+}
+
 /// Time series estimation settings (`config.json → estimation`).
 ///
 /// Controls automatic parameter estimation when historical inflow data is
@@ -782,6 +811,15 @@ fn validate_config(config: &Config, path: &Path) -> Result<(), LoadError> {
             path: path.to_path_buf(),
             field: "training.stopping_rules".to_string(),
             message: "required field is missing".to_string(),
+        });
+    }
+
+    let frac = config.energy.reference_volume_fraction;
+    if frac.is_nan() || frac <= 0.0 || frac > 1.0 {
+        return Err(LoadError::SchemaError {
+            path: path.to_path_buf(),
+            field: "energy.reference_volume_fraction".to_string(),
+            message: format!("must be in (0.0, 1.0] (exclusive zero, inclusive one), got {frac}"),
         });
     }
 
@@ -2001,5 +2039,133 @@ mod tests {
             matches!(parsed, OrderSelectionMethod::Pacf),
             "deprecated \"fixed\" must still resolve to Pacf, got: {parsed:?}"
         );
+    }
+
+    // ── EnergyConfig tests ────────────────────────────────────────────────────
+
+    /// AC: absent `energy` section → `reference_volume_fraction` defaults to 0.65.
+    #[test]
+    fn energy_config_defaults_to_065_when_absent() {
+        let f = write_config(
+            r#"{"training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}}"#,
+        );
+        let cfg = parse_config(f.path()).unwrap();
+        assert!(
+            (cfg.energy.reference_volume_fraction - 0.65).abs() < f64::EPSILON,
+            "default reference_volume_fraction should be 0.65, got: {}",
+            cfg.energy.reference_volume_fraction
+        );
+    }
+
+    /// AC: explicit `reference_volume_fraction` round-trips correctly.
+    #[test]
+    fn energy_config_round_trips_explicit_value() {
+        let f = write_config(
+            r#"{
+            "training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
+            "energy": {"reference_volume_fraction": 0.7}
+        }"#,
+        );
+        let cfg = parse_config(f.path()).unwrap();
+        assert!(
+            (cfg.energy.reference_volume_fraction - 0.7).abs() < f64::EPSILON,
+            "reference_volume_fraction should be 0.7, got: {}",
+            cfg.energy.reference_volume_fraction
+        );
+    }
+
+    /// AC: `reference_volume_fraction: 0.0` → SchemaError naming the field.
+    #[test]
+    fn energy_config_rejects_zero_fraction() {
+        let f = write_config(
+            r#"{
+            "training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
+            "energy": {"reference_volume_fraction": 0.0}
+        }"#,
+        );
+        let err = parse_config(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, .. } => {
+                assert!(
+                    field.contains("energy.reference_volume_fraction"),
+                    "field should name energy.reference_volume_fraction, got: {field}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// AC: `reference_volume_fraction: 1.5` → SchemaError (above 1.0).
+    #[test]
+    fn energy_config_rejects_value_above_one() {
+        let f = write_config(
+            r#"{
+            "training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
+            "energy": {"reference_volume_fraction": 1.5}
+        }"#,
+        );
+        let err = parse_config(f.path()).unwrap_err();
+        assert!(
+            matches!(err, LoadError::SchemaError { .. }),
+            "expected SchemaError for fraction > 1.0, got: {err:?}"
+        );
+    }
+
+    /// AC: negative `reference_volume_fraction` → SchemaError.
+    #[test]
+    fn energy_config_rejects_negative_value() {
+        let f = write_config(
+            r#"{
+            "training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
+            "energy": {"reference_volume_fraction": -0.1}
+        }"#,
+        );
+        let err = parse_config(f.path()).unwrap_err();
+        assert!(
+            matches!(err, LoadError::SchemaError { .. }),
+            "expected SchemaError for negative fraction, got: {err:?}"
+        );
+    }
+
+    /// AC: NaN `reference_volume_fraction` → SchemaError.
+    #[test]
+    fn energy_config_rejects_nan() {
+        // JSON does not support NaN literals; we test by direct struct validation.
+        // Build an EnergyConfig with NaN and confirm validate_config catches it.
+        let cfg = Config {
+            schema: None,
+            modeling: ModelingConfig::default(),
+            training: TrainingConfig {
+                enabled: true,
+                tree_seed: None,
+                forward_passes: Some(10),
+                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 5 }]),
+                stopping_mode: "any".to_string(),
+                cut_formulation: None,
+                forward_pass: None,
+                cut_selection: RowSelectionConfig::default(),
+                solver: TrainingSolverConfig::default(),
+                scenario_source: None,
+            },
+            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
+            policy: PolicyConfig::default(),
+            simulation: SimulationConfig::default(),
+            exports: ExportsConfig::default(),
+            estimation: EstimationConfig::default(),
+            energy: EnergyConfig {
+                reference_volume_fraction: f64::NAN,
+            },
+        };
+        let path = std::path::Path::new("config.json");
+        let err = validate_config(&cfg, path).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, .. } => {
+                assert!(
+                    field.contains("energy.reference_volume_fraction"),
+                    "field should name energy.reference_volume_fraction, got: {field}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
     }
 }
