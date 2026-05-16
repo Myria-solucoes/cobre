@@ -170,6 +170,12 @@ pub struct StudySetup {
     /// system's hydros, cascade topology, and reference-volume resolver.
     /// Consumed by Epic 2 (energy-balance constraints and ENA/EARM extraction).
     pub(crate) energy_conversion: EnergyConversionSet,
+
+    /// `V_min` (`min_storage_hm3`) per hydro, in declaration order.
+    ///
+    /// Pre-computed once at setup time and threaded into the simulation
+    /// pipeline for stored-energy calculations.
+    pub(crate) hydro_min_storage_hm3: Vec<f64>,
 }
 
 impl StudySetup {
@@ -660,6 +666,9 @@ impl StudySetup {
         )
         .map_err(|e| SddpError::Validation(e.to_string()))?;
 
+        let hydro_min_storage_hm3: Vec<f64> =
+            system.hydros().iter().map(|h| h.min_storage_hm3).collect();
+
         Ok(Self {
             stage_data: stage_data::StageData {
                 stage_templates,
@@ -708,6 +717,7 @@ impl StudySetup {
             recent_observation_seed,
             downstream_par_order,
             energy_conversion,
+            hydro_min_storage_hm3,
         })
     }
 }

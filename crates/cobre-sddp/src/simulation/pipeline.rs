@@ -115,6 +115,19 @@ pub struct SimulationOutputSpec<'a> {
     /// override (or base value if no override); for FPHA hydros it is 0.0.
     pub hydro_productivities_per_stage: &'a [Vec<f64>],
 
+    /// Pre-computed energy-conversion scalars for every `(hydro, stage)` pair.
+    ///
+    /// Threaded into [`crate::simulation::extraction::StageExtractionSpec`] at
+    /// each stage to populate the five energy fields on per-block hydro rows.
+    pub energy_conversion: &'a crate::energy_conversion::EnergyConversionSet,
+
+    /// Minimum storage volume `V_min` per hydro plant (hm³), in canonical
+    /// ID-sorted order.
+    ///
+    /// Threaded into [`crate::simulation::extraction::StageExtractionSpec`] to
+    /// compute `stored_energy_mwh = (V - V_min) · ρ_acum · ENERGY_FACTOR`.
+    pub hydro_min_storage_hm3: &'a [f64],
+
     /// Optional event sender for streaming progress events to the CLI/UI.
     pub event_sender: Option<Sender<TrainingEvent>>,
 }
@@ -669,6 +682,9 @@ fn extract_sim_stage_result(
                 .get(t)
                 .copied()
                 .unwrap_or(1.0),
+            energy_conversion: output.energy_conversion,
+            hydro_min_storage_hm3: output.hydro_min_storage_hm3,
+            stage_index: t,
         },
         ids.stage_id_u32,
     );
@@ -1418,6 +1434,26 @@ mod tests {
         vec![vec![1.0]; n_stages]
     }
 
+    /// Build a zero-valued [`crate::energy_conversion::EnergyConversionSet`] for tests
+    /// that do not assert on energy fields.
+    fn zero_energy_conversion(
+        n_hydros: usize,
+        n_stages: usize,
+    ) -> crate::energy_conversion::EnergyConversionSet {
+        use crate::energy_conversion::{EnergyConversion, EnergyConversionSet};
+        let zero_ec = EnergyConversion {
+            equivalent_productivity_mw_per_m3s: 0.0,
+            reference_volume_hm3: 0.0,
+            reference_outflow_m3s: 0.0,
+        };
+        EnergyConversionSet::new(
+            vec![vec![zero_ec; n_stages]; n_hydros],
+            vec![vec![0.0_f64; n_stages]; n_hydros],
+            n_hydros,
+            n_stages,
+        )
+    }
+
     /// Wrap a `MockSolver` in a single-workspace slice for `simulate()` calls.
     ///
     /// All tests use a single workspace (serial execution) so that existing
@@ -1495,6 +1531,7 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel(16);
 
         let hprod = hydro_productivities_1hydro(n_stages);
+        let ec = zero_energy_conversion(1, n_stages);
         let mut workspaces = single_workspace(solver);
         let result = run_simulate(
             &mut workspaces,
@@ -1544,6 +1581,8 @@ mod tests {
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0],
                 event_sender: None,
             },
             None,
@@ -1606,6 +1645,7 @@ mod tests {
         let (tx, _rx) = mpsc::sync_channel(16);
 
         let hprod = hydro_productivities_1hydro(n_stages);
+        let ec = zero_energy_conversion(1, n_stages);
         let mut workspaces = single_workspace(solver);
         let result = run_simulate(
             &mut workspaces,
@@ -1655,6 +1695,8 @@ mod tests {
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0],
                 event_sender: None,
             },
             None,
@@ -1707,6 +1749,7 @@ mod tests {
         let (tx, _rx) = mpsc::sync_channel(16);
 
         let hprod = hydro_productivities_1hydro(n_stages);
+        let ec = zero_energy_conversion(1, n_stages);
         let mut workspaces = single_workspace(solver);
         let result = run_simulate(
             &mut workspaces,
@@ -1756,6 +1799,8 @@ mod tests {
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0],
                 event_sender: None,
             },
             None,
@@ -1806,6 +1851,7 @@ mod tests {
         drop(rx);
 
         let hprod = hydro_productivities_1hydro(n_stages);
+        let ec = zero_energy_conversion(1, n_stages);
         let mut workspaces = single_workspace(solver);
         let result = run_simulate(
             &mut workspaces,
@@ -1855,6 +1901,8 @@ mod tests {
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0],
                 event_sender: None,
             },
             None,
@@ -1907,6 +1955,7 @@ mod tests {
         let (tx, _rx) = mpsc::sync_channel(16);
 
         let hprod = hydro_productivities_1hydro(n_stages);
+        let ec = zero_energy_conversion(1, n_stages);
         let mut workspaces = single_workspace(solver);
         let run_result = run_simulate(
             &mut workspaces,
@@ -1956,6 +2005,8 @@ mod tests {
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0],
                 event_sender: None,
             },
             None,
@@ -2005,6 +2056,7 @@ mod tests {
         let (tx, _rx) = mpsc::sync_channel(16);
 
         let hprod = hydro_productivities_1hydro(n_stages);
+        let ec = zero_energy_conversion(1, n_stages);
         let mut workspaces = single_workspace(solver);
         let run_result = run_simulate(
             &mut workspaces,
@@ -2054,6 +2106,8 @@ mod tests {
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0],
                 event_sender: None,
             },
             None,
@@ -2103,6 +2157,7 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel(16);
 
         let hprod = hydro_productivities_1hydro(n_stages);
+        let ec = zero_energy_conversion(1, n_stages);
         let mut workspaces = single_workspace(solver);
         run_simulate(
             &mut workspaces,
@@ -2152,6 +2207,8 @@ mod tests {
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0],
                 event_sender: None,
             },
             None,
@@ -2195,6 +2252,7 @@ mod tests {
         let entity_counts = entity_counts_1_hydro();
 
         let hprod = hydro_productivities_1hydro(n_stages);
+        let ec = zero_energy_conversion(1, n_stages);
 
         // Run with 1 workspace.
         let (tx1, _rx1) = mpsc::sync_channel(64);
@@ -2247,6 +2305,8 @@ mod tests {
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0],
                 event_sender: None,
             },
             None,
@@ -2346,6 +2406,8 @@ mod tests {
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0],
                 event_sender: None,
             },
             None,
@@ -2422,6 +2484,7 @@ mod tests {
         let (event_tx, event_rx) = mpsc::channel::<TrainingEvent>();
 
         let hprod = hydro_productivities_1hydro(n_stages);
+        let ec = zero_energy_conversion(1, n_stages);
         let mut workspaces = single_workspace(solver);
         let result = run_simulate(
             &mut workspaces,
@@ -2471,6 +2534,8 @@ mod tests {
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0],
                 event_sender: Some(event_tx),
             },
             None,
@@ -2541,6 +2606,7 @@ mod tests {
         let (result_tx, _result_rx) = mpsc::sync_channel(16);
 
         let hprod = hydro_productivities_1hydro(n_stages);
+        let ec = zero_energy_conversion(1, n_stages);
         let mut workspaces = single_workspace(solver);
         let result = run_simulate(
             &mut workspaces,
@@ -2590,6 +2656,8 @@ mod tests {
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0],
                 event_sender: None,
             },
             None,
@@ -2645,6 +2713,7 @@ mod tests {
         let (event_tx, event_rx) = mpsc::channel::<TrainingEvent>();
 
         let hprod = hydro_productivities_1hydro(n_stages);
+        let ec = zero_energy_conversion(1, n_stages);
         let mut workspaces = single_workspace(solver);
         run_simulate(
             &mut workspaces,
@@ -2694,6 +2763,8 @@ mod tests {
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0],
                 event_sender: Some(event_tx),
             },
             None,
@@ -2760,6 +2831,7 @@ mod tests {
         let (event_tx, event_rx) = mpsc::channel::<TrainingEvent>();
 
         let hprod = hydro_productivities_1hydro(n_stages);
+        let ec = zero_energy_conversion(1, n_stages);
         let mut workspaces = single_workspace(solver);
         run_simulate(
             &mut workspaces,
@@ -2809,6 +2881,8 @@ mod tests {
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0],
                 event_sender: Some(event_tx),
             },
             None,
@@ -2874,6 +2948,7 @@ mod tests {
         let (event_tx, event_rx) = mpsc::channel::<TrainingEvent>();
 
         let hprod = hydro_productivities_1hydro(n_stages);
+        let ec = zero_energy_conversion(1, n_stages);
         let mut workspaces = single_workspace(solver);
         run_simulate(
             &mut workspaces,
@@ -2923,6 +2998,8 @@ mod tests {
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0],
                 event_sender: Some(event_tx),
             },
             None,
@@ -3003,6 +3080,7 @@ mod tests {
         let (event_tx, event_rx) = mpsc::channel::<TrainingEvent>();
 
         let hprod = hydro_productivities_1hydro(n_stages);
+        let ec = zero_energy_conversion(1, n_stages);
         let mut workspaces = single_workspace(solver);
         run_simulate(
             &mut workspaces,
@@ -3052,6 +3130,8 @@ mod tests {
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0],
                 event_sender: Some(event_tx),
             },
             None,
@@ -3331,6 +3411,7 @@ mod tests {
         let noise_scale = vec![1.0_f64]; // 1 hydro, 1 stage
 
         let hprod = hydro_productivities_1hydro(n_stages);
+        let ec = zero_energy_conversion(1, n_stages);
         run_simulate(
             &mut workspaces,
             &StageContext {
@@ -3379,6 +3460,8 @@ mod tests {
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0],
                 event_sender: None,
             },
             None,
@@ -3478,6 +3561,7 @@ mod tests {
         let (tx, _rx) = mpsc::sync_channel(4);
 
         let hprod = hydro_productivities_1hydro(n_stages);
+        let ec = zero_energy_conversion(1, n_stages);
         let mut workspaces = single_workspace(solver);
 
         run_simulate(
@@ -3528,6 +3612,8 @@ mod tests {
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0],
                 event_sender: None,
             },
             None,
@@ -3650,6 +3736,7 @@ mod tests {
         let noise_scale = vec![1.0_f64];
 
         let hprod = hydro_productivities_1hydro(n_stages);
+        let ec = zero_energy_conversion(1, n_stages);
         run_simulate(
             &mut workspaces,
             &StageContext {
@@ -3698,6 +3785,8 @@ mod tests {
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0],
                 event_sender: None,
             },
             None,
@@ -4005,6 +4094,7 @@ mod tests {
 
         // Use the hydro-aware workspace builder so zero_targets_buf[..1] is valid.
         let hprod = hydro_productivities_1hydro(n_stages);
+        let ec = zero_energy_conversion(1, n_stages);
         let mut workspaces = single_workspace_with_hydros(solver, 1);
         run_simulate(
             &mut workspaces,
@@ -4054,6 +4144,8 @@ mod tests {
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0],
                 event_sender: None,
             },
             None,
@@ -4118,6 +4210,7 @@ mod tests {
         let (tx, _rx) = mpsc::sync_channel(16);
 
         let hprod = hydro_productivities_1hydro(n_stages);
+        let ec = zero_energy_conversion(1, n_stages);
         let mut workspaces = single_workspace_with_hydros(solver, 1);
         run_simulate(
             &mut workspaces,
@@ -4167,6 +4260,8 @@ mod tests {
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0],
                 event_sender: None,
             },
             None,
@@ -4223,6 +4318,7 @@ mod tests {
         let entity_counts = entity_counts_1_hydro();
         let (tx, _rx) = mpsc::sync_channel(32);
         let hprod = hydro_productivities_1hydro(n_stages);
+        let ec = zero_energy_conversion(1, n_stages);
 
         let mut workspaces = single_workspace(solver);
         let result = run_simulate(
@@ -4273,6 +4369,8 @@ mod tests {
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0],
                 event_sender: None,
             },
             Some(baked.as_slice()),
@@ -4337,6 +4435,7 @@ mod tests {
         let entity_counts = entity_counts_1_hydro();
         let (tx, _rx) = mpsc::sync_channel(32);
         let hprod = hydro_productivities_1hydro(n_stages);
+        let ec = zero_energy_conversion(1, n_stages);
 
         let mut workspaces = single_workspace(solver);
         let result = run_simulate(
@@ -4387,6 +4486,8 @@ mod tests {
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0],
                 event_sender: None,
             },
             // fallback path
@@ -4440,6 +4541,7 @@ mod tests {
         let entity_counts = entity_counts_1_hydro();
         let (tx, _rx) = mpsc::sync_channel(8);
         let hprod = hydro_productivities_1hydro(n_stages);
+        let ec = zero_energy_conversion(1, n_stages);
 
         // Baked templates with wrong length (2 instead of 3).
         let wrong_baked: Vec<StageTemplate> =
@@ -4494,6 +4596,8 @@ mod tests {
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0],
                 event_sender: None,
             },
             Some(wrong_baked.as_slice()),
@@ -4599,6 +4703,7 @@ mod tests {
         let entity_counts = entity_counts_1_hydro();
         let (tx, _rx) = mpsc::sync_channel(16);
         let hprod = hydro_productivities_1hydro(n_stages);
+        let ec = zero_energy_conversion(1, n_stages);
 
         let mut workspaces = single_workspace(solver);
         let result = run_simulate(
@@ -4649,6 +4754,8 @@ mod tests {
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0],
                 event_sender: None,
             },
             // fallback path (no baked templates); reconstruction uses pool.active_cuts()
@@ -4731,6 +4838,7 @@ mod tests {
         let entity_counts = entity_counts_1_hydro();
         let (tx, _rx) = mpsc::sync_channel(32);
         let hprod = hydro_productivities_1hydro(n_stages);
+        let ec = zero_energy_conversion(1, n_stages);
 
         let mut workspaces = single_workspace(solver);
         let result = run_simulate(
@@ -4781,6 +4889,8 @@ mod tests {
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0],
                 event_sender: None,
             },
             None,

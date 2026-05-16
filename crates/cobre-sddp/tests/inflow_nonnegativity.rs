@@ -55,6 +55,7 @@ use cobre_sddp::{
     config::{CutManagementConfig, EventConfig, LoopConfig},
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
+    energy_conversion::{EnergyConversion, EnergyConversionSet},
     horizon_mode::HorizonMode,
     hydro_models::PrepareHydroModelsResult,
     indexer::StageIndexer,
@@ -623,6 +624,18 @@ fn simulate_fixture(
         .map(Vec::len)
         .collect();
 
+    let zero_ec = EnergyConversion {
+        equivalent_productivity_mw_per_m3s: 0.0,
+        reference_volume_hm3: 0.0,
+        reference_outflow_m3s: 0.0,
+    };
+    let ec = EnergyConversionSet::new(
+        vec![vec![zero_ec; N_STAGES]; N_HYDROS],
+        vec![vec![0.0_f64; N_STAGES]; N_HYDROS],
+        N_HYDROS,
+        N_STAGES,
+    );
+
     simulate(
         &mut sim_workspaces,
         &StageContext {
@@ -675,6 +688,8 @@ fn simulate_fixture(
             ncs_entity_ids_per_stage: &[],
             diversion_upstream: &HashMap::new(),
             hydro_productivities_per_stage: &fx.stage_templates.hydro_productivities_per_stage,
+            energy_conversion: &ec,
+            hydro_min_storage_hm3: &[0.0; N_HYDROS],
             event_sender: None,
         },
         None,

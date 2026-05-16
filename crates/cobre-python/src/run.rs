@@ -29,10 +29,10 @@ use cobre_comm::LocalBackend;
 use cobre_io::output::simulation_writer::{ScenarioWritePayload, SimulationParquetWriter};
 use cobre_io::{ParquetWriterConfig, SolverStatsRow};
 use cobre_sddp::{
+    ArOrderSummary, DEFAULT_SEED, EstimationReport, FutureCostFunction, HydroModelSummary,
+    ModelProvenanceReport, SolverStatsDelta, StochasticSource, StochasticSummary, StudySetup,
     build_hydro_model_summary, build_provenance_report, build_stochastic_summary,
-    prepare_hydro_models, prepare_stochastic, ArOrderSummary, EstimationReport, FutureCostFunction,
-    HydroModelSummary, ModelProvenanceReport, SolverStatsDelta, StochasticSource,
-    StochasticSummary, StudySetup, DEFAULT_SEED,
+    prepare_hydro_models, prepare_stochastic,
 };
 use cobre_solver::HighsSolver;
 
@@ -85,7 +85,7 @@ fn write_policy_checkpoint(
     export_states: bool,
 ) -> Result<(), String> {
     use cobre_io::output::policy::{
-        write_policy_checkpoint as io_write_policy_checkpoint, PolicyCheckpointMetadata,
+        PolicyCheckpointMetadata, write_policy_checkpoint as io_write_policy_checkpoint,
     };
     use cobre_sddp::policy_export::{
         build_active_indices, build_stage_basis_records, build_stage_cut_records,

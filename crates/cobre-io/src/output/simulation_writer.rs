@@ -36,13 +36,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{BooleanBuilder, Float64Builder, Int8Builder, Int32Builder, RecordBatch};
+use arrow::array::{BooleanBuilder, Float64Builder, Int32Builder, Int8Builder, RecordBatch};
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 
 use cobre_core::System;
 
-use crate::output::SimulationOutput;
 use crate::output::error::OutputError;
 use crate::output::parquet_config::ParquetWriterConfig;
 use crate::output::schemas::{
@@ -50,6 +49,7 @@ use crate::output::schemas::{
     hydros_schema, inflow_lags_schema, non_controllables_schema, pumping_stations_schema,
     thermals_schema,
 };
+use crate::output::SimulationOutput;
 
 // Payload types (mirrors solver simulation result types)
 
@@ -142,8 +142,16 @@ pub struct HydroWriteRecord {
     pub storage_final_hm3: f64,
     /// Active power generation in MW.
     pub generation_mw: f64,
-    /// Plant productivity in MW/(m³/s), or `None` for tabular production.
-    pub productivity_mw_per_m3s: Option<f64>,
+    /// Equivalent productivity (FPHA `ρ_eq`) in MW/(m³/s).
+    pub equivalent_productivity_mw_per_m3s: f64,
+    /// Accumulated productivity (VHA `ρ_acc`) in MW/(m³/s).
+    pub accumulated_productivity_mw_per_m3s: f64,
+    /// Incremental inflow energy equivalent in MW.
+    pub incremental_inflow_energy_mw: f64,
+    /// Stored energy at block start in `MWh`.
+    pub stored_energy_initial_mwh: f64,
+    /// Stored energy at block end in `MWh`.
+    pub stored_energy_final_mwh: f64,
     /// Spillage regularization cost.
     pub spillage_cost: f64,
     /// Water value (storage balance dual) in cost/hm³.
@@ -836,7 +844,7 @@ fn build_costs_batch<'a>(
 
 /// Arrow column builders for the hydros `RecordBatch`.
 ///
-/// Groups the 30 per-column builders so that [`fill_hydro_builders`] can
+/// Groups the 35 per-column builders so that [`fill_hydro_builders`] can
 /// accept them as a single argument without exceeding the parameter limit.
 struct HydroBuilders {
     stage_id: Int32Builder,
@@ -854,7 +862,11 @@ struct HydroBuilders {
     storage_final_hm3: Float64Builder,
     generation_mw: Float64Builder,
     generation_mwh: Float64Builder,
-    productivity_mw_per_m3s: Float64Builder,
+    equivalent_productivity_mw_per_m3s: Float64Builder,
+    accumulated_productivity_mw_per_m3s: Float64Builder,
+    incremental_inflow_energy_mw: Float64Builder,
+    stored_energy_initial_mwh: Float64Builder,
+    stored_energy_final_mwh: Float64Builder,
     spillage_cost: Float64Builder,
     water_value_per_hm3: Float64Builder,
     storage_binding_code: Int8Builder,
@@ -890,7 +902,11 @@ impl HydroBuilders {
             storage_final_hm3: Float64Builder::new(),
             generation_mw: Float64Builder::new(),
             generation_mwh: Float64Builder::new(),
-            productivity_mw_per_m3s: Float64Builder::new(),
+            equivalent_productivity_mw_per_m3s: Float64Builder::new(),
+            accumulated_productivity_mw_per_m3s: Float64Builder::new(),
+            incremental_inflow_energy_mw: Float64Builder::new(),
+            stored_energy_initial_mwh: Float64Builder::new(),
+            stored_energy_final_mwh: Float64Builder::new(),
             spillage_cost: Float64Builder::new(),
             water_value_per_hm3: Float64Builder::new(),
             storage_binding_code: Int8Builder::new(),
@@ -939,8 +955,16 @@ fn fill_hydro_builders<'a>(
         b.storage_final_hm3.append_value(r.storage_final_hm3);
         b.generation_mw.append_value(r.generation_mw);
         b.generation_mwh.append_value(r.generation_mw * dur);
-        b.productivity_mw_per_m3s
-            .append_option(r.productivity_mw_per_m3s);
+        b.equivalent_productivity_mw_per_m3s
+            .append_value(r.equivalent_productivity_mw_per_m3s);
+        b.accumulated_productivity_mw_per_m3s
+            .append_value(r.accumulated_productivity_mw_per_m3s);
+        b.incremental_inflow_energy_mw
+            .append_value(r.incremental_inflow_energy_mw);
+        b.stored_energy_initial_mwh
+            .append_value(r.stored_energy_initial_mwh);
+        b.stored_energy_final_mwh
+            .append_value(r.stored_energy_final_mwh);
         b.spillage_cost.append_value(r.spillage_cost);
         b.water_value_per_hm3.append_value(r.water_value_per_hm3);
         b.storage_binding_code.append_value(r.storage_binding_code);
@@ -998,7 +1022,11 @@ fn build_hydros_batch<'a>(
             Arc::new(b.storage_final_hm3.finish()),
             Arc::new(b.generation_mw.finish()),
             Arc::new(b.generation_mwh.finish()),
-            Arc::new(b.productivity_mw_per_m3s.finish()),
+            Arc::new(b.equivalent_productivity_mw_per_m3s.finish()),
+            Arc::new(b.accumulated_productivity_mw_per_m3s.finish()),
+            Arc::new(b.incremental_inflow_energy_mw.finish()),
+            Arc::new(b.stored_energy_initial_mwh.finish()),
+            Arc::new(b.stored_energy_final_mwh.finish()),
             Arc::new(b.spillage_cost.finish()),
             Arc::new(b.water_value_per_hm3.finish()),
             Arc::new(b.storage_binding_code.finish()),
@@ -1684,7 +1712,11 @@ mod tests {
             storage_initial_hm3: 500.0,
             storage_final_hm3: 495.0,
             generation_mw: 50.0,
-            productivity_mw_per_m3s: Some(0.9),
+            equivalent_productivity_mw_per_m3s: 0.9,
+            accumulated_productivity_mw_per_m3s: 2.7,
+            incremental_inflow_energy_mw: 135.0,
+            stored_energy_initial_mwh: 1234.5,
+            stored_energy_final_mwh: 1240.0,
             spillage_cost: 10.0,
             water_value_per_hm3: 5.0,
             storage_binding_code: 0,
@@ -1763,7 +1795,7 @@ mod tests {
         let batch = build_hydros_batch(records.iter().copied(), &block_durations)
             .expect("hydros batch must build");
         assert_eq!(batch.num_rows(), 2);
-        assert_eq!(batch.num_columns(), 31, "hydros schema has 31 columns");
+        assert_eq!(batch.num_columns(), 35, "hydros schema has 35 columns");
 
         let gen_mwh_col = batch
             .column_by_name("generation_mwh")
@@ -2214,6 +2246,116 @@ mod tests {
             hydros_batch.num_rows(),
             6,
             "hydros must have 6 rows (3 stages × 2 hydros)"
+        );
+    }
+
+    #[test]
+    fn hydros_schema_has_thirty_five_fields() {
+        let schema = hydros_schema();
+        assert_eq!(
+            schema.fields().len(),
+            35,
+            "hydros_schema must have 35 fields after energy column expansion"
+        );
+    }
+
+    #[test]
+    fn hydros_schema_drops_old_productivity_field() {
+        let schema = hydros_schema();
+        assert!(
+            schema.field_with_name("productivity_mw_per_m3s").is_err(),
+            "productivity_mw_per_m3s must not exist in the updated schema"
+        );
+    }
+
+    #[test]
+    fn hydros_schema_has_equivalent_productivity_column() {
+        use arrow::datatypes::DataType;
+        let schema = hydros_schema();
+        let field = schema
+            .field_with_name("equivalent_productivity_mw_per_m3s")
+            .expect("equivalent_productivity_mw_per_m3s must exist in schema");
+        assert_eq!(
+            field.data_type(),
+            &DataType::Float64,
+            "equivalent_productivity_mw_per_m3s must be Float64"
+        );
+        assert!(
+            !field.is_nullable(),
+            "equivalent_productivity_mw_per_m3s must be non-nullable"
+        );
+    }
+
+    #[test]
+    fn hydros_batch_round_trips_new_columns() {
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+        let tmp = tempfile::tempdir().expect("tempdir must succeed");
+        std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
+
+        let system = make_test_system();
+        let config = ParquetWriterConfig::default();
+
+        let mut writer =
+            SimulationParquetWriter::new(tmp.path(), &system, &config).expect("new must succeed");
+
+        // Single payload using make_hydro_record which sets distinct values:
+        // equivalent_productivity_mw_per_m3s = 0.9
+        // accumulated_productivity_mw_per_m3s = 2.7
+        // incremental_inflow_energy_mw        = 135.0
+        // stored_energy_initial_mwh           = 1234.5
+        // stored_energy_final_mwh             = 1240.0
+        let payload = make_scenario_payload(0, 1);
+        writer
+            .write_scenario(payload)
+            .expect("write_scenario must succeed");
+
+        let path = tmp
+            .path()
+            .join("simulation/hydros/scenario_id=0000/data.parquet");
+        let file = std::fs::File::open(&path).expect("hydros parquet must exist");
+        let batch = ParquetRecordBatchReaderBuilder::try_new(file)
+            .expect("reader builder must succeed")
+            .build()
+            .expect("reader must build")
+            .next()
+            .expect("must have rows")
+            .expect("batch must be Ok");
+
+        let read_f64 = |col_name: &str| -> f64 {
+            batch
+                .column_by_name(col_name)
+                .unwrap_or_else(|| panic!("column {col_name} must exist"))
+                .as_any()
+                .downcast_ref::<arrow::array::Float64Array>()
+                .unwrap_or_else(|| panic!("column {col_name} must be Float64Array"))
+                .value(0)
+        };
+
+        assert_eq!(
+            read_f64("equivalent_productivity_mw_per_m3s"),
+            0.9,
+            "equivalent_productivity_mw_per_m3s must round-trip"
+        );
+        assert_eq!(
+            read_f64("accumulated_productivity_mw_per_m3s"),
+            2.7,
+            "accumulated_productivity_mw_per_m3s must round-trip"
+        );
+        assert_eq!(
+            read_f64("incremental_inflow_energy_mw"),
+            135.0,
+            "incremental_inflow_energy_mw must round-trip"
+        );
+        assert_eq!(
+            read_f64("stored_energy_initial_mwh"),
+            1234.5,
+            "stored_energy_initial_mwh must round-trip"
+        );
+        assert_eq!(
+            read_f64("stored_energy_final_mwh"),
+            1240.0,
+            "stored_energy_final_mwh must round-trip"
         );
     }
 }

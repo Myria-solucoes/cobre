@@ -45,6 +45,7 @@ use cobre_sddp::{
     config::{CutManagementConfig, EventConfig, LoopConfig},
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
+    energy_conversion::{EnergyConversion, EnergyConversionSet},
     horizon_mode::HorizonMode,
     indexer::StageIndexer,
     inflow_method::InflowNonNegativityMethod,
@@ -754,6 +755,18 @@ fn train_simulate_write_cycle() {
         },
     )];
 
+    let zero_ec = EnergyConversion {
+        equivalent_productivity_mw_per_m3s: 0.0,
+        reference_volume_hm3: 0.0,
+        reference_outflow_m3s: 0.0,
+    };
+    let ec = EnergyConversionSet::new(
+        vec![vec![zero_ec; fx.n_stages]; 1],
+        vec![vec![0.0_f64; fx.n_stages]; 1],
+        1,
+        fx.n_stages,
+    );
+
     simulate(
         &mut sim_workspaces,
         &StageContext {
@@ -802,6 +815,8 @@ fn train_simulate_write_cycle() {
             ncs_entity_ids_per_stage: &[],
             diversion_upstream: &HashMap::new(),
             hydro_productivities_per_stage: &vec![vec![1.0]; fx.n_stages],
+            energy_conversion: &ec,
+            hydro_min_storage_hm3: &[0.0],
             event_sender: None,
         },
         None,
@@ -1423,6 +1438,18 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
         },
     )];
 
+    let zero_ec2 = EnergyConversion {
+        equivalent_productivity_mw_per_m3s: 0.0,
+        reference_volume_hm3: 0.0,
+        reference_outflow_m3s: 0.0,
+    };
+    let ec2 = EnergyConversionSet::new(
+        vec![vec![zero_ec2; n_stages]; 1],
+        vec![vec![0.0_f64; n_stages]; 1],
+        1,
+        n_stages,
+    );
+
     simulate(
         &mut sim_workspaces,
         &stage_ctx,
@@ -1456,6 +1483,8 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
             ncs_entity_ids_per_stage: &[],
             diversion_upstream: &HashMap::new(),
             hydro_productivities_per_stage: &hydro_productivities_per_stage,
+            energy_conversion: &ec2,
+            hydro_min_storage_hm3: &[0.0],
             event_sender: None,
         },
         None,

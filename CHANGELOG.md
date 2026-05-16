@@ -18,6 +18,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   empty library following the existing `cobre-tui` reservation pattern
   and is not yet implemented.
 
+- Five new columns in `simulation/hydros.parquet`, populated for every
+  `(stage, block, hydro)` row:
+  - `equivalent_productivity_mw_per_m3s` (MW/(m³/s)) — equivalent
+    productivity `ρ_eq`. For `ConstantProductivity` and
+    `LinearizedHead` hydros it is the stored input scalar; for FPHA
+    hydros it is derived from VHA geometry, the specific productivity
+    `ρ_esp`, and the reference operating point `(V_ref, Q_ref)`.
+  - `accumulated_productivity_mw_per_m3s` (MW/(m³/s)) — accumulated
+    productivity `ρ_acum`: the sum of `ρ_eq` over each hydro and every
+    plant downstream of it along the cascade.
+  - `incremental_inflow_energy_mw` (MW) — incremental natural inflow
+    expressed as energy, computed as
+    `ρ_acum · incremental_inflow_m3s`.
+  - `stored_energy_initial_mwh` (MWh) — stored reservoir energy at the
+    start of the block,
+    `(storage_initial_hm3 − min_storage_hm3) · ρ_acum · 10⁶ / 3600`.
+  - `stored_energy_final_mwh` (MWh) — stored reservoir energy at the
+    end of the block, using the same formula with the final storage.
+
+- Soft-consistency warning emitted to stderr at preprocessing time
+  when a non-FPHA hydro declares both `specific_productivity_mw_per_m3s_per_m`
+  (`ρ_esp`) and a `productivity_mw_per_m3s` (`ρ_eq_stored`) whose
+  implied `ρ_esp = ρ_eq_stored / h_eq(V_ref, Q_ref)` diverges from the
+  supplied value by more than 5%. The warning prefix is
+  `[energy-conversion] WARN:` and includes the hydro and stage IDs.
+  The run is not aborted — the warning flags a likely data-entry bug
+  while preserving legitimate turbine-retrofit cases.
+
 ### Removed
 
 - `cobre_stochastic::par::fit_par_annual_with_reduction` and its
@@ -28,6 +56,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   estimation pipeline. The wired path
   (`apply_annual_prepass_reductions` → `reduce_entity_orders_annual`)
   remains the single source of truth.
+
+- Column `productivity_mw_per_m3s` from `simulation/hydros.parquet`. The
+  column was `null` for FPHA hydros and duplicated input for non-FPHA
+  hydros. It is replaced by the five always-populated energy columns
+  listed above.
+
+### Breaking Changes
+
+**Output schema** — `simulation/hydros.parquet` grows from 31 to 35
+columns. The column `productivity_mw_per_m3s` is removed; five new
+non-nullable `Float64` columns are added after `generation_mwh`:
+`equivalent_productivity_mw_per_m3s`,
+`accumulated_productivity_mw_per_m3s`, `incremental_inflow_energy_mw`,
+`stored_energy_initial_mwh`, `stored_energy_final_mwh`. The
+accompanying `variables.csv` dictionary file is updated to reflect the
+new columns and drops the entry for the removed one.
+
+**FPHA validation** — Studies that declare a hydro with
+`generation_model: "fpha"` must now supply either VHA geometry plus
+`specific_productivity_mw_per_m3s_per_m`, or (when the optional
+`system/hydro_energy_productivity.parquet` override is in place) a
+per-`(hydro, stage)` `equivalent_productivity` entry. Cases that
+previously loaded with neither source now fail fast at setup time with
+an error that names the offending plant and lists the three accepted
+remediations.
+
+**Migration**
+
+- Replace reads of `productivity_mw_per_m3s` with
+  `equivalent_productivity_mw_per_m3s`. For `ConstantProductivity` and
+  `LinearizedHead` hydros the numeric value is identical to the
+  previous column; for FPHA hydros it is the derived `ρ_eq`
+  (previously `null`).
+- Notebooks and dashboards that filtered out the old `null` values for
+  FPHA hydros can now treat all hydros uniformly.
+- Downstream consumers that need accumulated cascade productivity,
+  energy-units inflows, or reservoir energy state should read from the
+  four new columns instead of computing them externally.
 
 ## [0.5.1] - 2026-04-28
 

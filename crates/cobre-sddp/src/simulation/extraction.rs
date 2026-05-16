@@ -34,8 +34,9 @@ use std::ops::Range;
 use cobre_core::ConstraintSense;
 use cobre_core::EntityId;
 
+use crate::energy_conversion::EnergyConversionSet;
 use crate::indexer::StageIndexer;
-use crate::lp_builder::{COST_SCALE_FACTOR, GenericConstraintRowEntry};
+use crate::lp_builder::{GenericConstraintRowEntry, COST_SCALE_FACTOR};
 use crate::simulation::types::{
     ScenarioCategoryCosts, SimulationBusResult, SimulationContractResult, SimulationCostResult,
     SimulationExchangeResult, SimulationGenericViolationResult, SimulationHydroResult,
@@ -183,6 +184,15 @@ pub struct SolutionView<'a> {
     pub row_lower: &'a [f64],
 }
 
+/// Conversion factor from `hm³ · MW/(m³/s)` to `MWh`.
+///
+/// Unit cancellation:
+/// `hm³ × 10⁶ m³/hm³ ÷ 3600 s/h × MW/(m³/s) = MWh`
+///
+/// Used to compute stored-energy fields:
+/// `stored_energy_mwh = (V_hm3 − V_min_hm3) · ρ_acum · ENERGY_FACTOR`.
+pub const ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S: f64 = 1.0e6 / 3600.0;
+
 /// Extraction parameters bundled for a single stage.
 ///
 /// Bundles the static configuration used by all per-entity extraction helpers
@@ -247,6 +257,24 @@ pub struct StageExtractionSpec<'a> {
     /// Product of all one-step discount factors for transitions preceding
     /// this stage. `1.0` for stage 0.
     pub cumulative_discount_factor: f64,
+    /// Pre-computed energy-conversion scalars for every `(hydro, stage)` pair.
+    ///
+    /// Provides `ρ_eq` (equivalent productivity) via
+    /// [`EnergyConversionSet::conversion`] and `ρ_acum` (accumulated cascade
+    /// productivity) via [`EnergyConversionSet::accumulated_productivity`].
+    /// Used to populate the five energy fields on [`crate::simulation::types::SimulationHydroResult`].
+    pub energy_conversion: &'a EnergyConversionSet,
+    /// Minimum storage volume `V_min` per hydro plant (hm³), in canonical
+    /// ID-sorted order matching `entity_counts.hydro_ids`.
+    ///
+    /// Used to compute `stored_energy_mwh = (V - V_min) · ρ_acum · ENERGY_FACTOR`.
+    pub hydro_min_storage_hm3: &'a [f64],
+    /// Stage index within the planning horizon (0-based).
+    ///
+    /// Passed to [`EnergyConversionSet::conversion`] and
+    /// [`EnergyConversionSet::accumulated_productivity`] so that per-stage
+    /// productivity scalars are read for the correct stage.
+    pub stage_index: usize,
 }
 
 impl StageExtractionSpec<'_> {
@@ -258,7 +286,11 @@ impl StageExtractionSpec<'_> {
     fn col_scale_factor(&self, col: usize) -> f64 {
         if col < self.col_scale.len() {
             let d = self.col_scale[col];
-            if d == 0.0 { 1.0 } else { d }
+            if d == 0.0 {
+                1.0
+            } else {
+                d
+            }
         } else {
             1.0
         }
@@ -331,14 +363,6 @@ fn extract_hydro_no_turbine(
             (0.0, 0.0, 0.0, 0.0)
         };
 
-    // Determine if hydro `h` is FPHA via O(1) reverse lookup.
-    let is_fpha = lookup.fpha[h].is_some();
-    let productivity_mw_per_m3s = if is_fpha {
-        None
-    } else {
-        Some(spec.hydro_productivities[h])
-    };
-
     // Evaporation: read from LP columns when present; fall back to 0.0.
     let (evaporation_m3s, evaporation_violation_neg_m3s, evaporation_violation_pos_m3s) =
         if let Some(local_evap_idx) = lookup.evap[h] {
@@ -351,6 +375,15 @@ fn extract_hydro_no_turbine(
             (Some(0.0), 0.0, 0.0)
         };
 
+    // Energy-conversion scalars from EnergyConversionSet.
+    let conv = spec.energy_conversion.conversion(h, spec.stage_index);
+    let rho_acum = spec
+        .energy_conversion
+        .accumulated_productivity(h, spec.stage_index);
+    let v_min = spec.hydro_min_storage_hm3.get(h).copied().unwrap_or(0.0);
+    let storage_initial = view.primal[indexer.storage_in.start + h];
+    let storage_final = view.primal[indexer.storage.start + h];
+
     SimulationHydroResult {
         stage_id,
         block_id: None,
@@ -362,10 +395,18 @@ fn extract_hydro_no_turbine(
         diverted_outflow_m3s: Some(0.0),
         incremental_inflow_m3s: incremental_inflow,
         inflow_m3s: incremental_inflow,
-        storage_initial_hm3: view.primal[indexer.storage_in.start + h],
-        storage_final_hm3: view.primal[indexer.storage.start + h],
+        storage_initial_hm3: storage_initial,
+        storage_final_hm3: storage_final,
         generation_mw: 0.0,
-        productivity_mw_per_m3s,
+        equivalent_productivity_mw_per_m3s: conv.equivalent_productivity_mw_per_m3s,
+        accumulated_productivity_mw_per_m3s: rho_acum,
+        incremental_inflow_energy_mw: rho_acum * incremental_inflow,
+        stored_energy_initial_mwh: (storage_initial - v_min)
+            * rho_acum
+            * ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S,
+        stored_energy_final_mwh: (storage_final - v_min)
+            * rho_acum
+            * ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S,
         spillage_cost: 0.0,
         water_value_per_hm3: water_value,
         storage_binding_code: 0,
@@ -398,7 +439,11 @@ struct HydroStageContext {
     withdrawal_pos: f64,
     water_value: f64,
     fpha_local: Option<usize>,
-    productivity_mw_per_m3s: Option<f64>,
+    equivalent_productivity_mw_per_m3s: f64,
+    accumulated_productivity_mw_per_m3s: f64,
+    incremental_inflow_energy_mw: f64,
+    stored_energy_initial_mwh: f64,
+    stored_energy_final_mwh: f64,
     evaporation_m3s: Option<f64>,
     evaporation_violation_neg_m3s: f64,
     evaporation_violation_pos_m3s: f64,
@@ -443,28 +488,23 @@ impl HydroStageContext {
             .copied()
             .unwrap_or(0.0)
             * COST_SCALE_FACTOR;
-        // Determine if hydro `h` is FPHA. If so, record its local FPHA index so we
-        // can read generation from the LP `g_{h,k}` column rather than computing
-        // turbined * productivity. productivity_mw_per_m3s is None for FPHA hydros
-        // because they use a piecewise function, not a scalar constant.
-        let fpha_local: Option<usize> = lookup.fpha[h];
-        let productivity_mw_per_m3s = if fpha_local.is_some() {
-            None
-        } else {
-            Some(spec.hydro_productivities[h])
-        };
-        // Evaporation: stage-level (one column per hydro, same for all blocks).
-        let local_evap: Option<usize> = lookup.evap[h];
+        let fpha_local = lookup.fpha[h];
+        let local_evap = lookup.evap[h];
         let (evaporation_m3s, evaporation_violation_neg_m3s, evaporation_violation_pos_m3s) =
             if let Some(lei) = local_evap {
                 let ei = &indexer.evap_indices[lei];
                 let q_ev = view.primal[ei.q_ev_col];
-                let neg = view.primal[ei.f_evap_plus_col]; // f_evap_plus = under-evaporation
-                let pos = view.primal[ei.f_evap_minus_col]; // f_evap_minus = over-evaporation
+                let neg = view.primal[ei.f_evap_plus_col];
+                let pos = view.primal[ei.f_evap_minus_col];
                 (Some(q_ev), neg, pos)
             } else {
                 (Some(0.0), 0.0, 0.0)
             };
+        let conv = spec.energy_conversion.conversion(h, spec.stage_index);
+        let rho_acum = spec
+            .energy_conversion
+            .accumulated_productivity(h, spec.stage_index);
+        let v_min = spec.hydro_min_storage_hm3.get(h).copied().unwrap_or(0.0);
         Self {
             storage_final,
             storage_initial,
@@ -474,7 +514,15 @@ impl HydroStageContext {
             withdrawal_pos,
             water_value,
             fpha_local,
-            productivity_mw_per_m3s,
+            equivalent_productivity_mw_per_m3s: conv.equivalent_productivity_mw_per_m3s,
+            accumulated_productivity_mw_per_m3s: rho_acum,
+            incremental_inflow_energy_mw: rho_acum * incremental_inflow,
+            stored_energy_initial_mwh: (storage_initial - v_min)
+                * rho_acum
+                * ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S,
+            stored_energy_final_mwh: (storage_final - v_min)
+                * rho_acum
+                * ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S,
             evaporation_m3s,
             evaporation_violation_neg_m3s,
             evaporation_violation_pos_m3s,
@@ -562,7 +610,11 @@ fn extract_hydro_per_block<'a>(
             storage_initial_hm3: ctx.storage_initial,
             storage_final_hm3: ctx.storage_final,
             generation_mw,
-            productivity_mw_per_m3s: ctx.productivity_mw_per_m3s,
+            equivalent_productivity_mw_per_m3s: ctx.equivalent_productivity_mw_per_m3s,
+            accumulated_productivity_mw_per_m3s: ctx.accumulated_productivity_mw_per_m3s,
+            incremental_inflow_energy_mw: ctx.incremental_inflow_energy_mw,
+            stored_energy_initial_mwh: ctx.stored_energy_initial_mwh,
+            stored_energy_final_mwh: ctx.stored_energy_final_mwh,
             spillage_cost: spillage * view.objective_coeffs[s_col] / spec.col_scale_factor(s_col)
                 * COST_SCALE_FACTOR,
             water_value_per_hm3: ctx.water_value,
@@ -958,7 +1010,11 @@ fn compute_cost_result(
     let scale_factor = |col: usize| -> f64 {
         if col < col_scale.len() {
             let d = col_scale[col];
-            if d == 0.0 { 1.0 } else { d }
+            if d == 0.0 {
+                1.0
+            } else {
+                d
+            }
         } else {
             1.0
         }
@@ -1366,8 +1422,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        EntityCounts, SolutionView, StageExtractionSpec, accumulate_category_costs,
-        assign_scenarios, extract_stage_result,
+        accumulate_category_costs, assign_scenarios, extract_stage_result, EntityCounts,
+        SolutionView, StageExtractionSpec,
     };
     use crate::indexer::StageIndexer;
     use crate::simulation::types::{ScenarioCategoryCosts, SimulationCostResult};
@@ -1449,6 +1505,26 @@ mod tests {
     // extract_stage_result
     // -------------------------------------------------------------------------
 
+    /// Build a zero-valued [`crate::energy_conversion::EnergyConversionSet`] for tests
+    /// that do not assert on energy fields.
+    fn zero_energy_conversion(
+        n_hydros: usize,
+        n_stages: usize,
+    ) -> crate::energy_conversion::EnergyConversionSet {
+        use crate::energy_conversion::{EnergyConversion, EnergyConversionSet};
+        let zero_ec = EnergyConversion {
+            equivalent_productivity_mw_per_m3s: 0.0,
+            reference_volume_hm3: 0.0,
+            reference_outflow_m3s: 0.0,
+        };
+        EnergyConversionSet::new(
+            vec![vec![zero_ec; n_stages]; n_hydros],
+            vec![vec![0.0_f64; n_stages]; n_hydros],
+            n_hydros,
+            n_stages,
+        )
+    }
+
     fn make_entity_counts_2_hydros() -> EntityCounts {
         EntityCounts {
             hydro_ids: vec![10, 20],
@@ -1492,6 +1568,7 @@ mod tests {
         let indexer = StageIndexer::new(2, 1);
         let primal = make_primal_2_1([100.0, 200.0], [50.0, 60.0], [90.0, 180.0], 999.5);
         let dual = vec![0.0; 4];
+        let ec = zero_energy_conversion(2, 1);
 
         let result = extract_stage_result(
             &SolutionView {
@@ -1516,6 +1593,9 @@ mod tests {
                 col_scale: &[],
                 row_scale: &[],
                 cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0; 2],
+                stage_index: 0,
             },
             3,
         );
@@ -1534,6 +1614,7 @@ mod tests {
         let objective = 800.0;
         let primal = make_primal_2_1([0.0; 2], [0.0; 2], [0.0; 2], theta_val);
         let dual = vec![0.0; 4];
+        let ec = zero_energy_conversion(2, 1);
 
         let result = extract_stage_result(
             &SolutionView {
@@ -1558,6 +1639,9 @@ mod tests {
                 col_scale: &[],
                 row_scale: &[],
                 cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0; 2],
+                stage_index: 0,
             },
             0,
         );
@@ -1576,6 +1660,7 @@ mod tests {
         let indexer = StageIndexer::new(2, 1);
         let primal = make_primal_2_1([100.0, 200.0], [50.0, 60.0], [90.0, 180.0], 999.5);
         let dual = vec![0.0; 4];
+        let ec = zero_energy_conversion(2, 1);
 
         let result = extract_stage_result(
             &SolutionView {
@@ -1600,6 +1685,9 @@ mod tests {
                 col_scale: &[],
                 row_scale: &[],
                 cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0; 2],
+                stage_index: 0,
             },
             0,
         );
@@ -1620,6 +1708,7 @@ mod tests {
         let indexer = StageIndexer::new(2, 1);
         let primal = make_primal_2_1([100.0, 200.0], [50.0, 60.0], [90.0, 180.0], 999.5);
         let dual = vec![0.0; 4];
+        let ec = zero_energy_conversion(2, 1);
 
         let result = extract_stage_result(
             &SolutionView {
@@ -1644,12 +1733,15 @@ mod tests {
                 col_scale: &[],
                 row_scale: &[],
                 cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0; 2],
+                stage_index: 0,
             },
             0,
         );
 
         assert_eq!(result.inflow_lags.len(), 2); // 2 hydros × 1 lag each
-        // Hydro 10, lag 0 → primal[2] = 50.0
+                                                 // Hydro 10, lag 0 → primal[2] = 50.0
         assert_eq!(result.inflow_lags[0].hydro_id, 10);
         assert_eq!(result.inflow_lags[0].lag_index, 0);
         assert_eq!(result.inflow_lags[0].inflow_m3s, 50.0);
@@ -1676,6 +1768,7 @@ mod tests {
             contract_ids: vec![],
             non_controllable_ids: vec![],
         };
+        let ec = zero_energy_conversion(2, 1);
 
         let result = extract_stage_result(
             &SolutionView {
@@ -1700,6 +1793,9 @@ mod tests {
                 col_scale: &[],
                 row_scale: &[],
                 cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0; 2],
+                stage_index: 0,
             },
             2,
         );
@@ -1714,6 +1810,7 @@ mod tests {
         let primal = make_primal_2_1([100.0, 200.0], [50.0, 60.0], [90.0, 180.0], 10.0);
         let dual = vec![0.0; 4];
         let stage_id = 7_u32;
+        let ec = zero_energy_conversion(2, 1);
 
         let result = extract_stage_result(
             &SolutionView {
@@ -1738,6 +1835,9 @@ mod tests {
                 col_scale: &[],
                 row_scale: &[],
                 cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0; 2],
+                stage_index: 0,
             },
             stage_id,
         );
@@ -1758,6 +1858,7 @@ mod tests {
         let indexer = StageIndexer::new(2, 1);
         let primal = make_primal_2_1([0.0; 2], [0.0; 2], [0.0; 2], 0.0);
         let dual = vec![0.0; 4];
+        let ec = zero_energy_conversion(2, 1);
 
         let result = extract_stage_result(
             &SolutionView {
@@ -1782,6 +1883,9 @@ mod tests {
                 col_scale: &[],
                 row_scale: &[],
                 cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0; 2],
+                stage_index: 0,
             },
             0,
         );
@@ -1863,7 +1967,7 @@ mod tests {
         primal[1] = 200.0; // storage h1
         primal[2] = 50.0; // lag h0
         primal[3] = 60.0; // lag h1
-        // primal[4..6] = z_inflow (zeros)
+                          // primal[4..6] = z_inflow (zeros)
         primal[6] = 90.0; // storage_in h0
         primal[7] = 180.0; // storage_in h1
         primal[8] = 500.0; // theta
@@ -1871,7 +1975,7 @@ mod tests {
         primal[10] = 40.0; // turbine h1 b0
         primal[11] = 5.0; // spillage h0 b0
         primal[12] = 0.0; // spillage h1 b0
-        // primal[13..15] = diversion (zeros)
+                          // primal[13..15] = diversion (zeros)
         primal[15] = 80.0; // thermal t0 b0
         primal[16] = 15.0; // line_fwd l0 b0
         primal[17] = 0.0; // line_rev l0 b0
@@ -1909,6 +2013,7 @@ mod tests {
         let mut row_lower = vec![0.0_f64; 9]; // must be >= load_balance.end = 9
         row_lower[8] = 75.0; // load = 75 MW for bus 100
         let block_hours = [720.0_f64]; // one block, 30-day month
+        let ec = zero_energy_conversion(2, 1);
         let result = extract_stage_result(
             &SolutionView {
                 primal: &primal,
@@ -1932,6 +2037,9 @@ mod tests {
                 col_scale: &[],
                 row_scale: &[],
                 cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0; 2],
+                stage_index: 0,
             },
             0,
         );
@@ -2006,6 +2114,7 @@ mod tests {
             non_controllable_ids: vec![],
         };
 
+        let ec = zero_energy_conversion(1, 1);
         let result = extract_stage_result(
             &SolutionView {
                 primal: &primal,
@@ -2029,6 +2138,9 @@ mod tests {
                 col_scale: &[],
                 row_scale: &[],
                 cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0],
+                stage_index: 0,
             },
             0,
         );
@@ -2269,6 +2381,7 @@ mod tests {
             non_controllable_ids: vec![],
         };
 
+        let ec = zero_energy_conversion(2, 1);
         let result = extract_stage_result(
             &SolutionView {
                 primal: &primal,
@@ -2292,6 +2405,9 @@ mod tests {
                 col_scale: &[],
                 row_scale: &[],
                 cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0; 2],
+                stage_index: 0,
             },
             0,
         );
@@ -2356,6 +2472,7 @@ mod tests {
             non_controllable_ids: vec![],
         };
 
+        let ec = zero_energy_conversion(2, 1);
         let result = extract_stage_result(
             &SolutionView {
                 primal: &primal,
@@ -2379,6 +2496,9 @@ mod tests {
                 col_scale: &[],
                 row_scale: &[],
                 cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0; 2],
+                stage_index: 0,
             },
             0,
         );
@@ -2454,6 +2574,7 @@ mod tests {
             non_controllable_ids: vec![],
         };
 
+        let ec = zero_energy_conversion(2, 1);
         let result = extract_stage_result(
             &SolutionView {
                 primal: &primal,
@@ -2477,6 +2598,9 @@ mod tests {
                 col_scale: &[],
                 row_scale: &[],
                 cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0; 2],
+                stage_index: 0,
             },
             0,
         );
@@ -2539,7 +2663,7 @@ mod tests {
         let mut primal = vec![0.0_f64; n_cols];
         primal[0] = 50.0; // storage h0
         primal[1] = 80.0; // storage h1
-        // primal[2..4] = z_inflow (zeros)
+                          // primal[2..4] = z_inflow (zeros)
         primal[4] = 45.0; // storage_in h0
         primal[5] = 75.0; // storage_in h1
         primal[6] = 0.0; // theta
@@ -2547,7 +2671,7 @@ mod tests {
         primal[8] = 30.0; // turbine h1 b0
         primal[9] = 0.0; // spillage h0 b0
         primal[10] = 0.0; // spillage h1 b0
-        // primal[11..13] = diversion (zeros)
+                          // primal[11..13] = diversion (zeros)
         primal[13] = 75.0; // FPHA generation h0 b0 — acceptance criterion value
 
         let obj = vec![0.0_f64; n_cols];
@@ -2565,6 +2689,7 @@ mod tests {
             non_controllable_ids: vec![],
         };
 
+        let ec = zero_energy_conversion(2, 1);
         let result = extract_stage_result(
             &SolutionView {
                 primal: &primal,
@@ -2588,6 +2713,9 @@ mod tests {
                 col_scale: &[],
                 row_scale: &[],
                 cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0; 2],
+                stage_index: 0,
             },
             0,
         );
@@ -2611,10 +2739,12 @@ mod tests {
         );
     }
 
-    /// Acceptance criterion: FPHA hydro has `productivity_mw_per_m3s == None`;
-    /// constant-productivity hydro has `Some(rho)`.
+    /// Acceptance criterion: both FPHA and constant-productivity hydros report
+    /// the `equivalent_productivity_mw_per_m3s` produced by the supplied
+    /// `EnergyConversionSet`. With a zero-valued set the field is `0.0` for
+    /// every hydro regardless of generation model.
     #[test]
-    fn fpha_productivity_is_none() {
+    fn fpha_productivity_placeholder_zero() {
         let indexer = make_indexer_2h_1fpha_1blk();
         let n_cols = indexer.generation_below_slack.end;
         let primal = vec![0.0_f64; n_cols];
@@ -2633,6 +2763,7 @@ mod tests {
             non_controllable_ids: vec![],
         };
 
+        let ec = zero_energy_conversion(2, 1);
         let result = extract_stage_result(
             &SolutionView {
                 primal: &primal,
@@ -2656,18 +2787,21 @@ mod tests {
                 col_scale: &[],
                 row_scale: &[],
                 cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0; 2],
+                stage_index: 0,
             },
             0,
         );
 
+        // Both hydros report the values supplied by the zero-valued EnergyConversionSet.
         assert_eq!(
-            result.hydros[0].productivity_mw_per_m3s, None,
-            "FPHA hydro must have productivity_mw_per_m3s == None"
+            result.hydros[0].equivalent_productivity_mw_per_m3s, 0.0,
+            "FPHA hydro must carry placeholder 0.0 for equivalent_productivity_mw_per_m3s"
         );
         assert_eq!(
-            result.hydros[1].productivity_mw_per_m3s,
-            Some(1.5),
-            "constant-productivity hydro must have Some(1.5)"
+            result.hydros[1].equivalent_productivity_mw_per_m3s, 0.0,
+            "constant-productivity hydro must carry placeholder 0.0 for equivalent_productivity_mw_per_m3s"
         );
     }
 
@@ -2717,12 +2851,12 @@ mod tests {
         let n_cols = indexer.generation_below_slack.end;
         let mut primal = vec![0.0_f64; n_cols];
         primal[0] = 200.0; // storage h0
-        // primal[1] = z_inflow h0 (zero)
+                           // primal[1] = z_inflow h0 (zero)
         primal[2] = 190.0; // storage_in h0
         primal[3] = 0.0; // theta
         primal[4] = 10.0; // turbine h0 b0
         primal[5] = 0.0; // spillage h0 b0
-        // primal[6] = diversion h0 b0 (zero)
+                         // primal[6] = diversion h0 b0 (zero)
         primal[7] = 3.5; // Q_ev — acceptance criterion value
 
         let obj = vec![0.0_f64; n_cols];
@@ -2740,6 +2874,7 @@ mod tests {
             non_controllable_ids: vec![],
         };
 
+        let ec = zero_energy_conversion(1, 1);
         let result = extract_stage_result(
             &SolutionView {
                 primal: &primal,
@@ -2763,6 +2898,9 @@ mod tests {
                 col_scale: &[],
                 row_scale: &[],
                 cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0],
+                stage_index: 0,
             },
             0,
         );
@@ -2790,8 +2928,8 @@ mod tests {
         primal[0] = 200.0;
         // primal[1] = z_inflow h0 (zero)
         primal[2] = 190.0; // storage_in h0
-        // primal[3] = theta = 0
-        // primal[6] = diversion h0 b0 (zero)
+                           // primal[3] = theta = 0
+                           // primal[6] = diversion h0 b0 (zero)
         primal[7] = 2.0; // Q_ev
         primal[8] = 0.5; // f_evap_plus (under-evaporation -> neg)
         primal[9] = 0.0; // f_evap_minus (over-evaporation -> pos)
@@ -2811,6 +2949,7 @@ mod tests {
             non_controllable_ids: vec![],
         };
 
+        let ec = zero_energy_conversion(1, 1);
         let result = extract_stage_result(
             &SolutionView {
                 primal: &primal,
@@ -2834,6 +2973,9 @@ mod tests {
                 col_scale: &[],
                 row_scale: &[],
                 cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0],
+                stage_index: 0,
             },
             0,
         );
@@ -2870,7 +3012,7 @@ mod tests {
 
         let mut obj = vec![0.0_f64; n_cols];
         obj[6] = 1.0; // theta coefficient (undiscounted)
-        // FPHA generation column 13: objective_coeff=0.01
+                      // FPHA generation column 13: objective_coeff=0.01
         obj[13] = 0.01;
 
         let dual = vec![0.0_f64; 2];
@@ -2887,6 +3029,7 @@ mod tests {
             non_controllable_ids: vec![],
         };
 
+        let ec = zero_energy_conversion(2, 1);
         let result = extract_stage_result(
             &SolutionView {
                 primal: &primal,
@@ -2910,6 +3053,9 @@ mod tests {
                 col_scale: &[],
                 row_scale: &[],
                 cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0; 2],
+                stage_index: 0,
             },
             0,
         );
@@ -2961,8 +3107,8 @@ mod tests {
         let mut obj = vec![0.0_f64; n_cols];
         obj[6] = 1.0; // theta coefficient (undiscounted)
         obj[13] = 0.01; // FPHA generation cost (scaled)
-        // objective in scaled space = theta_coeff * theta + fpha_coeff * fpha
-        //                           = 1.0 * 500 + 0.01 * 30 = 500.3
+                        // objective in scaled space = theta_coeff * theta + fpha_coeff * fpha
+                        //                           = 1.0 * 500 + 0.01 * 30 = 500.3
         let objective_val = 500.3_f64;
 
         let dual = vec![0.0_f64; 2];
@@ -2979,6 +3125,7 @@ mod tests {
             non_controllable_ids: vec![],
         };
 
+        let ec = zero_energy_conversion(2, 1);
         let result = extract_stage_result(
             &SolutionView {
                 primal: &primal,
@@ -3002,6 +3149,9 @@ mod tests {
                 col_scale: &[],
                 row_scale: &[],
                 cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0; 2],
+                stage_index: 0,
             },
             0,
         );
@@ -3047,7 +3197,7 @@ mod tests {
 
         let mut obj = vec![0.0_f64; n_cols];
         obj[6] = 1.0; // theta coefficient (undiscounted)
-        // c_orig / K = 0.005.  With col_scale = 2.0: obj_coeff = 0.005 * 2.0 = 0.01.
+                      // c_orig / K = 0.005.  With col_scale = 2.0: obj_coeff = 0.005 * 2.0 = 0.01.
         obj[13] = 0.01;
 
         // Build col_scale: all 1.0 except column 13 = 2.0.
@@ -3068,6 +3218,7 @@ mod tests {
             non_controllable_ids: vec![],
         };
 
+        let ec = zero_energy_conversion(2, 1);
         let result = extract_stage_result(
             &SolutionView {
                 primal: &primal,
@@ -3091,6 +3242,9 @@ mod tests {
                 col_scale: &col_scale,
                 row_scale: &[],
                 cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0; 2],
+                stage_index: 0,
             },
             0,
         );
@@ -3179,6 +3333,7 @@ mod tests {
             non_controllable_ids: vec![],
         };
 
+        let ec = zero_energy_conversion(2, 1);
         let result = extract_stage_result(
             &SolutionView {
                 primal: &primal,
@@ -3202,6 +3357,9 @@ mod tests {
                 col_scale: &[],
                 row_scale: &[],
                 cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0; 2],
+                stage_index: 0,
             },
             0,
         );
@@ -3258,6 +3416,197 @@ mod tests {
             (cost.hydro_violation_cost - component_sum).abs() < 1e-6,
             "hydro_violation_cost ({}) must equal sum of components ({component_sum})",
             cost.hydro_violation_cost
+        );
+    }
+
+    /// Build an [`EnergyConversionSet`] for the (1 hydro, 1 stage) case with
+    /// explicit `ρ_eq` and `ρ_acum` values.
+    fn one_hydro_energy_set(
+        rho_eq: f64,
+        rho_acum: f64,
+    ) -> crate::energy_conversion::EnergyConversionSet {
+        use crate::energy_conversion::{EnergyConversion, EnergyConversionSet};
+        let cell = EnergyConversion {
+            equivalent_productivity_mw_per_m3s: rho_eq,
+            reference_volume_hm3: 0.0,
+            reference_outflow_m3s: 0.0,
+        };
+        EnergyConversionSet::new(vec![vec![cell; 1]; 1], vec![vec![rho_acum; 1]; 1], 1, 1)
+    }
+
+    fn make_entity_counts_1_hydro() -> EntityCounts {
+        EntityCounts {
+            hydro_ids: vec![10],
+            hydro_productivities: vec![1.0],
+            thermal_ids: vec![],
+            line_ids: vec![],
+            bus_ids: vec![100],
+            pumping_station_ids: vec![],
+            contract_ids: vec![],
+            non_controllable_ids: vec![],
+        }
+    }
+
+    /// Build a primal vector for `StageIndexer::new(1, 1)`:
+    /// `[storage, lag, z_inflow, storage_in, theta]` (length 5).
+    fn make_primal_1_1(storage: f64, storage_in: f64, theta: f64) -> Vec<f64> {
+        vec![storage, 0.0, 0.0, storage_in, theta]
+    }
+
+    #[test]
+    fn stored_energy_initial_uses_v_min_offset() {
+        // storage_initial = 110, V_min = 100, ρ_acum = 4.0 →
+        // stored_energy_initial = (110 - 100) * 4 * 1e6 / 3600 ≈ 11_111.111…
+        let indexer = StageIndexer::new(1, 1);
+        let primal = make_primal_1_1(120.0, 110.0, 0.0);
+        let dual = vec![0.0; 2];
+        let ec = one_hydro_energy_set(0.9, 4.0);
+
+        let result = extract_stage_result(
+            &SolutionView {
+                primal: &primal,
+                dual: &dual,
+                objective: 0.0,
+                objective_coeffs: &[],
+                row_lower: &[],
+            },
+            &StageExtractionSpec {
+                indexer: &indexer,
+                entity_counts: &make_entity_counts_1_hydro(),
+                inflow_m3s_per_hydro: &[],
+                block_hours: &[],
+                generic_constraint_entries: &[],
+                ncs_col_start: 0,
+                n_ncs: 0,
+                ncs_entity_ids: &[],
+                ncs_col_upper: &[],
+                diversion_upstream: &HashMap::new(),
+                hydro_productivities: &[1.0],
+                col_scale: &[],
+                row_scale: &[],
+                cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[100.0],
+                stage_index: 0,
+            },
+            0,
+        );
+
+        assert_eq!(result.hydros.len(), 1);
+        let h = &result.hydros[0];
+        assert!(
+            (h.equivalent_productivity_mw_per_m3s - 0.9).abs() < 1e-12,
+            "equivalent_productivity should be 0.9, got {}",
+            h.equivalent_productivity_mw_per_m3s
+        );
+        assert!(
+            (h.accumulated_productivity_mw_per_m3s - 4.0).abs() < 1e-12,
+            "accumulated_productivity should be 4.0, got {}",
+            h.accumulated_productivity_mw_per_m3s
+        );
+        // storage_initial_hm3 = 110.0 (from primal storage_in), V_min = 100.0.
+        let expected = (110.0_f64 - 100.0) * 4.0 * 1.0e6 / 3600.0;
+        assert!(
+            (h.stored_energy_initial_mwh - expected).abs() < 1e-6,
+            "stored_energy_initial: expected {expected}, got {}",
+            h.stored_energy_initial_mwh
+        );
+    }
+
+    #[test]
+    fn incremental_inflow_energy_uses_rho_acum() {
+        // ρ_acum = 4.0, incremental_inflow = 50.0 →
+        // incremental_inflow_energy = 4.0 * 50.0 = 200.0 (exactly).
+        let indexer = StageIndexer::new(1, 1);
+        let primal = make_primal_1_1(120.0, 110.0, 0.0);
+        let dual = vec![0.0; 2];
+        let ec = one_hydro_energy_set(0.9, 4.0);
+
+        let result = extract_stage_result(
+            &SolutionView {
+                primal: &primal,
+                dual: &dual,
+                objective: 0.0,
+                objective_coeffs: &[],
+                row_lower: &[],
+            },
+            &StageExtractionSpec {
+                indexer: &indexer,
+                entity_counts: &make_entity_counts_1_hydro(),
+                inflow_m3s_per_hydro: &[50.0],
+                block_hours: &[],
+                generic_constraint_entries: &[],
+                ncs_col_start: 0,
+                n_ncs: 0,
+                ncs_entity_ids: &[],
+                ncs_col_upper: &[],
+                diversion_upstream: &HashMap::new(),
+                hydro_productivities: &[1.0],
+                col_scale: &[],
+                row_scale: &[],
+                cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[100.0],
+                stage_index: 0,
+            },
+            0,
+        );
+
+        assert_eq!(result.hydros.len(), 1);
+        assert!(
+            (result.hydros[0].incremental_inflow_energy_mw - 200.0).abs() < 1e-12,
+            "incremental_inflow_energy should be 200.0, got {}",
+            result.hydros[0].incremental_inflow_energy_mw
+        );
+    }
+
+    #[test]
+    fn stage_path_propagates_productivity_values() {
+        // The per-stage path (block_hours empty) must read ρ_eq and ρ_acum
+        // from the supplied EnergyConversionSet and surface them on the
+        // result. The per-block path shares the same HydroStageContext,
+        // so by construction it cannot disagree.
+        let indexer = StageIndexer::new(1, 1);
+        let primal = make_primal_1_1(120.0, 110.0, 0.0);
+        let dual = vec![0.0; 2];
+        let ec = one_hydro_energy_set(0.85, 3.5);
+
+        let stage_result = extract_stage_result(
+            &SolutionView {
+                primal: &primal,
+                dual: &dual,
+                objective: 0.0,
+                objective_coeffs: &[],
+                row_lower: &[],
+            },
+            &StageExtractionSpec {
+                indexer: &indexer,
+                entity_counts: &make_entity_counts_1_hydro(),
+                inflow_m3s_per_hydro: &[10.0],
+                block_hours: &[],
+                generic_constraint_entries: &[],
+                ncs_col_start: 0,
+                n_ncs: 0,
+                ncs_entity_ids: &[],
+                ncs_col_upper: &[],
+                diversion_upstream: &HashMap::new(),
+                hydro_productivities: &[1.0],
+                col_scale: &[],
+                row_scale: &[],
+                cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[100.0],
+                stage_index: 0,
+            },
+            0,
+        );
+
+        let rho_eq = stage_result.hydros[0].equivalent_productivity_mw_per_m3s;
+        let rho_acum = stage_result.hydros[0].accumulated_productivity_mw_per_m3s;
+        assert!((rho_eq - 0.85).abs() < 1e-12, "stage rho_eq = {rho_eq}");
+        assert!(
+            (rho_acum - 3.5).abs() < 1e-12,
+            "stage rho_acum = {rho_acum}"
         );
     }
 }

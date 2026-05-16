@@ -122,9 +122,23 @@ pub struct SimulationHydroResult {
     pub storage_final_hm3: f64,
     /// Active power generation in MW.
     pub generation_mw: f64,
-    /// Plant productivity in MW/(m³/s), or [`None`] if using a tabular
-    /// production function.
-    pub productivity_mw_per_m3s: Option<f64>,
+    /// Equivalent productivity `ρ_eq` \[MW/(m³/s)\]. For `ConstantProductivity` /
+    /// `LinearizedHead` models this is the stored input scalar; for FPHA models
+    /// it is derived from VHA geometry, `ρ_esp`, `V_ref`, and `Q_ref` by
+    /// `EnergyConversionSet`. Always populated.
+    pub equivalent_productivity_mw_per_m3s: f64,
+    /// Accumulated productivity `ρ_acum` \[MW/(m³/s)\]: the sum of `ρ_eq` along
+    /// the downstream cascade. Always populated.
+    pub accumulated_productivity_mw_per_m3s: f64,
+    /// Incremental inflow expressed in energy units
+    /// (`ρ_acum · incremental_inflow_m3s`) \[MW\].
+    pub incremental_inflow_energy_mw: f64,
+    /// Stored energy at the start of the block
+    /// (`(storage_initial_hm3 − V_min) · ρ_acum · 10^6 / 3600`) \[`MWh`\].
+    pub stored_energy_initial_mwh: f64,
+    /// Stored energy at the end of the block
+    /// (`(storage_final_hm3 − V_min) · ρ_acum · 10^6 / 3600`) \[`MWh`\].
+    pub stored_energy_final_mwh: f64,
     /// Regularization cost for spillage at this plant.
     pub spillage_cost: f64,
     /// Water value (dual of the storage balance constraint) in cost/hm³.
@@ -591,7 +605,11 @@ mod tests {
             storage_initial_hm3: 500.0,
             storage_final_hm3: 480.0,
             generation_mw: 50.0,
-            productivity_mw_per_m3s: Some(0.5),
+            equivalent_productivity_mw_per_m3s: 0.5,
+            accumulated_productivity_mw_per_m3s: 0.5,
+            incremental_inflow_energy_mw: 100.0,
+            stored_energy_initial_mwh: 250.0,
+            stored_energy_final_mwh: 240.0,
             spillage_cost: 0.0,
             water_value_per_hm3: 10.0,
             storage_binding_code: 0,
@@ -614,7 +632,98 @@ mod tests {
         assert_eq!(r.evaporation_m3s, None);
         assert_eq!(r.diverted_inflow_m3s, None);
         assert_eq!(r.diverted_outflow_m3s, None);
-        assert_eq!(r.productivity_mw_per_m3s, Some(0.5));
+        assert_eq!(r.equivalent_productivity_mw_per_m3s, 0.5);
+        assert_eq!(r.accumulated_productivity_mw_per_m3s, 0.5);
+        assert_eq!(r.incremental_inflow_energy_mw, 100.0);
+        assert_eq!(r.stored_energy_initial_mwh, 250.0);
+        assert_eq!(r.stored_energy_final_mwh, 240.0);
+    }
+
+    #[test]
+    fn simulation_hydro_result_serde_round_trip() {
+        let original = SimulationHydroResult {
+            stage_id: 3,
+            block_id: Some(1),
+            hydro_id: 7,
+            turbined_m3s: 120.0,
+            spillage_m3s: 5.0,
+            evaporation_m3s: Some(0.3),
+            diverted_inflow_m3s: Some(10.0),
+            diverted_outflow_m3s: Some(8.0),
+            incremental_inflow_m3s: 300.0,
+            inflow_m3s: 310.0,
+            storage_initial_hm3: 600.0,
+            storage_final_hm3: 590.0,
+            generation_mw: 65.0,
+            equivalent_productivity_mw_per_m3s: 1.0,
+            accumulated_productivity_mw_per_m3s: 2.0,
+            incremental_inflow_energy_mw: 3.0,
+            stored_energy_initial_mwh: 4.0,
+            stored_energy_final_mwh: 5.0,
+            spillage_cost: 0.1,
+            water_value_per_hm3: 15.0,
+            storage_binding_code: 1,
+            operative_state_code: 1,
+            turbined_slack_m3s: 0.0,
+            outflow_slack_below_m3s: 0.0,
+            outflow_slack_above_m3s: 0.0,
+            generation_slack_mw: 0.0,
+            storage_violation_below_hm3: 0.0,
+            filling_target_violation_hm3: 0.0,
+            evaporation_violation_pos_m3s: 0.0,
+            evaporation_violation_neg_m3s: 0.0,
+            inflow_nonnegativity_slack_m3s: 0.0,
+            water_withdrawal_violation_pos_m3s: 0.0,
+            water_withdrawal_violation_neg_m3s: 0.0,
+        };
+
+        let json = serde_json::to_string(&original).expect("serialize");
+        let decoded: SimulationHydroResult = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(decoded.stage_id, original.stage_id);
+        assert_eq!(decoded.block_id, original.block_id);
+        assert_eq!(decoded.hydro_id, original.hydro_id);
+        assert_eq!(
+            decoded.equivalent_productivity_mw_per_m3s,
+            original.equivalent_productivity_mw_per_m3s
+        );
+        assert_eq!(
+            decoded.accumulated_productivity_mw_per_m3s,
+            original.accumulated_productivity_mw_per_m3s
+        );
+        assert_eq!(
+            decoded.incremental_inflow_energy_mw,
+            original.incremental_inflow_energy_mw
+        );
+        assert_eq!(
+            decoded.stored_energy_initial_mwh,
+            original.stored_energy_initial_mwh
+        );
+        assert_eq!(
+            decoded.stored_energy_final_mwh,
+            original.stored_energy_final_mwh
+        );
+        // Verify the exact bit patterns match for the five new fields.
+        assert_eq!(
+            decoded.equivalent_productivity_mw_per_m3s.to_bits(),
+            original.equivalent_productivity_mw_per_m3s.to_bits()
+        );
+        assert_eq!(
+            decoded.accumulated_productivity_mw_per_m3s.to_bits(),
+            original.accumulated_productivity_mw_per_m3s.to_bits()
+        );
+        assert_eq!(
+            decoded.incremental_inflow_energy_mw.to_bits(),
+            original.incremental_inflow_energy_mw.to_bits()
+        );
+        assert_eq!(
+            decoded.stored_energy_initial_mwh.to_bits(),
+            original.stored_energy_initial_mwh.to_bits()
+        );
+        assert_eq!(
+            decoded.stored_energy_final_mwh.to_bits(),
+            original.stored_energy_final_mwh.to_bits()
+        );
     }
 
     #[test]

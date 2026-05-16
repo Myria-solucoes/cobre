@@ -156,6 +156,8 @@ impl StudySetup {
                 .stage_data
                 .stage_templates
                 .hydro_productivities_per_stage,
+            energy_conversion: &self.energy_conversion,
+            hydro_min_storage_hm3: &self.hydro_min_storage_hm3,
             event_sender,
         };
 
