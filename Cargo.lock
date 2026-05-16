@@ -522,6 +522,7 @@ version = "0.5.1"
 name = "cobre-cli"
 version = "0.5.1"
 dependencies = [
+ "arrow",
  "assert_cmd",
  "chrono",
  "clap",
@@ -533,6 +534,7 @@ dependencies = [
  "cobre-stochastic",
  "console",
  "indicatif",
+ "parquet",
  "postcard",
  "predicates",
  "rayon",

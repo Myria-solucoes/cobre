@@ -12,6 +12,8 @@
         clippy::expect_used,
         clippy::panic,
         clippy::float_cmp,
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
     )
 )]
 
