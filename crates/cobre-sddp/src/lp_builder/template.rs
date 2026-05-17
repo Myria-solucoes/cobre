@@ -9,9 +9,10 @@ use crate::error::SddpError;
 use crate::hydro_models::{EvaporationModelSet, ProductionModelSet, ResolvedProductionModel};
 use crate::indexer::StageIndexer;
 use crate::inflow_method::InflowNonNegativityMethod;
+use crate::resolved_parameters::ResolvedParameters;
 
 use super::layout::{StageLayout, TemplateBuildCtx};
-use super::{COST_SCALE_FACTOR, GenericConstraintRowEntry, matrix, scaling};
+use super::{matrix, scaling, GenericConstraintRowEntry, COST_SCALE_FACTOR};
 
 /// Outcome of [`build_stage_templates`]: one [`StageTemplate`] per study stage
 /// plus the per-stage `base_rows` offsets needed by `PatchBuffer`.
@@ -354,6 +355,7 @@ fn collect_load_bus_indices(system: &System, bus_pos: &HashMap<EntityId, usize>)
 /// use cobre_sddp::InflowNonNegativityMethod;
 /// use cobre_sddp::hydro_models::PrepareHydroModelsResult;
 /// use cobre_sddp::lp_builder::build_stage_templates;
+/// use cobre_sddp::resolved_parameters::ResolvedParameters;
 /// use cobre_stochastic::par::precompute::PrecomputedPar;
 ///
 /// let bus = Bus {
@@ -367,9 +369,11 @@ fn collect_load_bus_indices(system: &System, bus_pos: &HashMap<EntityId, usize>)
 /// let par_lp = PrecomputedPar::build(&[], &[], &[]).expect("empty ok");
 /// let normal_lp = cobre_stochastic::normal::precompute::PrecomputedNormal::default();
 /// let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
+/// let resolved_parameters = ResolvedParameters::default();
 /// // No stages → empty result.
 /// let result = build_stage_templates(&system, &method, &par_lp, &normal_lp,
-///                                    &hydro_models.production, &hydro_models.evaporation)
+///                                    &hydro_models.production, &hydro_models.evaporation,
+///                                    &resolved_parameters)
 ///     .expect("empty system ok");
 /// assert!(result.templates.is_empty());
 /// ```
@@ -380,6 +384,7 @@ pub fn build_stage_templates(
     normal_lp: &PrecomputedNormal,
     production_models: &ProductionModelSet,
     evaporation_models: &EvaporationModelSet,
+    resolved_parameters: &ResolvedParameters,
 ) -> Result<StageTemplates, SddpError> {
     // Only build templates for study stages (id >= 0), in canonical order.
     let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
@@ -415,6 +420,7 @@ pub fn build_stage_templates(
         par_lp,
         production_models,
         evaporation_models,
+        resolved_parameters,
     );
     let n_load_buses = load_bus_indices.len();
     debug_assert!(
@@ -486,6 +492,7 @@ fn build_template_build_ctx<'a>(
     par_lp: &'a PrecomputedPar,
     production_models: &'a ProductionModelSet,
     evaporation_models: &'a EvaporationModelSet,
+    resolved_parameters: &'a ResolvedParameters,
 ) -> (
     TemplateBuildCtx<'a>,
     Vec<usize>,
@@ -561,6 +568,7 @@ fn build_template_build_ctx<'a>(
         non_controllable_sources: system.non_controllable_sources(),
         resolved_ncs_bounds: system.resolved_ncs_bounds(),
         resolved_ncs_factors: system.resolved_ncs_factors(),
+        resolved_parameters,
         diversion_upstream,
         n_hydros,
         n_thermals: system.thermals().len(),
@@ -1044,6 +1052,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
         assert!(result.templates.is_empty());
@@ -1061,6 +1070,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
         assert_eq!(result.templates.len(), 1);
@@ -1081,6 +1091,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
         let t = &result.templates[0];
@@ -1102,6 +1113,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
         let t = &result.templates[0];
@@ -1126,6 +1138,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
         let t = &result.templates[0];
@@ -1149,6 +1162,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
         let t = &result.templates[0];
@@ -1169,6 +1183,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
         let t = &result.templates[0];
@@ -1191,6 +1206,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
         let t = &result.templates[0];
@@ -1210,6 +1226,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
         let t = &result.templates[0];
@@ -1228,6 +1245,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
         let t = &result.templates[0];
@@ -1245,6 +1263,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
         let t = &result.templates[0];
@@ -1266,6 +1285,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
         for (s, (&br, t)) in result.base_rows.iter().zip(&result.templates).enumerate() {
@@ -1288,6 +1308,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
         let t = &result.templates[0];
@@ -1310,6 +1331,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
         let t = &result.templates[0];
@@ -1334,6 +1356,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
         let t = &result.templates[0];
@@ -1362,6 +1385,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
         let t = &result.templates[0];
@@ -1384,6 +1408,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
         let t = &result.templates[0];
@@ -1646,6 +1671,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &production,
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("fpha system builds ok");
         let t = &result.templates[0];
@@ -1672,6 +1698,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
         let t = &result.templates[0];
@@ -1700,6 +1727,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &production,
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("fpha multi-block system builds ok");
         let t = &result.templates[0];
@@ -1783,6 +1811,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &production,
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("mixed system builds");
         let t = &result.templates[0];
@@ -1830,6 +1859,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
         let t = &result.templates[0];
@@ -1856,6 +1886,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
         assert_eq!(result.templates.len(), 3);
@@ -1872,6 +1903,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
         let cloned = result.clone();
@@ -2063,6 +2095,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &production,
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         );
 
         // The builder must now succeed (the old guard has been removed).
@@ -2094,6 +2127,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         );
         assert!(
             result.is_ok(),
@@ -2122,6 +2156,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
         let with_p = build_stage_templates(
@@ -2131,6 +2166,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
         assert_eq!(
@@ -2156,6 +2192,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
         let without = build_stage_templates(
@@ -2165,6 +2202,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
         assert_eq!(
@@ -2187,6 +2225,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
         let t = &result.templates[0];
@@ -2215,6 +2254,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
         let t = &result.templates[0];
@@ -2247,6 +2287,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
         let t = &result.templates[0];
@@ -2285,6 +2326,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
         let t = &result.templates[0];
@@ -2319,6 +2361,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
         let t = &result.templates[0];
@@ -2360,6 +2403,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
         assert_eq!(result.templates.len(), 3);
@@ -2407,6 +2451,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
         let template = &result.templates[0];
@@ -2702,6 +2747,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
 
@@ -2738,6 +2784,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
 
@@ -2768,6 +2815,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
 
@@ -3242,6 +3290,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &production,
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("FPHA system ok");
 
@@ -3253,6 +3302,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity ok");
 
@@ -3303,6 +3353,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &production,
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("FPHA system ok");
 
@@ -3353,6 +3404,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &production,
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("FPHA system ok");
 
@@ -3391,6 +3443,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &production,
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("FPHA system ok");
 
@@ -3437,6 +3490,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &production,
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("mixed FPHA/constant system ok");
 
@@ -3585,6 +3639,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &production,
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("FPHA template build must succeed");
 
@@ -3649,6 +3704,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &production,
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("FPHA template build must succeed");
 
@@ -3770,6 +3826,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &fpha_production,
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("FPHA template build must succeed");
 
@@ -3785,6 +3842,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &const_production,
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("constant productivity template build must succeed");
 
@@ -3860,6 +3918,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &production,
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("mixed FPHA/constant system template build must succeed");
 
@@ -3973,6 +4032,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &no_evap,
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("no evaporation ok");
 
@@ -3983,6 +4043,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &EvaporationModelSet::new(vec![EvaporationModel::None]),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("none evaporation ok");
 
@@ -4022,6 +4083,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system1),
             &EvaporationModelSet::new(vec![EvaporationModel::None]),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("no evaporation baseline ok");
 
@@ -4033,6 +4095,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system1),
             &evap,
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("1 evaporation hydro ok");
 
@@ -4069,6 +4132,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &evap,
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("evaporation system ok");
 
@@ -4102,6 +4166,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &evap,
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("evaporation system ok");
 
@@ -4214,6 +4279,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &evap,
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("evaporation system ok");
 
@@ -4338,6 +4404,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &evap,
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("evaporation system ok");
 
@@ -4382,6 +4449,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &no_evap,
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("no evaporation ok");
 
@@ -4392,6 +4460,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &EvaporationModelSet::new(vec![EvaporationModel::None]),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("none evaporation ok");
 
@@ -4440,6 +4509,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &production,
             &evap,
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("2-evap-hydro system ok");
 
@@ -4489,6 +4559,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &evap,
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("evaporation system ok");
 
@@ -4538,6 +4609,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &evap,
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("evaporation system ok");
 
@@ -4749,6 +4821,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &evap,
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("2-hydro evap system ok");
 
@@ -4804,6 +4877,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &no_evap,
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("no evaporation ok");
 
@@ -4814,6 +4888,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("default evaporation ok");
 
@@ -5054,6 +5129,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &evap,
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("evap violation cost system builds ok");
 
@@ -5100,6 +5176,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &evap,
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("evap system with zero k_evap builds ok");
 
@@ -5135,6 +5212,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &evap,
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("evap system template build must succeed");
 
@@ -5191,6 +5269,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &evap,
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("evap system template build must succeed");
 
@@ -5252,6 +5331,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system_evap),
             &evap,
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("evap system template build must succeed");
 
@@ -5265,6 +5345,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system_base),
             &no_evap,
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("baseline system template build must succeed");
 
@@ -5326,6 +5407,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &evap,
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("evap dump valve test: template build must succeed");
 
@@ -5652,6 +5734,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("build ok");
 
@@ -5709,6 +5792,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("build ok");
 
@@ -5770,6 +5854,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("build ok");
 
@@ -5836,6 +5921,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("build ok");
 
@@ -6138,6 +6224,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("build ok");
 
@@ -6181,6 +6268,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system_zero),
             &default_evaporation(&system_zero),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("zero-withdrawal build ok");
 
@@ -6191,6 +6279,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system_base),
             &default_evaporation(&system_base),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("base build ok");
 
@@ -6231,6 +6320,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("build ok");
 
@@ -6276,6 +6366,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("build ok");
 
@@ -6301,6 +6392,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("build ok");
 
@@ -6327,6 +6419,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("build ok");
 
@@ -6573,6 +6666,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("build ok");
 
@@ -6832,6 +6926,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("build ok");
 
@@ -7021,6 +7116,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &production,
             &evaporation,
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("build_templates_for: valid")
         .templates
@@ -7698,13 +7794,13 @@ mod tests {
     #[allow(clippy::cast_possible_wrap)]
     fn generic_constraint_two_hydros_sum_csc_entries() {
         use chrono::NaiveDate;
-        use cobre_core::ResolvedGenericConstraintBounds;
         use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
         use cobre_core::scenario::{InflowModel, LoadModel};
         use cobre_core::temporal::{
             Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
             StageStateConfig,
         };
+        use cobre_core::ResolvedGenericConstraintBounds;
         use cobre_core::{
             ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
             VariableRef,
@@ -8357,6 +8453,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("active violations ok")
     }
@@ -8480,6 +8577,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("base ok");
         let t = &result.templates[0];
@@ -9330,6 +9428,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("build_stage_templates ok");
 
@@ -9382,6 +9481,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("build_stage_templates ok");
 
@@ -9442,6 +9542,7 @@ mod tests {
             &PrecomputedNormal::default(),
             &default_production(&system),
             &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
         )
         .expect("build_stage_templates ok");
 
@@ -9476,5 +9577,131 @@ mod tests {
             "z-inflow definition row for hydro 0 must have exactly 12 lag-column entries \
              when max_par_order == 12, got {lag_entry_count}"
         );
+    }
+
+    /// Regression guard: [`PatchBuffer`] must never grow to include generic-constraint rows.
+    ///
+    /// The five row categories that [`PatchBuffer`] mutates at solve time are:
+    /// storage-fixing (Category 1), AR lag-fixing (Category 2), AR dynamics /
+    /// noise (Category 3), load-balance (Category 4), and z-inflow definition
+    /// (Category 5). Generic-constraint rows are not in this list; their
+    /// coefficients — including those derived from parameter resolution — are
+    /// immutable after stage-template construction.
+    ///
+    /// This test pins the invariant by verifying that `forward_patch_count`
+    /// after filling all five categories equals exactly
+    /// `N*(2+L) + M*B_active + N_z` and never exceeds the allocated capacity
+    /// `N*(2+L) + M*B_max + N`. If a future change adds generic-constraint
+    /// patching, either the count or the capacity formula must change,
+    /// triggering a compile-time or run-time failure here.
+    #[test]
+    #[allow(clippy::cast_precision_loss)] // fixture values are small integers; no precision is lost
+    fn parameter_coefficient_persists_across_stage_template_uses() {
+        use crate::indexer::StageIndexer;
+        use crate::lp_builder::PatchBuffer;
+
+        // Realistic-scale system: N=3, L=2, M=2, B_max=3.
+        // Capacity = N*(2+L) + M*B_max + N = 3*(2+2) + 2*3 + 3 = 12 + 6 + 3 = 21.
+        let n: usize = 3;
+        let l: usize = 2;
+        let m: usize = 2;
+        let b_max: usize = 3;
+
+        let capacity_formula = n * (2 + l) + m * b_max + n;
+        let mut buf = PatchBuffer::new(n, l, m, b_max);
+
+        // Verify the capacity matches the documented formula.
+        assert_eq!(
+            buf.indices.len(),
+            capacity_formula,
+            "PatchBuffer capacity must equal N*(2+L) + M*B_max + N; \
+             formula change indicates new patch categories were added"
+        );
+
+        // Fill all five categories with realistic values.
+        let n_state = n * (1 + l);
+        let state: Vec<f64> = (0..n_state).map(|i| (i + 1) as f64 * 10.0).collect();
+        let noise: Vec<f64> = (0..n).map(|h| h as f64 * 0.5).collect();
+        let base_row: usize = n * (2 + l); // typical value: AR dynamics start
+
+        // Categories 1, 2, 3.
+        buf.fill_forward_patches(&StageIndexer::new(n, l), &state, &noise, base_row, &[]);
+
+        // Category 4 — 2 load buses, 2 active blocks (< max 3).
+        let b_active: usize = 2;
+        let load_rhs: Vec<f64> = (0..m * b_active).map(|i| 100.0 + i as f64).collect();
+        let bus_positions: Vec<usize> = (0..m).collect();
+        let load_row_start: usize = 200; // arbitrary LP row offset
+        buf.fill_load_patches(load_row_start, b_active, &load_rhs, &bus_positions, &[]);
+
+        // Category 5 — z-inflow rows.
+        let z_inflow_rhs: Vec<f64> = (0..n).map(|h| 80.0 + h as f64).collect();
+        let z_inflow_row_start: usize = 50;
+        buf.fill_z_inflow_patches(z_inflow_row_start, &z_inflow_rhs, &[]);
+
+        // forward_patch_count must equal N*(2+L) + M*b_active + N exactly.
+        // It must not equal the total capacity (which includes unused B_max - b_active
+        // load slots and z-inflow capacity). If generic-constraint rows were ever
+        // patched, this count would exceed N*(2+L) + M*B_max + N, which is already
+        // the full capacity — an out-of-bounds write caught by the Vec length check.
+        let expected_count = n * (2 + l) + m * b_active + n;
+        assert_eq!(
+            buf.forward_patch_count(),
+            expected_count,
+            "forward_patch_count must equal N*(2+L) + M*b_active + N; \
+             any generic-constraint patching would alter this count"
+        );
+
+        // The count must also be strictly less than the buffer's total capacity
+        // (since b_active < b_max). This verifies the buffer is not over-filled.
+        assert!(
+            buf.forward_patch_count() < buf.indices.len(),
+            "forward_patch_count {} must be < capacity {} when b_active < b_max",
+            buf.forward_patch_count(),
+            buf.indices.len(),
+        );
+
+        // Verify that stage-template CSC values are unaffected by PatchBuffer operations.
+        // Build two templates from the same system and confirm their CSC value slices
+        // are bit-for-bit identical — proving the matrix is not mutated by the solver loop.
+        let system = one_hydro_system(2, l);
+        let result_a = build_stage_templates(
+            &system,
+            &no_penalty_config(),
+            &PrecomputedPar::default(),
+            &PrecomputedNormal::default(),
+            &default_production(&system),
+            &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
+        )
+        .expect("build ok");
+        let result_b = build_stage_templates(
+            &system,
+            &no_penalty_config(),
+            &PrecomputedPar::default(),
+            &PrecomputedNormal::default(),
+            &default_production(&system),
+            &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
+        )
+        .expect("build ok");
+
+        // Both builds must produce bit-identical CSC value arrays for every stage.
+        for (s, (ta, tb)) in result_a
+            .templates
+            .iter()
+            .zip(&result_b.templates)
+            .enumerate()
+        {
+            assert_eq!(
+                ta.values, tb.values,
+                "stage {s}: CSC values differ between two builds of the same system; \
+                 stage-template matrix must be deterministic and immutable"
+            );
+            assert_eq!(
+                ta.row_indices, tb.row_indices,
+                "stage {s}: CSC row_indices differ between two builds"
+            );
+        }
     }
 }

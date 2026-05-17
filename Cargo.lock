@@ -608,6 +608,7 @@ dependencies = [
  "criterion",
  "dhat",
  "parquet",
+ "postcard",
  "rand",
  "rand_distr",
  "rayon",

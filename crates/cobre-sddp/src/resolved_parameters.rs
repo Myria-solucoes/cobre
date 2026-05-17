@@ -17,6 +17,26 @@
 //! source file. [`id_to_slot`](ResolvedParameters::id_to_slot) is sorted
 //! ascending by `EntityId.0` and searched with `binary_search` at query time,
 //! giving `O(log n)` lookup with no hashing.
+//!
+//! ## Basis-cache invariance
+//!
+//! Parameter values are resolved once at setup time and baked into
+//! [`StageTemplate`](cobre_solver::StageTemplate) entries during LP construction.
+//! The [`ResolvedParameters`] table itself is never mutated after construction,
+//! and stage templates are never rebuilt during training or simulation.
+//!
+//! The hot-path solver loop patches only **row bounds** via
+//! [`PatchBuffer`](crate::lp_builder::PatchBuffer). The five row categories
+//! that `PatchBuffer` mutates — storage-fixing, AR lag-fixing, AR dynamics,
+//! load-balance, and z-inflow definition — are all distinct from generic-constraint
+//! rows. Consequently, LP matrix coefficients (including those derived from
+//! parameter resolution) remain identical iteration-to-iteration, and the
+//! warm-start basis cache does not need to be invalidated when parameter values
+//! differ across stages.
+//!
+//! Any future change that mutates parameter values across iterations (for example,
+//! adaptive parameter updates) would invalidate this assumption and must explicitly
+//! rebuild or invalidate the affected `StageTemplate` entries.
 
 use std::collections::HashMap;
 
@@ -102,7 +122,7 @@ pub enum ResolvedParametersError {
 /// maps `EntityId.0` to a slot index via `binary_search`. This preserves
 /// declaration-order invariance under postcard serialisation and avoids the
 /// non-determinism of `HashMap`.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ResolvedParameters {
     /// Outer index: parameter slot (dense, matches `Vec<ScalarParameter>` order).
     /// Inner index: `stage_idx` in `0..n_stages`.
@@ -409,6 +429,108 @@ fn resolve_computed(
 }
 
 // ---------------------------------------------------------------------------
+// Postcard broadcast helpers
+// ---------------------------------------------------------------------------
+
+/// Serialize a [`ResolvedParameters`] table to a postcard byte buffer for MPI
+/// broadcast.
+///
+/// The returned `Vec<u8>` encodes the complete table — both the dense
+/// `per_param` rows and the sorted `id_to_slot` index — as a single postcard
+/// payload. The caller is responsible for the MPI broadcast call itself; these
+/// helpers are pure serialization/deserialization with no network I/O.
+///
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] if postcard serialization fails.  With
+/// the current struct layout (`Vec<Vec<f64>>` + `Vec<(i32, usize)>`) this
+/// cannot occur in practice; the error path exists to satisfy the
+/// `Result<_, SddpError>` contract used by other broadcast helpers.
+///
+/// # Examples
+///
+/// ```
+/// use cobre_sddp::resolved_parameters::{
+///     build_resolved_parameters, deserialize_resolved_parameters,
+///     serialize_resolved_parameters,
+/// };
+/// use cobre_core::{EntityId, ParameterKind, ScalarParameter};
+/// use cobre_sddp::energy_conversion::{EnergyConversionSet, HydroEnergyProductivityOverride};
+///
+/// let params = vec![ScalarParameter {
+///     id: EntityId(1),
+///     name: "rho_eq".to_string(),
+///     kind: ParameterKind::Constant(3.6),
+/// }];
+/// let ec = EnergyConversionSet::new(vec![], vec![], 0, 4);
+/// let overrides = HydroEnergyProductivityOverride::default();
+/// let table = build_resolved_parameters(&params, &ec, &overrides, &[], &[0, 0, 1, 1], 4)
+///     .unwrap();
+///
+/// let bytes = serialize_resolved_parameters(&table).unwrap();
+/// let restored = deserialize_resolved_parameters(&bytes).unwrap();
+/// assert_eq!(
+///     table.get(EntityId(1), 0).to_bits(),
+///     restored.get(EntityId(1), 0).to_bits()
+/// );
+/// ```
+pub fn serialize_resolved_parameters(
+    table: &ResolvedParameters,
+) -> Result<Vec<u8>, crate::error::SddpError> {
+    postcard::to_allocvec(table).map_err(|e| {
+        crate::error::SddpError::Validation(format!("postcard resolved_parameters: {e}"))
+    })
+}
+
+/// Deserialize a [`ResolvedParameters`] table from a postcard byte buffer
+/// received via MPI broadcast.
+///
+/// The byte buffer must have been produced by [`serialize_resolved_parameters`].
+/// An empty slice or a corrupted buffer returns an error; this function never
+/// silently discards data.
+///
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] with a message containing
+/// `"postcard resolved_parameters"` if the byte slice is corrupted,
+/// truncated, or not a valid postcard encoding of [`ResolvedParameters`].
+///
+/// # Examples
+///
+/// ```
+/// use cobre_sddp::resolved_parameters::{
+///     deserialize_resolved_parameters, serialize_resolved_parameters,
+/// };
+/// use cobre_core::{EntityId, ParameterKind, ScalarParameter};
+/// use cobre_sddp::energy_conversion::{EnergyConversionSet, HydroEnergyProductivityOverride};
+/// use cobre_sddp::resolved_parameters::build_resolved_parameters;
+///
+/// let params = vec![ScalarParameter {
+///     id: EntityId(1),
+///     name: "rho_eq".to_string(),
+///     kind: ParameterKind::Constant(3.6),
+/// }];
+/// let ec = EnergyConversionSet::new(vec![], vec![], 0, 4);
+/// let overrides = HydroEnergyProductivityOverride::default();
+/// let table = build_resolved_parameters(&params, &ec, &overrides, &[], &[0, 0, 1, 1], 4)
+///     .unwrap();
+///
+/// let bytes = serialize_resolved_parameters(&table).unwrap();
+/// let restored = deserialize_resolved_parameters(&bytes).unwrap();
+/// assert_eq!(
+///     table.get(EntityId(1), 2).to_bits(),
+///     restored.get(EntityId(1), 2).to_bits()
+/// );
+/// ```
+pub fn deserialize_resolved_parameters(
+    bytes: &[u8],
+) -> Result<ResolvedParameters, crate::error::SddpError> {
+    postcard::from_bytes(bytes).map_err(|e| {
+        crate::error::SddpError::Validation(format!("postcard resolved_parameters: {e}"))
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -416,8 +538,8 @@ fn resolve_computed(
 #[allow(clippy::cast_precision_loss)]
 mod tests {
     use cobre_core::{
-        ComputedParameter, EntityId, ParameterKind, ScalarParameter,
         entities::hydro::{HydroGenerationModel, HydroPenalties},
+        ComputedParameter, EntityId, ParameterKind, ScalarParameter,
     };
 
     use super::*;
@@ -833,5 +955,95 @@ mod tests {
         let table = build_resolved_parameters(&[], &ec, &overrides, &[], &[], 0).unwrap();
         // Nothing to query — just verify it doesn't panic.
         let _ = table;
+    }
+
+    // -------------------------------------------------------------------------
+    // Broadcast helper tests
+    // -------------------------------------------------------------------------
+
+    /// Build a populated [`ResolvedParameters`] exercising `Constant`,
+    /// `PerStage`, and `Computed(EquivalentProductivity)` resolution paths.
+    fn broadcast_fixture() -> ResolvedParameters {
+        let n_stages = 4;
+        let (hydros, energy_conversion, override_table, stage_to_season) =
+            make_setup_inputs(n_stages);
+
+        let params = vec![
+            make_param(10, ParameterKind::Constant(3.6)),
+            make_param(20, ParameterKind::PerStage(vec![1.0, 2.0, 3.0, 4.0])),
+            make_param(
+                30,
+                ParameterKind::Computed(ComputedParameter::EquivalentProductivity {
+                    hydro_id: EntityId(0),
+                }),
+            ),
+        ];
+
+        build_resolved_parameters(
+            &params,
+            &energy_conversion,
+            &override_table,
+            &hydros,
+            &stage_to_season,
+            n_stages,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn round_trip_populated_resolved_parameters() {
+        let original = broadcast_fixture();
+        let bytes = super::serialize_resolved_parameters(&original).unwrap();
+        assert!(!bytes.is_empty());
+        let restored = super::deserialize_resolved_parameters(&bytes).unwrap();
+
+        for id in [EntityId(10), EntityId(20), EntityId(30)] {
+            for t in 0..4_usize {
+                assert_eq!(
+                    original.get(id, t).to_bits(),
+                    restored.get(id, t).to_bits(),
+                    "bit mismatch for id={id:?}, stage={t}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn serialize_resolved_parameters_is_deterministic() {
+        let table = broadcast_fixture();
+        let bytes_a = super::serialize_resolved_parameters(&table).unwrap();
+        let bytes_b = super::serialize_resolved_parameters(&table).unwrap();
+        assert_eq!(bytes_a, bytes_b, "postcard encoding must be deterministic");
+    }
+
+    #[test]
+    fn deserialize_resolved_parameters_rejects_corrupted_bytes() {
+        let result = super::deserialize_resolved_parameters(&[0xFF, 0xFE, 0xFD, 0xFC]);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("postcard resolved_parameters"),
+            "error message must contain 'postcard resolved_parameters', got: {msg}"
+        );
+    }
+
+    #[test]
+    fn deserialize_resolved_parameters_rejects_empty_buffer() {
+        let result = super::deserialize_resolved_parameters(&[]);
+        assert!(result.is_err(), "empty buffer must return Err");
+    }
+
+    #[test]
+    fn round_trip_empty_resolved_parameters() {
+        let table = ResolvedParameters::default();
+        let bytes = super::serialize_resolved_parameters(&table).unwrap();
+        // Postcard encodes empty Vecs as a short varint-prefixed payload.
+        assert!(
+            !bytes.is_empty(),
+            "even an empty table must produce non-empty bytes"
+        );
+        let restored = super::deserialize_resolved_parameters(&bytes).unwrap();
+        // Both tables are empty; any get() on an unknown id returns 0.0 via debug_assert path.
+        let _ = restored;
     }
 }

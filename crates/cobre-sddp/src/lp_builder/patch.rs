@@ -34,6 +34,10 @@ use crate::indexer::StageIndexer;
 /// and records `active_load_patches` for the current stage's block count.
 /// When `n_load_buses == 0`, Category 4 is empty and `forward_patch_count`
 /// returns `N*(2+L)` unchanged.
+///
+/// Generic-constraint rows are not in this list; their coefficients,
+/// including those resolved from [`ResolvedParameters`](crate::resolved_parameters::ResolvedParameters),
+/// are immutable after stage-template construction.
 #[derive(Debug, Clone)]
 pub struct PatchBuffer {
     /// Row indices to patch.
@@ -548,7 +552,7 @@ pub fn ar_dynamics_row_offset(base_row: usize, hydro_index: usize) -> usize {
     clippy::cast_possible_truncation
 )]
 mod tests {
-    use super::{PatchBuffer, ar_dynamics_row_offset};
+    use super::{ar_dynamics_row_offset, PatchBuffer};
     use crate::indexer::StageIndexer;
 
     /// Convenience: make an indexer without repeating N/L everywhere.

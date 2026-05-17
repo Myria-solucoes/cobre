@@ -439,6 +439,7 @@ fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixtur
         &cobre_stochastic::normal::precompute::PrecomputedNormal::default(),
         &hydro_models.production,
         &hydro_models.evaporation,
+        &cobre_sddp::resolved_parameters::ResolvedParameters::default(),
     )
     .expect("no FPHA plants in integration test fixture");
     let stochastic = build_stochastic();
@@ -924,6 +925,7 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
         &cobre_stochastic::normal::precompute::PrecomputedNormal::default(),
         &hydro_models.production,
         &hydro_models.evaporation,
+        &cobre_sddp::resolved_parameters::ResolvedParameters::default(),
     )
     .expect("build_stage_templates must succeed");
 

@@ -52,6 +52,12 @@ pub(crate) struct TemplateBuildCtx<'a> {
     pub(crate) resolved_ncs_bounds: &'a ResolvedNcsBounds,
     /// Pre-resolved per-block NCS generation scaling factors.
     pub(crate) resolved_ncs_factors: &'a ResolvedNcsFactors,
+    /// Lookup table for parameter coefficient resolution.
+    ///
+    /// Maps `(parameter_id, stage_idx)` to a pre-resolved `f64` value.
+    /// Queried by the LP builder when a [`cobre_core::CoefficientRef::Parameter`]
+    /// term is encountered in a generic constraint expression.
+    pub(crate) resolved_parameters: &'a crate::resolved_parameters::ResolvedParameters,
     /// Mapping from target hydro ID to source hydro indices that divert to it.
     ///
     /// For each hydro `d` with `diversion.downstream_id == target_id`, the map

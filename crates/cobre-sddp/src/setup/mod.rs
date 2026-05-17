@@ -187,9 +187,8 @@ pub struct StudySetup {
     ///
     /// Until the scalar-parameter loader is fully wired into
     /// `from_broadcast_params`, the table is built from an empty slice and
-    /// any query against it will trigger the `debug_assert!` inside
-    /// [`crate::resolved_parameters::ResolvedParameters::get`], matching the
-    /// existing LP-build sentinel.
+    /// only parameters with no `CoefficientRef::Parameter` terms are affected.
+    /// Retained for MPI broadcast (upcoming broadcast integration).
     #[allow(dead_code)]
     pub(crate) resolved_parameters: crate::resolved_parameters::ResolvedParameters,
 }
@@ -288,6 +287,50 @@ impl StudySetup {
             hydro_energy_productivity_rows,
         } = config;
 
+        // Build the per-(hydro, stage) energy-conversion set and resolved
+        // parameter table before template construction so the LP builder can
+        // look up CoefficientRef::Parameter values.
+        //
+        // The stage-to-season mapping uses `season_id.unwrap_or(0)` so that
+        // stages without a season assignment (None) collapse to season 0 —
+        // consistent with all other season-indexed lookups.
+        let n_stages_pre = system.stages().iter().filter(|s| s.id >= 0).count();
+        let stage_to_season: Vec<i32> = system
+            .stages()
+            .iter()
+            .filter(|s| s.id >= 0)
+            .map(|s| i32::try_from(s.season_id.unwrap_or(0)).unwrap_or(0))
+            .collect();
+        let reference_volume_fractions = build_hydro_reference_volume_fractions(
+            Vec::new(),
+            0.65,
+            system.hydros(),
+            &stage_to_season,
+        )?;
+        let override_table =
+            build_hydro_energy_productivity_override(hydro_energy_productivity_rows)
+                .map_err(|e| SddpError::Validation(e.to_string()))?;
+        let energy_conversion = build_energy_conversion_set(
+            system.hydros(),
+            n_stages_pre,
+            system.cascade(),
+            &reference_volume_fractions,
+            &std::collections::HashMap::<cobre_core::EntityId, Vec<cobre_io::HydroGeometryRow>>::new(),
+            Some(&override_table),
+        )
+        .map_err(|e| SddpError::Validation(e.to_string()))?;
+        // ScalarParameter loader lands in Epic 04 ticket-022; until then pass
+        // an empty slice. The table remains empty until the loader is wired in.
+        let resolved_parameters = crate::resolved_parameters::build_resolved_parameters(
+            &[],
+            &energy_conversion,
+            &override_table,
+            system.hydros(),
+            &stage_to_season,
+            n_stages_pre,
+        )
+        .map_err(|e| SddpError::Validation(e.to_string()))?;
+
         let mut stage_templates = build_stage_templates(
             system,
             &inflow_method,
@@ -295,6 +338,7 @@ impl StudySetup {
             stochastic.normal(),
             &hydro_models.production,
             &hydro_models.evaporation,
+            &resolved_parameters,
         )?;
 
         let scaling_report =
@@ -649,35 +693,6 @@ impl StudySetup {
             },
         };
 
-        // Build the per-(hydro, stage) energy-conversion set.
-        //
-        // The stage-to-season mapping uses `season_id.unwrap_or(0)` so that
-        // stages without a season assignment (None) collapse to season 0 for
-        // the purpose of the reference-volume resolver — consistent with what
-        // all other season-indexed lookups do when no season_id is present.
-        let stage_to_season: Vec<i32> = stages
-            .iter()
-            .map(|s| i32::try_from(s.season_id.unwrap_or(0)).unwrap_or(0))
-            .collect();
-        let reference_volume_fractions = build_hydro_reference_volume_fractions(
-            Vec::new(),
-            0.65,
-            system.hydros(),
-            &stage_to_season,
-        )?;
-        let override_table =
-            build_hydro_energy_productivity_override(hydro_energy_productivity_rows)
-                .map_err(|e| SddpError::Validation(e.to_string()))?;
-        let energy_conversion = build_energy_conversion_set(
-            system.hydros(),
-            n_stages,
-            system.cascade(),
-            &reference_volume_fractions,
-            &std::collections::HashMap::<cobre_core::EntityId, Vec<cobre_io::HydroGeometryRow>>::new(),
-            Some(&override_table),
-        )
-        .map_err(|e| SddpError::Validation(e.to_string()))?;
-
         let hydro_min_storage_hm3: Vec<f64> =
             system.hydros().iter().map(|h| h.min_storage_hm3).collect();
 
@@ -730,7 +745,7 @@ impl StudySetup {
             downstream_par_order,
             energy_conversion,
             hydro_min_storage_hm3,
-            resolved_parameters: crate::resolved_parameters::ResolvedParameters::default(),
+            resolved_parameters,
         })
     }
 }

@@ -115,4 +115,5 @@ pub use training_output::build_training_output;
 // ── resolved_parameters ───────────────────────────────────────────────────────
 pub use resolved_parameters::{
     ResolvedParameters, ResolvedParametersError, build_resolved_parameters,
+    deserialize_resolved_parameters, serialize_resolved_parameters,
 };

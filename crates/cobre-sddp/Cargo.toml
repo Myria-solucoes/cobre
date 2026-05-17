@@ -38,6 +38,7 @@ cobre-stochastic = { version = "0.5.1", path = "../cobre-stochastic" }
 cobre-io = { version = "0.5.1", path = "../cobre-io" }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 dhat = { version = "0.3", optional = true }
+postcard = { version = "1", features = ["alloc"] }
 rayon = "1"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"

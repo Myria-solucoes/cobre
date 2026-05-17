@@ -1256,6 +1256,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
         stochastic.normal(),
         &hydro_models.production,
         &hydro_models.evaporation,
+        &cobre_sddp::resolved_parameters::ResolvedParameters::default(),
     )
     .expect("build_stage_templates must succeed");
 
