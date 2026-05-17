@@ -12,7 +12,7 @@ use crate::inflow_method::InflowNonNegativityMethod;
 use crate::resolved_parameters::ResolvedParameters;
 
 use super::layout::{StageLayout, TemplateBuildCtx};
-use super::{matrix, scaling, GenericConstraintRowEntry, COST_SCALE_FACTOR};
+use super::{COST_SCALE_FACTOR, GenericConstraintRowEntry, matrix, scaling};
 
 /// Outcome of [`build_stage_templates`]: one [`StageTemplate`] per study stage
 /// plus the per-stage `base_rows` offsets needed by `PatchBuffer`.
@@ -7794,13 +7794,13 @@ mod tests {
     #[allow(clippy::cast_possible_wrap)]
     fn generic_constraint_two_hydros_sum_csc_entries() {
         use chrono::NaiveDate;
+        use cobre_core::ResolvedGenericConstraintBounds;
         use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
         use cobre_core::scenario::{InflowModel, LoadModel};
         use cobre_core::temporal::{
             Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
             StageStateConfig,
         };
-        use cobre_core::ResolvedGenericConstraintBounds;
         use cobre_core::{
             ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
             VariableRef,

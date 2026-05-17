@@ -31,14 +31,19 @@ use std::sync::mpsc;
 
 use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::scenario::ScenarioSource;
+use cobre_io::load_hydro_energy_productivity;
 use cobre_io::{
     PolicyCheckpointMetadata, PolicyCutRecord, StageCutsPayload, write_policy_checkpoint,
 };
 use cobre_sddp::{
-    StudySetup, aggregate_simulation, hydro_models::prepare_hydro_models, setup::prepare_stochastic,
+    StudySetup, aggregate_simulation,
+    hydro_models::prepare_hydro_models,
+    setup::{StudyParams, prepare_stochastic},
 };
 use cobre_solver::SolverInterface;
 use cobre_solver::highs::HighsSolver;
+
+mod common;
 
 /// Single-rank communicator stub for deterministic testing.
 struct StubComm;
@@ -86,6 +91,54 @@ impl Communicator for StubComm {
     }
 }
 
+/// Build a [`StudySetup`] for a case directory, loading
+/// `system/hydro_energy_productivity.parquet` when present.
+///
+/// This replaces direct calls to `StudySetup::new` in the deterministic test
+/// helpers.  The key difference is that it loads `hydro_energy_productivity_rows`
+/// from disk (if the file exists) and passes them to
+/// `StudySetup::from_broadcast_params` so that FPHA hydros can satisfy the
+/// energy-conversion correctness gate without VHA geometry.
+///
+/// All other helpers that do NOT need FPHA override support may continue to use
+/// `StudySetup::new`; only the three deterministic helpers are routed here.
+fn build_setup_for_case(
+    case_dir: &Path,
+    config: &cobre_io::Config,
+    system: &cobre_core::System,
+    stochastic: cobre_stochastic::StochasticContext,
+    hydro_models: cobre_sddp::hydro_models::PrepareHydroModelsResult,
+) -> StudySetup {
+    let productivity_path = case_dir
+        .join("system")
+        .join("hydro_energy_productivity.parquet");
+    let productivity_rows =
+        load_hydro_energy_productivity(productivity_path.exists().then_some(&productivity_path))
+            .expect("hydro_energy_productivity load must succeed");
+
+    let sentinel = std::path::Path::new("config.json");
+    let training_source = config
+        .training_scenario_source(sentinel)
+        .expect("training_scenario_source must parse");
+    let simulation_source = config
+        .simulation_scenario_source(sentinel)
+        .expect("simulation_scenario_source must parse");
+
+    let params = StudyParams::from_config(config).expect("StudyParams::from_config must succeed");
+    let mut construction = params.into_construction_config();
+    construction.hydro_energy_productivity_rows = productivity_rows;
+
+    StudySetup::from_broadcast_params(
+        system,
+        stochastic,
+        construction,
+        hydro_models,
+        &training_source,
+        &simulation_source,
+    )
+    .expect("StudySetup::from_broadcast_params must build")
+}
+
 /// Execute the full training pipeline for a case directory and return both the
 /// `TrainingResult` and the `HighsSolver`. Uses `StubComm`, seed 42, and 1 thread.
 ///
@@ -106,8 +159,7 @@ fn run_deterministic_with_solver(case_dir: &Path) -> (cobre_sddp::TrainingResult
     let hydro_models =
         prepare_hydro_models(&system, case_dir).expect("prepare_hydro_models must succeed");
 
-    let mut setup =
-        StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup must build");
+    let mut setup = build_setup_for_case(case_dir, &config, &system, stochastic, hydro_models);
 
     let comm = StubComm;
     let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
@@ -136,8 +188,7 @@ fn run_deterministic(case_dir: &Path) -> cobre_sddp::TrainingResult {
     let hydro_models =
         prepare_hydro_models(&system, case_dir).expect("prepare_hydro_models must succeed");
 
-    let mut setup =
-        StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup must build");
+    let mut setup = build_setup_for_case(case_dir, &config, &system, stochastic, hydro_models);
 
     let comm = StubComm;
     let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
@@ -177,8 +228,13 @@ fn run_with_simulation(
     config_with_sim.simulation.enabled = true;
     config_with_sim.simulation.num_scenarios = 1;
 
-    let mut setup = StudySetup::new(&system, &config_with_sim, stochastic, hydro_models)
-        .expect("StudySetup must build");
+    let mut setup = build_setup_for_case(
+        case_dir,
+        &config_with_sim,
+        &system,
+        stochastic,
+        hydro_models,
+    );
 
     let comm = StubComm;
     let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
@@ -229,6 +285,59 @@ fn assert_cost(actual: f64, expected: f64, tolerance: f64, case_name: &str) {
         diff <= tolerance,
         "{case_name}: expected cost {expected}, got {actual} (diff={diff} > tolerance={tolerance})"
     );
+}
+
+/// Write a single-row `hydro_energy_productivity.parquet` file supplying a
+/// per-hydro-default `ρ_eq` override (`stage_id = NULL`).
+///
+/// Used by FPHA test cases that lack VHA geometry to satisfy the FPHA
+/// correctness gate without modifying LP economics.
+fn write_energy_productivity_override(
+    dest: &std::path::Path,
+    hydro_id: i32,
+    equivalent_productivity_mw_per_m3s: f64,
+) {
+    use arrow::array::{Float64Array, Int32Array};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use parquet::arrow::ArrowWriter;
+    use std::sync::Arc;
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("hydro_id", DataType::Int32, false),
+        Field::new("stage_id", DataType::Int32, true),
+        Field::new(
+            "equivalent_productivity_mw_per_m3s",
+            DataType::Float64,
+            true,
+        ),
+        Field::new("reference_volume_hm3", DataType::Float64, true),
+        Field::new("reference_outflow_m3s", DataType::Float64, true),
+        Field::new(
+            "specific_productivity_mw_per_m3s_per_m",
+            DataType::Float64,
+            true,
+        ),
+    ]));
+
+    // One row: (hydro_id, stage_id=NULL, rho_eq, all others NULL).
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int32Array::from(vec![hydro_id])),
+            Arc::new(Int32Array::from(vec![None::<i32>])),
+            Arc::new(Float64Array::from(vec![equivalent_productivity_mw_per_m3s])),
+            Arc::new(Float64Array::from(vec![None::<f64>])),
+            Arc::new(Float64Array::from(vec![None::<f64>])),
+            Arc::new(Float64Array::from(vec![None::<f64>])),
+        ],
+    )
+    .expect("valid RecordBatch for hydro_energy_productivity override");
+
+    let file = std::fs::File::create(dest).expect("create hydro_energy_productivity.parquet");
+    let mut writer = ArrowWriter::try_new(file, schema, None).expect("ArrowWriter for override");
+    writer.write(&batch).expect("write override batch");
+    writer.close().expect("close override writer");
 }
 
 /// Expected total cost for D02 (single hydro, 2 stages, deterministic inflows).
@@ -375,6 +484,18 @@ fn d04_transmission() {
 #[test]
 fn d05_fpha_constant_head() {
     let case_dir = Path::new("../../examples/deterministic/d05-fpha-constant-head");
+
+    // Supply a hydro_energy_productivity.parquet override so that the FPHA
+    // correctness gate can derive ρ_eq for H0 without VHA geometry.
+    // rho_eq = 1.0 MW/(m³/s) is LP-neutral: the D05 FPHA hyperplane encodes
+    // gen_h = 1.0 × turbined_m3s, so ρ_eq = 1.0 matches the implicit scalar.
+    // NULL stage_id means the row applies to all stages for this hydro.
+    write_energy_productivity_override(
+        &case_dir.join("system/hydro_energy_productivity.parquet"),
+        0,   // hydro_id
+        1.0, // equivalent_productivity_mw_per_m3s
+    );
+
     let result = run_deterministic(case_dir);
     assert_cost(result.final_lb, D02_EXPECTED_COST, 1e-6, "D05");
     assert!(
@@ -470,6 +591,16 @@ pub const D06_EXPECTED_COST: f64 = 732_952_154.0 / 225.0;
 #[test]
 fn d06_fpha_variable_head() {
     let case_dir = Path::new("../../examples/deterministic/d06-fpha-variable-head");
+
+    // Supply a hydro_energy_productivity.parquet override so the FPHA gate can
+    // derive ρ_eq for H0. The exact value does not affect LP economics (D06
+    // assertions depend only on FPHA hyperplane evaluation, not on ρ_eq).
+    write_energy_productivity_override(
+        &case_dir.join("system/hydro_energy_productivity.parquet"),
+        0,   // hydro_id
+        1.0, // equivalent_productivity_mw_per_m3s
+    );
+
     let result = run_deterministic(case_dir);
     assert_cost(result.final_lb, D06_EXPECTED_COST, 1e-4, "D06");
     assert!(
@@ -537,6 +668,272 @@ fn d07_fpha_computed() {
         "D07: final_lb={} must be positive",
         result.final_lb
     );
+}
+
+// ---------------------------------------------------------------------------
+// D-case energy-output correctness sweep (d02, d03)
+// ---------------------------------------------------------------------------
+
+/// Conversion factor from hm³·MW/(m³/s) to MWh (= 10⁶ / 3600).
+///
+/// `stored_energy_mwh = (volume_hm3 − V_min) × ρ_acum × ENERGY_FACTOR`
+const ENERGY_FACTOR: f64 = 1.0e6 / 3600.0;
+
+/// Expected `ρ_eq` and `ρ_acum` for D02 (single hydro, `constant_productivity = 1.0`,
+/// no downstream).
+///
+/// `ρ_eq = 1.0` MW/(m³/s) — read directly from `hydros.json`.
+/// `ρ_acum = 1.0` — H0 has no downstream, so accumulated = own `ρ_eq`.
+const D02_RHO_EQ: f64 = 1.0;
+const D02_RHO_ACUM: f64 = 1.0;
+
+/// Stage-0 initial storage for D02 H0 \[hm³\] from `initial_conditions.json`.
+const D02_H0_V_INIT: f64 = 100.0;
+
+/// Deterministic stage-0 inflow for D02 H0 \[m³/s\].
+///
+/// From the D02 scenario parquet (std = 0): mean = 40.0 m³/s.
+const D02_H0_STAGE0_INFLOW: f64 = 40.0;
+
+/// Deterministic stage-1 inflow for D02 H0 \[m³/s\].
+///
+/// From the D02 scenario parquet (std = 0): mean = 10.0 m³/s.
+const D02_H0_STAGE1_INFLOW: f64 = 10.0;
+
+/// Expected `ρ_eq` and `ρ_acum` for D03 H0.
+///
+/// `ρ_eq(H0) = 1.0` — from `hydros.json`, `constant_productivity`.
+/// `ρ_acum(H0) = 2.0` — H0 is upstream of H1; accumulated = ρ_eq(H0) + ρ_eq(H1).
+const D03_H0_RHO_EQ: f64 = 1.0;
+const D03_H0_RHO_ACUM: f64 = 2.0;
+
+/// Expected `ρ_eq` and `ρ_acum` for D03 H1.
+///
+/// `ρ_eq(H1) = 1.0` — from `hydros.json`, `constant_productivity`.
+/// `ρ_acum(H1) = 1.0` — H1 has no downstream.
+const D03_H1_RHO_EQ: f64 = 1.0;
+const D03_H1_RHO_ACUM: f64 = 1.0;
+
+/// Stage-0 initial storage for D03 H0 \[hm³\] from `initial_conditions.json`.
+const D03_H0_V_INIT: f64 = 80.0;
+
+/// Stage-0 initial storage for D03 H1 \[hm³\] from `initial_conditions.json`.
+const D03_H1_V_INIT: f64 = 50.0;
+
+/// Verify `ENA` and `EARM` columns in `simulation/hydros` for D02 and D03.
+///
+/// Both cases use `ConstantProductivity` hydros (bypassing the FPHA gate),
+/// which makes `ρ_eq` and `ρ_acum` directly computable from `hydros.json`
+/// without running the LP. The test asserts:
+///
+/// - `equivalent_productivity_mw_per_m3s` matches the stored scalar.
+/// - `accumulated_productivity_mw_per_m3s` matches the cascade-sum expectation.
+/// - `incremental_inflow_energy_mw = ρ_acum × incremental_inflow_m3s` (field
+///   consistency check — no fixed inflow constant needed for D03).
+/// - `stored_energy_initial_mwh = (storage_initial − V_min) × ρ_acum × FACTOR`.
+///   For stage 0 this is deterministic from `initial_conditions.json`.
+///
+/// All comparisons use absolute tolerance `1e-6`.
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+#[test]
+fn d_case_energy_outputs() {
+    const TOL: f64 = 1e-6;
+    const V_MIN: f64 = 0.0; // both cases have min_storage_hm3 = 0
+
+    // ── D02: single hydro, 2 stages ──────────────────────────────────────────
+    {
+        let case_dir = Path::new("../../examples/deterministic/d02-single-hydro");
+        let (_result, scenario_results, _summary) = run_with_simulation(case_dir);
+
+        assert_eq!(scenario_results.len(), 1, "D02: expected 1 scenario");
+        let scenario = &scenario_results[0];
+        assert_eq!(scenario.stages.len(), 2, "D02: expected 2 stages");
+
+        for stage_result in &scenario.stages {
+            let stage = stage_result.stage_id as usize;
+            assert_eq!(
+                stage_result.hydros.len(),
+                1,
+                "D02 stage {stage}: expected 1 hydro result"
+            );
+            let h = &stage_result.hydros[0];
+
+            // Column 1: ρ_eq must equal the stored constant-productivity scalar.
+            let diff_rho_eq = (h.equivalent_productivity_mw_per_m3s - D02_RHO_EQ).abs();
+            assert!(
+                diff_rho_eq <= TOL,
+                "D02 stage {stage} H0: equivalent_productivity_mw_per_m3s = {} (expected {D02_RHO_EQ}, diff = {diff_rho_eq})",
+                h.equivalent_productivity_mw_per_m3s,
+            );
+
+            // Column 2: ρ_acum must equal ρ_eq (no downstream).
+            let diff_rho_acum = (h.accumulated_productivity_mw_per_m3s - D02_RHO_ACUM).abs();
+            assert!(
+                diff_rho_acum <= TOL,
+                "D02 stage {stage} H0: accumulated_productivity_mw_per_m3s = {} (expected {D02_RHO_ACUM}, diff = {diff_rho_acum})",
+                h.accumulated_productivity_mw_per_m3s,
+            );
+
+            // Column 3: incremental_inflow_energy_mw = ρ_acum × incremental_inflow_m3s.
+            let expected_energy = h.accumulated_productivity_mw_per_m3s * h.incremental_inflow_m3s;
+            let diff_energy = (h.incremental_inflow_energy_mw - expected_energy).abs();
+            assert!(
+                diff_energy <= TOL,
+                "D02 stage {stage} H0: incremental_inflow_energy_mw = {} (ρ_acum × inflow = {expected_energy}, diff = {diff_energy})",
+                h.incremental_inflow_energy_mw,
+            );
+
+            // Column 4: stored_energy_initial_mwh = (V_initial − V_min) × ρ_acum × FACTOR.
+            let expected_earm = (h.storage_initial_hm3 - V_MIN)
+                * h.accumulated_productivity_mw_per_m3s
+                * ENERGY_FACTOR;
+            let diff_earm = (h.stored_energy_initial_mwh - expected_earm).abs();
+            assert!(
+                diff_earm <= TOL,
+                "D02 stage {stage} H0: stored_energy_initial_mwh = {} (expected {expected_earm}, diff = {diff_earm})",
+                h.stored_energy_initial_mwh,
+            );
+        }
+
+        // Fixed-constant assertions for stage 0 (deterministic from inputs).
+        let h0_stage0 = scenario.stages[0]
+            .hydros
+            .iter()
+            .find(|h| h.hydro_id == 0)
+            .expect("D02: H0 missing from stage 0");
+
+        let diff_inflow0 =
+            (h0_stage0.incremental_inflow_energy_mw - D02_RHO_ACUM * D02_H0_STAGE0_INFLOW).abs();
+        assert!(
+            diff_inflow0 <= TOL,
+            "D02 stage 0 H0: incremental_inflow_energy_mw = {} (expected {}, diff = {diff_inflow0})",
+            h0_stage0.incremental_inflow_energy_mw,
+            D02_RHO_ACUM * D02_H0_STAGE0_INFLOW,
+        );
+
+        let expected_earm0 = (D02_H0_V_INIT - V_MIN) * D02_RHO_ACUM * ENERGY_FACTOR;
+        let diff_earm0 = (h0_stage0.stored_energy_initial_mwh - expected_earm0).abs();
+        assert!(
+            diff_earm0 <= TOL,
+            "D02 stage 0 H0: stored_energy_initial_mwh = {} (expected {expected_earm0}, diff = {diff_earm0})",
+            h0_stage0.stored_energy_initial_mwh,
+        );
+
+        let h0_stage1 = scenario.stages[1]
+            .hydros
+            .iter()
+            .find(|h| h.hydro_id == 0)
+            .expect("D02: H0 missing from stage 1");
+
+        let diff_inflow1 =
+            (h0_stage1.incremental_inflow_energy_mw - D02_RHO_ACUM * D02_H0_STAGE1_INFLOW).abs();
+        assert!(
+            diff_inflow1 <= TOL,
+            "D02 stage 1 H0: incremental_inflow_energy_mw = {} (expected {}, diff = {diff_inflow1})",
+            h0_stage1.incremental_inflow_energy_mw,
+            D02_RHO_ACUM * D02_H0_STAGE1_INFLOW,
+        );
+    }
+
+    // ── D03: two-hydro cascade, 3 stages ─────────────────────────────────────
+    {
+        let case_dir = Path::new("../../examples/deterministic/d03-two-hydro-cascade");
+        let (_result, scenario_results, _summary) = run_with_simulation(case_dir);
+
+        assert_eq!(scenario_results.len(), 1, "D03: expected 1 scenario");
+        let scenario = &scenario_results[0];
+        assert_eq!(scenario.stages.len(), 3, "D03: expected 3 stages");
+
+        for stage_result in &scenario.stages {
+            let stage = stage_result.stage_id as usize;
+            assert_eq!(
+                stage_result.hydros.len(),
+                2,
+                "D03 stage {stage}: expected 2 hydro results"
+            );
+
+            for h in &stage_result.hydros {
+                let (expected_rho_eq, expected_rho_acum) = if h.hydro_id == 0 {
+                    (D03_H0_RHO_EQ, D03_H0_RHO_ACUM)
+                } else {
+                    (D03_H1_RHO_EQ, D03_H1_RHO_ACUM)
+                };
+
+                // Column 1: ρ_eq.
+                let diff_rho_eq = (h.equivalent_productivity_mw_per_m3s - expected_rho_eq).abs();
+                assert!(
+                    diff_rho_eq <= TOL,
+                    "D03 stage {stage} H{}: equivalent_productivity_mw_per_m3s = {} (expected {expected_rho_eq}, diff = {diff_rho_eq})",
+                    h.hydro_id,
+                    h.equivalent_productivity_mw_per_m3s,
+                );
+
+                // Column 2: ρ_acum.
+                let diff_rho_acum =
+                    (h.accumulated_productivity_mw_per_m3s - expected_rho_acum).abs();
+                assert!(
+                    diff_rho_acum <= TOL,
+                    "D03 stage {stage} H{}: accumulated_productivity_mw_per_m3s = {} (expected {expected_rho_acum}, diff = {diff_rho_acum})",
+                    h.hydro_id,
+                    h.accumulated_productivity_mw_per_m3s,
+                );
+
+                // Column 3: incremental_inflow_energy consistency.
+                let expected_energy =
+                    h.accumulated_productivity_mw_per_m3s * h.incremental_inflow_m3s;
+                let diff_energy = (h.incremental_inflow_energy_mw - expected_energy).abs();
+                assert!(
+                    diff_energy <= TOL,
+                    "D03 stage {stage} H{}: incremental_inflow_energy_mw = {} (ρ_acum × inflow = {expected_energy}, diff = {diff_energy})",
+                    h.hydro_id,
+                    h.incremental_inflow_energy_mw,
+                );
+
+                // Column 4: stored_energy_initial consistency.
+                let expected_earm = (h.storage_initial_hm3 - V_MIN)
+                    * h.accumulated_productivity_mw_per_m3s
+                    * ENERGY_FACTOR;
+                let diff_earm = (h.stored_energy_initial_mwh - expected_earm).abs();
+                assert!(
+                    diff_earm <= TOL,
+                    "D03 stage {stage} H{}: stored_energy_initial_mwh = {} (expected {expected_earm}, diff = {diff_earm})",
+                    h.hydro_id,
+                    h.stored_energy_initial_mwh,
+                );
+            }
+        }
+
+        // Fixed-constant assertions for stage 0 (deterministic from initial conditions).
+        let h0_s0 = scenario.stages[0]
+            .hydros
+            .iter()
+            .find(|h| h.hydro_id == 0)
+            .expect("D03: H0 missing from stage 0");
+        let h1_s0 = scenario.stages[0]
+            .hydros
+            .iter()
+            .find(|h| h.hydro_id == 1)
+            .expect("D03: H1 missing from stage 0");
+
+        let expected_earm_h0 = (D03_H0_V_INIT - V_MIN) * D03_H0_RHO_ACUM * ENERGY_FACTOR;
+        let diff_earm_h0 = (h0_s0.stored_energy_initial_mwh - expected_earm_h0).abs();
+        assert!(
+            diff_earm_h0 <= TOL,
+            "D03 stage 0 H0: stored_energy_initial_mwh = {} (expected {expected_earm_h0}, diff = {diff_earm_h0})",
+            h0_s0.stored_energy_initial_mwh,
+        );
+
+        let expected_earm_h1 = (D03_H1_V_INIT - V_MIN) * D03_H1_RHO_ACUM * ENERGY_FACTOR;
+        let diff_earm_h1 = (h1_s0.stored_energy_initial_mwh - expected_earm_h1).abs();
+        assert!(
+            diff_earm_h1 <= TOL,
+            "D03 stage 0 H1: stored_energy_initial_mwh = {} (expected {expected_earm_h1}, diff = {diff_earm_h1})",
+            h1_s0.stored_energy_initial_mwh,
+        );
+    }
 }
 
 /// Expected total cost for D08 (single hydro with linearized evaporation, 2 stages).

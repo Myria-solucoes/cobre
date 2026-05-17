@@ -25,7 +25,7 @@
 //!   information but is not an error).
 //!
 //! Duplicate `(hydro_id, stage_id)` detection is performed at build time by
-//! `build_hydro_energy_productivity_override` in `cobre-sddp`.
+//! the consumer that assembles the loaded rows into the override table.
 
 use std::fs::File;
 use std::path::Path;
@@ -484,10 +484,9 @@ mod tests {
     }
 
     // ── duplicate-key detection uses a HashSet ─────────────────────────────────
-    // Duplicate detection is the responsibility of build_hydro_energy_productivity_override
-    // in cobre-sddp. The parser itself does NOT detect duplicates (it only validates
-    // per-row values). The HashSet-based duplicate check lives in the builder.
-    // See energy_conversion.rs tests for that coverage.
+    // Duplicate detection is the consumer's responsibility (the builder that
+    // assembles the loaded rows into the override table). The parser itself
+    // does NOT detect duplicates — it only validates per-row values.
 
     /// `reference_outflow_m3s = 0.0` must be accepted (zero outflow is valid).
     #[test]

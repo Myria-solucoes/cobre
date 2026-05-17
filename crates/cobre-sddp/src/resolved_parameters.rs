@@ -538,8 +538,8 @@ pub fn deserialize_resolved_parameters(
 #[allow(clippy::cast_precision_loss)]
 mod tests {
     use cobre_core::{
-        entities::hydro::{HydroGenerationModel, HydroPenalties},
         ComputedParameter, EntityId, ParameterKind, ScalarParameter,
+        entities::hydro::{HydroGenerationModel, HydroPenalties},
     };
 
     use super::*;

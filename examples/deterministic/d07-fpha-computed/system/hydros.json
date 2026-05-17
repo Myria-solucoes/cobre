@@ -21,6 +21,7 @@
         "min_generation_mw": 0.0,
         "max_generation_mw": 50.0
       },
+      "specific_productivity_mw_per_m3s_per_m": 0.0085,
       "tailrace": {
         "type": "polynomial",
         "coefficients": [300.0]
