@@ -350,6 +350,53 @@ pub(crate) fn retry_histogram_schema() -> Schema {
     ])
 }
 
+/// Schema for `system/scalar_parameter_definitions.parquet` — parameter registry.
+///
+/// 4 fields. One row per named scalar parameter available to expression evaluation.
+pub(crate) fn scalar_parameter_definitions_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("id", DataType::Int32, false),
+        Field::new("name", DataType::Utf8, false),
+        Field::new("kind", DataType::Utf8, false),
+        Field::new("computed_spec", DataType::Utf8, true),
+    ])
+}
+
+/// Schema for `system/scalar_parameter_values.parquet` — parameter value rows.
+///
+/// 4 fields. One row per (parameter, stage/season) value entry.
+pub(crate) fn scalar_parameter_values_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("parameter_id", DataType::Int32, false),
+        Field::new("stage_id", DataType::Int32, true),
+        Field::new("season_id", DataType::Int32, true),
+        Field::new("value", DataType::Float64, false),
+    ])
+}
+
+/// Schema for `system/hydro_energy_productivity.parquet` — per-hydro productivity overrides.
+///
+/// 6 fields. One row per (hydro, stage) override entry; null `stage_id` applies as
+/// a per-hydro default across all stages.
+pub(crate) fn hydro_energy_productivity_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("hydro_id", DataType::Int32, false),
+        Field::new("stage_id", DataType::Int32, true),
+        Field::new(
+            "equivalent_productivity_mw_per_m3s",
+            DataType::Float64,
+            true,
+        ),
+        Field::new("reference_volume_hm3", DataType::Float64, true),
+        Field::new("reference_outflow_m3s", DataType::Float64, true),
+        Field::new(
+            "specific_productivity_mw_per_m3s_per_m",
+            DataType::Float64,
+            true,
+        ),
+    ])
+}
+
 /// Schema for `training/cut_selection/iterations.parquet` — per-stage
 /// row-selection statistics.
 ///
@@ -962,5 +1009,94 @@ mod tests {
                 "schema '{name}' field count: expected {exp}, got {actual}"
             );
         }
+    }
+
+    #[test]
+    fn scalar_parameter_definitions_schema_field_count_and_names() {
+        let schema = scalar_parameter_definitions_schema();
+        assert_eq!(
+            schema.fields().len(),
+            4,
+            "scalar_parameter_definitions schema must have 4 fields"
+        );
+        let names = field_names(&schema);
+        assert_eq!(names, vec!["id", "name", "kind", "computed_spec"]);
+        // id, name, kind are non-null; computed_spec is nullable
+        assert!(!is_nullable(&schema, "id"));
+        assert!(!is_nullable(&schema, "name"));
+        assert!(!is_nullable(&schema, "kind"));
+        assert!(is_nullable(&schema, "computed_spec"));
+        // id is Int32; name/kind/computed_spec are Utf8
+        assert_eq!(field_type(&schema, "id"), DataType::Int32);
+        assert_eq!(field_type(&schema, "name"), DataType::Utf8);
+        assert_eq!(field_type(&schema, "kind"), DataType::Utf8);
+        assert_eq!(field_type(&schema, "computed_spec"), DataType::Utf8);
+    }
+
+    #[test]
+    fn scalar_parameter_values_schema_field_count_and_names() {
+        let schema = scalar_parameter_values_schema();
+        assert_eq!(
+            schema.fields().len(),
+            4,
+            "scalar_parameter_values schema must have 4 fields"
+        );
+        let names = field_names(&schema);
+        assert_eq!(
+            names,
+            vec!["parameter_id", "stage_id", "season_id", "value"]
+        );
+        // parameter_id and value are non-null; stage_id and season_id are nullable
+        assert!(!is_nullable(&schema, "parameter_id"));
+        assert!(is_nullable(&schema, "stage_id"));
+        assert!(is_nullable(&schema, "season_id"));
+        assert!(!is_nullable(&schema, "value"));
+        assert_eq!(field_type(&schema, "parameter_id"), DataType::Int32);
+        assert_eq!(field_type(&schema, "stage_id"), DataType::Int32);
+        assert_eq!(field_type(&schema, "season_id"), DataType::Int32);
+        assert_eq!(field_type(&schema, "value"), DataType::Float64);
+    }
+
+    #[test]
+    fn hydro_energy_productivity_schema_field_count_and_names() {
+        let schema = hydro_energy_productivity_schema();
+        assert_eq!(
+            schema.fields().len(),
+            6,
+            "hydro_energy_productivity schema must have 6 fields"
+        );
+        let names = field_names(&schema);
+        assert_eq!(
+            names,
+            vec![
+                "hydro_id",
+                "stage_id",
+                "equivalent_productivity_mw_per_m3s",
+                "reference_volume_hm3",
+                "reference_outflow_m3s",
+                "specific_productivity_mw_per_m3s_per_m",
+            ]
+        );
+        // hydro_id is non-null; all others are nullable
+        assert!(!is_nullable(&schema, "hydro_id"));
+        assert!(is_nullable(&schema, "stage_id"));
+        assert!(is_nullable(&schema, "equivalent_productivity_mw_per_m3s"));
+        assert!(is_nullable(&schema, "reference_volume_hm3"));
+        assert!(is_nullable(&schema, "reference_outflow_m3s"));
+        assert!(is_nullable(
+            &schema,
+            "specific_productivity_mw_per_m3s_per_m"
+        ));
+        // types
+        assert_eq!(field_type(&schema, "hydro_id"), DataType::Int32);
+        assert_eq!(field_type(&schema, "stage_id"), DataType::Int32);
+        assert_eq!(
+            field_type(&schema, "equivalent_productivity_mw_per_m3s"),
+            DataType::Float64
+        );
+        assert_eq!(
+            field_type(&schema, "specific_productivity_mw_per_m3s_per_m"),
+            DataType::Float64
+        );
     }
 }

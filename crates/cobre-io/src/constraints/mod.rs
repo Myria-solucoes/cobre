@@ -287,6 +287,11 @@ pub fn load_penalty_overrides_ncs(
 ///
 /// When `path` is `None`, returns `Ok(Vec::new())` without touching the filesystem.
 ///
+/// `name_to_id` maps parameter definition names to their [`cobre_core::EntityId`].
+/// Pass `&HashMap::new()` when no parameters have been loaded; expressions that
+/// contain `@name` tokens will then fail with a schema error. The real mapping
+/// is wired in by the caller once the parameter loader output is available.
+///
 /// # Errors
 ///
 /// Propagates [`LoadError`] from [`parse_generic_constraints`] when `path` is `Some`.
@@ -295,15 +300,20 @@ pub fn load_penalty_overrides_ncs(
 ///
 /// ```
 /// use cobre_io::constraints::load_generic_constraints;
+/// use std::collections::HashMap;
 ///
 /// // No file present — returns empty vec.
-/// let constraints = load_generic_constraints(None).expect("no file is fine");
+/// let constraints = load_generic_constraints(None, &HashMap::new()).expect("no file is fine");
 /// assert!(constraints.is_empty());
 /// ```
-pub fn load_generic_constraints(path: Option<&Path>) -> Result<Vec<GenericConstraint>, LoadError> {
+#[allow(clippy::implicit_hasher)]
+pub fn load_generic_constraints(
+    path: Option<&Path>,
+    name_to_id: &std::collections::HashMap<String, cobre_core::EntityId>,
+) -> Result<Vec<GenericConstraint>, LoadError> {
     match path {
         None => Ok(Vec::new()),
-        Some(p) => parse_generic_constraints(p),
+        Some(p) => parse_generic_constraints(p, name_to_id),
     }
 }
 

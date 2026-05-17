@@ -241,6 +241,21 @@ impl LinearTerm {
             variable,
         }
     }
+
+    /// Construct a `LinearTerm` whose coefficient is a named parameter reference.
+    ///
+    /// The `scale` argument carries the literal multiplier from the expression
+    /// (e.g. `2.5` for `"2.5 * @rho_eq * x"`, or `sign` for `"@rho_eq * x"`).
+    /// Resolution of the parameter to a concrete `f64` per stage happens at
+    /// LP-build time.
+    #[must_use]
+    pub fn parameter(id: crate::EntityId, scale: f64, variable: VariableRef) -> Self {
+        Self {
+            coefficient: CoefficientRef::Parameter(id),
+            scale,
+            variable,
+        }
+    }
 }
 
 /// Parsed linear constraint expression.

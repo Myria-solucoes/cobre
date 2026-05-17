@@ -544,9 +544,10 @@ pub(crate) fn validate_schema(
     let generic_constraints = optional_or_error(
         manifest.constraints_generic_constraints_json,
         || {
-            load_generic_constraints(Some(
-                &case_root.join("constraints/generic_constraints.json"),
-            ))
+            load_generic_constraints(
+                Some(&case_root.join("constraints/generic_constraints.json")),
+                &std::collections::HashMap::new(),
+            )
         },
         Vec::new,
         "constraints/generic_constraints.json",

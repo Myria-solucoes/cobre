@@ -178,6 +178,20 @@ pub struct StudySetup {
     /// Pre-computed once at setup time and threaded into the simulation
     /// pipeline for stored-energy calculations.
     pub(crate) hydro_min_storage_hm3: Vec<f64>,
+
+    /// Pre-materialised lookup table mapping `(parameter_id, stage_idx)` → `f64`.
+    ///
+    /// Built once at setup time from the assembled [`cobre_core::ScalarParameter`]
+    /// slice and the energy-conversion / hydro data. Consumed by the LP builder
+    /// when resolving [`cobre_core::CoefficientRef::Parameter`] references.
+    ///
+    /// Until the scalar-parameter loader is fully wired into
+    /// `from_broadcast_params`, the table is built from an empty slice and
+    /// any query against it will trigger the `debug_assert!` inside
+    /// [`crate::resolved_parameters::ResolvedParameters::get`], matching the
+    /// existing LP-build sentinel.
+    #[allow(dead_code)]
+    pub(crate) resolved_parameters: crate::resolved_parameters::ResolvedParameters,
 }
 
 impl StudySetup {
@@ -716,6 +730,7 @@ impl StudySetup {
             downstream_par_order,
             energy_conversion,
             hydro_min_storage_hm3,
+            resolved_parameters: crate::resolved_parameters::ResolvedParameters::default(),
         })
     }
 }

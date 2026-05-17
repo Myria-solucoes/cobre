@@ -14,21 +14,22 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Float64Builder, Int8Builder, Int32Builder, RecordBatch};
+use arrow::array::{Float64Builder, Int32Builder, Int8Builder, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use cobre_core::System;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 
-use crate::Config;
 use crate::output::error::OutputError;
 use crate::output::parquet_config::ParquetWriterConfig;
 use crate::output::schemas::{
     buses_schema, contracts_schema, convergence_schema, costs_schema, exchanges_schema,
-    generic_violations_schema, hydros_schema, inflow_lags_schema, iteration_timing_schema,
-    non_controllables_schema, pumping_stations_schema, rank_timing_schema, retry_histogram_schema,
-    row_selection_schema, solver_iterations_schema, thermals_schema,
+    generic_violations_schema, hydro_energy_productivity_schema, hydros_schema, inflow_lags_schema,
+    iteration_timing_schema, non_controllables_schema, pumping_stations_schema, rank_timing_schema,
+    retry_histogram_schema, row_selection_schema, scalar_parameter_definitions_schema,
+    scalar_parameter_values_schema, solver_iterations_schema, thermals_schema,
 };
+use crate::Config;
 
 // ─── Entity type codes (SS3) ─────────────────────────────────────────────────
 
@@ -282,6 +283,15 @@ fn write_variables_csv(path: &Path) -> Result<(), OutputError> {
         ("cut_selection", row_selection_schema()),
         ("solver_iterations", solver_iterations_schema()),
         ("retry_histogram", retry_histogram_schema()),
+        (
+            "scalar_parameter_definitions",
+            scalar_parameter_definitions_schema(),
+        ),
+        ("scalar_parameter_values", scalar_parameter_values_schema()),
+        (
+            "hydro_energy_productivity",
+            hydro_energy_productivity_schema(),
+        ),
     ];
 
     for (schema_name, schema) in schemas {
@@ -314,8 +324,11 @@ fn arrow_type_str(dt: &DataType) -> &'static str {
         DataType::Int8 => "i8",
         DataType::Int32 => "i32",
         DataType::Int64 => "i64",
+        DataType::UInt32 => "u32",
+        DataType::UInt64 => "u64",
         DataType::Float64 => "f64",
         DataType::Boolean => "bool",
+        DataType::Utf8 => "string",
         _ => "unknown",
     }
 }
@@ -1087,13 +1100,13 @@ mod tests {
     use super::*;
     use chrono::NaiveDate;
     use cobre_core::{
-        Block, BlockMode, Bus, DeficitSegment, EntityId, Hydro, HydroGenerationModel,
-        HydroPenalties, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
-        StageStateConfig, SystemBuilder, Thermal,
         resolved::{
             BoundsCountsSpec, BoundsDefaults, ContractStageBounds, HydroStageBounds,
             LineStageBounds, PumpingStageBounds, ResolvedBounds, ThermalStageBounds,
         },
+        Block, BlockMode, Bus, DeficitSegment, EntityId, Hydro, HydroGenerationModel,
+        HydroPenalties, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
+        StageStateConfig, SystemBuilder, Thermal,
     };
 
     // ── Fixtures ─────────────────────────────────────────────────────────────
@@ -1468,8 +1481,8 @@ mod tests {
 
         let row_count = rdr.records().count();
         assert_eq!(
-            row_count, 200,
-            "variables.csv must have exactly 200 data rows (one per column across all schemas)"
+            row_count, 214,
+            "variables.csv must have exactly 214 data rows (one per column across all schemas)"
         );
     }
 

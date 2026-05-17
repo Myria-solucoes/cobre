@@ -45,6 +45,7 @@ pub(crate) mod noise;
 pub mod policy_export;
 pub mod policy_load;
 pub mod provenance;
+pub mod resolved_parameters;
 pub mod risk_measure;
 pub mod scaling_report;
 pub mod setup;
@@ -111,3 +112,7 @@ pub use stopping_rule::{StoppingMode, StoppingRule, StoppingRuleSet};
 pub use training::{TrainingResult, train};
 // ── training_output ───────────────────────────────────────────────────────────
 pub use training_output::build_training_output;
+// ── resolved_parameters ───────────────────────────────────────────────────────
+pub use resolved_parameters::{
+    ResolvedParameters, ResolvedParametersError, build_resolved_parameters,
+};
