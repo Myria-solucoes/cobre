@@ -7392,13 +7392,13 @@ mod tests {
             name: "gc_thermal_le".to_string(),
             description: None,
             expression: ConstraintExpression {
-                terms: vec![LinearTerm {
-                    coefficient: 1.0,
-                    variable: VariableRef::ThermalGeneration {
+                terms: vec![LinearTerm::literal(
+                    1.0,
+                    VariableRef::ThermalGeneration {
                         thermal_id: thermal_entity_id,
                         block_id: None,
                     },
-                }],
+                )],
             },
             sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
@@ -7471,13 +7471,13 @@ mod tests {
             name: "gc_thermal_le_slack".to_string(),
             description: None,
             expression: ConstraintExpression {
-                terms: vec![LinearTerm {
-                    coefficient: 1.0,
-                    variable: VariableRef::ThermalGeneration {
+                terms: vec![LinearTerm::literal(
+                    1.0,
+                    VariableRef::ThermalGeneration {
                         thermal_id: thermal_entity_id,
                         block_id: None,
                     },
-                }],
+                )],
             },
             sense: ConstraintSense::LessEqual,
             slack: SlackConfig {
@@ -7556,13 +7556,13 @@ mod tests {
             name: "gc_thermal_ge".to_string(),
             description: None,
             expression: ConstraintExpression {
-                terms: vec![LinearTerm {
-                    coefficient: 1.0,
-                    variable: VariableRef::ThermalGeneration {
+                terms: vec![LinearTerm::literal(
+                    1.0,
+                    VariableRef::ThermalGeneration {
                         thermal_id: thermal_entity_id,
                         block_id: None,
                     },
-                }],
+                )],
             },
             sense: ConstraintSense::GreaterEqual,
             slack: SlackConfig {
@@ -7832,20 +7832,20 @@ mod tests {
             description: None,
             expression: ConstraintExpression {
                 terms: vec![
-                    LinearTerm {
-                        coefficient: 1.0,
-                        variable: VariableRef::HydroGeneration {
+                    LinearTerm::literal(
+                        1.0,
+                        VariableRef::HydroGeneration {
                             hydro_id: h1_id,
                             block_id: None,
                         },
-                    },
-                    LinearTerm {
-                        coefficient: 1.0,
-                        variable: VariableRef::HydroGeneration {
+                    ),
+                    LinearTerm::literal(
+                        1.0,
+                        VariableRef::HydroGeneration {
                             hydro_id: h2_id,
                             block_id: None,
                         },
-                    },
+                    ),
                 ],
             },
             sense: ConstraintSense::LessEqual,

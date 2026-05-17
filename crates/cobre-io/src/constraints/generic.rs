@@ -502,25 +502,13 @@ fn parse_single_term(
             }
 
             let (variable, end_pos) = parse_variable_ref(tokens, var_pos)?;
-            Ok((
-                LinearTerm {
-                    coefficient,
-                    variable,
-                },
-                end_pos,
-            ))
+            Ok((LinearTerm::literal(coefficient, variable), end_pos))
         }
         Token::Ident(_) => {
             // Variable reference with implicit coefficient 1.0 × sign.
             let coefficient = sign;
             let (variable, end_pos) = parse_variable_ref(tokens, pos)?;
-            Ok((
-                LinearTerm {
-                    coefficient,
-                    variable,
-                },
-                end_pos,
-            ))
+            Ok((LinearTerm::literal(coefficient, variable), end_pos))
         }
         other => Err(format!(
             "expected a coefficient or variable name at position {pos}, got {other:?}"
@@ -787,6 +775,7 @@ fn build_variable_ref(
 )]
 mod tests {
     use super::*;
+    use cobre_core::CoefficientRef;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -796,6 +785,13 @@ mod tests {
         let mut f = NamedTempFile::new().expect("tempfile");
         f.write_all(content.as_bytes()).expect("write");
         f
+    }
+
+    fn lit(term: &LinearTerm) -> f64 {
+        match term.coefficient {
+            CoefficientRef::Literal(v) => v,
+            CoefficientRef::Parameter(_) => panic!("expected literal"),
+        }
     }
 
     const VALID_JSON: &str = r#"{
@@ -824,7 +820,7 @@ mod tests {
     fn test_expr_simple_single_term() {
         let expr = parse_expression("hydro_generation(10)").unwrap();
         assert_eq!(expr.terms.len(), 1);
-        assert!((expr.terms[0].coefficient - 1.0).abs() < f64::EPSILON);
+        assert!((lit(&expr.terms[0]) - 1.0).abs() < f64::EPSILON);
         assert_eq!(
             expr.terms[0].variable,
             VariableRef::HydroGeneration {
@@ -839,7 +835,7 @@ mod tests {
     fn test_expr_addition_two_terms() {
         let expr = parse_expression("hydro_generation(10) + hydro_generation(11)").unwrap();
         assert_eq!(expr.terms.len(), 2);
-        assert!((expr.terms[0].coefficient - 1.0).abs() < f64::EPSILON);
+        assert!((lit(&expr.terms[0]) - 1.0).abs() < f64::EPSILON);
         assert_eq!(
             expr.terms[0].variable,
             VariableRef::HydroGeneration {
@@ -847,7 +843,7 @@ mod tests {
                 block_id: None,
             }
         );
-        assert!((expr.terms[1].coefficient - 1.0).abs() < f64::EPSILON);
+        assert!((lit(&expr.terms[1]) - 1.0).abs() < f64::EPSILON);
         assert_eq!(
             expr.terms[1].variable,
             VariableRef::HydroGeneration {
@@ -862,7 +858,7 @@ mod tests {
     fn test_expr_coefficient_and_subtraction() {
         let expr = parse_expression("2.5 * thermal_generation(5) - hydro_generation(3)").unwrap();
         assert_eq!(expr.terms.len(), 2);
-        assert!((expr.terms[0].coefficient - 2.5).abs() < 1e-10);
+        assert!((lit(&expr.terms[0]) - 2.5).abs() < 1e-10);
         assert_eq!(
             expr.terms[0].variable,
             VariableRef::ThermalGeneration {
@@ -870,7 +866,7 @@ mod tests {
                 block_id: None,
             }
         );
-        assert!((expr.terms[1].coefficient - (-1.0)).abs() < f64::EPSILON);
+        assert!((lit(&expr.terms[1]) - (-1.0)).abs() < f64::EPSILON);
         assert_eq!(
             expr.terms[1].variable,
             VariableRef::HydroGeneration {
@@ -885,8 +881,8 @@ mod tests {
     fn test_expr_subtraction_negates_coefficient() {
         let expr = parse_expression("thermal_generation(5) - hydro_generation(3)").unwrap();
         assert_eq!(expr.terms.len(), 2);
-        assert!((expr.terms[0].coefficient - 1.0).abs() < f64::EPSILON);
-        assert!((expr.terms[1].coefficient - (-1.0)).abs() < f64::EPSILON);
+        assert!((lit(&expr.terms[0]) - 1.0).abs() < f64::EPSILON);
+        assert!((lit(&expr.terms[1]) - (-1.0)).abs() < f64::EPSILON);
     }
 
     /// Block-specific variable: `hydro_turbined(5, 0)` → `block_id: Some(0)`.
@@ -1143,7 +1139,7 @@ mod tests {
         // After sorting, result[1] is the "min_hydro" constraint.
         let min_hydro = &result[1];
         assert_eq!(min_hydro.expression.terms.len(), 2);
-        assert!((min_hydro.expression.terms[0].coefficient - 1.0).abs() < f64::EPSILON);
+        assert!((lit(&min_hydro.expression.terms[0]) - 1.0).abs() < f64::EPSILON);
         assert_eq!(
             min_hydro.expression.terms[0].variable,
             VariableRef::HydroGeneration {
@@ -1170,7 +1166,8 @@ mod tests {
         // result[0] is id=0 "max_thermal"
         let max_thermal = &result[0];
         assert_eq!(max_thermal.expression.terms.len(), 2);
-        assert!((max_thermal.expression.terms[0].coefficient - 2.5).abs() < 1e-10);
+        assert!((lit(&max_thermal.expression.terms[0]) - 2.5).abs() < 1e-10);
+        assert!((max_thermal.expression.terms[0].scale - 1.0).abs() < f64::EPSILON);
         assert_eq!(
             max_thermal.expression.terms[0].variable,
             VariableRef::ThermalGeneration {
@@ -1178,7 +1175,8 @@ mod tests {
                 block_id: None,
             }
         );
-        assert!((max_thermal.expression.terms[1].coefficient - (-1.0)).abs() < f64::EPSILON);
+        assert!((lit(&max_thermal.expression.terms[1]) - (-1.0)).abs() < f64::EPSILON);
+        assert!((max_thermal.expression.terms[1].scale - 1.0).abs() < f64::EPSILON);
         assert_eq!(
             max_thermal.expression.terms[1].variable,
             VariableRef::HydroGeneration {

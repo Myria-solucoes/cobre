@@ -54,7 +54,9 @@ pub mod stages;
 pub mod system;
 pub mod validation;
 
-pub use broadcast::{deserialize_system, serialize_system};
+pub use broadcast::{
+    deserialize_parameters, deserialize_system, serialize_parameters, serialize_system,
+};
 pub use config::{
     BoundaryPolicy, Config, EnergyConfig, EstimationConfig, OrderSelectionMethod, PolicyMode,
     parse_config,

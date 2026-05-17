@@ -1,5 +1,5 @@
 use cobre_core::entities::hydro::HydroGenerationModel;
-use cobre_core::{ConstraintSense, Stage};
+use cobre_core::{CoefficientRef, ConstraintSense, Stage};
 
 use crate::generic_constraints::resolve_variable_ref;
 use crate::hydro_models::{EvaporationModel, ResolvedProductionModel};
@@ -1236,7 +1236,20 @@ pub(super) fn fill_generic_constraint_entries(
                 &positions,
             );
             for (col, multiplier) in pairs {
-                col_entries[col].push((row, term.coefficient * multiplier));
+                let coef = match term.coefficient {
+                    CoefficientRef::Literal(v) => v,
+                    CoefficientRef::Parameter(_) => {
+                        // The resolver layer is not yet wired in; the parser
+                        // cannot currently produce this variant. Treat as 0.0
+                        // until parameter resolution lands.
+                        debug_assert!(
+                            false,
+                            "CoefficientRef::Parameter reached LP build before resolution is implemented"
+                        );
+                        0.0
+                    }
+                };
+                col_entries[col].push((row, coef * term.scale * multiplier));
             }
         }
 
