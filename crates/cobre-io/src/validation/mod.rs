@@ -24,6 +24,7 @@
 //! ```
 
 pub mod dimensional;
+pub mod productivity_resolution;
 pub mod referential;
 pub mod scalar_parameters;
 pub mod schema;

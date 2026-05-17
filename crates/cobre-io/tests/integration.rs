@@ -217,6 +217,23 @@ fn test_inflow_history_wired_into_system() {
     let dir = TempDir::new().unwrap();
     helpers::make_multi_entity_case(&dir);
 
+    // Overwrite hydro_production_models.json with entries for all 3 hydros.
+    std::fs::write(
+        dir.path().join("system/hydro_production_models.json"),
+        r#"{ "production_models": [
+            { "hydro_id": 1, "selection_mode": "stage_ranges",
+              "stage_ranges": [{ "start_stage_id": 0, "end_stage_id": null,
+                "model": "constant_productivity", "productivity_mw_per_m3s": 0.9 }] },
+            { "hydro_id": 2, "selection_mode": "stage_ranges",
+              "stage_ranges": [{ "start_stage_id": 0, "end_stage_id": null,
+                "model": "constant_productivity", "productivity_mw_per_m3s": 0.85 }] },
+            { "hydro_id": 3, "selection_mode": "stage_ranges",
+              "stage_ranges": [{ "start_stage_id": 0, "end_stage_id": null,
+                "model": "constant_productivity", "productivity_mw_per_m3s": 0.8 }] }
+        ] }"#,
+    )
+    .unwrap();
+
     // Overwrite hydros.json with 3 hydros (all on bus_id=1).
     std::fs::write(
         dir.path().join("system/hydros.json"),
@@ -370,6 +387,23 @@ fn test_external_scenarios_wired_into_system() {
 
     let dir = TempDir::new().unwrap();
     helpers::make_multi_entity_case(&dir);
+
+    // Overwrite hydro_production_models.json with entries for all 3 hydros.
+    std::fs::write(
+        dir.path().join("system/hydro_production_models.json"),
+        r#"{ "production_models": [
+            { "hydro_id": 1, "selection_mode": "stage_ranges",
+              "stage_ranges": [{ "start_stage_id": 0, "end_stage_id": null,
+                "model": "constant_productivity", "productivity_mw_per_m3s": 0.9 }] },
+            { "hydro_id": 2, "selection_mode": "stage_ranges",
+              "stage_ranges": [{ "start_stage_id": 0, "end_stage_id": null,
+                "model": "constant_productivity", "productivity_mw_per_m3s": 0.85 }] },
+            { "hydro_id": 3, "selection_mode": "stage_ranges",
+              "stage_ranges": [{ "start_stage_id": 0, "end_stage_id": null,
+                "model": "constant_productivity", "productivity_mw_per_m3s": 0.8 }] }
+        ] }"#,
+    )
+    .unwrap();
 
     // Overwrite hydros.json with 3 hydros (all on bus_id=1).
     std::fs::write(

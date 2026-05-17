@@ -303,6 +303,7 @@ mod tests {
             energy_contracts: vec![],
             hydro_geometry,
             production_models: vec![],
+            hydro_energy_productivity_rows: vec![],
             fpha_hyperplanes,
             scalar_parameters: vec![],
             inflow_history: vec![],
@@ -1216,6 +1217,7 @@ mod tests {
             energy_contracts: vec![],
             hydro_geometry: vec![],
             production_models: vec![],
+            hydro_energy_productivity_rows: vec![],
             fpha_hyperplanes: vec![],
             scalar_parameters: vec![],
             inflow_history: vec![],
@@ -2393,6 +2395,7 @@ mod tests {
             energy_contracts: vec![],
             hydro_geometry: vec![],
             production_models: vec![],
+            hydro_energy_productivity_rows: vec![],
             fpha_hyperplanes: vec![],
             inflow_history,
             inflow_seasonal_stats: vec![], // empty → estimation path active
@@ -2672,6 +2675,7 @@ mod tests {
             energy_contracts: vec![],
             hydro_geometry: vec![],
             production_models: vec![],
+            hydro_energy_productivity_rows: vec![],
             fpha_hyperplanes: vec![],
             inflow_history: vec![],
             // Populate a sentinel entry so the estimation path (rules 19-21) is

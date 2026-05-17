@@ -32,8 +32,9 @@ use crate::{
         load_penalty_overrides_ncs, load_pumping_bounds, load_thermal_bounds,
     },
     extensions::{
-        FphaHyperplaneRow, HydroGeometryRow, ProductionModelConfig, load_fpha_hyperplanes,
-        load_production_models, parse_hydro_geometry, parse_scalar_parameters_json,
+        FphaHyperplaneRow, HydroEnergyProductivityRow, HydroGeometryRow, ProductionModelConfig,
+        load_fpha_hyperplanes, load_hydro_energy_productivity, load_production_models,
+        parse_hydro_geometry, parse_scalar_parameters_json,
     },
     initial_conditions::parse_initial_conditions,
     penalties::parse_penalties,
@@ -99,6 +100,11 @@ pub(crate) struct ParsedData {
     pub(crate) hydro_geometry: Vec<HydroGeometryRow>,
     /// Parsed `system/hydro_production_models.json`. Empty when absent.
     pub(crate) production_models: Vec<ProductionModelConfig>,
+    /// Parsed `system/hydro_energy_productivity.parquet`. Empty when absent.
+    ///
+    /// Consumed by `validation::productivity_resolution` to enforce that exactly
+    /// one source supplies `productivity_mw_per_m3s` for each `(hydro, stage)`.
+    pub(crate) hydro_energy_productivity_rows: Vec<HydroEnergyProductivityRow>,
     /// Parsed `system/fpha_hyperplanes.parquet`. Empty when absent.
     pub(crate) fpha_hyperplanes: Vec<FphaHyperplaneRow>,
     /// Parsed `system/scalar_parameters.json`. Empty when absent.
@@ -350,6 +356,18 @@ pub(crate) fn validate_schema(
         || load_production_models(Some(&case_root.join("system/hydro_production_models.json"))),
         Vec::new,
         "system/hydro_production_models.json",
+        ctx,
+    );
+
+    let hydro_energy_productivity_rows = optional_or_error(
+        manifest.system_hydro_energy_productivity_parquet,
+        || {
+            load_hydro_energy_productivity(Some(
+                &case_root.join("system/hydro_energy_productivity.parquet"),
+            ))
+        },
+        Vec::new,
+        "system/hydro_energy_productivity.parquet",
         ctx,
     );
 
@@ -691,6 +709,7 @@ pub(crate) fn validate_schema(
         energy_contracts,
         hydro_geometry,
         production_models,
+        hydro_energy_productivity_rows,
         fpha_hyperplanes,
         scalar_parameters,
         inflow_history,
@@ -1146,6 +1165,248 @@ mod tests {
                 .file
                 .to_string_lossy()
                 .contains("system/buses.json")
+        );
+    }
+
+    // ── hydro_energy_productivity.parquet in Layer 2 ──────────────────────────
+
+    /// Write a minimal valid `system/hydro_energy_productivity.parquet` with the
+    /// given rows to a path inside `root`.
+    fn write_hydro_energy_productivity_parquet(
+        root: &Path,
+        rows: &[(i32, Option<i32>, Option<f64>)],
+    ) {
+        use std::sync::Arc;
+
+        use arrow::array::{Float64Array, Int32Array};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("hydro_id", DataType::Int32, false),
+            Field::new("stage_id", DataType::Int32, true),
+            Field::new(
+                "equivalent_productivity_mw_per_m3s",
+                DataType::Float64,
+                true,
+            ),
+            Field::new("reference_volume_hm3", DataType::Float64, true),
+            Field::new("reference_outflow_m3s", DataType::Float64, true),
+            Field::new(
+                "specific_productivity_mw_per_m3s_per_m",
+                DataType::Float64,
+                true,
+            ),
+        ]));
+
+        let hydro_ids: Vec<i32> = rows.iter().map(|(h, _, _)| *h).collect();
+        let stage_ids: Vec<Option<i32>> = rows.iter().map(|(_, s, _)| *s).collect();
+        let rho_eqs: Vec<Option<f64>> = rows.iter().map(|(_, _, r)| *r).collect();
+        let nulls: Vec<Option<f64>> = rows.iter().map(|_| None).collect();
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(hydro_ids)),
+                Arc::new(Int32Array::from(stage_ids)),
+                Arc::new(Float64Array::from(rho_eqs)),
+                Arc::new(Float64Array::from(nulls.clone())),
+                Arc::new(Float64Array::from(nulls.clone())),
+                Arc::new(Float64Array::from(nulls)),
+            ],
+        )
+        .expect("valid batch");
+
+        let dest = root.join("system/hydro_energy_productivity.parquet");
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&dest)
+            .expect("create parquet file");
+        let mut writer =
+            ArrowWriter::try_new(file, batch.schema(), None).expect("ArrowWriter::try_new");
+        writer.write(&batch).expect("write batch");
+        writer.close().expect("close writer");
+    }
+
+    /// Write a `system/hydro_energy_productivity.parquet` with a NULL `hydro_id`
+    /// column to trigger a `SchemaError` during parsing.
+    fn write_hydro_energy_productivity_null_hydro_id(root: &Path) {
+        use std::sync::Arc;
+
+        use arrow::array::{Float64Array, Int32Array};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+
+        // Use a nullable hydro_id column so we can insert a NULL value.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("hydro_id", DataType::Int32, true),
+            Field::new("stage_id", DataType::Int32, true),
+            Field::new(
+                "equivalent_productivity_mw_per_m3s",
+                DataType::Float64,
+                true,
+            ),
+            Field::new("reference_volume_hm3", DataType::Float64, true),
+            Field::new("reference_outflow_m3s", DataType::Float64, true),
+            Field::new(
+                "specific_productivity_mw_per_m3s_per_m",
+                DataType::Float64,
+                true,
+            ),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(vec![None::<i32>])),
+                Arc::new(Int32Array::from(vec![None::<i32>])),
+                Arc::new(Float64Array::from(vec![None::<f64>])),
+                Arc::new(Float64Array::from(vec![None::<f64>])),
+                Arc::new(Float64Array::from(vec![None::<f64>])),
+                Arc::new(Float64Array::from(vec![None::<f64>])),
+            ],
+        )
+        .expect("valid batch");
+
+        let dest = root.join("system/hydro_energy_productivity.parquet");
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&dest)
+            .expect("create parquet file");
+        let mut writer =
+            ArrowWriter::try_new(file, batch.schema(), None).expect("ArrowWriter::try_new");
+        writer.write(&batch).expect("write batch");
+        writer.close().expect("close writer");
+    }
+
+    /// Given a case directory with a valid 2-row `system/hydro_energy_productivity.parquet`,
+    /// `validate_schema` returns `Some(ParsedData)` whose
+    /// `hydro_energy_productivity_rows` has length 2 and both rows carry the
+    /// parsed values.
+    #[test]
+    fn test_validate_schema_loads_hydro_energy_productivity_when_present() {
+        let dir = TempDir::new().unwrap();
+        make_valid_case(&dir);
+
+        // Write a valid 2-row parquet: hydro_id=0 at stage_id=0 and stage_id=1.
+        write_hydro_energy_productivity_parquet(
+            dir.path(),
+            &[(0, Some(0), Some(3.6)), (0, Some(1), Some(4.0))],
+        );
+
+        let mut ctx = ValidationContext::new();
+        let manifest = validate_structure(dir.path(), &mut ctx);
+        assert!(!ctx.has_errors(), "structural validation should pass");
+        assert!(
+            manifest.system_hydro_energy_productivity_parquet,
+            "manifest should detect the parquet"
+        );
+
+        let data = validate_schema(dir.path(), &manifest, &mut ctx);
+
+        assert!(
+            data.is_some(),
+            "validate_schema should return Some(ParsedData) for a valid case"
+        );
+        assert!(
+            !ctx.has_errors(),
+            "ctx should have no errors, got: {:?}",
+            ctx.errors()
+        );
+
+        let rows = &data.unwrap().hydro_energy_productivity_rows;
+        assert_eq!(rows.len(), 2, "expected 2 rows parsed from the parquet");
+        assert!(
+            rows.iter().all(|r| r.hydro_id.0 == 0),
+            "both rows should have hydro_id=0"
+        );
+    }
+
+    /// Given a case directory without `system/hydro_energy_productivity.parquet`,
+    /// `validate_schema` returns `Some(ParsedData)` with
+    /// `hydro_energy_productivity_rows` equal to `Vec::new()` and no error is
+    /// added for the absent file.
+    #[test]
+    fn test_validate_schema_hydro_energy_productivity_absent_is_empty() {
+        let dir = TempDir::new().unwrap();
+        make_valid_case(&dir);
+        // Do NOT write system/hydro_energy_productivity.parquet.
+
+        let mut ctx = ValidationContext::new();
+        let manifest = validate_structure(dir.path(), &mut ctx);
+        assert!(!ctx.has_errors(), "structural validation should pass");
+        assert!(
+            !manifest.system_hydro_energy_productivity_parquet,
+            "manifest should show parquet absent"
+        );
+
+        let data = validate_schema(dir.path(), &manifest, &mut ctx);
+
+        assert!(
+            data.is_some(),
+            "validate_schema should return Some(ParsedData)"
+        );
+        assert!(
+            !ctx.has_errors(),
+            "no error should be added for an absent optional file"
+        );
+        assert!(
+            data.unwrap().hydro_energy_productivity_rows.is_empty(),
+            "hydro_energy_productivity_rows should be empty when the file is absent"
+        );
+    }
+
+    /// Given a case directory whose `system/hydro_energy_productivity.parquet`
+    /// contains a row with a NULL `hydro_id`, `validate_schema` returns `None`
+    /// and the `ValidationContext` contains a `SchemaViolation` error whose
+    /// file path references the parquet.
+    #[test]
+    fn test_validate_schema_malformed_hydro_energy_productivity_collects_error() {
+        let dir = TempDir::new().unwrap();
+        make_valid_case(&dir);
+        write_hydro_energy_productivity_null_hydro_id(dir.path());
+
+        let mut ctx = ValidationContext::new();
+        let manifest = validate_structure(dir.path(), &mut ctx);
+        assert!(!ctx.has_errors(), "structural validation should pass");
+        assert!(
+            manifest.system_hydro_energy_productivity_parquet,
+            "manifest should detect the parquet"
+        );
+
+        let data = validate_schema(dir.path(), &manifest, &mut ctx);
+
+        assert!(
+            data.is_none(),
+            "validate_schema should return None when the parquet has a schema violation"
+        );
+        assert!(ctx.has_errors(), "ctx should have at least one error");
+
+        let schema_errors: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::SchemaViolation)
+            .collect();
+        assert!(
+            !schema_errors.is_empty(),
+            "ctx should have at least one SchemaViolation entry"
+        );
+        assert!(
+            schema_errors.iter().any(|e| e
+                .file
+                .to_string_lossy()
+                .contains("hydro_energy_productivity")),
+            "SchemaViolation should reference the parquet path, got: {:?}",
+            schema_errors
+                .iter()
+                .map(|e| e.file.display().to_string())
+                .collect::<Vec<_>>()
         );
     }
 }

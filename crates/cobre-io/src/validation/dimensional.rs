@@ -572,6 +572,7 @@ mod tests {
             energy_contracts: vec![],
             hydro_geometry: vec![],
             production_models: vec![],
+            hydro_energy_productivity_rows: vec![],
             fpha_hyperplanes: vec![],
             scalar_parameters: vec![],
             inflow_history: vec![],

@@ -24,6 +24,7 @@ use crate::{
     validation::{
         ValidationContext,
         dimensional::validate_dimensional_consistency,
+        productivity_resolution::validate_productivity_resolution,
         referential::validate_referential_integrity,
         schema::validate_schema,
         semantic::{validate_semantic_hydro_thermal, validate_semantic_stages_penalties_scenarios},
@@ -88,6 +89,9 @@ pub(crate) fn run_pipeline_with_report(
     validate_dimensional_consistency(&data, &mut ctx);
     validate_semantic_hydro_thermal(&data, &mut ctx);
     validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
+
+    // Layer 6 — cross-file productivity resolution (conflict + coverage).
+    validate_productivity_resolution(&data, &mut ctx);
 
     // Capture warnings before consuming the context. Errors cause early return.
     let report = generate_report(&ctx);

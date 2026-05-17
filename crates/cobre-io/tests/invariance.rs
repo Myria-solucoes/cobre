@@ -147,6 +147,28 @@ fn make_shuffled_multi_entity_case(dir: &TempDir) {
     ]
 }"#,
     );
+
+    // Production model for hydro_id=1 covering both study stages.
+    helpers::write_file(
+        root,
+        "system/hydro_production_models.json",
+        r#"{
+    "production_models": [
+        {
+            "hydro_id": 1,
+            "selection_mode": "stage_ranges",
+            "stage_ranges": [
+                {
+                    "start_stage_id": 0,
+                    "end_stage_id": null,
+                    "model": "constant_productivity",
+                    "productivity_mw_per_m3s": 0.9
+                }
+            ]
+        }
+    ]
+}"#,
+    );
 }
 
 // ── test_bus_ordering_invariance ──────────────────────────────────────────────

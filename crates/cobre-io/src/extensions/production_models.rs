@@ -43,11 +43,21 @@
 //! - For `stage_ranges` mode: `start_stage_id <= end_stage_id` when `end_stage_id` is not null.
 //! - In `fitting_window`: absolute bounds (`volume_min_hm3` / `volume_max_hm3`) and percentile
 //!   bounds (`volume_min_percentile` / `volume_max_percentile`) are mutually exclusive.
+//! - `productivity_mw_per_m3s` is **rejected** for `"fpha"` entries (both stage-range and
+//!   seasonal); FPHA derives productivity from its hyperplane geometry.
+//! - `productivity_mw_per_m3s` is **optional** for `"constant_productivity"` and
+//!   `"linearized_head"` entries. When omitted or `null`, the value is expected to be supplied by
+//!   `system/hydro_energy_productivity.parquet`; cross-file resolution is enforced by
+//!   `validation::productivity_resolution`.
+//! - When `productivity_mw_per_m3s` is present for a non-FPHA entry it must be strictly positive
+//!   and finite.
 //!
 //! Deferred validations (not performed here):
 //!
 //! - `hydro_id` existence in the hydro registry — Layer 3.
 //! - Cross-validation that `source: "precomputed"` hydros have FPHA hyperplanes — Layer 3/5.
+//! - That exactly one source (JSON or parquet) provides `productivity_mw_per_m3s` for each
+//!   `(hydro, stage)` pair — `validation::productivity_resolution`.
 
 use cobre_core::EntityId;
 use serde::Deserialize;
@@ -115,9 +125,11 @@ pub struct StageRange {
     pub fpha_config: Option<FphaColumnLayout>,
     /// Per-stage productivity coefficient [MW/(m³/s)].
     ///
-    /// Required (must be `Some(x)` with `x > 0.0`) for `"constant_productivity"` and
-    /// `"linearized_head"` models. Must be `None` for `"fpha"` (FPHA computes
-    /// head-dependent productivity from the hyperplane geometry).
+    /// Optional for `"constant_productivity"` and `"linearized_head"` models. When `None`,
+    /// the value is supplied by `system/hydro_energy_productivity.parquet`; cross-file
+    /// resolution is enforced by `validation::productivity_resolution`. When present, must
+    /// be strictly positive and finite. Must be `None` for `"fpha"` (FPHA derives productivity
+    /// from its hyperplane geometry).
     pub productivity_mw_per_m3s: Option<f64>,
 }
 
@@ -132,9 +144,11 @@ pub struct SeasonConfig {
     pub fpha_config: Option<FphaColumnLayout>,
     /// Per-season productivity coefficient [MW/(m³/s)].
     ///
-    /// Required (must be `Some(x)` with `x > 0.0`) for `"constant_productivity"` and
-    /// `"linearized_head"` models. Must be `None` for `"fpha"` (FPHA computes
-    /// head-dependent productivity from the hyperplane geometry).
+    /// Optional for `"constant_productivity"` and `"linearized_head"` models. When `None`,
+    /// the value is supplied by `system/hydro_energy_productivity.parquet`; cross-file
+    /// resolution is enforced by `validation::productivity_resolution`. When present, must
+    /// be strictly positive and finite. Must be `None` for `"fpha"` (FPHA derives productivity
+    /// from its hyperplane geometry).
     pub productivity_mw_per_m3s: Option<f64>,
 }
 
@@ -249,9 +263,10 @@ struct RawStageRange {
     /// FPHA configuration. Required when `model` is `"fpha"`. Absent or null
     /// otherwise.
     fpha_config: Option<RawFphaColumnLayout>,
-    /// Per-stage productivity coefficient [MW/(m³/s)]. Required and must be
-    /// `> 0.0` for `"constant_productivity"` and `"linearized_head"` models.
-    /// Must be absent or null for `"fpha"`.
+    /// Per-stage productivity coefficient [MW/(m³/s)]. Optional for
+    /// `"constant_productivity"` and `"linearized_head"` models; when absent or
+    /// null the value is expected from `system/hydro_energy_productivity.parquet`.
+    /// When present must be `> 0.0` and finite. Must be absent or null for `"fpha"`.
     productivity_mw_per_m3s: Option<f64>,
 }
 
@@ -266,9 +281,10 @@ struct RawSeasonConfig {
     /// FPHA configuration. Required when `model` is `"fpha"`. Absent or null
     /// otherwise.
     fpha_config: Option<RawFphaColumnLayout>,
-    /// Per-season productivity coefficient [MW/(m³/s)]. Required and must be
-    /// `> 0.0` for `"constant_productivity"` and `"linearized_head"` models.
-    /// Must be absent or null for `"fpha"`.
+    /// Per-season productivity coefficient [MW/(m³/s)]. Optional for
+    /// `"constant_productivity"` and `"linearized_head"` models; when absent or
+    /// null the value is expected from `system/hydro_energy_productivity.parquet`.
+    /// When present must be `> 0.0` and finite. Must be absent or null for `"fpha"`.
     productivity_mw_per_m3s: Option<f64>,
 }
 
@@ -423,20 +439,10 @@ fn validate_production_models(models: &[RawProductionModel], path: &Path) -> Res
                         });
                     }
 
-                    // Require productivity_mw_per_m3s for non-FPHA seasons.
+                    // Validate productivity_mw_per_m3s value when present for non-FPHA seasons.
                     if season.model != "fpha" {
-                        match season.productivity_mw_per_m3s {
-                            None => {
-                                return Err(LoadError::SchemaError {
-                                    path: path.to_path_buf(),
-                                    field: field_base,
-                                    message: format!(
-                                        "productivity_mw_per_m3s is required for model '{}'",
-                                        season.model
-                                    ),
-                                });
-                            }
-                            Some(val) if val <= 0.0 => {
+                        if let Some(val) = season.productivity_mw_per_m3s {
+                            if val <= 0.0 || !val.is_finite() {
                                 return Err(LoadError::SchemaError {
                                     path: path.to_path_buf(),
                                     field: field_base,
@@ -445,7 +451,6 @@ fn validate_production_models(models: &[RawProductionModel], path: &Path) -> Res
                                     ),
                                 });
                             }
-                            Some(_) => {}
                         }
                     }
 
@@ -502,27 +507,16 @@ fn validate_stage_range(
         });
     }
 
-    // Require productivity_mw_per_m3s for non-FPHA stages.
+    // Validate productivity_mw_per_m3s value when present for non-FPHA stages.
     if range.model != "fpha" {
-        match range.productivity_mw_per_m3s {
-            None => {
-                return Err(LoadError::SchemaError {
-                    path: path.to_path_buf(),
-                    field: field_base,
-                    message: format!(
-                        "productivity_mw_per_m3s is required for model '{}'",
-                        range.model
-                    ),
-                });
-            }
-            Some(val) if val <= 0.0 => {
+        if let Some(val) = range.productivity_mw_per_m3s {
+            if val <= 0.0 || !val.is_finite() {
                 return Err(LoadError::SchemaError {
                     path: path.to_path_buf(),
                     field: field_base,
                     message: format!("productivity_mw_per_m3s must be positive, got {val}"),
                 });
             }
-            Some(_) => {}
         }
     }
 
@@ -625,16 +619,12 @@ fn convert_fpha_column_layout(raw: RawFphaColumnLayout) -> FphaColumnLayout {
         turbine_discretization_points: raw.turbine_discretization_points,
         spillage_discretization_points: raw.spillage_discretization_points,
         max_planes_per_hydro: raw.max_planes_per_hydro,
-        fitting_window: raw.fitting_window.map(|fw| convert_fitting_window(&fw)),
-    }
-}
-
-fn convert_fitting_window(raw: &RawFittingWindow) -> FittingWindow {
-    FittingWindow {
-        volume_min_hm3: raw.volume_min_hm3,
-        volume_max_hm3: raw.volume_max_hm3,
-        volume_min_percentile: raw.volume_min_percentile,
-        volume_max_percentile: raw.volume_max_percentile,
+        fitting_window: raw.fitting_window.map(|fw| FittingWindow {
+            volume_min_hm3: fw.volume_min_hm3,
+            volume_max_hm3: fw.volume_max_hm3,
+            volume_min_percentile: fw.volume_min_percentile,
+            volume_max_percentile: fw.volume_max_percentile,
+        }),
     }
 }
 
@@ -1165,10 +1155,10 @@ mod tests {
         }
     }
 
-    /// `constant_productivity` stage range without `productivity_mw_per_m3s` ->
-    /// `SchemaError` whose message names both the field and the model.
+    /// Non-FPHA stage range with `productivity_mw_per_m3s` omitted parses to `Ok` with
+    /// `productivity_mw_per_m3s: None`. The parquet override is expected to supply the value.
     #[test]
-    fn constant_productivity_rejects_non_positive_coefficient() {
+    fn test_non_fpha_stage_range_without_productivity_is_accepted() {
         let json = r#"{
           "production_models": [{
             "hydro_id": 0,
@@ -1182,30 +1172,23 @@ mod tests {
           }]
         }"#;
         let f = write_json(json);
-        let err = parse_production_models(f.path()).unwrap_err();
-        match &err {
-            LoadError::SchemaError { field, message, .. } => {
+        let models = parse_production_models(f.path()).unwrap();
+        match &models[0].selection_mode {
+            SelectionMode::StageRanges { ranges } => {
                 assert!(
-                    field.contains("productivity_mw_per_m3s"),
-                    "field should contain 'productivity_mw_per_m3s', got: {field}"
-                );
-                assert!(
-                    message.contains("productivity_mw_per_m3s"),
-                    "message should contain 'productivity_mw_per_m3s', got: {message}"
-                );
-                assert!(
-                    message.contains("constant_productivity"),
-                    "message should contain 'constant_productivity', got: {message}"
+                    ranges[0].productivity_mw_per_m3s.is_none(),
+                    "expected None when field is omitted, got: {:?}",
+                    ranges[0].productivity_mw_per_m3s
                 );
             }
-            other => panic!("expected SchemaError, got: {other:?}"),
+            other => panic!("expected StageRanges, got: {other:?}"),
         }
     }
 
-    /// `linearized_head` stage range without `productivity_mw_per_m3s` ->
-    /// `SchemaError` whose message names both the field and the model.
+    /// Non-FPHA stage range with `productivity_mw_per_m3s: null` parses to `Ok` with
+    /// `productivity_mw_per_m3s: None`. The parquet override is expected to supply the value.
     #[test]
-    fn linearized_head_requires_coefficient() {
+    fn test_non_fpha_stage_range_with_null_productivity_is_accepted() {
         let json = r#"{
           "production_models": [{
             "hydro_id": 0,
@@ -1213,29 +1196,23 @@ mod tests {
             "stage_ranges": [
               {
                 "start_stage_id": 0, "end_stage_id": 24,
-                "model": "linearized_head"
+                "model": "linearized_head",
+                "productivity_mw_per_m3s": null
               }
             ]
           }]
         }"#;
         let f = write_json(json);
-        let err = parse_production_models(f.path()).unwrap_err();
-        match &err {
-            LoadError::SchemaError { field, message, .. } => {
+        let models = parse_production_models(f.path()).unwrap();
+        match &models[0].selection_mode {
+            SelectionMode::StageRanges { ranges } => {
                 assert!(
-                    field.contains("productivity_mw_per_m3s"),
-                    "field should contain 'productivity_mw_per_m3s', got: {field}"
-                );
-                assert!(
-                    message.contains("productivity_mw_per_m3s"),
-                    "message should contain 'productivity_mw_per_m3s', got: {message}"
-                );
-                assert!(
-                    message.contains("linearized_head"),
-                    "message should contain 'linearized_head', got: {message}"
+                    ranges[0].productivity_mw_per_m3s.is_none(),
+                    "expected None when field is null, got: {:?}",
+                    ranges[0].productivity_mw_per_m3s
                 );
             }
-            other => panic!("expected SchemaError, got: {other:?}"),
+            other => panic!("expected StageRanges, got: {other:?}"),
         }
     }
 
@@ -1346,6 +1323,96 @@ mod tests {
                 assert_eq!(seasons[0].productivity_mw_per_m3s, Some(0.75));
             }
             other => panic!("expected Seasonal, got: {other:?}"),
+        }
+    }
+
+    /// Non-FPHA seasonal entry with `productivity_mw_per_m3s` omitted parses to `Ok` with
+    /// `productivity_mw_per_m3s: None`. The parquet override is expected to supply the value.
+    #[test]
+    fn test_non_fpha_seasonal_without_productivity_is_accepted() {
+        let json = r#"{
+          "production_models": [{
+            "hydro_id": 0,
+            "selection_mode": "seasonal",
+            "default_model": "constant_productivity",
+            "seasons": [
+              {
+                "season_id": 0,
+                "model": "constant_productivity"
+              }
+            ]
+          }]
+        }"#;
+        let f = write_json(json);
+        let models = parse_production_models(f.path()).unwrap();
+        match &models[0].selection_mode {
+            SelectionMode::Seasonal { seasons, .. } => {
+                assert!(
+                    seasons[0].productivity_mw_per_m3s.is_none(),
+                    "expected None when field is omitted, got: {:?}",
+                    seasons[0].productivity_mw_per_m3s
+                );
+            }
+            other => panic!("expected Seasonal, got: {other:?}"),
+        }
+    }
+
+    /// Regression guard: FPHA stage range with `productivity_mw_per_m3s` set is still rejected.
+    #[test]
+    fn test_fpha_stage_range_with_productivity_still_rejected() {
+        let json = r#"{
+          "production_models": [{
+            "hydro_id": 0,
+            "selection_mode": "stage_ranges",
+            "stage_ranges": [
+              {
+                "start_stage_id": 0, "end_stage_id": 24,
+                "model": "fpha",
+                "fpha_config": { "source": "computed" },
+                "productivity_mw_per_m3s": 0.9
+              }
+            ]
+          }]
+        }"#;
+        let f = write_json(json);
+        let err = parse_production_models(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { message, .. } => {
+                assert!(
+                    message.contains("must not be set when model is 'fpha'"),
+                    "message should mention fpha rejection, got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// Regression guard: non-positive `productivity_mw_per_m3s` is still rejected when present.
+    #[test]
+    fn test_non_positive_productivity_still_rejected() {
+        let json = r#"{
+          "production_models": [{
+            "hydro_id": 0,
+            "selection_mode": "stage_ranges",
+            "stage_ranges": [
+              {
+                "start_stage_id": 0, "end_stage_id": 24,
+                "model": "constant_productivity",
+                "productivity_mw_per_m3s": 0.0
+              }
+            ]
+          }]
+        }"#;
+        let f = write_json(json);
+        let err = parse_production_models(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { message, .. } => {
+                assert!(
+                    message.contains("productivity_mw_per_m3s must be positive"),
+                    "message should mention positive requirement, got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
         }
     }
 }
