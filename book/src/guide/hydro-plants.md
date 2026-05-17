@@ -224,7 +224,7 @@ approximately `9.81 × 80 × 0.90 / 1000 ≈ 0.706` MW/(m³/s).
 
 ## FPHA Production Model
 
-The FPHA (Forebay-Height Production Approximation) model represents the nonlinear
+The FPHA (Função de Produção Hidroelétrica Aproximada) model represents the nonlinear
 relationship between reservoir volume, turbined flow, spillage, and electrical
 generation as a piecewise-linear envelope. It captures the head
 dependence of hydro production — plants with high reservoir levels generate more
