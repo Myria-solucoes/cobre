@@ -113,11 +113,12 @@ pub struct StageRange {
     pub model: String,
     /// FPHA configuration, required when `model == "fpha"`.
     pub fpha_config: Option<FphaColumnLayout>,
-    /// Optional productivity override (MW per m3/s). When `Some`, this value
-    /// replaces the entity's base `productivity_mw_per_m3s` for this stage range.
-    /// Only valid for `"constant_productivity"` and `"linearized_head"` models.
-    /// Must be positive when present.
-    pub productivity_override: Option<f64>,
+    /// Per-stage productivity coefficient [MW/(m³/s)].
+    ///
+    /// Required (must be `Some(x)` with `x > 0.0`) for `"constant_productivity"` and
+    /// `"linearized_head"` models. Must be `None` for `"fpha"` (FPHA computes
+    /// head-dependent productivity from the hyperplane geometry).
+    pub productivity_mw_per_m3s: Option<f64>,
 }
 
 /// A season-specific model descriptor for the `seasonal` selection mode.
@@ -129,11 +130,12 @@ pub struct SeasonConfig {
     pub model: String,
     /// FPHA configuration, required when `model == "fpha"`.
     pub fpha_config: Option<FphaColumnLayout>,
-    /// Optional productivity override (MW per m3/s). When `Some`, this value
-    /// replaces the entity's base `productivity_mw_per_m3s` for this season.
-    /// Only valid for `"constant_productivity"` and `"linearized_head"` models.
-    /// Must be positive when present.
-    pub productivity_override: Option<f64>,
+    /// Per-season productivity coefficient [MW/(m³/s)].
+    ///
+    /// Required (must be `Some(x)` with `x > 0.0`) for `"constant_productivity"` and
+    /// `"linearized_head"` models. Must be `None` for `"fpha"` (FPHA computes
+    /// head-dependent productivity from the hyperplane geometry).
+    pub productivity_mw_per_m3s: Option<f64>,
 }
 
 /// Configuration for the FPHA production function model.
@@ -247,11 +249,10 @@ struct RawStageRange {
     /// FPHA configuration. Required when `model` is `"fpha"`. Absent or null
     /// otherwise.
     fpha_config: Option<RawFphaColumnLayout>,
-    /// Optional productivity override [MW/(m³/s)]. When present, replaces the
-    /// entity's base `productivity_mw_per_m3s` for this stage range. Only
-    /// valid for `"constant_productivity"` and `"linearized_head"` models.
-    /// Must be positive when present.
-    productivity_override: Option<f64>,
+    /// Per-stage productivity coefficient [MW/(m³/s)]. Required and must be
+    /// `> 0.0` for `"constant_productivity"` and `"linearized_head"` models.
+    /// Must be absent or null for `"fpha"`.
+    productivity_mw_per_m3s: Option<f64>,
 }
 
 /// Season-specific model descriptor for the `seasonal` selection mode.
@@ -265,11 +266,10 @@ struct RawSeasonConfig {
     /// FPHA configuration. Required when `model` is `"fpha"`. Absent or null
     /// otherwise.
     fpha_config: Option<RawFphaColumnLayout>,
-    /// Optional productivity override [MW/(m³/s)]. When present, replaces the
-    /// entity's base `productivity_mw_per_m3s` for this season. Only valid
-    /// for `"constant_productivity"` and `"linearized_head"` models. Must be
-    /// positive when present.
-    productivity_override: Option<f64>,
+    /// Per-season productivity coefficient [MW/(m³/s)]. Required and must be
+    /// `> 0.0` for `"constant_productivity"` and `"linearized_head"` models.
+    /// Must be absent or null for `"fpha"`.
+    productivity_mw_per_m3s: Option<f64>,
 }
 
 /// Configuration for the FPHA production function model.
@@ -409,30 +409,43 @@ fn validate_production_models(models: &[RawProductionModel], path: &Path) -> Res
             }
             RawSelectionMode::Seasonal { seasons, .. } => {
                 for (season_idx, season) in seasons.iter().enumerate() {
-                    // Reject productivity_override on FPHA seasons.
-                    if season.model == "fpha" && season.productivity_override.is_some() {
+                    let field_base = format!(
+                        "production_models[{entry_idx}].seasons[{season_idx}].productivity_mw_per_m3s"
+                    );
+
+                    // Reject productivity_mw_per_m3s on FPHA seasons.
+                    if season.model == "fpha" && season.productivity_mw_per_m3s.is_some() {
                         return Err(LoadError::SchemaError {
                             path: path.to_path_buf(),
-                            field: format!(
-                                "production_models[{entry_idx}].seasons[{season_idx}].productivity_override"
-                            ),
-                            message: "productivity_override is not valid for model \"fpha\""
+                            field: field_base,
+                            message: "productivity_mw_per_m3s must not be set when model is 'fpha'"
                                 .to_string(),
                         });
                     }
 
-                    // Reject non-positive productivity_override.
-                    if let Some(val) = season.productivity_override {
-                        if val <= 0.0 {
-                            return Err(LoadError::SchemaError {
-                                path: path.to_path_buf(),
-                                field: format!(
-                                    "production_models[{entry_idx}].seasons[{season_idx}].productivity_override"
-                                ),
-                                message: format!(
-                                    "productivity_override must be positive, got {val}"
-                                ),
-                            });
+                    // Require productivity_mw_per_m3s for non-FPHA seasons.
+                    if season.model != "fpha" {
+                        match season.productivity_mw_per_m3s {
+                            None => {
+                                return Err(LoadError::SchemaError {
+                                    path: path.to_path_buf(),
+                                    field: field_base,
+                                    message: format!(
+                                        "productivity_mw_per_m3s is required for model '{}'",
+                                        season.model
+                                    ),
+                                });
+                            }
+                            Some(val) if val <= 0.0 => {
+                                return Err(LoadError::SchemaError {
+                                    path: path.to_path_buf(),
+                                    field: field_base,
+                                    message: format!(
+                                        "productivity_mw_per_m3s must be positive, got {val}"
+                                    ),
+                                });
+                            }
+                            Some(_) => {}
                         }
                     }
 
@@ -477,27 +490,39 @@ fn validate_stage_range(
         }
     }
 
-    // Reject productivity_override on FPHA stages.
-    if range.model == "fpha" && range.productivity_override.is_some() {
+    let field_base =
+        format!("production_models[{entry_idx}].stage_ranges[{range_idx}].productivity_mw_per_m3s");
+
+    // Reject productivity_mw_per_m3s on FPHA stages.
+    if range.model == "fpha" && range.productivity_mw_per_m3s.is_some() {
         return Err(LoadError::SchemaError {
             path: path.to_path_buf(),
-            field: format!(
-                "production_models[{entry_idx}].stage_ranges[{range_idx}].productivity_override"
-            ),
-            message: "productivity_override is not valid for model \"fpha\"".to_string(),
+            field: field_base,
+            message: "productivity_mw_per_m3s must not be set when model is 'fpha'".to_string(),
         });
     }
 
-    // Reject non-positive productivity_override.
-    if let Some(val) = range.productivity_override {
-        if val <= 0.0 {
-            return Err(LoadError::SchemaError {
-                path: path.to_path_buf(),
-                field: format!(
-                    "production_models[{entry_idx}].stage_ranges[{range_idx}].productivity_override"
-                ),
-                message: format!("productivity_override must be positive, got {val}"),
-            });
+    // Require productivity_mw_per_m3s for non-FPHA stages.
+    if range.model != "fpha" {
+        match range.productivity_mw_per_m3s {
+            None => {
+                return Err(LoadError::SchemaError {
+                    path: path.to_path_buf(),
+                    field: field_base,
+                    message: format!(
+                        "productivity_mw_per_m3s is required for model '{}'",
+                        range.model
+                    ),
+                });
+            }
+            Some(val) if val <= 0.0 => {
+                return Err(LoadError::SchemaError {
+                    path: path.to_path_buf(),
+                    field: field_base,
+                    message: format!("productivity_mw_per_m3s must be positive, got {val}"),
+                });
+            }
+            Some(_) => {}
         }
     }
 
@@ -580,7 +605,7 @@ fn convert_stage_range(raw: RawStageRange) -> StageRange {
         end_stage_id: raw.end_stage_id,
         model: raw.model,
         fpha_config: raw.fpha_config.map(convert_fpha_column_layout),
-        productivity_override: raw.productivity_override,
+        productivity_mw_per_m3s: raw.productivity_mw_per_m3s,
     }
 }
 
@@ -589,7 +614,7 @@ fn convert_season_config(raw: RawSeasonConfig) -> SeasonConfig {
         season_id: raw.season_id,
         model: raw.model,
         fpha_config: raw.fpha_config.map(convert_fpha_column_layout),
-        productivity_override: raw.productivity_override,
+        productivity_mw_per_m3s: raw.productivity_mw_per_m3s,
     }
 }
 
@@ -658,7 +683,11 @@ mod tests {
                   "fitting_window": { "volume_min_hm3": null, "volume_max_hm3": null }
                 }
               },
-              { "start_stage_id": 25, "end_stage_id": null, "model": "constant_productivity" }
+              {
+                "start_stage_id": 25, "end_stage_id": null,
+                "model": "constant_productivity",
+                "productivity_mw_per_m3s": 0.9
+              }
             ]
           }]
         }"#;
@@ -687,6 +716,7 @@ mod tests {
                 assert!(ranges[1].end_stage_id.is_none());
                 assert_eq!(ranges[1].model, "constant_productivity");
                 assert!(ranges[1].fpha_config.is_none());
+                assert_eq!(ranges[1].productivity_mw_per_m3s, Some(0.9));
             }
             other => panic!("expected StageRanges, got: {other:?}"),
         }
@@ -709,7 +739,8 @@ mod tests {
                 "model": "fpha",
                 "fpha_config": { "source": "computed", "volume_discretization_points": 5 }
               },
-              { "season_id": 1, "model": "fpha",
+              {
+                "season_id": 1, "model": "fpha",
                 "fpha_config": { "source": "computed", "turbine_discretization_points": 10 }
               }
             ]
@@ -762,7 +793,11 @@ mod tests {
               "hydro_id": 3,
               "selection_mode": "stage_ranges",
               "stage_ranges": [
-                { "start_stage_id": 0, "end_stage_id": null, "model": "constant_productivity" }
+                {
+                  "start_stage_id": 0, "end_stage_id": null,
+                  "model": "constant_productivity",
+                  "productivity_mw_per_m3s": 0.8
+                }
               ]
             }
           ]
@@ -799,7 +834,7 @@ mod tests {
             {
               "hydro_id": 5,
               "selection_mode": "stage_ranges",
-              "stage_ranges": [{ "start_stage_id": 0, "end_stage_id": null, "model": "constant_productivity" }]
+              "stage_ranges": [{ "start_stage_id": 0, "end_stage_id": null, "model": "constant_productivity", "productivity_mw_per_m3s": 0.9 }]
             }
           ]
         }"#;
@@ -831,7 +866,11 @@ mod tests {
             "hydro_id": 0,
             "selection_mode": "stage_ranges",
             "stage_ranges": [
-              { "start_stage_id": 25, "end_stage_id": 10, "model": "constant_productivity" }
+              {
+                "start_stage_id": 25, "end_stage_id": 10,
+                "model": "constant_productivity",
+                "productivity_mw_per_m3s": 0.9
+              }
             ]
           }]
         }"#;
@@ -862,7 +901,11 @@ mod tests {
             "hydro_id": 0,
             "selection_mode": "stage_ranges",
             "stage_ranges": [
-              { "start_stage_id": 5, "end_stage_id": 5, "model": "constant_productivity" }
+              {
+                "start_stage_id": 5, "end_stage_id": 5,
+                "model": "constant_productivity",
+                "productivity_mw_per_m3s": 0.9
+              }
             ]
           }]
         }"#;
@@ -1033,21 +1076,21 @@ mod tests {
         let json_asc = r#"{
           "production_models": [
             { "hydro_id": 1, "selection_mode": "stage_ranges",
-              "stage_ranges": [{ "start_stage_id": 0, "end_stage_id": null, "model": "constant_productivity" }] },
+              "stage_ranges": [{ "start_stage_id": 0, "end_stage_id": null, "model": "constant_productivity", "productivity_mw_per_m3s": 0.9 }] },
             { "hydro_id": 5, "selection_mode": "stage_ranges",
-              "stage_ranges": [{ "start_stage_id": 0, "end_stage_id": null, "model": "constant_productivity" }] },
+              "stage_ranges": [{ "start_stage_id": 0, "end_stage_id": null, "model": "constant_productivity", "productivity_mw_per_m3s": 0.9 }] },
             { "hydro_id": 99, "selection_mode": "stage_ranges",
-              "stage_ranges": [{ "start_stage_id": 0, "end_stage_id": null, "model": "constant_productivity" }] }
+              "stage_ranges": [{ "start_stage_id": 0, "end_stage_id": null, "model": "constant_productivity", "productivity_mw_per_m3s": 0.9 }] }
           ]
         }"#;
         let json_desc = r#"{
           "production_models": [
             { "hydro_id": 99, "selection_mode": "stage_ranges",
-              "stage_ranges": [{ "start_stage_id": 0, "end_stage_id": null, "model": "constant_productivity" }] },
+              "stage_ranges": [{ "start_stage_id": 0, "end_stage_id": null, "model": "constant_productivity", "productivity_mw_per_m3s": 0.9 }] },
             { "hydro_id": 5, "selection_mode": "stage_ranges",
-              "stage_ranges": [{ "start_stage_id": 0, "end_stage_id": null, "model": "constant_productivity" }] },
+              "stage_ranges": [{ "start_stage_id": 0, "end_stage_id": null, "model": "constant_productivity", "productivity_mw_per_m3s": 0.9 }] },
             { "hydro_id": 1, "selection_mode": "stage_ranges",
-              "stage_ranges": [{ "start_stage_id": 0, "end_stage_id": null, "model": "constant_productivity" }] }
+              "stage_ranges": [{ "start_stage_id": 0, "end_stage_id": null, "model": "constant_productivity", "productivity_mw_per_m3s": 0.9 }] }
           ]
         }"#;
         let f_asc = write_json(json_asc);
@@ -1093,11 +1136,12 @@ mod tests {
         }
     }
 
-    // ── productivity_override tests ───────────────────────────────────────────
+    // ── productivity_mw_per_m3s tests ─────────────────────────────────────────
 
-    /// Parse stage range with `productivity_override` present.
+    /// `constant_productivity` stage range with a positive value parses OK and
+    /// exposes `productivity_mw_per_m3s = Some(0.85)`.
     #[test]
-    fn test_productivity_override_present() {
+    fn constant_productivity_requires_coefficient() {
         let json = r#"{
           "production_models": [{
             "hydro_id": 0,
@@ -1106,7 +1150,7 @@ mod tests {
               {
                 "start_stage_id": 0, "end_stage_id": 24,
                 "model": "constant_productivity",
-                "productivity_override": 0.85
+                "productivity_mw_per_m3s": 0.85
               }
             ]
           }]
@@ -1115,15 +1159,16 @@ mod tests {
         let models = parse_production_models(f.path()).unwrap();
         match &models[0].selection_mode {
             SelectionMode::StageRanges { ranges } => {
-                assert_eq!(ranges[0].productivity_override, Some(0.85));
+                assert_eq!(ranges[0].productivity_mw_per_m3s, Some(0.85));
             }
             other => panic!("expected StageRanges, got: {other:?}"),
         }
     }
 
-    /// Backward compatibility: missing `productivity_override` defaults to None.
+    /// `constant_productivity` stage range without `productivity_mw_per_m3s` ->
+    /// `SchemaError` whose message names both the field and the model.
     #[test]
-    fn test_productivity_override_absent_defaults_to_none() {
+    fn constant_productivity_rejects_non_positive_coefficient() {
         let json = r#"{
           "production_models": [{
             "hydro_id": 0,
@@ -1137,18 +1182,30 @@ mod tests {
           }]
         }"#;
         let f = write_json(json);
-        let models = parse_production_models(f.path()).unwrap();
-        match &models[0].selection_mode {
-            SelectionMode::StageRanges { ranges } => {
-                assert!(ranges[0].productivity_override.is_none());
+        let err = parse_production_models(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert!(
+                    field.contains("productivity_mw_per_m3s"),
+                    "field should contain 'productivity_mw_per_m3s', got: {field}"
+                );
+                assert!(
+                    message.contains("productivity_mw_per_m3s"),
+                    "message should contain 'productivity_mw_per_m3s', got: {message}"
+                );
+                assert!(
+                    message.contains("constant_productivity"),
+                    "message should contain 'constant_productivity', got: {message}"
+                );
             }
-            other => panic!("expected StageRanges, got: {other:?}"),
+            other => panic!("expected SchemaError, got: {other:?}"),
         }
     }
 
-    /// Validation rejects negative `productivity_override`.
+    /// `linearized_head` stage range without `productivity_mw_per_m3s` ->
+    /// `SchemaError` whose message names both the field and the model.
     #[test]
-    fn test_productivity_override_negative_rejected() {
+    fn linearized_head_requires_coefficient() {
         let json = r#"{
           "production_models": [{
             "hydro_id": 0,
@@ -1156,47 +1213,36 @@ mod tests {
             "stage_ranges": [
               {
                 "start_stage_id": 0, "end_stage_id": 24,
-                "model": "constant_productivity",
-                "productivity_override": -1.0
+                "model": "linearized_head"
               }
             ]
           }]
         }"#;
         let f = write_json(json);
         let err = parse_production_models(f.path()).unwrap_err();
-        assert!(
-            matches!(err, LoadError::SchemaError { .. }),
-            "expected SchemaError, got: {err:?}"
-        );
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert!(
+                    field.contains("productivity_mw_per_m3s"),
+                    "field should contain 'productivity_mw_per_m3s', got: {field}"
+                );
+                assert!(
+                    message.contains("productivity_mw_per_m3s"),
+                    "message should contain 'productivity_mw_per_m3s', got: {message}"
+                );
+                assert!(
+                    message.contains("linearized_head"),
+                    "message should contain 'linearized_head', got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
     }
 
-    /// Validation rejects zero `productivity_override`.
+    /// `fpha` stage range with `productivity_mw_per_m3s` set -> `SchemaError`
+    /// with the exact message `"productivity_mw_per_m3s must not be set when model is 'fpha'"`.
     #[test]
-    fn test_productivity_override_zero_rejected() {
-        let json = r#"{
-          "production_models": [{
-            "hydro_id": 0,
-            "selection_mode": "stage_ranges",
-            "stage_ranges": [
-              {
-                "start_stage_id": 0, "end_stage_id": 24,
-                "model": "constant_productivity",
-                "productivity_override": 0.0
-              }
-            ]
-          }]
-        }"#;
-        let f = write_json(json);
-        let err = parse_production_models(f.path()).unwrap_err();
-        assert!(
-            matches!(err, LoadError::SchemaError { .. }),
-            "expected SchemaError, got: {err:?}"
-        );
-    }
-
-    /// Validation rejects `productivity_override` on FPHA stages.
-    #[test]
-    fn test_productivity_override_rejected_on_fpha() {
+    fn fpha_rejects_coefficient() {
         let json = r#"{
           "production_models": [{
             "hydro_id": 0,
@@ -1206,7 +1252,40 @@ mod tests {
                 "start_stage_id": 0, "end_stage_id": 24,
                 "model": "fpha",
                 "fpha_config": { "source": "computed" },
-                "productivity_override": 0.5
+                "productivity_mw_per_m3s": 1.0
+              }
+            ]
+          }]
+        }"#;
+        let f = write_json(json);
+        let err = parse_production_models(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert!(
+                    field.contains("productivity_mw_per_m3s"),
+                    "field should contain 'productivity_mw_per_m3s', got: {field}"
+                );
+                assert_eq!(
+                    message, "productivity_mw_per_m3s must not be set when model is 'fpha'",
+                    "message must match exactly"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// Validation rejects non-positive `productivity_mw_per_m3s`.
+    #[test]
+    fn test_productivity_negative_rejected() {
+        let json = r#"{
+          "production_models": [{
+            "hydro_id": 0,
+            "selection_mode": "stage_ranges",
+            "stage_ranges": [
+              {
+                "start_stage_id": 0, "end_stage_id": 24,
+                "model": "constant_productivity",
+                "productivity_mw_per_m3s": -1.0
               }
             ]
           }]
@@ -1219,9 +1298,33 @@ mod tests {
         );
     }
 
-    /// Seasonal mode with `productivity_override` parses correctly.
+    /// Validation rejects zero `productivity_mw_per_m3s`.
     #[test]
-    fn test_seasonal_productivity_override() {
+    fn test_productivity_zero_rejected() {
+        let json = r#"{
+          "production_models": [{
+            "hydro_id": 0,
+            "selection_mode": "stage_ranges",
+            "stage_ranges": [
+              {
+                "start_stage_id": 0, "end_stage_id": 24,
+                "model": "constant_productivity",
+                "productivity_mw_per_m3s": 0.0
+              }
+            ]
+          }]
+        }"#;
+        let f = write_json(json);
+        let err = parse_production_models(f.path()).unwrap_err();
+        assert!(
+            matches!(err, LoadError::SchemaError { .. }),
+            "expected SchemaError, got: {err:?}"
+        );
+    }
+
+    /// Seasonal mode with `productivity_mw_per_m3s` parses correctly.
+    #[test]
+    fn test_seasonal_productivity_mw_per_m3s() {
         let json = r#"{
           "production_models": [{
             "hydro_id": 0,
@@ -1231,7 +1334,7 @@ mod tests {
               {
                 "season_id": 0,
                 "model": "constant_productivity",
-                "productivity_override": 0.75
+                "productivity_mw_per_m3s": 0.75
               }
             ]
           }]
@@ -1240,7 +1343,7 @@ mod tests {
         let models = parse_production_models(f.path()).unwrap();
         match &models[0].selection_mode {
             SelectionMode::Seasonal { seasons, .. } => {
-                assert_eq!(seasons[0].productivity_override, Some(0.75));
+                assert_eq!(seasons[0].productivity_mw_per_m3s, Some(0.75));
             }
             other => panic!("expected Seasonal, got: {other:?}"),
         }

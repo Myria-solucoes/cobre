@@ -180,9 +180,7 @@ fn make_stochastic_context(n_stages: usize, n_openings: usize) -> StochasticCont
         max_storage_hm3: 100.0,
         min_outflow_m3s: 0.0,
         max_outflow_m3s: None,
-        generation_model: HydroGenerationModel::ConstantProductivity {
-            productivity_mw_per_m3s: 1.0,
-        },
+        generation_model: HydroGenerationModel::ConstantProductivity,
         min_turbined_m3s: 0.0,
         max_turbined_m3s: 100.0,
         specific_productivity_mw_per_m3s_per_m: None,
@@ -444,9 +442,7 @@ fn make_system() -> cobre_core::System {
         max_storage_hm3: 100.0,
         min_outflow_m3s: 0.0,
         max_outflow_m3s: None,
-        generation_model: HydroGenerationModel::ConstantProductivity {
-            productivity_mw_per_m3s: 1.0,
-        },
+        generation_model: HydroGenerationModel::ConstantProductivity,
         min_turbined_m3s: 0.0,
         max_turbined_m3s: 100.0,
         specific_productivity_mw_per_m3s_per_m: None,
@@ -1030,9 +1026,7 @@ fn make_min_outflow_system() -> cobre_core::System {
         max_storage_hm3: 200.0,
         min_outflow_m3s: 50.0,
         max_outflow_m3s: None,
-        generation_model: HydroGenerationModel::ConstantProductivity {
-            productivity_mw_per_m3s: 1.0,
-        },
+        generation_model: HydroGenerationModel::ConstantProductivity,
         min_turbined_m3s: 0.0,
         max_turbined_m3s: 100.0,
         specific_productivity_mw_per_m3s_per_m: None,

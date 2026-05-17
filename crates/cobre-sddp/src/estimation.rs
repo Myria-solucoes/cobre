@@ -3041,9 +3041,7 @@ mod tests {
             max_storage_hm3: 5000.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 0.9,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 1000.0,
             specific_productivity_mw_per_m3s_per_m: None,
@@ -5283,9 +5281,7 @@ mod tests {
             max_storage_hm3: 5000.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 0.9,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 1000.0,
             specific_productivity_mw_per_m3s_per_m: None,
@@ -5527,9 +5523,7 @@ mod tests {
             max_storage_hm3: 5000.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 0.9,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 1000.0,
             specific_productivity_mw_per_m3s_per_m: None,

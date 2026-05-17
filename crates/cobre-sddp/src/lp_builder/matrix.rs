@@ -1,4 +1,3 @@
-use cobre_core::entities::hydro::HydroGenerationModel;
 use cobre_core::{CoefficientRef, ConstraintSense, Stage};
 
 use crate::generic_constraints::resolve_variable_ref;
@@ -903,8 +902,8 @@ pub(super) fn fill_load_balance_entries(
                 }
             }
         } else {
-            // Constant productivity: use the resolved per-stage production model,
-            // which accounts for hydro_production_models.json overrides.
+            // Constant productivity: use the resolved per-stage production model
+            // from hydro_production_models.json.
             let rho = match ctx.production_models.model(h_idx, stage_idx) {
                 ResolvedProductionModel::ConstantProductivity { productivity } => *productivity,
                 ResolvedProductionModel::Fpha { .. } => {
@@ -1425,27 +1424,15 @@ pub(super) fn fill_operational_violation_entries(
             }
         } else {
             // Constant productivity: gen_k = rho * q_k (MW).
-            let rho = match &ctx.hydros[h_idx].generation_model {
-                HydroGenerationModel::ConstantProductivity {
-                    productivity_mw_per_m3s,
-                }
-                | HydroGenerationModel::LinearizedHead {
-                    productivity_mw_per_m3s,
-                } => *productivity_mw_per_m3s,
-                HydroGenerationModel::Fpha => {
-                    // Entity model is Fpha but resolved model at this stage is
-                    // ConstantProductivity (fallback). Extract rho from the resolved model.
-                    if let ResolvedProductionModel::ConstantProductivity { productivity } =
-                        ctx.production_models.model(h_idx, stage_idx)
-                    {
-                        *productivity
-                    } else {
-                        debug_assert!(
-                            false,
-                            "Fpha entity model with non-Fpha resolved model and no local index for hydro {h_idx}"
-                        );
-                        0.0
-                    }
+            // Always read rho from the resolved per-stage production model.
+            let rho = match ctx.production_models.model(h_idx, stage_idx) {
+                ResolvedProductionModel::ConstantProductivity { productivity } => *productivity,
+                ResolvedProductionModel::Fpha { .. } => {
+                    debug_assert!(
+                        false,
+                        "Fpha resolved model with no local index for hydro {h_idx}"
+                    );
+                    0.0
                 }
             };
             for blk in 0..n_blks {

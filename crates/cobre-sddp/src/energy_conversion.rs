@@ -184,16 +184,10 @@ impl EnergyConversionSet {
         let mut warnings = Vec::new();
 
         for (h_idx, hydro) in hydros.iter().enumerate() {
-            // Skip FPHA hydros — they have no `ρ_eq_stored` to compare against.
-            let rho_eq_stored = match hydro.generation_model {
-                HydroGenerationModel::ConstantProductivity {
-                    productivity_mw_per_m3s,
-                }
-                | HydroGenerationModel::LinearizedHead {
-                    productivity_mw_per_m3s,
-                } => productivity_mw_per_m3s,
-                HydroGenerationModel::Fpha => continue,
-            };
+            // Skip FPHA hydros — they have no scalar `ρ_eq` to compare against.
+            if matches!(hydro.generation_model, HydroGenerationModel::Fpha) {
+                continue;
+            }
 
             // Skip when no supplied ρ_esp.
             let Some(supplied_rho_esp) = hydro.specific_productivity_mw_per_m3s_per_m else {
@@ -214,6 +208,10 @@ impl EnergyConversionSet {
                 let conv = self.conversion(h_idx, stage);
                 let v_ref = conv.reference_volume_hm3;
                 let q_ref = conv.reference_outflow_m3s;
+
+                // Read ρ_eq from the already-resolved conversion set rather
+                // than from the entity model (which no longer carries a scalar).
+                let rho_eq_stored = conv.equivalent_productivity_mw_per_m3s;
 
                 // Skip when h_eq <= 0.0 (non-positive head is informational
                 // for non-FPHA hydros; no error is raised here).
@@ -537,6 +535,11 @@ pub enum EnergyConversionError {
 /// 2. VHA geometry + `ρ_esp` — derived via `ρ_esp · h_eq(V_ref, Q_ref)`.
 /// 3. Neither — returns [`EnergyConversionError::FphaMissingEquivalentProductivity`].
 ///
+/// For non-FPHA hydros, `ρ_eq` is read from `production_models` (the per-stage
+/// resolved production model, populated from `hydro_production_models.json`).
+/// Pass `None` to use `0.0` as a placeholder (only appropriate in tests that do
+/// not require accurate `equivalent_productivity_mw_per_m3s` values).
+///
 /// `accumulated` (`ρ_acum`) is zero-initialized and then filled by the cascade
 /// walk before returning.
 ///
@@ -558,12 +561,13 @@ pub fn build_energy_conversion_set<S: std::hash::BuildHasher>(
     reference_volume_fractions: &HydroReferenceVolumeFractions,
     vha_rows_by_hydro: &HashMap<EntityId, Vec<HydroGeometryRow>, S>,
     override_table: Option<&HydroEnergyProductivityOverride>,
+    production_models: Option<&crate::hydro_models::ProductionModelSet>,
 ) -> Result<EnergyConversionSet, EnergyConversionError> {
     let n_hydros = hydros.len();
 
     let mut per_hydro_stage: Vec<Vec<EnergyConversion>> = Vec::with_capacity(n_hydros);
 
-    for hydro in hydros {
+    for (h_idx, hydro) in hydros.iter().enumerate() {
         let v_min = hydro.min_storage_hm3;
         let v_max = hydro.max_storage_hm3;
         let q_max = hydro.max_turbined_m3s;
@@ -611,7 +615,20 @@ pub fn build_energy_conversion_set<S: std::hash::BuildHasher>(
         let mut row: Vec<EnergyConversion> = Vec::with_capacity(n_stages);
         for stage in 0..n_stages {
             let fraction = reference_volume_fractions.get(hydro.id, stage);
-            let mut conversion = derive_conversion_for_hydro(hydro, fraction);
+            // For non-FPHA hydros, read ρ_eq from the resolved per-stage
+            // production model. For FPHA hydros, use 0.0 as a placeholder
+            // (the FPHA branch below overwrites it).
+            let productivity = if matches!(hydro.generation_model, HydroGenerationModel::Fpha) {
+                0.0
+            } else {
+                production_models.map_or(0.0, |pm| match pm.model(h_idx, stage) {
+                    crate::hydro_models::ResolvedProductionModel::ConstantProductivity {
+                        productivity,
+                    } => *productivity,
+                    crate::hydro_models::ResolvedProductionModel::Fpha { .. } => 0.0,
+                })
+            };
+            let mut conversion = derive_conversion_for_hydro(hydro, fraction, productivity);
 
             if matches!(hydro.generation_model, HydroGenerationModel::Fpha) {
                 // Try override first, then VHA derivation, then error.
@@ -703,24 +720,21 @@ pub fn build_energy_conversion_set<S: std::hash::BuildHasher>(
 ///
 /// `fraction` is the resolved reference-volume fraction for the
 /// `(hydro, stage)` of interest, already obtained from the resolver. For FPHA
-/// hydros, `equivalent_productivity_mw_per_m3s` is left at `0.0` here — it is
-/// filled in by the FPHA-specific derivation in `build_energy_conversion_set`.
-fn derive_conversion_for_hydro(hydro: &Hydro, fraction: f64) -> EnergyConversion {
+/// hydros, `productivity` should be `0.0` — it is filled in by the
+/// FPHA-specific derivation in `build_energy_conversion_set`. For non-FPHA
+/// hydros, `productivity` is the per-stage value from the resolved production
+/// model (i.e., from `hydro_production_models.json`).
+fn derive_conversion_for_hydro(
+    hydro: &Hydro,
+    fraction: f64,
+    productivity: f64,
+) -> EnergyConversion {
     let v_min = hydro.min_storage_hm3;
     let v_max = hydro.max_storage_hm3;
     let reference_volume_hm3 = v_min + fraction * (v_max - v_min);
     let reference_outflow_m3s = hydro.max_turbined_m3s;
-    let equivalent_productivity_mw_per_m3s = match hydro.generation_model {
-        HydroGenerationModel::ConstantProductivity {
-            productivity_mw_per_m3s,
-        }
-        | HydroGenerationModel::LinearizedHead {
-            productivity_mw_per_m3s,
-        } => productivity_mw_per_m3s,
-        HydroGenerationModel::Fpha => 0.0,
-    };
     EnergyConversion {
-        equivalent_productivity_mw_per_m3s,
+        equivalent_productivity_mw_per_m3s: productivity,
         reference_volume_hm3,
         reference_outflow_m3s,
     }
@@ -792,6 +806,8 @@ mod tests {
         HydroGeometryRow, HydroReferenceVolumeFractions, build_hydro_reference_volume_fractions,
     };
 
+    use crate::hydro_models::{ProductionModelSet, ResolvedProductionModel};
+
     use super::*;
 
     fn penalties_zero() -> HydroPenalties {
@@ -827,9 +843,7 @@ mod tests {
             max_storage_hm3: 100.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 1.0,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 50.0,
             specific_productivity_mw_per_m3s_per_m: None,
@@ -926,22 +940,31 @@ mod tests {
 
     #[test]
     fn builder_returns_grid_with_expected_dimensions() {
-        // hydro id=1 (downstream=2) and hydro id=2 (terminal), both ρ_eq=1.0
-        // (default from make_hydro). After the cascade walk:
+        // hydro id=1 (downstream=2) and hydro id=2 (terminal), both ρ_eq=1.0.
+        // After the cascade walk:
         //   ρ_acum(id=2) = 1.0            (terminal, no downstream contrib)
         //   ρ_acum(id=1) = 1.0 + 1.0 = 2.0
+        let n_stages = 2;
         let hydros = vec![make_hydro(1, Some(2)), make_hydro(2, None)];
         let cascade = CascadeTopology::build(&hydros);
         let resolver = make_resolver(&hydros);
+        let pm = production_set(&[1.0, 1.0], n_stages);
 
-        let set =
-            build_energy_conversion_set(&hydros, 2, &cascade, &resolver, &HashMap::new(), None)
-                .expect("builder succeeds");
+        let set = build_energy_conversion_set(
+            &hydros,
+            n_stages,
+            &cascade,
+            &resolver,
+            &HashMap::new(),
+            None,
+            Some(&pm),
+        )
+        .expect("builder succeeds");
 
         assert_eq!(set.n_hydros(), 2);
-        assert_eq!(set.n_stages(), 2);
+        assert_eq!(set.n_stages(), n_stages);
         // hydro index 0 = id=1 (upstream), index 1 = id=2 (terminal).
-        for s in 0..2 {
+        for s in 0..n_stages {
             assert_eq!(set.accumulated_productivity(1, s), 1.0); // id=2, terminal
             assert_eq!(set.accumulated_productivity(0, s), 2.0); // id=1, upstream of id=2
         }
@@ -981,24 +1004,46 @@ mod tests {
             .expect("resolver builds")
     }
 
+    /// Build a `ProductionModelSet` where every (hydro, stage) cell uses
+    /// `ConstantProductivity` with the given per-hydro productivity values.
+    ///
+    /// `productivities[h]` is the productivity for hydro at declaration index `h`.
+    fn production_set(productivities: &[f64], n_stages: usize) -> ProductionModelSet {
+        let n_hydros = productivities.len();
+        let models = productivities
+            .iter()
+            .map(|&p| {
+                vec![ResolvedProductionModel::ConstantProductivity { productivity: p }; n_stages]
+            })
+            .collect();
+        ProductionModelSet::new(models, n_hydros, n_stages)
+    }
+
     #[test]
     fn constant_productivity_yields_input_scalar() {
+        let n_stages = 2;
         let hydros = vec![make_hydro_with(
             1,
-            HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 0.9,
-            },
+            HydroGenerationModel::ConstantProductivity,
             100.0,
             200.0,
             50.0,
             None,
         )];
         let cascade = CascadeTopology::build(&hydros);
-        let resolver = constant_resolver(&hydros, 0.65, 2);
+        let resolver = constant_resolver(&hydros, 0.65, n_stages);
+        let pm = production_set(&[0.9], n_stages);
 
-        let set =
-            build_energy_conversion_set(&hydros, 2, &cascade, &resolver, &HashMap::new(), None)
-                .expect("builder succeeds");
+        let set = build_energy_conversion_set(
+            &hydros,
+            n_stages,
+            &cascade,
+            &resolver,
+            &HashMap::new(),
+            None,
+            Some(&pm),
+        )
+        .expect("builder succeeds");
 
         let c = set.conversion(0, 0);
         assert_eq!(c.equivalent_productivity_mw_per_m3s, 0.9);
@@ -1008,22 +1053,29 @@ mod tests {
 
     #[test]
     fn linearized_head_yields_input_scalar() {
+        let n_stages = 1;
         let hydros = vec![make_hydro_with(
             1,
-            HydroGenerationModel::LinearizedHead {
-                productivity_mw_per_m3s: 1.2,
-            },
+            HydroGenerationModel::LinearizedHead,
             100.0,
             200.0,
             40.0,
             None,
         )];
         let cascade = CascadeTopology::build(&hydros);
-        let resolver = constant_resolver(&hydros, 0.5, 1);
+        let resolver = constant_resolver(&hydros, 0.5, n_stages);
+        let pm = production_set(&[1.2], n_stages);
 
-        let set =
-            build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &HashMap::new(), None)
-                .expect("builder succeeds");
+        let set = build_energy_conversion_set(
+            &hydros,
+            n_stages,
+            &cascade,
+            &resolver,
+            &HashMap::new(),
+            None,
+            Some(&pm),
+        )
+        .expect("builder succeeds");
 
         assert_eq!(set.conversion(0, 0).equivalent_productivity_mw_per_m3s, 1.2);
     }
@@ -1032,9 +1084,7 @@ mod tests {
     fn reference_volume_uses_fraction() {
         let hydros = vec![make_hydro_with(
             1,
-            HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 1.0,
-            },
+            HydroGenerationModel::ConstantProductivity,
             100.0,
             200.0,
             50.0,
@@ -1044,9 +1094,16 @@ mod tests {
 
         for f in [0.1_f64, 0.5, 1.0] {
             let resolver = constant_resolver(&hydros, f, 1);
-            let set =
-                build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &HashMap::new(), None)
-                    .expect("builder succeeds");
+            let set = build_energy_conversion_set(
+                &hydros,
+                1,
+                &cascade,
+                &resolver,
+                &HashMap::new(),
+                None,
+                None,
+            )
+            .expect("builder succeeds");
             let expected = 100.0 + f * (200.0 - 100.0);
             assert!(
                 (set.conversion(0, 0).reference_volume_hm3 - expected).abs() < f64::EPSILON,
@@ -1058,11 +1115,10 @@ mod tests {
 
     #[test]
     fn per_season_override_produces_different_v_ref_per_stage() {
+        let n_stages = 4;
         let hydros = vec![make_hydro_with(
             1,
-            HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 0.9,
-            },
+            HydroGenerationModel::ConstantProductivity,
             100.0,
             200.0,
             50.0,
@@ -1086,9 +1142,17 @@ mod tests {
         let resolver =
             build_hydro_reference_volume_fractions(rows, 0.65, &hydros, &stage_to_season)
                 .expect("resolver builds");
-        let set =
-            build_energy_conversion_set(&hydros, 4, &cascade, &resolver, &HashMap::new(), None)
-                .expect("builder succeeds");
+        let pm = production_set(&[0.9], n_stages);
+        let set = build_energy_conversion_set(
+            &hydros,
+            n_stages,
+            &cascade,
+            &resolver,
+            &HashMap::new(),
+            None,
+            Some(&pm),
+        )
+        .expect("builder succeeds");
 
         let expected = [150.0_f64, 170.0, 150.0, 170.0];
         for (s, want) in expected.iter().enumerate() {
@@ -1105,9 +1169,7 @@ mod tests {
     fn invalid_storage_range_is_rejected() {
         let hydros = vec![make_hydro_with(
             42,
-            HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 1.0,
-            },
+            HydroGenerationModel::ConstantProductivity,
             200.0,
             100.0,
             50.0,
@@ -1116,9 +1178,16 @@ mod tests {
         let cascade = CascadeTopology::build(&hydros);
         let resolver = constant_resolver(&hydros, 0.65, 1);
 
-        let err =
-            build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &HashMap::new(), None)
-                .unwrap_err();
+        let err = build_energy_conversion_set(
+            &hydros,
+            1,
+            &cascade,
+            &resolver,
+            &HashMap::new(),
+            None,
+            None,
+        )
+        .unwrap_err();
         match err {
             EnergyConversionError::InvalidStorageRange { hydro_id, .. } => {
                 assert_eq!(hydro_id, hydros[0].id);
@@ -1131,9 +1200,7 @@ mod tests {
     fn negative_max_turbined_is_rejected() {
         let hydros = vec![make_hydro_with(
             42,
-            HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 1.0,
-            },
+            HydroGenerationModel::ConstantProductivity,
             100.0,
             200.0,
             -1.0,
@@ -1142,9 +1209,16 @@ mod tests {
         let cascade = CascadeTopology::build(&hydros);
         let resolver = constant_resolver(&hydros, 0.65, 1);
 
-        let err =
-            build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &HashMap::new(), None)
-                .unwrap_err();
+        let err = build_energy_conversion_set(
+            &hydros,
+            1,
+            &cascade,
+            &resolver,
+            &HashMap::new(),
+            None,
+            None,
+        )
+        .unwrap_err();
         match err {
             EnergyConversionError::NegativeMaxTurbined { hydro_id, q_max } => {
                 assert_eq!(hydro_id, hydros[0].id);
@@ -1169,9 +1243,16 @@ mod tests {
         )];
         let cascade = CascadeTopology::build(&hydros);
         let resolver = constant_resolver(&hydros, 0.5, 1);
-        let err =
-            build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &HashMap::new(), None)
-                .unwrap_err();
+        let err = build_energy_conversion_set(
+            &hydros,
+            1,
+            &cascade,
+            &resolver,
+            &HashMap::new(),
+            None,
+            None,
+        )
+        .unwrap_err();
         match err {
             EnergyConversionError::FphaMissingEquivalentProductivity {
                 hydro_id,
@@ -1235,7 +1316,7 @@ mod tests {
         let mut map = HashMap::new();
         map.insert(id, rows);
 
-        let set = build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &map, None)
+        let set = build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &map, None, None)
             .expect("builder succeeds");
 
         let got = set.conversion(0, 0).equivalent_productivity_mw_per_m3s;
@@ -1258,7 +1339,7 @@ mod tests {
         let mut map = HashMap::new();
         map.insert(id, rows);
 
-        let set = build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &map, None)
+        let set = build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &map, None, None)
             .expect("builder succeeds");
 
         // h_eq = 400 - 0 - 0.05 * 400 = 380; rho_eq = 0.009 * 380 = 3.42
@@ -1282,7 +1363,7 @@ mod tests {
         let mut map = HashMap::new();
         map.insert(id, rows);
 
-        let set = build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &map, None)
+        let set = build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &map, None, None)
             .expect("builder succeeds");
 
         // h_eq = 400 - 0 - 5 = 395; rho_eq = 0.009 * 395 = 3.555
@@ -1309,8 +1390,8 @@ mod tests {
         let mut map = HashMap::new();
         map.insert(id, rows);
 
-        let err =
-            build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &map, None).unwrap_err();
+        let err = build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &map, None, None)
+            .unwrap_err();
         match err {
             EnergyConversionError::FphaMissingEquivalentProductivity {
                 hydro_id,
@@ -1336,9 +1417,16 @@ mod tests {
         let cascade = CascadeTopology::build(&hydros);
         let resolver = constant_resolver(&hydros, 0.65, 1);
 
-        let err =
-            build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &HashMap::new(), None)
-                .unwrap_err();
+        let err = build_energy_conversion_set(
+            &hydros,
+            1,
+            &cascade,
+            &resolver,
+            &HashMap::new(),
+            None,
+            None,
+        )
+        .unwrap_err();
         match err {
             EnergyConversionError::FphaMissingEquivalentProductivity {
                 hydro_id,
@@ -1368,8 +1456,8 @@ mod tests {
         let mut map = HashMap::new();
         map.insert(id, rows);
 
-        let err =
-            build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &map, None).unwrap_err();
+        let err = build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &map, None, None)
+            .unwrap_err();
         match err {
             EnergyConversionError::NonPositiveEquivalentHead { hydro_id, h_eq } => {
                 assert_eq!(hydro_id, hydros[0].id);
@@ -1395,8 +1483,8 @@ mod tests {
         let mut map = HashMap::new();
         map.insert(hydros[0].id, rows);
 
-        let err =
-            build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &map, None).unwrap_err();
+        let err = build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &map, None, None)
+            .unwrap_err();
         match err {
             EnergyConversionError::ForebayTableInvalid { hydro_id, .. } => {
                 assert_eq!(hydro_id, hydros[0].id);
@@ -1411,27 +1499,30 @@ mod tests {
     /// Expected ρ_acum: C=5.0, B=3+5=8.0, A=2+8=10.0.
     #[test]
     fn linear_cascade_accumulates_three_levels() {
-        // A(id=0)->B(id=1)->C(id=2, terminal). Each hydro has ConstantProductivity
-        // with the ρ_eq values given in the acceptance criterion.
+        // A(id=0)->B(id=1)->C(id=2, terminal). Each hydro has ConstantProductivity.
+        // The ρ_eq values are supplied via ProductionModelSet (declaration order: A=0, B=1, C=2).
         let mut a = make_hydro(0, Some(1));
-        a.generation_model = HydroGenerationModel::ConstantProductivity {
-            productivity_mw_per_m3s: 2.0,
-        };
+        a.generation_model = HydroGenerationModel::ConstantProductivity;
         let mut b = make_hydro(1, Some(2));
-        b.generation_model = HydroGenerationModel::ConstantProductivity {
-            productivity_mw_per_m3s: 3.0,
-        };
+        b.generation_model = HydroGenerationModel::ConstantProductivity;
         let mut c = make_hydro(2, None);
-        c.generation_model = HydroGenerationModel::ConstantProductivity {
-            productivity_mw_per_m3s: 5.0,
-        };
+        c.generation_model = HydroGenerationModel::ConstantProductivity;
         let hydros = vec![a, b, c];
         let cascade = CascadeTopology::build(&hydros);
         let resolver = constant_resolver(&hydros, 0.65, 1);
+        // Declaration order: A(idx=0)=2.0, B(idx=1)=3.0, C(idx=2)=5.0.
+        let pm = production_set(&[2.0, 3.0, 5.0], 1);
 
-        let set =
-            build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &HashMap::new(), None)
-                .expect("builder succeeds");
+        let set = build_energy_conversion_set(
+            &hydros,
+            1,
+            &cascade,
+            &resolver,
+            &HashMap::new(),
+            None,
+            Some(&pm),
+        )
+        .expect("builder succeeds");
 
         // Index by declaration order: A=0, B=1, C=2.
         assert_eq!(set.accumulated_productivity(0, 0), 10.0); // A
@@ -1444,24 +1535,27 @@ mod tests {
     #[test]
     fn branching_cascade_accumulates_correctly() {
         let mut a = make_hydro(0, Some(2));
-        a.generation_model = HydroGenerationModel::ConstantProductivity {
-            productivity_mw_per_m3s: 1.0,
-        };
+        a.generation_model = HydroGenerationModel::ConstantProductivity;
         let mut b = make_hydro(1, Some(2));
-        b.generation_model = HydroGenerationModel::ConstantProductivity {
-            productivity_mw_per_m3s: 2.0,
-        };
+        b.generation_model = HydroGenerationModel::ConstantProductivity;
         let mut c = make_hydro(2, None);
-        c.generation_model = HydroGenerationModel::ConstantProductivity {
-            productivity_mw_per_m3s: 4.0,
-        };
+        c.generation_model = HydroGenerationModel::ConstantProductivity;
         let hydros = vec![a, b, c];
         let cascade = CascadeTopology::build(&hydros);
         let resolver = constant_resolver(&hydros, 0.65, 1);
+        // Declaration order: A(idx=0)=1.0, B(idx=1)=2.0, C(idx=2)=4.0.
+        let pm = production_set(&[1.0, 2.0, 4.0], 1);
 
-        let set =
-            build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &HashMap::new(), None)
-                .expect("builder succeeds");
+        let set = build_energy_conversion_set(
+            &hydros,
+            1,
+            &cascade,
+            &resolver,
+            &HashMap::new(),
+            None,
+            Some(&pm),
+        )
+        .expect("builder succeeds");
 
         // A(idx=0), B(idx=1), C(idx=2).
         assert_eq!(set.accumulated_productivity(2, 0), 4.0); // C terminal
@@ -1480,19 +1574,11 @@ mod tests {
                 1 => Some(2),
                 _ => None,
             };
-            let productivity = |id: i32| match id {
-                0 => 2.0_f64,
-                1 => 3.0,
-                2 => 5.0,
-                _ => unreachable!(),
-            };
             let hydros: Vec<Hydro> = order
                 .iter()
                 .map(|&id| {
                     let mut h = make_hydro(id, downstream(id));
-                    h.generation_model = HydroGenerationModel::ConstantProductivity {
-                        productivity_mw_per_m3s: productivity(id),
-                    };
+                    h.generation_model = HydroGenerationModel::ConstantProductivity;
                     h
                 })
                 .collect();
@@ -1515,6 +1601,7 @@ mod tests {
             &resolver_abc,
             &HashMap::new(),
             None,
+            None,
         )
         .expect("abc order");
         let set_cab = build_energy_conversion_set(
@@ -1523,6 +1610,7 @@ mod tests {
             &cascade_cab,
             &resolver_cab,
             &HashMap::new(),
+            None,
             None,
         )
         .expect("cab order");
@@ -1568,20 +1656,23 @@ mod tests {
         // The DanglingDownstream error fires when the inner loop tries to look
         // up ds_id=99 in id_to_index.
         let mut h0 = make_hydro(0, Some(99));
-        h0.generation_model = HydroGenerationModel::ConstantProductivity {
-            productivity_mw_per_m3s: 1.0,
-        };
+        h0.generation_model = HydroGenerationModel::ConstantProductivity;
         let mut h1 = make_hydro(1, None);
-        h1.generation_model = HydroGenerationModel::ConstantProductivity {
-            productivity_mw_per_m3s: 1.0,
-        };
+        h1.generation_model = HydroGenerationModel::ConstantProductivity;
         let hydros = vec![h0, h1];
         let cascade = CascadeTopology::build(&hydros);
         let resolver = constant_resolver(&hydros, 0.65, 1);
 
-        let err =
-            build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &HashMap::new(), None)
-                .unwrap_err();
+        let err = build_energy_conversion_set(
+            &hydros,
+            1,
+            &cascade,
+            &resolver,
+            &HashMap::new(),
+            None,
+            None,
+        )
+        .unwrap_err();
         match err {
             EnergyConversionError::DanglingDownstream {
                 hydro_id,
@@ -1617,6 +1708,7 @@ mod tests {
             &short_cascade,
             &resolver,
             &HashMap::new(),
+            None,
             None,
         )
         .unwrap_err();
@@ -1659,6 +1751,7 @@ mod tests {
             &resolver,
             &HashMap::new(),
             Some(&override_table),
+            None,
         )
         .expect("builder succeeds with override only");
 
@@ -1674,23 +1767,30 @@ mod tests {
 
     /// A ConstantProductivity hydro with no VHA, no rho_esp, and no override
     /// must succeed — the FPHA correctness gate must not apply to non-FPHA
-    /// generation models.
+    /// generation models. The productivity is supplied via `ProductionModelSet`;
+    /// the test verifies the value is passed through to the conversion cell.
     #[test]
     fn constant_productivity_bypasses_gate() {
         let mut hydro = make_hydro(0, None);
-        hydro.generation_model = HydroGenerationModel::ConstantProductivity {
-            productivity_mw_per_m3s: 1.5,
-        };
+        hydro.generation_model = HydroGenerationModel::ConstantProductivity;
         hydro.specific_productivity_mw_per_m3s_per_m = None;
         hydro.tailrace = None;
         hydro.hydraulic_losses = None;
         let hydros = vec![hydro];
         let cascade = CascadeTopology::build(&hydros);
         let resolver = constant_resolver(&hydros, 0.65, 1);
+        let pm = production_set(&[1.5], 1);
 
-        let set =
-            build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &HashMap::new(), None)
-                .expect("non-FPHA hydro succeeds despite missing FPHA inputs");
+        let set = build_energy_conversion_set(
+            &hydros,
+            1,
+            &cascade,
+            &resolver,
+            &HashMap::new(),
+            None,
+            Some(&pm),
+        )
+        .expect("non-FPHA hydro succeeds despite missing FPHA inputs");
 
         let cell = set.conversion(0, 0);
         assert!((cell.equivalent_productivity_mw_per_m3s - 1.5).abs() < 1e-12);
@@ -1700,6 +1800,9 @@ mod tests {
 
     /// Build a 1-hydro EnergyConversionSet with `ConstantProductivity` and the
     /// given `rho_eq`, `v_ref`, and `specific_productivity`.
+    ///
+    /// `rho_eq` is supplied via a `ProductionModelSet` so that
+    /// `equivalent_productivity_mw_per_m3s` in the returned set equals `rho_eq`.
     ///
     /// Uses fraction=0.0 so `V_ref = v_min + 0 * (v_max - v_min) = v_min`,
     /// giving a deterministic `reference_volume_hm3` value.
@@ -1712,9 +1815,7 @@ mod tests {
         // v_min = v_ref, v_max = v_ref + 100 so fraction=0.0 yields exactly v_ref.
         let mut hydro = make_hydro_with(
             id,
-            HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: rho_eq,
-            },
+            HydroGenerationModel::ConstantProductivity,
             v_ref,
             v_ref + 100.0,
             50.0,
@@ -1726,9 +1827,17 @@ mod tests {
         let cascade = CascadeTopology::build(&hydros);
         // fraction=0.0 -> V_ref = v_min = v_ref exactly.
         let resolver = constant_resolver(&hydros, 0.0, 1);
-        let set =
-            build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &HashMap::new(), None)
-                .expect("set builds");
+        let pm = production_set(&[rho_eq], 1);
+        let set = build_energy_conversion_set(
+            &hydros,
+            1,
+            &cascade,
+            &resolver,
+            &HashMap::new(),
+            None,
+            Some(&pm),
+        )
+        .expect("set builds");
         (set, hydro)
     }
 
@@ -1864,6 +1973,7 @@ mod tests {
             &resolver,
             &HashMap::new(),
             Some(&override_table),
+            None,
         )
         .expect("FPHA set builds with override");
 
@@ -1885,9 +1995,7 @@ mod tests {
         let n_stages = 3;
         let mut hydro = make_hydro_with(
             1,
-            HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 0.50,
-            },
+            HydroGenerationModel::ConstantProductivity,
             0.0,
             100.0,
             50.0,
@@ -1904,6 +2012,7 @@ mod tests {
             &cascade,
             &resolver,
             &HashMap::new(),
+            None,
             None,
         )
         .expect("set builds");
@@ -1940,9 +2049,7 @@ mod tests {
         // Hydro 0 (index 0): rho_eq=0.85, supplied=0.0085, h_fore=100 → implied=0.0085 (consistent).
         let mut h0 = make_hydro_with(
             10,
-            HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 0.85,
-            },
+            HydroGenerationModel::ConstantProductivity,
             0.0,
             100.0,
             50.0,
@@ -1954,9 +2061,7 @@ mod tests {
         // Hydro 1 (index 1): rho_eq=0.50, supplied=0.0085, h_fore=100 → implied=0.005 (divergent).
         let mut h1 = make_hydro_with(
             20,
-            HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 0.50,
-            },
+            HydroGenerationModel::ConstantProductivity,
             0.0,
             100.0,
             50.0,
@@ -1968,6 +2073,8 @@ mod tests {
         let hydros = vec![h0.clone(), h1.clone()];
         let cascade = CascadeTopology::build(&hydros);
         let resolver = constant_resolver(&hydros, 0.0, n_stages);
+        // h0(idx=0) ρ_eq=0.85 (consistent), h1(idx=1) ρ_eq=0.50 (divergent).
+        let pm = production_set(&[0.85, 0.50], n_stages);
         let set = build_energy_conversion_set(
             &hydros,
             n_stages,
@@ -1975,6 +2082,7 @@ mod tests {
             &resolver,
             &HashMap::new(),
             None,
+            Some(&pm),
         )
         .expect("set builds");
 

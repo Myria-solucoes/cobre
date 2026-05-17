@@ -692,6 +692,21 @@ mod tests {
         PrepareHydroModelsResult::default_from_system(system).evaporation
     }
 
+    /// Build a `ProductionModelSet` where every (hydro, stage) cell uses
+    /// `ConstantProductivity` with the given per-hydro productivity values.
+    ///
+    /// `productivities[h]` is the productivity for hydro at declaration index `h`.
+    fn production_set(productivities: &[f64], n_stages: usize) -> ProductionModelSet {
+        let n_hydros = productivities.len();
+        let models = productivities
+            .iter()
+            .map(|&p| {
+                vec![ResolvedProductionModel::ConstantProductivity { productivity: p }; n_stages]
+            })
+            .collect();
+        ProductionModelSet::new(models, n_hydros, n_stages)
+    }
+
     /// Method with no penalty — used in structural tests that check exact
     /// column/row counts that would change if penalty columns were added.
     fn no_penalty_config() -> InflowNonNegativityMethod {
@@ -895,9 +910,7 @@ mod tests {
             max_storage_hm3: 200.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 2.5,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
             specific_productivity_mw_per_m3s_per_m: None,
@@ -2417,9 +2430,8 @@ mod tests {
     }
 
     // AC-4 / test_penalty_slack_absorbs_negative_inflow:
-    // A negative noise value would render the LP infeasible without the inflow
-    // slack column. With `penalty_config`, the slack absorbs the deficit and the
-    // solve must succeed with a positive slack value.
+    // A large negative noise value forces the LP to activate the inflow slack
+    // because the deficit cannot be absorbed by storage drawdown alone.
     //
     // System: N=1, L=0, K=1 block (744 h), B=1 bus, T=0, Lines=0.
     // Column layout:
@@ -2436,20 +2448,26 @@ mod tests {
     //   row 4: min_outflow     row 5: max_outflow
     //   row 6: min_turbine     row 7: min_generation
     //
-    // To apply negative inflow noise we patch the water balance row (row 2)
-    // to RHS = -5.0. Without the slack this would make the LP infeasible.
+    // Water balance: v_out - v_in + ζ*(turbine + spillage - inflow_slack) = RHS.
+    // With v_in = 100 hm³ and RHS = -110 hm³:
+    //   v_out + ζ*(turbine + spillage - inflow_slack) = -10.
+    // Since v_out ≥ 0 and turbine, spillage ≥ 0:
+    //   ζ * inflow_slack ≥ 10 > 0, so inflow_slack is strictly positive.
+    // The magnitude -110 exceeds the maximum storage drawdown (v_in = 100 hm³),
+    // guaranteeing that the slack is mandatory regardless of turbine level.
     #[test]
     fn test_penalty_slack_absorbs_negative_inflow() {
         use cobre_solver::{HighsSolver, RowBatch, SolverInterface};
 
         let system = one_hydro_system(1, 0);
         let config = penalty_config(1000.0);
+        let pm = production_set(&[0.9], 1);
         let result = build_stage_templates(
             &system,
             &config,
             &PrecomputedPar::default(),
             &PrecomputedNormal::default(),
-            &default_production(&system),
+            &pm,
             &default_evaporation(&system),
             &crate::resolved_parameters::ResolvedParameters::default(),
         )
@@ -2481,10 +2499,12 @@ mod tests {
 
         // Patch the state rows.
         // Row 0 (storage_fixing): fix incoming storage to 100 hm³.
-        // Row water_balance_row (water_balance): set RHS to -5.0 m³/s (negative noise).
-        // Both are equality constraints: lower == upper == rhs.
+        // Row water_balance_row (water_balance): set RHS to -110.0 hm³.
+        // The magnitude 110 exceeds v_in = 100 hm³, so inflow_slack is mandatory:
+        //   v_out + ζ*(turbine + spillage - inflow_slack) = v_in + (-110) = -10
+        //   ⟹ ζ*inflow_slack ≥ 10 + v_out + ζ*(turbine + spillage) ≥ 10 > 0.
         let initial_storage = 100.0_f64;
-        let negative_noise = -5.0_f64;
+        let negative_noise = -110.0_f64;
         solver.set_row_bounds(
             &[0, water_balance_row],
             &[initial_storage, negative_noise],
@@ -2600,9 +2620,7 @@ mod tests {
                 max_storage_hm3: 200.0,
                 min_outflow_m3s: 0.0,
                 max_outflow_m3s: None,
-                generation_model: HydroGenerationModel::ConstantProductivity {
-                    productivity_mw_per_m3s: 1.0,
-                },
+                generation_model: HydroGenerationModel::ConstantProductivity,
                 min_turbined_m3s: 0.0,
                 max_turbined_m3s: 50.0,
                 specific_productivity_mw_per_m3s_per_m: None,
@@ -3131,18 +3149,8 @@ mod tests {
         };
 
         let hydros = vec![
-            make_hydro(
-                100,
-                HydroGenerationModel::ConstantProductivity {
-                    productivity_mw_per_m3s: 2.5,
-                },
-            ),
-            make_hydro(
-                101,
-                HydroGenerationModel::ConstantProductivity {
-                    productivity_mw_per_m3s: 3.0,
-                },
-            ),
+            make_hydro(100, HydroGenerationModel::ConstantProductivity),
+            make_hydro(101, HydroGenerationModel::ConstantProductivity),
             make_hydro(102, HydroGenerationModel::Fpha),
             make_hydro(103, HydroGenerationModel::Fpha),
         ];
@@ -4694,9 +4702,7 @@ mod tests {
             max_storage_hm3: 200.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 2.5,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
             specific_productivity_mw_per_m3s_per_m: None,
@@ -4945,9 +4951,7 @@ mod tests {
             max_storage_hm3: 2_000.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 2.5,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
             specific_productivity_mw_per_m3s_per_m: None,
@@ -6021,9 +6025,7 @@ mod tests {
             max_storage_hm3: 200.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 2.5,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
             specific_productivity_mw_per_m3s_per_m: None,
@@ -6479,9 +6481,7 @@ mod tests {
             max_storage_hm3: 200.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 2.5,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
             specific_productivity_mw_per_m3s_per_m: None,
@@ -6751,9 +6751,7 @@ mod tests {
             max_storage_hm3: 200.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 2.5,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
             specific_productivity_mw_per_m3s_per_m: None,
@@ -7812,7 +7810,7 @@ mod tests {
         let prod_h1 = 2.5_f64;
         let prod_h2 = 3.0_f64;
 
-        let make_hydro = |id: EntityId, prod: f64| Hydro {
+        let make_hydro = |id: EntityId, _prod: f64| Hydro {
             id,
             name: format!("H{}", id.0),
             bus_id: EntityId(1),
@@ -7823,9 +7821,7 @@ mod tests {
             max_storage_hm3: 200.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: prod,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
             specific_productivity_mw_per_m3s_per_m: None,
@@ -8025,7 +8021,21 @@ mod tests {
             .build()
             .expect("two_hydro_system: valid");
 
-        let t = &build_templates_for(&system)[0];
+        // Provide the expected per-hydro productivity values explicitly so that
+        // the LP coefficients in the generic constraint row match the test's
+        // expectations (prod_h1=2.5 at index 0, prod_h2=3.0 at index 1).
+        let pm = production_set(&[prod_h1, prod_h2], 1);
+        let t = &build_stage_templates(
+            &system,
+            &no_penalty_config(),
+            &PrecomputedPar::default(),
+            &PrecomputedNormal::default(),
+            &pm,
+            &default_evaporation(&system),
+            &crate::resolved_parameters::ResolvedParameters::default(),
+        )
+        .expect("two_hydro_system: valid")
+        .templates[0];
 
         // Hydros sorted by ID: H1(5) at pos=0, H2(10) at pos=1
         // Column layout (N=2, T=0, K=1, 1 block, constant productivity → no FPHA gen cols):
@@ -8256,9 +8266,7 @@ mod tests {
             max_storage_hm3: 200.0,
             min_outflow_m3s: 50.0,
             max_outflow_m3s: Some(800.0),
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 0.5,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 10.0,
             max_turbined_m3s: 100.0,
             specific_productivity_mw_per_m3s_per_m: None,
@@ -8446,12 +8454,15 @@ mod tests {
 
     fn build_active_violations_template() -> super::StageTemplates {
         let system = one_hydro_active_violations(1);
+        // Productivity = 0.5 to match the coefficient expected by
+        // `min_generation_constant_productivity_coefficients`.
+        let pm = production_set(&[0.5], 1);
         build_stage_templates(
             &system,
             &no_penalty_config(),
             &PrecomputedPar::default(),
             &PrecomputedNormal::default(),
-            &default_production(&system),
+            &pm,
             &default_evaporation(&system),
             &crate::resolved_parameters::ResolvedParameters::default(),
         )
@@ -9252,9 +9263,7 @@ mod tests {
             max_storage_hm3: 200.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 2.5,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
             specific_productivity_mw_per_m3s_per_m: None,

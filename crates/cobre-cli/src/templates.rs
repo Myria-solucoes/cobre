@@ -79,6 +79,14 @@ static DTOY1_FILES: &[TemplateFile] = &[
         description: "Hydro plant definitions: reservoir bounds, outflow limits, turbine model, and generation limits",
     },
     TemplateFile {
+        relative_path: "system/hydro_production_models.json",
+        content: include_bytes!(concat!(
+            env!("OUT_DIR"),
+            "/templates/1dtoy/system/hydro_production_models.json"
+        )),
+        description: "Per-(hydro, stage) production-model configuration carrying the productivity coefficient",
+    },
+    TemplateFile {
         relative_path: "system/lines.json",
         content: include_bytes!(concat!(
             env!("OUT_DIR"),
@@ -168,7 +176,7 @@ mod tests {
     #[test]
     fn test_1dtoy_template_has_files() {
         let template = find_template("1dtoy").unwrap();
-        assert_eq!(template.files.len(), 10);
+        assert_eq!(template.files.len(), 11);
     }
 
     #[test]

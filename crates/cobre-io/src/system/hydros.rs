@@ -18,7 +18,6 @@
 //!     "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
 //!     "generation": {
 //!       "model": "constant_productivity",
-//!       "productivity_mw_per_m3s": 0.8765,
 //!       "min_turbined_m3s": 0.0, "max_turbined_m3s": 1692.0,
 //!       "min_generation_mw": 0.0, "max_generation_mw": 1312.0
 //!     },
@@ -149,15 +148,22 @@ pub(crate) struct RawOutflow {
 ///
 /// Uses `#[serde(tag = "model")]` (internally-tagged) to dispatch on the
 /// `"model"` field value. Each variant carries only the fields relevant to
-/// that model — notably, `Fpha` does NOT have `productivity_mw_per_m3s`.
+/// that model. The `productivity_mw_per_m3s` field is NOT accepted here —
+/// productivity coefficients are read from `system/hydro_production_models.json`
+/// and are associated per `(hydro, stage)` outside this file.
+/// A `hydros.json` input that includes `productivity_mw_per_m3s` in its
+/// `generation` block will be rejected with a parse error.
 #[derive(Deserialize)]
-#[serde(tag = "model", rename_all = "snake_case")]
+#[serde(tag = "model", rename_all = "snake_case", deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) enum RawGeneration {
     /// Constant productivity: `power = productivity * turbined_m3s`.
+    ///
+    /// The productivity coefficient is read from
+    /// `system/hydro_production_models.json` per `(hydro, stage)`. It is not
+    /// accepted in `hydros.json`; supplying `productivity_mw_per_m3s` here
+    /// produces a hard parse error.
     ConstantProductivity {
-        /// Power output per unit of turbined flow [MW/(m³/s)].
-        productivity_mw_per_m3s: f64,
         /// Minimum turbined flow [m³/s].
         min_turbined_m3s: f64,
         /// Maximum turbined flow [m³/s].
@@ -168,9 +174,12 @@ pub(crate) enum RawGeneration {
         max_generation_mw: f64,
     },
     /// Head-dependent productivity linearized around an operating point.
+    ///
+    /// The productivity coefficient is read from
+    /// `system/hydro_production_models.json` per `(hydro, stage)`. It is not
+    /// accepted in `hydros.json`; supplying `productivity_mw_per_m3s` here
+    /// produces a hard parse error.
     LinearizedHead {
-        /// Nominal power output per unit of turbined flow at reference head [MW/(m³/s)].
-        productivity_mw_per_m3s: f64,
         /// Minimum turbined flow [m³/s].
         min_turbined_m3s: f64,
         /// Maximum turbined flow [m³/s].
@@ -182,8 +191,9 @@ pub(crate) enum RawGeneration {
     },
     /// Full production function with head-area-productivity tables (FPHA model).
     ///
-    /// Does NOT have `productivity_mw_per_m3s` — FPHA computes head-dependent
-    /// productivity from internal tables.
+    /// Productivity is derived from the FPHA tables in
+    /// `system/hydro_production_models.json`. The `productivity_mw_per_m3s`
+    /// field is not accepted here or in any other `generation` variant.
     Fpha {
         /// Minimum turbined flow [m³/s].
         min_turbined_m3s: f64,
@@ -755,30 +765,26 @@ fn convert_hydros(raw: RawHydroFile, global: &GlobalPenaltyDefaults) -> Vec<Hydr
 fn convert_generation(raw: RawGeneration) -> (HydroGenerationModel, f64, f64, f64, f64) {
     match raw {
         RawGeneration::ConstantProductivity {
-            productivity_mw_per_m3s,
             min_turbined_m3s,
             max_turbined_m3s,
             min_generation_mw,
             max_generation_mw,
+            ..
         } => (
-            HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s,
-            },
+            HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s,
             max_turbined_m3s,
             min_generation_mw,
             max_generation_mw,
         ),
         RawGeneration::LinearizedHead {
-            productivity_mw_per_m3s,
             min_turbined_m3s,
             max_turbined_m3s,
             min_generation_mw,
             max_generation_mw,
+            ..
         } => (
-            HydroGenerationModel::LinearizedHead {
-                productivity_mw_per_m3s,
-            },
+            HydroGenerationModel::LinearizedHead,
             min_turbined_m3s,
             max_turbined_m3s,
             min_generation_mw,
@@ -949,7 +955,6 @@ mod tests {
       "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
       "generation": {
         "model": "constant_productivity",
-        "productivity_mw_per_m3s": 0.75,
         "min_turbined_m3s": 0.0,
         "max_turbined_m3s": 1000.0,
         "min_generation_mw": 0.0,
@@ -969,7 +974,6 @@ mod tests {
       "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": 4000.0 },
       "generation": {
         "model": "constant_productivity",
-        "productivity_mw_per_m3s": 0.8765,
         "min_turbined_m3s": 0.0,
         "max_turbined_m3s": 1692.0,
         "min_generation_mw": 0.0,
@@ -1012,11 +1016,9 @@ mod tests {
         assert!(
             matches!(
                 h0.generation_model,
-                HydroGenerationModel::ConstantProductivity {
-                    productivity_mw_per_m3s
-                } if (productivity_mw_per_m3s - 0.8765).abs() < f64::EPSILON
+                HydroGenerationModel::ConstantProductivity
             ),
-            "expected ConstantProductivity with correct productivity"
+            "expected ConstantProductivity generation model"
         );
         assert!((h0.min_turbined_m3s - 0.0).abs() < f64::EPSILON);
         assert!((h0.max_turbined_m3s - 1692.0).abs() < f64::EPSILON);
@@ -1118,7 +1120,6 @@ mod tests {
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
             "generation": {
               "model": "linearized_head",
-              "productivity_mw_per_m3s": 0.65,
               "min_turbined_m3s": 100.0,
               "max_turbined_m3s": 3000.0,
               "min_generation_mw": 0.0,
@@ -1134,10 +1135,9 @@ mod tests {
         assert!(
             matches!(
                 &hydros[0].generation_model,
-                HydroGenerationModel::LinearizedHead { productivity_mw_per_m3s }
-                if (productivity_mw_per_m3s - 0.65).abs() < f64::EPSILON
+                HydroGenerationModel::LinearizedHead
             ),
-            "expected LinearizedHead with productivity 0.65"
+            "expected LinearizedHead generation model"
         );
     }
 
@@ -1154,7 +1154,6 @@ mod tests {
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
             "generation": {
               "model": "constant_productivity",
-              "productivity_mw_per_m3s": 0.5,
               "min_turbined_m3s": 0.0,
               "max_turbined_m3s": 500.0,
               "min_generation_mw": 0.0,
@@ -1195,7 +1194,6 @@ mod tests {
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
             "generation": {
               "model": "constant_productivity",
-              "productivity_mw_per_m3s": 0.5,
               "min_turbined_m3s": 0.0,
               "max_turbined_m3s": 500.0,
               "min_generation_mw": 0.0,
@@ -1231,7 +1229,6 @@ mod tests {
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
             "generation": {
               "model": "constant_productivity",
-              "productivity_mw_per_m3s": 0.5,
               "min_turbined_m3s": 0.0,
               "max_turbined_m3s": 500.0,
               "min_generation_mw": 0.0,
@@ -1274,7 +1271,6 @@ mod tests {
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
             "generation": {
               "model": "constant_productivity",
-              "productivity_mw_per_m3s": 0.5,
               "min_turbined_m3s": 0.0,
               "max_turbined_m3s": 500.0,
               "min_generation_mw": 0.0,
@@ -1332,7 +1328,6 @@ mod tests {
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
             "generation": {
               "model": "constant_productivity",
-              "productivity_mw_per_m3s": 0.5,
               "min_turbined_m3s": 0.0,
               "max_turbined_m3s": 500.0,
               "min_generation_mw": 0.0,
@@ -1368,7 +1363,6 @@ mod tests {
           "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
           "generation": {
             "model": "constant_productivity",
-            "productivity_mw_per_m3s": 0.5,
             "min_turbined_m3s": 0.0, "max_turbined_m3s": 500.0,
             "min_generation_mw": 0.0, "max_generation_mw": 250.0
           }
@@ -1406,7 +1400,6 @@ mod tests {
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
             "generation": {
               "model": "constant_productivity",
-              "productivity_mw_per_m3s": 0.5,
               "min_turbined_m3s": 0.0, "max_turbined_m3s": 500.0,
               "min_generation_mw": 0.0, "max_generation_mw": 250.0
             }
@@ -1441,7 +1434,6 @@ mod tests {
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
             "generation": {
               "model": "constant_productivity",
-              "productivity_mw_per_m3s": 0.5,
               "min_turbined_m3s": 0.0, "max_turbined_m3s": 500.0,
               "min_generation_mw": 0.0, "max_generation_mw": 250.0
             }
@@ -1467,7 +1459,6 @@ mod tests {
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
             "generation": {
               "model": "constant_productivity",
-              "productivity_mw_per_m3s": 0.5,
               "min_turbined_m3s": 0.0, "max_turbined_m3s": 500.0,
               "min_generation_mw": 0.0, "max_generation_mw": 250.0
             }
@@ -1495,7 +1486,6 @@ mod tests {
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
             "generation": {
               "model": "constant_productivity",
-              "productivity_mw_per_m3s": 0.5,
               "min_turbined_m3s": 0.0, "max_turbined_m3s": 500.0,
               "min_generation_mw": 500.0, "max_generation_mw": 100.0
             }
@@ -1530,7 +1520,6 @@ mod tests {
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
             "generation": {
               "model": "constant_productivity",
-              "productivity_mw_per_m3s": 0.5,
               "min_turbined_m3s": 600.0, "max_turbined_m3s": 500.0,
               "min_generation_mw": 0.0, "max_generation_mw": 250.0
             }
@@ -1556,7 +1545,6 @@ mod tests {
             "outflow": { "min_outflow_m3s": -10.0, "max_outflow_m3s": null },
             "generation": {
               "model": "constant_productivity",
-              "productivity_mw_per_m3s": 0.5,
               "min_turbined_m3s": 0.0, "max_turbined_m3s": 500.0,
               "min_generation_mw": 0.0, "max_generation_mw": 250.0
             }
@@ -1584,7 +1572,6 @@ mod tests {
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
             "generation": {
               "model": "constant_productivity",
-              "productivity_mw_per_m3s": 0.5,
               "min_turbined_m3s": 0.0, "max_turbined_m3s": 500.0,
               "min_generation_mw": 0.0, "max_generation_mw": 250.0
             },
@@ -1649,7 +1636,6 @@ mod tests {
           "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
           "generation": {
             "model": "constant_productivity",
-            "productivity_mw_per_m3s": 0.5,
             "min_turbined_m3s": 0.0, "max_turbined_m3s": 500.0,
             "min_generation_mw": 0.0, "max_generation_mw": 250.0
           }
@@ -1661,7 +1647,6 @@ mod tests {
           "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
           "generation": {
             "model": "constant_productivity",
-            "productivity_mw_per_m3s": 0.8,
             "min_turbined_m3s": 0.0, "max_turbined_m3s": 1000.0,
             "min_generation_mw": 0.0, "max_generation_mw": 800.0
           }
@@ -1737,7 +1722,6 @@ mod tests {
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
             "generation": {
               "model": "constant_productivity",
-              "productivity_mw_per_m3s": 0.5,
               "min_turbined_m3s": 0.0, "max_turbined_m3s": 500.0,
               "min_generation_mw": 0.0, "max_generation_mw": 250.0
             }
@@ -1762,7 +1746,6 @@ mod tests {
       "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
       "generation": {
         "model": "constant_productivity",
-        "productivity_mw_per_m3s": 0.75,
         "min_turbined_m3s": 0.0,
         "max_turbined_m3s": 1000.0,
         "min_generation_mw": 0.0,
@@ -1784,7 +1767,6 @@ mod tests {
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
             "generation": {
               "model": "constant_productivity",
-              "productivity_mw_per_m3s": 0.75,
               "min_turbined_m3s": 0.0,
               "max_turbined_m3s": 1000.0,
               "min_generation_mw": 0.0,
@@ -1822,7 +1804,6 @@ mod tests {
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
             "generation": {
               "model": "constant_productivity",
-              "productivity_mw_per_m3s": 0.75,
               "min_turbined_m3s": 0.0,
               "max_turbined_m3s": 1000.0,
               "min_generation_mw": 0.0,
@@ -1853,7 +1834,6 @@ mod tests {
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
             "generation": {
               "model": "constant_productivity",
-              "productivity_mw_per_m3s": 0.75,
               "min_turbined_m3s": 0.0,
               "max_turbined_m3s": 1000.0,
               "min_generation_mw": 0.0,
@@ -1895,7 +1875,6 @@ mod tests {
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
             "generation": {
               "model": "constant_productivity",
-              "productivity_mw_per_m3s": 0.75,
               "min_turbined_m3s": 0.0,
               "max_turbined_m3s": 1000.0,
               "min_generation_mw": 0.0,
@@ -1951,7 +1930,6 @@ mod tests {
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
             "generation": {
               "model": "constant_productivity",
-              "productivity_mw_per_m3s": 0.75,
               "min_turbined_m3s": 0.0,
               "max_turbined_m3s": 1000.0,
               "min_generation_mw": 0.0,
@@ -1994,7 +1972,6 @@ mod tests {
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
             "generation": {
               "model": "constant_productivity",
-              "productivity_mw_per_m3s": 0.75,
               "min_turbined_m3s": 0.0,
               "max_turbined_m3s": 1000.0,
               "min_generation_mw": 0.0,
@@ -2039,6 +2016,44 @@ mod tests {
         assert!(hydros[0].evaporation_reference_volumes_hm3.is_none());
     }
 
+    // ── AC: legacy productivity_mw_per_m3s is rejected ───────────────────────
+
+    /// Given a `hydros.json` whose `generation` block contains the legacy
+    /// `productivity_mw_per_m3s` field, `parse_hydros` returns an `Err` whose
+    /// message contains the substring `"productivity_mw_per_m3s"`.
+    ///
+    /// This guards against silent acceptance of stale case files: after ticket-003
+    /// removed the field from the `RawGeneration` variants, adding
+    /// `#[serde(deny_unknown_fields)]` ensures the presence of the legacy key is
+    /// a hard parse error rather than an ignored unknown field.
+    #[test]
+    fn hydros_json_rejects_legacy_inline_productivity() {
+        let json = r#"{
+          "hydros": [{
+            "id": 0, "name": "LegacyPlant", "bus_id": 0,
+            "downstream_id": null,
+            "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
+            "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
+            "generation": {
+              "model": "constant_productivity",
+              "productivity_mw_per_m3s": 1.0,
+              "min_turbined_m3s": 0.0,
+              "max_turbined_m3s": 100.0,
+              "min_generation_mw": 0.0,
+              "max_generation_mw": 100.0
+            }
+          }]
+        }"#;
+        let f = write_json(json);
+        let global = make_global();
+        let err = parse_hydros(f.path(), &global).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("productivity_mw_per_m3s"),
+            "error message should name the rejected field 'productivity_mw_per_m3s', got: {msg}"
+        );
+    }
+
     /// `$schema` field is accepted and ignored.
     #[test]
     fn test_schema_field_is_ignored() {
@@ -2051,7 +2066,6 @@ mod tests {
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
             "generation": {
               "model": "constant_productivity",
-              "productivity_mw_per_m3s": 0.5,
               "min_turbined_m3s": 0.0, "max_turbined_m3s": 100.0,
               "min_generation_mw": 0.0, "max_generation_mw": 50.0
             }

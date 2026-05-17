@@ -564,9 +564,7 @@ mod tests {
             downstream_id: None,
             entry_stage_id: None,
             exit_stage_id: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 0.85,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_storage_hm3: min_storage,
             max_storage_hm3: max_storage,
             min_outflow_m3s: 0.0,

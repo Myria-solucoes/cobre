@@ -130,9 +130,7 @@ fn build_par_a_fixture() -> (cobre_core::System, PrecomputedPar) {
             max_storage_hm3: 500.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 1.0,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 200.0,
             specific_productivity_mw_per_m3s_per_m: None,
@@ -392,9 +390,7 @@ fn build_classical_fixture() -> (cobre_core::System, PrecomputedPar) {
             max_storage_hm3: 500.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 1.0,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 200.0,
             specific_productivity_mw_per_m3s_per_m: None,

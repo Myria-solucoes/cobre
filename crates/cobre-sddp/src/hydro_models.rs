@@ -20,13 +20,13 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use cobre_core::{EntityId, System, entities::hydro::HydroGenerationModel};
+use cobre_core::{entities::hydro::HydroGenerationModel, EntityId, System};
 use cobre_io::extensions::{
     FphaColumnLayout, FphaHyperplaneRow, HydroGeometryRow, ProductionModelConfig, SelectionMode,
 };
 
+use crate::fpha_fitting::{fit_fpha_planes, FphaFitResult};
 use crate::SddpError;
-use crate::fpha_fitting::{FphaFitResult, fit_fpha_planes};
 
 // ── Hyperplane types ──────────────────────────────────────────────────────────
 
@@ -413,17 +413,13 @@ impl PrepareHydroModelsResult {
         let production_models: Vec<Vec<ResolvedProductionModel>> = system
             .hydros()
             .iter()
-            .map(|hydro| {
-                let productivity = match &hydro.generation_model {
-                    HydroGenerationModel::ConstantProductivity {
-                        productivity_mw_per_m3s,
-                    }
-                    | HydroGenerationModel::LinearizedHead {
-                        productivity_mw_per_m3s,
-                    } => *productivity_mw_per_m3s,
-                    HydroGenerationModel::Fpha => 0.0,
-                };
-                vec![ResolvedProductionModel::ConstantProductivity { productivity }; n_stages]
+            .map(|_hydro| {
+                // Non-FPHA entity models have no inline productivity after the
+                // HydroGenerationModel refactor; the coefficient lives solely in
+                // hydro_production_models.json. Use 0.0 as a placeholder — this
+                // factory is only used in tests and on non-root MPI ranks that
+                // reconstruct the result from a broadcast payload (not from scratch).
+                vec![ResolvedProductionModel::ConstantProductivity { productivity: 0.0 }; n_stages]
             })
             .collect();
 
@@ -1061,8 +1057,7 @@ fn determine_source(
     } else {
         // No config entry: use HydroGenerationModel from entity.
         match &hydro.generation_model {
-            HydroGenerationModel::ConstantProductivity { .. }
-            | HydroGenerationModel::LinearizedHead { .. } => {
+            HydroGenerationModel::ConstantProductivity | HydroGenerationModel::LinearizedHead => {
                 Ok(ProductionModelSource::DefaultConstant)
             }
             HydroGenerationModel::Fpha => Err(SddpError::Validation(format!(
@@ -1114,28 +1109,38 @@ fn resolve_stage_model(
             }
         } else {
             // "constant_productivity" or "linearized_head" from config:
-            // use override if provided, otherwise entity productivity.
-            let productivity = model_info
-                .and_then(|(_, ovr)| ovr)
-                .unwrap_or_else(|| entity_productivity(hydro));
+            // productivity_mw_per_m3s is required for non-FPHA models (validated at
+            // schema load time by ticket-003). Return an error if absent rather than
+            // silently defaulting.
+            let model_name = model_info.as_ref().map_or_else(
+                || "constant_productivity".to_owned(),
+                |(name, _)| name.clone(),
+            );
+            let productivity = model_info.and_then(|(_, p)| p).ok_or_else(|| {
+                SddpError::Validation(format!(
+                    "hydro {} uses model {} at stage {} but \
+                         productivity_mw_per_m3s is missing in hydro_production_models.json",
+                    hydro.name, model_name, stage.id
+                ))
+            })?;
             Ok(ResolvedProductionModel::ConstantProductivity { productivity })
         }
     } else {
-        // No config entry: use entity generation model.
-        match &hydro.generation_model {
-            HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s,
+        // No config entry: non-FPHA models require an entry in
+        // hydro_production_models.json to supply the productivity coefficient.
+        // (Fpha without config is already rejected by determine_source().)
+        let model_name = match hydro.generation_model {
+            HydroGenerationModel::ConstantProductivity => "ConstantProductivity",
+            HydroGenerationModel::LinearizedHead => "LinearizedHead",
+            HydroGenerationModel::Fpha => {
+                unreachable!("Fpha without config should have been rejected in determine_source")
             }
-            | HydroGenerationModel::LinearizedHead {
-                productivity_mw_per_m3s,
-            } => Ok(ResolvedProductionModel::ConstantProductivity {
-                productivity: *productivity_mw_per_m3s,
-            }),
-            // Fpha without config is already rejected by determine_source().
-            HydroGenerationModel::Fpha => unreachable!(
-                "Fpha entity without config entry should have been rejected in determine_source"
-            ),
-        }
+        };
+        Err(SddpError::Validation(format!(
+            "hydro {} uses model {} at stage {} but no entry was found in \
+             hydro_production_models.json",
+            hydro.name, model_name, stage.id
+        )))
     }
 }
 
@@ -1154,7 +1159,7 @@ fn find_model_for_stage(
                 let after_start = stage.id >= range.start_stage_id;
                 let before_end = range.end_stage_id.is_none_or(|end| stage.id <= end);
                 if after_start && before_end {
-                    return Some((range.model.clone(), range.productivity_override));
+                    return Some((range.model.clone(), range.productivity_mw_per_m3s));
                 }
             }
             None
@@ -1168,7 +1173,7 @@ fn find_model_for_stage(
                     // season.season_id is i32; stage.season_id is usize.
                     // Convert usize to i32 for comparison to avoid cast_sign_loss.
                     if i32::try_from(season_id).is_ok_and(|sid| sid == season.season_id) {
-                        return Some((season.model.clone(), season.productivity_override));
+                        return Some((season.model.clone(), season.productivity_mw_per_m3s));
                     }
                 }
             }
@@ -1176,27 +1181,6 @@ fn find_model_for_stage(
             // Default model has no override.
             Some((default_model.clone(), None))
         }
-    }
-}
-
-/// Return the productivity field from the hydro entity regardless of which
-/// `HydroGenerationModel` variant is active.
-///
-/// Used when a config entry explicitly assigns `"constant_productivity"` or
-/// `"linearized_head"` to a stage that would otherwise use the entity model.
-fn entity_productivity(hydro: &cobre_core::entities::hydro::Hydro) -> f64 {
-    match &hydro.generation_model {
-        HydroGenerationModel::ConstantProductivity {
-            productivity_mw_per_m3s,
-        }
-        | HydroGenerationModel::LinearizedHead {
-            productivity_mw_per_m3s,
-        } => *productivity_mw_per_m3s,
-        // Fpha entity model has no productivity scalar — use 0.0 as a safe
-        // placeholder; this case is only reached when the config explicitly
-        // assigns a non-FPHA model to a stage for an Fpha entity, which is
-        // unusual but not an error (the caller chose to override via config).
-        HydroGenerationModel::Fpha => 0.0,
     }
 }
 
@@ -1705,14 +1689,14 @@ mod tests {
 
     use chrono::NaiveDate;
     use cobre_core::{
-        Bus, DeficitSegment, EfficiencyModel, EntityId, HydraulicLossesModel, SystemBuilder,
-        TailraceModel,
         entities::hydro::{HydroGenerationModel, HydroPenalties},
         scenario::CorrelationModel,
         temporal::{
             Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
             StageStateConfig,
         },
+        Bus, DeficitSegment, EfficiencyModel, EntityId, HydraulicLossesModel, SystemBuilder,
+        TailraceModel,
     };
     use cobre_io::extensions::{
         FphaColumnLayout, FphaHyperplaneRow, HydroGeometryRow, ProductionModelConfig, SeasonConfig,
@@ -1720,12 +1704,12 @@ mod tests {
     };
 
     use super::{
+        build_fpha_model, build_hydro_model_summary, determine_source, find_fpha_config_for_stage,
+        find_model_for_stage, validate_computed_prerequisites, validate_hyperplane_row,
         EvaporationModel, EvaporationModelSet, EvaporationReferenceSource, EvaporationSource,
         FphaHydroDetail, FphaPlane, HydroModelProvenance, HydroModelSummary, LinearizedEvaporation,
         PrepareHydroModelsResult, ProductionModelSet, ProductionModelSource,
-        ResolvedProductionModel, build_fpha_model, build_hydro_model_summary, determine_source,
-        find_fpha_config_for_stage, find_model_for_stage, validate_computed_prerequisites,
-        validate_hyperplane_row,
+        ResolvedProductionModel,
     };
 
     // ── Test helpers ──────────────────────────────────────────────────────────
@@ -1837,7 +1821,7 @@ mod tests {
                         max_planes_per_hydro: None,
                         fitting_window: None,
                     }),
-                    productivity_override: None,
+                    productivity_mw_per_m3s: None,
                 }],
             },
         }
@@ -1859,7 +1843,7 @@ mod tests {
                         max_planes_per_hydro: None,
                         fitting_window: None,
                     }),
-                    productivity_override: None,
+                    productivity_mw_per_m3s: None,
                 }],
             },
         }
@@ -1867,33 +1851,27 @@ mod tests {
 
     // ── resolve_production_models unit tests (in-memory, no disk I/O) ─────────
 
-    /// All-constant system with no config file: all hydros → DefaultConstant provenance.
+    /// All-constant system with no config file: all hydros → DefaultConstant provenance
+    /// from `determine_source`, but `resolve_stage_model` returns a validation error
+    /// because non-FPHA hydros must supply a productivity coefficient via
+    /// `hydro_production_models.json` (inline fallback was removed in ticket-004).
     #[test]
     fn all_constant_no_config_returns_default_constant_provenance() {
-        let hydro0 = make_hydro(
-            0,
-            HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 0.9,
-            },
-        );
-        let hydro1 = make_hydro(
-            1,
-            HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 0.8,
-            },
-        );
+        let hydro0 = make_hydro(0, HydroGenerationModel::ConstantProductivity);
+        let hydro1 = make_hydro(1, HydroGenerationModel::ConstantProductivity);
 
         let stage = make_stage(0);
 
-        // Test determine_source: no config entry, ConstantProductivity entity model.
+        // determine_source still returns DefaultConstant for non-FPHA entities with no config.
         let src0 = determine_source(&hydro0, None).expect("should succeed");
         let src1 = determine_source(&hydro1, None).expect("should succeed");
         assert_eq!(src0, ProductionModelSource::DefaultConstant);
         assert_eq!(src1, ProductionModelSource::DefaultConstant);
 
-        // Test resolve_stage_model: constant productivity should come from entity.
+        // resolve_stage_model must now return an error when no config entry exists for a
+        // non-FPHA hydro — the inline productivity fallback was removed in ticket-004.
         let empty_map = std::collections::HashMap::new();
-        let model0 = super::resolve_stage_model(
+        let err0 = super::resolve_stage_model(
             &hydro0,
             &stage,
             None,
@@ -1901,30 +1879,32 @@ mod tests {
             &empty_map,
             None,
         )
-        .expect("should succeed");
+        .expect_err("should fail: no config entry for non-FPHA hydro");
+        let msg0 = err0.to_string();
         assert!(
-            matches!(model0, ResolvedProductionModel::ConstantProductivity { productivity }
-                if (productivity - 0.9).abs() < f64::EPSILON),
-            "expected ConstantProductivity 0.9, got {model0:?}"
+            msg0.contains("Hydro0")
+                && msg0.contains("ConstantProductivity")
+                && msg0.contains("hydro_production_models.json"),
+            "error must name the hydro, model, and config file; got: {msg0}"
         );
     }
 
-    /// LinearizedHead entity model without config → ConstantProductivity with the productivity field.
+    /// `LinearizedHead` entity without a config entry: `determine_source` still
+    /// classifies it as `DefaultConstant`, but `resolve_stage_model` must return
+    /// a validation error because the productivity coefficient must come from
+    /// `hydro_production_models.json` (inline fallback removed in ticket-004).
     #[test]
     fn linearized_head_entity_resolves_to_constant_productivity() {
-        let hydro = make_hydro(
-            0,
-            HydroGenerationModel::LinearizedHead {
-                productivity_mw_per_m3s: 0.75,
-            },
-        );
+        let hydro = make_hydro(0, HydroGenerationModel::LinearizedHead);
         let stage = make_stage(0);
 
+        // determine_source still succeeds for non-FPHA entities without config.
         let src = determine_source(&hydro, None).expect("should succeed");
         assert_eq!(src, ProductionModelSource::DefaultConstant);
 
+        // resolve_stage_model must error when no config entry exists for a non-FPHA hydro.
         let empty_map = std::collections::HashMap::new();
-        let model = super::resolve_stage_model(
+        let err = super::resolve_stage_model(
             &hydro,
             &stage,
             None,
@@ -1932,11 +1912,13 @@ mod tests {
             &empty_map,
             None,
         )
-        .expect("should succeed");
+        .expect_err("should fail: no config entry for LinearizedHead hydro");
+        let msg = err.to_string();
         assert!(
-            matches!(model, ResolvedProductionModel::ConstantProductivity { productivity }
-                if (productivity - 0.75).abs() < f64::EPSILON),
-            "LinearizedHead should resolve to ConstantProductivity 0.75, got {model:?}"
+            msg.contains("Hydro0")
+                && msg.contains("LinearizedHead")
+                && msg.contains("hydro_production_models.json"),
+            "error must name the hydro, model, and config file; got: {msg}"
         );
     }
 
@@ -2076,7 +2058,7 @@ mod tests {
                         max_planes_per_hydro: None,
                         fitting_window: None,
                     }),
-                    productivity_override: None,
+                    productivity_mw_per_m3s: None,
                 }],
             },
         };
@@ -2455,7 +2437,7 @@ mod tests {
                     end_stage_id: Some(10),
                     model: "fpha".to_string(),
                     fpha_config: None,
-                    productivity_override: None,
+                    productivity_mw_per_m3s: None,
                 }],
             },
         };
@@ -2478,7 +2460,7 @@ mod tests {
                     end_stage_id: None,
                     model: "constant_productivity".to_string(),
                     fpha_config: None,
-                    productivity_override: None,
+                    productivity_mw_per_m3s: None,
                 }],
             },
         };
@@ -2498,12 +2480,7 @@ mod tests {
     /// resolve_stage_model uses productivity_override when present.
     #[test]
     fn resolve_stage_model_uses_productivity_override() {
-        let hydro = make_hydro(
-            0,
-            HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 0.9,
-            },
-        );
+        let hydro = make_hydro(0, HydroGenerationModel::ConstantProductivity);
         let stage = make_stage(0);
         let config = ProductionModelConfig {
             hydro_id: EntityId::from(0),
@@ -2513,7 +2490,7 @@ mod tests {
                     end_stage_id: None,
                     model: "constant_productivity".to_string(),
                     fpha_config: None,
-                    productivity_override: Some(0.55),
+                    productivity_mw_per_m3s: Some(0.55),
                 }],
             },
         };
@@ -2534,16 +2511,14 @@ mod tests {
         );
     }
 
-    /// resolve_stage_model falls back to entity productivity when override is None.
+    /// resolve_stage_model returns a validation error when the config entry exists but
+    /// has `productivity_mw_per_m3s: None` — the coefficient is mandatory and there is
+    /// no inline fallback after ticket-004.
     #[test]
     fn resolve_stage_model_uses_entity_productivity_when_no_override() {
-        let hydro = make_hydro(
-            0,
-            HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 0.9,
-            },
-        );
+        let hydro = make_hydro(0, HydroGenerationModel::ConstantProductivity);
         let stage = make_stage(0);
+        // Config entry exists but productivity is missing.
         let config = ProductionModelConfig {
             hydro_id: EntityId::from(0),
             selection_mode: SelectionMode::StageRanges {
@@ -2552,12 +2527,12 @@ mod tests {
                     end_stage_id: None,
                     model: "constant_productivity".to_string(),
                     fpha_config: None,
-                    productivity_override: None,
+                    productivity_mw_per_m3s: None,
                 }],
             },
         };
         let empty_map = std::collections::HashMap::new();
-        let model = super::resolve_stage_model(
+        let err = super::resolve_stage_model(
             &hydro,
             &stage,
             Some(&config),
@@ -2565,12 +2540,65 @@ mod tests {
             &empty_map,
             None,
         )
-        .expect("should succeed");
+        .expect_err("should fail: productivity_mw_per_m3s is None in the config entry");
+        let msg = err.to_string();
         assert!(
-            matches!(model, ResolvedProductionModel::ConstantProductivity { productivity }
-                if (productivity - 0.9).abs() < f64::EPSILON),
-            "expected ConstantProductivity 0.9 (entity), got {model:?}"
+            msg.contains("Hydro0")
+                && msg.contains("productivity_mw_per_m3s is missing")
+                && msg.contains("hydro_production_models.json"),
+            "error must name the hydro and explain what is missing; got: {msg}"
         );
+    }
+
+    /// A non-FPHA hydro with no entry in `hydro_production_models.json` must produce
+    /// a validation error whose message contains the hydro name, the model selector,
+    /// the stage index, and the filename.
+    ///
+    /// This exercises the no-config-entry branch of `resolve_stage_model` that was
+    /// introduced in ticket-004 to replace the removed inline productivity fallback.
+    #[test]
+    fn hydro_without_production_models_entry_rejects() {
+        let hydro_cp = make_hydro(7, HydroGenerationModel::ConstantProductivity);
+        let hydro_lh = make_hydro(9, HydroGenerationModel::LinearizedHead);
+        let stage = make_stage(3);
+        let empty_map = std::collections::HashMap::new();
+
+        for hydro in [&hydro_cp, &hydro_lh] {
+            let err = super::resolve_stage_model(
+                hydro,
+                &stage,
+                None, // no entry in hydro_production_models.json
+                ProductionModelSource::DefaultConstant,
+                &empty_map,
+                None,
+            )
+            .expect_err("non-FPHA hydro without config entry must be rejected");
+
+            let msg = err.to_string();
+            assert!(
+                msg.contains(&hydro.name),
+                "error must contain the hydro name '{}'; got: {msg}",
+                hydro.name
+            );
+            // The selector name in the error matches the model variant label.
+            let expected_model = match hydro.generation_model {
+                HydroGenerationModel::ConstantProductivity => "ConstantProductivity",
+                HydroGenerationModel::LinearizedHead => "LinearizedHead",
+                HydroGenerationModel::Fpha => unreachable!(),
+            };
+            assert!(
+                msg.contains(expected_model),
+                "error must contain model '{expected_model}'; got: {msg}"
+            );
+            assert!(
+                msg.contains('3') || msg.contains("stage"),
+                "error must reference the stage index; got: {msg}"
+            );
+            assert!(
+                msg.contains("hydro_production_models.json"),
+                "error must mention 'hydro_production_models.json'; got: {msg}"
+            );
+        }
     }
 
     /// find_model_for_stage returns override in tuple.
@@ -2584,7 +2612,7 @@ mod tests {
                     end_stage_id: None,
                     model: "constant_productivity".to_string(),
                     fpha_config: None,
-                    productivity_override: Some(0.75),
+                    productivity_mw_per_m3s: Some(0.75),
                 }],
             },
         };
@@ -2608,7 +2636,7 @@ mod tests {
                     season_id: 1,
                     model: "constant_productivity".to_string(),
                     fpha_config: None,
-                    productivity_override: Some(0.60),
+                    productivity_mw_per_m3s: Some(0.60),
                 }],
             },
         };
@@ -3146,9 +3174,7 @@ mod tests {
             max_storage_hm3: max_storage,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 0.9,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 500.0,
             specific_productivity_mw_per_m3s_per_m: None,
@@ -3198,11 +3224,9 @@ mod tests {
         );
         assert!(!models.has_evaporation(), "has_evaporation() must be false");
         assert_eq!(provenance.len(), 2);
-        assert!(
-            provenance
-                .iter()
-                .all(|(_, src)| *src == EvaporationSource::NotModeled)
-        );
+        assert!(provenance
+            .iter()
+            .all(|(_, src)| *src == EvaporationSource::NotModeled));
     }
 
     /// resolve_evaporation_models core logic: known geometry + coefficient gives correct k_evap0 and k_evap_v.
@@ -3695,14 +3719,7 @@ mod tests {
         let hydro_ids = [1i32, 2, 3];
         let hydros = hydro_ids
             .iter()
-            .map(|&id| {
-                make_hydro(
-                    id,
-                    HydroGenerationModel::ConstantProductivity {
-                        productivity_mw_per_m3s: 0.95,
-                    },
-                )
-            })
+            .map(|&id| make_hydro(id, HydroGenerationModel::ConstantProductivity))
             .collect();
         let system = make_system_for_summary(hydros);
 
@@ -4008,14 +4025,7 @@ mod tests {
         let hydro_ids = [1i32, 2, 3, 4];
         let hydros = hydro_ids
             .iter()
-            .map(|&id| {
-                make_hydro(
-                    id,
-                    HydroGenerationModel::ConstantProductivity {
-                        productivity_mw_per_m3s: 0.95,
-                    },
-                )
-            })
+            .map(|&id| make_hydro(id, HydroGenerationModel::ConstantProductivity))
             .collect();
         let system = make_system_for_summary(hydros);
         let result = make_result_all_constant(&hydro_ids);
@@ -4048,14 +4058,7 @@ mod tests {
         let all_ids = [1i32, 2, 3, 4];
         let hydros = all_ids
             .iter()
-            .map(|&id| {
-                make_hydro(
-                    id,
-                    HydroGenerationModel::ConstantProductivity {
-                        productivity_mw_per_m3s: 0.95,
-                    },
-                )
-            })
+            .map(|&id| make_hydro(id, HydroGenerationModel::ConstantProductivity))
             .collect();
         let system = make_system_for_summary(hydros);
         let result = make_result_mixed(&constant_ids, &fpha_ids, 5);
@@ -4092,14 +4095,7 @@ mod tests {
         let all_ids = [1i32, 2, 3, 4];
         let hydros = all_ids
             .iter()
-            .map(|&id| {
-                make_hydro(
-                    id,
-                    HydroGenerationModel::ConstantProductivity {
-                        productivity_mw_per_m3s: 0.95,
-                    },
-                )
-            })
+            .map(|&id| make_hydro(id, HydroGenerationModel::ConstantProductivity))
             .collect();
         let system = make_system_for_summary(hydros);
 
@@ -4212,14 +4208,7 @@ mod tests {
         let evap_ids = [1i32, 3];
         let hydros = hydro_ids
             .iter()
-            .map(|&id| {
-                make_hydro(
-                    id,
-                    HydroGenerationModel::ConstantProductivity {
-                        productivity_mw_per_m3s: 0.95,
-                    },
-                )
-            })
+            .map(|&id| make_hydro(id, HydroGenerationModel::ConstantProductivity))
             .collect();
         let system = make_system_for_summary(hydros);
         let result = make_result_with_evaporation(&hydro_ids, &evap_ids);

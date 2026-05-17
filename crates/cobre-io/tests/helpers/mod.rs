@@ -235,7 +235,6 @@ pub fn make_multi_entity_case(dir: &TempDir) {
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
             "generation": {
                 "model": "constant_productivity",
-                "productivity_mw_per_m3s": 1.0,
                 "min_turbined_m3s": 0.0,
                 "max_turbined_m3s": 200.0,
                 "min_generation_mw": 0.0,
@@ -289,7 +288,6 @@ pub fn make_referential_violation_case(dir: &TempDir) {
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
             "generation": {
                 "model": "constant_productivity",
-                "productivity_mw_per_m3s": 1.0,
                 "min_turbined_m3s": 0.0,
                 "max_turbined_m3s": 200.0,
                 "min_generation_mw": 0.0,

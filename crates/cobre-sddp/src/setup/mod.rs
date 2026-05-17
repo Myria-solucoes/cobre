@@ -51,7 +51,6 @@ use std::path::Path;
 
 use cobre_core::{
     EntityId, Stage, System,
-    entities::hydro::HydroGenerationModel,
     scenario::{SamplingScheme, ScenarioSource},
 };
 use cobre_io::build_hydro_reference_volume_fractions;
@@ -317,6 +316,7 @@ impl StudySetup {
             &reference_volume_fractions,
             &std::collections::HashMap::<cobre_core::EntityId, Vec<cobre_io::HydroGeometryRow>>::new(),
             Some(&override_table),
+            Some(&hydro_models.production),
         )
         .map_err(|e| SddpError::Validation(e.to_string()))?;
         // ScalarParameter loader lands in Epic 04 ticket-022; until then pass
@@ -780,19 +780,7 @@ fn max_iterations_from_rules(rules: &StoppingRuleSet) -> u64 {
 fn build_entity_counts(system: &System) -> EntityCounts {
     EntityCounts {
         hydro_ids: system.hydros().iter().map(|h| h.id.0).collect(),
-        hydro_productivities: system
-            .hydros()
-            .iter()
-            .map(|h| match &h.generation_model {
-                HydroGenerationModel::ConstantProductivity {
-                    productivity_mw_per_m3s,
-                }
-                | HydroGenerationModel::LinearizedHead {
-                    productivity_mw_per_m3s,
-                } => *productivity_mw_per_m3s,
-                HydroGenerationModel::Fpha => 0.0,
-            })
-            .collect(),
+        hydro_productivities: vec![0.0; system.hydros().len()],
         thermal_ids: system.thermals().iter().map(|t| t.id.0).collect(),
         line_ids: system.lines().iter().map(|l| l.id.0).collect(),
         bus_ids: system.buses().iter().map(|b| b.id.0).collect(),
@@ -857,7 +845,9 @@ fn build_initial_state(system: &System, indexer: &StageIndexer) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::StudySetup;
-    use crate::hydro_models::PrepareHydroModelsResult;
+    use crate::hydro_models::{
+        PrepareHydroModelsResult, ProductionModelSet, ResolvedProductionModel,
+    };
     use crate::indexer::StageIndexer;
 
     use cobre_core::{
@@ -932,9 +922,7 @@ mod tests {
             max_storage_hm3: 200.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 2.5,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
             specific_productivity_mw_per_m3s_per_m: None,
@@ -2448,9 +2436,7 @@ mod tests {
             max_storage_hm3: 200.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 2.5,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
             specific_productivity_mw_per_m3s_per_m: None,
@@ -2768,13 +2754,28 @@ mod tests {
         )
         .expect("stochastic context");
 
-        let setup = StudySetup::new(
-            &system,
-            &config,
-            stochastic,
-            PrepareHydroModelsResult::default_from_system(&system),
-        )
-        .expect("setup");
+        // Build a PrepareHydroModelsResult with productivity=2.5 for the single hydro.
+        // `default_from_system` uses 0.0 as a placeholder; here we supply the
+        // specific value that the assertion checks against.
+        let n_study_stages = system.stages().iter().filter(|s| s.id >= 0).count();
+        let hydro_models_result = {
+            let mut result = PrepareHydroModelsResult::default_from_system(&system);
+            let pm = ProductionModelSet::new(
+                vec![vec![
+                    ResolvedProductionModel::ConstantProductivity {
+                        productivity: 2.5
+                    };
+                    n_study_stages
+                ]],
+                1,
+                n_study_stages,
+            );
+            result.production = pm;
+            result
+        };
+
+        let setup =
+            StudySetup::new(&system, &config, stochastic, hydro_models_result).expect("setup");
 
         let ec = setup.energy_conversion();
         assert_eq!(ec.n_hydros(), system.hydros().len());
@@ -2875,9 +2876,7 @@ mod tests {
             max_storage_hm3: 200.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 2.5,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
             specific_productivity_mw_per_m3s_per_m: None,
@@ -3397,9 +3396,7 @@ mod tests {
             max_storage_hm3: 200.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 2.5,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
             specific_productivity_mw_per_m3s_per_m: None,
@@ -3672,9 +3669,7 @@ mod tests {
             max_storage_hm3: 200.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 2.5,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
             specific_productivity_mw_per_m3s_per_m: None,
@@ -3929,9 +3924,7 @@ mod tests {
             max_storage_hm3: 200.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 2.5,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
             specific_productivity_mw_per_m3s_per_m: None,
@@ -4204,9 +4197,7 @@ mod tests {
             max_storage_hm3: 200.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 2.5,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
             specific_productivity_mw_per_m3s_per_m: None,
@@ -4506,9 +4497,7 @@ mod tests {
             max_storage_hm3: 200.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 2.5,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
             specific_productivity_mw_per_m3s_per_m: None,
