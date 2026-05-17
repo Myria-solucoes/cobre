@@ -91,6 +91,22 @@ pub enum SddpError {
     /// [`SimulationError`](crate::SimulationError).
     #[error("simulation error: {0}")]
     Simulation(String),
+
+    /// A postcard-encoded payload was produced by an incompatible binary.
+    ///
+    /// Raised when the `version` field in a wire envelope does not match the
+    /// version expected by the current binary. Callers should abort the run and
+    /// restart all ranks with a consistent binary.
+    #[error(
+        "wire format version mismatch: encoded={encoded}, expected={expected}; \
+         restart all ranks with the same binary"
+    )]
+    WireVersionMismatch {
+        /// The version number found in the encoded payload.
+        encoded: u32,
+        /// The version number expected by the current binary.
+        expected: u32,
+    },
 }
 
 impl From<EstimationError> for SddpError {
@@ -270,6 +286,10 @@ mod tests {
                 scenario: 0,
             },
             SddpError::Simulation("simulation phase failed".to_string()),
+            SddpError::WireVersionMismatch {
+                encoded: 0,
+                expected: 1,
+            },
         ];
         for err in &variants {
             let _: &dyn std::error::Error = err;
@@ -295,6 +315,10 @@ mod tests {
                 scenario: 3,
             },
             SddpError::Simulation("test simulation error".to_string()),
+            SddpError::WireVersionMismatch {
+                encoded: 0,
+                expected: 1,
+            },
         ];
         for err in &variants {
             assert!(!format!("{err:?}").is_empty());

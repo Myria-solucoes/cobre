@@ -6,7 +6,7 @@
 //!
 //! Call [`validate_structure`] with a path to the case root and a mutable
 //! [`ValidationContext`].  It returns a [`FileManifest`] that records which of
-//! the 43 input files are present.  Missing required files produce
+//! the 42 input files are present.  Missing required files produce
 //! [`ErrorKind::FileNotFound`] entries in the context.  Missing optional files
 //! leave the corresponding manifest field `false` without adding any error.
 //!
@@ -28,12 +28,12 @@ use super::{ErrorKind, ValidationContext};
 
 // ── FileManifest ─────────────────────────────────────────────────────────────
 
-/// Records whether each of the 43 input files is present in the case directory.
+/// Records whether each of the 42 input files is present in the case directory.
 ///
 /// All fields default to `false`.  After calling [`validate_structure`], each field
 /// is `true` if the corresponding file was found on disk.
 ///
-/// The 43 files are organised by subdirectory following the input directory structure spec.
+/// The 42 files are organised by subdirectory following the input directory structure spec.
 /// Each bool is an independent "present/absent" flag for a distinct file.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default)]
@@ -67,10 +67,8 @@ pub struct FileManifest {
     pub system_hydro_production_models_json: bool,
     /// `system/fpha_hyperplanes.parquet` — optional
     pub system_fpha_hyperplanes_parquet: bool,
-    /// `system/scalar_parameter_definitions.parquet` — optional
-    pub system_scalar_parameter_definitions_parquet: bool,
-    /// `system/scalar_parameter_values.parquet` — optional
-    pub system_scalar_parameter_values_parquet: bool,
+    /// `system/scalar_parameters.json` — optional
+    pub system_scalar_parameters_json: bool,
     /// `system/hydro_energy_productivity.parquet` — optional
     pub system_hydro_energy_productivity_parquet: bool,
 
@@ -201,11 +199,7 @@ const FILE_ENTRIES: &[FileEntry] = &[
         required: false,
     },
     FileEntry {
-        relative: "system/scalar_parameter_definitions.parquet",
-        required: false,
-    },
-    FileEntry {
-        relative: "system/scalar_parameter_values.parquet",
+        relative: "system/scalar_parameters.json",
         required: false,
     },
     FileEntry {
@@ -322,7 +316,7 @@ const FILE_ENTRIES: &[FileEntry] = &[
 
 /// Performs Layer 1 structural validation on the case directory at `case_root`.
 ///
-/// For each of the 43 known input files:
+/// For each of the 42 known input files:
 ///
 /// - If the file is present, the corresponding [`FileManifest`] field is set to `true`.
 /// - If the file is absent **and required**, an [`ErrorKind::FileNotFound`] error is
@@ -339,7 +333,7 @@ const FILE_ENTRIES: &[FileEntry] = &[
 ///
 /// # Returns
 ///
-/// A [`FileManifest`] recording presence/absence of all 43 files.
+/// A [`FileManifest`] recording presence/absence of all 42 files.
 #[must_use]
 pub fn validate_structure(case_root: &Path, ctx: &mut ValidationContext) -> FileManifest {
     let mut manifest = FileManifest::default();
@@ -369,7 +363,7 @@ pub fn validate_structure(case_root: &Path, ctx: &mut ValidationContext) -> File
 ///
 /// This keeps the mapping between entries and manifest fields explicit and avoids
 /// fragile positional indexing elsewhere.
-fn manifest_fields_mut(m: &mut FileManifest) -> [&mut bool; 43] {
+fn manifest_fields_mut(m: &mut FileManifest) -> [&mut bool; 42] {
     [
         // Root (4)
         &mut m.config_json,
@@ -381,15 +375,14 @@ fn manifest_fields_mut(m: &mut FileManifest) -> [&mut bool; 43] {
         &mut m.system_lines_json,
         &mut m.system_hydros_json,
         &mut m.system_thermals_json,
-        // system/ optional (9)
+        // system/ optional (8)
         &mut m.system_non_controllable_sources_json,
         &mut m.system_pumping_stations_json,
         &mut m.system_energy_contracts_json,
         &mut m.system_hydro_geometry_parquet,
         &mut m.system_hydro_production_models_json,
         &mut m.system_fpha_hyperplanes_parquet,
-        &mut m.system_scalar_parameter_definitions_parquet,
-        &mut m.system_scalar_parameter_values_parquet,
+        &mut m.system_scalar_parameters_json,
         &mut m.system_hydro_energy_productivity_parquet,
         // scenarios/ (9)
         &mut m.scenarios_inflow_history_parquet,
@@ -593,45 +586,39 @@ mod tests {
 
     #[test]
     fn test_structural_manifest_fields_count() {
-        // Verify the FILE_ENTRIES array and manifest_fields_mut are consistent (43 entries)
+        // Verify the FILE_ENTRIES array and manifest_fields_mut are consistent (42 entries)
         assert_eq!(
             FILE_ENTRIES.len(),
-            43,
-            "FILE_ENTRIES should have exactly 43 entries"
+            42,
+            "FILE_ENTRIES should have exactly 42 entries"
         );
 
         let mut manifest = FileManifest::default();
         let fields = manifest_fields_mut(&mut manifest);
         assert_eq!(
             fields.len(),
-            43,
-            "manifest_fields_mut should return exactly 43 fields"
+            42,
+            "manifest_fields_mut should return exactly 42 fields"
         );
     }
 
     #[test]
-    fn test_file_entries_count_is_43() {
+    fn test_file_entries_count_is_42() {
         assert_eq!(
             FILE_ENTRIES.len(),
-            43,
-            "FILE_ENTRIES must have exactly 43 entries"
+            42,
+            "FILE_ENTRIES must have exactly 42 entries"
         );
     }
 
     #[test]
-    fn test_all_three_new_files_present_sets_all_three_booleans() {
+    fn test_scalar_parameters_json_and_hydro_energy_productivity_present() {
         let dir = TempDir::new().unwrap();
         make_case_with_required(&dir);
-        // Create all three new optional files
+        // Create both new optional files
         fs::write(
-            dir.path()
-                .join("system/scalar_parameter_definitions.parquet"),
-            b"",
-        )
-        .unwrap();
-        fs::write(
-            dir.path().join("system/scalar_parameter_values.parquet"),
-            b"",
+            dir.path().join("system/scalar_parameters.json"),
+            b"{\"scalar_parameters\":[]}",
         )
         .unwrap();
         fs::write(
@@ -648,12 +635,8 @@ mod tests {
             "no errors expected when all required files present"
         );
         assert!(
-            manifest.system_scalar_parameter_definitions_parquet,
-            "system_scalar_parameter_definitions_parquet should be true"
-        );
-        assert!(
-            manifest.system_scalar_parameter_values_parquet,
-            "system_scalar_parameter_values_parquet should be true"
+            manifest.system_scalar_parameters_json,
+            "system_scalar_parameters_json should be true"
         );
         assert!(
             manifest.system_hydro_energy_productivity_parquet,
@@ -662,10 +645,10 @@ mod tests {
     }
 
     #[test]
-    fn test_all_three_new_files_absent_returns_false_no_error() {
+    fn test_scalar_parameters_json_and_hydro_energy_productivity_absent() {
         let dir = TempDir::new().unwrap();
         make_case_with_required(&dir);
-        // The three new optional files are deliberately not created
+        // The optional files are deliberately not created
 
         let mut ctx = ValidationContext::new();
         let manifest = validate_structure(dir.path(), &mut ctx);
@@ -675,12 +658,8 @@ mod tests {
             "absent optional files must not produce errors"
         );
         assert!(
-            !manifest.system_scalar_parameter_definitions_parquet,
-            "system_scalar_parameter_definitions_parquet should be false when file is absent"
-        );
-        assert!(
-            !manifest.system_scalar_parameter_values_parquet,
-            "system_scalar_parameter_values_parquet should be false when file is absent"
+            !manifest.system_scalar_parameters_json,
+            "system_scalar_parameters_json should be false when file is absent"
         );
         assert!(
             !manifest.system_hydro_energy_productivity_parquet,
@@ -688,33 +667,49 @@ mod tests {
         );
     }
 
+    /// AC: a case directory containing `system/scalar_parameters.json` must set
+    /// `manifest.system_scalar_parameters_json == true`.
     #[test]
-    fn test_only_definitions_present_isolates_field() {
+    fn manifest_detects_scalar_parameters_json_when_present() {
         let dir = TempDir::new().unwrap();
         make_case_with_required(&dir);
-        // Only scalar_parameter_definitions.parquet is present; the other two are absent
         fs::write(
-            dir.path()
-                .join("system/scalar_parameter_definitions.parquet"),
-            b"",
+            dir.path().join("system/scalar_parameters.json"),
+            b"{\"scalar_parameters\":[]}",
         )
         .unwrap();
 
         let mut ctx = ValidationContext::new();
         let manifest = validate_structure(dir.path(), &mut ctx);
 
-        assert!(!ctx.has_errors(), "no errors expected");
         assert!(
-            manifest.system_scalar_parameter_definitions_parquet,
-            "system_scalar_parameter_definitions_parquet should be true"
+            !ctx.has_errors(),
+            "no errors expected when all required files are present"
         );
         assert!(
-            !manifest.system_scalar_parameter_values_parquet,
-            "system_scalar_parameter_values_parquet should be false when file is absent"
+            manifest.system_scalar_parameters_json,
+            "system_scalar_parameters_json must be true when system/scalar_parameters.json exists"
+        );
+    }
+
+    /// AC: a case directory with no scalar parameter file must report
+    /// `manifest.system_scalar_parameters_json == false` without producing an error.
+    #[test]
+    fn manifest_reports_absent_when_no_parameter_file() {
+        let dir = TempDir::new().unwrap();
+        make_case_with_required(&dir);
+        // system/scalar_parameters.json is deliberately absent.
+
+        let mut ctx = ValidationContext::new();
+        let manifest = validate_structure(dir.path(), &mut ctx);
+
+        assert!(
+            !ctx.has_errors(),
+            "absent optional file must not produce errors"
         );
         assert!(
-            !manifest.system_hydro_energy_productivity_parquet,
-            "system_hydro_energy_productivity_parquet should be false when file is absent"
+            !manifest.system_scalar_parameters_json,
+            "system_scalar_parameters_json must be false when system/scalar_parameters.json is absent"
         );
     }
 

@@ -43,8 +43,8 @@ impl StudySetup {
     /// Return the pre-computed [`EnergyConversionSet`] for this study.
     ///
     /// Provides `ρ_eq`, `V_ref`, `Q_ref`, and `ρ_acum` (accumulated cascade
-    /// productivity) for every `(hydro, stage)` pair. Consumed by Epic 2
-    /// (energy-balance constraints and ENA/EARM extraction).
+    /// productivity) for every `(hydro, stage)` pair. Consumed by the
+    /// energy-balance LP constraints and ENA/EARM extraction.
     #[must_use]
     pub fn energy_conversion(&self) -> &EnergyConversionSet {
         &self.energy_conversion

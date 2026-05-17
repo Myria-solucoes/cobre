@@ -169,7 +169,7 @@ pub struct StudySetup {
     /// Holds `ρ_eq` (equivalent productivity), `V_ref`, `Q_ref`, and `ρ_acum`
     /// (accumulated cascade productivity). Built once at setup time from the
     /// system's hydros, cascade topology, and reference-volume resolver.
-    /// Consumed by Epic 2 (energy-balance constraints and ENA/EARM extraction).
+    /// Consumed by the energy-balance LP constraints and ENA/EARM extraction.
     pub(crate) energy_conversion: EnergyConversionSet,
 
     /// `V_min` (`min_storage_hm3`) per hydro, in declaration order.
@@ -284,6 +284,7 @@ impl StudySetup {
             budget,
             export_states,
             hydro_energy_productivity_rows,
+            scalar_parameters,
         } = config;
 
         // Build the per-(hydro, stage) energy-conversion set and resolved
@@ -319,10 +320,8 @@ impl StudySetup {
             Some(&hydro_models.production),
         )
         .map_err(|e| SddpError::Validation(e.to_string()))?;
-        // ScalarParameter loader lands in Epic 04 ticket-022; until then pass
-        // an empty slice. The table remains empty until the loader is wired in.
         let resolved_parameters = crate::resolved_parameters::build_resolved_parameters(
-            &[],
+            &scalar_parameters,
             &energy_conversion,
             &override_table,
             system.hydros(),

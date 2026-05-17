@@ -27,8 +27,7 @@ use crate::output::schemas::{
     buses_schema, contracts_schema, convergence_schema, costs_schema, exchanges_schema,
     generic_violations_schema, hydro_energy_productivity_schema, hydros_schema, inflow_lags_schema,
     iteration_timing_schema, non_controllables_schema, pumping_stations_schema, rank_timing_schema,
-    retry_histogram_schema, row_selection_schema, scalar_parameter_definitions_schema,
-    scalar_parameter_values_schema, solver_iterations_schema, thermals_schema,
+    retry_histogram_schema, row_selection_schema, solver_iterations_schema, thermals_schema,
 };
 
 // ─── Entity type codes (SS3) ─────────────────────────────────────────────────
@@ -283,11 +282,6 @@ fn write_variables_csv(path: &Path) -> Result<(), OutputError> {
         ("cut_selection", row_selection_schema()),
         ("solver_iterations", solver_iterations_schema()),
         ("retry_histogram", retry_histogram_schema()),
-        (
-            "scalar_parameter_definitions",
-            scalar_parameter_definitions_schema(),
-        ),
-        ("scalar_parameter_values", scalar_parameter_values_schema()),
         (
             "hydro_energy_productivity",
             hydro_energy_productivity_schema(),
@@ -1479,8 +1473,8 @@ mod tests {
 
         let row_count = rdr.records().count();
         assert_eq!(
-            row_count, 214,
-            "variables.csv must have exactly 214 data rows (one per column across all schemas)"
+            row_count, 206,
+            "variables.csv must have exactly 206 data rows (one per column across all schemas)"
         );
     }
 

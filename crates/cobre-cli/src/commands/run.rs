@@ -818,7 +818,19 @@ fn broadcast_and_build_setup(
 
     let training_enabled = bcast_config.training_enabled;
     let policy_mode = bcast_config.policy_mode;
-    let setup = build_study_setup(&system, &mut bcast_config, stochastic, hydro_models)?;
+    let scalar_parameters_path = args.case_dir.join("system/scalar_parameters.json");
+    let scalar_parameters = if scalar_parameters_path.exists() {
+        cobre_io::load_scalar_parameters_json(&args.case_dir)?
+    } else {
+        Vec::new()
+    };
+    let setup = build_study_setup(
+        &system,
+        &mut bcast_config,
+        stochastic,
+        hydro_models,
+        scalar_parameters,
+    )?;
 
     Ok(LoadBroadcastResult {
         system,
@@ -832,11 +844,13 @@ fn broadcast_and_build_setup(
 }
 
 /// Construct `StudySetup` on all ranks from broadcast parameters.
+#[allow(clippy::needless_pass_by_value)]
 fn build_study_setup(
     system: &System,
     bcast_config: &mut BroadcastConfig,
     stochastic: cobre_stochastic::StochasticContext,
     hydro_models: PrepareHydroModelsResult,
+    scalar_parameters: Vec<cobre_core::ScalarParameter>,
 ) -> Result<StudySetup, CliError> {
     let stopping_rule_set = stopping_rules_from_broadcast(bcast_config);
     let cut_selection = bcast_config.cut_selection.take();
@@ -854,6 +868,7 @@ fn build_study_setup(
         budget: bcast_config.budget,
         export_states: bcast_config.export_states,
         hydro_energy_productivity_rows: Vec::new(),
+        scalar_parameters,
     };
     StudySetup::from_broadcast_params(
         system,

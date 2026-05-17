@@ -520,6 +520,7 @@ fn run_programmatic(
         budget: None,
         export_states: false,
         hydro_energy_productivity_rows: Vec::new(),
+        scalar_parameters: Vec::new(),
     };
     let mut setup =
         StudySetup::from_broadcast_params(system, stochastic, config, hydro_models, source, source)
@@ -850,6 +851,7 @@ fn run_with_setup(
         budget: None,
         export_states: false,
         hydro_energy_productivity_rows: Vec::new(),
+        scalar_parameters: Vec::new(),
     };
     let mut setup =
         StudySetup::from_broadcast_params(system, stochastic, config, hydro_models, source, source)

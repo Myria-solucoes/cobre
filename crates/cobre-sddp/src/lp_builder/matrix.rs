@@ -1760,7 +1760,7 @@ mod parameter_resolution_tests {
         let params = vec![ScalarParameter {
             id: param_id,
             name: format!("p{}", param_id.0),
-            kind: ParameterKind::Constant(value),
+            kind: ParameterKind::Constant { value },
         }];
         build_resolved_parameters(
             &params,
@@ -1786,7 +1786,7 @@ mod parameter_resolution_tests {
         let params = vec![ScalarParameter {
             id: param_id,
             name: format!("p{}", param_id.0),
-            kind: ParameterKind::PerStage(values),
+            kind: ParameterKind::PerStage { values },
         }];
         build_resolved_parameters(
             &params,

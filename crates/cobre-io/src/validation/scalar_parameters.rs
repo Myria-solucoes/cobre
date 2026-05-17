@@ -2,7 +2,7 @@
 //!
 //! Provides [`validate_scalar_parameters`], which performs three checks on a
 //! [`Vec<ScalarParameter>`] that has already passed the per-file structural and
-//! schema validations:
+//! schema validations from `system/scalar_parameters.json`:
 //!
 //! - **Check A** — every [`ParameterKind::Computed`] references a `hydro_id`
 //!   that exists in `system.hydros()`.
@@ -34,17 +34,17 @@ use super::{ErrorKind, ValidationContext};
 /// 1. **Computed hydro reference** — every `Computed(c)` parameter must
 ///    reference a `hydro_id` that exists in `system.hydros()`.  A missing id
 ///    produces an [`ErrorKind::InvalidReference`] entry tagged to
-///    `"system/scalar_parameter_definitions.parquet"`.
+///    `"system/scalar_parameters.json"`.
 ///
 /// 2. **`PerStage` length** — every `PerStage(v)` parameter must satisfy
 ///    `v.len() == n_stages`.  A length mismatch produces an
 ///    [`ErrorKind::SchemaViolation`] entry tagged to
-///    `"system/scalar_parameter_values.parquet"`.
+///    `"system/scalar_parameters.json"`.
 ///
 /// 3. **Global uniqueness** — parameter `id`s and `name`s must each be unique
 ///    across the full list.  A duplicate produces an
 ///    [`ErrorKind::SchemaViolation`] entry tagged to
-///    `"system/scalar_parameter_definitions.parquet"`.
+///    `"system/scalar_parameters.json"`.
 ///
 /// # Arguments
 ///
@@ -75,12 +75,12 @@ fn check_computed_hydro_references(
     ctx: &mut ValidationContext,
 ) {
     for param in parameters {
-        if let ParameterKind::Computed(c) = param.kind {
+        if let ParameterKind::Computed { computed_spec: c } = param.kind {
             let hid = hydro_id_of(c);
             if !hydro_ids.contains(&hid) {
                 ctx.add_error(
                     ErrorKind::InvalidReference,
-                    "system/scalar_parameter_definitions.parquet",
+                    "system/scalar_parameters.json",
                     Some(format!("{}.computed_spec.hydro_id", param.name)),
                     format!(
                         "parameter '{}' references non-existent hydro id {}",
@@ -99,12 +99,12 @@ fn check_per_stage_lengths(
     ctx: &mut ValidationContext,
 ) {
     for param in parameters {
-        if let ParameterKind::PerStage(ref values) = param.kind {
+        if let ParameterKind::PerStage { ref values } = param.kind {
             let actual = values.len();
             if actual != n_stages {
                 ctx.add_error(
                     ErrorKind::SchemaViolation,
-                    "system/scalar_parameter_values.parquet",
+                    "system/scalar_parameters.json",
                     Some(param.name.as_str()),
                     format!(
                         "parameter '{}' has {} values but expected {} (n_stages)",
@@ -125,7 +125,7 @@ fn check_global_uniqueness(parameters: &[ScalarParameter], ctx: &mut ValidationC
         if !seen_ids.insert(param.id) {
             ctx.add_error(
                 ErrorKind::SchemaViolation,
-                "system/scalar_parameter_definitions.parquet",
+                "system/scalar_parameters.json",
                 Some(format!("id={}", param.id.0)),
                 format!(
                     "duplicate parameter id {} (name: '{}')",
@@ -137,7 +137,7 @@ fn check_global_uniqueness(parameters: &[ScalarParameter], ctx: &mut ValidationC
         if !seen_names.insert(param.name.as_str()) {
             ctx.add_error(
                 ErrorKind::SchemaViolation,
-                "system/scalar_parameter_definitions.parquet",
+                "system/scalar_parameters.json",
                 Some(param.name.as_str()),
                 format!("duplicate parameter name '{}'", param.name),
             );
@@ -253,7 +253,7 @@ mod tests {
         ScalarParameter {
             id: EntityId(id),
             name: name.to_string(),
-            kind: ParameterKind::Computed(c),
+            kind: ParameterKind::Computed { computed_spec: c },
         }
     }
 
@@ -261,7 +261,7 @@ mod tests {
         ScalarParameter {
             id: EntityId(id),
             name: name.to_string(),
-            kind: ParameterKind::Constant(value),
+            kind: ParameterKind::Constant { value },
         }
     }
 
@@ -269,7 +269,7 @@ mod tests {
         ScalarParameter {
             id: EntityId(id),
             name: name.to_string(),
-            kind: ParameterKind::PerStage(values),
+            kind: ParameterKind::PerStage { values },
         }
     }
 
@@ -296,7 +296,7 @@ mod tests {
         assert_eq!(entry.kind, ErrorKind::InvalidReference);
         assert_eq!(
             entry.file.to_str().unwrap(),
-            "system/scalar_parameter_definitions.parquet"
+            "system/scalar_parameters.json"
         );
         assert!(
             entry.message.contains("99"),
@@ -320,7 +320,7 @@ mod tests {
         assert_eq!(entry.kind, ErrorKind::SchemaViolation);
         assert_eq!(
             entry.file.to_str().unwrap(),
-            "system/scalar_parameter_values.parquet"
+            "system/scalar_parameters.json"
         );
         assert!(
             entry.message.contains('2'),

@@ -204,7 +204,7 @@ impl ResolvedParameters {
 /// let params = vec![ScalarParameter {
 ///     id: EntityId(1),
 ///     name: "constant_coeff".to_string(),
-///     kind: ParameterKind::Constant(3.6),
+///     kind: ParameterKind::Constant { value: 3.6 },
 /// }];
 /// let ec = EnergyConversionSet::new(vec![], vec![], 0, 4);
 /// let overrides = HydroEnergyProductivityOverride::default();
@@ -250,9 +250,9 @@ pub fn build_resolved_parameters(
     }
 
     // Sort by EntityId.0 for O(log n) binary-search lookup. Adjacent-equality
-    // check documents the uniqueness invariant (Epic 04 already enforced it
-    // on the input but a debug_assert here makes it observable at the resolver
-    // boundary).
+    // check documents the uniqueness invariant (the JSON reader already enforces
+    // uniqueness upstream, but a debug_assert here makes it observable at the
+    // resolver boundary).
     id_to_slot.sort_by_key(|(k, _)| *k);
     debug_assert!(
         id_to_slot.windows(2).all(|w| w[0].0 != w[1].0),
@@ -287,9 +287,9 @@ fn resolve_kind(
     hydro_index: &HashMap<EntityId, usize>,
 ) -> Result<Vec<f64>, ResolvedParametersError> {
     match kind {
-        ParameterKind::Constant(c) => Ok(vec![*c; n_stages]),
+        ParameterKind::Constant { value: c } => Ok(vec![*c; n_stages]),
 
-        ParameterKind::PerStage(v) => {
+        ParameterKind::PerStage { values: v } => {
             if v.len() != n_stages {
                 return Err(ResolvedParametersError::PerStageLengthMismatch {
                     name: name.to_string(),
@@ -300,7 +300,7 @@ fn resolve_kind(
             Ok(v.clone())
         }
 
-        ParameterKind::Seasonal(pairs) => {
+        ParameterKind::Seasonal { values: pairs } => {
             let mut values = Vec::with_capacity(n_stages);
             for (t, &season_id) in stage_to_season.iter().enumerate() {
                 // `pairs` is sorted ascending by season_id (invariant from
@@ -319,7 +319,7 @@ fn resolve_kind(
             Ok(values)
         }
 
-        ParameterKind::Computed(cp) => resolve_computed(
+        ParameterKind::Computed { computed_spec: cp } => resolve_computed(
             *cp,
             name,
             n_stages,
@@ -338,7 +338,7 @@ fn resolve_computed(
     cp: ComputedParameter,
     name: &str,
     n_stages: usize,
-    stage_to_season: &[i32],
+    _stage_to_season: &[i32],
     energy_conversion: &EnergyConversionSet,
     override_table: &HydroEnergyProductivityOverride,
     hydros: &[Hydro],
@@ -420,9 +420,6 @@ fn resolve_computed(
                     hydro_id,
                 })?,
         };
-        // `stage_to_season` is borrowed but unused for stage-varying resolution
-        // (it's only needed for Seasonal lookup). Suppress the lint.
-        let _ = stage_to_season;
         values.push(value);
     }
     Ok(values)
@@ -432,10 +429,33 @@ fn resolve_computed(
 // Postcard broadcast helpers
 // ---------------------------------------------------------------------------
 
+/// Wire format version for the [`ResolvedParameters`] postcard envelope.
+///
+/// Bumped to 1 in the same change that introduced struct-form variants for
+/// [`ParameterKind`] and internally-tagged [`ComputedParameter`]. Although
+/// [`ResolvedParameters`] itself only stores pre-resolved `f64` values (no
+/// `ParameterKind` fields), an explicit version guard ensures that a
+/// heterogeneous MPI cluster — where one rank runs a new binary and another
+/// runs an old binary — fails fast with a clear error rather than silently
+/// misinterpreting bytes.
+pub const RESOLVED_PARAMETERS_WIRE_VERSION: u32 = 1;
+
+/// Thin envelope that prepends a version tag to a [`ResolvedParameters`]
+/// payload for MPI broadcast.
+///
+/// Encoding always sets `version` to [`RESOLVED_PARAMETERS_WIRE_VERSION`].
+/// Decoding rejects any `version` that does not match, returning
+/// [`SddpError::WireVersionMismatch`].
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ResolvedParametersWireEnvelope {
+    version: u32,
+    payload: ResolvedParameters,
+}
+
 /// Serialize a [`ResolvedParameters`] table to a postcard byte buffer for MPI
 /// broadcast.
 ///
-/// The returned `Vec<u8>` encodes the complete table — both the dense
+/// The returned `Vec<u8>` encodes a versioned envelope — both the dense
 /// `per_param` rows and the sorted `id_to_slot` index — as a single postcard
 /// payload. The caller is responsible for the MPI broadcast call itself; these
 /// helpers are pure serialization/deserialization with no network I/O.
@@ -460,7 +480,7 @@ fn resolve_computed(
 /// let params = vec![ScalarParameter {
 ///     id: EntityId(1),
 ///     name: "rho_eq".to_string(),
-///     kind: ParameterKind::Constant(3.6),
+///     kind: ParameterKind::Constant { value: 3.6 },
 /// }];
 /// let ec = EnergyConversionSet::new(vec![], vec![], 0, 4);
 /// let overrides = HydroEnergyProductivityOverride::default();
@@ -477,7 +497,11 @@ fn resolve_computed(
 pub fn serialize_resolved_parameters(
     table: &ResolvedParameters,
 ) -> Result<Vec<u8>, crate::error::SddpError> {
-    postcard::to_allocvec(table).map_err(|e| {
+    let envelope = ResolvedParametersWireEnvelope {
+        version: RESOLVED_PARAMETERS_WIRE_VERSION,
+        payload: table.clone(),
+    };
+    postcard::to_allocvec(&envelope).map_err(|e| {
         crate::error::SddpError::Validation(format!("postcard resolved_parameters: {e}"))
     })
 }
@@ -487,13 +511,16 @@ pub fn serialize_resolved_parameters(
 ///
 /// The byte buffer must have been produced by [`serialize_resolved_parameters`].
 /// An empty slice or a corrupted buffer returns an error; this function never
-/// silently discards data.
+/// silently discards data. A version mismatch returns
+/// [`SddpError::WireVersionMismatch`] so callers can distinguish format
+/// incompatibility from corruption.
 ///
 /// # Errors
 ///
-/// Returns [`SddpError::Validation`] with a message containing
-/// `"postcard resolved_parameters"` if the byte slice is corrupted,
-/// truncated, or not a valid postcard encoding of [`ResolvedParameters`].
+/// - [`SddpError::Validation`] — byte slice is corrupted, truncated, or not a
+///   valid postcard encoding of [`ResolvedParametersWireEnvelope`].
+/// - [`SddpError::WireVersionMismatch`] — the encoded version does not match
+///   [`RESOLVED_PARAMETERS_WIRE_VERSION`]; a binary mismatch across MPI ranks.
 ///
 /// # Examples
 ///
@@ -508,7 +535,7 @@ pub fn serialize_resolved_parameters(
 /// let params = vec![ScalarParameter {
 ///     id: EntityId(1),
 ///     name: "rho_eq".to_string(),
-///     kind: ParameterKind::Constant(3.6),
+///     kind: ParameterKind::Constant { value: 3.6 },
 /// }];
 /// let ec = EnergyConversionSet::new(vec![], vec![], 0, 4);
 /// let overrides = HydroEnergyProductivityOverride::default();
@@ -525,9 +552,16 @@ pub fn serialize_resolved_parameters(
 pub fn deserialize_resolved_parameters(
     bytes: &[u8],
 ) -> Result<ResolvedParameters, crate::error::SddpError> {
-    postcard::from_bytes(bytes).map_err(|e| {
+    let envelope: ResolvedParametersWireEnvelope = postcard::from_bytes(bytes).map_err(|e| {
         crate::error::SddpError::Validation(format!("postcard resolved_parameters: {e}"))
-    })
+    })?;
+    if envelope.version != RESOLVED_PARAMETERS_WIRE_VERSION {
+        return Err(crate::error::SddpError::WireVersionMismatch {
+            encoded: envelope.version,
+            expected: RESOLVED_PARAMETERS_WIRE_VERSION,
+        });
+    }
+    Ok(envelope.payload)
 }
 
 // ---------------------------------------------------------------------------
@@ -661,7 +695,7 @@ mod tests {
 
     #[test]
     fn constant_kind_fills_all_stages() {
-        let params = vec![make_param(0, ParameterKind::Constant(3.6))];
+        let params = vec![make_param(0, ParameterKind::Constant { value: 3.6 })];
         let ec = EnergyConversionSet::new(vec![], vec![], 0, 4);
         let overrides = HydroEnergyProductivityOverride::default();
         let stage_to_season = vec![0i32; 4];
@@ -681,7 +715,12 @@ mod tests {
 
     #[test]
     fn per_stage_kind_length_mismatch_errors() {
-        let params = vec![make_param(0, ParameterKind::PerStage(vec![1.0, 2.0]))];
+        let params = vec![make_param(
+            0,
+            ParameterKind::PerStage {
+                values: vec![1.0, 2.0],
+            },
+        )];
         let ec = EnergyConversionSet::new(vec![], vec![], 0, 3);
         let overrides = HydroEnergyProductivityOverride::default();
         let stage_to_season = vec![0i32; 3];
@@ -706,7 +745,9 @@ mod tests {
     fn seasonal_kind_maps_stage_to_value() {
         let params = vec![make_param(
             0,
-            ParameterKind::Seasonal(vec![(0, 0.5), (1, 1.5)]),
+            ParameterKind::Seasonal {
+                values: vec![(0, 0.5), (1, 1.5)],
+            },
         )];
         let ec = EnergyConversionSet::new(vec![], vec![], 0, 3);
         let overrides = HydroEnergyProductivityOverride::default();
@@ -732,9 +773,11 @@ mod tests {
 
         let params = vec![make_param(
             0,
-            ParameterKind::Computed(ComputedParameter::EquivalentProductivity {
-                hydro_id: EntityId(0),
-            }),
+            ParameterKind::Computed {
+                computed_spec: ComputedParameter::EquivalentProductivity {
+                    hydro_id: EntityId(0),
+                },
+            },
         )];
 
         let table = build_resolved_parameters(
@@ -779,9 +822,11 @@ mod tests {
 
         let params = vec![make_param(
             0,
-            ParameterKind::Computed(ComputedParameter::SpecificProductivity {
-                hydro_id: EntityId(0),
-            }),
+            ParameterKind::Computed {
+                computed_spec: ComputedParameter::SpecificProductivity {
+                    hydro_id: EntityId(0),
+                },
+            },
         )];
 
         let result = build_resolved_parameters(
@@ -812,13 +857,20 @@ mod tests {
         let (hydros, energy_conversion, override_table, stage_to_season) =
             make_setup_inputs(n_stages);
 
-        let param_a = make_param(10, ParameterKind::Constant(1.0));
-        let param_b = make_param(20, ParameterKind::PerStage(vec![2.0, 3.0, 4.0]));
+        let param_a = make_param(10, ParameterKind::Constant { value: 1.0 });
+        let param_b = make_param(
+            20,
+            ParameterKind::PerStage {
+                values: vec![2.0, 3.0, 4.0],
+            },
+        );
         let param_c = make_param(
             30,
-            ParameterKind::Computed(ComputedParameter::AccumulatedProductivity {
-                hydro_id: EntityId(0),
-            }),
+            ParameterKind::Computed {
+                computed_spec: ComputedParameter::AccumulatedProductivity {
+                    hydro_id: EntityId(0),
+                },
+            },
         );
 
         let params_abc = vec![param_a.clone(), param_b.clone(), param_c.clone()];
@@ -867,9 +919,11 @@ mod tests {
         // Use a hydro_id that does not exist in the hydros slice (ids 0 and 1 exist).
         let params = vec![make_param(
             0,
-            ParameterKind::Computed(ComputedParameter::MinStorage {
-                hydro_id: EntityId(99),
-            }),
+            ParameterKind::Computed {
+                computed_spec: ComputedParameter::MinStorage {
+                    hydro_id: EntityId(99),
+                },
+            },
         )];
 
         let result = build_resolved_parameters(
@@ -903,15 +957,19 @@ mod tests {
         let params = vec![
             make_param(
                 0,
-                ParameterKind::Computed(ComputedParameter::MinStorage {
-                    hydro_id: EntityId(0),
-                }),
+                ParameterKind::Computed {
+                    computed_spec: ComputedParameter::MinStorage {
+                        hydro_id: EntityId(0),
+                    },
+                },
             ),
             make_param(
                 1,
-                ParameterKind::Computed(ComputedParameter::MaxStorage {
-                    hydro_id: EntityId(1),
-                }),
+                ParameterKind::Computed {
+                    computed_spec: ComputedParameter::MaxStorage {
+                        hydro_id: EntityId(1),
+                    },
+                },
             ),
         ];
 
@@ -967,13 +1025,20 @@ mod tests {
             make_setup_inputs(n_stages);
 
         let params = vec![
-            make_param(10, ParameterKind::Constant(3.6)),
-            make_param(20, ParameterKind::PerStage(vec![1.0, 2.0, 3.0, 4.0])),
+            make_param(10, ParameterKind::Constant { value: 3.6 }),
+            make_param(
+                20,
+                ParameterKind::PerStage {
+                    values: vec![1.0, 2.0, 3.0, 4.0],
+                },
+            ),
             make_param(
                 30,
-                ParameterKind::Computed(ComputedParameter::EquivalentProductivity {
-                    hydro_id: EntityId(0),
-                }),
+                ParameterKind::Computed {
+                    computed_spec: ComputedParameter::EquivalentProductivity {
+                        hydro_id: EntityId(0),
+                    },
+                },
             ),
         ];
 
@@ -1043,5 +1108,49 @@ mod tests {
         let restored = super::deserialize_resolved_parameters(&bytes).unwrap();
         // Both tables are empty; any get() on an unknown id returns 0.0 via debug_assert path.
         let _ = restored;
+    }
+
+    // -------------------------------------------------------------------------
+    // Wire envelope round-trip tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn resolved_parameters_wire_envelope_round_trip() {
+        let original = broadcast_fixture();
+        let bytes = super::serialize_resolved_parameters(&original).unwrap();
+        assert!(!bytes.is_empty(), "encoded envelope must be non-empty");
+        let restored = super::deserialize_resolved_parameters(&bytes).unwrap();
+
+        for id in [EntityId(10), EntityId(20), EntityId(30)] {
+            for t in 0..4_usize {
+                assert_eq!(
+                    original.get(id, t).to_bits(),
+                    restored.get(id, t).to_bits(),
+                    "bit mismatch for id={id:?}, stage={t}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn resolved_parameters_wire_envelope_rejects_old_version() {
+        // Encode an envelope with a version older than RESOLVED_PARAMETERS_WIRE_VERSION.
+        let old_version: u32 = super::RESOLVED_PARAMETERS_WIRE_VERSION.saturating_sub(1);
+        let envelope = super::ResolvedParametersWireEnvelope {
+            version: old_version,
+            payload: ResolvedParameters::default(),
+        };
+        let bytes = postcard::to_allocvec(&envelope).expect("postcard encoding must not fail");
+
+        let result = super::deserialize_resolved_parameters(&bytes);
+        assert!(
+            result.is_err(),
+            "decoder must reject an old-version envelope"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("version"),
+            "error message must contain 'version', got: {msg}"
+        );
     }
 }

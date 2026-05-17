@@ -3,7 +3,7 @@
 //! These helpers centralise the typed-downcast logic used by every Parquet parser
 //! in `cobre-io`. They are `pub(crate)` — not part of the public API.
 
-use arrow::array::{Array, Date32Array, Float64Array, Int32Array, StringArray, UInt32Array};
+use arrow::array::{Array, Date32Array, Float64Array, Int32Array, UInt32Array};
 use std::path::Path;
 
 use crate::LoadError;
@@ -137,58 +137,6 @@ pub(crate) fn extract_required_uint32<'a>(
                 col.data_type()
             ),
         })
-}
-
-/// Extract a required column as [`StringArray`] by name.
-///
-/// Returns `SchemaError` if the column is absent or has the wrong Arrow type.
-pub(crate) fn extract_required_utf8<'a>(
-    batch: &'a arrow::record_batch::RecordBatch,
-    name: &str,
-    path: &Path,
-) -> Result<&'a StringArray, LoadError> {
-    let col = batch
-        .column_by_name(name)
-        .ok_or_else(|| LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: name.to_string(),
-            message: format!("missing required column \"{name}\""),
-        })?;
-    col.as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: name.to_string(),
-            message: format!(
-                "column \"{name}\" has type {} but Utf8 is required",
-                col.data_type()
-            ),
-        })
-}
-
-/// Extract an optional column as [`StringArray`] by name, returning `None` if absent.
-///
-/// Returns `SchemaError` if the column exists but has the wrong Arrow type.
-pub(crate) fn extract_optional_utf8<'a>(
-    batch: &'a arrow::record_batch::RecordBatch,
-    name: &str,
-    path: &Path,
-) -> Result<Option<&'a StringArray>, LoadError> {
-    let Some(col) = batch.column_by_name(name) else {
-        return Ok(None);
-    };
-    let arr = col
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: name.to_string(),
-            message: format!(
-                "column \"{name}\" has type {} but Utf8 is required",
-                col.data_type()
-            ),
-        })?;
-    Ok(Some(arr))
 }
 
 /// Extract a required column as [`Date32Array`] by name.
