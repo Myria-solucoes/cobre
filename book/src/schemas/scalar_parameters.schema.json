@@ -1,0 +1,177 @@
+{
+  "$defs": {
+    "ComputedSpec": {
+      "description": "Specification for a computed parameter.\n\nIdentifies which hydro-indexed quantity to derive and from which plant.",
+      "properties": {
+        "hydro_id": {
+          "description": "Hydro plant identifier. Must match an `id` in `hydros.json`.",
+          "format": "int32",
+          "type": "integer"
+        },
+        "tag": {
+          "description": "Which quantity to derive. One of: `equivalent_productivity`,\n`accumulated_productivity`, `reference_volume`, `reference_turbine`,\n`min_storage`, `max_storage`, `specific_productivity`.",
+          "type": "string"
+        }
+      },
+      "required": ["tag", "hydro_id"],
+      "type": "object"
+    },
+    "ScalarParameterEntry": {
+      "description": "One scalar parameter entry. The `kind` field discriminates between the\nfour payload shapes.",
+      "oneOf": [
+        {
+          "description": "Constant parameter — one value applied to every stage.",
+          "properties": {
+            "id": {
+              "description": "Unique parameter identifier (int32). Must be unique across all entries.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "kind": {
+              "const": "constant",
+              "type": "string"
+            },
+            "name": {
+              "description": "Unique parameter name. Must be non-empty and have no leading or\ntrailing whitespace.",
+              "type": "string"
+            },
+            "value": {
+              "description": "The constant value applied to all stages. Must be finite.",
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": ["id", "name", "kind", "value"],
+          "type": "object"
+        },
+        {
+          "description": "Per-stage parameter — one value per study stage.\n\nThe `values` array contains `[stage_id, value]` pairs. The `stage_id`\nintegers must form a contiguous range starting at 0 (i.e. [0, 1, 2, …,\nN-1]). Gaps, duplicates, and non-zero starts are all rejected.",
+          "properties": {
+            "id": {
+              "description": "Unique parameter identifier (int32). Must be unique across all entries.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "kind": {
+              "const": "per_stage",
+              "type": "string"
+            },
+            "name": {
+              "description": "Unique parameter name. Must be non-empty and have no leading or\ntrailing whitespace.",
+              "type": "string"
+            },
+            "values": {
+              "description": "Array of [stage_id, value] pairs. Must be non-empty. stage_id values\nmust be contiguous from 0. All values must be finite.",
+              "items": {
+                "description": "[stage_id, value] pair.",
+                "items": [
+                  {
+                    "description": "Zero-based stage index.",
+                    "format": "int32",
+                    "type": "integer"
+                  },
+                  {
+                    "description": "Finite numeric value for this stage.",
+                    "format": "double",
+                    "type": "number"
+                  }
+                ],
+                "maxItems": 2,
+                "minItems": 2,
+                "type": "array"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": ["id", "name", "kind", "values"],
+          "type": "object"
+        },
+        {
+          "description": "Seasonal parameter — one value per season index.\n\nThe `values` array contains `[season_id, value]` pairs. Season indices\nneed not be contiguous, but must be unique within the entry. The value\nfor a stage is looked up by the stage's season.",
+          "properties": {
+            "id": {
+              "description": "Unique parameter identifier (int32). Must be unique across all entries.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "kind": {
+              "const": "seasonal",
+              "type": "string"
+            },
+            "name": {
+              "description": "Unique parameter name. Must be non-empty and have no leading or\ntrailing whitespace.",
+              "type": "string"
+            },
+            "values": {
+              "description": "Array of [season_id, value] pairs. Must be non-empty. season_id values\nmust be unique within this entry. All values must be finite.",
+              "items": {
+                "description": "[season_id, value] pair.",
+                "items": [
+                  {
+                    "description": "Season index (matches the season map in stages.json).",
+                    "format": "int32",
+                    "type": "integer"
+                  },
+                  {
+                    "description": "Finite numeric value for this season.",
+                    "format": "double",
+                    "type": "number"
+                  }
+                ],
+                "maxItems": 2,
+                "minItems": 2,
+                "type": "array"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": ["id", "name", "kind", "values"],
+          "type": "object"
+        },
+        {
+          "description": "Computed parameter — value derived from hydro geometry at each stage.\n\nNo numeric values are supplied; the solver resolves the value from\nthe hydro plant's geometry and the study's reference operating point.\nThe `computed_spec` object names which quantity to derive and from\nwhich plant.",
+          "properties": {
+            "computed_spec": {
+              "$ref": "#/$defs/ComputedSpec"
+            },
+            "id": {
+              "description": "Unique parameter identifier (int32). Must be unique across all entries.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "kind": {
+              "const": "computed",
+              "type": "string"
+            },
+            "name": {
+              "description": "Unique parameter name. Must be non-empty and have no leading or\ntrailing whitespace.",
+              "type": "string"
+            }
+          },
+          "required": ["id", "name", "kind", "computed_spec"],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Scalar parameters loaded from `system/scalar_parameters.json`.\n\nScalar parameters are named values that can be referenced by the `@name`\nsigil in generic-constraint coefficient expressions. The solver resolves\neach parameter to a concrete f64 value before building the LP for each stage.\n\nFour kinds are supported:\n\n- `constant` — one value applied to every stage.\n- `per_stage` — one value per study stage, indexed from 0.\n- `seasonal` — one value per season index, looked up by the stage's season.\n- `computed` — derived from hydro geometry data; no numeric values supplied.\n\nAll `id` values must be unique across the array. All `name` values must be\nunique, non-empty, and free of leading/trailing whitespace.",
+  "properties": {
+    "$schema": {
+      "description": "JSON schema URI — informational, not validated.",
+      "type": ["string", "null"]
+    },
+    "scalar_parameters": {
+      "description": "Array of scalar parameter entries. May be empty. Each entry must have\na unique `id` and a unique `name`.",
+      "items": {
+        "$ref": "#/$defs/ScalarParameterEntry"
+      },
+      "type": "array"
+    }
+  },
+  "required": ["scalar_parameters"],
+  "title": "ScalarParametersFile",
+  "type": "object"
+}

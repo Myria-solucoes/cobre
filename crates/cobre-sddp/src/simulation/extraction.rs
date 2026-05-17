@@ -93,9 +93,9 @@ pub struct EntityCounts {
     pub line_ids: Vec<i32>,
     /// Entity IDs for buses, in canonical ID-sorted order.
     pub bus_ids: Vec<i32>,
-    /// Productivity (MW per m³/s) for each hydro plant, same order as `hydro_ids`.
-    ///
-    /// Used to compute `generation_mw = turbined_m3s * productivity`.
+    /// Length must equal `indexer.hydro_count`. Values are unused — per-stage
+    /// productivity is accessed through `StageExtractionSpec::hydro_productivities`
+    /// instead. This field is retained for the `debug_assert!` length invariant.
     pub hydro_productivities: Vec<f64>,
     /// Entity IDs for pumping stations (may be empty if none exist).
     pub pumping_station_ids: Vec<i32>,

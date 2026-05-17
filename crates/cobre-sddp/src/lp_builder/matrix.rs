@@ -1428,11 +1428,10 @@ pub(super) fn fill_operational_violation_entries(
             let rho = match ctx.production_models.model(h_idx, stage_idx) {
                 ResolvedProductionModel::ConstantProductivity { productivity } => *productivity,
                 ResolvedProductionModel::Fpha { .. } => {
-                    debug_assert!(
-                        false,
-                        "Fpha resolved model with no local index for hydro {h_idx}"
+                    unreachable!(
+                        "Fpha resolved model in ConstantProductivity LP path for hydro \
+                         {h_idx}; validate production model assignment upstream"
                     );
-                    0.0
                 }
             };
             for blk in 0..n_blks {

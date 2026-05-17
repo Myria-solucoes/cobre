@@ -17,9 +17,9 @@ point `(V_ref, Q_ref)`. It collapses the head, tailrace, and hydraulic loss
 effects into one number for a given stage.
 
 For the two fixed-productivity models (`constant_productivity` and
-`linearized_head`), `ρ_eq` is taken directly from the plant's
-`productivity_mw_per_m3s` field in `hydros.json` (or its stage-range override
-from `hydro_production_models.json`). For FPHA plants the head is variable, so
+`linearized_head`), `ρ_eq` is taken directly from the per-`(hydro, stage)`
+`productivity_mw_per_m3s` entry resolved from
+`system/hydro_production_models.json`. For FPHA plants the head is variable, so
 `ρ_eq` is computed at a reference operating point:
 
 ```text

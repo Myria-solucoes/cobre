@@ -58,7 +58,6 @@ all fields — required and optional — for a single plant:
       },
       "generation": {
         "model": "constant_productivity",
-        "productivity_mw_per_m3s": 0.8765,
         "min_turbined_m3s": 500.0,
         "max_turbined_m3s": 22500.0,
         "min_generation_mw": 0.0,
@@ -192,7 +191,6 @@ production function converts flow to power.
 ```json
 "generation": {
   "model": "constant_productivity",
-  "productivity_mw_per_m3s": 1.0,
   "min_turbined_m3s": 0.0,
   "max_turbined_m3s": 50.0,
   "min_generation_mw": 0.0,
@@ -200,28 +198,27 @@ production function converts flow to power.
 }
 ```
 
-| Field                     | Type   | Description                                                                                                |
-| ------------------------- | ------ | ---------------------------------------------------------------------------------------------------------- |
-| `model`                   | string | Production function variant. See the model table below.                                                    |
-| `productivity_mw_per_m3s` | number | Power output per unit of turbined flow [MW/(m³/s)]. Used by `constant_productivity` and `linearized_head`. |
-| `min_turbined_m3s`        | number | Minimum turbined flow [m³/s]. Non-zero values model a minimum stable turbine operation.                    |
-| `max_turbined_m3s`        | number | Maximum turbined flow (installed turbine capacity) [m³/s].                                                 |
-| `min_generation_mw`       | number | Minimum electrical generation [MW].                                                                        |
-| `max_generation_mw`       | number | Maximum electrical generation (installed capacity) [MW].                                                   |
+| Field               | Type   | Description                                                                             |
+| ------------------- | ------ | --------------------------------------------------------------------------------------- |
+| `model`             | string | Production function variant. See the model table below.                                 |
+| `min_turbined_m3s`  | number | Minimum turbined flow [m³/s]. Non-zero values model a minimum stable turbine operation. |
+| `max_turbined_m3s`  | number | Maximum turbined flow (installed turbine capacity) [m³/s].                              |
+| `min_generation_mw` | number | Minimum electrical generation [MW].                                                     |
+| `max_generation_mw` | number | Maximum electrical generation (installed capacity) [MW].                                |
 
 ### Available Production Function Models
 
-| Model                 | `model` value             | Status            | Description                                                                                                                               |
-| --------------------- | ------------------------- | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| Constant productivity | `"constant_productivity"` | Available         | `power = productivity * turbined_flow`. Independent of reservoir head. Requires only `productivity_mw_per_m3s`.                           |
-| FPHA                  | `"fpha"`                  | Available         | Piecewise-linear envelope of the nonlinear production function. Head-dependent. Configured via `hydro_production_models.json`. See below. |
-| Linearized head       | `"linearized_head"`       | Not yet available | Head-dependent productivity linearized around an operating point at each stage. Will be documented when released.                         |
+| Model                 | `model` value             | Status            | Description                                                                                                                                                                  |
+| --------------------- | ------------------------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Constant productivity | `"constant_productivity"` | Available         | `power = productivity * turbined_flow`. Independent of reservoir head. Productivity coefficient supplied per stage range or season in `system/hydro_production_models.json`. |
+| FPHA                  | `"fpha"`                  | Available         | Piecewise-linear envelope of the nonlinear production function. Head-dependent. Configured via `hydro_production_models.json`. See below.                                    |
+| Linearized head       | `"linearized_head"`       | Not yet available | Head-dependent productivity linearized around an operating point at each stage. Will be documented when released.                                                            |
 
 For the `1dtoy` example and for most initial studies, `constant_productivity` is
-the correct choice. The `productivity_mw_per_m3s` factor encodes the plant's
-average efficiency and net head. For a plant with 80 m net head and 90% efficiency,
-the theoretical productivity is approximately `9.81 * 80 * 0.90 / 1000 ≈ 0.706`
-MW/(m³/s).
+the correct choice. The productivity coefficient encodes the plant's average
+efficiency and net head, and is supplied in `system/hydro_production_models.json`.
+For a plant with 80 m net head and 90% efficiency, the theoretical productivity is
+approximately `9.81 × 80 × 0.90 / 1000 ≈ 0.706` MW/(m³/s).
 
 ---
 
@@ -269,8 +266,9 @@ Two selection strategies are supported:
 }
 ```
 
-Each stage range and season entry may include an optional `productivity_override`
-field (see [Productivity Override](#productivity-override) below).
+Each stage range and season entry for a `constant_productivity` or `linearized_head`
+plant must include a `productivity_mw_per_m3s` field
+(see [Per-Range and Per-Season Productivity](#per-range-and-per-season-productivity) below).
 
 **`seasonal`** — assigns a model based on season index, with a fallback for seasons
 not explicitly listed:
@@ -438,12 +436,12 @@ To switch from computed to precomputed fitting on a subsequent run, copy this fi
 to `system/fpha_hyperplanes.parquet` and change `source` to `"precomputed"` in
 `hydro_production_models.json`.
 
-### Productivity Override
+### Per-Range and Per-Season Productivity
 
 When a plant uses the `constant_productivity` or `linearized_head` model, the
-productivity value normally comes from the entity's `productivity_mw_per_m3s` field
-in `hydros.json`. The optional `productivity_override` field on a stage range or
-season entry replaces this base value for the stages covered by that entry.
+productivity coefficient [MW/(m³/s)] is supplied directly on each stage range or
+season entry in `system/hydro_production_models.json` via the
+`productivity_mw_per_m3s` field.
 
 This is useful when external data (e.g., temporal overrides of tailrace or
 forebay elevations from other planning tools) changes the effective head drop
@@ -454,20 +452,21 @@ at specific stages, requiring a different productivity coefficient.
   "start_stage_id": 12,
   "end_stage_id": 24,
   "model": "constant_productivity",
-  "productivity_override": 0.72
+  "productivity_mw_per_m3s": 0.72
 }
 ```
 
-| Field                   | Type           | Default | Description                                                                                           |
-| ----------------------- | -------------- | ------- | ----------------------------------------------------------------------------------------------------- |
-| `productivity_override` | number or null | `null`  | When present, replaces `productivity_mw_per_m3s` for this entry. Must be positive. Not valid on FPHA. |
+| Field                     | Type   | Required       | Description                                                                        |
+| ------------------------- | ------ | -------------- | ---------------------------------------------------------------------------------- |
+| `productivity_mw_per_m3s` | number | Yes (non-FPHA) | Productivity coefficient [MW/(m³/s)]. Must be strictly positive. Rejected on FPHA. |
 
 **Validation rules:**
 
-- `productivity_override` must be strictly positive when present.
-- `productivity_override` is rejected when `model` is `"fpha"` (FPHA computes
+- `productivity_mw_per_m3s` must be strictly positive when present.
+- `productivity_mw_per_m3s` is rejected when `model` is `"fpha"` (FPHA computes
   productivity from hyperplanes, not a scalar coefficient).
-- When absent or `null`, the entity's base `productivity_mw_per_m3s` is used.
+- `productivity_mw_per_m3s` is required for `constant_productivity` and
+  `linearized_head` models.
 
 ---
 

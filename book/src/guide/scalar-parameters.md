@@ -19,34 +19,67 @@ Parameters are useful when:
 
 ## Input Files
 
-Scalar parameters are loaded from two parquet files:
+Scalar parameters are loaded from a single JSON file:
 
-### `system/scalar_parameter_definitions.parquet`
+### `system/scalar_parameters.json`
 
-One row per parameter. Defines the identity and kind of each parameter.
-
-| Column          | Parquet type | Nullable | Description                                                            |
-| --------------- | ------------ | -------- | ---------------------------------------------------------------------- |
-| `id`            | INT32        | no       | Unique parameter identifier (`EntityId`)                               |
-| `name`          | UTF8         | no       | Unique parameter name (non-empty, no leading/trailing spaces)          |
-| `kind`          | UTF8         | no       | One of `constant` / `per_stage` / `seasonal` / `computed`              |
-| `computed_spec` | UTF8         | yes      | Non-null and parseable when `kind == "computed"`; null for other kinds |
-
-### `system/scalar_parameter_values.parquet`
-
-One row per (parameter, stage or season). Supplies the numeric values for
-`constant`, `per_stage`, and `seasonal` parameters. Not used for `computed`
-parameters.
-
-| Column         | Parquet type | Nullable | Description                            |
-| -------------- | ------------ | -------- | -------------------------------------- |
-| `parameter_id` | INT32        | no       | `EntityId` of the parameter            |
-| `stage_id`     | INT32        | yes      | Zero-based stage index for `per_stage` |
-| `season_id`    | INT32        | yes      | Season id for `seasonal`               |
-| `value`        | DOUBLE       | no       | Finite `f64` value                     |
-
-Both files are optional. When absent, no parameters are loaded and any `@name`
+The file is optional. When absent, no parameters are loaded and any `@name`
 token in a constraint expression causes a load error.
+
+**Top-level object shape:**
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/book/src/schemas/scalar_parameters.schema.json",
+  "scalar_parameters": [
+    { "id": 1, "name": "discount_rate", "kind": "constant", "value": 0.05 },
+    {
+      "id": 2,
+      "name": "demand",
+      "kind": "per_stage",
+      "values": [
+        [0, 100.0],
+        [1, 110.0],
+        [2, 105.0]
+      ]
+    },
+    {
+      "id": 3,
+      "name": "wet_season_factor",
+      "kind": "seasonal",
+      "values": [
+        [0, 1.2],
+        [1, 0.8]
+      ]
+    },
+    {
+      "id": 4,
+      "name": "hydro_prod",
+      "kind": "computed",
+      "computed_spec": { "tag": "equivalent_productivity", "hydro_id": 7 }
+    }
+  ]
+}
+```
+
+**Per-entry fields present on every parameter:**
+
+| Field  | Type    | Description                                                             |
+| ------ | ------- | ----------------------------------------------------------------------- |
+| `id`   | integer | Unique parameter identifier (int32). Must be unique across all entries. |
+| `name` | string  | Unique parameter name. Non-empty, no leading or trailing whitespace.    |
+| `kind` | string  | One of `constant`, `per_stage`, `seasonal`, `computed`.                 |
+
+**Kind-specific payload fields** (present only for the matching `kind`):
+
+| `kind`      | Extra field(s)                                                            |
+| ----------- | ------------------------------------------------------------------------- |
+| `constant`  | `"value": <f64>` — one finite value for all stages                        |
+| `per_stage` | `"values": [[stage_id, value], ...]` — contiguous from 0, all finite      |
+| `seasonal`  | `"values": [[season_id, value], ...]` — unique season indices, all finite |
+| `computed`  | `"computed_spec": { "tag": "<variant>", "hydro_id": <int> }`              |
+
+Unknown fields on any entry are rejected at parse time.
 
 ---
 
@@ -54,63 +87,64 @@ token in a constraint expression causes a load error.
 
 ### `constant`
 
-One value applied to every stage. Requires exactly one value row with both
-`stage_id` and `season_id` null.
+One value applied to every stage.
 
-```text
-Definitions row:
-  id=1  name="demand_scale"  kind="constant"  computed_spec=null
-
-Values row:
-  parameter_id=1  stage_id=null  season_id=null  value=1.05
+```json
+{ "id": 1, "name": "demand_scale", "kind": "constant", "value": 1.05 }
 ```
 
 ### `per_stage`
 
-One value per study stage. Requires exactly `n_stages` value rows, one for each
-stage from `0` to `n_stages − 1`. Both `season_id` must be null.
+One value per study stage. The `values` array contains `[stage_id, value]`
+pairs. Stage indices must form a contiguous range starting at 0 (i.e.
+`[0, 1, 2, …, N-1]`). Duplicate indices and gaps are both rejected.
 
-```text
-Definitions row:
-  id=2  name="hydro_limit_factor"  kind="per_stage"  computed_spec=null
-
-Values rows (for a 3-stage study):
-  parameter_id=2  stage_id=0  season_id=null  value=0.90
-  parameter_id=2  stage_id=1  season_id=null  value=0.85
-  parameter_id=2  stage_id=2  season_id=null  value=0.80
+```json
+{
+  "id": 2,
+  "name": "hydro_limit_factor",
+  "kind": "per_stage",
+  "values": [
+    [0, 0.9],
+    [1, 0.85],
+    [2, 0.8]
+  ]
+}
 ```
 
 ### `seasonal`
 
 One value per season, keyed by `season_id`. The value for a given stage is
-looked up by the stage's season. Requires at least one value row; `stage_id`
-must be null on all rows.
+looked up by the stage's season. Season indices need not be contiguous but must
+be unique within the entry.
 
-```text
-Definitions row:
-  id=3  name="wet_season_weight"  kind="seasonal"  computed_spec=null
-
-Values rows:
-  parameter_id=3  stage_id=null  season_id=0  value=1.20
-  parameter_id=3  stage_id=null  season_id=1  value=0.95
-  parameter_id=3  stage_id=null  season_id=2  value=0.80
-  parameter_id=3  stage_id=null  season_id=3  value=1.10
+```json
+{
+  "id": 3,
+  "name": "wet_season_weight",
+  "kind": "seasonal",
+  "values": [
+    [0, 1.2],
+    [1, 0.95],
+    [2, 0.8],
+    [3, 1.1]
+  ]
+}
 ```
 
 ### `computed`
 
-The value is derived from hydro geometry data by the solver — no value rows are
-needed. `computed_spec` carries the variant and plant reference in the form:
+The value is derived from hydro geometry data by the solver — no numeric values
+are needed. The `computed_spec` object carries the variant tag and plant
+reference:
 
-```text
-<variant_tag>(hydro_id=<int>)
-```
-
-```text
-Definitions row:
-  id=4  name="rho_eq_h1"  kind="computed"  computed_spec="EquivalentProductivity(hydro_id=1)"
-
-No values rows needed for this parameter.
+```json
+{
+  "id": 4,
+  "name": "rho_eq_h1",
+  "kind": "computed",
+  "computed_spec": { "tag": "equivalent_productivity", "hydro_id": 1 }
+}
 ```
 
 ---
@@ -119,15 +153,15 @@ No values rows needed for this parameter.
 
 Seven hydro-indexed quantities are available as computed parameters:
 
-| Variant tag               | Symbol | Unit        | Description                                    |
-| ------------------------- | ------ | ----------- | ---------------------------------------------- |
-| `EquivalentProductivity`  | ρ_eq   | MW/(m³/s)   | Equivalent productivity at the reference point |
-| `AccumulatedProductivity` | ρ_acum | MW/(m³/s)   | Accumulated cascade productivity               |
-| `ReferenceVolume`         | V_ref  | hm³         | Reference reservoir volume                     |
-| `ReferenceTurbine`        | Q_ref  | m³/s        | Reference turbined flow                        |
-| `MinStorage`              | V_min  | hm³         | Minimum operational reservoir storage          |
-| `MaxStorage`              | V_max  | hm³         | Maximum operational reservoir storage          |
-| `SpecificProductivity`    | ρ_esp  | MW/(m³/s)/m | Specific productivity from `hydros.json`       |
+| `tag`                      | Symbol | Unit        | Description                                    |
+| -------------------------- | ------ | ----------- | ---------------------------------------------- |
+| `equivalent_productivity`  | ρ_eq   | MW/(m³/s)   | Equivalent productivity at the reference point |
+| `accumulated_productivity` | ρ_acum | MW/(m³/s)   | Accumulated cascade productivity               |
+| `reference_volume`         | V_ref  | hm³         | Reference reservoir volume                     |
+| `reference_turbine`        | Q_ref  | m³/s        | Reference turbined flow                        |
+| `min_storage`              | V_min  | hm³         | Minimum operational reservoir storage          |
+| `max_storage`              | V_max  | hm³         | Maximum operational reservoir storage          |
+| `specific_productivity`    | ρ_esp  | MW/(m³/s)/m | Specific productivity from `hydros.json`       |
 
 All seven are stage-resolved: the value provided to the LP builder is the scalar
 for the stage currently being built.
@@ -180,11 +214,19 @@ fails with a schema error during load.
 
 ## Validation Rules
 
-- `id` values must be unique across all definition rows.
-- `name` values must be unique, non-empty, and have no leading or trailing whitespace.
-- `kind` must be exactly one of `constant`, `per_stage`, `seasonal`, or `computed`.
-- When `kind` is `computed`, `computed_spec` must be non-null, non-empty, and parse
-  as `<variant_tag>(hydro_id=<int>)` using one of the seven variant tags above.
-- When `kind` is not `computed`, `computed_spec` must be null or absent.
-- Existence of the referenced `hydro_id` in the hydro registry is validated
-  during cross-reference checks after all entity files are loaded.
+- `id` values must be unique across all entries.
+- `name` values must be unique (case-sensitive), non-empty, and have no leading
+  or trailing whitespace.
+- `kind` must be exactly one of `constant`, `per_stage`, `seasonal`, or
+  `computed`.
+- For `constant`: `value` must be present and finite.
+- For `per_stage`: `values` must be present and non-empty; the `stage_id`
+  integers must form a contiguous range starting at 0; all values must be
+  finite.
+- For `seasonal`: `values` must be present and non-empty; `season_id` values
+  must be unique within the entry; all values must be finite.
+- For `computed`: `computed_spec` must be present with a valid `tag` (one of
+  the seven listed above) and a `hydro_id` integer. Existence of the referenced
+  hydro is validated during cross-reference checks after all entity files are
+  loaded.
+- Unknown JSON fields on any entry are rejected immediately at parse time.

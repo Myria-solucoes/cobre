@@ -195,7 +195,7 @@ impl<'a> LbEvalScratchBundle<'a> {
     }
 }
 
-/// Phase 1 — rank-0 buffer pre-population and append-only LP management.
+/// Step 1 — rank-0 buffer pre-population and append-only LP management.
 ///
 /// Pre-populates the constant NCS column-bound index/lower buffers (same across
 /// all openings at a given stage) in `scratch` and performs the append-only LP
@@ -273,7 +273,7 @@ fn lb_init_rank0<S: SolverInterface>(
     }
 }
 
-/// Phase 2 — truncation precompute and per-opening LP evaluation.
+/// Step 2 — truncation precompute and per-opening LP evaluation.
 ///
 /// Precomputes the PAR lag matrix and eta floor (constant across openings), then
 /// iterates over all stage-0 openings. For each opening: evaluates PAR inflows,

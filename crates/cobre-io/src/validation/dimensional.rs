@@ -573,6 +573,7 @@ mod tests {
             hydro_geometry: vec![],
             production_models: vec![],
             fpha_hyperplanes: vec![],
+            scalar_parameters: vec![],
             inflow_history: vec![],
             inflow_seasonal_stats: vec![],
             inflow_ar_coefficients: vec![],

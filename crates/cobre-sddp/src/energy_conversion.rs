@@ -405,10 +405,10 @@ pub const SPECIFIC_PRODUCTIVITY_CONSISTENCY_TOLERANCE: f64 = 0.05;
 ///
 /// # Future resolution
 ///
-/// Epic 4 ticket-020 will add an `expect_inconsistent_productivity_layers: bool`
-/// field to the `hydro_energy_productivity.parquet` row schema as the
-/// user-facing suppression mechanism. Phase-1 (this ticket) emits warnings
-/// unconditionally.
+/// A future user-facing suppression mechanism (e.g. an
+/// `expect_inconsistent_productivity_layers: bool` field on the
+/// `hydro_energy_productivity.parquet` row schema) is planned but not yet
+/// implemented. Warnings are currently emitted unconditionally.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConsistencyWarning {
     /// The `ρ_esp` supplied on the `Hydro` field diverges from the value

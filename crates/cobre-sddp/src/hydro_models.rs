@@ -1110,8 +1110,8 @@ fn resolve_stage_model(
         } else {
             // "constant_productivity" or "linearized_head" from config:
             // productivity_mw_per_m3s is required for non-FPHA models (validated at
-            // schema load time by ticket-003). Return an error if absent rather than
-            // silently defaulting.
+            // schema load time in the hydros.json parser). Return an error if absent
+            // rather than silently defaulting.
             let model_name = model_info.as_ref().map_or_else(
                 || "constant_productivity".to_owned(),
                 |(name, _)| name.clone(),

@@ -29,10 +29,10 @@ use cobre_comm::LocalBackend;
 use cobre_io::output::simulation_writer::{ScenarioWritePayload, SimulationParquetWriter};
 use cobre_io::{ParquetWriterConfig, SolverStatsRow};
 use cobre_sddp::{
-    ArOrderSummary, DEFAULT_SEED, EstimationReport, FutureCostFunction, HydroModelSummary,
-    ModelProvenanceReport, SolverStatsDelta, StochasticSource, StochasticSummary, StudySetup,
     build_hydro_model_summary, build_provenance_report, build_stochastic_summary,
-    prepare_hydro_models, prepare_stochastic,
+    prepare_hydro_models, prepare_stochastic, ArOrderSummary, EstimationReport, FutureCostFunction,
+    HydroModelSummary, ModelProvenanceReport, SolverStatsDelta, StochasticSource,
+    StochasticSummary, StudyParams, StudySetup, DEFAULT_SEED,
 };
 use cobre_solver::HighsSolver;
 
@@ -85,7 +85,7 @@ fn write_policy_checkpoint(
     export_states: bool,
 ) -> Result<(), String> {
     use cobre_io::output::policy::{
-        PolicyCheckpointMetadata, write_policy_checkpoint as io_write_policy_checkpoint,
+        write_policy_checkpoint as io_write_policy_checkpoint, PolicyCheckpointMetadata,
     };
     use cobre_sddp::policy_export::{
         build_active_indices, build_stage_basis_records, build_stage_cut_records,
@@ -534,8 +534,28 @@ fn run_inner(
     let hydro_models_result = prepare_hydro_models(&system, case_dir)
         .map_err(|e| format!("hydro model preprocessing error: {e}"))?;
 
-    let mut setup = StudySetup::new(&system, &config, result.stochastic, hydro_models_result)
-        .map_err(|e| e.to_string())?;
+    let scalar_parameters_path = case_dir.join("system/scalar_parameters.json");
+    let scalar_parameters = if scalar_parameters_path.exists() {
+        cobre_io::load_scalar_parameters_json(case_dir).map_err(|e| e.to_string())?
+    } else {
+        Vec::new()
+    };
+
+    let simulation_source = config
+        .simulation_scenario_source(&case_dir.join("config.json"))
+        .map_err(|e| format!("scenario source error: {e}"))?;
+    let params = StudyParams::from_config(&config).map_err(|e| e.to_string())?;
+    let mut construction = params.into_construction_config();
+    construction.scalar_parameters = scalar_parameters;
+    let mut setup = StudySetup::from_broadcast_params(
+        &system,
+        result.stochastic,
+        construction,
+        hydro_models_result,
+        &training_source,
+        &simulation_source,
+    )
+    .map_err(|e| e.to_string())?;
     setup.set_export_states(config.exports.states);
 
     let provenance_report = build_provenance_report(

@@ -12,7 +12,7 @@
 use std::path::Path;
 
 use cobre_core::{
-    GenericConstraint,
+    EntityId, GenericConstraint, ScalarParameter,
     entities::{Bus, EnergyContract, Hydro, Line, NonControllableSource, PumpingStation, Thermal},
     initial_conditions::InitialConditions,
     penalty::GlobalPenaltyDefaults,
@@ -33,7 +33,7 @@ use crate::{
     },
     extensions::{
         FphaHyperplaneRow, HydroGeometryRow, ProductionModelConfig, load_fpha_hyperplanes,
-        load_production_models, parse_hydro_geometry,
+        load_production_models, parse_hydro_geometry, parse_scalar_parameters_json,
     },
     initial_conditions::parse_initial_conditions,
     penalties::parse_penalties,
@@ -101,6 +101,12 @@ pub(crate) struct ParsedData {
     pub(crate) production_models: Vec<ProductionModelConfig>,
     /// Parsed `system/fpha_hyperplanes.parquet`. Empty when absent.
     pub(crate) fpha_hyperplanes: Vec<FphaHyperplaneRow>,
+    /// Parsed `system/scalar_parameters.json`. Empty when absent.
+    ///
+    /// Loaded before `constraints/generic_constraints.json` so that `@name`
+    /// sigils in constraint expressions can be resolved during Layer 2.
+    #[allow(dead_code)]
+    pub(crate) scalar_parameters: Vec<ScalarParameter>,
 
     /// Parsed `scenarios/inflow_history.parquet`. Empty when absent.
     pub(crate) inflow_history: Vec<InflowHistoryRow>,
@@ -541,12 +547,31 @@ pub(crate) fn validate_schema(
         ctx,
     );
 
+    // Load scalar_parameters.json BEFORE generic_constraints so that `@name`
+    // sigils in constraint expressions can be resolved.  This must stay ahead
+    // of the `generic_constraints` block below.
+    let scalar_parameters: Vec<ScalarParameter> = optional_or_error(
+        manifest.system_scalar_parameters_json,
+        || parse_scalar_parameters_json(&case_root.join("system/scalar_parameters.json")),
+        Vec::new,
+        "system/scalar_parameters.json",
+        ctx,
+    );
+
+    // Build the name → EntityId map so expression tokens like `@demand_scale`
+    // can be resolved.  When the file was absent or failed to parse, the map is
+    // empty and any @name reference will produce a descriptive schema error.
+    let scalar_name_to_id: std::collections::HashMap<String, EntityId> = scalar_parameters
+        .iter()
+        .map(|p| (p.name.clone(), p.id))
+        .collect();
+
     let generic_constraints = optional_or_error(
         manifest.constraints_generic_constraints_json,
         || {
             load_generic_constraints(
                 Some(&case_root.join("constraints/generic_constraints.json")),
-                &std::collections::HashMap::new(),
+                &scalar_name_to_id,
             )
         },
         Vec::new,
@@ -667,6 +692,7 @@ pub(crate) fn validate_schema(
         hydro_geometry,
         production_models,
         fpha_hyperplanes,
+        scalar_parameters,
         inflow_history,
         inflow_seasonal_stats,
         inflow_ar_coefficients,

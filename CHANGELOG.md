@@ -62,6 +62,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hydros. It is replaced by the five always-populated energy columns
   listed above.
 
+- Inline `productivity_mw_per_m3s` field on
+  `system/hydros.json` `generation` blocks. The per-stage
+  productivity coefficient is now authored on every
+  `stage_ranges[]` or `seasons[]` entry in
+  `system/hydro_production_models.json` under the same key.
+  Cases that previously omitted
+  `system/hydro_production_models.json` and relied on the
+  entity-level scalar must now ship the file with one entry per
+  hydro.
+
+- Input files `system/scalar_parameter_definitions.parquet` and
+  `system/scalar_parameter_values.parquet`. Scalar parameters
+  for generic constraints (`@name` references) are now authored
+  in a single `system/scalar_parameters.json` carrying one
+  object per parameter with a `kind` discriminator and
+  kind-specific payload (`value`, `values`, or
+  `computed_spec`).
+
 ### Breaking Changes
 
 **Output schema** — `simulation/hydros.parquet` grows from 31 to 35
@@ -82,6 +100,29 @@ previously loaded with neither source now fail fast at setup time with
 an error that names the offending plant and lists the three accepted
 remediations.
 
+**Hydro productivity authoring** — Studies must remove
+`productivity_mw_per_m3s` from every `hydros.json` `generation`
+block and supply the same value via a
+`system/hydro_production_models.json` entry. For non-FPHA models
+(`constant_productivity`, `linearized_head`) the field is now
+required and positive on every `stage_ranges[]` /
+`seasons[]` entry. The previous opt-in
+`productivity_override` key on those entries is renamed to
+`productivity_mw_per_m3s`; the override semantics (replace the
+entity-level base value) no longer apply because there is no
+longer an entity-level base value.
+
+**Scalar parameters file format** — The pair of input parquet
+files `system/scalar_parameter_definitions.parquet` and
+`system/scalar_parameter_values.parquet` is removed. Studies
+that use scalar parameters in generic constraints must now ship
+`system/scalar_parameters.json` instead. The new file uses one
+array entry per parameter with a `kind` discriminator
+(`constant`, `per_stage`, `seasonal`, or `computed`) and a
+kind-specific payload. Authoring order is preserved at parse
+time; LP coefficients are unaffected by authoring order
+(parameters are looked up by `id` at LP-build time).
+
 **Migration**
 
 - Replace reads of `productivity_mw_per_m3s` with
@@ -94,6 +135,20 @@ remediations.
 - Downstream consumers that need accumulated cascade productivity,
   energy-units inflows, or reservoir energy state should read from the
   four new columns instead of computing them externally.
+- Remove `productivity_mw_per_m3s` from every `generation` block
+  in `system/hydros.json`; transfer the same numeric value into
+  the matching entry in `system/hydro_production_models.json`
+  under the same key.
+- Rename any `productivity_override` keys in
+  `system/hydro_production_models.json` to
+  `productivity_mw_per_m3s`. The values do not change; the
+  positive-value validation rule still applies, but the
+  override-versus-default distinction is gone.
+- Replace `system/scalar_parameter_definitions.parquet` and
+  `system/scalar_parameter_values.parquet` with a single
+  `system/scalar_parameters.json` (see the schema at
+  `book/src/schemas/scalar_parameters.schema.json` and the
+  authoring guide at `book/src/guide/scalar-parameters.md`).
 
 ## [0.5.1] - 2026-04-28
 
@@ -1278,14 +1333,14 @@ disappears from `cobre.results.load_policy` per-cut dicts.
 
 ### Added
 
-- Phase 1 (cobre-core): Entity model (Bus, Line, Thermal, Hydro, Contract, PumpingStation, NonControllable), system registry, topology validation, three-tier penalty resolution
-- Phase 2 (cobre-io): Case loader with five-layer validation, JSON/Parquet parsing for 33 input types, penalty/bound resolution
-- Phase 3 (cobre-solver): LP solver abstraction with HiGHS backend, warm-start support, conformance tests
-- Phase 4 (cobre-comm): Communicator trait with LocalBackend and FerrompiBackend, compile-time feature selection
-- Phase 5 (cobre-stochastic): PAR(p) preprocessing, SipHash seed derivation, Cholesky correlation, opening trees, InSample sampling
-- Phase 6 (cobre-sddp): SDDP training loop with forward/backward pass, Benders cuts, stopping rule set, convergence monitoring
-- Phase 7 (cobre-sddp + cobre-io): Simulation pipeline with MPI aggregation, Hive-partitioned Parquet output, FlatBuffers policy checkpoint
-- Phase 8 (cobre-cli): Command-line interface with `run`, `validate`, `report`, `version` subcommands, progress bars, exit codes
+- Entity model and core (cobre-core): Bus, Line, Thermal, Hydro, Contract, PumpingStation, NonControllable types; system registry; topology validation; three-tier penalty resolution
+- Case loader (cobre-io): five-layer validation; JSON/Parquet parsing for 33 input types; penalty/bound resolution
+- LP solver abstraction (cobre-solver): HiGHS backend; warm-start support; conformance tests
+- Communication layer (cobre-comm): Communicator trait with LocalBackend and FerrompiBackend; compile-time feature selection
+- Stochastic preprocessing (cobre-stochastic): PAR(p) preprocessing; SipHash seed derivation; Cholesky correlation; opening trees; InSample sampling
+- SDDP training loop (cobre-sddp): forward/backward pass; Benders cuts; stopping rule set; convergence monitoring
+- Simulation pipeline (cobre-sddp + cobre-io): MPI aggregation; Hive-partitioned Parquet output; FlatBuffers policy checkpoint
+- Command-line interface (cobre-cli): `run`, `validate`, `report`, `version` subcommands; progress bars; exit codes
 
 ## [0.0.1] - 2026-02-23
 

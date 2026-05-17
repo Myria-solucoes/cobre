@@ -29,7 +29,8 @@ my_case/
 │   ├── energy_contracts.json                # Bilateral contracts (optional)
 │   ├── hydro_geometry.parquet               # Reservoir geometry tables (optional)
 │   ├── hydro_production_models.json         # FPHA production function configs (optional)
-│   └── fpha_hyperplanes.parquet             # FPHA hyperplane coefficients (optional)
+│   ├── fpha_hyperplanes.parquet             # FPHA hyperplane coefficients (optional)
+│   └── scalar_parameters.json              # Scalar parameters for constraint expressions (optional)
 ├── scenarios/
 │   ├── inflow_history.parquet               # Historical inflow series (optional)
 │   ├── inflow_seasonal_stats.parquet        # PAR model seasonal statistics (optional)
@@ -78,8 +79,7 @@ my_case/
 | `system/hydro_production_models.json`           | JSON    | No       | FPHA production function configs                                                   |
 | `system/fpha_hyperplanes.parquet`               | Parquet | No       | FPHA hyperplane coefficients                                                       |
 | `system/hydro_energy_productivity.parquet`      | Parquet | No       | Per-plant, per-stage energy-conversion overrides                                   |
-| `system/scalar_parameter_definitions.parquet`   | Parquet | No       | Scalar parameter definitions for constraint expressions                            |
-| `system/scalar_parameter_values.parquet`        | Parquet | No       | Numeric values for scalar parameters                                               |
+| `system/scalar_parameters.json`                 | JSON    | No       | Scalar parameters for constraint expressions                                       |
 | `scenarios/inflow_history.parquet`              | Parquet | No       | Historical inflow time series                                                      |
 | `scenarios/inflow_seasonal_stats.parquet`       | Parquet | No       | PAR model seasonal statistics                                                      |
 | `scenarios/inflow_ar_coefficients.parquet`      | Parquet | No       | PAR autoregressive coefficients                                                    |
@@ -600,7 +600,6 @@ Key fields:
 | `hydros[].outflow`                            | Yes                | `min_outflow_m3s` and `max_outflow_m3s` total outflow bounds                           |
 | `hydros[].generation`                         | Yes                | Generation model: `model`, turbine flow bounds, generation MW bounds                   |
 | `hydros[].generation.model`                   | Yes                | `"constant_productivity"`, `"linearized_head"`, or `"fpha"`                            |
-| `hydros[].generation.productivity_mw_per_m3s`         | Yes (for non-fpha) | Turbine productivity factor [MW/(m³/s)]                                                |
 | `hydros[].specific_productivity_mw_per_m3s_per_m`     | No                 | Specific productivity ρ_esp [MW/(m³/s)/m]. Required for FPHA hydros that rely on VHA geometry to derive ρ_eq. |
 | `hydros[].tailrace`                           | No                 | Tailrace model: `"polynomial"` or `"piecewise"`                                        |
 | `hydros[].hydraulic_losses`                   | No                 | Head loss model: `"factor"` or `"constant"`                                            |
@@ -708,7 +707,7 @@ to mean "until end of horizon".
 | `end_stage_id`          | Yes      | Last stage (inclusive); `null` means open-ended                                                                       |
 | `model`                 | Yes      | Model name: `"constant_productivity"`, `"linearized_head"`, or `"fpha"`                                               |
 | `fpha_config`           | No       | Required when `model` is `"fpha"`. See FPHA config fields below.                                                      |
-| `productivity_override` | No       | Replaces base `productivity_mw_per_m3s` for this range. Must be > 0. Rejected on `"fpha"`. Default: entity base value |
+| `productivity_mw_per_m3s` | No       | Required and positive for `constant_productivity` and `linearized_head`. Rejected on `"fpha"`. |
 
 **`seasonal` mode.** The model for a stage is determined by its `season_id`.
 Stages whose season is not listed use `default_model`.
@@ -716,7 +715,7 @@ Stages whose season is not listed use `default_model`.
 | Field           | Required | Description                                                                                      |
 | --------------- | -------- | ------------------------------------------------------------------------------------------------ |
 | `default_model` | Yes      | Fallback model name for unlisted seasons                                                         |
-| `seasons`       | Yes      | Array of season overrides: `season_id`, `model`, optional `fpha_config`, `productivity_override` |
+| `seasons`       | Yes      | Array of season overrides: `season_id`, `model`, optional `fpha_config`, `productivity_mw_per_m3s` |
 
 **`fpha_config` fields (required when `model` is `"fpha"`):**
 
@@ -770,7 +769,7 @@ mutually exclusive — set one pair or the other, not both.
           "start_stage_id": 25,
           "end_stage_id": null,
           "model": "constant_productivity",
-          "productivity_override": 0.72
+          "productivity_mw_per_m3s": 0.72
         }
       ]
     }
@@ -867,54 +866,63 @@ by a stage-specific row.
 
 ---
 
-### `system/scalar_parameter_definitions.parquet`
+### `system/scalar_parameters.json`
 
-Defines the scalar parameters that can be referenced from generic-constraint
-coefficient expressions using the `@name` sigil. One row per parameter.
+Named scalar parameters that can be referenced from generic-constraint coefficient
+expressions using the `@name` sigil. The file is optional; when absent, no
+parameters are loaded and any `@name` token in a constraint expression causes a
+load error.
 
-| Column          | Parquet type | Nullable | Description                                              |
-| --------------- | ------------ | -------- | -------------------------------------------------------- |
-| `id`            | INT32        | no       | Unique parameter identifier                              |
-| `name`          | UTF8         | no       | Unique parameter name (non-empty, no leading/trailing spaces) |
-| `kind`          | UTF8         | no       | One of `constant` / `per_stage` / `seasonal` / `computed` |
-| `computed_spec` | UTF8         | yes      | Non-null and parseable when `kind == "computed"`; null otherwise |
+**Top-level structure:**
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/book/src/schemas/scalar_parameters.schema.json",
+  "scalar_parameters": [
+    { "id": 1, "name": "rho_eq_h1", "kind": "computed",
+      "computed_spec": { "tag": "equivalent_productivity", "hydro_id": 1 } }
+  ]
+}
+```
+
+**Per-entry fields:**
+
+| Field           | Type    | Required | Description                                                                       |
+| --------------- | ------- | -------- | --------------------------------------------------------------------------------- |
+| `id`            | integer | Yes      | Unique parameter identifier (int32)                                               |
+| `name`          | string  | Yes      | Unique parameter name (non-empty, no leading/trailing whitespace)                 |
+| `kind`          | string  | Yes      | One of `constant`, `per_stage`, `seasonal`, `computed`                            |
+| `value`         | number  | kind dep | Finite f64 value. Required for `constant`. Absent otherwise.                     |
+| `values`        | array   | kind dep | Array of `[index, value]` pairs. Required for `per_stage` and `seasonal`.        |
+| `computed_spec` | object  | kind dep | `{"tag": "<variant>", "hydro_id": <int>}`. Required for `computed`.              |
+
+**`computed_spec` tag values:**
+
+| `tag`                      | Description                             |
+| -------------------------- | --------------------------------------- |
+| `equivalent_productivity`  | Equivalent productivity ρ_eq            |
+| `accumulated_productivity` | Accumulated cascade productivity ρ_acum |
+| `reference_volume`         | Reference reservoir volume V_ref        |
+| `reference_turbine`        | Reference turbined flow Q_ref           |
+| `min_storage`              | Minimum operational storage V_min       |
+| `max_storage`              | Maximum operational storage V_max       |
+| `specific_productivity`    | Specific productivity ρ_esp             |
 
 **Validation:**
 
-- `id`, `name`, and `kind` must not be null.
-- `name` must be non-empty with no leading or trailing whitespace.
+- `id` values must be unique across all entries.
+- `name` values must be unique (case-sensitive), non-empty, and have no leading
+  or trailing whitespace.
 - `kind` must be exactly one of the four legal values.
-- When `kind` is `"computed"`, `computed_spec` must be non-null and parse as
-  `<variant_tag>(hydro_id=<int>)`. Valid variant tags are:
-  `EquivalentProductivity`, `AccumulatedProductivity`, `ReferenceVolume`,
-  `ReferenceTurbine`, `MinStorage`, `MaxStorage`, `SpecificProductivity`.
-- When `kind` is not `"computed"`, `computed_spec` must be null.
-- `id` values must be unique. `name` values must be unique (case-sensitive).
+- For `per_stage`: `values` pairs must have contiguous `stage_id` keys starting
+  at 0; duplicates and gaps are rejected.
+- For `seasonal`: `season_id` keys within an entry must be unique; duplicates
+  are rejected.
+- For `computed`: `computed_spec` must be present with a valid `tag` and integer
+  `hydro_id`. The referenced hydro must exist in `hydros.json`.
+- Unknown JSON fields on any entry are rejected immediately.
 
 See [Scalar Parameters](../guide/scalar-parameters.md) for usage examples.
-
----
-
-### `system/scalar_parameter_values.parquet`
-
-Numeric values for `constant`, `per_stage`, and `seasonal` parameters.
-Not used for `computed` parameters (they have no value rows).
-
-| Column         | Parquet type | Nullable | Description                              |
-| -------------- | ------------ | -------- | ---------------------------------------- |
-| `parameter_id` | INT32        | no       | `EntityId` of the parameter              |
-| `stage_id`     | INT32        | yes      | Zero-based stage index for `per_stage`   |
-| `season_id`    | INT32        | yes      | Season id for `seasonal`                 |
-| `value`        | DOUBLE       | no       | Finite f64 value                         |
-
-**Validation:**
-
-- `parameter_id` and `value` must not be null.
-- `value` must be finite.
-- For `constant` parameters: one row with both `stage_id` and `season_id` null.
-- For `per_stage` parameters: exactly `n_stages` rows, one per stage index,
-  with `season_id` null on every row.
-- For `seasonal` parameters: at least one row with `stage_id` null.
 
 ---
 

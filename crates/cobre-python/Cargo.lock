@@ -381,6 +381,7 @@ dependencies = [
  "cobre-io",
  "cobre-solver",
  "cobre-stochastic",
+ "postcard",
  "rayon",
  "serde",
  "thiserror",

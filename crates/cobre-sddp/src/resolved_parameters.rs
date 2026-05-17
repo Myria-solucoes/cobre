@@ -126,11 +126,11 @@ pub enum ResolvedParametersError {
 pub struct ResolvedParameters {
     /// Outer index: parameter slot (dense, matches `Vec<ScalarParameter>` order).
     /// Inner index: `stage_idx` in `0..n_stages`.
-    per_param: Vec<Vec<f64>>,
+    pub per_param: Vec<Vec<f64>>,
     /// Maps `EntityId.0` of the parameter to its slot in `per_param`.
     /// Sorted ascending by key for declaration-order invariance and `O(log n)`
     /// binary-search lookup.
-    id_to_slot: Vec<(i32, usize)>,
+    pub id_to_slot: Vec<(i32, usize)>,
 }
 
 impl ResolvedParameters {

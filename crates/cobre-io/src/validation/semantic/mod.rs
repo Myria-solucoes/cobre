@@ -304,6 +304,7 @@ mod tests {
             hydro_geometry,
             production_models: vec![],
             fpha_hyperplanes,
+            scalar_parameters: vec![],
             inflow_history: vec![],
             inflow_seasonal_stats: vec![],
             inflow_ar_coefficients: vec![],
@@ -1216,6 +1217,7 @@ mod tests {
             hydro_geometry: vec![],
             production_models: vec![],
             fpha_hyperplanes: vec![],
+            scalar_parameters: vec![],
             inflow_history: vec![],
             inflow_seasonal_stats: inflow_stats,
             inflow_ar_coefficients: inflow_ar,
@@ -2417,6 +2419,7 @@ mod tests {
             penalty_overrides_hydro: vec![],
             penalty_overrides_ncs: vec![],
             ncs_bounds: vec![],
+            scalar_parameters: vec![],
         }
     }
 
@@ -2702,6 +2705,7 @@ mod tests {
             penalty_overrides_hydro: vec![],
             penalty_overrides_ncs: vec![],
             ncs_bounds: vec![],
+            scalar_parameters: vec![],
         }
     }
 
