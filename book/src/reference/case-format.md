@@ -29,6 +29,7 @@ my_case/
 │   ├── energy_contracts.json                # Bilateral contracts (optional)
 │   ├── hydro_geometry.parquet               # Reservoir geometry tables (optional)
 │   ├── hydro_production_models.json         # FPHA production function configs (optional)
+    ├── hydro_energy_productivity.parquet    # Per-plant, per-stage energy-conversion overrides (optional)
 │   ├── fpha_hyperplanes.parquet             # FPHA hyperplane coefficients (optional)
 │   └── scalar_parameters.json              # Scalar parameters for constraint expressions (optional)
 ├── scenarios/

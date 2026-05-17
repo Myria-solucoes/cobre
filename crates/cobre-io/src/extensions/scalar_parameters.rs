@@ -73,7 +73,7 @@
 //!
 //! Top-level parse failures (malformed JSON) return
 //! [`crate::LoadError::ParseError`].  I/O failures return
-//! [`crate::LoadError::Io`].
+//! [`crate::LoadError`].
 //!
 //! ## Output ordering
 //!
@@ -161,7 +161,7 @@ pub(crate) struct ScalarParameterJsonEntry {
 ///
 /// | Condition                                     | Error variant                  |
 /// | --------------------------------------------- | ------------------------------ |
-/// | File not found or permission denied           | [`LoadError::Io`]              |
+/// | File not found or permission denied           | [`LoadError`]              |
 /// | Malformed JSON                                | [`LoadError::ParseError`]      |
 /// | Unknown JSON field in any entry               | [`LoadError::ParseError`]      |
 /// | Duplicate `id` across entries                 | [`LoadError::SchemaError`]     |

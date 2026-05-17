@@ -445,7 +445,7 @@ pub const RESOLVED_PARAMETERS_WIRE_VERSION: u32 = 1;
 ///
 /// Encoding always sets `version` to [`RESOLVED_PARAMETERS_WIRE_VERSION`].
 /// Decoding rejects any `version` that does not match, returning
-/// [`SddpError::WireVersionMismatch`].
+/// [`crate::SddpError::WireVersionMismatch`].
 #[derive(serde::Serialize, serde::Deserialize)]
 struct ResolvedParametersWireEnvelope {
     version: u32,
@@ -462,7 +462,7 @@ struct ResolvedParametersWireEnvelope {
 ///
 /// # Errors
 ///
-/// Returns [`SddpError::Validation`] if postcard serialization fails.  With
+/// Returns [`crate::SddpError::Validation`] if postcard serialization fails.  With
 /// the current struct layout (`Vec<Vec<f64>>` + `Vec<(i32, usize)>`) this
 /// cannot occur in practice; the error path exists to satisfy the
 /// `Result<_, SddpError>` contract used by other broadcast helpers.
@@ -512,14 +512,14 @@ pub fn serialize_resolved_parameters(
 /// The byte buffer must have been produced by [`serialize_resolved_parameters`].
 /// An empty slice or a corrupted buffer returns an error; this function never
 /// silently discards data. A version mismatch returns
-/// [`SddpError::WireVersionMismatch`] so callers can distinguish format
+/// [`crate::SddpError::WireVersionMismatch`] so callers can distinguish format
 /// incompatibility from corruption.
 ///
 /// # Errors
 ///
-/// - [`SddpError::Validation`] — byte slice is corrupted, truncated, or not a
-///   valid postcard encoding of [`ResolvedParametersWireEnvelope`].
-/// - [`SddpError::WireVersionMismatch`] — the encoded version does not match
+/// - [`crate::SddpError::Validation`] — byte slice is corrupted, truncated, or not a
+///   valid postcard encoding of the versioned envelope.
+/// - [`crate::SddpError::WireVersionMismatch`] — the encoded version does not match
 ///   [`RESOLVED_PARAMETERS_WIRE_VERSION`]; a binary mismatch across MPI ranks.
 ///
 /// # Examples
