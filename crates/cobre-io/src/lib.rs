@@ -55,6 +55,7 @@ pub mod system;
 pub mod validation;
 
 pub use broadcast::{
+    BroadcastComputedParameter, BroadcastParameterKind, BroadcastScalarParameter,
     deserialize_parameters, deserialize_system, serialize_parameters, serialize_system,
 };
 pub use config::{

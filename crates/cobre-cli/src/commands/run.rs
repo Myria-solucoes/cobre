@@ -98,6 +98,7 @@ type LoadedCase = (
     PrepareHydroModelsResult,
     BroadcastConfig,
     cobre_io::Config,
+    Vec<cobre_core::ScalarParameter>,
 );
 
 /// Load case and config on rank 0, capturing errors for MPI collective participation.
@@ -133,7 +134,13 @@ fn load_case_and_config(
     .map_err(CliError::from)?;
     let hydro_models =
         prepare_hydro_models(&prepared.system, &args.case_dir).map_err(CliError::from)?;
-    Ok((prepared, hydro_models, bcast, config))
+    let scalar_parameters_path = args.case_dir.join("system/scalar_parameters.json");
+    let scalar_parameters = if scalar_parameters_path.exists() {
+        cobre_io::load_scalar_parameters_json(&args.case_dir)?
+    } else {
+        Vec::new()
+    };
+    Ok((prepared, hydro_models, bcast, config, scalar_parameters))
 }
 
 /// Shared context for execute phases (communicator, output, topology, etc.).
@@ -616,10 +623,11 @@ fn broadcast_and_build_setup(
         root_estimation_path,
         raw_bcast_tree,
         root_hydro_models,
+        raw_scalar_parameters,
         load_err,
     ) = if ctx.is_root {
         match load_case_and_config(args, ctx.quiet, &ctx.stderr) {
-            Ok((prepared, hydro_models, bcast, config)) => {
+            Ok((prepared, hydro_models, bcast, config, scalar_parameters)) => {
                 let bcast_tree = if prepared.stochastic.provenance().opening_tree
                     == ComponentProvenance::UserSupplied
                 {
@@ -638,6 +646,10 @@ fn broadcast_and_build_setup(
                     estimation_report,
                     estimation_path,
                 } = prepared;
+                let bcast_params: Vec<cobre_io::BroadcastScalarParameter> = scalar_parameters
+                    .iter()
+                    .map(cobre_io::BroadcastScalarParameter::from)
+                    .collect();
                 (
                     Some(system),
                     Some(bcast),
@@ -647,19 +659,32 @@ fn broadcast_and_build_setup(
                     Some(estimation_path),
                     Some(bcast_tree),
                     Some(hydro_models),
+                    Some(bcast_params),
                     None,
                 )
             }
-            Err(e) => (None, None, None, None, None, None, None, None, Some(e)),
+            Err(e) => (
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(e),
+            ),
         }
     } else {
-        (None, None, None, None, None, None, None, None, None)
+        (None, None, None, None, None, None, None, None, None, None)
     };
     let root_estimation_report: Option<EstimationReport> = root_estimation_report;
     let root_estimation_path: Option<cobre_sddp::EstimationPath> = root_estimation_path;
 
     let system_result = broadcast_value(raw_system, &ctx.comm);
     let bcast_config_result = broadcast_value(raw_bcast_config, &ctx.comm);
+    let scalar_parameters_result = broadcast_value(raw_scalar_parameters, &ctx.comm);
     let root_hydro_models: Option<PrepareHydroModelsResult> = root_hydro_models;
 
     let tree_result = broadcast_value(raw_bcast_tree, &ctx.comm);
@@ -818,12 +843,10 @@ fn broadcast_and_build_setup(
 
     let training_enabled = bcast_config.training_enabled;
     let policy_mode = bcast_config.policy_mode;
-    let scalar_parameters_path = args.case_dir.join("system/scalar_parameters.json");
-    let scalar_parameters = if scalar_parameters_path.exists() {
-        cobre_io::load_scalar_parameters_json(&args.case_dir)?
-    } else {
-        Vec::new()
-    };
+    let scalar_parameters: Vec<cobre_core::ScalarParameter> = scalar_parameters_result?
+        .into_iter()
+        .map(cobre_core::ScalarParameter::from)
+        .collect();
     let setup = build_study_setup(
         &system,
         &mut bcast_config,

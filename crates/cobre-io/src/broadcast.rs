@@ -5,6 +5,20 @@
 //! These helpers serialize payloads to compact byte buffers for broadcast
 //! and deserialize them on worker ranks.
 //!
+//! ## Why broadcast mirror types
+//!
+//! [`ParameterKind`] and [`ComputedParameter`] use serde internally-tagged
+//! enums (`#[serde(tag = "...")]`) to drive the user-facing JSON schema. Postcard
+//! does not support that representation. To keep MPI broadcast working without
+//! per-rank disk reads, the public `serialize_parameters` /
+//! `deserialize_parameters` helpers convert through tag-free mirror types
+//! ([`BroadcastScalarParameter`], [`BroadcastParameterKind`],
+//! [`BroadcastComputedParameter`]) on the wire and reconstruct the in-memory
+//! shape on the receiving end. This mirrors the [`BroadcastConfig`] pattern in
+//! `cobre-cli` used for [`crate::Config`].
+//!
+//! [`BroadcastConfig`]: ../../cobre_cli/commands/broadcast/struct.BroadcastConfig.html
+//!
 //! # Usage
 //!
 //! On rank 0, load the case and serialize:
@@ -23,10 +37,150 @@
 //! // system.bus(id) works immediately — indices are rebuilt
 //! ```
 
-use cobre_core::ScalarParameter;
-use cobre_core::System;
+use cobre_core::{ComputedParameter, EntityId, ParameterKind, ScalarParameter, System};
+use serde::{Deserialize, Serialize};
 
 use crate::LoadError;
+
+// ── Broadcast mirror types (tag-free, postcard-compatible) ──────────────────
+
+/// Postcard-safe mirror of [`ScalarParameter`].
+///
+/// Carries the same data as `ScalarParameter` but with a [`BroadcastParameterKind`]
+/// in place of [`ParameterKind`] (which uses internal serde tagging that postcard
+/// does not support). Convert with `From` in both directions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BroadcastScalarParameter {
+    /// Unique parameter identifier.
+    pub id: EntityId,
+    /// Short name used in reports and log output.
+    pub name: String,
+    /// Kind in the broadcast-safe representation.
+    pub kind: BroadcastParameterKind,
+}
+
+/// Postcard-safe mirror of [`ParameterKind`]. Uses externally-tagged enum
+/// encoding (the serde default), which postcard supports natively.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum BroadcastParameterKind {
+    /// Single scalar value applied to every stage.
+    Constant(f64),
+    /// Dense `Vec<f64>` indexed by stage (0-based).
+    PerStage(Vec<f64>),
+    /// Sorted, deduplicated `(season_id, value)` pairs.
+    Seasonal(Vec<(i32, f64)>),
+    /// Computed-parameter specification.
+    Computed(BroadcastComputedParameter),
+}
+
+/// Postcard-safe mirror of [`ComputedParameter`]. Externally-tagged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BroadcastComputedParameter {
+    /// Equivalent productivity coefficient (`ρ_eq`).
+    EquivalentProductivity(EntityId),
+    /// Accumulated productivity coefficient (`ρ_acum`).
+    AccumulatedProductivity(EntityId),
+    /// Reference reservoir volume (`V_ref`).
+    ReferenceVolume(EntityId),
+    /// Reference turbine flow (`Q_ref`).
+    ReferenceTurbine(EntityId),
+    /// Minimum operational storage (`V_min`).
+    MinStorage(EntityId),
+    /// Maximum operational storage (`V_max`).
+    MaxStorage(EntityId),
+    /// Specific productivity (`ρ_esp`).
+    SpecificProductivity(EntityId),
+}
+
+impl From<&ScalarParameter> for BroadcastScalarParameter {
+    fn from(p: &ScalarParameter) -> Self {
+        Self {
+            id: p.id,
+            name: p.name.clone(),
+            kind: BroadcastParameterKind::from(&p.kind),
+        }
+    }
+}
+
+impl From<BroadcastScalarParameter> for ScalarParameter {
+    fn from(b: BroadcastScalarParameter) -> Self {
+        Self {
+            id: b.id,
+            name: b.name,
+            kind: ParameterKind::from(b.kind),
+        }
+    }
+}
+
+impl From<&ParameterKind> for BroadcastParameterKind {
+    fn from(k: &ParameterKind) -> Self {
+        match k {
+            ParameterKind::Constant { value } => Self::Constant(*value),
+            ParameterKind::PerStage { values } => Self::PerStage(values.clone()),
+            ParameterKind::Seasonal { values } => Self::Seasonal(values.clone()),
+            ParameterKind::Computed { computed_spec } => {
+                Self::Computed(BroadcastComputedParameter::from(*computed_spec))
+            }
+        }
+    }
+}
+
+impl From<BroadcastParameterKind> for ParameterKind {
+    fn from(b: BroadcastParameterKind) -> Self {
+        match b {
+            BroadcastParameterKind::Constant(value) => Self::Constant { value },
+            BroadcastParameterKind::PerStage(values) => Self::PerStage { values },
+            BroadcastParameterKind::Seasonal(values) => Self::Seasonal { values },
+            BroadcastParameterKind::Computed(c) => Self::Computed {
+                computed_spec: ComputedParameter::from(c),
+            },
+        }
+    }
+}
+
+impl From<ComputedParameter> for BroadcastComputedParameter {
+    fn from(c: ComputedParameter) -> Self {
+        match c {
+            ComputedParameter::EquivalentProductivity { hydro_id } => {
+                Self::EquivalentProductivity(hydro_id)
+            }
+            ComputedParameter::AccumulatedProductivity { hydro_id } => {
+                Self::AccumulatedProductivity(hydro_id)
+            }
+            ComputedParameter::ReferenceVolume { hydro_id } => Self::ReferenceVolume(hydro_id),
+            ComputedParameter::ReferenceTurbine { hydro_id } => Self::ReferenceTurbine(hydro_id),
+            ComputedParameter::MinStorage { hydro_id } => Self::MinStorage(hydro_id),
+            ComputedParameter::MaxStorage { hydro_id } => Self::MaxStorage(hydro_id),
+            ComputedParameter::SpecificProductivity { hydro_id } => {
+                Self::SpecificProductivity(hydro_id)
+            }
+        }
+    }
+}
+
+impl From<BroadcastComputedParameter> for ComputedParameter {
+    fn from(b: BroadcastComputedParameter) -> Self {
+        match b {
+            BroadcastComputedParameter::EquivalentProductivity(hydro_id) => {
+                Self::EquivalentProductivity { hydro_id }
+            }
+            BroadcastComputedParameter::AccumulatedProductivity(hydro_id) => {
+                Self::AccumulatedProductivity { hydro_id }
+            }
+            BroadcastComputedParameter::ReferenceVolume(hydro_id) => {
+                Self::ReferenceVolume { hydro_id }
+            }
+            BroadcastComputedParameter::ReferenceTurbine(hydro_id) => {
+                Self::ReferenceTurbine { hydro_id }
+            }
+            BroadcastComputedParameter::MinStorage(hydro_id) => Self::MinStorage { hydro_id },
+            BroadcastComputedParameter::MaxStorage(hydro_id) => Self::MaxStorage { hydro_id },
+            BroadcastComputedParameter::SpecificProductivity(hydro_id) => {
+                Self::SpecificProductivity { hydro_id }
+            }
+        }
+    }
+}
 
 /// Serialize a [`System`] to a postcard byte buffer for MPI broadcast.
 ///
@@ -111,11 +265,8 @@ pub fn deserialize_system(bytes: &[u8]) -> Result<System, LoadError> {
 ///
 /// # Examples
 ///
-/// ```no_run
-/// // NOTE: postcard does not support serde internal tagging used by ParameterKind.
-/// // This example is compile-tested only; the full round-trip is tracked
-/// // separately and requires a postcard-compatible envelope for ParameterKind.
-/// use cobre_core::{ComputedParameter, EntityId, ParameterKind, ScalarParameter};
+/// ```
+/// use cobre_core::{EntityId, ParameterKind, ScalarParameter};
 /// use cobre_io::serialize_parameters;
 ///
 /// let param = ScalarParameter {
@@ -130,7 +281,11 @@ pub fn deserialize_system(bytes: &[u8]) -> Result<System, LoadError> {
 /// assert_eq!(restored, vec![param]);
 /// ```
 pub fn serialize_parameters(parameters: &[ScalarParameter]) -> Result<Vec<u8>, LoadError> {
-    postcard::to_allocvec(parameters)
+    let mirror: Vec<BroadcastScalarParameter> = parameters
+        .iter()
+        .map(BroadcastScalarParameter::from)
+        .collect();
+    postcard::to_allocvec(&mirror)
         .map_err(|e| LoadError::parse("<broadcast>", format!("postcard serialization: {e}")))
 }
 
@@ -149,10 +304,7 @@ pub fn serialize_parameters(parameters: &[ScalarParameter]) -> Result<Vec<u8>, L
 ///
 /// # Examples
 ///
-/// ```no_run
-/// // NOTE: postcard does not support serde internal tagging used by ParameterKind.
-/// // This example is compile-tested only; the full round-trip is tracked
-/// // separately and requires a postcard-compatible envelope for ParameterKind.
+/// ```
 /// use cobre_core::{EntityId, ParameterKind, ScalarParameter};
 /// use cobre_io::{deserialize_parameters, serialize_parameters};
 ///
@@ -166,8 +318,9 @@ pub fn serialize_parameters(parameters: &[ScalarParameter]) -> Result<Vec<u8>, L
 /// assert_eq!(restored, vec![param]);
 /// ```
 pub fn deserialize_parameters(bytes: &[u8]) -> Result<Vec<ScalarParameter>, LoadError> {
-    postcard::from_bytes(bytes)
-        .map_err(|e| LoadError::parse("<broadcast>", format!("postcard deserialization: {e}")))
+    let mirror: Vec<BroadcastScalarParameter> = postcard::from_bytes(bytes)
+        .map_err(|e| LoadError::parse("<broadcast>", format!("postcard deserialization: {e}")))?;
+    Ok(mirror.into_iter().map(ScalarParameter::from).collect())
 }
 
 #[cfg(test)]
@@ -361,13 +514,12 @@ mod tests {
         ]
     }
 
-    // This round-trip test is known to fail because `ParameterKind` now
-    // serializes via `ParameterKindJson` which uses serde internal tagging
-    // (`#[serde(tag = "kind")]`) — a feature that postcard explicitly does
-    // not support. The test is kept here to document the expected behaviour
-    // once that limitation is addressed (separate follow-up).
+    // Full round-trip of all four ParameterKind variants through the postcard
+    // wire format. The broadcast mirror types (BroadcastScalarParameter,
+    // BroadcastParameterKind, BroadcastComputedParameter) provide a tag-free
+    // representation that postcard can serialize natively; the conversion in
+    // and out preserves the in-memory shape.
     #[test]
-    #[ignore = "postcard does not support serde internal tagging on ParameterKind"]
     fn round_trip_all_four_parameter_kinds() {
         let original = four_kinds_fixture();
         let bytes = serialize_parameters(&original).unwrap();
