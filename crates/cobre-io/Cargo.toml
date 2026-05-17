@@ -13,7 +13,7 @@ keywords = ["power-systems", "energy", "io", "validation"]
 categories = ["science", "parser-implementations"]
 
 [features]
-schema = ["dep:schemars"]
+schema = ["dep:schemars", "cobre-core/schema"]
 ## Opt-in to the slow test suite (no slow tests currently in this crate;
 ## declaration reserved for workspace consistency).
 slow-tests = []

@@ -6,22 +6,34 @@
         "volume_max_hm3": {
           "description": "Explicit maximum volume for fitting [hm³]. Mutually exclusive with\n`volume_max_percentile`.",
           "format": "double",
-          "type": ["number", "null"]
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "volume_max_percentile": {
           "description": "Maximum as a percentile of the operating range. Mutually exclusive\nwith `volume_max_hm3`.",
           "format": "double",
-          "type": ["number", "null"]
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "volume_min_hm3": {
           "description": "Explicit minimum volume for fitting [hm³]. Mutually exclusive with\n`volume_min_percentile`.",
           "format": "double",
-          "type": ["number", "null"]
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "volume_min_percentile": {
           "description": "Minimum as a percentile of the operating range. Mutually exclusive\nwith `volume_min_hm3`.",
           "format": "double",
-          "type": ["number", "null"]
+          "type": [
+            "number",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -43,7 +55,10 @@
         "max_planes_per_hydro": {
           "description": "Maximum number of planes per hydro after heuristic selection. Absent =\nalgorithm default (10).",
           "format": "int32",
-          "type": ["integer", "null"]
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "source": {
           "description": "Hyperplane source: `\"computed\"` (fit from topology) or\n`\"precomputed\"` (from `fpha_hyperplanes.parquet`).",
@@ -52,20 +67,31 @@
         "spillage_discretization_points": {
           "description": "Number of spillage discretization points used when computing\nhyperplanes. Absent = algorithm default (5).",
           "format": "int32",
-          "type": ["integer", "null"]
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "turbine_discretization_points": {
           "description": "Number of turbine flow discretization points used when computing\nhyperplanes. Absent = algorithm default (5).",
           "format": "int32",
-          "type": ["integer", "null"]
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "volume_discretization_points": {
           "description": "Number of volume discretization points used when computing hyperplanes.\nAbsent = algorithm default (5).",
           "format": "int32",
-          "type": ["integer", "null"]
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
-      "required": ["source"],
+      "required": [
+        "source"
+      ],
       "type": "object"
     },
     "RawProductionModel": {
@@ -86,7 +112,10 @@
               "type": "array"
             }
           },
-          "required": ["selection_mode", "stage_ranges"],
+          "required": [
+            "selection_mode",
+            "stage_ranges"
+          ],
           "type": "object"
         },
         {
@@ -108,7 +137,11 @@
               "type": "string"
             }
           },
-          "required": ["selection_mode", "default_model", "seasons"],
+          "required": [
+            "selection_mode",
+            "default_model",
+            "seasons"
+          ],
           "type": "object"
         }
       ],
@@ -119,7 +152,9 @@
           "type": "integer"
         }
       },
-      "required": ["hydro_id"],
+      "required": [
+        "hydro_id"
+      ],
       "type": "object"
     },
     "RawSeasonConfig": {
@@ -141,9 +176,12 @@
           "type": "string"
         },
         "productivity_mw_per_m3s": {
-          "description": "Productivity coefficient [MW/(m³/s)]. Required and positive when\n`model` is `\"constant_productivity\"` or `\"linearized_head\"`. Must be\nabsent (null) when `model` is `\"fpha\"`.",
+          "description": "Per-season productivity coefficient [MW/(m³/s)]. Required and must be\n`> 0.0` for `\"constant_productivity\"` and `\"linearized_head\"` models.\nMust be absent or null for `\"fpha\"`.",
           "format": "double",
-          "type": ["number", "null"]
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "season_id": {
           "description": "Season index (0-based, matching the `stages.json` season map).",
@@ -151,7 +189,10 @@
           "type": "integer"
         }
       },
-      "required": ["season_id", "model"],
+      "required": [
+        "season_id",
+        "model"
+      ],
       "type": "object"
     },
     "RawStageRange": {
@@ -160,7 +201,10 @@
         "end_stage_id": {
           "description": "Last stage (inclusive) to which this entry applies. `null` = until end\nof horizon.",
           "format": "int32",
-          "type": ["integer", "null"]
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "fpha_config": {
           "anyOf": [
@@ -178,9 +222,12 @@
           "type": "string"
         },
         "productivity_mw_per_m3s": {
-          "description": "Productivity coefficient [MW/(m³/s)]. Required and positive when\n`model` is `\"constant_productivity\"` or `\"linearized_head\"`. Must be\nabsent (null) when `model` is `\"fpha\"`.",
+          "description": "Per-stage productivity coefficient [MW/(m³/s)]. Required and must be\n`> 0.0` for `\"constant_productivity\"` and `\"linearized_head\"` models.\nMust be absent or null for `\"fpha\"`.",
           "format": "double",
-          "type": ["number", "null"]
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "start_stage_id": {
           "description": "First stage (inclusive) to which this entry applies. Must be <=\n`end_stage_id` when `end_stage_id` is set.",
@@ -188,7 +235,10 @@
           "type": "integer"
         }
       },
-      "required": ["start_stage_id", "model"],
+      "required": [
+        "start_stage_id",
+        "model"
+      ],
       "type": "object"
     }
   },
@@ -197,7 +247,10 @@
   "properties": {
     "$schema": {
       "description": "JSON schema URI — informational, not validated.",
-      "type": ["string", "null"]
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "production_models": {
       "description": "Array of per-hydro production model configurations. Each `hydro_id`\nmust be unique.",
@@ -207,7 +260,9 @@
       "type": "array"
     }
   },
-  "required": ["production_models"],
+  "required": [
+    "production_models"
+  ],
   "title": "RawProductionModelFile",
   "type": "object"
 }

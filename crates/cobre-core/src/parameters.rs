@@ -82,6 +82,7 @@ pub enum CoefficientRef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(tag = "tag", rename_all = "snake_case"))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum ComputedParameter {
     /// Equivalent productivity coefficient (`ρ_eq`).
     EquivalentProductivity {

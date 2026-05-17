@@ -108,7 +108,12 @@ use crate::LoadError;
 /// `"$schema"` and similar JSON schema tooling keys are tolerated.  Unknown fields
 /// are only rejected at the per-entry level via [`ScalarParameterJsonEntry`].
 #[derive(Deserialize)]
-struct ScalarParametersFile {
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) struct ScalarParametersFile {
+    /// `$schema` field — informational, not validated.
+    #[serde(rename = "$schema", default)]
+    _schema: Option<String>,
+    /// Array of scalar parameter entries.
     scalar_parameters: Vec<ScalarParameterJsonEntry>,
 }
 
@@ -119,15 +124,27 @@ struct ScalarParametersFile {
 /// in the message, rather than being silently ignored.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ScalarParameterJsonEntry {
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) struct ScalarParameterJsonEntry {
+    /// Stable numeric identifier; unique within the file.
     id: i32,
+    /// Human-readable name; unique within the file. Used as the `@name` reference
+    /// from `generic_constraints.json`.
     name: String,
+    /// Discriminator: `"constant"`, `"per_stage"`, `"seasonal"`, or `"computed"`.
+    /// The presence of `value` / `values` / `computed_spec` is determined by
+    /// this field at parse time.
     kind: String,
-    /// Present for `"constant"` kind only.
+    /// Scalar value. Required when `kind == "constant"`; must be absent for all
+    /// other kinds.
     value: Option<f64>,
-    /// Present for `"per_stage"` and `"seasonal"` kinds only.
+    /// `[[key, value], ...]` pairs. Required when `kind == "per_stage"` (keys are
+    /// stage ids, must be a contiguous range starting at 0) or
+    /// `kind == "seasonal"` (keys are season ids, must be unique). Must be absent
+    /// for `"constant"` and `"computed"`.
     values: Option<Vec<(i32, f64)>>,
-    /// Present for `"computed"` kind only.
+    /// Computed-parameter specification. Required when `kind == "computed"`;
+    /// must be absent for all other kinds.
     computed_spec: Option<ComputedParameter>,
 }
 

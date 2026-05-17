@@ -1,177 +1,230 @@
 {
   "$defs": {
-    "ComputedSpec": {
-      "description": "Specification for a computed parameter.\n\nIdentifies which hydro-indexed quantity to derive and from which plant.",
-      "properties": {
-        "hydro_id": {
-          "description": "Hydro plant identifier. Must match an `id` in `hydros.json`.",
-          "format": "int32",
-          "type": "integer"
-        },
-        "tag": {
-          "description": "Which quantity to derive. One of: `equivalent_productivity`,\n`accumulated_productivity`, `reference_volume`, `reference_turbine`,\n`min_storage`, `max_storage`, `specific_productivity`.",
-          "type": "string"
-        }
-      },
-      "required": ["tag", "hydro_id"],
-      "type": "object"
-    },
-    "ScalarParameterEntry": {
-      "description": "One scalar parameter entry. The `kind` field discriminates between the\nfour payload shapes.",
+    "ComputedParameter": {
+      "description": "A Cobre-computed quantity indexed by hydro plant.\n\nEach variant names one of the seven scalar quantities that the resolver\nderives from hydro geometry and operational data. All variants carry a\nsingle `hydro_id` field identifying the hydro plant.\n\n# Examples\n\n```\nuse cobre_core::{ComputedParameter, EntityId};\n\nlet param = ComputedParameter::EquivalentProductivity {\n    hydro_id: EntityId(1),\n};\n\n// ComputedParameter is Copy:\nlet copy = param;\nassert_eq!(param, copy);\n```",
       "oneOf": [
         {
-          "description": "Constant parameter — one value applied to every stage.",
+          "description": "Equivalent productivity coefficient (`ρ_eq`).",
           "properties": {
-            "id": {
-              "description": "Unique parameter identifier (int32). Must be unique across all entries.",
-              "format": "int32",
-              "type": "integer"
+            "hydro_id": {
+              "$ref": "#/$defs/EntityId",
+              "description": "Hydro plant identifier."
             },
-            "kind": {
-              "const": "constant",
+            "tag": {
+              "const": "equivalent_productivity",
               "type": "string"
-            },
-            "name": {
-              "description": "Unique parameter name. Must be non-empty and have no leading or\ntrailing whitespace.",
-              "type": "string"
-            },
-            "value": {
-              "description": "The constant value applied to all stages. Must be finite.",
-              "format": "double",
-              "type": "number"
             }
           },
-          "required": ["id", "name", "kind", "value"],
+          "required": [
+            "tag",
+            "hydro_id"
+          ],
           "type": "object"
         },
         {
-          "description": "Per-stage parameter — one value per study stage.\n\nThe `values` array contains `[stage_id, value]` pairs. The `stage_id`\nintegers must form a contiguous range starting at 0 (i.e. [0, 1, 2, …,\nN-1]). Gaps, duplicates, and non-zero starts are all rejected.",
+          "description": "Accumulated productivity coefficient (`ρ_acum`).",
           "properties": {
-            "id": {
-              "description": "Unique parameter identifier (int32). Must be unique across all entries.",
-              "format": "int32",
-              "type": "integer"
+            "hydro_id": {
+              "$ref": "#/$defs/EntityId",
+              "description": "Hydro plant identifier."
             },
-            "kind": {
-              "const": "per_stage",
+            "tag": {
+              "const": "accumulated_productivity",
               "type": "string"
-            },
-            "name": {
-              "description": "Unique parameter name. Must be non-empty and have no leading or\ntrailing whitespace.",
-              "type": "string"
-            },
-            "values": {
-              "description": "Array of [stage_id, value] pairs. Must be non-empty. stage_id values\nmust be contiguous from 0. All values must be finite.",
-              "items": {
-                "description": "[stage_id, value] pair.",
-                "items": [
-                  {
-                    "description": "Zero-based stage index.",
-                    "format": "int32",
-                    "type": "integer"
-                  },
-                  {
-                    "description": "Finite numeric value for this stage.",
-                    "format": "double",
-                    "type": "number"
-                  }
-                ],
-                "maxItems": 2,
-                "minItems": 2,
-                "type": "array"
-              },
-              "minItems": 1,
-              "type": "array"
             }
           },
-          "required": ["id", "name", "kind", "values"],
+          "required": [
+            "tag",
+            "hydro_id"
+          ],
           "type": "object"
         },
         {
-          "description": "Seasonal parameter — one value per season index.\n\nThe `values` array contains `[season_id, value]` pairs. Season indices\nneed not be contiguous, but must be unique within the entry. The value\nfor a stage is looked up by the stage's season.",
+          "description": "Reference reservoir volume (`V_ref`).",
           "properties": {
-            "id": {
-              "description": "Unique parameter identifier (int32). Must be unique across all entries.",
-              "format": "int32",
-              "type": "integer"
+            "hydro_id": {
+              "$ref": "#/$defs/EntityId",
+              "description": "Hydro plant identifier."
             },
-            "kind": {
-              "const": "seasonal",
+            "tag": {
+              "const": "reference_volume",
               "type": "string"
-            },
-            "name": {
-              "description": "Unique parameter name. Must be non-empty and have no leading or\ntrailing whitespace.",
-              "type": "string"
-            },
-            "values": {
-              "description": "Array of [season_id, value] pairs. Must be non-empty. season_id values\nmust be unique within this entry. All values must be finite.",
-              "items": {
-                "description": "[season_id, value] pair.",
-                "items": [
-                  {
-                    "description": "Season index (matches the season map in stages.json).",
-                    "format": "int32",
-                    "type": "integer"
-                  },
-                  {
-                    "description": "Finite numeric value for this season.",
-                    "format": "double",
-                    "type": "number"
-                  }
-                ],
-                "maxItems": 2,
-                "minItems": 2,
-                "type": "array"
-              },
-              "minItems": 1,
-              "type": "array"
             }
           },
-          "required": ["id", "name", "kind", "values"],
+          "required": [
+            "tag",
+            "hydro_id"
+          ],
           "type": "object"
         },
         {
-          "description": "Computed parameter — value derived from hydro geometry at each stage.\n\nNo numeric values are supplied; the solver resolves the value from\nthe hydro plant's geometry and the study's reference operating point.\nThe `computed_spec` object names which quantity to derive and from\nwhich plant.",
+          "description": "Reference turbine flow (`q_ref`).",
           "properties": {
-            "computed_spec": {
-              "$ref": "#/$defs/ComputedSpec"
+            "hydro_id": {
+              "$ref": "#/$defs/EntityId",
+              "description": "Hydro plant identifier."
             },
-            "id": {
-              "description": "Unique parameter identifier (int32). Must be unique across all entries.",
-              "format": "int32",
-              "type": "integer"
-            },
-            "kind": {
-              "const": "computed",
-              "type": "string"
-            },
-            "name": {
-              "description": "Unique parameter name. Must be non-empty and have no leading or\ntrailing whitespace.",
+            "tag": {
+              "const": "reference_turbine",
               "type": "string"
             }
           },
-          "required": ["id", "name", "kind", "computed_spec"],
+          "required": [
+            "tag",
+            "hydro_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Minimum operational storage (`V_min`).",
+          "properties": {
+            "hydro_id": {
+              "$ref": "#/$defs/EntityId",
+              "description": "Hydro plant identifier."
+            },
+            "tag": {
+              "const": "min_storage",
+              "type": "string"
+            }
+          },
+          "required": [
+            "tag",
+            "hydro_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Maximum operational storage (`V_max`).",
+          "properties": {
+            "hydro_id": {
+              "$ref": "#/$defs/EntityId",
+              "description": "Hydro plant identifier."
+            },
+            "tag": {
+              "const": "max_storage",
+              "type": "string"
+            }
+          },
+          "required": [
+            "tag",
+            "hydro_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Specific productivity (`ρ_esp`).",
+          "properties": {
+            "hydro_id": {
+              "$ref": "#/$defs/EntityId",
+              "description": "Hydro plant identifier."
+            },
+            "tag": {
+              "const": "specific_productivity",
+              "type": "string"
+            }
+          },
+          "required": [
+            "tag",
+            "hydro_id"
+          ],
           "type": "object"
         }
       ]
+    },
+    "EntityId": {
+      "description": "Strongly-typed entity identifier.\n\nWraps the `i32` identifier from JSON input files. The newtype pattern prevents\naccidental confusion between entity IDs and collection indices (`usize`), which\nis a common source of bugs in systems with both ID-based lookup and index-based\naccess. `EntityId` is used as the key in `HashMap<EntityId, usize>` lookup tables\nand as the value in cross-reference fields (e.g., `Hydro::bus_id`, `Line::source_bus_id`).\n\nWhy `i32` and not `String`: All JSON entity schemas use integer IDs (`i32`). Integer\nkeys are cheaper to hash, compare, and copy than strings — important because\n`EntityId` appears in every lookup table and cross-reference field. If a future\ninput format requires string IDs, the newtype boundary isolates the change to\n`EntityId`'s internal representation and its `From`/`Into` impls.\n\n# Examples\n\n```\nuse cobre_core::EntityId;\n\nlet id: EntityId = EntityId::from(42);\nassert_eq!(id.to_string(), \"42\");\n\nlet raw: i32 = i32::from(id);\nassert_eq!(raw, 42);\n```",
+      "format": "int32",
+      "type": "integer"
+    },
+    "ScalarParameterJsonEntry": {
+      "additionalProperties": false,
+      "description": "Per-entry intermediate representation.\n\n`#[serde(deny_unknown_fields)]` ensures that any unknown field (e.g. a\nstale `\"values_source\"`) causes an immediate parse error with the field name\nin the message, rather than being silently ignored.",
+      "properties": {
+        "computed_spec": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ComputedParameter"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Computed-parameter specification. Required when `kind == \"computed\"`;\nmust be absent for all other kinds."
+        },
+        "id": {
+          "description": "Stable numeric identifier; unique within the file.",
+          "format": "int32",
+          "type": "integer"
+        },
+        "kind": {
+          "description": "Discriminator: `\"constant\"`, `\"per_stage\"`, `\"seasonal\"`, or `\"computed\"`.\nThe presence of `value` / `values` / `computed_spec` is determined by\nthis field at parse time.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Human-readable name; unique within the file. Used as the `@name` reference\nfrom `generic_constraints.json`.",
+          "type": "string"
+        },
+        "value": {
+          "description": "Scalar value. Required when `kind == \"constant\"`; must be absent for all\nother kinds.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "values": {
+          "description": "`[[key, value], ...]` pairs. Required when `kind == \"per_stage\"` (keys are\nstage ids, must be a contiguous range starting at 0) or\n`kind == \"seasonal\"` (keys are season ids, must be unique). Must be absent\nfor `\"constant\"` and `\"computed\"`.",
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "format": "int32",
+                "type": "integer"
+              },
+              {
+                "format": "double",
+                "type": "number"
+              }
+            ],
+            "type": "array"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "kind"
+      ],
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "Scalar parameters loaded from `system/scalar_parameters.json`.\n\nScalar parameters are named values that can be referenced by the `@name`\nsigil in generic-constraint coefficient expressions. The solver resolves\neach parameter to a concrete f64 value before building the LP for each stage.\n\nFour kinds are supported:\n\n- `constant` — one value applied to every stage.\n- `per_stage` — one value per study stage, indexed from 0.\n- `seasonal` — one value per season index, looked up by the stage's season.\n- `computed` — derived from hydro geometry data; no numeric values supplied.\n\nAll `id` values must be unique across the array. All `name` values must be\nunique, non-empty, and free of leading/trailing whitespace.",
+  "description": "Top-level JSON wrapper.\n\n`#[serde(deny_unknown_fields)]` is intentionally omitted at this level so that\n`\"$schema\"` and similar JSON schema tooling keys are tolerated.  Unknown fields\nare only rejected at the per-entry level via [`ScalarParameterJsonEntry`].",
   "properties": {
     "$schema": {
-      "description": "JSON schema URI — informational, not validated.",
-      "type": ["string", "null"]
+      "default": null,
+      "description": "`$schema` field — informational, not validated.",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "scalar_parameters": {
-      "description": "Array of scalar parameter entries. May be empty. Each entry must have\na unique `id` and a unique `name`.",
+      "description": "Array of scalar parameter entries.",
       "items": {
-        "$ref": "#/$defs/ScalarParameterEntry"
+        "$ref": "#/$defs/ScalarParameterJsonEntry"
       },
       "type": "array"
     }
   },
-  "required": ["scalar_parameters"],
+  "required": [
+    "scalar_parameters"
+  ],
   "title": "ScalarParametersFile",
   "type": "object"
 }

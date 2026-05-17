@@ -94,10 +94,11 @@
       "type": "object"
     },
     "RawGeneration": {
-      "description": "Tagged-union intermediate type for the `generation` sub-object.\n\nUses `#[serde(tag = \"model\")]` (internally-tagged) to dispatch on the\n`\"model\"` field value. Each variant carries only the fields relevant to\nthat model — notably, `Fpha` does NOT have `productivity_mw_per_m3s`.",
+      "description": "Tagged-union intermediate type for the `generation` sub-object.\n\nUses `#[serde(tag = \"model\")]` (internally-tagged) to dispatch on the\n`\"model\"` field value. Each variant carries only the fields relevant to\nthat model. The `productivity_mw_per_m3s` field is NOT accepted here —\nproductivity coefficients are read from `system/hydro_production_models.json`\nand are associated per `(hydro, stage)` outside this file.\nA `hydros.json` input that includes `productivity_mw_per_m3s` in its\n`generation` block will be rejected with a parse error.",
       "oneOf": [
         {
-          "description": "Constant productivity: `power = productivity * turbined_m3s`.",
+          "additionalProperties": false,
+          "description": "Constant productivity: `power = productivity * turbined_m3s`.\n\nThe productivity coefficient is read from\n`system/hydro_production_models.json` per `(hydro, stage)`. It is not\naccepted in `hydros.json`; supplying `productivity_mw_per_m3s` here\nproduces a hard parse error.",
           "properties": {
             "max_generation_mw": {
               "description": "Maximum electrical generation [MW].",
@@ -122,16 +123,10 @@
             "model": {
               "const": "constant_productivity",
               "type": "string"
-            },
-            "productivity_mw_per_m3s": {
-              "description": "Power output per unit of turbined flow [MW/(m³/s)].",
-              "format": "double",
-              "type": "number"
             }
           },
           "required": [
             "model",
-            "productivity_mw_per_m3s",
             "min_turbined_m3s",
             "max_turbined_m3s",
             "min_generation_mw",
@@ -140,7 +135,8 @@
           "type": "object"
         },
         {
-          "description": "Head-dependent productivity linearized around an operating point.",
+          "additionalProperties": false,
+          "description": "Head-dependent productivity linearized around an operating point.\n\nThe productivity coefficient is read from\n`system/hydro_production_models.json` per `(hydro, stage)`. It is not\naccepted in `hydros.json`; supplying `productivity_mw_per_m3s` here\nproduces a hard parse error.",
           "properties": {
             "max_generation_mw": {
               "description": "Maximum electrical generation [MW].",
@@ -165,16 +161,10 @@
             "model": {
               "const": "linearized_head",
               "type": "string"
-            },
-            "productivity_mw_per_m3s": {
-              "description": "Nominal power output per unit of turbined flow at reference head [MW/(m³/s)].",
-              "format": "double",
-              "type": "number"
             }
           },
           "required": [
             "model",
-            "productivity_mw_per_m3s",
             "min_turbined_m3s",
             "max_turbined_m3s",
             "min_generation_mw",
@@ -183,7 +173,8 @@
           "type": "object"
         },
         {
-          "description": "Full production function with head-area-productivity tables (FPHA model).\n\nDoes NOT have `productivity_mw_per_m3s` — FPHA computes head-dependent\nproductivity from internal tables.",
+          "additionalProperties": false,
+          "description": "Full production function with head-area-productivity tables (FPHA model).\n\nProductivity is derived from the FPHA tables in\n`system/hydro_production_models.json`. The `productivity_mw_per_m3s`\nfield is not accepted here or in any other `generation` variant.",
           "properties": {
             "max_generation_mw": {
               "description": "Maximum electrical generation [MW].",
@@ -384,6 +375,15 @@
         "reservoir": {
           "$ref": "#/$defs/RawReservoir",
           "description": "Reservoir storage bounds."
+        },
+        "specific_productivity_mw_per_m3s_per_m": {
+          "default": null,
+          "description": "Specific productivity `ρ_esp` \\[MW / ((m³/s) · m)\\]. Absent or null = not specified.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "tailrace": {
           "anyOf": [
