@@ -60,7 +60,9 @@ use cobre_stochastic::{ExternalScenarioLibrary, HistoricalScenarioLibrary, Stoch
 use crate::{
     config::{CutManagementConfig, EventParams},
     cut::FutureCostFunction,
-    energy_conversion::{EnergyConversionSet, build_energy_conversion_set},
+    energy_conversion::{
+        EnergyConversionSet, build_energy_conversion_set, build_hydro_energy_productivity_override,
+    },
     error::SddpError,
     horizon_mode::HorizonMode,
     hydro_models::{EvaporationModel, PrepareHydroModelsResult, ResolvedProductionModel},
@@ -269,6 +271,7 @@ impl StudySetup {
             basis_activity_window,
             budget,
             export_states,
+            hydro_energy_productivity_rows,
         } = config;
 
         let mut stage_templates = build_stage_templates(
@@ -638,14 +641,6 @@ impl StudySetup {
         // stages without a season assignment (None) collapse to season 0 for
         // the purpose of the reference-volume resolver — consistent with what
         // all other season-indexed lookups do when no season_id is present.
-        //
-        // Phase 1 does not yet load the per-(hydro, season) override parquet or
-        // the VHA geometry parquet at this construction site; both are deferred
-        // to Epic 4 where the full I/O pipeline is wired. Passing empty
-        // collections here causes the resolver to fall back to the global
-        // default fraction (0.65) and causes FPHA hydros to receive ρ_eq=0.0
-        // (which ticket-007 will then validate into a hard error for cases that
-        // truly lack VHA data).
         let stage_to_season: Vec<i32> = stages
             .iter()
             .map(|s| i32::try_from(s.season_id.unwrap_or(0)).unwrap_or(0))
@@ -656,13 +651,16 @@ impl StudySetup {
             system.hydros(),
             &stage_to_season,
         )?;
+        let override_table =
+            build_hydro_energy_productivity_override(hydro_energy_productivity_rows)
+                .map_err(|e| SddpError::Validation(e.to_string()))?;
         let energy_conversion = build_energy_conversion_set(
             system.hydros(),
             n_stages,
             system.cascade(),
             &reference_volume_fractions,
             &std::collections::HashMap::<cobre_core::EntityId, Vec<cobre_io::HydroGeometryRow>>::new(),
-            None,
+            Some(&override_table),
         )
         .map_err(|e| SddpError::Validation(e.to_string()))?;
 

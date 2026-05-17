@@ -76,12 +76,15 @@ pub use constraints::{
 };
 pub use error::LoadError;
 pub use extensions::{
-    FittingWindow, FphaColumnLayout, FphaHyperplaneRow, HydroGeometryRow,
-    HydroReferenceVolumeFractionRow, HydroReferenceVolumeFractions, ProductionModelConfig,
-    SeasonConfig, SelectionMode, StageRange, build_hydro_reference_volume_fractions,
-    load_fpha_hyperplanes, load_hydro_geometry, load_hydro_reference_volume_fractions,
-    load_production_models, parse_fpha_hyperplanes, parse_hydro_geometry,
-    parse_hydro_reference_volume_fractions, parse_production_models,
+    FittingWindow, FphaColumnLayout, FphaHyperplaneRow, HydroEnergyProductivityRow,
+    HydroGeometryRow, HydroReferenceVolumeFractionRow, HydroReferenceVolumeFractions,
+    ParameterDefinitionRow, ParameterKindHeader, ProductionModelConfig, ScalarParameterValueRow,
+    SeasonConfig, SelectionMode, StageRange, assemble_scalar_parameters,
+    build_hydro_reference_volume_fractions, load_fpha_hyperplanes, load_hydro_energy_productivity,
+    load_hydro_geometry, load_hydro_reference_volume_fractions, load_production_models,
+    load_scalar_parameter_definitions, load_scalar_parameter_values, parse_fpha_hyperplanes,
+    parse_hydro_energy_productivity, parse_hydro_geometry, parse_hydro_reference_volume_fractions,
+    parse_production_models, parse_scalar_parameter_definitions, parse_scalar_parameter_values,
 };
 pub use initial_conditions::parse_initial_conditions;
 pub use output::policy::{
@@ -123,6 +126,7 @@ pub use system::{
     parse_energy_contracts, parse_hydros, parse_lines, parse_non_controllable_sources,
     parse_pumping_stations, parse_thermals,
 };
+pub use validation::scalar_parameters::validate_scalar_parameters;
 pub use validation::structural::{FileManifest, validate_structure};
 pub use validation::{ErrorKind, Severity, ValidationContext, ValidationEntry};
 

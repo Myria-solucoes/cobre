@@ -853,6 +853,7 @@ fn build_study_setup(
         basis_activity_window: bcast_config.basis_activity_window,
         budget: bcast_config.budget,
         export_states: bcast_config.export_states,
+        hydro_energy_productivity_rows: Vec::new(),
     };
     StudySetup::from_broadcast_params(
         system,
