@@ -615,11 +615,27 @@ pub fn build_energy_conversion_set<S: std::hash::BuildHasher>(
         let mut row: Vec<EnergyConversion> = Vec::with_capacity(n_stages);
         for stage in 0..n_stages {
             let fraction = reference_volume_fractions.get(hydro.id, stage);
-            // For non-FPHA hydros, read ρ_eq from the resolved per-stage
-            // production model. For FPHA hydros, use 0.0 as a placeholder
-            // (the FPHA branch below overwrites it).
+            // The parquet override is consulted for every hydro (FPHA and
+            // non-FPHA). Load-time validation guarantees a single source
+            // supplies each non-FPHA `(hydro, stage)` ρ_eq, so the override
+            // lookup here is the authoritative path when present.
+            let parquet_rho_eq =
+                override_table.and_then(|o| o.equivalent_productivity(hydro.id, stage));
+
+            // Seed the conversion with the appropriate productivity scalar.
+            //
+            // - FPHA: use 0.0 as a placeholder; the FPHA branch below derives
+            //   ρ_eq from the override or from the VHA + ρ_esp pipeline and
+            //   overwrites it.
+            // - Non-FPHA: prefer the parquet override; otherwise fall back to
+            //   the JSON-resolved value from `production_models`. If neither is
+            //   supplied, use 0.0 as a sentinel (which signals a load-time
+            //   validation bug — see
+            //   `cobre_io::validation::productivity_resolution`).
             let productivity = if matches!(hydro.generation_model, HydroGenerationModel::Fpha) {
                 0.0
+            } else if let Some(value) = parquet_rho_eq {
+                value
             } else {
                 production_models.map_or(0.0, |pm| match pm.model(h_idx, stage) {
                     crate::hydro_models::ResolvedProductionModel::ConstantProductivity {
@@ -632,9 +648,7 @@ pub fn build_energy_conversion_set<S: std::hash::BuildHasher>(
 
             if matches!(hydro.generation_model, HydroGenerationModel::Fpha) {
                 // Try override first, then VHA derivation, then error.
-                let rho_eq = if let Some(value) =
-                    override_table.and_then(|o| o.equivalent_productivity(hydro.id, stage))
-                {
+                let rho_eq = if let Some(value) = parquet_rho_eq {
                     value
                 } else if let Some((ref table, rho_esp)) = fpha_derivation {
                     let h_eq = fpha_equivalent_head(
@@ -1794,6 +1808,148 @@ mod tests {
 
         let cell = set.conversion(0, 0);
         assert!((cell.equivalent_productivity_mw_per_m3s - 1.5).abs() < 1e-12);
+    }
+
+    /// For a non-FPHA hydro at stage 0 with both a JSON-resolved productivity
+    /// (0.9) and a parquet override row supplying 0.85, the override wins.
+    ///
+    /// This exercises the override-consultation path that
+    /// `build_energy_conversion_set` now runs uniformly for every hydro. A
+    /// conflict like this would normally be rejected by load-time validation
+    /// in `cobre_io::validation::productivity_resolution`; the test bypasses
+    /// that layer by constructing the inputs directly.
+    #[test]
+    fn test_non_fpha_parquet_override_wins_over_json() {
+        let n_stages = 1;
+        let hydros = vec![make_hydro_with(
+            1,
+            HydroGenerationModel::ConstantProductivity,
+            100.0,
+            200.0,
+            50.0,
+            None,
+        )];
+        let cascade = CascadeTopology::build(&hydros);
+        let resolver = constant_resolver(&hydros, 0.65, n_stages);
+        let pm = production_set(&[0.9], n_stages);
+        let override_table =
+            build_hydro_energy_productivity_override(vec![HydroEnergyProductivityRow {
+                hydro_id: hydros[0].id,
+                stage_id: Some(0),
+                equivalent_productivity_mw_per_m3s: Some(0.85),
+                reference_volume_hm3: None,
+                reference_outflow_m3s: None,
+                specific_productivity_mw_per_m3s_per_m: None,
+            }])
+            .expect("override builds");
+
+        let set = build_energy_conversion_set(
+            &hydros,
+            n_stages,
+            &cascade,
+            &resolver,
+            &HashMap::new(),
+            Some(&override_table),
+            Some(&pm),
+        )
+        .expect("builder succeeds");
+
+        let cell = set.conversion(0, 0);
+        assert!(
+            (cell.equivalent_productivity_mw_per_m3s - 0.85).abs() < 1e-12,
+            "parquet override must win over JSON; got {}",
+            cell.equivalent_productivity_mw_per_m3s
+        );
+    }
+
+    /// For a non-FPHA hydro with no JSON productivity (sentinel 0.0 returned
+    /// by `ProductionModelSet::model`) and a per-hydro-default parquet row
+    /// (stage_id = None) supplying 0.7, every stage receives 0.7.
+    #[test]
+    fn test_non_fpha_parquet_per_hydro_default_used_for_uncovered_stage() {
+        let n_stages = 3;
+        let hydros = vec![make_hydro_with(
+            1,
+            HydroGenerationModel::ConstantProductivity,
+            100.0,
+            200.0,
+            50.0,
+            None,
+        )];
+        let cascade = CascadeTopology::build(&hydros);
+        let resolver = constant_resolver(&hydros, 0.65, n_stages);
+        // JSON sentinel: no productivity supplied (0.0 per the post-resolution
+        // sentinel returned by `resolve_stage_model`).
+        let pm = production_set(&[0.0], n_stages);
+        let override_table =
+            build_hydro_energy_productivity_override(vec![HydroEnergyProductivityRow {
+                hydro_id: hydros[0].id,
+                stage_id: None,
+                equivalent_productivity_mw_per_m3s: Some(0.7),
+                reference_volume_hm3: None,
+                reference_outflow_m3s: None,
+                specific_productivity_mw_per_m3s_per_m: None,
+            }])
+            .expect("override builds");
+
+        let set = build_energy_conversion_set(
+            &hydros,
+            n_stages,
+            &cascade,
+            &resolver,
+            &HashMap::new(),
+            Some(&override_table),
+            Some(&pm),
+        )
+        .expect("builder succeeds");
+
+        for s in 0..n_stages {
+            let cell = set.conversion(0, s);
+            assert!(
+                (cell.equivalent_productivity_mw_per_m3s - 0.7).abs() < 1e-12,
+                "stage {s}: expected 0.7 from per-hydro default, got {}",
+                cell.equivalent_productivity_mw_per_m3s
+            );
+        }
+    }
+
+    /// For a non-FPHA hydro with no parquet override and a JSON-resolved
+    /// productivity of 0.9, every stage receives 0.9. Regression for the
+    /// JSON-only path.
+    #[test]
+    fn test_non_fpha_json_only_path_unchanged() {
+        let n_stages = 2;
+        let hydros = vec![make_hydro_with(
+            1,
+            HydroGenerationModel::ConstantProductivity,
+            100.0,
+            200.0,
+            50.0,
+            None,
+        )];
+        let cascade = CascadeTopology::build(&hydros);
+        let resolver = constant_resolver(&hydros, 0.65, n_stages);
+        let pm = production_set(&[0.9], n_stages);
+
+        let set = build_energy_conversion_set(
+            &hydros,
+            n_stages,
+            &cascade,
+            &resolver,
+            &HashMap::new(),
+            None,
+            Some(&pm),
+        )
+        .expect("builder succeeds");
+
+        for s in 0..n_stages {
+            let cell = set.conversion(0, s);
+            assert!(
+                (cell.equivalent_productivity_mw_per_m3s - 0.9).abs() < 1e-12,
+                "stage {s}: expected 0.9 from JSON-only path, got {}",
+                cell.equivalent_productivity_mw_per_m3s
+            );
+        }
     }
 
     // ── ticket-008 consistency_warnings tests ─────────────────────────────────

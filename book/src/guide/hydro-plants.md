@@ -438,14 +438,31 @@ to `system/fpha_hyperplanes.parquet` and change `source` to `"precomputed"` in
 
 ### Per-Range and Per-Season Productivity
 
-When a plant uses the `constant_productivity` or `linearized_head` model, the
-productivity coefficient [MW/(m³/s)] is supplied directly on each stage range or
-season entry in `system/hydro_production_models.json` via the
-`productivity_mw_per_m3s` field.
+For `constant_productivity` and `linearized_head` hydros, the equivalent
+productivity ρ_eq [MW/(m³/s)] for each `(hydro, stage)` pair must be supplied
+by exactly one of two sources:
 
-This is useful when external data (e.g., temporal overrides of tailrace or
-forebay elevations from other planning tools) changes the effective head drop
-at specific stages, requiring a different productivity coefficient.
+- **`system/hydro_production_models.json`** — set
+  `productivity_mw_per_m3s` directly on a `stage_range` or seasonal
+  entry. Use this when productivity is constant across a range of stages
+  or repeats with the season cycle.
+- **`system/hydro_energy_productivity.parquet`** — supply a row in the
+  `equivalent_productivity_mw_per_m3s` column. A row with `stage_id` set
+  refines a single stage; a row with `stage_id = NULL` is a per-hydro
+  default that covers any stage not refined by a stage-specific row.
+  Use this for per-stage numerical refinement of an otherwise declarative
+  JSON configuration.
+
+Resolution order at load time:
+
+1. Parquet stage-specific row (exact `stage_id` match).
+2. Parquet per-hydro default row (`stage_id = NULL`).
+3. JSON `productivity_mw_per_m3s` on the matching stage range or season.
+
+If neither source supplies a value for a `(hydro, stage)` pair, loading
+fails with a clear schema error naming both files. Supplying a value
+from both files for the same `(hydro, stage)` is also rejected — pick
+exactly one source per pair.
 
 ```json
 {
@@ -456,17 +473,22 @@ at specific stages, requiring a different productivity coefficient.
 }
 ```
 
-| Field                     | Type   | Required       | Description                                                                        |
-| ------------------------- | ------ | -------------- | ---------------------------------------------------------------------------------- |
-| `productivity_mw_per_m3s` | number | Yes (non-FPHA) | Productivity coefficient [MW/(m³/s)]. Must be strictly positive. Rejected on FPHA. |
+| Field                     | Type   | Required            | Description                                                                                                                     |
+| ------------------------- | ------ | ------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `productivity_mw_per_m3s` | number | Optional (non-FPHA) | Productivity coefficient [MW/(m³/s)]. Must be strictly positive when present. Omit to supply via the parquet. Rejected on FPHA. |
 
 **Validation rules:**
 
 - `productivity_mw_per_m3s` must be strictly positive when present.
-- `productivity_mw_per_m3s` is rejected when `model` is `"fpha"` (FPHA computes
-  productivity from hyperplanes, not a scalar coefficient).
-- `productivity_mw_per_m3s` is required for `constant_productivity` and
-  `linearized_head` models.
+- `productivity_mw_per_m3s` is rejected when `model` is `"fpha"` (FPHA derives
+  productivity from VHA geometry and ρ_esp, not a scalar coefficient).
+- For `constant_productivity` and `linearized_head`, the JSON value may be
+  omitted (or set to `null`) when the parquet override supplies the value
+  for the same `(hydro, stage)`.
+
+For FPHA hydros, ρ_eq is derived from VHA geometry and ρ_esp. The parquet
+column `equivalent_productivity_mw_per_m3s` may still supply an override
+that replaces the derivation when present.
 
 ---
 

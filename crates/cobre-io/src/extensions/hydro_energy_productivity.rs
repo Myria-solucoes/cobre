@@ -1,6 +1,21 @@
 //! Parser for `system/hydro_energy_productivity.parquet` — per-plant per-stage
 //! override values used by the energy-conversion preprocessing layer.
 //!
+//! ## Applicability
+//!
+//! The `equivalent_productivity_mw_per_m3s` column applies to **all** hydro
+//! generation models. For FPHA hydros it overrides the `ρ_eq` value otherwise
+//! derived from VHA geometry and `ρ_esp`. For non-FPHA hydros
+//! (`constant_productivity`, `linearized_head`) it supplies `ρ_eq` directly
+//! when `productivity_mw_per_m3s` is omitted from
+//! `system/hydro_production_models.json`. Load-time validation enforces that
+//! exactly one source supplies the value for each non-FPHA `(hydro, stage)`
+//! pair — see [`crate::validation::productivity_resolution`].
+//!
+//! The other three override columns (`reference_volume_hm3`,
+//! `reference_outflow_m3s`, `specific_productivity_mw_per_m3s_per_m`) keep
+//! their existing per-row semantics independent of the generation model.
+//!
 //! ## Parquet schema
 //!
 //! | Column                                    | Parquet type | Nullable | Description                                     |

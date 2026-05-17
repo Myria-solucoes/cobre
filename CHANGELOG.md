@@ -80,6 +80,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kind-specific payload (`value`, `values`, or
   `computed_spec`).
 
+### Changed
+
+- `system/hydro_production_models.json` —
+  `productivity_mw_per_m3s` is now optional for
+  `constant_productivity` and `linearized_head` models. Omit the
+  field (or set it to `null`) when the value is supplied per stage
+  by `system/hydro_energy_productivity.parquet`.
+
 ### Breaking Changes
 
 **Output schema** — `simulation/hydros.parquet` grows from 31 to 35
@@ -104,13 +112,29 @@ remediations.
 `productivity_mw_per_m3s` from every `hydros.json` `generation`
 block and supply the same value via a
 `system/hydro_production_models.json` entry. For non-FPHA models
-(`constant_productivity`, `linearized_head`) the field is now
-required and positive on every `stage_ranges[]` /
-`seasons[]` entry. The previous opt-in
+(`constant_productivity`, `linearized_head`) the field is
+positive when present on every `stage_ranges[]` / `seasons[]`
+entry, and may be omitted (or `null`) to defer to the parquet
+override (see the next entry). The previous opt-in
 `productivity_override` key on those entries is renamed to
 `productivity_mw_per_m3s`; the override semantics (replace the
 entity-level base value) no longer apply because there is no
 longer an entity-level base value.
+
+**Productivity resolution across files** — The
+`equivalent_productivity_mw_per_m3s` column in
+`system/hydro_energy_productivity.parquet` now applies to **all**
+hydro generation models, not only FPHA. A row supplying this value
+for a non-FPHA hydro is honoured as the equivalent productivity
+ρ_eq for that `(hydro, stage)` instead of being silently ignored.
+Studies that supplied a value for the same `(hydro, stage)` pair
+in both `system/hydro_production_models.json`
+(`productivity_mw_per_m3s`) and `system/hydro_energy_productivity.parquet`
+(`equivalent_productivity_mw_per_m3s`) are now rejected at load time
+with a schema error naming both files. Studies that supplied a value
+in neither file for a non-FPHA `(hydro, stage)` pair are likewise
+rejected with a clear coverage-gap error, rather than failing deeper
+in the SDDP setup layer.
 
 **Scalar parameters file format** — The pair of input parquet
 files `system/scalar_parameter_definitions.parquet` and

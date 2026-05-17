@@ -1108,39 +1108,46 @@ fn resolve_stage_model(
                 build_fpha_model(hydro, stage, source, hyperplane_map)
             }
         } else {
-            // "constant_productivity" or "linearized_head" from config:
-            // productivity_mw_per_m3s is required for non-FPHA models (validated at
-            // schema load time in the hydros.json parser). Return an error if absent
-            // rather than silently defaulting.
-            let model_name = model_info.as_ref().map_or_else(
-                || "constant_productivity".to_owned(),
-                |(name, _)| name.clone(),
-            );
-            let productivity = model_info.and_then(|(_, p)| p).ok_or_else(|| {
-                SddpError::Validation(format!(
-                    "hydro {} uses model {} at stage {} but \
-                         productivity_mw_per_m3s is missing in hydro_production_models.json",
-                    hydro.name, model_name, stage.id
-                ))
-            })?;
+            // "constant_productivity" or "linearized_head" from config.
+            //
+            // `productivity_mw_per_m3s` may be `None` here when the value is
+            // supplied by `system/hydro_energy_productivity.parquet` instead.
+            // Load-time validation in
+            // `cobre_io::validation::productivity_resolution` guarantees that
+            // exactly one source (JSON or parquet) supplies each non-FPHA
+            // `(hydro, stage)` value, so reaching this branch with `None` means
+            // the parquet override is the supplier. Return a sentinel
+            // `ConstantProductivity { productivity: 0.0 }`; the build site in
+            // `build_energy_conversion_set` consults the override table first
+            // and overwrites the sentinel with the user-supplied value.
+            let productivity = model_info.and_then(|(_, p)| p).unwrap_or_else(|| {
+                debug_assert!(
+                    false,
+                    "non-FPHA {}/{} reached resolve_stage_model with productivity=None; \
+                     see cobre_io::validation::productivity_resolution",
+                    hydro.name, stage.id
+                );
+                0.0
+            });
             Ok(ResolvedProductionModel::ConstantProductivity { productivity })
         }
     } else {
-        // No config entry: non-FPHA models require an entry in
-        // hydro_production_models.json to supply the productivity coefficient.
-        // (Fpha without config is already rejected by determine_source().)
-        let model_name = match hydro.generation_model {
-            HydroGenerationModel::ConstantProductivity => "ConstantProductivity",
-            HydroGenerationModel::LinearizedHead => "LinearizedHead",
-            HydroGenerationModel::Fpha => {
-                unreachable!("Fpha without config should have been rejected in determine_source")
-            }
-        };
-        Err(SddpError::Validation(format!(
-            "hydro {} uses model {} at stage {} but no entry was found in \
-             hydro_production_models.json",
-            hydro.name, model_name, stage.id
-        )))
+        // No config entry at all for this hydro.
+        //
+        // Load-time validation in `cobre_io::validation::productivity_resolution`
+        // guarantees that every non-FPHA hydro has exactly one source supplying
+        // its productivity (either a JSON entry here or a parquet override row).
+        // Reaching this branch in release builds means the parquet supplies the
+        // value; the build site in `build_energy_conversion_set` consults the
+        // override table first and overwrites the sentinel. (FPHA without config
+        // is already rejected by `determine_source`.)
+        debug_assert!(
+            false,
+            "non-FPHA {}/{} reached resolve_stage_model with productivity=None; \
+             see cobre_io::validation::productivity_resolution",
+            hydro.name, stage.id
+        );
+        Ok(ResolvedProductionModel::ConstantProductivity { productivity: 0.0 })
     }
 }
 
@@ -1851,75 +1858,31 @@ mod tests {
 
     // ── resolve_production_models unit tests (in-memory, no disk I/O) ─────────
 
-    /// All-constant system with no config file: all hydros → DefaultConstant provenance
-    /// from `determine_source`, but `resolve_stage_model` returns a validation error
-    /// because non-FPHA hydros must supply a productivity coefficient via
-    /// `hydro_production_models.json` (inline fallback was removed in ticket-004).
+    /// Non-FPHA hydros without any config entry produce
+    /// `DefaultConstant` provenance from `determine_source`. The
+    /// downstream sentinel behaviour in `resolve_stage_model` is exercised
+    /// by `test_resolve_stage_model_returns_sentinel_when_no_config_entry`.
     #[test]
     fn all_constant_no_config_returns_default_constant_provenance() {
         let hydro0 = make_hydro(0, HydroGenerationModel::ConstantProductivity);
         let hydro1 = make_hydro(1, HydroGenerationModel::ConstantProductivity);
 
-        let stage = make_stage(0);
-
-        // determine_source still returns DefaultConstant for non-FPHA entities with no config.
         let src0 = determine_source(&hydro0, None).expect("should succeed");
         let src1 = determine_source(&hydro1, None).expect("should succeed");
         assert_eq!(src0, ProductionModelSource::DefaultConstant);
         assert_eq!(src1, ProductionModelSource::DefaultConstant);
-
-        // resolve_stage_model must now return an error when no config entry exists for a
-        // non-FPHA hydro — the inline productivity fallback was removed in ticket-004.
-        let empty_map = std::collections::HashMap::new();
-        let err0 = super::resolve_stage_model(
-            &hydro0,
-            &stage,
-            None,
-            ProductionModelSource::DefaultConstant,
-            &empty_map,
-            None,
-        )
-        .expect_err("should fail: no config entry for non-FPHA hydro");
-        let msg0 = err0.to_string();
-        assert!(
-            msg0.contains("Hydro0")
-                && msg0.contains("ConstantProductivity")
-                && msg0.contains("hydro_production_models.json"),
-            "error must name the hydro, model, and config file; got: {msg0}"
-        );
     }
 
-    /// `LinearizedHead` entity without a config entry: `determine_source` still
-    /// classifies it as `DefaultConstant`, but `resolve_stage_model` must return
-    /// a validation error because the productivity coefficient must come from
-    /// `hydro_production_models.json` (inline fallback removed in ticket-004).
+    /// `LinearizedHead` entities without a config entry produce
+    /// `DefaultConstant` provenance from `determine_source`. The downstream
+    /// sentinel behaviour in `resolve_stage_model` is exercised by
+    /// `test_resolve_stage_model_returns_sentinel_when_no_config_entry`.
     #[test]
     fn linearized_head_entity_resolves_to_constant_productivity() {
         let hydro = make_hydro(0, HydroGenerationModel::LinearizedHead);
-        let stage = make_stage(0);
 
-        // determine_source still succeeds for non-FPHA entities without config.
         let src = determine_source(&hydro, None).expect("should succeed");
         assert_eq!(src, ProductionModelSource::DefaultConstant);
-
-        // resolve_stage_model must error when no config entry exists for a non-FPHA hydro.
-        let empty_map = std::collections::HashMap::new();
-        let err = super::resolve_stage_model(
-            &hydro,
-            &stage,
-            None,
-            ProductionModelSource::DefaultConstant,
-            &empty_map,
-            None,
-        )
-        .expect_err("should fail: no config entry for LinearizedHead hydro");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("Hydro0")
-                && msg.contains("LinearizedHead")
-                && msg.contains("hydro_production_models.json"),
-            "error must name the hydro, model, and config file; got: {msg}"
-        );
     }
 
     /// Fpha entity model without config → validation error.
@@ -2511,14 +2474,23 @@ mod tests {
         );
     }
 
-    /// resolve_stage_model returns a validation error when the config entry exists but
-    /// has `productivity_mw_per_m3s: None` — the coefficient is mandatory and there is
-    /// no inline fallback after ticket-004.
+    /// When the JSON config entry exists but its `productivity_mw_per_m3s`
+    /// field is `None`, `resolve_stage_model` returns a sentinel
+    /// `ConstantProductivity { productivity: 0.0 }`. The build site in
+    /// `build_energy_conversion_set` consults the parquet override and
+    /// overwrites the sentinel with the user-supplied value.
+    ///
+    /// In debug builds the sentinel path is gated by a `debug_assert!` that
+    /// catches mis-configured cases that escape load-time validation in
+    /// `cobre_io::validation::productivity_resolution`. In release builds the
+    /// `debug_assert!` is compiled out and the function returns the sentinel
+    /// directly.
     #[test]
-    fn resolve_stage_model_uses_entity_productivity_when_no_override() {
+    fn test_resolve_stage_model_returns_sentinel_when_json_lacks_productivity() {
         let hydro = make_hydro(0, HydroGenerationModel::ConstantProductivity);
         let stage = make_stage(0);
-        // Config entry exists but productivity is missing.
+        // Config entry exists but productivity is missing — the parquet
+        // override is the supplier in production.
         let config = ProductionModelConfig {
             hydro_id: EntityId::from(0),
             selection_mode: SelectionMode::StageRanges {
@@ -2532,71 +2504,119 @@ mod tests {
             },
         };
         let empty_map = std::collections::HashMap::new();
-        let err = super::resolve_stage_model(
-            &hydro,
-            &stage,
-            Some(&config),
-            ProductionModelSource::DefaultConstant,
-            &empty_map,
-            None,
-        )
-        .expect_err("should fail: productivity_mw_per_m3s is None in the config entry");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("Hydro0")
-                && msg.contains("productivity_mw_per_m3s is missing")
-                && msg.contains("hydro_production_models.json"),
-            "error must name the hydro and explain what is missing; got: {msg}"
-        );
-    }
 
-    /// A non-FPHA hydro with no entry in `hydro_production_models.json` must produce
-    /// a validation error whose message contains the hydro name, the model selector,
-    /// the stage index, and the filename.
-    ///
-    /// This exercises the no-config-entry branch of `resolve_stage_model` that was
-    /// introduced in ticket-004 to replace the removed inline productivity fallback.
-    #[test]
-    fn hydro_without_production_models_entry_rejects() {
-        let hydro_cp = make_hydro(7, HydroGenerationModel::ConstantProductivity);
-        let hydro_lh = make_hydro(9, HydroGenerationModel::LinearizedHead);
-        let stage = make_stage(3);
-        let empty_map = std::collections::HashMap::new();
+        #[cfg(debug_assertions)]
+        {
+            // Debug build: the `debug_assert!` fires and the call panics.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                super::resolve_stage_model(
+                    &hydro,
+                    &stage,
+                    Some(&config),
+                    ProductionModelSource::DefaultConstant,
+                    &empty_map,
+                    None,
+                )
+            }));
+            let panic_payload = result
+                .expect_err("debug build must panic via debug_assert! when productivity is None");
+            let msg = panic_payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| {
+                    panic_payload
+                        .downcast_ref::<&str>()
+                        .map(|s| (*s).to_owned())
+                })
+                .unwrap_or_default();
+            assert!(
+                msg.contains("Hydro0") && msg.contains("validation::productivity_resolution"),
+                "panic message must name the hydro and the validator; got: {msg}"
+            );
+        }
 
-        for hydro in [&hydro_cp, &hydro_lh] {
-            let err = super::resolve_stage_model(
-                hydro,
+        #[cfg(not(debug_assertions))]
+        {
+            // Release build: the assert is compiled out and the function
+            // returns the sentinel directly.
+            let model = super::resolve_stage_model(
+                &hydro,
                 &stage,
-                None, // no entry in hydro_production_models.json
+                Some(&config),
                 ProductionModelSource::DefaultConstant,
                 &empty_map,
                 None,
             )
-            .expect_err("non-FPHA hydro without config entry must be rejected");
+            .expect("release build returns sentinel");
+            assert!(
+                matches!(
+                    model,
+                    ResolvedProductionModel::ConstantProductivity { productivity }
+                    if productivity == 0.0
+                ),
+                "release build must return ConstantProductivity {{ productivity: 0.0 }}; got {model:?}"
+            );
+        }
+    }
 
-            let msg = err.to_string();
+    /// When no JSON config entry exists at all for a non-FPHA hydro,
+    /// `resolve_stage_model` returns the same sentinel. Load-time validation
+    /// in `cobre_io::validation::productivity_resolution` is responsible for
+    /// catching missing entries; this branch trusts that invariant in release
+    /// builds and is guarded by a `debug_assert!` in debug builds.
+    #[test]
+    fn test_resolve_stage_model_returns_sentinel_when_no_config_entry() {
+        let hydro = make_hydro(7, HydroGenerationModel::ConstantProductivity);
+        let stage = make_stage(3);
+        let empty_map = std::collections::HashMap::new();
+
+        #[cfg(debug_assertions)]
+        {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                super::resolve_stage_model(
+                    &hydro,
+                    &stage,
+                    None,
+                    ProductionModelSource::DefaultConstant,
+                    &empty_map,
+                    None,
+                )
+            }));
+            let panic_payload = result
+                .expect_err("debug build must panic via debug_assert! when no config entry exists");
+            let msg = panic_payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| {
+                    panic_payload
+                        .downcast_ref::<&str>()
+                        .map(|s| (*s).to_owned())
+                })
+                .unwrap_or_default();
             assert!(
-                msg.contains(&hydro.name),
-                "error must contain the hydro name '{}'; got: {msg}",
-                hydro.name
+                msg.contains("Hydro7") && msg.contains("validation::productivity_resolution"),
+                "panic message must name the hydro and the validator; got: {msg}"
             );
-            // The selector name in the error matches the model variant label.
-            let expected_model = match hydro.generation_model {
-                HydroGenerationModel::ConstantProductivity => "ConstantProductivity",
-                HydroGenerationModel::LinearizedHead => "LinearizedHead",
-                HydroGenerationModel::Fpha => unreachable!(),
-            };
+        }
+
+        #[cfg(not(debug_assertions))]
+        {
+            let model = super::resolve_stage_model(
+                &hydro,
+                &stage,
+                None,
+                ProductionModelSource::DefaultConstant,
+                &empty_map,
+                None,
+            )
+            .expect("release build returns sentinel");
             assert!(
-                msg.contains(expected_model),
-                "error must contain model '{expected_model}'; got: {msg}"
-            );
-            assert!(
-                msg.contains('3') || msg.contains("stage"),
-                "error must reference the stage index; got: {msg}"
-            );
-            assert!(
-                msg.contains("hydro_production_models.json"),
-                "error must mention 'hydro_production_models.json'; got: {msg}"
+                matches!(
+                    model,
+                    ResolvedProductionModel::ConstantProductivity { productivity }
+                    if productivity == 0.0
+                ),
+                "release build must return ConstantProductivity {{ productivity: 0.0 }}; got {model:?}"
             );
         }
     }

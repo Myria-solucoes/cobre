@@ -589,26 +589,26 @@ turbine, and optional cascade linkage.
 
 Key fields:
 
-| Field                                         | Required           | Description                                                                            |
-| --------------------------------------------- | ------------------ | -------------------------------------------------------------------------------------- |
-| `hydros[].id`                                 | Yes                | Plant identifier (integer, unique)                                                     |
-| `hydros[].name`                               | Yes                | Human-readable plant name                                                              |
-| `hydros[].bus_id`                             | Yes                | Bus where generation is injected                                                       |
-| `hydros[].downstream_id`                      | No                 | Downstream plant ID in the cascade; `null` = tailwater                                 |
-| `hydros[].entry_stage_id`                     | No                 | Stage when plant enters service; `null` = always exists                                |
-| `hydros[].exit_stage_id`                      | No                 | Stage when plant is decommissioned; `null` = never                                     |
-| `hydros[].reservoir`                          | Yes                | `min_storage_hm3` and `max_storage_hm3` (both >= 0)                                    |
-| `hydros[].outflow`                            | Yes                | `min_outflow_m3s` and `max_outflow_m3s` total outflow bounds                           |
-| `hydros[].generation`                         | Yes                | Generation model: `model`, turbine flow bounds, generation MW bounds                   |
-| `hydros[].generation.model`                   | Yes                | `"constant_productivity"`, `"linearized_head"`, or `"fpha"`                            |
-| `hydros[].specific_productivity_mw_per_m3s_per_m`     | No                 | Specific productivity ρ_esp [MW/(m³/s)/m]. Required for FPHA hydros that rely on VHA geometry to derive ρ_eq. |
-| `hydros[].tailrace`                           | No                 | Tailrace model: `"polynomial"` or `"piecewise"`                                        |
-| `hydros[].hydraulic_losses`                   | No                 | Head loss model: `"factor"` or `"constant"`                                            |
-| `hydros[].efficiency`                         | No                 | Turbine efficiency model: `"constant"`                                                 |
-| `hydros[].evaporation`                        | No                 | Evaporation config: `coefficients_mm` (12 values) and optional `reference_volumes_hm3` |
-| `hydros[].diversion`                          | No                 | Diversion channel: `downstream_id` and `max_flow_m3s`                                  |
-| `hydros[].filling`                            | No                 | Filling config: `start_stage_id` and `filling_inflow_m3s`                              |
-| `hydros[].penalties`                          | No                 | Entity-level hydro penalty overrides (all fields optional, fall back to global)        |
+| Field                                             | Required | Description                                                                                                   |
+| ------------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------- |
+| `hydros[].id`                                     | Yes      | Plant identifier (integer, unique)                                                                            |
+| `hydros[].name`                                   | Yes      | Human-readable plant name                                                                                     |
+| `hydros[].bus_id`                                 | Yes      | Bus where generation is injected                                                                              |
+| `hydros[].downstream_id`                          | No       | Downstream plant ID in the cascade; `null` = tailwater                                                        |
+| `hydros[].entry_stage_id`                         | No       | Stage when plant enters service; `null` = always exists                                                       |
+| `hydros[].exit_stage_id`                          | No       | Stage when plant is decommissioned; `null` = never                                                            |
+| `hydros[].reservoir`                              | Yes      | `min_storage_hm3` and `max_storage_hm3` (both >= 0)                                                           |
+| `hydros[].outflow`                                | Yes      | `min_outflow_m3s` and `max_outflow_m3s` total outflow bounds                                                  |
+| `hydros[].generation`                             | Yes      | Generation model: `model`, turbine flow bounds, generation MW bounds                                          |
+| `hydros[].generation.model`                       | Yes      | `"constant_productivity"`, `"linearized_head"`, or `"fpha"`                                                   |
+| `hydros[].specific_productivity_mw_per_m3s_per_m` | No       | Specific productivity ρ_esp [MW/(m³/s)/m]. Required for FPHA hydros that rely on VHA geometry to derive ρ_eq. |
+| `hydros[].tailrace`                               | No       | Tailrace model: `"polynomial"` or `"piecewise"`                                                               |
+| `hydros[].hydraulic_losses`                       | No       | Head loss model: `"factor"` or `"constant"`                                                                   |
+| `hydros[].efficiency`                             | No       | Turbine efficiency model: `"constant"`                                                                        |
+| `hydros[].evaporation`                            | No       | Evaporation config: `coefficients_mm` (12 values) and optional `reference_volumes_hm3`                        |
+| `hydros[].diversion`                              | No       | Diversion channel: `downstream_id` and `max_flow_m3s`                                                         |
+| `hydros[].filling`                                | No       | Filling config: `start_stage_id` and `filling_inflow_m3s`                                                     |
+| `hydros[].penalties`                              | No       | Entity-level hydro penalty overrides (all fields optional, fall back to global)                               |
 
 All fields within `hydros[].penalties` are optional. When a field is absent the
 global default from `penalties.json` is used. The following fields are supported:
@@ -702,20 +702,20 @@ plant and is identified by a unique `hydro_id`. Results are loaded in
 matching `[start_stage_id, end_stage_id]` range. `end_stage_id` may be `null`
 to mean "until end of horizon".
 
-| Field within each range | Required | Description                                                                                                           |
-| ----------------------- | -------- | --------------------------------------------------------------------------------------------------------------------- |
-| `start_stage_id`        | Yes      | First stage (inclusive) to which this entry applies                                                                   |
-| `end_stage_id`          | Yes      | Last stage (inclusive); `null` means open-ended                                                                       |
-| `model`                 | Yes      | Model name: `"constant_productivity"`, `"linearized_head"`, or `"fpha"`                                               |
-| `fpha_config`           | No       | Required when `model` is `"fpha"`. See FPHA config fields below.                                                      |
-| `productivity_mw_per_m3s` | No       | Required and positive for `constant_productivity` and `linearized_head`. Rejected on `"fpha"`. |
+| Field within each range   | Required | Description                                                                                                                                                                                                                                                                  |
+| ------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `start_stage_id`          | Yes      | First stage (inclusive) to which this entry applies                                                                                                                                                                                                                          |
+| `end_stage_id`            | Yes      | Last stage (inclusive); `null` means open-ended                                                                                                                                                                                                                              |
+| `model`                   | Yes      | Model name: `"constant_productivity"`, `"linearized_head"`, or `"fpha"`                                                                                                                                                                                                      |
+| `fpha_config`             | No       | Required when `model` is `"fpha"`. See FPHA config fields below.                                                                                                                                                                                                             |
+| `productivity_mw_per_m3s` | No       | Positive when present; rejected on `"fpha"`. Optional for `constant_productivity` and `linearized_head` — when omitted, supply the value via `system/hydro_energy_productivity.parquet`. Exactly one source per `(hydro, stage)` is required; both is rejected at load time. |
 
 **`seasonal` mode.** The model for a stage is determined by its `season_id`.
 Stages whose season is not listed use `default_model`.
 
-| Field           | Required | Description                                                                                      |
-| --------------- | -------- | ------------------------------------------------------------------------------------------------ |
-| `default_model` | Yes      | Fallback model name for unlisted seasons                                                         |
+| Field           | Required | Description                                                                                        |
+| --------------- | -------- | -------------------------------------------------------------------------------------------------- |
+| `default_model` | Yes      | Fallback model name for unlisted seasons                                                           |
 | `seasons`       | Yes      | Array of season overrides: `season_id`, `model`, optional `fpha_config`, `productivity_mw_per_m3s` |
 
 **`fpha_config` fields (required when `model` is `"fpha"`):**
@@ -846,14 +846,14 @@ that would otherwise be derived from VHA geometry or plant defaults. Rows with
 `stage_id = NULL` act as per-hydro defaults and apply to all stages not covered
 by a stage-specific row.
 
-| Column                                   | Parquet type | Nullable | Description                                     |
-| ---------------------------------------- | ------------ | -------- | ----------------------------------------------- |
-| `hydro_id`                               | INT32        | no       | Hydro plant identifier                          |
-| `stage_id`                               | INT32        | yes      | Stage; NULL means "applies to all stages"       |
+| Column                                   | Parquet type | Nullable | Description                                        |
+| ---------------------------------------- | ------------ | -------- | -------------------------------------------------- |
+| `hydro_id`                               | INT32        | no       | Hydro plant identifier                             |
+| `stage_id`                               | INT32        | yes      | Stage; NULL means "applies to all stages"          |
 | `equivalent_productivity_mw_per_m3s`     | DOUBLE       | yes      | Direct ρ_eq override [MW/(m³/s)]; finite and > 0.0 |
-| `reference_volume_hm3`                   | DOUBLE       | yes      | V_ref override [hm³]; finite and > 0.0          |
-| `reference_outflow_m3s`                  | DOUBLE       | yes      | Q_ref override [m³/s]; finite and >= 0.0        |
-| `specific_productivity_mw_per_m3s_per_m` | DOUBLE       | yes      | ρ_esp override [MW/(m³/s)/m]; finite and > 0.0  |
+| `reference_volume_hm3`                   | DOUBLE       | yes      | V_ref override [hm³]; finite and > 0.0             |
+| `reference_outflow_m3s`                  | DOUBLE       | yes      | Q_ref override [m³/s]; finite and >= 0.0           |
+| `specific_productivity_mw_per_m3s_per_m` | DOUBLE       | yes      | ρ_esp override [MW/(m³/s)/m]; finite and > 0.0     |
 
 **Validation:**
 
@@ -880,22 +880,26 @@ load error.
 {
   "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/book/src/schemas/scalar_parameters.schema.json",
   "scalar_parameters": [
-    { "id": 1, "name": "rho_eq_h1", "kind": "computed",
-      "computed_spec": { "tag": "equivalent_productivity", "hydro_id": 1 } }
+    {
+      "id": 1,
+      "name": "rho_eq_h1",
+      "kind": "computed",
+      "computed_spec": { "tag": "equivalent_productivity", "hydro_id": 1 }
+    }
   ]
 }
 ```
 
 **Per-entry fields:**
 
-| Field           | Type    | Required | Description                                                                       |
-| --------------- | ------- | -------- | --------------------------------------------------------------------------------- |
-| `id`            | integer | Yes      | Unique parameter identifier (int32)                                               |
-| `name`          | string  | Yes      | Unique parameter name (non-empty, no leading/trailing whitespace)                 |
-| `kind`          | string  | Yes      | One of `constant`, `per_stage`, `seasonal`, `computed`                            |
-| `value`         | number  | kind dep | Finite f64 value. Required for `constant`. Absent otherwise.                     |
-| `values`        | array   | kind dep | Array of `[index, value]` pairs. Required for `per_stage` and `seasonal`.        |
-| `computed_spec` | object  | kind dep | `{"tag": "<variant>", "hydro_id": <int>}`. Required for `computed`.              |
+| Field           | Type    | Required | Description                                                               |
+| --------------- | ------- | -------- | ------------------------------------------------------------------------- |
+| `id`            | integer | Yes      | Unique parameter identifier (int32)                                       |
+| `name`          | string  | Yes      | Unique parameter name (non-empty, no leading/trailing whitespace)         |
+| `kind`          | string  | Yes      | One of `constant`, `per_stage`, `seasonal`, `computed`                    |
+| `value`         | number  | kind dep | Finite f64 value. Required for `constant`. Absent otherwise.              |
+| `values`        | array   | kind dep | Array of `[index, value]` pairs. Required for `per_stage` and `seasonal`. |
+| `computed_spec` | object  | kind dep | `{"tag": "<variant>", "hydro_id": <int>}`. Required for `computed`.       |
 
 **`computed_spec` tag values:**
 
