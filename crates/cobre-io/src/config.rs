@@ -222,26 +222,35 @@ pub struct RowSelectionConfig {
     #[serde(default)]
     pub check_frequency: Option<u32>,
 
-    /// Minimum dual multiplier for a row to count as binding.
+    /// Minimum dual multiplier magnitude for a constraint row to be counted as
+    /// binding at a given solution point.
+    ///
+    /// Rows whose dual value falls below this threshold are treated as inactive
+    /// in activity-tracking computations. Increase to reduce noise from
+    /// near-zero duals; decrease to be more inclusive.
     #[serde(default)]
     pub cut_activity_tolerance: Option<f64>,
 
-    /// Activity-window size for the basis-reconstruction classifier and
-    /// Scheme 1 sort popcount. Bit `i` of `activity_window` counts toward the
-    /// classifier and popcount mask when `i < basis_activity_window`.
+    /// Width (in iterations) of the sliding observation window used to track
+    /// which constraint rows have been recently active.
+    ///
+    /// A larger window retains activity information over a longer recent
+    /// history, making row-selection decisions less sensitive to short-term
+    /// fluctuations. A smaller window is more responsive to recent changes in
+    /// the active set.
     ///
     /// Validated range: 1..=31. Default when absent: 5.
     #[serde(default)]
     pub basis_activity_window: Option<u32>,
 
-    /// Maximum number of active rows per stage (stage 2 of the row-selection
-    /// pipeline — hard cap on LP size).
+    /// Row budget per stage: maximum number of constraint rows allowed to be
+    /// active in a single stage's LP.
     ///
     /// When `Some(n)`, the training loop enforces a hard cap of `n` active rows
-    /// per stage after strategy selection has completed. Rows are evicted in
-    /// order of staleness (`last_active_iter` ascending), tie-broken by usage
-    /// frequency (`active_count` ascending). Rows generated in the current
-    /// iteration are never evicted.
+    /// per stage after the pruning strategy has been applied. Rows are evicted
+    /// in order of staleness (least recently active first), tie-broken by
+    /// overall usage frequency (least frequently active first). Rows added in
+    /// the current iteration are never evicted.
     ///
     /// When `None` (the default), no hard cap is enforced.
     #[serde(default)]
@@ -1854,8 +1863,8 @@ mod tests {
     mod test_subscriber {
         use std::sync::{Arc, Mutex};
         use tracing::{
-            Event, Level, Metadata, Subscriber,
             span::{Attributes, Id, Record},
+            Event, Level, Metadata, Subscriber,
         };
 
         pub(super) struct WarnRecorder {
