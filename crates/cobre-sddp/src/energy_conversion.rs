@@ -1108,9 +1108,9 @@ mod tests {
         }
     }
 
-    /// Prior to ticket-007, an FPHA hydro with ρ_esp but no VHA silently
-    /// yielded ρ_eq=0.0. After ticket-007, the correctness gate rejects it with
-    /// `FphaMissingEquivalentProductivity`.
+    /// An FPHA hydro that supplies ρ_esp but no VHA geometry is rejected with
+    /// `FphaMissingEquivalentProductivity` (a permissive fallback to ρ_eq=0.0
+    /// would silently mis-model the plant).
     #[test]
     fn fpha_hydro_missing_vha_is_rejected_with_actionable_error() {
         let hydros = vec![make_hydro_with(
@@ -1150,7 +1150,7 @@ mod tests {
         }
     }
 
-    // ── ticket-005 FPHA derivation tests ───────────────────────────────────
+    // ── FPHA derivation tests ──────────────────────────────────────────────
 
     /// Create a flat VHA table (constant height) for testing.
     fn vha_constant_height(hydro_id: EntityId, height: f64) -> (EntityId, Vec<HydroGeometryRow>) {
@@ -1255,8 +1255,8 @@ mod tests {
         );
     }
 
-    /// Prior to ticket-007, an FPHA hydro with VHA but no ρ_esp silently
-    /// yielded ρ_eq=0.0. After ticket-007 the correctness gate rejects it.
+    /// An FPHA hydro that supplies VHA geometry but no ρ_esp is rejected (a
+    /// permissive fallback to ρ_eq=0.0 would silently mis-model the plant).
     #[test]
     fn fpha_missing_rho_esp_is_rejected() {
         let mut hydro = fpha_hydro_for_tests(7);
@@ -1288,8 +1288,8 @@ mod tests {
         }
     }
 
-    /// Prior to ticket-007, an FPHA hydro with ρ_esp but no VHA silently
-    /// yielded ρ_eq=0.0. After ticket-007 the correctness gate rejects it.
+    /// An FPHA hydro that supplies ρ_esp but no VHA geometry is rejected (a
+    /// permissive fallback to ρ_eq=0.0 would silently mis-model the plant).
     #[test]
     fn fpha_missing_vha_is_rejected() {
         let hydro = fpha_hydro_for_tests(7); // has rho_esp = Some(0.009)
@@ -1373,7 +1373,7 @@ mod tests {
         }
     }
 
-    // ── ticket-006 cascade accumulator tests ──────────────────────────────────
+    // ── cascade accumulator tests ─────────────────────────────────────────────
 
     /// A->B->C linear cascade. ρ_eq values: A=2.0, B=3.0, C=5.0 at stage 0.
     /// Expected ρ_acum: C=5.0, B=3+5=8.0, A=2+8=10.0.

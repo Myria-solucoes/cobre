@@ -2042,10 +2042,10 @@ mod tests {
     /// `productivity_mw_per_m3s` field, `parse_hydros` returns an `Err` whose
     /// message contains the substring `"productivity_mw_per_m3s"`.
     ///
-    /// This guards against silent acceptance of stale case files: after ticket-003
-    /// removed the field from the `RawGeneration` variants, adding
-    /// `#[serde(deny_unknown_fields)]` ensures the presence of the legacy key is
-    /// a hard parse error rather than an ignored unknown field.
+    /// This guards against silent acceptance of stale case files: the field is
+    /// no longer a member of any `RawGeneration` variant, and
+    /// `#[serde(deny_unknown_fields)]` ensures the presence of the legacy key
+    /// surfaces as a hard parse error rather than being silently ignored.
     #[test]
     fn hydros_json_rejects_legacy_inline_productivity() {
         let json = r#"{
