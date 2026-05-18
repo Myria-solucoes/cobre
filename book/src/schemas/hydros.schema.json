@@ -1,6 +1,7 @@
 {
   "$defs": {
     "RawDiversionChannel": {
+      "additionalProperties": false,
       "description": "Intermediate type for the `diversion` sub-object.",
       "properties": {
         "downstream_id": {
@@ -45,6 +46,7 @@
       ]
     },
     "RawEvaporation": {
+      "additionalProperties": false,
       "description": "Intermediate type for the `evaporation` sub-object.",
       "properties": {
         "coefficients_mm": {
@@ -74,6 +76,7 @@
       "type": "object"
     },
     "RawFillingConfig": {
+      "additionalProperties": false,
       "description": "Intermediate type for the `filling` sub-object.",
       "properties": {
         "filling_inflow_m3s": {
@@ -256,6 +259,7 @@
       ]
     },
     "RawHydro": {
+      "additionalProperties": false,
       "description": "Intermediate type for a single hydro plant entry.",
       "properties": {
         "bus_id": {
@@ -378,7 +382,7 @@
         },
         "specific_productivity_mw_per_m3s_per_m": {
           "default": null,
-          "description": "Specific productivity `ρ_esp` \\[MW / ((m³/s) · m)\\]. Absent or null = not specified.",
+          "description": "Specific productivity `ρ_esp` \\[MW / ((m³/s) · m)\\].\n\n**Resolution cascade** (first source that supplies a non-`null` value wins):\n\n1. Per-`(hydro, stage)` row in `system/hydro_energy_productivity.parquet`\n   (loaded at study setup time by the solver).\n2. This field — a single value applied uniformly across all stages.\n\nAbsent or `null` means this fallback level is skipped.  If the cascade\nfinds no value for a hydro whose generation model requires one\n(`constant_productivity` or `linearized_head`), study setup fails with an\nexplicit error.",
           "format": "double",
           "type": [
             "number",
@@ -408,6 +412,7 @@
       "type": "object"
     },
     "RawHydroPenaltyOverrides": {
+      "additionalProperties": false,
       "description": "Intermediate type for entity-level hydro penalty overrides.\n\nAll 11 fields are `Option<f64>`. Absent fields default to `None`,\nmeaning the global default for that penalty is used.\n\nJSON field names mirror `HydroPenalties` and `HydroPenaltyOverrides` field names.",
       "properties": {
         "diversion_cost": {
@@ -510,6 +515,7 @@
       "type": "object"
     },
     "RawOutflow": {
+      "additionalProperties": false,
       "description": "Intermediate type for the `outflow` sub-object.",
       "properties": {
         "max_outflow_m3s": {
@@ -532,6 +538,7 @@
       "type": "object"
     },
     "RawReservoir": {
+      "additionalProperties": false,
       "description": "Intermediate type for the `reservoir` sub-object.",
       "properties": {
         "max_storage_hm3": {
@@ -600,6 +607,7 @@
       ]
     },
     "RawTailracePoint": {
+      "additionalProperties": false,
       "description": "Intermediate type for a single piecewise tailrace breakpoint.",
       "properties": {
         "height_m": {
@@ -621,6 +629,7 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "description": "Top-level intermediate type for `hydros.json`.\n\nPrivate — only used during deserialization. Not re-exported.",
   "properties": {
     "$schema": {

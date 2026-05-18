@@ -1,6 +1,7 @@
 {
   "$defs": {
     "RawContract": {
+      "additionalProperties": false,
       "description": "Intermediate type for a single energy contract entry.",
       "properties": {
         "bus_id": {
@@ -60,6 +61,7 @@
       "type": "object"
     },
     "RawContractLimits": {
+      "additionalProperties": false,
       "description": "Intermediate type for the nested limits sub-object.",
       "properties": {
         "max_mw": {
@@ -96,6 +98,7 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "description": "Top-level intermediate type for `energy_contracts.json` (serde only, not re-exported).",
   "properties": {
     "$schema": {

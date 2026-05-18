@@ -118,7 +118,18 @@ pub(crate) struct RawHydro {
     /// Reservoir filling configuration. Absent or null = no filling operation.
     #[serde(default)]
     filling: Option<RawFillingConfig>,
-    /// Specific productivity `ρ_esp` \[MW / ((m³/s) · m)\]. Absent or null = not specified.
+    /// Specific productivity `ρ_esp` \[MW / ((m³/s) · m)\].
+    ///
+    /// **Resolution cascade** (first source that supplies a non-`null` value wins):
+    ///
+    /// 1. Per-`(hydro, stage)` row in `system/hydro_energy_productivity.parquet`
+    ///    (loaded at study setup time by the solver).
+    /// 2. This field — a single value applied uniformly across all stages.
+    ///
+    /// Absent or `null` means this fallback level is skipped.  If the cascade
+    /// finds no value for a hydro whose generation model requires one
+    /// (`constant_productivity` or `linearized_head`), study setup fails with an
+    /// explicit error.
     #[serde(default)]
     specific_productivity_mw_per_m3s_per_m: Option<f64>,
     /// Entity-level penalty overrides. Absent = all penalties use global defaults.
