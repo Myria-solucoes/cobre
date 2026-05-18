@@ -117,6 +117,11 @@ pub struct LbEvalScratch {
     pub effective_eta_buf: Vec<f64>,
     /// Per-hydro zero-target vector for truncation precompute.
     pub zero_targets_buf: Vec<f64>,
+    /// Uniform per-opening probabilities passed to the risk measure during
+    /// rank-0 aggregation. Resized and refilled per call to
+    /// `lb_aggregate_and_broadcast`; capacity is reused across iterations to
+    /// avoid the per-iteration allocation flagged by the architecture audit.
+    pub uniform_prob_buf: Vec<f64>,
 }
 
 impl LbEvalScratch {
@@ -137,6 +142,7 @@ impl LbEvalScratch {
             par_inflow_buf: Vec::new(),
             effective_eta_buf: Vec::new(),
             zero_targets_buf: Vec::new(),
+            uniform_prob_buf: Vec::new(),
         }
     }
 }
@@ -459,18 +465,27 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
 /// probabilities, scales by [`COST_SCALE_FACTOR`], then broadcasts the scalar
 /// lower bound from rank 0 to all other ranks.
 ///
+/// `scratch.uniform_prob_buf` is resized and refilled in-place every call so
+/// the per-iteration allocation pattern (`vec![1/n; n]`) is amortized to a
+/// capacity-only growth on the first call.
+///
 /// # Errors
 ///
 /// Returns [`SddpError::Communication`] if the broadcast fails.
 fn lb_aggregate_and_broadcast<C: Communicator>(
     objectives: &[f64],
     risk_measure: &RiskMeasure,
+    scratch: &mut LbEvalScratch,
     comm: &C,
 ) -> Result<f64, SddpError> {
     #[allow(clippy::cast_precision_loss)]
     let uniform_prob = 1.0_f64 / objectives.len() as f64;
-    let mut lb = risk_measure.evaluate_risk(objectives, &vec![uniform_prob; objectives.len()])
-        * COST_SCALE_FACTOR;
+    scratch.uniform_prob_buf.clear();
+    scratch
+        .uniform_prob_buf
+        .resize(objectives.len(), uniform_prob);
+    let mut lb =
+        risk_measure.evaluate_risk(objectives, &scratch.uniform_prob_buf) * COST_SCALE_FACTOR;
     comm.broadcast(std::slice::from_mut(&mut lb), 0)
         .map_err(SddpError::from)?;
     Ok(lb)
@@ -547,7 +562,7 @@ pub fn evaluate_lower_bound<S: SolverInterface, C: Communicator>(
         )?;
 
         // Phase 3: risk-measure aggregation + broadcast.
-        lb = lb_aggregate_and_broadcast(&objectives, spec.risk_measure, comm)?;
+        lb = lb_aggregate_and_broadcast(&objectives, spec.risk_measure, scratch.lb_scratch, comm)?;
         return Ok(lb);
     }
 
