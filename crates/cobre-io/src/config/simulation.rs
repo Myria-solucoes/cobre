@@ -15,15 +15,6 @@ pub struct SimulationConfig {
     /// Number of simulation scenarios.
     pub num_scenarios: u32,
 
-    /// Policy representation: `"outer"` (envelope rows) or `"inner"` (vertices).
-    pub policy_type: String,
-
-    /// Directory for simulation output files.
-    pub output_path: Option<String>,
-
-    /// Output mode: `"streaming"` or `"batched"`.
-    pub output_mode: Option<String>,
-
     /// Bounded channel capacity between simulation threads and the I/O writer thread.
     pub io_channel_capacity: u32,
 
@@ -38,9 +29,6 @@ impl Default for SimulationConfig {
         Self {
             enabled: false,
             num_scenarios: 2000,
-            policy_type: "outer".to_string(),
-            output_path: None,
-            output_mode: None,
             io_channel_capacity: 64,
             scenario_source: None,
         }

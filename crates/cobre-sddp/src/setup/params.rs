@@ -355,8 +355,6 @@ mod tests {
                 forward_passes: Some(1),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),
                 stopping_mode: "any".to_string(),
-                cut_formulation: None,
-                forward_pass: None,
                 cut_selection: RowSelectionConfig {
                     basis_activity_window: window,
                     ..RowSelectionConfig::default()
@@ -433,8 +431,6 @@ mod tests {
                 forward_passes: Some(2),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),
                 stopping_mode: "any".to_string(),
-                cut_formulation: None,
-                forward_pass: None,
                 cut_selection: RowSelectionConfig {
                     max_active_per_stage: Some(1),
                     ..RowSelectionConfig::default()
@@ -473,8 +469,6 @@ mod tests {
                     bound_tol: 0.01,
                 }]),
                 stopping_mode: "any".to_string(),
-                cut_formulation: None,
-                forward_pass: None,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 scenario_source: None,

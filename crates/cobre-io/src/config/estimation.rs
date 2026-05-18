@@ -12,9 +12,6 @@ use serde::{Deserialize, Serialize};
 /// - `"pacf_annual"` — extends `"pacf"` with an annual component (PAR(p)-A),
 ///   adding one extra coefficient ψ per (entity, season) that multiplies
 ///   the rolling 12-month average of past observations.
-///
-/// The legacy `"fixed"` JSON value is deprecated; it is accepted for
-/// backwards compatibility but mapped to `Pacf` at parse time with a warning.
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -47,17 +44,9 @@ impl<'de> serde::Deserialize<'de> for OrderSelectionMethod {
         match s.as_str() {
             "pacf" => Ok(Self::Pacf),
             "pacf_annual" => Ok(Self::PacfAnnual),
-            "fixed" => {
-                tracing::warn!(
-                    "OrderSelectionMethod::Fixed is deprecated and will be removed \
-                     in a future release. The PACF method is now used for all order \
-                     selection. Please update your config.json to use \"pacf\"."
-                );
-                Ok(Self::Pacf)
-            }
             other => Err(serde::de::Error::unknown_variant(
                 other,
-                &["pacf", "pacf_annual", "fixed"],
+                &["pacf", "pacf_annual"],
             )),
         }
     }

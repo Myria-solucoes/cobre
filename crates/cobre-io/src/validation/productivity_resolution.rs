@@ -318,8 +318,6 @@ mod tests {
                 forward_passes: Some(10),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 100 }]),
                 stopping_mode: "any".to_string(),
-                cut_formulation: None,
-                forward_pass: None,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 scenario_source: None,

@@ -303,9 +303,9 @@ fn parse_config(case_dir: &Path) -> Config {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-/// C2 — Fixed-order estimation: `estimate_from_history` with
-/// `estimation.order_selection = "fixed"` and `estimation.max_order = 2`
-/// produces one `InflowModel` per (hydro, stage) pair with `ar_order() == 2`
+/// C2 — PACF estimation with `max_order = 2`: `estimate_from_history` with
+/// `estimation.order_selection = "pacf"` and `estimation.max_order = 2`
+/// produces one `InflowModel` per (hydro, stage) pair with `ar_order() <= 2`
 /// and finite, positive `mean_m3s` and `std_m3s`.
 ///
 /// Setup:
@@ -319,7 +319,7 @@ fn test_estimate_from_history_fixed_order() {
     let dir = TempDir::new().unwrap();
     let case_dir = dir.path();
 
-    create_minimal_case_skeleton(case_dir, "fixed", 2);
+    create_minimal_case_skeleton(case_dir, "pacf", 2);
     write_inflow_history(&case_dir.join("scenarios/inflow_history.parquet"));
 
     let system = build_system_with_one_hydro();
@@ -703,7 +703,7 @@ fn test_estimation_round_trip_par1() {
     let dir = TempDir::new().unwrap();
     let case_dir = dir.path();
 
-    create_minimal_case_skeleton(case_dir, "fixed", 1);
+    create_minimal_case_skeleton(case_dir, "pacf", 1);
     write_par1_inflow_history(&case_dir.join("scenarios/inflow_history.parquet"), 1);
 
     let system = build_system_for_par1(1);
@@ -966,7 +966,7 @@ fn test_estimation_round_trip_two_hydros() {
     let dir = TempDir::new().unwrap();
     let case_dir = dir.path();
 
-    create_minimal_case_skeleton(case_dir, "fixed", 1);
+    create_minimal_case_skeleton(case_dir, "pacf", 1);
     write_par1_inflow_history(&case_dir.join("scenarios/inflow_history.parquet"), N_HYDROS);
 
     let system = build_system_for_par1(N_HYDROS);

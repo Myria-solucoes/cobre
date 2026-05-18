@@ -33,14 +33,6 @@ pub struct TrainingConfig {
     #[serde(default = "TrainingConfig::default_stopping_mode")]
     pub stopping_mode: String,
 
-    /// Row formulation: `"single"` or `"multi"`.
-    #[serde(default)]
-    pub cut_formulation: Option<String>,
-
-    /// Forward pass configuration.
-    #[serde(default)]
-    pub forward_pass: Option<ForwardPassConfig>,
-
     /// Row-selection settings.
     #[serde(default)]
     pub cut_selection: RowSelectionConfig,
@@ -68,15 +60,6 @@ impl TrainingConfig {
     // and stopping_rules are mandatory and have no sensible defaults.
 }
 
-/// Forward pass mode configuration.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct ForwardPassConfig {
-    /// Forward pass type: `"default"` or other variants.
-    #[serde(rename = "type")]
-    pub pass_type: String,
-}
-
 /// Row-selection settings (`config.json → training.cut_selection`).
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -89,29 +72,24 @@ pub struct RowSelectionConfig {
     #[serde(default)]
     pub method: Option<String>,
 
-    /// Generic threshold (deprecated — prefer method-specific fields below).
+    /// Activity-count threshold for the `"level1"` row-selection method.
     ///
-    /// Interpretation depends on the method:
-    /// - `"level1"`: minimum iterations before first pruning pass
-    /// - `"lml1"`: memory window size (iterations)
-    /// - `"domination"`: epsilon for domination test (integer-limited)
-    ///
-    /// Use `memory_window` for lml1 and `domination_epsilon` for domination
-    /// to avoid the integer limitation. This field is retained for backwards
-    /// compatibility.
-    #[serde(default, deserialize_with = "deserialize_deprecated_threshold")]
+    /// A row is deactivated when its `active_count <= threshold`. Typical
+    /// value: 0 (deactivate only fully-inactive rows). Ignored by the
+    /// `"lml1"` and `"domination"` methods.
+    #[serde(default)]
     pub threshold: Option<u32>,
 
     /// Memory window size for the `"lml1"` method (iterations).
     ///
-    /// Overrides `threshold` when the method is `"lml1"`. Ignored for other methods.
+    /// Required when `method = "lml1"`. Ignored for other methods.
     #[serde(default)]
     pub memory_window: Option<u32>,
 
     /// Epsilon for the `"domination"` method.
     ///
-    /// Overrides `threshold` when the method is `"domination"`. Accepts
-    /// fractional values (e.g., `1e-6`) unlike the integer-limited `threshold`.
+    /// Required when `method = "domination"`. Accepts fractional values
+    /// (e.g., `1e-6`).
     #[serde(default)]
     pub domination_epsilon: Option<f64>,
 
@@ -265,29 +243,4 @@ pub struct LipschitzConfig {
     /// Multiplicative safety margin applied to computed Lipschitz constants.
     #[serde(default)]
     pub scale_factor: Option<f64>,
-}
-
-/// Deserialize `RowSelectionConfig::threshold`, emitting a deprecation warning
-/// when a non-`None` value is present.
-///
-/// Used as the target of `#[serde(deserialize_with = ...)]` on the `threshold`
-/// field. The warning fires once per parse — i.e. once per config load — and
-/// mirrors the phrasing used for the deprecated `"fixed"` value of
-/// [`OrderSelectionMethod`](super::estimation::OrderSelectionMethod).
-pub(super) fn deserialize_deprecated_threshold<'de, D>(
-    deserializer: D,
-) -> Result<Option<u32>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value: Option<u32> = Option::deserialize(deserializer)?;
-    if value.is_some() {
-        tracing::warn!(
-            "RowSelectionConfig::threshold is deprecated and will be removed in a \
-             future release. Use `memory_window` for the \"lml1\" method and \
-             `domination_epsilon` for the \"domination\" method. Please update \
-             your config.json."
-        );
-    }
-    Ok(value)
 }

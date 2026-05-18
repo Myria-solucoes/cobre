@@ -42,8 +42,8 @@ pub use policy::{BoundaryPolicy, CheckpointingConfig, PolicyConfig, PolicyMode};
 pub use scenario_source::{RawClassConfigEntry, RawHistoricalYearsConfig, RawScenarioSourceConfig};
 pub use simulation::SimulationConfig;
 pub use training::{
-    ForwardPassConfig, LipschitzConfig, RowSelectionConfig, StoppingRuleConfig, TrainingConfig,
-    TrainingSolverConfig, UpperBoundEvaluationConfig,
+    LipschitzConfig, RowSelectionConfig, StoppingRuleConfig, TrainingConfig, TrainingSolverConfig,
+    UpperBoundEvaluationConfig,
 };
 
 use cobre_core::scenario::{HistoricalYears, SamplingScheme, ScenarioSource};
@@ -789,22 +789,20 @@ mod tests {
         assert_eq!(cfg.estimation.min_observations_per_season, 30);
     }
 
-    /// AC-035-2: `"order_selection": "fixed"` deserializes to `Pacf` (deprecated alias).
+    /// AC-035-2: `"order_selection": "fixed"` is now a hard parse error.
     #[test]
-    fn test_estimation_config_order_selection_fixed_deprecated() {
+    fn test_estimation_config_order_selection_fixed_rejected() {
         let f = write_config(
             r#"{
             "training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
             "estimation": {"max_order": 3, "order_selection": "fixed", "min_observations_per_season": 20}
         }"#,
         );
-        let cfg = parse_config(f.path()).unwrap();
-        assert_eq!(cfg.estimation.max_order, 3);
+        let result = parse_config(f.path());
         assert!(
-            matches!(cfg.estimation.order_selection, OrderSelectionMethod::Pacf),
-            "deprecated 'fixed' must deserialize to Pacf"
+            result.is_err(),
+            "\"fixed\" order_selection must now be a parse error"
         );
-        assert_eq!(cfg.estimation.min_observations_per_season, 20);
     }
 
     /// AC-035-2b: `"order_selection": "pacf"` deserializes to `Pacf` with no warning.
@@ -1225,122 +1223,14 @@ mod tests {
         assert_eq!(boundary.source_stage, 5);
     }
 
-    // ── RowSelectionConfig::threshold deprecation warning tests ──────────────
+    // ── RowSelectionConfig::threshold tests ──────────────────────────────────
 
-    /// Minimal tracing subscriber that records WARN-level event messages for
-    /// use in unit tests. Thread-safe via `Arc<Mutex<Vec<String>>>`.
-    mod test_subscriber {
-        use std::sync::{Arc, Mutex};
-        use tracing::{
-            Event, Level, Metadata, Subscriber,
-            span::{Attributes, Id, Record},
-        };
-
-        pub(super) struct WarnRecorder {
-            pub(super) messages: Arc<Mutex<Vec<String>>>,
-        }
-
-        impl WarnRecorder {
-            pub(super) fn new() -> (Self, Arc<Mutex<Vec<String>>>) {
-                let messages = Arc::new(Mutex::new(Vec::new()));
-                (
-                    Self {
-                        messages: Arc::clone(&messages),
-                    },
-                    messages,
-                )
-            }
-        }
-
-        impl Subscriber for WarnRecorder {
-            fn enabled(&self, metadata: &Metadata<'_>) -> bool {
-                *metadata.level() <= Level::WARN
-            }
-
-            fn new_span(&self, _attrs: &Attributes<'_>) -> Id {
-                Id::from_u64(1)
-            }
-
-            fn record(&self, _span: &Id, _values: &Record<'_>) {}
-
-            fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
-
-            fn event(&self, event: &Event<'_>) {
-                if *event.metadata().level() == Level::WARN {
-                    struct MessageVisitor(String);
-                    impl tracing::field::Visit for MessageVisitor {
-                        fn record_debug(
-                            &mut self,
-                            field: &tracing::field::Field,
-                            value: &dyn std::fmt::Debug,
-                        ) {
-                            if field.name() == "message" {
-                                self.0 = format!("{value:?}");
-                            }
-                        }
-                        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-                            if field.name() == "message" {
-                                self.0 = value.to_string();
-                            }
-                        }
-                    }
-                    let mut visitor = MessageVisitor(String::new());
-                    event.record(&mut visitor);
-                    self.messages.lock().unwrap().push(visitor.0);
-                }
-            }
-
-            fn enter(&self, _span: &Id) {}
-
-            fn exit(&self, _span: &Id) {}
-        }
-    }
-
-    /// AC: parsing `RowSelectionConfig` with `threshold: Some(5)` emits exactly
-    /// one WARN event whose message contains "threshold" and "deprecated".
+    /// AC: `threshold` is accepted and round-trips for `level1`.
     #[test]
-    fn test_row_selection_threshold_deprecated_warning() {
-        let (subscriber, messages) = test_subscriber::WarnRecorder::new();
-        tracing::subscriber::with_default(subscriber, || {
-            let json = r#"{"threshold": 5}"#;
-            let cfg: RowSelectionConfig = serde_json::from_str(json).unwrap();
-            assert_eq!(cfg.threshold, Some(5), "threshold must be stored");
-        });
-        let recorded = messages.lock().unwrap();
-        let warn_events: Vec<&str> = recorded
-            .iter()
-            .map(std::string::String::as_str)
-            .filter(|msg| msg.contains("threshold") && msg.contains("deprecated"))
-            .collect();
-        assert!(
-            !warn_events.is_empty(),
-            "expected at least one WARN event containing 'threshold' and 'deprecated', got: {recorded:?}"
-        );
-    }
-
-    /// AC: parsing `RowSelectionConfig` without `threshold` emits no WARN event
-    /// from this code path.
-    #[test]
-    fn test_row_selection_threshold_absent_no_warning() {
-        let (subscriber, messages) = test_subscriber::WarnRecorder::new();
-        tracing::subscriber::with_default(subscriber, || {
-            let json = r#"{"enabled": true, "method": "lml1", "memory_window": 10}"#;
-            let cfg: RowSelectionConfig = serde_json::from_str(json).unwrap();
-            assert!(
-                cfg.threshold.is_none(),
-                "threshold must be None when absent"
-            );
-        });
-        let recorded = messages.lock().unwrap();
-        let threshold_warns: Vec<&str> = recorded
-            .iter()
-            .map(std::string::String::as_str)
-            .filter(|msg| msg.contains("threshold") && msg.contains("deprecated"))
-            .collect();
-        assert!(
-            threshold_warns.is_empty(),
-            "expected no WARN events about threshold deprecation when field is absent, got: {threshold_warns:?}"
-        );
+    fn test_row_selection_threshold_accepted() {
+        let json = r#"{"threshold": 5}"#;
+        let cfg: RowSelectionConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.threshold, Some(5), "threshold must be stored");
     }
 
     /// Stale `exports` keys (`training`, `cuts`, `vertices`, `simulation`,
@@ -1409,13 +1299,13 @@ mod tests {
         );
     }
 
-    /// The deprecated `"fixed"` string still resolves to `Pacf`.
+    /// `"fixed"` is no longer a valid value and must hard-error on parse.
     #[test]
-    fn order_selection_fixed_still_maps_to_pacf() {
-        let parsed: OrderSelectionMethod = serde_json::from_str("\"fixed\"").unwrap();
+    fn order_selection_fixed_rejected() {
+        let result: Result<OrderSelectionMethod, _> = serde_json::from_str("\"fixed\"");
         assert!(
-            matches!(parsed, OrderSelectionMethod::Pacf),
-            "deprecated \"fixed\" must still resolve to Pacf, got: {parsed:?}"
+            result.is_err(),
+            "\"fixed\" must be rejected; expected an error"
         );
     }
 
@@ -1519,8 +1409,6 @@ mod tests {
                 forward_passes: Some(10),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 5 }]),
                 stopping_mode: "any".to_string(),
-                cut_formulation: None,
-                forward_pass: None,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 scenario_source: None,

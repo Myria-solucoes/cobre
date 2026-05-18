@@ -277,8 +277,6 @@ mod tests {
                 forward_passes: Some(4),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 10 }]),
                 stopping_mode: "any".to_string(),
-                cut_formulation: None,
-                forward_pass: None,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 scenario_source: None,
@@ -294,9 +292,6 @@ mod tests {
             simulation: SimulationConfig {
                 enabled: false,
                 num_scenarios: 0,
-                policy_type: "outer".to_string(),
-                output_path: None,
-                output_mode: None,
                 io_channel_capacity: 64,
                 scenario_source: None,
             },
