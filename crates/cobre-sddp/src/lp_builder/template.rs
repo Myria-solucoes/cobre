@@ -371,7 +371,7 @@ fn collect_load_bus_indices(system: &System, bus_pos: &HashMap<EntityId, usize>)
 /// let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
 /// let resolved_parameters = ResolvedParameters::default();
 /// // No stages → empty result.
-/// let result = build_stage_templates(&system, &method, &par_lp, &normal_lp,
+/// let result = build_stage_templates(&system, method, &par_lp, &normal_lp,
 ///                                    &hydro_models.production, &hydro_models.evaporation,
 ///                                    &resolved_parameters)
 ///     .expect("empty system ok");
