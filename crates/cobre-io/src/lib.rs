@@ -130,8 +130,56 @@ pub use validation::scalar_parameters::validate_scalar_parameters;
 pub use validation::structural::{FileManifest, validate_structure};
 pub use validation::{ErrorKind, Severity, ValidationContext, ValidationEntry};
 
-use cobre_core::System;
+use cobre_core::{ScalarParameter, System};
 use std::path::Path;
+
+/// Auxiliary rows produced by the load pipeline alongside [`System`].
+///
+/// Downstream solver crates used to re-open the same parquet/JSON files from
+/// disk after [`load_case`] returned. `CaseArtifacts` is the single-source
+/// delivery of those already-parsed-and-validated rows, eliminating the disk
+/// re-reads.
+///
+/// Fields are owned `Vec`s in deterministic (canonical) order. Empty vectors
+/// indicate the optional file was absent on disk.
+#[derive(Debug, Clone, Default)]
+pub struct CaseArtifacts {
+    /// File-presence manifest produced by Layer 1 (structural). Lets
+    /// downstream code avoid re-running `validate_structure` to check
+    /// optional-file presence.
+    pub file_manifest: FileManifest,
+
+    /// Rows from `system/hydro_geometry.parquet`. Empty when the file is
+    /// absent.
+    pub hydro_geometry: Vec<extensions::HydroGeometryRow>,
+
+    /// Entries from `system/hydro_production_models.json`. Empty when the
+    /// file is absent.
+    pub production_models: Vec<extensions::ProductionModelConfig>,
+
+    /// Rows from `system/hydro_energy_productivity.parquet`. Empty when the
+    /// file is absent.
+    pub hydro_energy_productivity: Vec<extensions::HydroEnergyProductivityRow>,
+
+    /// Rows from `system/fpha_hyperplanes.parquet`. Empty when the file is
+    /// absent.
+    pub fpha_hyperplanes: Vec<extensions::FphaHyperplaneRow>,
+
+    /// Assembled scalar parameters from `system/scalar_parameters.json`.
+    /// Empty when the file is absent.
+    pub scalar_parameters: Vec<ScalarParameter>,
+}
+
+/// Fully-loaded case bundle: the validated [`System`] plus the auxiliary
+/// row sets that downstream consumers need without re-reading the case
+/// directory.
+#[derive(Debug)]
+pub struct LoadedCase {
+    /// Validated, ready-to-solve system.
+    pub system: System,
+    /// Auxiliary rows (parsed and validated by the load pipeline).
+    pub artifacts: CaseArtifacts,
+}
 
 /// Load a case directory and return a fully-validated [`System`].
 ///
@@ -152,6 +200,12 @@ use std::path::Path;
 /// Warnings collected during validation are silently discarded. Use [`validate_case`]
 /// when you need to inspect or display warnings alongside the loaded [`System`].
 ///
+/// Prefer [`load_case_with_artifacts`] when the downstream consumer needs the
+/// auxiliary parquet/JSON rows that this pipeline already parsed (production
+/// models, hydro geometry, FPHA hyperplanes, scalar parameters): it returns
+/// them as a [`CaseArtifacts`] bundle so downstream code can skip the
+/// duplicate disk reads.
+///
 /// # Errors
 ///
 /// - [`LoadError::IoError`] — a required file is missing or cannot be read.
@@ -162,6 +216,21 @@ use std::path::Path;
 ///   across Layers 1-5, or `SystemBuilder` rejected the assembled data.
 pub fn load_case(path: &Path) -> Result<System, LoadError> {
     pipeline::run_pipeline(path)
+}
+
+/// Load a case directory and return the validated [`System`] together with
+/// the [`CaseArtifacts`] bundle of pre-parsed auxiliary rows.
+///
+/// This is the preferred entry point for solver pipelines that need the
+/// production-model / hydro-geometry / FPHA hyperplane / scalar-parameter
+/// rows: returning them here avoids the disk re-reads (and the parallel
+/// validation paths) that previously lived in downstream crates.
+///
+/// # Errors
+///
+/// Same error conditions as [`load_case`].
+pub fn load_case_with_artifacts(path: &Path) -> Result<LoadedCase, LoadError> {
+    pipeline::run_pipeline_with_artifacts(path).map(|(loaded, _report)| loaded)
 }
 
 /// Load a case directory and return both the fully-validated [`System`] and a

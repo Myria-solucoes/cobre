@@ -625,10 +625,29 @@ pub fn prepare_hydro_models(
     system: &System,
     case_dir: &Path,
 ) -> Result<PrepareHydroModelsResult, SddpError> {
+    let artifacts = load_artifacts_for_hydro_models(case_dir)?;
+    prepare_hydro_models_from_artifacts(system, &artifacts)
+}
+
+/// Variant of [`prepare_hydro_models`] that consumes a pre-parsed
+/// [`cobre_io::CaseArtifacts`] bundle instead of re-reading the case
+/// directory from disk.
+///
+/// Use this from any pipeline that has already called
+/// [`cobre_io::load_case_with_artifacts`]; it avoids the duplicate parsing
+/// and parallel validation paths the audit (CR-3) flagged.
+///
+/// # Errors
+///
+/// Same conditions as [`prepare_hydro_models`].
+pub fn prepare_hydro_models_from_artifacts(
+    system: &System,
+    artifacts: &cobre_io::CaseArtifacts,
+) -> Result<PrepareHydroModelsResult, SddpError> {
     let (production, productivity_override, production_sources, kappa_warnings, fpha_export_rows) =
-        resolve_production_models(system, case_dir)?;
+        resolve_production_models_from_artifacts(system, artifacts)?;
     let (evaporation, evaporation_sources, evaporation_reference_sources) =
-        resolve_evaporation_models(system, case_dir)?;
+        resolve_evaporation_models_from_artifacts(system, artifacts)?;
 
     Ok(PrepareHydroModelsResult {
         production,
@@ -641,6 +660,51 @@ pub fn prepare_hydro_models(
         },
         kappa_warnings,
         fpha_export_rows,
+    })
+}
+
+/// Build a [`cobre_io::CaseArtifacts`] containing the rows
+/// [`prepare_hydro_models_from_artifacts`] needs, by reading the case
+/// directory directly.
+///
+/// Used to back the legacy [`prepare_hydro_models`] signature; production
+/// pipelines should call [`cobre_io::load_case_with_artifacts`] instead so
+/// the full validation runs once.
+fn load_artifacts_for_hydro_models(case_dir: &Path) -> Result<cobre_io::CaseArtifacts, SddpError> {
+    let mut ctx = cobre_io::ValidationContext::new();
+    let manifest = cobre_io::validate_structure(case_dir, &mut ctx);
+
+    let prod_path = if manifest.system_hydro_production_models_json {
+        Some(case_dir.join("system").join("hydro_production_models.json"))
+    } else {
+        None
+    };
+    let geom_path = if manifest.system_hydro_geometry_parquet {
+        Some(case_dir.join("system").join("hydro_geometry.parquet"))
+    } else {
+        None
+    };
+    let fpha_path = if manifest.system_fpha_hyperplanes_parquet {
+        Some(case_dir.join("system").join("fpha_hyperplanes.parquet"))
+    } else {
+        None
+    };
+    let prod_eff_path = case_dir
+        .join("system")
+        .join("hydro_energy_productivity.parquet");
+    let prod_eff_path_opt = if prod_eff_path.exists() {
+        Some(prod_eff_path.as_path())
+    } else {
+        None
+    };
+
+    Ok(cobre_io::CaseArtifacts {
+        file_manifest: manifest,
+        hydro_geometry: cobre_io::extensions::load_hydro_geometry(geom_path.as_deref())?,
+        production_models: cobre_io::extensions::load_production_models(prod_path.as_deref())?,
+        hydro_energy_productivity: cobre_io::load_hydro_energy_productivity(prod_eff_path_opt)?,
+        fpha_hyperplanes: cobre_io::extensions::load_fpha_hyperplanes(fpha_path.as_deref())?,
+        scalar_parameters: Vec::new(),
     })
 }
 
@@ -709,51 +773,55 @@ pub fn resolve_production_models(
     system: &System,
     case_dir: &Path,
 ) -> Result<ResolveProductionResult, SddpError> {
-    // ── Step 1: check whether the optional config file is present ─────────────
-    let mut ctx = cobre_io::ValidationContext::new();
-    let manifest = cobre_io::validate_structure(case_dir, &mut ctx);
-    let config_path = if manifest.system_hydro_production_models_json {
-        Some(case_dir.join("system").join("hydro_production_models.json"))
-    } else {
-        None
-    };
+    let artifacts = load_artifacts_for_hydro_models(case_dir)?;
+    resolve_production_models_from_artifacts(system, &artifacts)
+}
 
-    // ── Step 1b: load per-(hydro, stage) ρ_eq override from the parquet ──────
-    let override_table = {
-        let path = case_dir
-            .join("system")
-            .join("hydro_energy_productivity.parquet");
-        if path.exists() {
-            let rows = cobre_io::load_hydro_energy_productivity(Some(&path))?;
-            crate::energy_conversion::build_hydro_energy_productivity_override(rows)
-                .map_err(|e| SddpError::Validation(e.to_string()))?
-        } else {
-            crate::energy_conversion::HydroEnergyProductivityOverride::default()
-        }
-    };
+/// Variant of [`resolve_production_models`] that consumes a pre-parsed
+/// [`cobre_io::CaseArtifacts`] bundle.
+///
+/// # Errors
+///
+/// Same conditions as [`resolve_production_models`].
+pub fn resolve_production_models_from_artifacts(
+    system: &System,
+    artifacts: &cobre_io::CaseArtifacts,
+) -> Result<ResolveProductionResult, SddpError> {
+    // ── Step 1b: build the per-(hydro, stage) ρ_eq override from the
+    //            already-parsed rows.
+    let override_table = crate::energy_conversion::build_hydro_energy_productivity_override(
+        artifacts.hydro_energy_productivity.clone(),
+    )
+    .map_err(|e| SddpError::Validation(e.to_string()))?;
 
-    // ── Step 2: load production model configs ─────────────────────────────────
-    let prod_configs: Vec<ProductionModelConfig> =
-        cobre_io::extensions::load_production_models(config_path.as_deref())?;
+    // ── Step 2: production model configs ─────────────────────────────────────
+    // Borrow from the artifacts bundle; no clone of the config rows is
+    // needed because the per-hydro maps below only need references.
+    let prod_configs: &[ProductionModelConfig] = &artifacts.production_models;
 
     // ── Step 3: build O(1) lookup: hydro_id → config ─────────────────────────
     let config_map: HashMap<EntityId, &ProductionModelConfig> =
         prod_configs.iter().map(|c| (c.hydro_id, c)).collect();
 
-    // ── Step 4/5/6: load and index precomputed FPHA hyperplane rows ───────────
-    let hyperplane_rows = load_precomputed_hyperplanes(&prod_configs, &manifest, case_dir)?;
+    // ── Step 4/5/6: index precomputed FPHA hyperplane rows ───────────────────
     let mut hyperplane_map: HashMap<(EntityId, Option<i32>), Vec<&FphaHyperplaneRow>> =
         HashMap::new();
-    for row in &hyperplane_rows {
-        hyperplane_map
-            .entry((row.hydro_id, row.stage_id))
-            .or_default()
-            .push(row);
+    if prod_configs.iter().any(config_uses_precomputed_fpha) {
+        for row in &artifacts.fpha_hyperplanes {
+            hyperplane_map
+                .entry((row.hydro_id, row.stage_id))
+                .or_default()
+                .push(row);
+        }
     }
 
-    // ── Step 4b/5b/6b: load and index geometry rows for computed-source hydros ─
-    let geometry_rows = load_geometry_rows(&prod_configs, &manifest, case_dir)?;
-    let geometry_map = build_geometry_map(&geometry_rows);
+    // ── Step 4b/5b/6b: index geometry rows for computed-source hydros ───────
+    let geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> =
+        if prod_configs.iter().any(config_uses_computed_fpha) {
+            build_geometry_map(&artifacts.hydro_geometry)
+        } else {
+            HashMap::new()
+        };
 
     // ── Step 7: collect study stages (id >= 0) in canonical order ────────────
     let study_stages: Vec<&cobre_core::temporal::Stage> =
@@ -822,48 +890,6 @@ pub fn resolve_production_models(
 
     let set = ProductionModelSet::new(all_models, n_hydros, n_stages);
     Ok((set, override_table, provenance, kappa_warnings, export_rows))
-}
-
-/// Load precomputed FPHA hyperplane rows from disk when any config uses `source: "precomputed"`.
-///
-/// Returns an empty vector when no precomputed hyperplanes are needed.
-fn load_precomputed_hyperplanes(
-    prod_configs: &[ProductionModelConfig],
-    manifest: &cobre_io::FileManifest,
-    case_dir: &Path,
-) -> Result<Vec<FphaHyperplaneRow>, SddpError> {
-    if !prod_configs.iter().any(config_uses_precomputed_fpha) {
-        return Ok(Vec::new());
-    }
-    let hp_path = if manifest.system_fpha_hyperplanes_parquet {
-        Some(case_dir.join("system").join("fpha_hyperplanes.parquet"))
-    } else {
-        None
-    };
-    Ok(cobre_io::extensions::load_fpha_hyperplanes(
-        hp_path.as_deref(),
-    )?)
-}
-
-/// Load geometry rows from disk when any config uses `source: "computed"`.
-///
-/// Returns an empty vector when no computed-source hydros exist.
-fn load_geometry_rows(
-    prod_configs: &[ProductionModelConfig],
-    manifest: &cobre_io::FileManifest,
-    case_dir: &Path,
-) -> Result<Vec<HydroGeometryRow>, SddpError> {
-    if !prod_configs.iter().any(config_uses_computed_fpha) {
-        return Ok(Vec::new());
-    }
-    let geo_path = if manifest.system_hydro_geometry_parquet {
-        Some(case_dir.join("system").join("hydro_geometry.parquet"))
-    } else {
-        None
-    };
-    Ok(cobre_io::extensions::load_hydro_geometry(
-        geo_path.as_deref(),
-    )?)
 }
 
 /// Build an `O(1)` geometry map: `hydro_id → sorted geometry row references`.
@@ -1381,6 +1407,28 @@ pub fn resolve_evaporation_models(
     ),
     SddpError,
 > {
+    let artifacts = load_artifacts_for_hydro_models(case_dir)?;
+    resolve_evaporation_models_from_artifacts(system, &artifacts)
+}
+
+/// Variant of [`resolve_evaporation_models`] that consumes a pre-parsed
+/// [`cobre_io::CaseArtifacts`] bundle.
+///
+/// # Errors
+///
+/// Same conditions as [`resolve_evaporation_models`].
+#[allow(clippy::type_complexity)]
+pub fn resolve_evaporation_models_from_artifacts(
+    system: &System,
+    artifacts: &cobre_io::CaseArtifacts,
+) -> Result<
+    (
+        EvaporationModelSet,
+        Vec<(EntityId, EvaporationSource)>,
+        Vec<(EntityId, EvaporationReferenceSource)>,
+    ),
+    SddpError,
+> {
     // ── Step 1: scan for any hydro that needs evaporation ─────────────────────
     let any_evaporation = system
         .hydros()
@@ -1411,20 +1459,13 @@ pub fn resolve_evaporation_models(
         ));
     }
 
-    // ── Step 3: load hydro_geometry.parquet ───────────────────────────────────
-    let mut ctx = cobre_io::ValidationContext::new();
-    let manifest = cobre_io::validate_structure(case_dir, &mut ctx);
-    let geometry_path = if manifest.system_hydro_geometry_parquet {
-        Some(case_dir.join("system").join("hydro_geometry.parquet"))
-    } else {
-        None
-    };
-    let geometry_rows = cobre_io::extensions::load_hydro_geometry(geometry_path.as_deref())?;
+    // ── Step 3: use pre-parsed hydro_geometry rows from the artifacts bundle ─
+    let geometry_rows: &[HydroGeometryRow] = &artifacts.hydro_geometry;
 
     // ── Step 4: group geometry rows by hydro_id ───────────────────────────────
     let mut geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
         HashMap::new();
-    for row in &geometry_rows {
+    for row in geometry_rows {
         geometry_map.entry(row.hydro_id).or_default().push(row);
     }
     // Sort each hydro's rows by volume_hm3 ascending (should already be sorted,

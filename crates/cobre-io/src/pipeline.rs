@@ -33,6 +33,7 @@ use crate::{
     },
 };
 
+use crate::{CaseArtifacts, LoadedCase};
 use cobre_core::System;
 use std::path::Path;
 
@@ -50,7 +51,6 @@ use std::path::Path;
 /// - [`LoadError::ConstraintError`] — one or more validation errors collected by
 ///   Layers 1-5, or `SystemBuilder::build` rejection.
 /// - [`LoadError::SchemaError`] — AR coefficient count mismatch in scenario assembly.
-#[allow(clippy::too_many_lines)]
 pub(crate) fn run_pipeline(path: &Path) -> Result<System, LoadError> {
     run_pipeline_with_report(path).map(|(system, _report)| system)
 }
@@ -64,10 +64,27 @@ pub(crate) fn run_pipeline(path: &Path) -> Result<System, LoadError> {
 /// # Errors
 ///
 /// Same error conditions as [`run_pipeline`].
-#[allow(clippy::too_many_lines)]
 pub(crate) fn run_pipeline_with_report(
     path: &Path,
 ) -> Result<(System, ValidationReport), LoadError> {
+    run_pipeline_with_artifacts(path).map(|(loaded, report)| (loaded.system, report))
+}
+
+/// Run the complete loading pipeline and return the validated [`System`] in a
+/// [`LoadedCase`] bundle alongside the auxiliary [`CaseArtifacts`] rows and a
+/// [`ValidationReport`] of any collected warnings.
+///
+/// This is the canonical pipeline; the simpler `run_pipeline` /
+/// `run_pipeline_with_report` entry points delegate here and strip what they
+/// don't need.
+///
+/// # Errors
+///
+/// Same error conditions as [`run_pipeline`].
+#[allow(clippy::too_many_lines)]
+pub(crate) fn run_pipeline_with_artifacts(
+    path: &Path,
+) -> Result<(LoadedCase, ValidationReport), LoadError> {
     let mut ctx = ValidationContext::new();
 
     // Layer 1 — structural validation (required files present on disk).
@@ -190,6 +207,20 @@ pub(crate) fn run_pipeline_with_report(
     )?;
     let load_models = assemble_load_models(data.load_seasonal_stats);
 
+    // ── Auxiliary artifacts ───────────────────────────────────────────────────
+    //
+    // Move the already-parsed/validated rows out of `ParsedData` before
+    // `SystemBuilder::build` consumes the rest. Downstream consumers receive
+    // these via [`CaseArtifacts`] instead of re-opening the files from disk.
+    let artifacts = CaseArtifacts {
+        file_manifest: manifest,
+        hydro_geometry: data.hydro_geometry,
+        production_models: data.production_models,
+        hydro_energy_productivity: data.hydro_energy_productivity_rows,
+        fpha_hyperplanes: data.fpha_hyperplanes,
+        scalar_parameters: data.scalar_parameters,
+    };
+
     // ── System construction ───────────────────────────────────────────────────
 
     let system = SystemBuilder::new()
@@ -228,5 +259,5 @@ pub(crate) fn run_pipeline_with_report(
                 .join("\n"),
         })?;
 
-    Ok((system, report))
+    Ok((LoadedCase { system, artifacts }, report))
 }

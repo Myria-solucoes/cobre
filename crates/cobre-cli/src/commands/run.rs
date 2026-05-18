@@ -117,7 +117,14 @@ fn load_case_and_config(
     if !quiet {
         let _ = stderr.write_line(&format!("Loading case: {}", args.case_dir.display()));
     }
-    let system = cobre_io::load_case(&args.case_dir)?;
+    // Single-source case load: `load_case_with_artifacts` runs the full
+    // validation pipeline once and returns both the System and the
+    // already-parsed parquet/JSON rows (production models, hydro geometry,
+    // FPHA hyperplanes, scalar parameters). Downstream consumers
+    // (`prepare_hydro_models_from_artifacts`, ConstructionConfig) receive
+    // these rows directly instead of re-reading the same files from disk.
+    let cobre_io::LoadedCase { system, artifacts } =
+        cobre_io::load_case_with_artifacts(&args.case_dir)?;
     let config_path = args.case_dir.join("config.json");
     let config = cobre_io::parse_config(&config_path)?;
     let bcast = BroadcastConfig::from_config(&config)?;
@@ -131,14 +138,15 @@ fn load_case_and_config(
     )
     .map_err(CliError::from)?;
     let hydro_models =
-        prepare_hydro_models(&prepared.system, &args.case_dir).map_err(CliError::from)?;
-    let scalar_parameters_path = args.case_dir.join("system/scalar_parameters.json");
-    let scalar_parameters = if scalar_parameters_path.exists() {
-        cobre_io::load_scalar_parameters_json(&args.case_dir)?
-    } else {
-        Vec::new()
-    };
-    Ok((prepared, hydro_models, bcast, config, scalar_parameters))
+        cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts(&prepared.system, &artifacts)
+            .map_err(CliError::from)?;
+    Ok((
+        prepared,
+        hydro_models,
+        bcast,
+        config,
+        artifacts.scalar_parameters,
+    ))
 }
 
 /// Shared context for execute phases (communicator, output, topology, etc.).
