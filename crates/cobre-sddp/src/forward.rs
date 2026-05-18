@@ -19,17 +19,17 @@ use cobre_core::{TrainingEvent, WelfordAccumulator};
 use cobre_solver::{RowBatch, SolverInterface, StageTemplate};
 use cobre_stochastic::context::ClassSchemes;
 use cobre_stochastic::{
-    ClassDimensions, ForwardSampler, ForwardSamplerConfig, build_forward_sampler,
+    build_forward_sampler, ClassDimensions, ForwardSampler, ForwardSamplerConfig,
 };
 
 use crate::{
     context::{StageContext, TrainingContext},
-    cut::FutureCostFunction,
     cut::pool::CutPool,
+    cut::FutureCostFunction,
     error::SddpError,
     indexer::StageIndexer,
     lp_builder::COST_SCALE_FACTOR,
-    noise::{NcsNoiseOffsets, transform_inflow_noise, transform_load_noise, transform_ncs_noise},
+    noise::{transform_inflow_noise, transform_load_noise, transform_ncs_noise, NcsNoiseOffsets},
     solver_stats::SolverStatsDelta,
     trajectory::TrajectoryRecord,
     workspace::{BasisStore, BasisStoreSliceMut, CapturedBasis, SolverWorkspace},
@@ -671,7 +671,7 @@ pub struct ForwardPassBatch<'a> {
     /// Activity-window size for the basis-reconstruction classifier (1..=31).
     ///
     /// Forwarded verbatim from [`crate::config::CutManagementConfig::basis_activity_window`]
-    /// and threaded through `StageKey` into [`crate::stage_solve::StageInputs`].
+    /// and threaded through `StageKey` into the stage-solve inputs.
     pub basis_activity_window: u32,
 }
 
@@ -1235,17 +1235,16 @@ mod tests {
     use cobre_solver::{
         Basis, LpSolution, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
     };
+    use cobre_stochastic::context::{build_stochastic_context, ClassSchemes, OpeningTreeInputs};
     use cobre_stochastic::StochasticContext;
-    use cobre_stochastic::context::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
     use cobre_comm::LocalBackend;
 
     use super::{
-        ForwardPassBatch, ForwardResult, SyncResult, build_cut_row_batch,
-        build_delta_cut_row_batch_into, partition, run_forward_pass, sync_forward,
+        build_cut_row_batch, build_delta_cut_row_batch_into, partition, run_forward_pass,
+        sync_forward, ForwardPassBatch, ForwardResult, SyncResult,
     };
     use crate::{
-        StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
         config::{CutManagementConfig, EventConfig, LoopConfig},
         context::{StageContext, TrainingContext},
         cut::FutureCostFunction,
@@ -1255,6 +1254,7 @@ mod tests {
         risk_measure::RiskMeasure,
         trajectory::TrajectoryRecord,
         workspace::{BackwardAccumulators, BasisStore, SolverWorkspace},
+        StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
     };
 
     // ── Mock solver ──────────────────────────────────────────────────────────
