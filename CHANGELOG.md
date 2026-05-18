@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-05-18
+
 ### Added
 
 - Reserved three new crate names in the workspace as placeholders for
@@ -36,15 +38,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `(storage_initial_hm3 − min_storage_hm3) · ρ_acum · 10⁶ / 3600`.
   - `stored_energy_final_mwh` (MWh) — stored reservoir energy at the
     end of the block, using the same formula with the final storage.
-
-- Soft-consistency warning emitted to stderr at preprocessing time
-  when a non-FPHA hydro declares both `specific_productivity_mw_per_m3s_per_m`
-  (`ρ_esp`) and a `productivity_mw_per_m3s` (`ρ_eq_stored`) whose
-  implied `ρ_esp = ρ_eq_stored / h_eq(V_ref, Q_ref)` diverges from the
-  supplied value by more than 5%. The warning prefix is
-  `[energy-conversion] WARN:` and includes the hydro and stage IDs.
-  The run is not aborted — the warning flags a likely data-entry bug
-  while preserving legitimate turbine-retrofit cases.
 
 ### Removed
 
@@ -80,6 +73,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kind-specific payload (`value`, `values`, or
   `computed_spec`).
 
+- Several `config.json` fields whose values were no longer wired to any
+  downstream consumer: `modeling.inflow_non_negativity.penalty_cost` (the
+  per-hydro slack cost is now sourced exclusively from
+  `penalties.json::hydro.inflow_nonnegativity_cost`),
+  `training.cut_formulation`, `training.forward_pass`,
+  `simulation.policy_type`, `simulation.output_mode`, `simulation.output_path`,
+  and the legacy export flags
+  (`training`, `cuts`, `vertices`, `simulation`, `forward_detail`,
+  `backward_detail`, `compression`) under `exports`. Any case still carrying
+  these keys is rejected at parse with an `unknown field` error.
+
+- The `"fixed"` value of `estimation.order_selection`. Only `"pacf"` and
+  `"pacf_annual"` remain valid; the alias was previously accepted and silently
+  mapped to `"pacf"`.
+
+- The `version` field on `penalties.json`. The field was parsed but never
+  consulted; schema-version gating is enforced via the `$schema` URL instead.
+
 ### Changed
 
 - `system/hydro_production_models.json` —
@@ -98,6 +109,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   affected `(hydro, stage)`; the LP treats these coefficients as
   multipliers, so zero produces zero generation without any
   division-by-zero hazard. Negative values are still rejected.
+
+- `config.json::modeling.inflow_non_negativity.method` is now a typed
+  enum with four valid values (`"none"`, `"truncation"`, `"penalty"`,
+  `"truncation_with_penalty"`). Unrecognised strings were previously
+  silently coerced to `"none"`; they are now rejected at parse.
+
+- `config.json::training.cut_selection.threshold` is consulted only
+  when `method = "level1"` (it is the activity-count cutoff for cut
+  deactivation). The `"lml1"` and `"domination"` methods no longer
+  fall back to `threshold`; they now require `memory_window` and
+  `domination_epsilon` respectively, and reject configurations that
+  omit them.
 
 ### Breaking Changes
 
@@ -157,6 +180,15 @@ array entry per parameter with a `kind` discriminator
 kind-specific payload. Authoring order is preserved at parse
 time; LP coefficients are unaffected by authoring order
 (parameters are looked up by `id` at LP-build time).
+
+**Strict JSON parsing** — every input JSON file (`config.json`,
+`penalties.json`, `stages.json`, `initial_conditions.json`, and every
+file under `system/`, `constraints/`, and `scenarios/`) now rejects
+unknown top-level and per-entry fields with a hard parse error.
+Misspellings (`"max_outflow"` vs `"max_outflow_m3s"`) and stale
+configuration keys from earlier releases that previously survived
+silently must be fixed before a case will load. The error message
+names the unrecognised field.
 
 **Migration**
 
