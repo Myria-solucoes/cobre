@@ -17,10 +17,13 @@ point `(V_ref, Q_ref)`. It collapses the head, tailrace, and hydraulic loss
 effects into one number for a given stage.
 
 For the two fixed-productivity models (`constant_productivity` and
-`linearized_head`), `ρ_eq` is taken directly from the per-`(hydro, stage)`
-`productivity_mw_per_m3s` entry resolved from
-`system/hydro_production_models.json`. For FPHA plants the head is variable, so
-`ρ_eq` is computed at a reference operating point:
+`linearized_head`), `ρ_eq` is supplied per `(hydro, stage)` by exactly one of
+the inline `productivity_mw_per_m3s` field on
+`system/hydro_production_models.json` or the
+`equivalent_productivity_mw_per_m3s` column in
+`system/hydro_energy_productivity.parquet`. Supplying the same `(hydro, stage)`
+value in both files is rejected at load time. For FPHA plants the head is
+variable, so `ρ_eq` is computed at a reference operating point:
 
 ```text
 ρ_eq = ρ_esp × h_eq(V_ref, Q_ref)
@@ -64,8 +67,11 @@ for this hydro, (2) add an entry in system/hydro_energy_productivity.parquet,
 or (3) change the hydro's generation_model away from FPHA.
 ```
 
-Non-FPHA plants always use path (1) from the override table or their stored
-`productivity_mw_per_m3s` scalar; they are never blocked by the FPHA gate.
+Non-FPHA plants follow the same priority order minus the VHA path: the
+`equivalent_productivity_mw_per_m3s` column wins when present, otherwise the
+inline `productivity_mw_per_m3s` field on `system/hydro_production_models.json`
+is used. Supplying the same `(hydro, stage)` in both files is rejected at load
+time; supplying neither is also rejected.
 
 ---
 

@@ -1357,16 +1357,16 @@ setting `method` to `"truncation_with_penalty"` in `config.json`:
 {
   "modeling": {
     "inflow_non_negativity": {
-      "method": "truncation_with_penalty",
-      "penalty_cost": 1000.0
+      "method": "truncation_with_penalty"
     }
   }
 }
 ```
 
 This method applies both truncation and a bounded slack variable: the inflow
-is clamped to zero and a slack penalised at `penalty_cost` is added, providing
-a smooth backstop for extreme tail realisations.
+is clamped to zero and a slack penalised by
+`penalties.json::hydro.inflow_nonnegativity_cost` is added, providing a smooth
+backstop for extreme tail realisations.
 
 For the mathematical theory behind all three methods, see the
 [Inflow Non-Negativity](https://cobre-rs.github.io/cobre-docs/theory/inflow-non-negativity.html)

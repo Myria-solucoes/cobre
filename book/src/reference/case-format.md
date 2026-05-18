@@ -131,10 +131,12 @@ sections are optional and fall back to documented defaults when absent.
 
 **`modeling` section:**
 
-| Field                                         | Type   | Default     | Description                                                                                                        |
-| --------------------------------------------- | ------ | ----------- | ------------------------------------------------------------------------------------------------------------------ |
-| `modeling.inflow_non_negativity.method`       | string | `"penalty"` | How to handle negative modelled inflows. One of `"none"`, `"penalty"`, `"truncation"`, `"truncation_with_penalty"` |
-| `modeling.inflow_non_negativity.penalty_cost` | number | `1000.0`    | Penalty coefficient when method is `"penalty"` or `"truncation_with_penalty"`                                      |
+| Field                                   | Type   | Default     | Description                                                                                                        |
+| --------------------------------------- | ------ | ----------- | ------------------------------------------------------------------------------------------------------------------ |
+| `modeling.inflow_non_negativity.method` | string | `"penalty"` | How to handle negative modelled inflows. One of `"none"`, `"penalty"`, `"truncation"`, `"truncation_with_penalty"` |
+
+The per-hydro penalty coefficient applied to the inflow slack column is
+authored in `penalties.json::hydro.inflow_nonnegativity_cost`.
 
 **`training` section (mandatory fields):**
 
@@ -145,7 +147,6 @@ sections are optional and fall back to documented defaults when absent.
 | `training.stopping_mode`   | string          | `"any"`      | How multiple rules combine: `"any"` (stop when any triggers) or `"all"` (stop when all trigger) |
 | `training.enabled`         | boolean         | `true`       | When `false`, skip training and proceed directly to simulation                                  |
 | `training.tree_seed`       | integer or null | `null`       | Random seed for reproducible noise generation (see [Seed resolution](#seed-resolution))         |
-| `training.cut_formulation` | string or null  | `null`       | Cut type: `"single"` or `"multi"`                                                               |
 | `training.scenario_source` | object or null  | `null`       | Per-class sampling scheme for the training forward pass (see below)                             |
 
 **`training.scenario_source` sub-section:**
@@ -231,9 +232,6 @@ Each entry has a `"type"` discriminator. Valid types:
 | --------------------------------------------- | --------------- | ------------- | ------------------------------------------------------------------------------------------------------ |
 | `enabled`                                     | boolean         | `false`       | Enable post-training simulation                                                                        |
 | `num_scenarios`                               | integer         | `2000`        | Number of simulation scenarios                                                                         |
-| `policy_type`                                 | string          | `"outer"`     | Policy representation: `"outer"` (cuts) or `"inner"` (vertices)                                        |
-| `output_path`                                 | string or null  | `null`        | Directory for simulation output files                                                                  |
-| `output_mode`                                 | string or null  | `null`        | Output mode: `"streaming"` or `"batched"`                                                              |
 | `io_channel_capacity`                         | integer         | `64`          | Channel capacity between simulation and I/O writer threads                                             |
 | `simulation.scenario_source`                  | object or null  | `null`        | Per-class sampling scheme for the simulation pass (see below)                                          |
 | `simulation.scenario_source.inflow.scheme`    | string          | `"in_sample"` | Inflow sampling scheme: `"in_sample"`, `"historical"`, `"external"`, or `"out_of_sample"`              |
@@ -243,17 +241,10 @@ Each entry has a `"type"` discriminator. Valid types:
 
 **`exports` section:**
 
-| Field             | Type           | Default | Description                                                        |
-| ----------------- | -------------- | ------- | ------------------------------------------------------------------ |
-| `training`        | boolean        | `true`  | Export training summary metrics                                    |
-| `cuts`            | boolean        | `true`  | Export row pool (piecewise-linear envelope)                        |
-| `states`          | boolean        | `false` | Export visited states                                              |
-| `vertices`        | boolean        | `true`  | Export inner approximation vertices                                |
-| `simulation`      | boolean        | `true`  | Export simulation results                                          |
-| `forward_detail`  | boolean        | `false` | Export per-scenario forward-pass detail                            |
-| `backward_detail` | boolean        | `false` | Export per-scenario backward-pass detail                           |
-| `compression`     | string or null | `null`  | Output compression: `"zstd"`, `"lz4"`, or `"none"`                 |
-| `stochastic`      | boolean        | `false` | Export stochastic preprocessing artifacts to `output/stochastic/`. |
+| Field        | Type    | Default | Description                                                       |
+| ------------ | ------- | ------- | ----------------------------------------------------------------- |
+| `states`     | boolean | `false` | Export visited forward-pass trial points to the policy checkpoint |
+| `stochastic` | boolean | `false` | Export stochastic preprocessing artifacts to `output/stochastic/` |
 
 **Minimal valid example:**
 
@@ -674,9 +665,12 @@ Multiple rows per `hydro_id` together constitute the VHA curve for that plant.
 
 ### `system/hydro_production_models.json`
 
-Per-hydro production function assignment. When absent, all hydros use
-`constant_productivity` (the productivity factor from `hydros.json`) for
-every stage.
+Per-hydro production function assignment. The file is required whenever
+the case contains at least one non-FPHA hydro: each non-FPHA plant must
+have a matching entry that supplies either an inline
+`productivity_mw_per_m3s` per stage range / season, or defers to
+`system/hydro_energy_productivity.parquet` for that `(hydro, stage)`
+coefficient.
 
 The file contains a `"production_models"` array. Each entry configures one hydro
 plant and is identified by a unique `hydro_id`. Results are loaded in

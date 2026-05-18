@@ -15,22 +15,22 @@ with all foreign keys resolved and all domain rules verified.
 
 ## Module overview
 
-| Module               | Purpose                                                                                                                             |
-| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `config`             | `Config` struct and `parse_config` — reads `config.json`                                                                            |
-| `system`             | Entity parsers for buses, lines, hydros, thermals, and stub types                                                                   |
-| `extensions`         | Hydro production model extensions — FPHA hyperplane loading, production model configuration parsing, and hydro geometry parsing     |
+| Module               | Purpose                                                                                                                                                                                                                           |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `config`             | `Config` struct and `parse_config` — reads `config.json`                                                                                                                                                                          |
+| `system`             | Entity parsers for buses, lines, hydros, thermals, and stub types                                                                                                                                                                 |
+| `extensions`         | Hydro production model extensions — FPHA hyperplane loading, production model configuration parsing, and hydro geometry parsing                                                                                                   |
 | `scenarios`          | Inflow and load statistical model loading, assembly, history-based estimation, and per-class external scenario loading (`external_inflow_scenarios.parquet`, `external_load_scenarios.parquet`, `external_ncs_scenarios.parquet`) |
-| `constraints`        | Stage-varying bound and penalty override loading from Parquet                                                                       |
-| `penalties`          | Global penalty defaults parser (`penalties.json`)                                                                                   |
-| `stages`             | Stage sequence and policy graph loading (`stages.json`), per-class scenario source parsing (`ScenarioSource`), and backward-incompatibility detection for removed fields           |
-| `initial_conditions` | Reservoir initial storage loading                                                                                                   |
-| `validation`         | Five-layer validation pipeline and `ValidationContext`                                                                              |
-| `resolution`         | Three-tier penalty and bound resolution into O(1) lookup tables                                                                     |
-| `pipeline`           | Orchestrator that wires all layers into a single `load_case` call                                                                   |
-| `report`             | Structured validation report generation                                                                                             |
-| `broadcast`          | System serialization and deserialization for MPI broadcast                                                                          |
-| `output`             | Output result types for simulation and training data; `output::hydro_models` exports fitted FPHA hyperplane coefficients to Parquet |
+| `constraints`        | Stage-varying bound and penalty override loading from Parquet                                                                                                                                                                     |
+| `penalties`          | Global penalty defaults parser (`penalties.json`)                                                                                                                                                                                 |
+| `stages`             | Stage sequence and policy graph loading (`stages.json`), per-class scenario source parsing (`ScenarioSource`), and backward-incompatibility detection for removed fields                                                          |
+| `initial_conditions` | Reservoir initial storage loading                                                                                                                                                                                                 |
+| `validation`         | Five-layer validation pipeline and `ValidationContext`                                                                                                                                                                            |
+| `resolution`         | Three-tier penalty and bound resolution into O(1) lookup tables                                                                                                                                                                   |
+| `pipeline`           | Orchestrator that wires all layers into a single `load_case` call                                                                                                                                                                 |
+| `report`             | Structured validation report generation                                                                                                                                                                                           |
+| `broadcast`          | System serialization and deserialization for MPI broadcast                                                                                                                                                                        |
+| `output`             | Output result types for simulation and training data; `output::hydro_models` exports fitted FPHA hyperplane coefficients to Parquet                                                                                               |
 
 ## `load_case`
 
@@ -219,11 +219,13 @@ passed to Layer 2 so that optional-file parsers are only called when the files
 are present.
 
 **Layer 2 (Schema):** Parses every file found by Layer 1. For JSON files,
-deserialization uses serde with strict field requirements — missing required
-fields and unknown field values surface immediately. For Parquet files, column
-presence and data types are verified. Post-deserialization checks catch domain
-range violations (for example, negative capacity values) that serde cannot
-express. All parse and schema errors are collected by `ValidationContext`.
+deserialization uses serde with strict field requirements: every input file
+applies `#[serde(deny_unknown_fields)]`, so missing required fields **and**
+unrecognised keys surface immediately as a hard parse error rather than
+being silently ignored. For Parquet files, column presence and data types
+are verified. Post-deserialization checks catch domain range violations
+(for example, negative capacity values) that serde cannot express. All
+parse and schema errors are collected by `ValidationContext`.
 
 **Layer 3 (Referential integrity):** Checks all cross-entity foreign-key
 references. Examples: every `hydro.bus_id` must name a bus in the bus registry;
@@ -297,11 +299,11 @@ The `config.json` file accepts an optional `"estimation"` section that controls
 the fitting procedure. All fields have defaults and the section may be omitted
 entirely.
 
-| Field                         | Type                  | Default  | Description                                                                      |
-| ----------------------------- | --------------------- | -------- | -------------------------------------------------------------------------------- |
-| `max_order`                   | `u32`                 | `6`      | Maximum autoregressive lag order considered during model selection               |
-| `order_selection`             | `"pacf"` or `"fixed"` | `"pacf"` | Criterion for selecting the AR order: PACF significance testing or fixed maximum |
-| `min_observations_per_season` | `u32`                 | `30`     | Minimum observations required per `(entity, season)` group                       |
+| Field                         | Type                        | Default  | Description                                                                                                    |
+| ----------------------------- | --------------------------- | -------- | -------------------------------------------------------------------------------------------------------------- |
+| `max_order`                   | `u32`                       | `6`      | Maximum autoregressive lag order considered during model selection                                             |
+| `order_selection`             | `"pacf"` or `"pacf_annual"` | `"pacf"` | Criterion for selecting the AR order: PACF significance testing, optionally augmented with an annual component |
+| `min_observations_per_season` | `u32`                       | `30`     | Minimum observations required per `(entity, season)` group                                                     |
 
 The `estimation` configuration is accessible at `config.estimation` after
 `parse_config`. The `min_observations_per_season` threshold is used both during

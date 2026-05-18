@@ -266,8 +266,11 @@ Two selection strategies are supported:
 }
 ```
 
-Each stage range and season entry for a `constant_productivity` or `linearized_head`
-plant must include a `productivity_mw_per_m3s` field
+Each stage range and season entry for a `constant_productivity` or
+`linearized_head` plant must supply its productivity coefficient through
+exactly one source: either an inline `productivity_mw_per_m3s` field on the
+entry, or a matching `(hydro, stage)` row in
+`system/hydro_energy_productivity.parquet`
 (see [Per-Range and Per-Season Productivity](#per-range-and-per-season-productivity) below).
 
 **`seasonal`** — assigns a model based on season index, with a fallback for seasons
