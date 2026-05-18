@@ -32,11 +32,9 @@ use cobre_io::output::{
 use cobre_io::scenarios::LoadSeasonalStatsRow;
 use cobre_sddp::{
     EstimationReport, PrepareHydroModelsResult, PrepareStochasticResult, StudySetup,
-    build_hydro_model_summary,
-    energy_conversion::ConsistencyWarning,
-    estimation_report_to_fitting_report, inflow_models_to_annual_component_rows,
-    inflow_models_to_ar_rows, inflow_models_to_stats_rows, prepare_hydro_models,
-    prepare_stochastic,
+    build_hydro_model_summary, estimation_report_to_fitting_report,
+    inflow_models_to_annual_component_rows, inflow_models_to_ar_rows, inflow_models_to_stats_rows,
+    prepare_hydro_models, prepare_stochastic,
     setup::{ConstructionConfig, build_ncs_factor_entries, load_load_factors_for_stochastic},
 };
 use cobre_solver::HighsSolver;
@@ -237,12 +235,6 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
     // Emit soft consistency warnings for non-FPHA hydros whose stored
     // `ρ_eq_stored` diverges from the implied `ρ_esp = ρ_eq_stored / h_eq`.
     // Warnings are purely diagnostic — they do not abort the run.
-    // Only rank 0 loads the geometry file and emits warnings; non-root ranks
-    // skip silently (the file is optional and the check is stateless).
-    if ctx.is_root {
-        emit_energy_conversion_warnings(&args.case_dir, &system, &setup);
-    }
-
     // Pre-training outputs (estimation artifacts, scaling report) run
     // regardless of training_enabled — they are data preparation outputs.
     run_pre_training(
@@ -901,57 +893,6 @@ fn build_study_setup(
         &bcast_config.simulation_source,
     )
     .map_err(CliError::from)
-}
-
-/// Print summaries, export stochastic artifacts, and write the scaling report.
-/// Load `system/hydro_geometry.parquet` (if present) and emit a
-/// `[energy-conversion] WARN: ...` line on stderr for each
-/// `ConsistencyWarning` returned by the energy-conversion check.
-///
-/// Diagnostic only — never aborts the run. A missing geometry file simply
-/// produces no warnings (no inputs, no implied `ρ_esp` to compare).
-fn emit_energy_conversion_warnings(case_dir: &Path, system: &System, setup: &StudySetup) {
-    use std::collections::HashMap;
-
-    let geo_path = case_dir.join("system").join("hydro_geometry.parquet");
-    let geometry_rows = if geo_path.exists() {
-        match cobre_io::extensions::parse_hydro_geometry(&geo_path) {
-            Ok(rows) => rows,
-            Err(e) => {
-                eprintln!(
-                    "[energy-conversion] WARN: failed to load hydro_geometry.parquet for \
-                     consistency check: {e}"
-                );
-                return;
-            }
-        }
-    } else {
-        Vec::new()
-    };
-
-    let mut vha_rows_by_hydro: HashMap<cobre_core::EntityId, Vec<cobre_io::HydroGeometryRow>> =
-        HashMap::new();
-    for row in geometry_rows {
-        vha_rows_by_hydro.entry(row.hydro_id).or_default().push(row);
-    }
-
-    for warning in setup
-        .energy_conversion()
-        .consistency_warnings(system.hydros(), &vha_rows_by_hydro)
-    {
-        let ConsistencyWarning::ImpliedSpecificProductivityMismatch {
-            hydro_id,
-            stage_id,
-            supplied_rho_esp,
-            implied_rho_esp,
-            tolerance,
-        } = warning;
-        eprintln!(
-            "[energy-conversion] WARN: hydro_id={hydro_id:?} stage_id={stage_id} \
-             supplied_rho_esp={supplied_rho_esp} \
-             implied_rho_esp={implied_rho_esp} tolerance={tolerance}"
-        );
-    }
 }
 
 fn run_pre_training(
