@@ -30,9 +30,8 @@ use cobre_io::output::simulation_writer::{ScenarioWritePayload, SimulationParque
 use cobre_io::{ParquetWriterConfig, SolverStatsRow};
 use cobre_sddp::{
     build_hydro_model_summary, build_provenance_report, build_stochastic_summary,
-    prepare_hydro_models, prepare_stochastic, ArOrderSummary, EstimationReport, FutureCostFunction,
-    HydroModelSummary, ModelProvenanceReport, SolverStatsDelta, StochasticSource,
-    StochasticSummary, StudyParams, StudySetup, DEFAULT_SEED,
+    prepare_stochastic, ArOrderSummary, HydroModelSummary, ModelProvenanceReport, SolverStatsDelta,
+    StochasticSource, StochasticSummary, StudyParams, StudySetup, DEFAULT_SEED,
 };
 use cobre_solver::HighsSolver;
 
@@ -70,174 +69,6 @@ fn init_rayon(threads: Option<u32>) -> usize {
                  actual={actual}, error={err}"
             );
             actual
-        }
-    }
-}
-
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn write_policy_checkpoint(
-    policy_dir: &std::path::Path,
-    fcf: &FutureCostFunction,
-    training_result: &cobre_sddp::TrainingResult,
-    max_iterations: u64,
-    forward_passes: u32,
-    seed: u64,
-    export_states: bool,
-) -> Result<(), String> {
-    use cobre_io::output::policy::{
-        write_policy_checkpoint as io_write_policy_checkpoint, PolicyCheckpointMetadata,
-    };
-    use cobre_sddp::policy_export::{
-        build_active_indices, build_stage_basis_records, build_stage_cut_records,
-        build_stage_cuts_payloads, build_stage_states_payloads, convert_basis_cache,
-    };
-
-    let n_stages = fcf.pools.len();
-    let state_dimension = fcf.state_dimension;
-
-    let stage_records = build_stage_cut_records(fcf);
-    let stage_active_indices = build_active_indices(&stage_records);
-    let stage_cuts = build_stage_cuts_payloads(fcf, &stage_records, &stage_active_indices);
-
-    let (basis_col_u8, basis_row_u8) = convert_basis_cache(training_result);
-    let stage_bases = build_stage_basis_records(fcf, training_result, &basis_col_u8, &basis_row_u8);
-
-    let warm_start_counts: Vec<u32> = fcf.pools.iter().map(|p| p.warm_start_count).collect();
-    let metadata = PolicyCheckpointMetadata {
-        cobre_version: env!("CARGO_PKG_VERSION").to_string(),
-        created_at: cobre_io::now_iso8601(),
-        completed_iterations: training_result.iterations as u32,
-        final_lower_bound: training_result.final_lb,
-        best_upper_bound: Some(training_result.final_ub),
-        state_dimension: state_dimension as u32,
-        num_stages: n_stages as u32,
-        max_iterations: max_iterations as u32,
-        forward_passes,
-        warm_start_cuts: warm_start_counts.iter().copied().max().unwrap_or(0),
-        warm_start_counts,
-        rng_seed: seed,
-        total_visited_states: training_result
-            .visited_archive
-            .as_ref()
-            .map_or(0, |a| (0..a.num_stages()).map(|t| a.count(t) as u64).sum()),
-    };
-
-    let stage_states = if export_states {
-        build_stage_states_payloads(training_result.visited_archive.as_ref())
-    } else {
-        Vec::new()
-    };
-
-    io_write_policy_checkpoint(
-        policy_dir,
-        &stage_cuts,
-        &stage_bases,
-        &metadata,
-        &stage_states,
-    )
-    .map_err(|e| e.to_string())
-}
-
-/// Write all applicable stochastic preprocessing artifacts to `{output_dir}/stochastic/`.
-///
-/// Called when `exports.stochastic` is `true` in `config.json`. Each writer call is
-/// independent: failure is logged to stderr as a warning and does not prevent the remaining
-/// files or training from proceeding.
-///
-/// Files written:
-/// - `noise_openings.parquet` — always
-/// - `inflow_seasonal_stats.parquet` — always
-/// - `inflow_ar_coefficients.parquet` — always
-/// - `inflow_annual_component.parquet` — always
-/// - `correlation.json` — always
-/// - `load_seasonal_stats.parquet` — only when any load model has `std_mw > 0`
-/// - `fitting_report.json` — only when `estimation_report` is `Some`
-fn export_stochastic_artifacts_py(
-    output_dir: &std::path::Path,
-    stochastic: &cobre_stochastic::StochasticContext,
-    system: &cobre_core::System,
-    estimation_report: Option<&EstimationReport>,
-) {
-    use cobre_core::scenario::LoadModel;
-    use cobre_io::output::{
-        write_correlation_json, write_fitting_report, write_inflow_annual_component,
-        write_inflow_ar_coefficients, write_inflow_seasonal_stats, write_load_seasonal_stats,
-        write_noise_openings,
-    };
-    use cobre_io::scenarios::LoadSeasonalStatsRow;
-    use cobre_sddp::{
-        estimation_report_to_fitting_report, inflow_models_to_annual_component_rows,
-        inflow_models_to_ar_rows, inflow_models_to_stats_rows,
-    };
-
-    let stochastic_dir = output_dir.join("stochastic");
-
-    if let Err(e) = write_noise_openings(
-        &stochastic_dir.join("noise_openings.parquet"),
-        stochastic.opening_tree(),
-    ) {
-        eprintln!("cobre-python: stochastic export warning: noise_openings: {e}");
-    }
-
-    let stats_rows = inflow_models_to_stats_rows(system.inflow_models());
-    if let Err(e) = write_inflow_seasonal_stats(
-        &stochastic_dir.join("inflow_seasonal_stats.parquet"),
-        &stats_rows,
-    ) {
-        eprintln!("cobre-python: stochastic export warning: inflow_seasonal_stats: {e}");
-    }
-
-    let ar_rows = inflow_models_to_ar_rows(system.inflow_models());
-    if let Err(e) = write_inflow_ar_coefficients(
-        &stochastic_dir.join("inflow_ar_coefficients.parquet"),
-        &ar_rows,
-    ) {
-        eprintln!("cobre-python: stochastic export warning: inflow_ar_coefficients: {e}");
-    }
-
-    let annual_rows = inflow_models_to_annual_component_rows(system.inflow_models());
-    if let Err(e) = write_inflow_annual_component(
-        &stochastic_dir.join("inflow_annual_component.parquet"),
-        &annual_rows,
-    ) {
-        eprintln!("cobre-python: stochastic export warning: inflow_annual_component: {e}");
-    }
-
-    if let Err(e) = write_correlation_json(
-        &stochastic_dir.join("correlation.json"),
-        system.correlation(),
-    ) {
-        eprintln!("cobre-python: stochastic export warning: correlation: {e}");
-    }
-
-    let has_stochastic_load = system
-        .load_models()
-        .iter()
-        .any(|m: &LoadModel| m.std_mw > 0.0);
-    if has_stochastic_load {
-        let load_rows: Vec<LoadSeasonalStatsRow> = system
-            .load_models()
-            .iter()
-            .map(|m| LoadSeasonalStatsRow {
-                bus_id: m.bus_id,
-                stage_id: m.stage_id,
-                mean_mw: m.mean_mw,
-                std_mw: m.std_mw,
-            })
-            .collect();
-        if let Err(e) = write_load_seasonal_stats(
-            &stochastic_dir.join("load_seasonal_stats.parquet"),
-            &load_rows,
-        ) {
-            eprintln!("cobre-python: stochastic export warning: load_seasonal_stats: {e}");
-        }
-    }
-
-    if let Some(report) = estimation_report {
-        let fitting = estimation_report_to_fitting_report(report);
-        if let Err(e) = write_fitting_report(&stochastic_dir.join("fitting_report.json"), &fitting)
-        {
-            eprintln!("cobre-python: stochastic export warning: fitting_report: {e}");
         }
     }
 }
@@ -333,14 +164,16 @@ fn write_training_artifacts(
     seed: u64,
     n_threads: usize,
 ) -> Result<(), String> {
-    write_policy_checkpoint(
+    cobre_sddp::orchestration::write_checkpoint(
         &output_dir.join(&setup.policy_path),
         &setup.fcf,
         &training.result,
-        setup.loop_params.max_iterations,
-        setup.loop_params.forward_passes,
-        seed,
-        config.exports.states,
+        &cobre_sddp::orchestration::CheckpointParams {
+            max_iterations: setup.loop_params.max_iterations,
+            forward_passes: setup.loop_params.forward_passes,
+            seed,
+            export_states: config.exports.states,
+        },
     )
     .map_err(|e| format!("policy checkpoint error: {e}"))?;
 
@@ -565,11 +398,15 @@ fn run_inner(
     );
 
     if config.exports.stochastic {
-        export_stochastic_artifacts_py(
+        let mut on_warning = |msg: &str| {
+            eprintln!("cobre-python: stochastic export warning: {msg}");
+        };
+        cobre_sddp::orchestration::export_stochastic_artifacts(
             &output_dir,
             &setup.stochastic,
             &system,
             estimation_report.as_ref(),
+            &mut on_warning,
         );
     }
 

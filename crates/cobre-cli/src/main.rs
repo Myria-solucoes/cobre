@@ -21,7 +21,6 @@
 mod banner;
 mod commands;
 mod error;
-mod policy_io;
 mod progress;
 mod summary;
 mod templates;

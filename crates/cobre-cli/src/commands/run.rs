@@ -24,17 +24,9 @@ use cobre_comm::{
     Communicator, ExecutionTopology, ReduceOp, TopologyProvider, create_communicator,
 };
 use cobre_core::{System, TrainingEvent};
-use cobre_io::output::{
-    write_correlation_json, write_fitting_report, write_inflow_annual_component,
-    write_inflow_ar_coefficients, write_inflow_seasonal_stats, write_load_seasonal_stats,
-    write_noise_openings,
-};
-use cobre_io::scenarios::LoadSeasonalStatsRow;
 use cobre_sddp::{
     EstimationReport, PrepareHydroModelsResult, PrepareStochasticResult, StudySetup,
-    build_hydro_model_summary, estimation_report_to_fitting_report,
-    inflow_models_to_annual_component_rows, inflow_models_to_ar_rows, inflow_models_to_stats_rows,
-    prepare_hydro_models, prepare_stochastic,
+    build_hydro_model_summary, prepare_hydro_models, prepare_stochastic,
     setup::{ConstructionConfig, build_ncs_factor_entries, load_load_factors_for_stochastic},
 };
 use cobre_solver::HighsSolver;
@@ -938,13 +930,22 @@ fn run_pre_training(
     }
 
     if ctx.is_root && root_config.is_some_and(|c| c.exports.stochastic) {
-        export_stochastic_artifacts(
+        if !ctx.quiet {
+            let _ = ctx.stderr.write_line("Exporting stochastic artifacts...");
+        }
+        let stderr = &ctx.stderr;
+        let quiet = ctx.quiet;
+        let mut on_warning = |msg: &str| {
+            if !quiet {
+                let _ = stderr.write_line(&format!("warning: stochastic export failed ({msg})"));
+            }
+        };
+        cobre_sddp::orchestration::export_stochastic_artifacts(
             &ctx.output_dir,
             &setup.stochastic,
             system,
             root_estimation_report,
-            ctx.quiet,
-            &ctx.stderr,
+            &mut on_warning,
         );
     }
 
@@ -1695,17 +1696,18 @@ fn write_training_outputs(args: &WriteTrainingArgs<'_>) -> Result<(), CliError> 
     let write_start = std::time::Instant::now();
 
     let policy_dir = args.output_dir.join(&args.setup.policy_path);
-    crate::policy_io::write_checkpoint(
+    cobre_sddp::orchestration::write_checkpoint(
         &policy_dir,
         &args.setup.fcf,
         args.training_result,
-        &crate::policy_io::CheckpointParams {
+        &cobre_sddp::orchestration::CheckpointParams {
             max_iterations: args.setup.loop_params.max_iterations,
             forward_passes: args.setup.loop_params.forward_passes,
             seed: args.setup.loop_params.seed,
             export_states: args.config.exports.states,
         },
-    )?;
+    )
+    .map_err(CliError::from)?;
 
     cobre_io::write_training_results(
         args.output_dir,
@@ -1822,133 +1824,6 @@ fn write_simulation_outputs(args: &WriteSimulationArgs<'_>) -> Result<(), CliErr
     }
 
     Ok(())
-}
-
-/// Write all applicable stochastic preprocessing artifacts to `{output_dir}/stochastic/`.
-///
-/// Called on rank 0 only when `--export-stochastic` is set (or `exports.stochastic = true`
-/// in config). Each writer call is independent: failure is logged as a warning on stderr
-/// and does not prevent the remaining files or training from proceeding.
-///
-/// Files written:
-/// - `noise_openings.parquet` — always
-/// - `inflow_seasonal_stats.parquet` — always
-/// - `inflow_ar_coefficients.parquet` — always
-/// - `correlation.json` — always
-/// - `load_seasonal_stats.parquet` — only when `system.load_models()` contains any model with `std_mw > 0`
-/// - `fitting_report.json` — only when `estimation_report` is `Some`
-fn export_stochastic_artifacts(
-    output_dir: &Path,
-    stochastic: &cobre_stochastic::StochasticContext,
-    system: &System,
-    estimation_report: Option<&EstimationReport>,
-    quiet: bool,
-    stderr: &Term,
-) {
-    use cobre_core::scenario::LoadModel;
-
-    let stochastic_dir = output_dir.join("stochastic");
-
-    if !quiet {
-        let _ = stderr.write_line("Exporting stochastic artifacts...");
-    }
-
-    if let Err(e) = write_noise_openings(
-        &stochastic_dir.join("noise_openings.parquet"),
-        stochastic.opening_tree(),
-    ) {
-        if !quiet {
-            let _ = stderr.write_line(&format!(
-                "warning: stochastic export failed (noise_openings): {e}"
-            ));
-        }
-    }
-
-    let stats_rows = inflow_models_to_stats_rows(system.inflow_models());
-    if let Err(e) = write_inflow_seasonal_stats(
-        &stochastic_dir.join("inflow_seasonal_stats.parquet"),
-        &stats_rows,
-    ) {
-        if !quiet {
-            let _ = stderr.write_line(&format!(
-                "warning: stochastic export failed (inflow_seasonal_stats): {e}"
-            ));
-        }
-    }
-
-    let ar_rows = inflow_models_to_ar_rows(system.inflow_models());
-    if let Err(e) = write_inflow_ar_coefficients(
-        &stochastic_dir.join("inflow_ar_coefficients.parquet"),
-        &ar_rows,
-    ) {
-        if !quiet {
-            let _ = stderr.write_line(&format!(
-                "warning: stochastic export failed (inflow_ar_coefficients): {e}"
-            ));
-        }
-    }
-
-    let annual_rows = inflow_models_to_annual_component_rows(system.inflow_models());
-    if let Err(e) = write_inflow_annual_component(
-        &stochastic_dir.join("inflow_annual_component.parquet"),
-        &annual_rows,
-    ) {
-        if !quiet {
-            let _ = stderr.write_line(&format!(
-                "warning: stochastic export failed (inflow_annual_component): {e}"
-            ));
-        }
-    }
-
-    if let Err(e) = write_correlation_json(
-        &stochastic_dir.join("correlation.json"),
-        system.correlation(),
-    ) {
-        if !quiet {
-            let _ = stderr.write_line(&format!(
-                "warning: stochastic export failed (correlation): {e}"
-            ));
-        }
-    }
-
-    let has_stochastic_load = system
-        .load_models()
-        .iter()
-        .any(|m: &LoadModel| m.std_mw > 0.0);
-    if has_stochastic_load {
-        let load_rows: Vec<LoadSeasonalStatsRow> = system
-            .load_models()
-            .iter()
-            .map(|m| LoadSeasonalStatsRow {
-                bus_id: m.bus_id,
-                stage_id: m.stage_id,
-                mean_mw: m.mean_mw,
-                std_mw: m.std_mw,
-            })
-            .collect();
-        if let Err(e) = write_load_seasonal_stats(
-            &stochastic_dir.join("load_seasonal_stats.parquet"),
-            &load_rows,
-        ) {
-            if !quiet {
-                let _ = stderr.write_line(&format!(
-                    "warning: stochastic export failed (load_seasonal_stats): {e}"
-                ));
-            }
-        }
-    }
-
-    if let Some(report) = estimation_report {
-        let fitting = estimation_report_to_fitting_report(report);
-        if let Err(e) = write_fitting_report(&stochastic_dir.join("fitting_report.json"), &fitting)
-        {
-            if !quiet {
-                let _ = stderr.write_line(&format!(
-                    "warning: stochastic export failed (fitting_report): {e}"
-                ));
-            }
-        }
-    }
 }
 
 #[cfg(test)]
