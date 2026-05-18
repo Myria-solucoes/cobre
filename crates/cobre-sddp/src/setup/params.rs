@@ -265,9 +265,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use cobre_io::config::{
-        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig, ModelingConfig,
-        PolicyConfig, RowSelectionConfig, SimulationConfig as IoSimulationConfig,
-        StoppingRuleConfig, TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
+        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+        InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
+        RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
+        TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
     };
     use tracing::{Event, Level, Metadata, Subscriber, span};
 
@@ -345,8 +346,7 @@ mod tests {
             schema: None,
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
-                    method: "penalty".to_string(),
-                    penalty_cost: 1000.0,
+                    method: CfgInflowMethod::Penalty,
                 },
             },
             training: TrainingConfig {
@@ -424,8 +424,7 @@ mod tests {
             schema: None,
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
-                    method: "penalty".to_string(),
-                    penalty_cost: 1000.0,
+                    method: CfgInflowMethod::Penalty,
                 },
             },
             training: TrainingConfig {
@@ -459,8 +458,7 @@ mod tests {
             schema: None,
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
-                    method: "penalty".to_string(),
-                    penalty_cost: 1000.0,
+                    method: CfgInflowMethod::Penalty,
                 },
             },
             training: TrainingConfig {

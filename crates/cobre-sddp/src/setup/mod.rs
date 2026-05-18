@@ -326,7 +326,7 @@ impl StudySetup {
 
         let mut stage_templates = build_stage_templates(
             system,
-            &inflow_method,
+            inflow_method,
             stochastic.par(),
             stochastic.normal(),
             &hydro_models.production,
@@ -863,8 +863,9 @@ mod tests {
         },
     };
     use cobre_io::config::{
-        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig, ModelingConfig,
-        PolicyConfig, RawClassConfigEntry, RawScenarioSourceConfig, RowSelectionConfig,
+        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+        InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
+        RawClassConfigEntry, RawScenarioSourceConfig, RowSelectionConfig,
         SimulationConfig as IoSimulationConfig, StoppingRuleConfig, TrainingConfig,
         TrainingSolverConfig, UpperBoundEvaluationConfig,
     };
@@ -1329,8 +1330,7 @@ mod tests {
             schema: None,
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
-                    method: "penalty".to_string(),
-                    penalty_cost: 1000.0,
+                    method: CfgInflowMethod::Penalty,
                 },
             },
             training: TrainingConfig {
@@ -2048,17 +2048,17 @@ mod tests {
         use super::{DEFAULT_FORWARD_PASSES, DEFAULT_SEED, StudyParams};
         use crate::stopping_rule::StoppingMode;
         use cobre_io::config::{
-            Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig, ModelingConfig,
-            PolicyConfig, RowSelectionConfig, SimulationConfig as IoSimulationConfig,
-            TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
+            Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+            InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
+            RowSelectionConfig, SimulationConfig as IoSimulationConfig, TrainingConfig,
+            TrainingSolverConfig, UpperBoundEvaluationConfig,
         };
 
         let config = Config {
             schema: None,
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
-                    method: "none".to_string(),
-                    penalty_cost: 0.0,
+                    method: CfgInflowMethod::None,
                 },
             },
             training: TrainingConfig {
@@ -2126,17 +2126,17 @@ mod tests {
         use super::StudyParams;
         use crate::stopping_rule::{StoppingMode, StoppingRule};
         use cobre_io::config::{
-            Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig, ModelingConfig,
-            PolicyConfig, RowSelectionConfig, SimulationConfig as IoSimulationConfig,
-            StoppingRuleConfig, TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
+            Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+            InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
+            RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
+            TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
         };
 
         let config = Config {
             schema: None,
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
-                    method: "penalty".to_string(),
-                    penalty_cost: 999.0,
+                    method: CfgInflowMethod::Penalty,
                 },
             },
             training: TrainingConfig {
@@ -2222,17 +2222,17 @@ mod tests {
     /// Build a minimal [`cobre_io::Config`] with no estimation or seed overrides.
     fn minimal_prepare_config() -> cobre_io::Config {
         use cobre_io::config::{
-            Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig, ModelingConfig,
-            PolicyConfig, RowSelectionConfig, SimulationConfig as IoSimulationConfig,
-            TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
+            Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+            InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
+            RowSelectionConfig, SimulationConfig as IoSimulationConfig, TrainingConfig,
+            TrainingSolverConfig, UpperBoundEvaluationConfig,
         };
 
         Config {
             schema: None,
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
-                    method: "none".to_string(),
-                    penalty_cost: 0.0,
+                    method: CfgInflowMethod::None,
                 },
             },
             training: TrainingConfig {

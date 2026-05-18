@@ -379,7 +379,7 @@ fn collect_load_bus_indices(system: &System, bus_pos: &HashMap<EntityId, usize>)
 /// ```
 pub fn build_stage_templates(
     system: &System,
-    inflow_method: &InflowNonNegativityMethod,
+    inflow_method: InflowNonNegativityMethod,
     par_lp: &PrecomputedPar,
     normal_lp: &PrecomputedNormal,
     production_models: &ProductionModelSet,
@@ -488,7 +488,7 @@ pub fn build_stage_templates(
 /// guard for empty systems.
 fn build_template_build_ctx<'a>(
     system: &'a System,
-    inflow_method: &InflowNonNegativityMethod,
+    inflow_method: InflowNonNegativityMethod,
     par_lp: &'a PrecomputedPar,
     production_models: &'a ProductionModelSet,
     evaporation_models: &'a EvaporationModelSet,

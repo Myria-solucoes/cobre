@@ -1724,7 +1724,7 @@ mod parameter_resolution_tests {
         let evaporation = PrepareHydroModelsResult::default_from_system(system).evaporation;
         crate::lp_builder::build_stage_templates(
             system,
-            &InflowNonNegativityMethod::None,
+            InflowNonNegativityMethod::None,
             &PrecomputedPar::default(),
             &PrecomputedNormal::default(),
             &production,

@@ -77,8 +77,8 @@ fn no_penalty_config() -> InflowNonNegativityMethod {
 
 /// Method with penalty — used in tests that verify the penalty
 /// column addition behaviour.
-fn penalty_config(cost: f64) -> InflowNonNegativityMethod {
-    InflowNonNegativityMethod::Penalty { cost }
+fn penalty_config(_cost: f64) -> InflowNonNegativityMethod {
+    InflowNonNegativityMethod::Penalty
 }
 
 fn default_hydro_bounds() -> HydroStageBounds {
@@ -422,7 +422,7 @@ fn empty_stages_returns_empty() {
     let system = one_bus_system(0);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -440,7 +440,7 @@ fn one_stage_one_template() {
     let system = one_bus_system(1);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -461,7 +461,7 @@ fn num_cols_formula_no_hydro_no_thermal_no_line() {
     let system = one_bus_system(1);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -483,7 +483,7 @@ fn num_cols_formula_one_hydro_lag_zero() {
     let system = one_hydro_system(1, 0);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -508,7 +508,7 @@ fn num_cols_formula_one_hydro_lag_two() {
     let system = one_hydro_system(1, 2);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -532,7 +532,7 @@ fn num_rows_formula_no_hydro() {
     let system = one_bus_system(1);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -553,7 +553,7 @@ fn num_rows_formula_one_hydro_lag_zero() {
     let system = one_hydro_system(1, 0);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -576,7 +576,7 @@ fn num_rows_formula_one_hydro_lag_two() {
     let system = one_hydro_system(1, 2);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -596,7 +596,7 @@ fn n_state_matches_indexer() {
     let system = one_hydro_system(1, 2);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -615,7 +615,7 @@ fn n_transfer_is_n_times_lag_order() {
     let system = one_hydro_system(1, 2);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -633,7 +633,7 @@ fn n_dual_relevant_equals_n_state_for_constant_productivity() {
     let system = one_hydro_system(1, 2);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -655,7 +655,7 @@ fn base_row_is_n_dual_relevant_plus_n_hydros() {
     let system = one_hydro_system(2, 2);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -678,7 +678,7 @@ fn csc_col_starts_monotone_nondecreasing() {
     let system = one_hydro_system(1, 1);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -701,7 +701,7 @@ fn csc_row_indices_in_range() {
     let system = one_hydro_system(1, 1);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -726,7 +726,7 @@ fn csc_nz_count_matches_col_starts() {
     let system = one_hydro_system(1, 1);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -755,7 +755,7 @@ fn theta_column_has_unit_objective() {
     let system = one_hydro_system(1, lag_order);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -778,7 +778,7 @@ fn spillage_objective_nonzero_for_nonzero_penalty() {
     let system = one_hydro_system(1, 0);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -1041,7 +1041,7 @@ fn fpha_turbined_cost_applied_to_fpha_turbine_column() {
     let (system, production) = fpha_system_with_turbined_cost(3, 0.5, &[720.0]);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &production,
@@ -1068,7 +1068,7 @@ fn constant_hydro_turbine_column_has_zero_objective() {
     let system = one_hydro_system(1, 0);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -1097,7 +1097,7 @@ fn fpha_turbined_cost_multi_block_uses_per_block_hours() {
     let (system, production) = fpha_system_with_turbined_cost(3, 1.0, &[300.0, 420.0]);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &production,
@@ -1181,7 +1181,7 @@ fn fpha_turbined_cost_mixed_system_only_fpha_hydros_carry_cost() {
 
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &production,
@@ -1229,7 +1229,7 @@ fn load_balance_rhs_matches_load_model_mean_mw() {
     let system = one_bus_system(1);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -1256,7 +1256,7 @@ fn multiple_stages_produce_same_count_templates_and_base_rows() {
     let system = one_hydro_system(3, 1);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -1273,7 +1273,7 @@ fn stage_templates_clone_and_debug() {
     let system = one_hydro_system(1, 0);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -1465,7 +1465,7 @@ fn test_fpha_model_accepted() {
     let production = PrepareHydroModelsResult::default_from_system(&system).production;
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &production,
@@ -1497,7 +1497,7 @@ fn test_constant_productivity_accepted() {
     let system = one_hydro_system(1, 0);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -1526,7 +1526,7 @@ fn test_penalty_columns_added() {
     let system = one_hydro_system(1, 0);
     let without = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -1536,7 +1536,7 @@ fn test_penalty_columns_added() {
     .expect("constant productivity ok");
     let with_p = build_stage_templates(
         &system,
-        &penalty_config(1000.0),
+        penalty_config(1000.0),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -1562,7 +1562,7 @@ fn test_penalty_columns_added_3_hydros() {
     let system = one_bus_system(1);
     let with_p = build_stage_templates(
         &system,
-        &penalty_config(1000.0),
+        penalty_config(1000.0),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -1572,7 +1572,7 @@ fn test_penalty_columns_added_3_hydros() {
     .expect("constant productivity ok");
     let without = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -1595,7 +1595,7 @@ fn test_penalty_objective_coefficient() {
     let config = penalty_config(1000.0);
     let result = build_stage_templates(
         &system,
-        &config,
+        config,
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -1624,7 +1624,7 @@ fn test_no_penalty_columns_when_none() {
     let system = one_hydro_system(1, 2);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -1657,7 +1657,7 @@ fn test_penalty_slack_in_water_balance() {
     let config = penalty_config(1000.0);
     let result = build_stage_templates(
         &system,
-        &config,
+        config,
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -1696,7 +1696,7 @@ fn test_penalty_slack_bounds() {
     let config = penalty_config(1000.0);
     let result = build_stage_templates(
         &system,
-        &config,
+        config,
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -1731,7 +1731,7 @@ fn test_penalty_water_balance_coefficient_value() {
     let config = penalty_config(1000.0);
     let result = build_stage_templates(
         &system,
-        &config,
+        config,
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -1773,7 +1773,7 @@ fn test_penalty_multi_stage_consistent() {
     let config = penalty_config(2000.0);
     let result = build_stage_templates(
         &system,
-        &config,
+        config,
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -1826,7 +1826,7 @@ fn test_penalty_slack_absorbs_negative_inflow() {
     let pm = production_set(&[0.9], 1);
     let result = build_stage_templates(
         &system,
-        &config,
+        config,
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &pm,
@@ -2122,7 +2122,7 @@ fn stage_templates_load_balance_row_starts_correct() {
     let system = two_bus_system_with_stochastic_load(2, 2, 3);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -2159,7 +2159,7 @@ fn stage_templates_n_load_buses_matches_stochastic_buses() {
     let system = two_bus_system_with_stochastic_load(1, 0, 1);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -2190,7 +2190,7 @@ fn stage_templates_no_load_buses_gives_zero() {
     let system = one_bus_system(2);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -2655,7 +2655,7 @@ fn fpha_ac1_dimensions_one_fpha_hydro_five_planes() {
     // Build with FPHA production model.
     let fpha_result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &production,
@@ -2667,7 +2667,7 @@ fn fpha_ac1_dimensions_one_fpha_hydro_five_planes() {
     // Build with constant-productivity production model (same system entity).
     let const_result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -2718,7 +2718,7 @@ fn fpha_ac2_generation_column_entries() {
 
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &production,
@@ -2768,7 +2768,7 @@ fn fpha_ac3_v_in_column_entries() {
 
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &production,
@@ -2807,7 +2807,7 @@ fn fpha_ac4_v_out_column_entries() {
 
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &production,
@@ -2854,7 +2854,7 @@ fn fpha_ac5_mixed_system_load_balance_uses_generation_col() {
 
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &production,
@@ -3003,7 +3003,7 @@ fn fpha_solve_one_hydro_optimal() {
     let (system, production) = fpha_solve_system();
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &production,
@@ -3068,7 +3068,7 @@ fn fpha_solve_hyperplane_constraints_hold() {
 
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &production,
@@ -3189,7 +3189,7 @@ fn fpha_solve_storage_fixing_dual_differs_from_constant() {
     // Build template for FPHA production model.
     let fpha_result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &fpha_production,
@@ -3205,7 +3205,7 @@ fn fpha_solve_storage_fixing_dual_differs_from_constant() {
     let const_production = default_production(&system);
     let const_result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &const_production,
@@ -3281,7 +3281,7 @@ fn fpha_solve_mixed_system_optimal() {
 
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &production,
@@ -3393,7 +3393,7 @@ fn evap_zero_hydros_layout_unchanged() {
     let no_evap = default_evaporation(&system);
     let with_evap = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -3404,7 +3404,7 @@ fn evap_zero_hydros_layout_unchanged() {
 
     let baseline = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -3444,7 +3444,7 @@ fn evap_two_hydros_increases_cols_and_rows() {
 
     let baseline = build_stage_templates(
         &system1,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system1),
@@ -3456,7 +3456,7 @@ fn evap_two_hydros_increases_cols_and_rows() {
     let evap = evap_set_for_system(&system1, &[0], &[1.5]);
     let with_evap = build_stage_templates(
         &system1,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system1),
@@ -3493,7 +3493,7 @@ fn evap_row_bounds_equality_at_k_evap0() {
 
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -3527,7 +3527,7 @@ fn evap_col_bounds_and_objective() {
 
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -3640,7 +3640,7 @@ fn evap_csc_entries_one_hydro_correct_coefficients() {
 
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -3765,7 +3765,7 @@ fn evap_csc_entries_coefficient_scaling() {
 
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -3810,7 +3810,7 @@ fn evap_csc_entries_zero_hydros_no_op() {
 
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -3821,7 +3821,7 @@ fn evap_csc_entries_zero_hydros_no_op() {
 
     let baseline = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -3870,7 +3870,7 @@ fn evap_csc_entries_two_hydros_independent_rows() {
 
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &production,
@@ -3920,7 +3920,7 @@ fn evap_csc_entries_zero_k_evap_v_produces_zero_volume_coefficients() {
 
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -3970,7 +3970,7 @@ fn evap_water_balance_one_hydro_coefficient_is_zeta() {
 
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -4180,7 +4180,7 @@ fn evap_water_balance_only_second_hydro_has_evap() {
 
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -4236,7 +4236,7 @@ fn evap_water_balance_zero_hydros_no_op() {
 
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -4247,7 +4247,7 @@ fn evap_water_balance_zero_hydros_no_op() {
 
     let baseline = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -4486,7 +4486,7 @@ fn evap_violation_cost_applied_to_slack_columns() {
 
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -4533,7 +4533,7 @@ fn evap_q_ev_objective_is_zero() {
 
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -4569,7 +4569,7 @@ fn evap_lp_solvable_and_q_ev_nonnegative() {
 
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -4626,7 +4626,7 @@ fn evap_violation_slacks_near_zero_feasible_constraint() {
 
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -4688,7 +4688,7 @@ fn evap_storage_fixing_dual_differs_from_no_evaporation() {
     let evap = evap_set_with_k_evap_v(&system_evap, &[0], 1.0, 0.02);
     let evap_result = build_stage_templates(
         &system_evap,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system_evap),
@@ -4702,7 +4702,7 @@ fn evap_storage_fixing_dual_differs_from_no_evaporation() {
     let no_evap = EvaporationModelSet::new(vec![EvaporationModel::None]);
     let base_result = build_stage_templates(
         &system_base,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system_base),
@@ -4764,7 +4764,7 @@ fn evap_bound_prevents_dump_valve() {
 
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -5091,7 +5091,7 @@ fn test_multi_segment_deficit_column_count() {
 
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -5149,7 +5149,7 @@ fn test_multi_segment_deficit_bounds_and_objective() {
 
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -5211,7 +5211,7 @@ fn test_single_segment_backward_compat() {
 
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -5278,7 +5278,7 @@ fn test_multi_segment_deficit_load_balance_coefficients() {
 
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -5579,7 +5579,7 @@ fn withdrawal_rhs_subtracted_from_water_balance() {
     let system = one_hydro_system_with_withdrawal(1, 0, withdrawal, 0.0);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -5623,7 +5623,7 @@ fn withdrawal_zero_leaves_rhs_unchanged_from_base() {
 
     let result_zero = build_stage_templates(
         &system_zero,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system_zero),
@@ -5634,7 +5634,7 @@ fn withdrawal_zero_leaves_rhs_unchanged_from_base() {
 
     let result_base = build_stage_templates(
         &system_base,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system_base),
@@ -5675,7 +5675,7 @@ fn withdrawal_slack_matrix_entry_coefficient_is_minus_zeta() {
     let system = one_hydro_system_with_withdrawal(1, 0, 5.0, 1000.0);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -5723,7 +5723,7 @@ fn withdrawal_slack_objective_equals_cost_times_hours() {
     let system = one_hydro_system_with_withdrawal(1, 0, 5.0, violation_cost);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -5749,7 +5749,7 @@ fn withdrawal_slack_objective_zero_when_cost_is_zero() {
     let system = one_hydro_system_with_withdrawal(1, 0, 0.0, 0.0);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -5776,7 +5776,7 @@ fn withdrawal_slack_bounds_are_zero_to_infinity() {
     let system = one_hydro_system_with_withdrawal(1, 0, 10.0, 5_000.0);
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -6021,7 +6021,7 @@ fn two_hydro_withdrawal_slack_entries_per_hydro() {
 
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -6279,7 +6279,7 @@ fn three_hydro_num_cols_includes_three_withdrawal_slacks() {
 
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -6469,7 +6469,7 @@ fn build_templates_for(system: &cobre_core::System) -> Vec<cobre_solver::StageTe
     let evaporation = default_evaporation(system);
     build_stage_templates(
         system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &production,
@@ -7383,7 +7383,7 @@ fn generic_constraint_two_hydros_sum_csc_entries() {
     let pm = production_set(&[prod_h1, prod_h2], 1);
     let t = &build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &pm,
@@ -7815,7 +7815,7 @@ fn build_active_violations_template() -> cobre_sddp::StageTemplates {
     let pm = production_set(&[0.5], 1);
     build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &pm,
@@ -7939,7 +7939,7 @@ fn operational_violation_inactive_pinned() {
     let system = one_hydro_system(1, 0); // default: all violation bounds = 0
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -8787,7 +8787,7 @@ fn max_par_order_uses_par_lp_when_annual_present() {
 
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &par_lp,
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -8839,7 +8839,7 @@ fn max_par_order_classical_unchanged() {
 
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &par_lp,
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -8899,7 +8899,7 @@ fn max_par_order_z_inflow_row_has_twelve_lag_entries() {
 
     let result = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &par_lp,
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -9029,7 +9029,7 @@ fn parameter_coefficient_persists_across_stage_template_uses() {
     let system = one_hydro_system(2, l);
     let result_a = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),
@@ -9039,7 +9039,7 @@ fn parameter_coefficient_persists_across_stage_template_uses() {
     .expect("build ok");
     let result_b = build_stage_templates(
         &system,
-        &no_penalty_config(),
+        no_penalty_config(),
         &PrecomputedPar::default(),
         &PrecomputedNormal::default(),
         &default_production(&system),

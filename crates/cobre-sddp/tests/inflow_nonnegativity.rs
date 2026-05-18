@@ -411,7 +411,7 @@ struct Fixture {
 }
 
 fn build_fixture() -> Fixture {
-    build_fixture_with_method(InflowNonNegativityMethod::Penalty { cost: 1000.0 })
+    build_fixture_with_method(InflowNonNegativityMethod::Penalty)
 }
 
 fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixture {
@@ -432,7 +432,7 @@ fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixtur
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
     let stage_templates = build_stage_templates(
         &system,
-        &inflow_method,
+        inflow_method,
         &par_lp,
         &cobre_stochastic::normal::precompute::PrecomputedNormal::default(),
         &hydro_models.production,
@@ -802,9 +802,7 @@ fn test_simulation_slack_output_populated() {
 /// 3. Noise is clamped (same as Truncation mode).
 #[test]
 fn truncation_with_penalty_training_completes() {
-    let fx = build_fixture_with_method(InflowNonNegativityMethod::TruncationWithPenalty {
-        cost: 1000.0,
-    });
+    let fx = build_fixture_with_method(InflowNonNegativityMethod::TruncationWithPenalty);
 
     // Verify the method has slack columns.
     assert!(
@@ -903,7 +901,7 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
         .unwrap();
 
     // Build templates.
-    let inflow_method = InflowNonNegativityMethod::Penalty { cost: 100.0 };
+    let inflow_method = InflowNonNegativityMethod::Penalty;
     let par_lp = PrecomputedPar::build(
         system.inflow_models(),
         &system
@@ -918,7 +916,7 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
     let templates = build_stage_templates(
         &system,
-        &inflow_method,
+        inflow_method,
         &par_lp,
         &cobre_stochastic::normal::precompute::PrecomputedNormal::default(),
         &hydro_models.production,

@@ -311,8 +311,7 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
     // across openings (same initial_state, same stage 0).
     let needs_truncation = matches!(
         spec.inflow_method,
-        InflowNonNegativityMethod::Truncation
-            | InflowNonNegativityMethod::TruncationWithPenalty { .. }
+        InflowNonNegativityMethod::Truncation | InflowNonNegativityMethod::TruncationWithPenalty
     );
 
     // Resolve the PAR LP once; used for both truncation and z-inflow RHS.
@@ -372,7 +371,7 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
         compute_effective_eta(
             raw_noise,
             n_hydros,
-            spec.inflow_method,
+            *spec.inflow_method,
             &scratch.par_inflow_buf,
             &scratch.eta_floor_buf,
             &mut scratch.effective_eta_buf,
@@ -1516,7 +1515,7 @@ mod tests {
             ncs_max_gen: &[],
             block_count: 1,
             ncs_generation: 0..0,
-            inflow_method: &InflowNonNegativityMethod::TruncationWithPenalty { cost: 100.0 },
+            inflow_method: &InflowNonNegativityMethod::TruncationWithPenalty,
         };
         let (mut row_batch_result, mut lb_scratch_result) = make_lb_locals();
         let mut bundle_result = LbEvalScratchBundle::from_scratch_fields(

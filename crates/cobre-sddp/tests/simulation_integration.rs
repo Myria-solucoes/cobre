@@ -1244,7 +1244,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
 
     let templates_result = build_stage_templates(
         &system,
-        &InflowNonNegativityMethod::None,
+        InflowNonNegativityMethod::None,
         stochastic.par(),
         stochastic.normal(),
         &hydro_models.production,

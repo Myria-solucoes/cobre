@@ -3283,7 +3283,7 @@ mod tests {
     /// the `noise_buf` from the workspace after the call.
     fn run_single_stage_forward(
         stochastic: &StochasticContext,
-        inflow_method: &InflowNonNegativityMethod,
+        inflow_method: InflowNonNegativityMethod,
         base_rhs: f64,
         noise_scale_val: f64,
     ) -> Vec<f64> {
@@ -3349,7 +3349,7 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 indexer: &indexer,
-                inflow_method,
+                inflow_method: &inflow_method,
                 stochastic,
                 initial_state: &initial_state,
                 inflow_scheme: SamplingScheme::InSample,
@@ -3410,7 +3410,7 @@ mod tests {
 
         let noise_buf_truncation = run_single_stage_forward(
             &stochastic,
-            &InflowNonNegativityMethod::Truncation,
+            InflowNonNegativityMethod::Truncation,
             base_rhs,
             noise_scale_val,
         );
@@ -3443,13 +3443,13 @@ mod tests {
 
         let noise_buf_truncation = run_single_stage_forward(
             &stochastic,
-            &InflowNonNegativityMethod::Truncation,
+            InflowNonNegativityMethod::Truncation,
             base_rhs,
             noise_scale_val,
         );
         let noise_buf_none = run_single_stage_forward(
             &stochastic,
-            &InflowNonNegativityMethod::None,
+            InflowNonNegativityMethod::None,
             base_rhs,
             noise_scale_val,
         );

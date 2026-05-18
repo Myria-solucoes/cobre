@@ -37,7 +37,7 @@ pub mod training;
 pub use energy::EnergyConfig;
 pub use estimation::{EstimationConfig, OrderSelectionMethod};
 pub use exports::ExportsConfig;
-pub use modeling::{InflowNonNegativityConfig, ModelingConfig};
+pub use modeling::{InflowNonNegativityConfig, InflowNonNegativityMethod, ModelingConfig};
 pub use policy::{BoundaryPolicy, CheckpointingConfig, PolicyConfig, PolicyMode};
 pub use scenario_source::{RawClassConfigEntry, RawHistoricalYearsConfig, RawScenarioSourceConfig};
 pub use simulation::SimulationConfig;
@@ -438,9 +438,8 @@ mod tests {
         assert!(cfg.training.enabled);
         assert_eq!(
             cfg.modeling.inflow_non_negativity.method,
-            "penalty".to_string()
+            InflowNonNegativityMethod::Penalty
         );
-        assert!((cfg.modeling.inflow_non_negativity.penalty_cost - 1000.0).abs() < f64::EPSILON);
         assert!(!cfg.simulation.enabled);
         assert_eq!(cfg.simulation.num_scenarios, 2000);
         assert_eq!(cfg.policy.mode, PolicyMode::Fresh);
@@ -502,8 +501,7 @@ mod tests {
           "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/book/src/schemas/config.schema.json",
           "modeling": {
             "inflow_non_negativity": {
-              "method": "penalty",
-              "penalty_cost": 500.0
+              "method": "penalty"
             }
           },
           "training": {
@@ -514,12 +512,9 @@ mod tests {
               {"type": "bound_stalling", "iterations": 10, "tolerance": 0.0001}
             ],
             "stopping_mode": "any",
-            "cut_formulation": "single",
-            "forward_pass": {"type": "default"},
             "cut_selection": {
               "enabled": true,
-              "method": "domination",
-              "threshold": 0
+              "method": "domination"
             }
           },
           "upper_bound_evaluation": {
@@ -541,10 +536,7 @@ mod tests {
           },
           "simulation": {
             "enabled": true,
-            "num_scenarios": 2000,
-            "policy_type": "outer",
-            "output_path": "./simulation",
-            "output_mode": "streaming"
+            "num_scenarios": 2000
           },
           "exports": {
             "states": true,
@@ -556,15 +548,16 @@ mod tests {
         let cfg = parse_config(f.path()).unwrap();
 
         // Modeling
-        assert_eq!(cfg.modeling.inflow_non_negativity.method, "penalty");
-        assert!((cfg.modeling.inflow_non_negativity.penalty_cost - 500.0).abs() < f64::EPSILON);
+        assert_eq!(
+            cfg.modeling.inflow_non_negativity.method,
+            InflowNonNegativityMethod::Penalty
+        );
 
         // Training
         assert_eq!(cfg.training.forward_passes, Some(192));
         assert_eq!(cfg.training.stopping_mode, "any");
         let rules = cfg.training.stopping_rules.as_ref().unwrap();
         assert_eq!(rules.len(), 2);
-        assert_eq!(cfg.training.cut_formulation.as_deref(), Some("single"));
         let cut_sel = &cfg.training.cut_selection;
         assert_eq!(cut_sel.enabled, Some(true));
         assert_eq!(cut_sel.method.as_deref(), Some("domination"));
@@ -581,7 +574,6 @@ mod tests {
         // Simulation
         assert!(cfg.simulation.enabled);
         assert_eq!(cfg.simulation.num_scenarios, 2000);
-        assert_eq!(cfg.simulation.policy_type, "outer");
 
         // Exports
         assert!(cfg.exports.states);
@@ -731,9 +723,8 @@ mod tests {
         assert_eq!(cfg.training.forward_passes, Some(1));
     }
 
-    /// `"truncation"` is accepted as a method string and
-    /// round-trips correctly through `parse_config`. The `penalty_cost` field
-    /// falls back to its default (1000.0) when absent from the JSON.
+    /// `"truncation"` is accepted as a method value and round-trips correctly
+    /// through `parse_config`.
     #[test]
     fn test_truncation_method_accepted() {
         let f = write_config(
@@ -751,12 +742,35 @@ mod tests {
         );
         let cfg = parse_config(f.path()).unwrap();
         assert_eq!(
-            cfg.modeling.inflow_non_negativity.method, "truncation",
-            "method field should round-trip as 'truncation'"
+            cfg.modeling.inflow_non_negativity.method,
+            InflowNonNegativityMethod::Truncation,
+            "method field should round-trip as Truncation"
         );
+    }
+
+    /// An unknown inflow non-negativity method string is rejected at parse time.
+    #[test]
+    fn test_unknown_inflow_method_rejected() {
+        let f = write_config(
+            r#"{
+            "modeling": {
+                "inflow_non_negativity": {
+                    "method": "bogus_method"
+                }
+            },
+            "training": {
+                "forward_passes": 10,
+                "stopping_rules": [{"type": "iteration_limit", "limit": 5}]
+            }
+        }"#,
+        );
+        let err = parse_config(f.path()).unwrap_err();
         assert!(
-            (cfg.modeling.inflow_non_negativity.penalty_cost - 1000.0).abs() < f64::EPSILON,
-            "penalty_cost should be the default 1000.0 when absent from JSON"
+            matches!(
+                err,
+                LoadError::SchemaError { .. } | LoadError::ParseError { .. }
+            ),
+            "expected parse/schema error for unknown method, got: {err:?}"
         );
     }
 

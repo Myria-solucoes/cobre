@@ -636,7 +636,7 @@ fn lag_11_lp_coefficient_equals_psi_hat_over_twelve() {
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
     let templates = build_stage_templates(
         &system,
-        &InflowNonNegativityMethod::None,
+        InflowNonNegativityMethod::None,
         &par_lp,
         &PrecomputedNormal::default(),
         &hydro_models.production,
@@ -702,7 +702,7 @@ fn lag_0_lp_coefficient_combines_ar_and_annual() {
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
     let templates = build_stage_templates(
         &system,
-        &InflowNonNegativityMethod::None,
+        InflowNonNegativityMethod::None,
         &par_lp,
         &PrecomputedNormal::default(),
         &hydro_models.production,
@@ -765,7 +765,7 @@ fn classical_par_has_no_lag_11_column() {
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
     let templates = build_stage_templates(
         &system,
-        &InflowNonNegativityMethod::None,
+        InflowNonNegativityMethod::None,
         &par_lp,
         &PrecomputedNormal::default(),
         &hydro_models.production,

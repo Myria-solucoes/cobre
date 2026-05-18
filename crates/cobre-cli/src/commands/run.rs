@@ -876,7 +876,7 @@ fn build_study_setup(
         n_scenarios: bcast_config.n_scenarios,
         io_channel_capacity: usize::try_from(bcast_config.io_channel_capacity).unwrap_or(64),
         policy_path: bcast_config.policy_path.clone(),
-        inflow_method: bcast_config.inflow_method.clone(),
+        inflow_method: bcast_config.inflow_method,
         cut_selection,
         cut_activity_tolerance: bcast_config.cut_activity_tolerance,
         basis_activity_window: bcast_config.basis_activity_window,
