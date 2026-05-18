@@ -35,15 +35,12 @@ use crate::LoadError;
 ///
 /// Private — only used during deserialization. Not re-exported.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawPenalties {
     /// `$schema` field — informational, not validated.
     #[serde(rename = "$schema")]
     _schema: Option<String>,
-
-    /// File format version — informational, not validated.
-    #[allow(dead_code)]
-    version: Option<String>,
 
     /// Bus penalty defaults.
     bus: RawBusPenalties,
@@ -60,6 +57,7 @@ pub(crate) struct RawPenalties {
 
 /// Intermediate type for the `bus` section.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawBusPenalties {
     /// Piecewise-linear deficit cost segments.
@@ -70,6 +68,7 @@ pub(crate) struct RawBusPenalties {
 
 /// Intermediate type for one deficit segment entry.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawDeficitSegment {
     /// MW depth of this segment. `null` means the segment is unbounded (last segment).
@@ -80,6 +79,7 @@ pub(crate) struct RawDeficitSegment {
 
 /// Intermediate type for the `line` section.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawLinePenalties {
     /// Exchange cost \[$/`MWh`\].
@@ -93,6 +93,7 @@ pub(crate) struct RawLinePenalties {
 /// [`HydroPenalties`] struct field names.
 #[allow(clippy::struct_field_names)]
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawHydroPenalties {
     spillage_cost: f64,
@@ -120,6 +121,7 @@ pub(crate) struct RawHydroPenalties {
 
 /// Intermediate type for the `non_controllable_source` section.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawNcsPenalties {
     /// Curtailment cost \[$/`MWh`\].
@@ -406,7 +408,6 @@ mod tests {
 
     const VALID_JSON: &str = r#"{
       "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/book/src/schemas/penalties.schema.json",
-      "version": "1.0",
       "bus": {
         "deficit_segments": [
           { "depth_mw": 500.0, "cost": 1000.0 },
@@ -861,6 +862,42 @@ mod tests {
             }
             other => panic!("expected SchemaError, got: {other:?}"),
         }
+    }
+
+    // ── AC: unknown fields → ParseError ──────────────────────────────────────
+
+    /// The dead `version` field (removed in schema-hardening) must now be
+    /// rejected by `deny_unknown_fields`; old case dirs that still contain it
+    /// will fail to parse, which is the desired behaviour.
+    #[test]
+    fn test_parse_penalties_unknown_field_rejected() {
+        let json = r#"{
+          "version": "1.0",
+          "bus": {
+            "deficit_segments": [{ "depth_mw": null, "cost": 1000.0 }],
+            "excess_cost": 100.0
+          },
+          "line": { "exchange_cost": 2.0 },
+          "hydro": {
+            "spillage_cost": 0.01, "fpha_turbined_cost": 0.05,
+            "diversion_cost": 0.1, "storage_violation_below_cost": 10000.0,
+            "filling_target_violation_cost": 50000.0,
+            "turbined_violation_below_cost": 500.0,
+            "outflow_violation_below_cost": 500.0,
+            "outflow_violation_above_cost": 500.0,
+            "generation_violation_below_cost": 1000.0,
+            "evaporation_violation_cost": 5000.0,
+            "water_withdrawal_violation_cost": 1000.0
+          },
+          "non_controllable_source": { "curtailment_cost": 0.005 }
+        }"#;
+
+        let f = write_json(json);
+        let err = parse_penalties(f.path()).unwrap_err();
+        assert!(
+            matches!(err, LoadError::ParseError { .. }),
+            "expected ParseError for unknown 'version' field, got: {err:?}"
+        );
     }
 
     /// Three deficit segments — valid, with monotonically increasing costs and

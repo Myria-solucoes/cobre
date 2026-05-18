@@ -132,12 +132,11 @@ fn write_inflow_history(path: &Path) {
 fn config_json(order_selection: &str, max_order: u32) -> String {
     format!(
         r#"{{
-            "training": {{ "seed": 42 }},
+            "training": {{ "tree_seed": 42 }},
             "simulation": {{ "enabled": false, "num_scenarios": 0, "io_channel_capacity": 16 }},
             "modeling": {{}},
             "policy": {{}},
             "exports": {{}},
-            "output": {{}},
             "estimation": {{
                 "order_selection": "{order_selection}",
                 "max_order": {max_order},

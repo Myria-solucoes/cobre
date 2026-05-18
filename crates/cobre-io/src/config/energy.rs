@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 /// Per-plant per-season overrides are loaded from
 /// `system/hydro_reference_volume_fractions.parquet`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct EnergyConfig {
     /// Case-wide default fraction in `(0.0, 1.0]` used when no per-`(hydro,

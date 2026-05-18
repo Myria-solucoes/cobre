@@ -9,6 +9,7 @@ use super::scenario_source::RawScenarioSourceConfig;
 /// `forward_passes` and `stopping_rules` are mandatory — the loader returns
 /// [`crate::LoadError::SchemaError`] if either is absent.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct TrainingConfig {
     /// Enable the training phase. When `false`, skip directly to simulation.
@@ -62,6 +63,7 @@ impl TrainingConfig {
 
 /// Row-selection settings (`config.json → training.cut_selection`).
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(default, deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RowSelectionConfig {
     /// Enable row pruning.
@@ -134,7 +136,7 @@ pub struct RowSelectionConfig {
 
 /// LP solver retry settings (`config.json → training.solver`).
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct TrainingSolverConfig {
     /// Maximum solver retry attempts before propagating a hard error.
@@ -209,6 +211,7 @@ pub enum StoppingRuleConfig {
 
 /// Upper-bound evaluation settings (`config.json → upper_bound_evaluation`).
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(default, deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct UpperBoundEvaluationConfig {
     /// Enable vertex-based inner approximation for upper bound computation.
@@ -230,6 +233,7 @@ pub struct UpperBoundEvaluationConfig {
 
 /// Lipschitz constant settings for inner approximation.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(default, deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LipschitzConfig {
     /// Computation mode: `"auto"`.

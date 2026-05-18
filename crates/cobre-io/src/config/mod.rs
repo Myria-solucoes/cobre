@@ -57,6 +57,7 @@ use std::path::Path;
 /// All sections except `training` are optional; their defaults are applied by
 /// serde when the section is absent from the JSON.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Config {
     /// JSON schema URI — informational, not validated.
@@ -704,11 +705,11 @@ mod tests {
         );
     }
 
-    /// JSON that still contains a `"version"` property is
-    /// silently accepted because `Config` has no `deny_unknown_fields` and the
-    /// removed field is treated as an unknown key that serde ignores.
+    /// JSON that contains the dead `"version"` property must now be rejected
+    /// because `Config` uses `deny_unknown_fields`. Old case dirs that still
+    /// contain this key will fail to parse — which is the desired behaviour.
     #[test]
-    fn test_legacy_version_field_silently_ignored() {
+    fn test_legacy_version_field_rejected() {
         let f = write_config(
             r#"{
             "version": "1.0.0",
@@ -718,9 +719,14 @@ mod tests {
             }
         }"#,
         );
-        // Must parse successfully — backward compatibility for existing case dirs.
-        let cfg = parse_config(f.path()).unwrap();
-        assert_eq!(cfg.training.forward_passes, Some(1));
+        let err = parse_config(f.path()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LoadError::ParseError { .. } | LoadError::SchemaError { .. }
+            ),
+            "expected parse/schema error for unknown 'version' field, got: {err:?}"
+        );
     }
 
     /// `"truncation"` is accepted as a method value and round-trips correctly
@@ -1071,22 +1077,25 @@ mod tests {
         }
     }
 
-    /// `simulation.sampling_scheme` (old dead field) is silently ignored since
-    /// `SimulationConfig` does not use `deny_unknown_fields`.
+    /// `simulation.sampling_scheme` (dead field) is now rejected because
+    /// `SimulationConfig` uses `deny_unknown_fields`. Old case dirs must remove
+    /// this key before loading.
     #[test]
-    fn test_dead_sampling_scheme_field_removed() {
-        // The old `sampling_scheme` key is an unknown field — serde ignores it.
+    fn test_dead_sampling_scheme_field_rejected() {
         let f = write_config(
             r#"{
             "training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
             "simulation": {"enabled": true, "sampling_scheme": {"type": "in_sample"}}
         }"#,
         );
-        let cfg = parse_config(f.path()).unwrap();
-        // Parsed successfully — old field silently ignored.
-        assert!(cfg.simulation.enabled);
-        // The new scenario_source field is absent.
-        assert!(cfg.simulation.scenario_source.is_none());
+        let err = parse_config(f.path()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LoadError::ParseError { .. } | LoadError::SchemaError { .. }
+            ),
+            "expected parse/schema error for unknown 'sampling_scheme' field, got: {err:?}"
+        );
     }
 
     /// max_active_per_stage serde roundtrip: Some(100) serializes and deserializes correctly.
@@ -1234,11 +1243,11 @@ mod tests {
     }
 
     /// Stale `exports` keys (`training`, `cuts`, `vertices`, `simulation`,
-    /// `forward_detail`, `backward_detail`, `compression`) are silently
-    /// ignored by serde rather than producing a parse error. This preserves
-    /// forward-compat for users with legacy config files.
+    /// `forward_detail`, `backward_detail`, `compression`) are now rejected
+    /// because `ExportsConfig` uses `deny_unknown_fields`. Old case dirs that
+    /// still contain these keys must remove them before loading.
     #[test]
-    fn parse_config_ignores_removed_exports_fields() {
+    fn parse_config_rejects_removed_exports_fields() {
         let json = r#"{
             "training": { "forward_passes": 4, "stopping_rules": [] },
             "exports": {
@@ -1251,11 +1260,11 @@ mod tests {
                 "compression": "zstd"
             }
         }"#;
-        let cfg: Config = serde_json::from_str(json).unwrap();
-        // The two surviving fields use their defaults because the JSON
-        // does not specify them.
-        assert!(!cfg.exports.states);
-        assert!(!cfg.exports.stochastic);
+        let result = serde_json::from_str::<Config>(json);
+        assert!(
+            result.is_err(),
+            "expected parse error for stale exports fields, got Ok"
+        );
     }
 
     // ── OrderSelectionMethod::PacfAnnual tests ────────────────────────────────

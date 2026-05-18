@@ -57,7 +57,7 @@ impl<'de> serde::Deserialize<'de> for OrderSelectionMethod {
 /// Controls automatic parameter estimation when historical inflow data is
 /// provided without explicit model statistics or coefficients.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct EstimationConfig {
     /// Maximum lag order considered during autoregressive model fitting.

@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 /// Scoped to `config.json` fields (`training.scenario_source` /
 /// `simulation.scenario_source`).
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(default, deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RawScenarioSourceConfig {
     /// Optional random seed for reproducible scenario generation.

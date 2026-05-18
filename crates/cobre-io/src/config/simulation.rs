@@ -6,7 +6,7 @@ use super::scenario_source::RawScenarioSourceConfig;
 
 /// Post-training simulation settings (`config.json → simulation`).
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SimulationConfig {
     /// Enable post-training simulation.

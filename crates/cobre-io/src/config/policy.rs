@@ -34,6 +34,7 @@ impl std::fmt::Display for PolicyMode {
 /// checkpoint and injects them as fixed boundary conditions at the
 /// terminal stage of the current study.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct BoundaryPolicy {
     /// Path to the source policy checkpoint directory.
@@ -44,7 +45,7 @@ pub struct BoundaryPolicy {
 
 /// Policy directory settings (`config.json → policy`).
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PolicyConfig {
     /// Directory for policy data (rows, states, vertices, basis).
@@ -78,6 +79,7 @@ impl Default for PolicyConfig {
 
 /// Checkpoint settings (`config.json → policy.checkpointing`).
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(default, deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CheckpointingConfig {
     /// Enable periodic checkpointing.

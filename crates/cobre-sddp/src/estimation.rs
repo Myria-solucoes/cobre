@@ -3472,8 +3472,7 @@ mod tests {
         "simulation": { "enabled": false, "num_scenarios": 0, "io_channel_capacity": 16 },
         "modeling": {},
         "policy": {},
-        "exports": {},
-        "output": {}
+        "exports": {}
     }"#;
 
     fn create_required_files(case_dir: &std::path::Path) {
