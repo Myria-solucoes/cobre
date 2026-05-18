@@ -26,6 +26,7 @@ use crate::{
         dimensional::validate_dimensional_consistency,
         productivity_resolution::validate_productivity_resolution,
         referential::validate_referential_integrity,
+        scalar_parameters::validate_scalar_parameters,
         schema::validate_schema,
         semantic::{validate_semantic_hydro_thermal, validate_semantic_stages_penalties_scenarios},
         structural::validate_structure,
@@ -92,6 +93,18 @@ pub(crate) fn run_pipeline_with_report(
 
     // Layer 6 — cross-file productivity resolution (conflict + coverage).
     validate_productivity_resolution(&data, &mut ctx);
+
+    // Layer 6 — scalar-parameter cross-validation (Computed hydro_id existence,
+    // PerStage length, id/name uniqueness). n_stages is the count of study
+    // stages (id >= 0); this matches what `build_resolved_parameters` consumes
+    // downstream.
+    let n_study_stages = data.stages.stages.iter().filter(|s| s.id >= 0).count();
+    validate_scalar_parameters(
+        &data.scalar_parameters,
+        &data.hydros,
+        n_study_stages,
+        &mut ctx,
+    );
 
     // Capture warnings before consuming the context. Errors cause early return.
     let report = generate_report(&ctx);

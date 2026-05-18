@@ -1,11 +1,11 @@
-//! Scalar parameter cross-validation against the loaded [`System`].
+//! Scalar parameter cross-validation against the parsed hydro slice.
 //!
 //! Provides [`validate_scalar_parameters`], which performs three checks on a
 //! [`Vec<ScalarParameter>`] that has already passed the per-file structural and
 //! schema validations from `system/scalar_parameters.json`:
 //!
 //! - **Check A** — every [`ParameterKind::Computed`] references a `hydro_id`
-//!   that exists in `system.hydros()`.
+//!   that exists in the supplied hydro slice.
 //! - **Check B** — every [`ParameterKind::PerStage`] vector has exactly
 //!   `n_stages` elements.
 //! - **Check C** — all parameter `id`s are unique and all `name`s are unique
@@ -18,13 +18,13 @@
 
 use std::collections::HashSet;
 
-use cobre_core::{ComputedParameter, EntityId, ParameterKind, ScalarParameter, System};
+use cobre_core::{ComputedParameter, EntityId, Hydro, ParameterKind, ScalarParameter};
 
 use super::{ErrorKind, ValidationContext};
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
-/// Cross-validates a parameter list against the loaded system and stage count.
+/// Cross-validates a parameter list against the parsed hydros and stage count.
 ///
 /// Appends one [`super::ValidationEntry`] to `ctx` per violation found.  The
 /// function is infallible — all results flow through `ctx`.
@@ -32,7 +32,7 @@ use super::{ErrorKind, ValidationContext};
 /// # Checks performed
 ///
 /// 1. **Computed hydro reference** — every `Computed(c)` parameter must
-///    reference a `hydro_id` that exists in `system.hydros()`.  A missing id
+///    reference a `hydro_id` that exists in `hydros`.  A missing id
 ///    produces an [`ErrorKind::InvalidReference`] entry tagged to
 ///    `"system/scalar_parameters.json"`.
 ///
@@ -49,17 +49,18 @@ use super::{ErrorKind, ValidationContext};
 /// # Arguments
 ///
 /// - `parameters` — output of the scalar-parameter assembler.
-/// - `system` — fully-loaded system that provides the authoritative hydro set.
+/// - `hydros` — authoritative hydro slice (typically `ParsedData.hydros` or
+///   `system.hydros()` post-build).
 /// - `n_stages` — number of study stages (`stage.id >= 0`).
 /// - `ctx` — mutable validation context that accumulates diagnostics.
 pub fn validate_scalar_parameters(
     parameters: &[ScalarParameter],
-    system: &System,
+    hydros: &[Hydro],
     n_stages: usize,
     ctx: &mut ValidationContext,
 ) {
     // Build the hydro-id lookup set once (O(H)) before the per-parameter loops.
-    let hydro_ids: HashSet<EntityId> = system.hydros().iter().map(|h| h.id).collect();
+    let hydro_ids: HashSet<EntityId> = hydros.iter().map(|h| h.id).collect();
 
     check_computed_hydro_references(parameters, &hydro_ids, ctx);
     check_per_stage_lengths(parameters, n_stages, ctx);
@@ -287,7 +288,7 @@ mod tests {
         )];
         let mut ctx = ValidationContext::new();
 
-        validate_scalar_parameters(&params, &system, 3, &mut ctx);
+        validate_scalar_parameters(&params, system.hydros(), 3, &mut ctx);
 
         assert!(ctx.has_errors(), "should have at least one error");
         let errors = ctx.errors();
@@ -311,7 +312,7 @@ mod tests {
         let params = vec![per_stage_param(1, "alpha", vec![1.0, 2.0])]; // len=2, expected 4
         let mut ctx = ValidationContext::new();
 
-        validate_scalar_parameters(&params, &system, 4, &mut ctx);
+        validate_scalar_parameters(&params, system.hydros(), 4, &mut ctx);
 
         assert!(ctx.has_errors());
         let errors = ctx.errors();
@@ -343,7 +344,7 @@ mod tests {
         ];
         let mut ctx = ValidationContext::new();
 
-        validate_scalar_parameters(&params, &system, 3, &mut ctx);
+        validate_scalar_parameters(&params, system.hydros(), 3, &mut ctx);
 
         assert!(ctx.has_errors());
         let errors = ctx.errors();
@@ -364,7 +365,7 @@ mod tests {
         // Exact-same name "rho" — should produce one error.
         let params_dup = vec![constant_param(1, "rho", 1.0), constant_param(2, "rho", 2.0)];
         let mut ctx_dup = ValidationContext::new();
-        validate_scalar_parameters(&params_dup, &system, 3, &mut ctx_dup);
+        validate_scalar_parameters(&params_dup, system.hydros(), 3, &mut ctx_dup);
         assert!(
             ctx_dup.has_errors(),
             "duplicate name 'rho' should produce an error"
@@ -377,7 +378,7 @@ mod tests {
         // Different case "rho" vs "Rho" — should produce NO error.
         let params_case = vec![constant_param(3, "rho", 1.0), constant_param(4, "Rho", 2.0)];
         let mut ctx_case = ValidationContext::new();
-        validate_scalar_parameters(&params_case, &system, 3, &mut ctx_case);
+        validate_scalar_parameters(&params_case, system.hydros(), 3, &mut ctx_case);
         assert!(
             !ctx_case.has_errors(),
             "'rho' and 'Rho' are different names; should produce no error"
@@ -400,7 +401,7 @@ mod tests {
         ];
         let mut ctx = ValidationContext::new();
 
-        validate_scalar_parameters(&params, &system, 3, &mut ctx);
+        validate_scalar_parameters(&params, system.hydros(), 3, &mut ctx);
 
         assert!(
             !ctx.has_errors(),
@@ -426,7 +427,7 @@ mod tests {
         ];
         let mut ctx = ValidationContext::new();
 
-        validate_scalar_parameters(&params, &system, 4, &mut ctx);
+        validate_scalar_parameters(&params, system.hydros(), 4, &mut ctx);
 
         assert!(ctx.has_errors());
         assert!(
@@ -493,7 +494,7 @@ mod tests {
         ];
         let mut ctx = ValidationContext::new();
 
-        validate_scalar_parameters(&params, &system, 0, &mut ctx);
+        validate_scalar_parameters(&params, system.hydros(), 0, &mut ctx);
 
         assert!(
             !ctx.has_errors(),
