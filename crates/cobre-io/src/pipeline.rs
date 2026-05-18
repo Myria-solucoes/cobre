@@ -1,6 +1,6 @@
-//! Pipeline orchestrator for the five-layer validation and `System` construction pipeline.
+//! Pipeline orchestrator for the six-layer validation and `System` construction pipeline.
 //!
-//! [`run_pipeline`] and [`run_pipeline_with_report`] wire together all five validation
+//! [`run_pipeline`] and [`run_pipeline_with_report`] wire together all six validation
 //! layers, the resolution step, the scenario assembly step, and `SystemBuilder::build`
 //! into single callables that either return a fully-validated [`cobre_core::System`] or a
 //! [`LoadError`] explaining what went wrong.
@@ -39,7 +39,7 @@ use std::path::Path;
 
 /// Run the complete loading pipeline for a case directory.
 ///
-/// Executes all five validation layers, the three-tier resolution step, scenario
+/// Executes all six validation layers, the three-tier resolution step, scenario
 /// assembly, and `SystemBuilder::build`. Returns `Ok(System)` when every layer
 /// succeeds, or the first `Err(LoadError)` encountered. Warnings collected during
 /// validation are silently discarded; use [`run_pipeline_with_report`] to retrieve them.
@@ -49,7 +49,7 @@ use std::path::Path;
 /// - [`LoadError::IoError`] / [`LoadError::ParseError`] — file read or JSON/Parquet
 ///   parse failure in Layer 2.
 /// - [`LoadError::ConstraintError`] — one or more validation errors collected by
-///   Layers 1-5, or `SystemBuilder::build` rejection.
+///   Layers 1-6, or `SystemBuilder::build` rejection.
 /// - [`LoadError::SchemaError`] — AR coefficient count mismatch in scenario assembly.
 pub(crate) fn run_pipeline(path: &Path) -> Result<System, LoadError> {
     run_pipeline_with_report(path).map(|(system, _report)| system)
@@ -108,13 +108,11 @@ pub(crate) fn run_pipeline_with_artifacts(
     validate_semantic_hydro_thermal(&data, &mut ctx);
     validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
 
-    // Layer 6 — cross-file productivity resolution (conflict + coverage).
+    // Layer 6 — cross-file resolution and cross-validation.
     validate_productivity_resolution(&data, &mut ctx);
-
-    // Layer 6 — scalar-parameter cross-validation (Computed hydro_id existence,
-    // PerStage length, id/name uniqueness). n_stages is the count of study
-    // stages (id >= 0); this matches what `build_resolved_parameters` consumes
-    // downstream.
+    // Scalar-parameter cross-validation: Computed hydro_id existence, PerStage
+    // length, id/name uniqueness. n_stages is the count of study stages (id >= 0);
+    // this matches what `build_resolved_parameters` consumes downstream.
     let n_study_stages = data.stages.stages.iter().filter(|s| s.id >= 0).count();
     validate_scalar_parameters(
         &data.scalar_parameters,

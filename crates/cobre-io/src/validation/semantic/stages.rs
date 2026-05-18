@@ -131,3 +131,330 @@ pub(super) fn check_stage_structure(data: &ParsedData, ctx: &mut ValidationConte
         }
     }
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::too_many_lines,
+    clippy::doc_markdown,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
+mod tests {
+    use super::super::test_support::*;
+    use super::super::validate_semantic_stages_penalties_scenarios;
+    use cobre_core::temporal::{Block, PolicyGraphType, StageRiskConfig, Transition};
+
+    use crate::validation::{ErrorKind, ValidationContext};
+
+    // ── Rule 1: Transition stage validity ─────────────────────────────────────
+
+    /// Transition referencing a non-existent source_id produces InvalidValue error.
+    #[test]
+    fn test_5b_transition_invalid_source_id() {
+        let mut stages = make_stages_5b(vec![0, 1]);
+        stages.policy_graph.transitions = vec![Transition {
+            source_id: 99, // does not exist
+            target_id: 1,
+            probability: 1.0,
+            annual_discount_rate_override: None,
+        }];
+        let data = make_data_5b(
+            vec![make_hydro_ordered_penalties(1)],
+            stages,
+            vec![make_bus_with_deficit(1, 10.0)],
+            vec![],
+            vec![],
+            None,
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
+        assert!(ctx.has_errors());
+        let errors = ctx.errors();
+        assert!(
+            errors.iter().any(|e| e.kind == ErrorKind::InvalidValue),
+            "should have InvalidValue for invalid source_id"
+        );
+    }
+
+    /// Transition referencing a non-existent target_id produces InvalidValue error.
+    #[test]
+    fn test_5b_transition_invalid_target_id() {
+        let mut stages = make_stages_5b(vec![0, 1]);
+        stages.policy_graph.transitions = vec![Transition {
+            source_id: 0,
+            target_id: 99, // does not exist
+            probability: 1.0,
+            annual_discount_rate_override: None,
+        }];
+        let data = make_data_5b(
+            vec![make_hydro_ordered_penalties(1)],
+            stages,
+            vec![make_bus_with_deficit(1, 10.0)],
+            vec![],
+            vec![],
+            None,
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
+        assert!(ctx.has_errors());
+        assert!(
+            ctx.errors()
+                .iter()
+                .any(|e| e.kind == ErrorKind::InvalidValue),
+            "should have InvalidValue for invalid target_id"
+        );
+    }
+
+    // ── Rule 2: Transition probability sums ───────────────────────────────────
+
+    /// Transitions from stage 0 with probability sum 0.5 produce one InvalidValue
+    /// error with "probability" and "stage 0" in the message.
+    #[test]
+    fn test_5b_transition_probability_sum_wrong() {
+        let mut stages = make_stages_5b(vec![0, 1]);
+        stages.policy_graph.transitions = vec![Transition {
+            source_id: 0,
+            target_id: 1,
+            probability: 0.5, // should sum to 1.0
+            annual_discount_rate_override: None,
+        }];
+        let data = make_data_5b(
+            vec![make_hydro_ordered_penalties(1)],
+            stages,
+            vec![make_bus_with_deficit(1, 10.0)],
+            vec![],
+            vec![],
+            None,
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
+        assert!(ctx.has_errors());
+        let errors = ctx.errors();
+        let relevant: Vec<_> = errors
+            .iter()
+            .filter(|e| e.kind == ErrorKind::InvalidValue)
+            .collect();
+        assert_eq!(relevant.len(), 1, "exactly 1 InvalidValue error expected");
+        let msg = &relevant[0].message;
+        assert!(
+            msg.contains("probability"),
+            "message should contain 'probability', got: {msg}"
+        );
+        assert!(
+            msg.contains("stage 0"),
+            "message should contain 'stage 0', got: {msg}"
+        );
+    }
+
+    /// Transitions from stage 0 summing exactly 1.0 produce no probability error.
+    #[test]
+    fn test_5b_transition_probability_sum_valid() {
+        let mut stages = make_stages_5b(vec![0, 1, 2]);
+        stages.policy_graph.transitions = vec![
+            Transition {
+                source_id: 0,
+                target_id: 1,
+                probability: 0.6,
+                annual_discount_rate_override: None,
+            },
+            Transition {
+                source_id: 0,
+                target_id: 2,
+                probability: 0.4,
+                annual_discount_rate_override: None,
+            },
+        ];
+        let data = make_data_5b(
+            vec![make_hydro_ordered_penalties(1)],
+            stages,
+            vec![make_bus_with_deficit(1, 10.0)],
+            vec![],
+            vec![],
+            None,
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
+        let prob_errors: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidValue)
+            .collect();
+        assert!(
+            prob_errors.is_empty(),
+            "valid probability sum should produce no InvalidValue errors, got: {prob_errors:?}"
+        );
+    }
+
+    // ── Rule 3: Cyclic discount rate ──────────────────────────────────────────
+
+    /// Cyclic graph with annual_discount_rate = 0.0 produces InvalidValue error.
+    #[test]
+    fn test_5b_cyclic_zero_discount_rate() {
+        let mut stages = make_stages_5b(vec![0]);
+        stages.policy_graph.graph_type = PolicyGraphType::Cyclic;
+        stages.policy_graph.annual_discount_rate = 0.0;
+        let data = make_data_5b(
+            vec![make_hydro_ordered_penalties(1)],
+            stages,
+            vec![make_bus_with_deficit(1, 10.0)],
+            vec![],
+            vec![],
+            None,
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
+        assert!(ctx.has_errors());
+        assert!(
+            ctx.errors()
+                .iter()
+                .any(|e| e.kind == ErrorKind::InvalidValue),
+            "cyclic with 0 discount rate should produce InvalidValue"
+        );
+    }
+
+    /// Cyclic graph with annual_discount_rate > 0.0 produces no discount rate error.
+    #[test]
+    fn test_5b_cyclic_positive_discount_rate_valid() {
+        let mut stages = make_stages_5b(vec![0]);
+        stages.policy_graph.graph_type = PolicyGraphType::Cyclic;
+        stages.policy_graph.annual_discount_rate = 0.06;
+        let data = make_data_5b(
+            vec![make_hydro_ordered_penalties(1)],
+            stages,
+            vec![make_bus_with_deficit(1, 10.0)],
+            vec![],
+            vec![],
+            None,
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
+        let discount_errors: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidValue)
+            .collect();
+        assert!(
+            discount_errors.is_empty(),
+            "cyclic with positive discount rate should produce no error, got: {discount_errors:?}"
+        );
+    }
+
+    // ── Rule 4: Block duration positivity ─────────────────────────────────────
+
+    /// A block with duration_hours = 0.0 produces an InvalidValue error.
+    #[test]
+    fn test_5b_block_zero_duration() {
+        let mut stages = make_stages_5b(vec![0]);
+        stages.stages[0].blocks = vec![Block {
+            index: 0,
+            name: "Peak".to_string(),
+            duration_hours: 0.0, // invalid
+        }];
+        let data = make_data_5b(
+            vec![make_hydro_ordered_penalties(1)],
+            stages,
+            vec![make_bus_with_deficit(1, 10.0)],
+            vec![],
+            vec![],
+            None,
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
+        assert!(ctx.has_errors());
+        assert!(
+            ctx.errors()
+                .iter()
+                .any(|e| e.kind == ErrorKind::InvalidValue),
+            "zero duration block should produce InvalidValue"
+        );
+    }
+
+    /// A block with positive duration_hours produces no block duration error.
+    #[test]
+    fn test_5b_block_positive_duration_valid() {
+        let mut stages = make_stages_5b(vec![0]);
+        stages.stages[0].blocks = vec![Block {
+            index: 0,
+            name: "Peak".to_string(),
+            duration_hours: 168.0,
+        }];
+        let data = make_data_5b(
+            vec![make_hydro_ordered_penalties(1)],
+            stages,
+            vec![make_bus_with_deficit(1, 10.0)],
+            vec![],
+            vec![],
+            None,
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
+        let errors: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidValue)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "positive block duration should produce no error, got: {errors:?}"
+        );
+    }
+
+    // ── Rule 5: CVaR parameter validity ───────────────────────────────────────
+
+    /// CVaR alpha = 0.0 (invalid, must be in (0, 1]) produces InvalidValue.
+    #[test]
+    fn test_5b_cvar_alpha_zero_invalid() {
+        let mut stages = make_stages_5b(vec![0]);
+        stages.stages[0].risk_config = StageRiskConfig::CVaR {
+            alpha: 0.0, // invalid: must be in (0, 1]
+            lambda: 0.5,
+        };
+        let data = make_data_5b(
+            vec![make_hydro_ordered_penalties(1)],
+            stages,
+            vec![make_bus_with_deficit(1, 10.0)],
+            vec![],
+            vec![],
+            None,
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
+        assert!(ctx.has_errors());
+        assert!(
+            ctx.errors()
+                .iter()
+                .any(|e| e.kind == ErrorKind::InvalidValue),
+            "CVaR alpha=0.0 should produce InvalidValue"
+        );
+    }
+
+    /// CVaR lambda = -0.1 (invalid, must be in [0, 1]) produces InvalidValue.
+    #[test]
+    fn test_5b_cvar_lambda_out_of_range() {
+        let mut stages = make_stages_5b(vec![0]);
+        stages.stages[0].risk_config = StageRiskConfig::CVaR {
+            alpha: 0.95,
+            lambda: -0.1, // invalid: must be in [0, 1]
+        };
+        let data = make_data_5b(
+            vec![make_hydro_ordered_penalties(1)],
+            stages,
+            vec![make_bus_with_deficit(1, 10.0)],
+            vec![],
+            vec![],
+            None,
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
+        assert!(ctx.has_errors());
+        assert!(
+            ctx.errors()
+                .iter()
+                .any(|e| e.kind == ErrorKind::InvalidValue),
+            "CVaR lambda=-0.1 should produce InvalidValue"
+        );
+    }
+}

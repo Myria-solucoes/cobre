@@ -12,7 +12,7 @@
 //!
 //! ## Loading pipeline
 //!
-//! [`load_case`] executes a five-layer validation pipeline:
+//! [`load_case`] executes a six-layer validation pipeline:
 //!
 //! 1. **Structural validation** — checks that required files exist on disk and records
 //!    which optional files are present ([`validation::structural`]).
@@ -22,6 +22,9 @@
 //!    cover all hydros).
 //! 5. **Semantic validation** — domain business rules (acyclic cascade, penalty ordering,
 //!    PAR stationarity, etc.).
+//! 6. **Cross-file resolution and cross-validation** — multi-file consistency checks that
+//!    span the parsed data assembled by earlier layers (productivity source conflict
+//!    detection, scalar-parameter hydro-ID existence, per-stage length checks).
 //!
 //! All validation diagnostics are collected by [`validation::ValidationContext`] before
 //! failing, so users see every problem in a single report.  Final errors are reported
