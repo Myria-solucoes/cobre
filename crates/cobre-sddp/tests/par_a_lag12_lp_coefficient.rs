@@ -641,7 +641,7 @@ fn lag_11_lp_coefficient_equals_psi_hat_over_twelve() {
         &PrecomputedNormal::default(),
         &hydro_models.production,
         &hydro_models.evaporation,
-        &cobre_sddp::resolved_parameters::ResolvedParameters::default(),
+        &cobre_sddp::ResolvedParameters::default(),
     )
     .expect("build_stage_templates must succeed for the PAR(2)-A fixture");
 
@@ -707,7 +707,7 @@ fn lag_0_lp_coefficient_combines_ar_and_annual() {
         &PrecomputedNormal::default(),
         &hydro_models.production,
         &hydro_models.evaporation,
-        &cobre_sddp::resolved_parameters::ResolvedParameters::default(),
+        &cobre_sddp::ResolvedParameters::default(),
     )
     .expect("build_stage_templates must succeed for the PAR(2)-A fixture");
 
@@ -770,7 +770,7 @@ fn classical_par_has_no_lag_11_column() {
         &PrecomputedNormal::default(),
         &hydro_models.production,
         &hydro_models.evaporation,
-        &cobre_sddp::resolved_parameters::ResolvedParameters::default(),
+        &cobre_sddp::ResolvedParameters::default(),
     )
     .expect("build_stage_templates must succeed for the classical PAR(2) fixture");
 

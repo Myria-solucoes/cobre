@@ -42,6 +42,11 @@ pub struct StageScalingReport {
 }
 
 /// LP matrix and objective dimensions.
+//
+// `clippy::struct_field_names` flags the common `num_` prefix; the field
+// names are the canonical LP terminology (`num_cols`, `num_rows`, `num_nz`)
+// matching what the solver layer uses, so we keep them as-is.
+#[allow(clippy::struct_field_names)]
 #[derive(Debug, Clone, Serialize)]
 pub struct LpDimensions {
     /// Number of columns (decision variables).

@@ -61,7 +61,7 @@ impl ArOrderSummary {
     /// # Examples
     ///
     /// ```
-    /// use cobre_sddp::stochastic_summary::ArOrderSummary;
+    /// use cobre_sddp::ArOrderSummary;
     ///
     /// let s = ArOrderSummary {
     ///     method: "AIC".into(),

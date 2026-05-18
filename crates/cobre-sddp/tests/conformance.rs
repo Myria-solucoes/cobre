@@ -25,7 +25,7 @@
 // #[cfg(test)] items from the main crate)
 
 use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
-use cobre_sddp::forward::SyncResult;
+use cobre_sddp::SyncResult;
 use cobre_solver::{
     Basis, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
 };
@@ -240,14 +240,8 @@ fn make_sync_result(global_ub_mean: f64) -> SyncResult {
     }
 }
 
-fn make_fcf(n_stages: usize, state_dimension: usize) -> cobre_sddp::cut::fcf::FutureCostFunction {
-    cobre_sddp::cut::fcf::FutureCostFunction::new(
-        n_stages,
-        state_dimension,
-        2,
-        100,
-        &vec![0; n_stages],
-    )
+fn make_fcf(n_stages: usize, state_dimension: usize) -> cobre_sddp::FutureCostFunction {
+    cobre_sddp::FutureCostFunction::new(n_stages, state_dimension, 2, 100, &vec![0; n_stages])
 }
 
 // ===========================================================================
@@ -674,7 +668,7 @@ mod cut_conformance {
 mod convergence_conformance {
     //! Conformance tests for `ConvergenceMonitor` gap formula and history.
 
-    use cobre_sddp::convergence::ConvergenceMonitor;
+    use cobre_sddp::ConvergenceMonitor;
     use cobre_sddp::stopping_rule::{StoppingMode, StoppingRule, StoppingRuleSet};
 
     use super::make_sync_result;

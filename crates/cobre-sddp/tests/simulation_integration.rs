@@ -571,7 +571,7 @@ fn train_simulate_write_cycle() {
             budget: None,
             cut_activity_tolerance: 0.0,
             warm_start_cuts: 0,
-            basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+            basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
             risk_measures: fx.risk_measures.clone(),
         },
         events: EventConfig {
@@ -717,7 +717,7 @@ fn train_simulate_write_cycle() {
     let sim_config = SimulationConfig {
         n_scenarios: 2,
         io_channel_capacity: 4,
-        basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
 
     let entity_counts = EntityCounts {
@@ -1233,15 +1233,14 @@ fn make_min_outflow_system() -> cobre_core::System {
 /// operational violation slack propagates correctly to the output.
 #[test]
 fn simulation_min_outflow_slack_extracted_from_primal() {
-    use cobre_sddp::lp_builder::build_stage_templates;
+    use cobre_sddp::build_stage_templates;
 
     let system = make_min_outflow_system();
     let n_stages = 2;
 
     let stochastic = make_stochastic_context(n_stages, 1);
 
-    let hydro_models =
-        cobre_sddp::hydro_models::PrepareHydroModelsResult::default_from_system(&system);
+    let hydro_models = cobre_sddp::PrepareHydroModelsResult::default_from_system(&system);
 
     let templates_result = build_stage_templates(
         &system,
@@ -1250,7 +1249,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
         stochastic.normal(),
         &hydro_models.production,
         &hydro_models.evaporation,
-        &cobre_sddp::resolved_parameters::ResolvedParameters::default(),
+        &cobre_sddp::ResolvedParameters::default(),
     )
     .expect("build_stage_templates must succeed");
 
@@ -1351,7 +1350,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
             budget: None,
             cut_activity_tolerance: 0.0,
             warm_start_cuts: 0,
-            basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+            basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -1392,7 +1391,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
     let sim_config = SimulationConfig {
         n_scenarios: 1,
         io_channel_capacity: 4,
-        basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
 
     let entity_counts = EntityCounts {

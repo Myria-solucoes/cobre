@@ -14,8 +14,8 @@
 )]
 
 use cobre_core::{EntityId, ParameterKind, ScalarParameter};
+use cobre_sddp::build_resolved_parameters;
 use cobre_sddp::energy_conversion::{EnergyConversionSet, HydroEnergyProductivityOverride};
-use cobre_sddp::resolved_parameters::build_resolved_parameters;
 
 /// Return three [`ScalarParameter`] entries in the order specified by `order`.
 ///

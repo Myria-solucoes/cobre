@@ -23,7 +23,7 @@ pub fn build_setup_for_case(
     config: &cobre_io::Config,
     system: &cobre_core::System,
     stochastic: cobre_stochastic::StochasticContext,
-    hydro_models: cobre_sddp::hydro_models::PrepareHydroModelsResult,
+    hydro_models: cobre_sddp::PrepareHydroModelsResult,
 ) -> StudySetup {
     let sentinel = Path::new("config.json");
     let training_source = config

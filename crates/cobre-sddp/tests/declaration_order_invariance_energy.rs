@@ -88,7 +88,7 @@ fn build_setup_for_case(
     config: &cobre_io::Config,
     system: &cobre_core::System,
     stochastic: cobre_stochastic::StochasticContext,
-    hydro_models: cobre_sddp::hydro_models::PrepareHydroModelsResult,
+    hydro_models: cobre_sddp::PrepareHydroModelsResult,
 ) -> StudySetup {
     let _ = case_dir; // override now flows via hydro_models.productivity_override
     let sentinel = Path::new("config.json");
@@ -234,7 +234,7 @@ fn reverse_hydros_json(case_dir: &Path) {
 /// Key type for per-(hydro, stage, block) record indexing.
 ///
 /// Using `(i32, u32, Option<u32>)` matches the field types in
-/// [`cobre_sddp::simulation::SimulationHydroResult`].
+/// [`cobre_sddp::SimulationHydroResult`].
 type RecordKey = (i32, u32, Option<u32>);
 
 /// The five energy column values stored as raw bits for bit-exact comparison.

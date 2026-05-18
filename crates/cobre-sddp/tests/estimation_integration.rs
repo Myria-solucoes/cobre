@@ -1,6 +1,6 @@
 //! Integration tests for the estimation pipeline.
 //!
-//! Exercises [`cobre_sddp::estimation::estimate_from_history`] end-to-end with a
+//! Exercises [`cobre_sddp::estimate_from_history`] end-to-end with a
 //! real temporary case directory, a synthetic `inflow_history.parquet`, and
 //! minimal supporting files. Covers acceptance criteria C2 (fixed-order)
 //!
@@ -39,7 +39,7 @@ use cobre_core::{
     },
 };
 use cobre_io::Config;
-use cobre_sddp::estimation::estimate_from_history;
+use cobre_sddp::estimate_from_history;
 use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
 
@@ -909,7 +909,7 @@ fn test_partial_estimation_end_to_end() {
     // Verify the correct path was taken.
     assert_eq!(
         path,
-        cobre_sddp::estimation::EstimationPath::PartialEstimation,
+        cobre_sddp::EstimationPath::PartialEstimation,
         "expected PartialEstimation path, got {path:?}"
     );
 

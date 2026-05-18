@@ -114,7 +114,7 @@ impl Communicator for StubComm {
 /// Returns the `TrainingResult`.
 fn run_case_from_dir(case_dir: &Path) -> cobre_sddp::TrainingResult {
     use cobre_io::parse_config;
-    use cobre_sddp::hydro_models::prepare_hydro_models;
+    use cobre_sddp::prepare_hydro_models;
 
     let config_path = case_dir.join("config.json");
     let config = parse_config(&config_path).expect("config must parse");
@@ -516,7 +516,7 @@ fn run_programmatic(
         inflow_method,
         cut_selection: None,
         cut_activity_tolerance: 0.0,
-        basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
         budget: None,
         export_states: false,
         scalar_parameters: Vec::new(),
@@ -846,7 +846,7 @@ fn run_with_setup(
         inflow_method: InflowNonNegativityMethod::None,
         cut_selection: None,
         cut_activity_tolerance: 0.0,
-        basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
         budget: None,
         export_states: false,
         scalar_parameters: Vec::new(),

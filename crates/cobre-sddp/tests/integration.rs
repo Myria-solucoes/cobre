@@ -555,7 +555,7 @@ fn run_one_deterministic_pass(
     fx: &Fixture,
     stochastic: &StochasticContext,
     limit: u64,
-) -> cobre_sddp::training::TrainingOutcome {
+) -> cobre_sddp::TrainingOutcome {
     let mut fcf = make_fcf(fx.n_stages);
     let mut solver = MockSolver::with_fixed(50.0);
     let stage_ctx = StageContext {
@@ -589,7 +589,7 @@ fn run_one_deterministic_pass(
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+                basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: fx.risk_measures.clone(),
             },
@@ -648,7 +648,7 @@ fn train_converges_with_mock_solver() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+            basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
             warm_start_cuts: 0,
             risk_measures: fx.risk_measures.clone(),
         },
@@ -757,7 +757,7 @@ fn train_lb_monotonically_nondecreasing() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+            basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
             warm_start_cuts: 0,
             risk_measures: fx.risk_measures.clone(),
         },
@@ -857,7 +857,7 @@ fn train_emits_correct_event_sequence() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+            basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
             warm_start_cuts: 0,
             risk_measures: fx.risk_measures.clone(),
         },
@@ -982,7 +982,7 @@ fn train_stops_at_iteration_limit() {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+                basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: fx.risk_measures.clone(),
             },
@@ -1071,7 +1071,7 @@ fn train_stops_on_graceful_shutdown() {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+                basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: fx.risk_measures.clone(),
             },
@@ -1150,7 +1150,7 @@ fn train_propagates_infeasible_error() {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+                basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: fx.risk_measures.clone(),
             },
@@ -1212,7 +1212,7 @@ fn train_propagates_infeasible_error() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn d17_level1_cut_selection_convergence() {
-    use cobre_sddp::cut_selection::CutSelectionStrategy;
+    use cobre_sddp::CutSelectionStrategy;
 
     let fx = Fixture::new(2);
     let mut fcf = make_fcf(fx.n_stages);
@@ -1236,7 +1236,7 @@ fn d17_level1_cut_selection_convergence() {
             }),
             budget: None,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+            basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
             warm_start_cuts: 0,
             risk_measures: fx.risk_measures.clone(),
         },
@@ -1371,7 +1371,7 @@ fn d17_level1_cut_selection_convergence() {
 /// - Zero basis rejections (reconstruction produces valid warm-start bases).
 #[test]
 fn d17_level1_cut_selection_reconstruction() {
-    use cobre_sddp::cut_selection::CutSelectionStrategy;
+    use cobre_sddp::CutSelectionStrategy;
 
     let fx = Fixture::new(2);
     let mut fcf = make_fcf(fx.n_stages);
@@ -1413,7 +1413,7 @@ fn d17_level1_cut_selection_reconstruction() {
                 }),
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+                basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: fx.risk_measures.clone(),
             },
@@ -1479,7 +1479,7 @@ fn d17_level1_cut_selection_reconstruction() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn d18_lml1_cut_selection_convergence() {
-    use cobre_sddp::cut_selection::CutSelectionStrategy;
+    use cobre_sddp::CutSelectionStrategy;
 
     let fx = Fixture::new(2);
     let mut fcf = make_fcf(fx.n_stages);
@@ -1503,7 +1503,7 @@ fn d18_lml1_cut_selection_convergence() {
             }),
             budget: None,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+            basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
             warm_start_cuts: 0,
             risk_measures: fx.risk_measures.clone(),
         },
@@ -1760,7 +1760,7 @@ fn baked_backward_pass_smoke_test() {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+                basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: fx.risk_measures.clone(),
             },

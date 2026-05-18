@@ -400,7 +400,7 @@ fn build_stochastic() -> StochasticContext {
 
 /// All resources needed to run training and simulation.
 struct Fixture {
-    stage_templates: cobre_sddp::lp_builder::StageTemplates,
+    stage_templates: cobre_sddp::StageTemplates,
     stochastic: StochasticContext,
     indexer: StageIndexer,
     initial_state: Vec<f64>,
@@ -437,7 +437,7 @@ fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixtur
         &cobre_stochastic::normal::precompute::PrecomputedNormal::default(),
         &hydro_models.production,
         &hydro_models.evaporation,
-        &cobre_sddp::resolved_parameters::ResolvedParameters::default(),
+        &cobre_sddp::ResolvedParameters::default(),
     )
     .expect("no FPHA plants in integration test fixture");
     let stochastic = build_stochastic();
@@ -501,7 +501,7 @@ fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixtur
 fn train_fixture(
     fx: &Fixture,
     iterations: u64,
-) -> Result<cobre_sddp::training::TrainingOutcome, cobre_sddp::SddpError> {
+) -> Result<cobre_sddp::TrainingOutcome, cobre_sddp::SddpError> {
     let n_stages = fx.stage_templates.templates.len();
     let mut fcf = FutureCostFunction::new(n_stages, fx.indexer.n_state, 1, 20, &vec![0; n_stages]);
     let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
@@ -550,7 +550,7 @@ fn train_fixture(
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+                basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: fx.risk_measures.clone(),
             },
@@ -588,7 +588,7 @@ fn train_fixture(
 fn simulate_fixture(
     fx: &Fixture,
     fcf: &FutureCostFunction,
-) -> Result<Vec<cobre_sddp::simulation::SimulationScenarioResult>, cobre_sddp::SimulationError> {
+) -> Result<Vec<cobre_sddp::SimulationScenarioResult>, cobre_sddp::SimulationError> {
     let (result_tx, result_rx) = mpsc::sync_channel(32);
 
     let collector_thread = std::thread::spawn(move || {
@@ -674,7 +674,7 @@ fn simulate_fixture(
         &SimulationConfig {
             n_scenarios: 20,
             io_channel_capacity: 32,
-            basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+            basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
         },
         SimulationOutputSpec {
             result_tx: &result_tx,
@@ -923,7 +923,7 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
         &cobre_stochastic::normal::precompute::PrecomputedNormal::default(),
         &hydro_models.production,
         &hydro_models.evaporation,
-        &cobre_sddp::resolved_parameters::ResolvedParameters::default(),
+        &cobre_sddp::ResolvedParameters::default(),
     )
     .expect("build_stage_templates must succeed");
 
