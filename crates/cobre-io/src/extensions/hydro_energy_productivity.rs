@@ -22,20 +22,25 @@
 //! |-------------------------------------------|--------------|----------|-------------------------------------------------|
 //! | `hydro_id`                                | INT32        | no       | Hydro plant identifier                          |
 //! | `stage_id`                                | INT32        | yes      | Stage; NULL means "applies to all stages"       |
-//! | `equivalent_productivity_mw_per_m3s`      | DOUBLE       | yes      | Direct `ρ_eq` override; finite and `> 0.0`      |
+//! | `equivalent_productivity_mw_per_m3s`      | DOUBLE       | yes      | Direct `ρ_eq` override; finite and `>= 0.0`     |
 //! | `reference_volume_hm3`                    | DOUBLE       | yes      | `V_ref` override; finite and `> 0.0`            |
 //! | `reference_outflow_m3s`                   | DOUBLE       | yes      | `Q_ref` override; finite and `>= 0.0`           |
-//! | `specific_productivity_mw_per_m3s_per_m`  | DOUBLE       | yes      | `ρ_esp` override; finite and `> 0.0`            |
+//! | `specific_productivity_mw_per_m3s_per_m`  | DOUBLE       | yes      | `ρ_esp` override; finite and `>= 0.0`           |
 //!
 //! ## Validation
 //!
 //! Per-row constraints enforced by [`parse_hydro_energy_productivity`]:
 //!
 //! - `hydro_id` must not be null.
-//! - `equivalent_productivity_mw_per_m3s`, when set, must be finite and `> 0.0`.
+//! - `equivalent_productivity_mw_per_m3s`, when set, must be finite and `>= 0.0`. A
+//!   value of `0.0` is accepted (planned outage / zero-generation stage); the LP
+//!   treats `ρ_eq` as a multiplier so zero produces zero generation without any
+//!   division-by-zero hazard.
 //! - `reference_volume_hm3`, when set, must be finite and `> 0.0`.
 //! - `reference_outflow_m3s`, when set, must be finite and `>= 0.0`.
-//! - `specific_productivity_mw_per_m3s_per_m`, when set, must be finite and `> 0.0`.
+//! - `specific_productivity_mw_per_m3s_per_m`, when set, must be finite and `>= 0.0`. A
+//!   value of `0.0` mirrors the planned-outage marker on
+//!   `equivalent_productivity_mw_per_m3s`.
 //! - A row where all four override columns are NULL is accepted (carries no
 //!   information but is not an error).
 //!
@@ -63,13 +68,15 @@ pub struct HydroEnergyProductivityRow {
     /// Stage the override applies to. `None` means "applies to all stages for
     /// this hydro" (a per-hydro default).
     pub stage_id: Option<i32>,
-    /// Direct `ρ_eq` override \[MW/(m³/s)\]. Finite and `> 0.0` when set.
+    /// Direct `ρ_eq` override \[MW/(m³/s)\]. Finite and `>= 0.0` when set.
+    /// `0.0` is accepted as a planned-outage marker.
     pub equivalent_productivity_mw_per_m3s: Option<f64>,
     /// `V_ref` override \[hm³\]. Finite and `> 0.0` when set.
     pub reference_volume_hm3: Option<f64>,
     /// `Q_ref` override \[m³/s\]. Finite and `>= 0.0` when set.
     pub reference_outflow_m3s: Option<f64>,
-    /// `ρ_esp` override \[MW/(m³/s)/m\]. Finite and `> 0.0` when set.
+    /// `ρ_esp` override \[MW/(m³/s)/m\]. Finite and `>= 0.0` when set. `0.0`
+    /// mirrors the planned-outage marker on `equivalent_productivity_mw_per_m3s`.
     pub specific_productivity_mw_per_m3s_per_m: Option<f64>,
 }
 
@@ -135,7 +142,7 @@ pub fn parse_hydro_energy_productivity(
             let equivalent_productivity_mw_per_m3s = if rho_eq_col.is_null(i) {
                 None
             } else {
-                Some(validate_strictly_positive(
+                Some(validate_nonnegative(
                     rho_eq_col.value(i),
                     row_idx,
                     "equivalent_productivity_mw_per_m3s",
@@ -168,7 +175,7 @@ pub fn parse_hydro_energy_productivity(
             let specific_productivity_mw_per_m3s_per_m = if rho_esp_col.is_null(i) {
                 None
             } else {
-                Some(validate_strictly_positive(
+                Some(validate_nonnegative(
                     rho_esp_col.value(i),
                     row_idx,
                     "specific_productivity_mw_per_m3s_per_m",
@@ -382,10 +389,21 @@ mod tests {
         assert_eq!(rows[2].stage_id, None);
     }
 
-    /// `equivalent_productivity_mw_per_m3s = 0.0` must be rejected.
+    /// `equivalent_productivity_mw_per_m3s = 0.0` is accepted as a planned-outage marker.
     #[test]
-    fn test_zero_rho_eq_rejected() {
+    fn test_zero_rho_eq_accepted() {
         let batch = make_batch(&[1], &[Some(0)], &[Some(0.0)], &[None], &[None], &[None]);
+        let tmp = write_parquet(&batch);
+        let rows = parse_hydro_energy_productivity(tmp.path())
+            .expect("zero ρ_eq must be accepted as a planned-outage marker");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].equivalent_productivity_mw_per_m3s, Some(0.0));
+    }
+
+    /// Negative `equivalent_productivity_mw_per_m3s` is still rejected.
+    #[test]
+    fn test_negative_rho_eq_rejected() {
+        let batch = make_batch(&[1], &[Some(0)], &[Some(-0.1)], &[None], &[None], &[None]);
         let tmp = write_parquet(&batch);
         let err = parse_hydro_energy_productivity(tmp.path()).unwrap_err();
         match err {
@@ -393,10 +411,6 @@ mod tests {
                 assert!(
                     field.contains("equivalent_productivity_mw_per_m3s"),
                     "field should name the column, got: {field}"
-                );
-                assert!(
-                    field.contains("[0]"),
-                    "field should name the row index, got: {field}"
                 );
             }
             other => panic!("expected SchemaError, got: {other:?}"),

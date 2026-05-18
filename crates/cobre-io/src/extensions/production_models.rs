@@ -49,8 +49,8 @@
 //!   `"linearized_head"` entries. When omitted or `null`, the value is expected to be supplied by
 //!   `system/hydro_energy_productivity.parquet`; cross-file resolution is enforced by
 //!   `validation::productivity_resolution`.
-//! - When `productivity_mw_per_m3s` is present for a non-FPHA entry it must be strictly positive
-//!   and finite.
+//! - When `productivity_mw_per_m3s` is present for a non-FPHA entry it must be finite and
+//!   non-negative (`>= 0.0`). A value of `0.0` is accepted as a planned-outage marker.
 //!
 //! Deferred validations (not performed here):
 //!
@@ -128,8 +128,8 @@ pub struct StageRange {
     /// Optional for `"constant_productivity"` and `"linearized_head"` models. When `None`,
     /// the value is supplied by `system/hydro_energy_productivity.parquet`; cross-file
     /// resolution is enforced by `validation::productivity_resolution`. When present, must
-    /// be strictly positive and finite. Must be `None` for `"fpha"` (FPHA derives productivity
-    /// from its hyperplane geometry).
+    /// be finite and non-negative (`>= 0.0`); `0.0` is accepted as a planned-outage marker.
+    /// Must be `None` for `"fpha"` (FPHA derives productivity from its hyperplane geometry).
     pub productivity_mw_per_m3s: Option<f64>,
 }
 
@@ -147,8 +147,8 @@ pub struct SeasonConfig {
     /// Optional for `"constant_productivity"` and `"linearized_head"` models. When `None`,
     /// the value is supplied by `system/hydro_energy_productivity.parquet`; cross-file
     /// resolution is enforced by `validation::productivity_resolution`. When present, must
-    /// be strictly positive and finite. Must be `None` for `"fpha"` (FPHA derives productivity
-    /// from its hyperplane geometry).
+    /// be finite and non-negative (`>= 0.0`); `0.0` is accepted as a planned-outage marker.
+    /// Must be `None` for `"fpha"` (FPHA derives productivity from its hyperplane geometry).
     pub productivity_mw_per_m3s: Option<f64>,
 }
 
@@ -440,14 +440,16 @@ fn validate_production_models(models: &[RawProductionModel], path: &Path) -> Res
                     }
 
                     // Validate productivity_mw_per_m3s value when present for non-FPHA seasons.
+                    // `0.0` is accepted as a planned-outage marker; reject only negative
+                    // or non-finite values.
                     if season.model != "fpha" {
                         if let Some(val) = season.productivity_mw_per_m3s {
-                            if val <= 0.0 || !val.is_finite() {
+                            if val < 0.0 || !val.is_finite() {
                                 return Err(LoadError::SchemaError {
                                     path: path.to_path_buf(),
                                     field: field_base,
                                     message: format!(
-                                        "productivity_mw_per_m3s must be positive, got {val}"
+                                        "productivity_mw_per_m3s must be finite and non-negative, got {val}"
                                     ),
                                 });
                             }
@@ -508,13 +510,17 @@ fn validate_stage_range(
     }
 
     // Validate productivity_mw_per_m3s value when present for non-FPHA stages.
+    // `0.0` is accepted as a planned-outage marker; reject only negative or
+    // non-finite values.
     if range.model != "fpha" {
         if let Some(val) = range.productivity_mw_per_m3s {
-            if val <= 0.0 || !val.is_finite() {
+            if val < 0.0 || !val.is_finite() {
                 return Err(LoadError::SchemaError {
                     path: path.to_path_buf(),
                     field: field_base,
-                    message: format!("productivity_mw_per_m3s must be positive, got {val}"),
+                    message: format!(
+                        "productivity_mw_per_m3s must be finite and non-negative, got {val}"
+                    ),
                 });
             }
         }
@@ -1275,9 +1281,9 @@ mod tests {
         );
     }
 
-    /// Validation rejects zero `productivity_mw_per_m3s`.
+    /// `productivity_mw_per_m3s = 0.0` is accepted as a planned-outage marker.
     #[test]
-    fn test_productivity_zero_rejected() {
+    fn test_productivity_zero_accepted() {
         let json = r#"{
           "production_models": [{
             "hydro_id": 0,
@@ -1292,11 +1298,12 @@ mod tests {
           }]
         }"#;
         let f = write_json(json);
-        let err = parse_production_models(f.path()).unwrap_err();
-        assert!(
-            matches!(err, LoadError::SchemaError { .. }),
-            "expected SchemaError, got: {err:?}"
-        );
+        let parsed = parse_production_models(f.path())
+            .expect("zero productivity must be accepted as a planned-outage marker");
+        let SelectionMode::StageRanges { ranges } = &parsed[0].selection_mode else {
+            panic!("expected StageRanges");
+        };
+        assert_eq!(ranges[0].productivity_mw_per_m3s, Some(0.0));
     }
 
     /// Seasonal mode with `productivity_mw_per_m3s` parses correctly.
@@ -1387,9 +1394,9 @@ mod tests {
         }
     }
 
-    /// Regression guard: non-positive `productivity_mw_per_m3s` is still rejected when present.
+    /// Regression guard: negative `productivity_mw_per_m3s` is still rejected when present.
     #[test]
-    fn test_non_positive_productivity_still_rejected() {
+    fn test_negative_productivity_still_rejected() {
         let json = r#"{
           "production_models": [{
             "hydro_id": 0,
@@ -1398,7 +1405,7 @@ mod tests {
               {
                 "start_stage_id": 0, "end_stage_id": 24,
                 "model": "constant_productivity",
-                "productivity_mw_per_m3s": 0.0
+                "productivity_mw_per_m3s": -0.1
               }
             ]
           }]
@@ -1408,8 +1415,8 @@ mod tests {
         match &err {
             LoadError::SchemaError { message, .. } => {
                 assert!(
-                    message.contains("productivity_mw_per_m3s must be positive"),
-                    "message should mention positive requirement, got: {message}"
+                    message.contains("productivity_mw_per_m3s must be finite and non-negative"),
+                    "message should mention non-negative requirement, got: {message}"
                 );
             }
             other => panic!("expected SchemaError, got: {other:?}"),

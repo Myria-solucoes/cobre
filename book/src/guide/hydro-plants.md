@@ -473,13 +473,14 @@ exactly one source per pair.
 }
 ```
 
-| Field                     | Type   | Required            | Description                                                                                                                     |
-| ------------------------- | ------ | ------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `productivity_mw_per_m3s` | number | Optional (non-FPHA) | Productivity coefficient [MW/(m³/s)]. Must be strictly positive when present. Omit to supply via the parquet. Rejected on FPHA. |
+| Field                     | Type   | Required            | Description                                                                                                                                                                  |
+| ------------------------- | ------ | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `productivity_mw_per_m3s` | number | Optional (non-FPHA) | Productivity coefficient [MW/(m³/s)]. Finite and non-negative when present (`>= 0.0`); `0.0` marks a planned-outage stage. Omit to supply via the parquet. Rejected on FPHA. |
 
 **Validation rules:**
 
-- `productivity_mw_per_m3s` must be strictly positive when present.
+- `productivity_mw_per_m3s` must be finite and non-negative (`>= 0.0`) when present.
+  `0.0` is accepted as a planned-outage marker.
 - `productivity_mw_per_m3s` is rejected when `model` is `"fpha"` (FPHA derives
   productivity from VHA geometry and ρ_esp, not a scalar coefficient).
 - For `constant_productivity` and `linearized_head`, the JSON value may be

@@ -846,22 +846,24 @@ that would otherwise be derived from VHA geometry or plant defaults. Rows with
 `stage_id = NULL` act as per-hydro defaults and apply to all stages not covered
 by a stage-specific row.
 
-| Column                                   | Parquet type | Nullable | Description                                        |
-| ---------------------------------------- | ------------ | -------- | -------------------------------------------------- |
-| `hydro_id`                               | INT32        | no       | Hydro plant identifier                             |
-| `stage_id`                               | INT32        | yes      | Stage; NULL means "applies to all stages"          |
-| `equivalent_productivity_mw_per_m3s`     | DOUBLE       | yes      | Direct ρ_eq override [MW/(m³/s)]; finite and > 0.0 |
-| `reference_volume_hm3`                   | DOUBLE       | yes      | V_ref override [hm³]; finite and > 0.0             |
-| `reference_outflow_m3s`                  | DOUBLE       | yes      | Q_ref override [m³/s]; finite and >= 0.0           |
-| `specific_productivity_mw_per_m3s_per_m` | DOUBLE       | yes      | ρ_esp override [MW/(m³/s)/m]; finite and > 0.0     |
+| Column                                   | Parquet type | Nullable | Description                                                                              |
+| ---------------------------------------- | ------------ | -------- | ---------------------------------------------------------------------------------------- |
+| `hydro_id`                               | INT32        | no       | Hydro plant identifier                                                                   |
+| `stage_id`                               | INT32        | yes      | Stage; NULL means "applies to all stages"                                                |
+| `equivalent_productivity_mw_per_m3s`     | DOUBLE       | yes      | Direct ρ_eq override [MW/(m³/s)]; finite and >= 0.0 (`0.0` marks a planned-outage stage) |
+| `reference_volume_hm3`                   | DOUBLE       | yes      | V_ref override [hm³]; finite and > 0.0                                                   |
+| `reference_outflow_m3s`                  | DOUBLE       | yes      | Q_ref override [m³/s]; finite and >= 0.0                                                 |
+| `specific_productivity_mw_per_m3s_per_m` | DOUBLE       | yes      | ρ_esp override [MW/(m³/s)/m]; finite and > 0.0                                           |
 
 **Validation:**
 
 - `hydro_id` must not be null.
-- `equivalent_productivity_mw_per_m3s`, when set, must be finite and > 0.0.
+- `equivalent_productivity_mw_per_m3s`, when set, must be finite and >= 0.0;
+  `0.0` is accepted as a planned-outage marker.
 - `reference_volume_hm3`, when set, must be finite and > 0.0.
 - `reference_outflow_m3s`, when set, must be finite and >= 0.0.
-- `specific_productivity_mw_per_m3s_per_m`, when set, must be finite and > 0.0.
+- `specific_productivity_mw_per_m3s_per_m`, when set, must be finite and >= 0.0;
+  `0.0` mirrors the `equivalent_productivity_mw_per_m3s` planned-outage marker.
 - A row where all four override columns are NULL is accepted.
 - Duplicate `(hydro_id, stage_id)` pairs are rejected during case build.
 

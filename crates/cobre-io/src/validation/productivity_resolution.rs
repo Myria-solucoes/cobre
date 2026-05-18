@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 
-use cobre_core::{entities::HydroGenerationModel, temporal::Stage, EntityId};
+use cobre_core::{EntityId, entities::HydroGenerationModel, temporal::Stage};
 
 use crate::{
     extensions::{HydroEnergyProductivityRow, ProductionModelConfig, SelectionMode},
@@ -173,6 +173,7 @@ fn find_productivity_for_stage(config: &ProductionModelConfig, stage: &Stage) ->
 mod tests {
     use chrono::NaiveDate;
     use cobre_core::{
+        EntityId,
         entities::{Bus, HydroGenerationModel, HydroPenalties},
         initial_conditions::InitialConditions,
         penalty::GlobalPenaltyDefaults,
@@ -180,7 +181,6 @@ mod tests {
             Block, BlockMode, NoiseMethod, PolicyGraph, ScenarioSourceConfig, Stage,
             StageRiskConfig, StageStateConfig,
         },
-        EntityId,
     };
 
     use super::{find_productivity_for_stage, validate_productivity_resolution};
@@ -195,7 +195,7 @@ mod tests {
             StageRange,
         },
         stages::StagesData,
-        validation::{schema::ParsedData, ErrorKind, ValidationContext},
+        validation::{ErrorKind, ValidationContext, schema::ParsedData},
     };
 
     // ── helpers ───────────────────────────────────────────────────────────────

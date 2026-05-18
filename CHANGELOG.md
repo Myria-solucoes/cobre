@@ -88,6 +88,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   field (or set it to `null`) when the value is supplied per stage
   by `system/hydro_energy_productivity.parquet`.
 
+- Productivity validation relaxed from strictly positive (`> 0.0`)
+  to non-negative (`>= 0.0`) for `productivity_mw_per_m3s` in
+  `system/hydro_production_models.json`,
+  `equivalent_productivity_mw_per_m3s` in
+  `system/hydro_energy_productivity.parquet`, and
+  `specific_productivity_mw_per_m3s_per_m` in the same parquet.
+  A value of `0.0` is accepted as a planned-outage marker for the
+  affected `(hydro, stage)`; the LP treats these coefficients as
+  multipliers, so zero produces zero generation without any
+  division-by-zero hazard. Negative values are still rejected.
+
 ### Breaking Changes
 
 **Output schema** — `simulation/hydros.parquet` grows from 31 to 35
