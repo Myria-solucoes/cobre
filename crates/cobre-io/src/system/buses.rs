@@ -53,6 +53,7 @@ use crate::LoadError;
 
 /// Top-level intermediate type for `buses.json` (serde only, not re-exported).
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawBusFile {
     /// `$schema` field — informational, not validated.
@@ -64,6 +65,7 @@ pub(crate) struct RawBusFile {
 
 /// Intermediate type for a single bus entry.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawBus {
     /// Bus identifier. Must be unique within the file.
@@ -77,6 +79,7 @@ pub(crate) struct RawBus {
 
 /// Intermediate type for a single deficit segment entry.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawDeficitSegment {
     /// MW depth of this segment. `null` means unbounded (last segment only).

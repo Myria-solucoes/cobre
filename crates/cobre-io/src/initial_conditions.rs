@@ -86,6 +86,7 @@ use crate::LoadError;
 /// a later validation layer.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RawInitialConditions {
     /// JSON schema URI — informational, not validated.
     #[serde(rename = "$schema")]
@@ -118,6 +119,7 @@ pub(crate) struct RawInitialConditions {
 /// Initial reservoir volume for one hydro plant, in hm³.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawHydroStorage {
     /// Hydro plant identifier. Must be unique within its array.
     hydro_id: i32,
@@ -128,6 +130,7 @@ struct RawHydroStorage {
 /// Past inflow values for PAR(p) lag initialization for one hydro plant.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawHydroPastInflows {
     /// Hydro plant identifier. Must be unique within `past_inflows`.
     hydro_id: i32,
@@ -150,6 +153,7 @@ struct RawHydroPastInflows {
 /// revisions.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawRecentObservation {
     /// Hydro plant identifier. Must reference a hydro entity in the system.
     hydro_id: i32,

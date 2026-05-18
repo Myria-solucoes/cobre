@@ -200,6 +200,7 @@ pub struct FittingWindow {
 /// ascending.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RawProductionModelFile {
     /// JSON schema URI — informational, not validated.
     #[serde(rename = "$schema")]
@@ -251,6 +252,7 @@ enum RawSelectionMode {
 /// Stage range descriptor for the `stage_ranges` selection mode.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawStageRange {
     /// First stage (inclusive) to which this entry applies. Must be <=
     /// `end_stage_id` when `end_stage_id` is set.
@@ -273,6 +275,7 @@ struct RawStageRange {
 /// Season-specific model descriptor for the `seasonal` selection mode.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawSeasonConfig {
     /// Season index (0-based, matching the `stages.json` season map).
     season_id: i32,
@@ -291,6 +294,7 @@ struct RawSeasonConfig {
 /// Configuration for the FPHA production function model.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawFphaColumnLayout {
     /// Hyperplane source: `"computed"` (fit from topology) or
     /// `"precomputed"` (from `fpha_hyperplanes.parquet`).
@@ -321,6 +325,7 @@ struct RawFphaColumnLayout {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[allow(clippy::struct_field_names)]
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawFittingWindow {
     /// Explicit minimum volume for fitting [hm³]. Mutually exclusive with
     /// `volume_min_percentile`.

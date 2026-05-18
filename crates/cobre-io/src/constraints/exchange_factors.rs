@@ -49,6 +49,7 @@ use crate::LoadError;
 /// Private — only used during deserialization. Not re-exported.
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RawExchangeFactorsFile {
     /// `$schema` field — informational, not validated.
     #[serde(rename = "$schema")]
@@ -61,6 +62,7 @@ pub(crate) struct RawExchangeFactorsFile {
 /// Intermediate type for a single `(line_id, stage_id)` entry.
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 struct RawExchangeFactorEntry {
     /// Transmission line identifier.
     line_id: i32,
@@ -73,6 +75,7 @@ struct RawExchangeFactorEntry {
 /// Intermediate type for a single block's exchange factors.
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 struct RawBlockExchangeFactor {
     /// Block index.
     block_id: i32,

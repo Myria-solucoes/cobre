@@ -64,6 +64,7 @@ use crate::LoadError;
 ///
 /// Private — only used during deserialization. Not re-exported.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawHydroFile {
     /// `$schema` field — informational, not validated.
@@ -76,6 +77,7 @@ pub(crate) struct RawHydroFile {
 
 /// Intermediate type for a single hydro plant entry.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawHydro {
     /// Hydro plant identifier. Must be unique within the file.
@@ -126,6 +128,7 @@ pub(crate) struct RawHydro {
 
 /// Intermediate type for the `reservoir` sub-object.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawReservoir {
     /// Minimum operational storage (dead volume) [hm³].
@@ -136,6 +139,7 @@ pub(crate) struct RawReservoir {
 
 /// Intermediate type for the `outflow` sub-object.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawOutflow {
     /// Minimum total outflow [m³/s].
@@ -260,6 +264,7 @@ pub(crate) enum RawTailrace {
 
 /// Intermediate type for a single piecewise tailrace breakpoint.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawTailracePoint {
     /// Total outflow at this point [m³/s].
@@ -299,6 +304,7 @@ pub(crate) enum RawEfficiency {
 
 /// Intermediate type for the `evaporation` sub-object.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawEvaporation {
     /// Monthly evaporation coefficients [mm/month], one per calendar month.
@@ -315,6 +321,7 @@ pub(crate) struct RawEvaporation {
 
 /// Intermediate type for the `diversion` sub-object.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawDiversionChannel {
     /// Identifier of the downstream hydro plant receiving diverted water.
@@ -325,6 +332,7 @@ pub(crate) struct RawDiversionChannel {
 
 /// Intermediate type for the `filling` sub-object.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawFillingConfig {
     /// Stage index at which filling begins (inclusive).
@@ -343,6 +351,7 @@ pub(crate) struct RawFillingConfig {
 /// JSON field names mirror `HydroPenalties` and `HydroPenaltyOverrides` field names.
 #[allow(clippy::struct_field_names)]
 #[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawHydroPenaltyOverrides {
     #[serde(default)]
