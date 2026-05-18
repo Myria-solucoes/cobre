@@ -1,7 +1,7 @@
 //! `StudyParams`, `ConstructionConfig`, and associated constants extracted from `setup/mod.rs`.
 
 use cobre_core::ScalarParameter;
-use cobre_io::{HydroEnergyProductivityRow, config::StoppingRuleConfig};
+use cobre_io::config::StoppingRuleConfig;
 
 use crate::{
     InflowNonNegativityMethod, SddpError,
@@ -201,7 +201,6 @@ impl StudyParams {
             basis_activity_window: self.basis_activity_window,
             budget: self.budget,
             export_states: false,
-            hydro_energy_productivity_rows: Vec::new(),
             scalar_parameters: Vec::new(),
         }
     }
@@ -252,10 +251,6 @@ pub struct ConstructionConfig {
     /// cut selection strategy. Defaults to `false`; set based on
     /// `exports.states`.
     pub export_states: bool,
-    /// Loaded `system/hydro_energy_productivity.parquet` rows, or empty when the
-    /// file is absent. Consumed by `build_energy_conversion_set` as the first
-    /// priority source for FPHA hydros' `ρ_eq`.
-    pub hydro_energy_productivity_rows: Vec<HydroEnergyProductivityRow>,
     /// Loaded `system/scalar_parameters.json` entries, or empty when the file is
     /// absent or the manifest flag `system_scalar_parameters_json` is `false`.
     /// Consumed by `build_resolved_parameters` to populate the per-`(parameter_id,

@@ -371,7 +371,21 @@ pub struct HydroModelSummary {
 #[derive(Debug)]
 pub struct PrepareHydroModelsResult {
     /// Resolved production models for all (hydro, stage) pairs.
+    ///
+    /// For non-FPHA hydros, the per-stage `productivity` already reflects the
+    /// `system/hydro_energy_productivity.parquet` override when supplied.
+    /// Downstream consumers (LP builder, energy conversion) read `productivity`
+    /// from this set as the single source of truth.
     pub production: ProductionModelSet,
+    /// Per-`(hydro, stage)` override table parsed from
+    /// `system/hydro_energy_productivity.parquet`. Empty when the file is absent.
+    ///
+    /// Carried alongside `production` because the FPHA derivation in
+    /// [`crate::energy_conversion::build_energy_conversion_set`] still needs the
+    /// raw override entries (`equivalent_productivity`, `reference_volume`,
+    /// `reference_outflow`) to override its VHA + `ρ_esp` derivation. For
+    /// non-FPHA hydros the override is already baked into `production`.
+    pub productivity_override: crate::energy_conversion::HydroEnergyProductivityOverride,
     /// Resolved evaporation models for all hydro plants.
     pub evaporation: EvaporationModelSet,
     /// Provenance records for all hydro plants.
@@ -451,6 +465,8 @@ impl PrepareHydroModelsResult {
 
         Self {
             production,
+            productivity_override:
+                crate::energy_conversion::HydroEnergyProductivityOverride::default(),
             evaporation,
             provenance: HydroModelProvenance {
                 production_sources,
@@ -609,13 +625,14 @@ pub fn prepare_hydro_models(
     system: &System,
     case_dir: &Path,
 ) -> Result<PrepareHydroModelsResult, SddpError> {
-    let (production, production_sources, kappa_warnings, fpha_export_rows) =
+    let (production, productivity_override, production_sources, kappa_warnings, fpha_export_rows) =
         resolve_production_models(system, case_dir)?;
     let (evaporation, evaporation_sources, evaporation_reference_sources) =
         resolve_evaporation_models(system, case_dir)?;
 
     Ok(PrepareHydroModelsResult {
         production,
+        productivity_override,
         evaporation,
         provenance: HydroModelProvenance {
             production_sources,
@@ -637,6 +654,7 @@ pub fn prepare_hydro_models(
 /// `resolve_production_models` never performs any I/O.
 type ResolveProductionResult = (
     ProductionModelSet,
+    crate::energy_conversion::HydroEnergyProductivityOverride,
     Vec<(EntityId, ProductionModelSource)>,
     Vec<(String, f64)>,
     Vec<cobre_io::FphaHyperplaneRow>,
@@ -698,6 +716,20 @@ pub fn resolve_production_models(
         Some(case_dir.join("system").join("hydro_production_models.json"))
     } else {
         None
+    };
+
+    // ── Step 1b: load per-(hydro, stage) ρ_eq override from the parquet ──────
+    let override_table = {
+        let path = case_dir
+            .join("system")
+            .join("hydro_energy_productivity.parquet");
+        if path.exists() {
+            let rows = cobre_io::load_hydro_energy_productivity(Some(&path))?;
+            crate::energy_conversion::build_hydro_energy_productivity_override(rows)
+                .map_err(|e| SddpError::Validation(e.to_string()))?
+        } else {
+            crate::energy_conversion::HydroEnergyProductivityOverride::default()
+        }
     };
 
     // ── Step 2: load production model configs ─────────────────────────────────
@@ -780,6 +812,7 @@ pub fn resolve_production_models(
                 source,
                 &hyperplane_map,
                 cached_computed_planes.as_deref(),
+                Some(&override_table),
             )?;
             stage_models.push(model);
         }
@@ -788,7 +821,7 @@ pub fn resolve_production_models(
     }
 
     let set = ProductionModelSet::new(all_models, n_hydros, n_stages);
-    Ok((set, provenance, kappa_warnings, export_rows))
+    Ok((set, override_table, provenance, kappa_warnings, export_rows))
 }
 
 /// Load precomputed FPHA hyperplane rows from disk when any config uses `source: "precomputed"`.
@@ -1083,7 +1116,16 @@ fn resolve_stage_model(
     source: ProductionModelSource,
     hyperplane_map: &HashMap<(EntityId, Option<i32>), Vec<&FphaHyperplaneRow>>,
     cached_computed_planes: Option<&[FphaPlane]>,
+    productivity_override: Option<&crate::energy_conversion::HydroEnergyProductivityOverride>,
 ) -> Result<ResolvedProductionModel, SddpError> {
+    // Look up the parquet override for non-FPHA (hydro, stage) productivity.
+    // Cross-file resolution (cobre_io::validation::productivity_resolution)
+    // rejects the case where both JSON and parquet supply a value, so this
+    // lookup never silently masks a JSON-supplied value at load time.
+    let stage_idx = usize::try_from(stage.id.max(0)).unwrap_or(0);
+    let parquet_productivity =
+        productivity_override.and_then(|o| o.equivalent_productivity(hydro.id, stage_idx));
+
     if let Some(config) = config_entry {
         let model_info = find_model_for_stage(config, stage);
 
@@ -1110,44 +1152,38 @@ fn resolve_stage_model(
         } else {
             // "constant_productivity" or "linearized_head" from config.
             //
-            // `productivity_mw_per_m3s` may be `None` here when the value is
-            // supplied by `system/hydro_energy_productivity.parquet` instead.
-            // Load-time validation in
-            // `cobre_io::validation::productivity_resolution` guarantees that
-            // exactly one source (JSON or parquet) supplies each non-FPHA
-            // `(hydro, stage)` value, so reaching this branch with `None` means
-            // the parquet override is the supplier. Return a sentinel
-            // `ConstantProductivity { productivity: 0.0 }`; the build site in
-            // `build_energy_conversion_set` consults the override table first
-            // and overwrites the sentinel with the user-supplied value.
-            let productivity = model_info.and_then(|(_, p)| p).unwrap_or_else(|| {
-                debug_assert!(
-                    false,
-                    "non-FPHA {}/{} reached resolve_stage_model with productivity=None; \
-                     see cobre_io::validation::productivity_resolution",
-                    hydro.name, stage.id
-                );
-                0.0
-            });
+            // Resolution order (matches build_energy_conversion_set): parquet
+            // override first, JSON productivity fallback. Load-time validation
+            // in cobre_io::validation::productivity_resolution guarantees that
+            // exactly one source supplies the value, so a None outcome here
+            // would indicate a validator gap.
+            let productivity = parquet_productivity
+                .or_else(|| model_info.and_then(|(_, p)| p))
+                .unwrap_or_else(|| {
+                    debug_assert!(
+                        false,
+                        "non-FPHA {}/{} reached resolve_stage_model with productivity=None; \
+                         see cobre_io::validation::productivity_resolution",
+                        hydro.name, stage.id
+                    );
+                    0.0
+                });
             Ok(ResolvedProductionModel::ConstantProductivity { productivity })
         }
     } else {
-        // No config entry at all for this hydro.
-        //
-        // Load-time validation in `cobre_io::validation::productivity_resolution`
-        // guarantees that every non-FPHA hydro has exactly one source supplying
-        // its productivity (either a JSON entry here or a parquet override row).
-        // Reaching this branch in release builds means the parquet supplies the
-        // value; the build site in `build_energy_conversion_set` consults the
-        // override table first and overwrites the sentinel. (FPHA without config
-        // is already rejected by `determine_source`.)
-        debug_assert!(
-            false,
-            "non-FPHA {}/{} reached resolve_stage_model with productivity=None; \
-             see cobre_io::validation::productivity_resolution",
-            hydro.name, stage.id
-        );
-        Ok(ResolvedProductionModel::ConstantProductivity { productivity: 0.0 })
+        // No JSON config entry at all for this hydro. Use the parquet override
+        // when present; otherwise fall through to the sentinel (validator
+        // already rejected this case at load time).
+        let productivity = parquet_productivity.unwrap_or_else(|| {
+            debug_assert!(
+                false,
+                "non-FPHA {}/{} reached resolve_stage_model with productivity=None; \
+                 see cobre_io::validation::productivity_resolution",
+                hydro.name, stage.id
+            );
+            0.0
+        });
+        Ok(ResolvedProductionModel::ConstantProductivity { productivity })
     }
 }
 
@@ -2465,6 +2501,7 @@ mod tests {
             ProductionModelSource::DefaultConstant,
             &empty_map,
             None,
+            None,
         )
         .expect("should succeed");
         assert!(
@@ -2516,6 +2553,7 @@ mod tests {
                     ProductionModelSource::DefaultConstant,
                     &empty_map,
                     None,
+                    None,
                 )
             }));
             let panic_payload = result
@@ -2546,6 +2584,7 @@ mod tests {
                 ProductionModelSource::DefaultConstant,
                 &empty_map,
                 None,
+                None,
             )
             .expect("release build returns sentinel");
             assert!(
@@ -2557,6 +2596,61 @@ mod tests {
                 "release build must return ConstantProductivity {{ productivity: 0.0 }}; got {model:?}"
             );
         }
+    }
+
+    /// When the JSON has no productivity and the parquet override supplies a
+    /// value, `resolve_stage_model` returns that value as the resolved
+    /// `ConstantProductivity { productivity }`. This is the path the LP
+    /// coefficient flows through for non-FPHA hydros authored entirely via the
+    /// parquet.
+    #[test]
+    fn test_resolve_stage_model_uses_parquet_override_when_json_omits_productivity() {
+        let hydro = make_hydro(0, HydroGenerationModel::ConstantProductivity);
+        let stage = make_stage(0);
+        let config = ProductionModelConfig {
+            hydro_id: EntityId::from(0),
+            selection_mode: SelectionMode::StageRanges {
+                ranges: vec![StageRange {
+                    start_stage_id: 0,
+                    end_stage_id: None,
+                    model: "constant_productivity".to_string(),
+                    fpha_config: None,
+                    productivity_mw_per_m3s: None,
+                }],
+            },
+        };
+        let empty_map = std::collections::HashMap::new();
+        let override_table =
+            crate::energy_conversion::build_hydro_energy_productivity_override(vec![
+                cobre_io::HydroEnergyProductivityRow {
+                    hydro_id: EntityId::from(0),
+                    stage_id: Some(0),
+                    equivalent_productivity_mw_per_m3s: Some(0.42),
+                    reference_volume_hm3: None,
+                    reference_outflow_m3s: None,
+                    specific_productivity_mw_per_m3s_per_m: None,
+                },
+            ])
+            .expect("override builds");
+
+        let model = super::resolve_stage_model(
+            &hydro,
+            &stage,
+            Some(&config),
+            ProductionModelSource::DefaultConstant,
+            &empty_map,
+            None,
+            Some(&override_table),
+        )
+        .expect("resolve succeeds");
+        assert!(
+            matches!(
+                model,
+                ResolvedProductionModel::ConstantProductivity { productivity }
+                if (productivity - 0.42).abs() < 1e-12
+            ),
+            "override value must reach the resolved model; got {model:?}"
+        );
     }
 
     /// When no JSON config entry exists at all for a non-FPHA hydro,
@@ -2579,6 +2673,7 @@ mod tests {
                     None,
                     ProductionModelSource::DefaultConstant,
                     &empty_map,
+                    None,
                     None,
                 )
             }));
@@ -2607,6 +2702,7 @@ mod tests {
                 None,
                 ProductionModelSource::DefaultConstant,
                 &empty_map,
+                None,
                 None,
             )
             .expect("release build returns sentinel");
@@ -2785,6 +2881,8 @@ mod tests {
         let evap_set = EvaporationModelSet::new(vec![EvaporationModel::None]);
         let result = PrepareHydroModelsResult {
             production: prod_set,
+            productivity_override:
+                crate::energy_conversion::HydroEnergyProductivityOverride::default(),
             evaporation: evap_set,
             provenance: prov,
             kappa_warnings: Vec::new(),
@@ -3786,6 +3884,8 @@ mod tests {
 
         let result = PrepareHydroModelsResult {
             production,
+            productivity_override:
+                crate::energy_conversion::HydroEnergyProductivityOverride::default(),
             evaporation: EvaporationModelSet::new(evap_models),
             provenance: HydroModelProvenance {
                 production_sources,
@@ -3888,6 +3988,8 @@ mod tests {
             hydro_ids.iter().map(|_| EvaporationModel::None).collect();
         PrepareHydroModelsResult {
             production,
+            productivity_override:
+                crate::energy_conversion::HydroEnergyProductivityOverride::default(),
             evaporation: EvaporationModelSet::new(evap_models),
             provenance: HydroModelProvenance {
                 production_sources,
@@ -3964,6 +4066,8 @@ mod tests {
             all_ids.iter().map(|_| EvaporationModel::None).collect();
         PrepareHydroModelsResult {
             production,
+            productivity_override:
+                crate::energy_conversion::HydroEnergyProductivityOverride::default(),
             evaporation: EvaporationModelSet::new(evap_models),
             provenance: HydroModelProvenance {
                 production_sources,
@@ -4030,6 +4134,8 @@ mod tests {
             .collect();
         PrepareHydroModelsResult {
             production,
+            productivity_override:
+                crate::energy_conversion::HydroEnergyProductivityOverride::default(),
             evaporation: EvaporationModelSet::new(evap_models),
             provenance: HydroModelProvenance {
                 production_sources,
@@ -4204,6 +4310,8 @@ mod tests {
             .collect();
         let result = PrepareHydroModelsResult {
             production,
+            productivity_override:
+                crate::energy_conversion::HydroEnergyProductivityOverride::default(),
             evaporation: EvaporationModelSet::new(evap_models),
             provenance: HydroModelProvenance {
                 production_sources,
@@ -4356,6 +4464,7 @@ mod tests {
             ProductionModelSource::ComputedFromGeometry,
             &empty_hyperplane_map,
             Some(planes),
+            None,
         )
         .expect("resolve_stage_model must succeed for ComputedFromGeometry with cached planes");
 
@@ -4434,6 +4543,7 @@ mod tests {
             src0,
             &hyperplane_map,
             None,
+            None,
         )
         .expect("resolve_stage_model must succeed for hydro 0 (precomputed)");
 
@@ -4447,6 +4557,7 @@ mod tests {
             src1,
             &empty_hyperplane_map,
             Some(&computed_fit.planes),
+            None,
         )
         .expect("resolve_stage_model must succeed for hydro 1 (computed)");
 
@@ -4508,6 +4619,7 @@ mod tests {
                     ProductionModelSource::ComputedFromGeometry,
                     &empty_hyperplane_map,
                     Some(&cached_fit.planes),
+                    None,
                 )
                 .expect("resolve_stage_model must succeed");
                 match model {
@@ -4572,6 +4684,8 @@ mod tests {
 
         let result = PrepareHydroModelsResult {
             production,
+            productivity_override:
+                crate::energy_conversion::HydroEnergyProductivityOverride::default(),
             evaporation: EvaporationModelSet::new(vec![EvaporationModel::None]),
             provenance: HydroModelProvenance {
                 production_sources: vec![(

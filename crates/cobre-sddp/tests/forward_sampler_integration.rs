@@ -519,7 +519,6 @@ fn run_programmatic(
         basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
         budget: None,
         export_states: false,
-        hydro_energy_productivity_rows: Vec::new(),
         scalar_parameters: Vec::new(),
     };
     let mut setup =
@@ -850,7 +849,6 @@ fn run_with_setup(
         basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
         budget: None,
         export_states: false,
-        hydro_energy_productivity_rows: Vec::new(),
         scalar_parameters: Vec::new(),
     };
     let mut setup =

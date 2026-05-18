@@ -849,7 +849,6 @@ fn broadcast_and_build_setup(
         .collect();
     let setup = build_study_setup(
         &system,
-        &args.case_dir,
         &mut bcast_config,
         stochastic,
         hydro_models,
@@ -871,7 +870,6 @@ fn broadcast_and_build_setup(
 #[allow(clippy::needless_pass_by_value)]
 fn build_study_setup(
     system: &System,
-    case_dir: &Path,
     bcast_config: &mut BroadcastConfig,
     stochastic: cobre_stochastic::StochasticContext,
     hydro_models: PrepareHydroModelsResult,
@@ -879,14 +877,6 @@ fn build_study_setup(
 ) -> Result<StudySetup, CliError> {
     let stopping_rule_set = stopping_rules_from_broadcast(bcast_config);
     let cut_selection = bcast_config.cut_selection.take();
-    let hydro_energy_productivity_rows = {
-        let path = case_dir.join("system/hydro_energy_productivity.parquet");
-        if path.exists() {
-            cobre_io::load_hydro_energy_productivity(Some(&path))?
-        } else {
-            Vec::new()
-        }
-    };
     let config = ConstructionConfig {
         seed: bcast_config.seed,
         forward_passes: bcast_config.forward_passes,
@@ -900,7 +890,6 @@ fn build_study_setup(
         basis_activity_window: bcast_config.basis_activity_window,
         budget: bcast_config.budget,
         export_states: bcast_config.export_states,
-        hydro_energy_productivity_rows,
         scalar_parameters,
     };
     StudySetup::from_broadcast_params(

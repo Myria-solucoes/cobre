@@ -27,7 +27,6 @@ use std::sync::mpsc;
 
 use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::scenario::ScenarioSource;
-use cobre_io::load_hydro_energy_productivity;
 use cobre_sddp::{
     StudySetup, aggregate_simulation,
     hydro_models::prepare_hydro_models,
@@ -91,13 +90,7 @@ fn build_setup_for_case(
     stochastic: cobre_stochastic::StochasticContext,
     hydro_models: cobre_sddp::hydro_models::PrepareHydroModelsResult,
 ) -> StudySetup {
-    let productivity_path = case_dir
-        .join("system")
-        .join("hydro_energy_productivity.parquet");
-    let productivity_rows =
-        load_hydro_energy_productivity(productivity_path.exists().then_some(&productivity_path))
-            .expect("hydro_energy_productivity load must succeed");
-
+    let _ = case_dir; // override now flows via hydro_models.productivity_override
     let sentinel = Path::new("config.json");
     let training_source = config
         .training_scenario_source(sentinel)
@@ -107,8 +100,7 @@ fn build_setup_for_case(
         .expect("simulation_scenario_source must parse");
 
     let params = StudyParams::from_config(config).expect("StudyParams::from_config must succeed");
-    let mut construction = params.into_construction_config();
-    construction.hydro_energy_productivity_rows = productivity_rows;
+    let construction = params.into_construction_config();
 
     StudySetup::from_broadcast_params(
         system,

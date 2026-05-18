@@ -57,7 +57,6 @@ use std::sync::mpsc;
 
 use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::{TrainingEvent, scenario::ScenarioSource};
-use cobre_io::load_hydro_energy_productivity;
 use cobre_sddp::{
     StudySetup, aggregate_simulation,
     hydro_models::prepare_hydro_models,
@@ -322,14 +321,9 @@ fn run_case(label: &str) {
     // Use a small fixed scenario count for determinism and speed.
     config_with_sim.simulation.num_scenarios = 1;
 
-    // Load system/hydro_energy_productivity.parquet when present so that FPHA
-    // hydros (D05/D06/D07) can satisfy the energy-conversion correctness gate.
-    // Cases without the file return an empty row vec, leaving non-FPHA cases
-    // on the existing ρ_eq derivation path.
-    let productivity_path = dir.join("system").join("hydro_energy_productivity.parquet");
-    let productivity_rows =
-        load_hydro_energy_productivity(productivity_path.exists().then_some(&productivity_path))
-            .expect("hydro_energy_productivity load must succeed");
+    // The `hydro_energy_productivity.parquet` override is already folded into
+    // `hydro_models.productivity_override` by the caller's
+    // `prepare_hydro_models` invocation, so this helper does no parquet I/O.
 
     let sentinel = Path::new("config.json");
     let training_source = config_with_sim
@@ -341,8 +335,7 @@ fn run_case(label: &str) {
 
     let params =
         StudyParams::from_config(&config_with_sim).expect("StudyParams::from_config must succeed");
-    let mut construction = params.into_construction_config();
-    construction.hydro_energy_productivity_rows = productivity_rows;
+    let construction = params.into_construction_config();
 
     let mut setup = StudySetup::from_broadcast_params(
         &system,

@@ -59,9 +59,7 @@ use cobre_stochastic::{ExternalScenarioLibrary, HistoricalScenarioLibrary, Stoch
 use crate::{
     config::{CutManagementConfig, EventParams},
     cut::FutureCostFunction,
-    energy_conversion::{
-        EnergyConversionSet, build_energy_conversion_set, build_hydro_energy_productivity_override,
-    },
+    energy_conversion::{EnergyConversionSet, build_energy_conversion_set},
     error::SddpError,
     horizon_mode::HorizonMode,
     hydro_models::{EvaporationModel, PrepareHydroModelsResult, ResolvedProductionModel},
@@ -283,7 +281,6 @@ impl StudySetup {
             basis_activity_window,
             budget,
             export_states,
-            hydro_energy_productivity_rows,
             scalar_parameters,
         } = config;
 
@@ -307,23 +304,20 @@ impl StudySetup {
             system.hydros(),
             &stage_to_season,
         )?;
-        let override_table =
-            build_hydro_energy_productivity_override(hydro_energy_productivity_rows)
-                .map_err(|e| SddpError::Validation(e.to_string()))?;
         let energy_conversion = build_energy_conversion_set(
             system.hydros(),
             n_stages_pre,
             system.cascade(),
             &reference_volume_fractions,
             &std::collections::HashMap::<cobre_core::EntityId, Vec<cobre_io::HydroGeometryRow>>::new(),
-            Some(&override_table),
+            Some(&hydro_models.productivity_override),
             Some(&hydro_models.production),
         )
         .map_err(|e| SddpError::Validation(e.to_string()))?;
         let resolved_parameters = crate::resolved_parameters::build_resolved_parameters(
             &scalar_parameters,
             &energy_conversion,
-            &override_table,
+            &hydro_models.productivity_override,
             system.hydros(),
             &stage_to_season,
             n_stages_pre,
