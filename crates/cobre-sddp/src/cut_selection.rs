@@ -687,19 +687,6 @@ mod tests {
         assert_eq!(deact.indices, vec![0, 2]);
     }
 
-    // Dominated select (stub): always returns empty set
-
-    #[test]
-    fn dominated_select_always_returns_empty_set() {
-        let strategy = CutSelectionStrategy::Dominated {
-            threshold: 0.001,
-            check_frequency: 10,
-        };
-        let pool = make_pool(&[make_meta(0, 1), make_meta(0, 1)], &[true, true]);
-        let deact = strategy.select(&pool, &[], 20);
-        assert!(deact.indices.is_empty());
-    }
-
     #[test]
     fn ac_level1_threshold_0_deactivates_zero_activity_cut() {
         let strategy = CutSelectionStrategy::Level1 {

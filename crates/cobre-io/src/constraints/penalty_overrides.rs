@@ -40,8 +40,13 @@
 //! | `outflow_violation_below_cost`    | DOUBLE | No       | Outflow below-min violation (USD/m³/s)|
 //! | `outflow_violation_above_cost`    | DOUBLE | No       | Outflow above-max violation (USD/m³/s)|
 //! | `generation_violation_below_cost` | DOUBLE | No       | Generation below-min violation (USD/MW)|
-//! | `evaporation_violation_cost`      | DOUBLE | No       | Evaporation violation (USD/hm³)      |
-//! | `water_withdrawal_violation_cost` | DOUBLE | No       | Water withdrawal violation (USD/m³/s)|
+//! | `evaporation_violation_cost`                 | DOUBLE | No       | Evaporation violation (USD/hm³)              |
+//! | `water_withdrawal_violation_cost`            | DOUBLE | No       | Water withdrawal violation (USD/m³/s)        |
+//! | `water_withdrawal_violation_pos_cost`        | DOUBLE | No       | Over-withdrawal violation (USD/m³/s)         |
+//! | `water_withdrawal_violation_neg_cost`        | DOUBLE | No       | Under-withdrawal violation (USD/m³/s)        |
+//! | `evaporation_violation_pos_cost`             | DOUBLE | No       | Over-evaporation violation (USD/hm³)         |
+//! | `evaporation_violation_neg_cost`             | DOUBLE | No       | Under-evaporation violation (USD/hm³)        |
+//! | `inflow_nonnegativity_cost`                  | DOUBLE | No       | Inflow non-negativity cost (USD/m³/s)        |
 //!
 //! ### `penalty_overrides_ncs`
 //!
@@ -145,7 +150,7 @@ pub struct LinePenaltyOverrideRow {
 
 /// A single row from `constraints/penalty_overrides_hydro.parquet`.
 ///
-/// Carries stage-varying penalty cost overrides for a hydro plant. All eleven
+/// Carries stage-varying penalty cost overrides for a hydro plant. All sixteen
 /// penalty columns are optional; absent or null means "use entity-level or
 /// global default".
 ///
@@ -471,7 +476,7 @@ pub fn parse_penalty_overrides_line(path: &Path) -> Result<Vec<LinePenaltyOverri
 /// Reads all record batches from the Parquet file at `path`, validates per-row
 /// constraints, then returns all rows sorted by `(hydro_id, stage_id)` ascending.
 ///
-/// The Parquet file may contain any subset of the eleven optional penalty columns.
+/// The Parquet file may contain any subset of the sixteen optional penalty columns.
 /// Columns absent from the file schema produce `None` in all rows (not a schema
 /// error — this is the intended sparse-override design).
 ///
@@ -517,7 +522,7 @@ pub fn parse_penalty_overrides_hydro(
         let hydro_id_col = extract_required_int32(&batch, "hydro_id", path)?;
         let stage_id_col = extract_required_int32(&batch, "stage_id", path)?;
 
-        // ── Optional penalty columns (all 11) ─────────────────────────────────
+        // ── Optional penalty columns (all 16) ────────────────────────────────
         let spillage_cost_col = extract_optional_float64(&batch, "spillage_cost", path)?;
         let fpha_turbined_cost_col = extract_optional_float64(&batch, "fpha_turbined_cost", path)?;
         let diversion_cost_col = extract_optional_float64(&batch, "diversion_cost", path)?;
@@ -537,6 +542,17 @@ pub fn parse_penalty_overrides_hydro(
             extract_optional_float64(&batch, "evaporation_violation_cost", path)?;
         let water_withdrawal_violation_cost_col =
             extract_optional_float64(&batch, "water_withdrawal_violation_cost", path)?;
+        // Directional overrides (5 additional columns).
+        let water_withdrawal_violation_pos_cost_col =
+            extract_optional_float64(&batch, "water_withdrawal_violation_pos_cost", path)?;
+        let water_withdrawal_violation_neg_cost_col =
+            extract_optional_float64(&batch, "water_withdrawal_violation_neg_cost", path)?;
+        let evaporation_violation_pos_cost_col =
+            extract_optional_float64(&batch, "evaporation_violation_pos_cost", path)?;
+        let evaporation_violation_neg_cost_col =
+            extract_optional_float64(&batch, "evaporation_violation_neg_cost", path)?;
+        let inflow_nonnegativity_cost_col =
+            extract_optional_float64(&batch, "inflow_nonnegativity_cost", path)?;
 
         let n = batch.num_rows();
         let base_idx = rows.len();
@@ -579,6 +595,21 @@ pub fn parse_penalty_overrides_hydro(
                 .filter(|col| !col.is_null(i))
                 .map(|col| col.value(i));
             let water_withdrawal_violation_cost = water_withdrawal_violation_cost_col
+                .filter(|col| !col.is_null(i))
+                .map(|col| col.value(i));
+            let water_withdrawal_violation_pos_cost = water_withdrawal_violation_pos_cost_col
+                .filter(|col| !col.is_null(i))
+                .map(|col| col.value(i));
+            let water_withdrawal_violation_neg_cost = water_withdrawal_violation_neg_cost_col
+                .filter(|col| !col.is_null(i))
+                .map(|col| col.value(i));
+            let evaporation_violation_pos_cost = evaporation_violation_pos_cost_col
+                .filter(|col| !col.is_null(i))
+                .map(|col| col.value(i));
+            let evaporation_violation_neg_cost = evaporation_violation_neg_cost_col
+                .filter(|col| !col.is_null(i))
+                .map(|col| col.value(i));
+            let inflow_nonnegativity_cost = inflow_nonnegativity_cost_col
                 .filter(|col| !col.is_null(i))
                 .map(|col| col.value(i));
 
@@ -659,6 +690,41 @@ pub fn parse_penalty_overrides_hydro(
                 "water_withdrawal_violation_cost",
                 path,
             )?;
+            validate_optional_positive(
+                water_withdrawal_violation_pos_cost,
+                "penalty_overrides_hydro",
+                row_idx,
+                "water_withdrawal_violation_pos_cost",
+                path,
+            )?;
+            validate_optional_positive(
+                water_withdrawal_violation_neg_cost,
+                "penalty_overrides_hydro",
+                row_idx,
+                "water_withdrawal_violation_neg_cost",
+                path,
+            )?;
+            validate_optional_positive(
+                evaporation_violation_pos_cost,
+                "penalty_overrides_hydro",
+                row_idx,
+                "evaporation_violation_pos_cost",
+                path,
+            )?;
+            validate_optional_positive(
+                evaporation_violation_neg_cost,
+                "penalty_overrides_hydro",
+                row_idx,
+                "evaporation_violation_neg_cost",
+                path,
+            )?;
+            validate_optional_positive(
+                inflow_nonnegativity_cost,
+                "penalty_overrides_hydro",
+                row_idx,
+                "inflow_nonnegativity_cost",
+                path,
+            )?;
 
             rows.push(HydroPenaltyOverrideRow {
                 hydro_id,
@@ -674,14 +740,11 @@ pub fn parse_penalty_overrides_hydro(
                 generation_violation_below_cost,
                 evaporation_violation_cost,
                 water_withdrawal_violation_cost,
-                // Directional overrides not yet exposed in Parquet schema —
-                // stage-level directional overrides will be added when the
-                // Parquet schema is extended.
-                water_withdrawal_violation_pos_cost: None,
-                water_withdrawal_violation_neg_cost: None,
-                evaporation_violation_pos_cost: None,
-                evaporation_violation_neg_cost: None,
-                inflow_nonnegativity_cost: None,
+                water_withdrawal_violation_pos_cost,
+                water_withdrawal_violation_neg_cost,
+                evaporation_violation_pos_cost,
+                evaporation_violation_neg_cost,
+                inflow_nonnegativity_cost,
             });
         }
     }
@@ -1364,6 +1427,108 @@ mod tests {
     fn test_load_hydro_none() {
         let rows = super::super::load_penalty_overrides_hydro(None).unwrap();
         assert!(rows.is_empty());
+    }
+
+    /// AC: Parquet file containing the 5 directional override columns is
+    /// parsed correctly into the matching struct fields — previously these were
+    /// hardcoded to `None` regardless of file content.
+    #[test]
+    fn test_hydro_directional_columns_parsed() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("hydro_id", DataType::Int32, false),
+            Field::new("stage_id", DataType::Int32, false),
+            Field::new(
+                "water_withdrawal_violation_pos_cost",
+                DataType::Float64,
+                true,
+            ),
+            Field::new(
+                "water_withdrawal_violation_neg_cost",
+                DataType::Float64,
+                true,
+            ),
+            Field::new("evaporation_violation_pos_cost", DataType::Float64, true),
+            Field::new("evaporation_violation_neg_cost", DataType::Float64, true),
+            Field::new("inflow_nonnegativity_cost", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int32Array::from(vec![4_i32])),
+                Arc::new(Int32Array::from(vec![2_i32])),
+                Arc::new(Float64Array::from(vec![Some(120.0_f64)])),
+                Arc::new(Float64Array::from(vec![Some(80.0_f64)])),
+                Arc::new(Float64Array::from(vec![Some(55.0_f64)])),
+                Arc::new(Float64Array::from(vec![None::<f64>])),
+                Arc::new(Float64Array::from(vec![Some(200.0_f64)])),
+            ],
+        )
+        .unwrap();
+        let tmp = write_parquet(&batch);
+        let rows = parse_penalty_overrides_hydro(tmp.path()).unwrap();
+
+        assert_eq!(rows.len(), 1);
+        let r = &rows[0];
+        assert_eq!(r.hydro_id, EntityId::from(4));
+        assert_eq!(r.stage_id, 2);
+        assert!(
+            (r.water_withdrawal_violation_pos_cost.unwrap() - 120.0).abs() < f64::EPSILON,
+            "water_withdrawal_violation_pos_cost must be 120.0"
+        );
+        assert!(
+            (r.water_withdrawal_violation_neg_cost.unwrap() - 80.0).abs() < f64::EPSILON,
+            "water_withdrawal_violation_neg_cost must be 80.0"
+        );
+        assert!(
+            (r.evaporation_violation_pos_cost.unwrap() - 55.0).abs() < f64::EPSILON,
+            "evaporation_violation_pos_cost must be 55.0"
+        );
+        assert!(
+            r.evaporation_violation_neg_cost.is_none(),
+            "evaporation_violation_neg_cost must be None (null in file)"
+        );
+        assert!(
+            (r.inflow_nonnegativity_cost.unwrap() - 200.0).abs() < f64::EPSILON,
+            "inflow_nonnegativity_cost must be 200.0"
+        );
+        // Columns absent from file schema -> None.
+        assert!(r.spillage_cost.is_none());
+        assert!(r.water_withdrawal_violation_cost.is_none());
+    }
+
+    /// AC: negative value in a directional column -> SchemaError mentioning the column name.
+    #[test]
+    fn test_hydro_directional_column_negative_rejected() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("hydro_id", DataType::Int32, false),
+            Field::new("stage_id", DataType::Int32, false),
+            Field::new("inflow_nonnegativity_cost", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int32Array::from(vec![1_i32])),
+                Arc::new(Int32Array::from(vec![0_i32])),
+                Arc::new(Float64Array::from(vec![Some(-5.0_f64)])),
+            ],
+        )
+        .unwrap();
+        let tmp = write_parquet(&batch);
+        let err = parse_penalty_overrides_hydro(tmp.path()).unwrap_err();
+
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert!(
+                    field.contains("inflow_nonnegativity_cost"),
+                    "field should contain 'inflow_nonnegativity_cost', got: {field}"
+                );
+                assert!(
+                    message.contains("must be > 0.0"),
+                    "message should contain 'must be > 0.0', got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
     }
 
     /// AC: scrambled input order -> output sorted by (hydro_id, stage_id).
