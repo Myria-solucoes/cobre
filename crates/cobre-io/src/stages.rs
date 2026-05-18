@@ -75,6 +75,7 @@ use crate::LoadError;
 ///
 /// Private — only used during deserialization. Not re-exported.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawStagesFile {
     /// `$schema` field — informational, not validated.
@@ -104,6 +105,7 @@ pub(crate) struct RawStagesFile {
 
 /// Intermediate type for the `season_definitions` sub-object.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawSeasonDefinitions {
     /// Cycle type: `"monthly"`, `"weekly"`, or `"custom"`.
@@ -114,6 +116,7 @@ pub(crate) struct RawSeasonDefinitions {
 
 /// Intermediate type for one season entry.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawSeasonEntry {
     /// Season index (0-based).
@@ -135,6 +138,7 @@ pub(crate) struct RawSeasonEntry {
 
 /// Intermediate type for the `policy_graph` sub-object.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawPolicyGraph {
     /// Horizon type: `"finite_horizon"` or `"cyclic"`.
@@ -149,6 +153,7 @@ pub(crate) struct RawPolicyGraph {
 
 /// Intermediate type for one policy graph transition.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawTransition {
     /// Source stage ID.
@@ -164,6 +169,7 @@ pub(crate) struct RawTransition {
 
 /// Intermediate type for a study stage entry.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawStage {
     /// Stage identifier (non-negative for study stages).
@@ -195,6 +201,7 @@ pub(crate) struct RawStage {
 
 /// Intermediate type for a pre-study stage entry (negative IDs).
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawPreStudyStage {
     /// Stage identifier (negative for pre-study stages).
@@ -210,6 +217,7 @@ pub(crate) struct RawPreStudyStage {
 
 /// Intermediate type for one load block.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawBlock {
     /// Block index (0-based within the stage). Must be contiguous.
@@ -222,6 +230,7 @@ pub(crate) struct RawBlock {
 
 /// Intermediate type for the `state_variables` sub-object.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawStateVariables {
     /// Whether storage is a state variable. Default: true.
@@ -263,6 +272,7 @@ pub(crate) enum RawRiskMeasure {
 
 /// `CVaR` parameters nested inside the `cvar` key.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawCVarParams {
     /// Confidence level alpha in (0, 1].

@@ -17,13 +17,13 @@
 /// ```rust
 /// use cobre_sddp::InflowNonNegativityMethod;
 ///
-/// let penalty = InflowNonNegativityMethod::Penalty { cost: 1000.0 };
+/// let penalty = InflowNonNegativityMethod::Penalty;
 /// assert!(penalty.has_slack_columns());
 ///
 /// let none = InflowNonNegativityMethod::None;
 /// assert!(!none.has_slack_columns());
 /// ```
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum InflowNonNegativityMethod {
     /// No inflow non-negativity enforcement.
     ///
@@ -40,17 +40,14 @@ pub enum InflowNonNegativityMethod {
     /// This prevents LP infeasibility without perturbing the objective function.
     Truncation,
 
-    /// Penalty-based enforcement with objective cost `penalty_cost` per m³/s
-    /// per stage-hour.
+    /// Penalty-based enforcement.
     ///
     /// Appends `N` slack columns (`sigma_inf_h >= 0`) to the LP.  Each slack
     /// enters the water balance row for hydro `h` with coefficient
     /// `tau_total * M3S_TO_HM3`, where `tau_total` is the total stage duration
-    /// in hours.  The objective coefficient is `penalty_cost * tau_total`.
-    Penalty {
-        /// Penalty coefficient `c^{inf}` applied to each slack unit.
-        cost: f64,
-    },
+    /// in hours.  The objective coefficient is sourced from
+    /// `penalties.json → hydro.inflow_nonnegativity_cost` (default 1000.0).
+    Penalty,
 
     /// Combined truncation and penalty enforcement.
     ///
@@ -59,10 +56,7 @@ pub enum InflowNonNegativityMethod {
     /// columns are added (identical to `Penalty`) so the solver can "undo"
     /// part of the clamping if cost-effective. This matches `SPTcpp`'s
     /// `truncamento_penalizacao` mode.
-    TruncationWithPenalty {
-        /// Legacy global cost (deprecated in favor of penalty cascade).
-        cost: f64,
-    },
+    TruncationWithPenalty,
 }
 
 impl InflowNonNegativityMethod {
@@ -74,56 +68,35 @@ impl InflowNonNegativityMethod {
     /// use cobre_sddp::InflowNonNegativityMethod;
     ///
     /// assert!(!InflowNonNegativityMethod::None.has_slack_columns());
-    /// assert!(InflowNonNegativityMethod::Penalty { cost: 100.0 }.has_slack_columns());
+    /// assert!(InflowNonNegativityMethod::Penalty.has_slack_columns());
     /// ```
     #[must_use]
     pub fn has_slack_columns(&self) -> bool {
         matches!(
             self,
-            InflowNonNegativityMethod::Penalty { .. }
-                | InflowNonNegativityMethod::TruncationWithPenalty { .. }
+            InflowNonNegativityMethod::Penalty | InflowNonNegativityMethod::TruncationWithPenalty
         )
-    }
-
-    /// Returns the penalty cost when slack columns are active, or `None`.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use cobre_sddp::InflowNonNegativityMethod;
-    ///
-    /// assert_eq!(InflowNonNegativityMethod::Penalty { cost: 500.0 }.penalty_cost(), Some(500.0));
-    /// assert_eq!(InflowNonNegativityMethod::None.penalty_cost(), None);
-    /// ```
-    #[must_use]
-    pub fn penalty_cost(&self) -> Option<f64> {
-        match self {
-            InflowNonNegativityMethod::Penalty { cost }
-            | InflowNonNegativityMethod::TruncationWithPenalty { cost } => Some(*cost),
-            InflowNonNegativityMethod::Truncation | InflowNonNegativityMethod::None => None,
-        }
     }
 }
 
 impl From<&cobre_io::config::InflowNonNegativityConfig> for InflowNonNegativityMethod {
     /// Convert from the cobre-io config type.
     ///
-    /// Recognised method strings are `"none"`, `"truncation"`, `"penalty"`,
-    /// and `"truncation_with_penalty"`.
-    /// Any other value is treated as `None`.  Method string validation is the
-    /// responsibility of the cobre-io loading pipeline (five-layer validation),
-    /// so unrecognised values indicate a programming error that should have been
-    /// caught upstream.
+    /// Recognised method values are `None`, `Truncation`, `Penalty`,
+    /// and `TruncationWithPenalty` (the typed enum — typos are rejected at parse
+    /// time before this conversion runs).
     fn from(cfg: &cobre_io::config::InflowNonNegativityConfig) -> Self {
-        match cfg.method.as_str() {
-            "truncation" => InflowNonNegativityMethod::Truncation,
-            "penalty" => InflowNonNegativityMethod::Penalty {
-                cost: cfg.penalty_cost,
-            },
-            "truncation_with_penalty" => InflowNonNegativityMethod::TruncationWithPenalty {
-                cost: cfg.penalty_cost,
-            },
-            _ => InflowNonNegativityMethod::None,
+        match cfg.method {
+            cobre_io::config::InflowNonNegativityMethod::None => InflowNonNegativityMethod::None,
+            cobre_io::config::InflowNonNegativityMethod::Truncation => {
+                InflowNonNegativityMethod::Truncation
+            }
+            cobre_io::config::InflowNonNegativityMethod::Penalty => {
+                InflowNonNegativityMethod::Penalty
+            }
+            cobre_io::config::InflowNonNegativityMethod::TruncationWithPenalty => {
+                InflowNonNegativityMethod::TruncationWithPenalty
+            }
         }
     }
 }
@@ -131,7 +104,7 @@ impl From<&cobre_io::config::InflowNonNegativityConfig> for InflowNonNegativityM
 #[cfg(test)]
 mod tests {
     use super::InflowNonNegativityMethod;
-    use cobre_io::config::InflowNonNegativityConfig;
+    use cobre_io::config::{InflowNonNegativityConfig, InflowNonNegativityMethod as CfgMethod};
 
     // ── has_slack_columns ────────────────────────────────────────────────────
 
@@ -147,27 +120,7 @@ mod tests {
 
     #[test]
     fn penalty_has_slack_columns() {
-        assert!(InflowNonNegativityMethod::Penalty { cost: 100.0 }.has_slack_columns());
-    }
-
-    // ── penalty_cost ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn penalty_cost_for_penalty_variant() {
-        assert_eq!(
-            InflowNonNegativityMethod::Penalty { cost: 500.0 }.penalty_cost(),
-            Some(500.0)
-        );
-    }
-
-    #[test]
-    fn penalty_cost_none_for_none_variant() {
-        assert_eq!(InflowNonNegativityMethod::None.penalty_cost(), None);
-    }
-
-    #[test]
-    fn truncation_penalty_cost_is_none() {
-        assert_eq!(InflowNonNegativityMethod::Truncation.penalty_cost(), None);
+        assert!(InflowNonNegativityMethod::Penalty.has_slack_columns());
     }
 
     // ── conversion from config ───────────────────────────────────────────────
@@ -175,8 +128,7 @@ mod tests {
     #[test]
     fn test_inflow_method_conversion_none() {
         let cfg = InflowNonNegativityConfig {
-            method: "none".to_string(),
-            penalty_cost: 0.0,
+            method: CfgMethod::None,
         };
         assert_eq!(
             InflowNonNegativityMethod::from(&cfg),
@@ -187,90 +139,40 @@ mod tests {
     #[test]
     fn test_inflow_method_conversion_penalty() {
         let cfg = InflowNonNegativityConfig {
-            method: "penalty".to_string(),
-            penalty_cost: 500.0,
+            method: CfgMethod::Penalty,
         };
         assert_eq!(
             InflowNonNegativityMethod::from(&cfg),
-            InflowNonNegativityMethod::Penalty { cost: 500.0 }
+            InflowNonNegativityMethod::Penalty
         );
     }
 
     #[test]
     fn test_inflow_method_conversion_truncation() {
         let cfg = InflowNonNegativityConfig {
-            method: "truncation".to_string(),
-            penalty_cost: 0.0,
+            method: CfgMethod::Truncation,
         };
         assert_eq!(
             InflowNonNegativityMethod::from(&cfg),
             InflowNonNegativityMethod::Truncation
         );
-    }
-
-    #[test]
-    fn test_truncation_ignores_penalty_cost() {
-        let cfg = InflowNonNegativityConfig {
-            method: "truncation".to_string(),
-            penalty_cost: 999.0,
-        };
-        assert_eq!(
-            InflowNonNegativityMethod::from(&cfg),
-            InflowNonNegativityMethod::Truncation
-        );
-    }
-
-    #[test]
-    fn test_inflow_method_conversion_unknown_falls_back_to_none() {
-        let cfg = InflowNonNegativityConfig {
-            method: "unknown_method".to_string(),
-            penalty_cost: 100.0,
-        };
-        assert_eq!(
-            InflowNonNegativityMethod::from(&cfg),
-            InflowNonNegativityMethod::None
-        );
-    }
-
-    #[test]
-    fn test_penalty_config_propagation() {
-        let costs = [0.0, 100.0, 500.0, 1000.0, f64::MAX];
-        for &expected_cost in &costs {
-            let cfg = InflowNonNegativityConfig {
-                method: "penalty".to_string(),
-                penalty_cost: expected_cost,
-            };
-            let method = InflowNonNegativityMethod::from(&cfg);
-            assert_eq!(method.penalty_cost(), Some(expected_cost));
-        }
     }
 
     // ── TruncationWithPenalty ───────────────────────────────────────────────
 
     #[test]
     fn truncation_with_penalty_has_slack_columns() {
-        assert!(
-            InflowNonNegativityMethod::TruncationWithPenalty { cost: 100.0 }.has_slack_columns()
-        );
-    }
-
-    #[test]
-    fn truncation_with_penalty_cost() {
-        assert_eq!(
-            InflowNonNegativityMethod::TruncationWithPenalty { cost: 500.0 }.penalty_cost(),
-            Some(500.0)
-        );
+        assert!(InflowNonNegativityMethod::TruncationWithPenalty.has_slack_columns());
     }
 
     #[test]
     fn test_inflow_method_conversion_truncation_with_penalty() {
         let cfg = InflowNonNegativityConfig {
-            method: "truncation_with_penalty".to_string(),
-            penalty_cost: 750.0,
+            method: CfgMethod::TruncationWithPenalty,
         };
         assert_eq!(
             InflowNonNegativityMethod::from(&cfg),
-            InflowNonNegativityMethod::TruncationWithPenalty { cost: 750.0 }
+            InflowNonNegativityMethod::TruncationWithPenalty
         );
     }
 }

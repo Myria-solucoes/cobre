@@ -217,6 +217,23 @@ fn test_inflow_history_wired_into_system() {
     let dir = TempDir::new().unwrap();
     helpers::make_multi_entity_case(&dir);
 
+    // Overwrite hydro_production_models.json with entries for all 3 hydros.
+    std::fs::write(
+        dir.path().join("system/hydro_production_models.json"),
+        r#"{ "production_models": [
+            { "hydro_id": 1, "selection_mode": "stage_ranges",
+              "stage_ranges": [{ "start_stage_id": 0, "end_stage_id": null,
+                "model": "constant_productivity", "productivity_mw_per_m3s": 0.9 }] },
+            { "hydro_id": 2, "selection_mode": "stage_ranges",
+              "stage_ranges": [{ "start_stage_id": 0, "end_stage_id": null,
+                "model": "constant_productivity", "productivity_mw_per_m3s": 0.85 }] },
+            { "hydro_id": 3, "selection_mode": "stage_ranges",
+              "stage_ranges": [{ "start_stage_id": 0, "end_stage_id": null,
+                "model": "constant_productivity", "productivity_mw_per_m3s": 0.8 }] }
+        ] }"#,
+    )
+    .unwrap();
+
     // Overwrite hydros.json with 3 hydros (all on bus_id=1).
     std::fs::write(
         dir.path().join("system/hydros.json"),
@@ -224,19 +241,19 @@ fn test_inflow_history_wired_into_system() {
             { "id": 1, "name": "H1", "bus_id": 1, "downstream_id": null,
               "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
               "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
-              "generation": { "model": "constant_productivity", "productivity_mw_per_m3s": 1.0,
+              "generation": { "model": "constant_productivity",
                 "min_turbined_m3s": 0.0, "max_turbined_m3s": 200.0,
                 "min_generation_mw": 0.0, "max_generation_mw": 200.0 } },
             { "id": 2, "name": "H2", "bus_id": 1, "downstream_id": null,
               "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 500.0 },
               "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
-              "generation": { "model": "constant_productivity", "productivity_mw_per_m3s": 1.0,
+              "generation": { "model": "constant_productivity",
                 "min_turbined_m3s": 0.0, "max_turbined_m3s": 100.0,
                 "min_generation_mw": 0.0, "max_generation_mw": 100.0 } },
             { "id": 3, "name": "H3", "bus_id": 1, "downstream_id": null,
               "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 300.0 },
               "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
-              "generation": { "model": "constant_productivity", "productivity_mw_per_m3s": 1.0,
+              "generation": { "model": "constant_productivity",
                 "min_turbined_m3s": 0.0, "max_turbined_m3s": 80.0,
                 "min_generation_mw": 0.0, "max_generation_mw": 80.0 } }
         ] }"#,
@@ -371,6 +388,23 @@ fn test_external_scenarios_wired_into_system() {
     let dir = TempDir::new().unwrap();
     helpers::make_multi_entity_case(&dir);
 
+    // Overwrite hydro_production_models.json with entries for all 3 hydros.
+    std::fs::write(
+        dir.path().join("system/hydro_production_models.json"),
+        r#"{ "production_models": [
+            { "hydro_id": 1, "selection_mode": "stage_ranges",
+              "stage_ranges": [{ "start_stage_id": 0, "end_stage_id": null,
+                "model": "constant_productivity", "productivity_mw_per_m3s": 0.9 }] },
+            { "hydro_id": 2, "selection_mode": "stage_ranges",
+              "stage_ranges": [{ "start_stage_id": 0, "end_stage_id": null,
+                "model": "constant_productivity", "productivity_mw_per_m3s": 0.85 }] },
+            { "hydro_id": 3, "selection_mode": "stage_ranges",
+              "stage_ranges": [{ "start_stage_id": 0, "end_stage_id": null,
+                "model": "constant_productivity", "productivity_mw_per_m3s": 0.8 }] }
+        ] }"#,
+    )
+    .unwrap();
+
     // Overwrite hydros.json with 3 hydros (all on bus_id=1).
     std::fs::write(
         dir.path().join("system/hydros.json"),
@@ -378,19 +412,19 @@ fn test_external_scenarios_wired_into_system() {
             { "id": 1, "name": "H1", "bus_id": 1, "downstream_id": null,
               "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
               "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
-              "generation": { "model": "constant_productivity", "productivity_mw_per_m3s": 1.0,
+              "generation": { "model": "constant_productivity",
                 "min_turbined_m3s": 0.0, "max_turbined_m3s": 200.0,
                 "min_generation_mw": 0.0, "max_generation_mw": 200.0 } },
             { "id": 2, "name": "H2", "bus_id": 1, "downstream_id": null,
               "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 500.0 },
               "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
-              "generation": { "model": "constant_productivity", "productivity_mw_per_m3s": 1.0,
+              "generation": { "model": "constant_productivity",
                 "min_turbined_m3s": 0.0, "max_turbined_m3s": 100.0,
                 "min_generation_mw": 0.0, "max_generation_mw": 100.0 } },
             { "id": 3, "name": "H3", "bus_id": 1, "downstream_id": null,
               "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 300.0 },
               "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
-              "generation": { "model": "constant_productivity", "productivity_mw_per_m3s": 1.0,
+              "generation": { "model": "constant_productivity",
                 "min_turbined_m3s": 0.0, "max_turbined_m3s": 80.0,
                 "min_generation_mw": 0.0, "max_generation_mw": 80.0 } }
         ] }"#,

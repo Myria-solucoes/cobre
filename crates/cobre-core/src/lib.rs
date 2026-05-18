@@ -42,6 +42,7 @@ pub mod entity_id;
 pub mod error;
 pub mod generic_constraint;
 pub mod initial_conditions;
+pub mod parameters;
 pub mod penalty;
 pub mod resolved;
 pub mod scenario;
@@ -64,6 +65,7 @@ pub use generic_constraint::{
 pub use initial_conditions::{
     HydroPastInflows, HydroStorage, InitialConditions, RecentObservation,
 };
+pub use parameters::{CoefficientRef, ComputedParameter, ParameterKind, ScalarParameter};
 pub use penalty::{
     GlobalPenaltyDefaults, HydroPenaltyOverrides, resolve_bus_deficit_segments,
     resolve_bus_excess_cost, resolve_hydro_penalties, resolve_line_exchange_cost,

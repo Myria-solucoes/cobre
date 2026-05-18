@@ -111,7 +111,7 @@ fn main() {
 
     let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
 
-    let cobre_sddp::setup::PrepareStochasticResult {
+    let cobre_sddp::PrepareStochasticResult {
         system, stochastic, ..
     } = prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
         .expect("prepare_stochastic must succeed");

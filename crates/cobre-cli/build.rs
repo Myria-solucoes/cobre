@@ -20,6 +20,7 @@ const TEMPLATE_FILES: &[&str] = &[
     "stages.json",
     "system/buses.json",
     "system/hydros.json",
+    "system/hydro_production_models.json",
     "system/lines.json",
     "system/thermals.json",
     "scenarios/inflow_seasonal_stats.parquet",

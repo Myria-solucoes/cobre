@@ -516,12 +516,13 @@ dependencies = [
 
 [[package]]
 name = "cobre"
-version = "0.5.1"
+version = "0.6.0"
 
 [[package]]
 name = "cobre-cli"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
+ "arrow",
  "assert_cmd",
  "chrono",
  "clap",
@@ -533,6 +534,7 @@ dependencies = [
  "cobre-stochastic",
  "console",
  "indicatif",
+ "parquet",
  "postcard",
  "predicates",
  "rayon",
@@ -545,7 +547,7 @@ dependencies = [
 
 [[package]]
 name = "cobre-comm"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "ferrompi",
  "thiserror",
@@ -553,24 +555,25 @@ dependencies = [
 
 [[package]]
 name = "cobre-core"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "chrono",
+ "schemars",
  "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "cobre-emt"
-version = "0.5.1"
+version = "0.6.0"
 
 [[package]]
 name = "cobre-flow"
-version = "0.5.1"
+version = "0.6.0"
 
 [[package]]
 name = "cobre-io"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "arrow",
  "chrono",
@@ -590,11 +593,11 @@ dependencies = [
 
 [[package]]
 name = "cobre-mcp"
-version = "0.5.1"
+version = "0.6.0"
 
 [[package]]
 name = "cobre-sddp"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "arrow",
  "chrono",
@@ -606,6 +609,7 @@ dependencies = [
  "criterion",
  "dhat",
  "parquet",
+ "postcard",
  "rand",
  "rand_distr",
  "rayon",
@@ -620,7 +624,7 @@ dependencies = [
 
 [[package]]
 name = "cobre-solver"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "cc",
  "cmake",
@@ -628,7 +632,7 @@ dependencies = [
 
 [[package]]
 name = "cobre-stochastic"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "cobre-core",
@@ -642,11 +646,11 @@ dependencies = [
 
 [[package]]
 name = "cobre-tui"
-version = "0.5.1"
+version = "0.6.0"
 
 [[package]]
 name = "cobre-uc"
-version = "0.5.1"
+version = "0.6.0"
 
 [[package]]
 name = "cobs"

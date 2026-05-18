@@ -39,7 +39,7 @@ pub(crate) fn costs_schema() -> Schema {
 
 /// Schema for `simulation/hydros/` — hydro plant dispatch results.
 ///
-/// 31 fields. See output-schemas.md SS5.2.
+/// 35 fields. See output-schemas.md SS5.2.
 pub(crate) fn hydros_schema() -> Schema {
     Schema::new(vec![
         Field::new("stage_id", DataType::Int32, false),
@@ -57,7 +57,19 @@ pub(crate) fn hydros_schema() -> Schema {
         Field::new("storage_final_hm3", DataType::Float64, false),
         Field::new("generation_mw", DataType::Float64, false),
         Field::new("generation_mwh", DataType::Float64, false),
-        Field::new("productivity_mw_per_m3s", DataType::Float64, true),
+        Field::new(
+            "equivalent_productivity_mw_per_m3s",
+            DataType::Float64,
+            false,
+        ),
+        Field::new(
+            "accumulated_productivity_mw_per_m3s",
+            DataType::Float64,
+            false,
+        ),
+        Field::new("incremental_inflow_energy_mw", DataType::Float64, false),
+        Field::new("stored_energy_initial_mwh", DataType::Float64, false),
+        Field::new("stored_energy_final_mwh", DataType::Float64, false),
         Field::new("spillage_cost", DataType::Float64, false),
         Field::new("water_value_per_hm3", DataType::Float64, false),
         Field::new("storage_binding_code", DataType::Int8, false),
@@ -338,6 +350,29 @@ pub(crate) fn retry_histogram_schema() -> Schema {
     ])
 }
 
+/// Schema for `system/hydro_energy_productivity.parquet` — per-hydro productivity overrides.
+///
+/// 6 fields. One row per (hydro, stage) override entry; null `stage_id` applies as
+/// a per-hydro default across all stages.
+pub(crate) fn hydro_energy_productivity_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("hydro_id", DataType::Int32, false),
+        Field::new("stage_id", DataType::Int32, true),
+        Field::new(
+            "equivalent_productivity_mw_per_m3s",
+            DataType::Float64,
+            true,
+        ),
+        Field::new("reference_volume_hm3", DataType::Float64, true),
+        Field::new("reference_outflow_m3s", DataType::Float64, true),
+        Field::new(
+            "specific_productivity_mw_per_m3s_per_m",
+            DataType::Float64,
+            true,
+        ),
+    ])
+}
+
 /// Schema for `training/cut_selection/iterations.parquet` — per-stage
 /// row-selection statistics.
 ///
@@ -486,12 +521,12 @@ mod tests {
     #[test]
     fn hydros_schema_field_count_and_names() {
         let schema = hydros_schema();
-        // The spec (output-schemas.md SS5.2) defines 31 data columns.
-        // Bidirectional withdrawal/evaporation slacks added pos/neg pairs.
+        // The spec (output-schemas.md SS5.2) defines 35 data columns.
+        // Five energy columns replace the old `productivity_mw_per_m3s` field.
         assert_eq!(
             schema.fields().len(),
-            31,
-            "hydros schema must have 31 fields"
+            35,
+            "hydros schema must have 35 fields"
         );
         let names = field_names(&schema);
         assert_eq!(
@@ -512,7 +547,11 @@ mod tests {
                 "storage_final_hm3",
                 "generation_mw",
                 "generation_mwh",
-                "productivity_mw_per_m3s",
+                "equivalent_productivity_mw_per_m3s",
+                "accumulated_productivity_mw_per_m3s",
+                "incremental_inflow_energy_mw",
+                "stored_energy_initial_mwh",
+                "stored_energy_final_mwh",
                 "spillage_cost",
                 "water_value_per_hm3",
                 "storage_binding_code",
@@ -535,14 +574,13 @@ mod tests {
     #[test]
     fn hydros_schema_nullable_fields() {
         let schema = hydros_schema();
-        // block_id, evaporation_m3s, diverted_inflow_m3s, diverted_outflow_m3s,
-        // productivity_mw_per_m3s are nullable per spec SS5.2
+        // block_id, evaporation_m3s, diverted_inflow_m3s, diverted_outflow_m3s
+        // are nullable per spec SS5.2
         for col in &[
             "block_id",
             "evaporation_m3s",
             "diverted_inflow_m3s",
             "diverted_outflow_m3s",
-            "productivity_mw_per_m3s",
         ] {
             assert!(is_nullable(&schema, col), "column {col} must be nullable");
         }
@@ -559,6 +597,11 @@ mod tests {
             "storage_final_hm3",
             "generation_mw",
             "generation_mwh",
+            "equivalent_productivity_mw_per_m3s",
+            "accumulated_productivity_mw_per_m3s",
+            "incremental_inflow_energy_mw",
+            "stored_energy_initial_mwh",
+            "stored_energy_final_mwh",
             "spillage_cost",
             "water_value_per_hm3",
             "storage_binding_code",
@@ -920,7 +963,7 @@ mod tests {
             .collect();
         let expected: &[(&str, usize)] = &[
             ("costs", 26),
-            ("hydros", 31),
+            ("hydros", 35),
             ("thermals", 10),
             ("exchanges", 11),
             ("buses", 10),
@@ -942,5 +985,48 @@ mod tests {
                 "schema '{name}' field count: expected {exp}, got {actual}"
             );
         }
+    }
+
+    #[test]
+    fn hydro_energy_productivity_schema_field_count_and_names() {
+        let schema = hydro_energy_productivity_schema();
+        assert_eq!(
+            schema.fields().len(),
+            6,
+            "hydro_energy_productivity schema must have 6 fields"
+        );
+        let names = field_names(&schema);
+        assert_eq!(
+            names,
+            vec![
+                "hydro_id",
+                "stage_id",
+                "equivalent_productivity_mw_per_m3s",
+                "reference_volume_hm3",
+                "reference_outflow_m3s",
+                "specific_productivity_mw_per_m3s_per_m",
+            ]
+        );
+        // hydro_id is non-null; all others are nullable
+        assert!(!is_nullable(&schema, "hydro_id"));
+        assert!(is_nullable(&schema, "stage_id"));
+        assert!(is_nullable(&schema, "equivalent_productivity_mw_per_m3s"));
+        assert!(is_nullable(&schema, "reference_volume_hm3"));
+        assert!(is_nullable(&schema, "reference_outflow_m3s"));
+        assert!(is_nullable(
+            &schema,
+            "specific_productivity_mw_per_m3s_per_m"
+        ));
+        // types
+        assert_eq!(field_type(&schema, "hydro_id"), DataType::Int32);
+        assert_eq!(field_type(&schema, "stage_id"), DataType::Int32);
+        assert_eq!(
+            field_type(&schema, "equivalent_productivity_mw_per_m3s"),
+            DataType::Float64
+        );
+        assert_eq!(
+            field_type(&schema, "specific_productivity_mw_per_m3s_per_m"),
+            DataType::Float64
+        );
     }
 }

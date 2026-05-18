@@ -474,16 +474,19 @@ pub fn parse_cut_selection_config(
             check_frequency: u64::from(check_frequency),
         })),
         "lml1" => {
-            let window = config.memory_window.unwrap_or(threshold);
+            let window = config.memory_window.ok_or_else(|| {
+                "cut_selection.method='lml1' requires memory_window to be set".to_string()
+            })?;
             Ok(Some(CutSelectionStrategy::Lml1 {
                 memory_window: u64::from(window),
                 check_frequency: u64::from(check_frequency),
             }))
         }
         "domination" => {
-            let epsilon = config
-                .domination_epsilon
-                .unwrap_or_else(|| f64::from(threshold));
+            let epsilon = config.domination_epsilon.ok_or_else(|| {
+                "cut_selection.method='domination' requires domination_epsilon to be set"
+                    .to_string()
+            })?;
             Ok(Some(CutSelectionStrategy::Dominated {
                 threshold: epsilon,
                 check_frequency: u64::from(check_frequency),
@@ -687,19 +690,6 @@ mod tests {
         assert_eq!(deact.indices, vec![0, 2]);
     }
 
-    // Dominated select (stub): always returns empty set
-
-    #[test]
-    fn dominated_select_always_returns_empty_set() {
-        let strategy = CutSelectionStrategy::Dominated {
-            threshold: 0.001,
-            check_frequency: 10,
-        };
-        let pool = make_pool(&[make_meta(0, 1), make_meta(0, 1)], &[true, true]);
-        let deact = strategy.select(&pool, &[], 20);
-        assert!(deact.indices.is_empty());
-    }
-
     #[test]
     fn ac_level1_threshold_0_deactivates_zero_activity_cut() {
         let strategy = CutSelectionStrategy::Level1 {
@@ -833,22 +823,21 @@ mod tests {
             enabled: Some(true),
             method: Some("lml1".to_string()),
             threshold: None,
-            check_frequency: None,
+            check_frequency: Some(5),
             cut_activity_tolerance: None,
             max_active_per_stage: None,
-            memory_window: None,
+            memory_window: Some(10),
             domination_epsilon: None,
             basis_activity_window: None,
         };
         let result = parse_cut_selection_config(&cfg);
         assert!(result.is_ok());
         let strategy = result.unwrap().expect("must produce Some for enabled lml1");
-        // threshold defaults to 0 (mapped to memory_window), check_frequency defaults to 5.
         assert!(
             matches!(
                 strategy,
                 CutSelectionStrategy::Lml1 {
-                    memory_window: 0,
+                    memory_window: 10,
                     check_frequency: 5,
                 }
             ),
@@ -857,16 +846,38 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_domination() {
+    fn test_parse_lml1_missing_memory_window_errors() {
         let cfg = RowSelectionConfig {
             enabled: Some(true),
-            method: Some("domination".to_string()),
-            threshold: Some(0),
-            check_frequency: Some(10),
+            method: Some("lml1".to_string()),
+            threshold: None,
+            check_frequency: None,
             cut_activity_tolerance: None,
             max_active_per_stage: None,
             memory_window: None,
             domination_epsilon: None,
+            basis_activity_window: None,
+        };
+        let result = parse_cut_selection_config(&cfg);
+        assert!(result.is_err(), "lml1 without memory_window must error");
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("memory_window"),
+            "error must mention memory_window, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_parse_domination() {
+        let cfg = RowSelectionConfig {
+            enabled: Some(true),
+            method: Some("domination".to_string()),
+            threshold: None,
+            check_frequency: Some(10),
+            cut_activity_tolerance: None,
+            max_active_per_stage: None,
+            memory_window: None,
+            domination_epsilon: Some(1e-6),
             basis_activity_window: None,
         };
         let result = parse_cut_selection_config(&cfg);
@@ -880,9 +891,34 @@ mod tests {
                 CutSelectionStrategy::Dominated {
                     threshold,
                     check_frequency: 10,
-                } if threshold == 0.0
+                } if (threshold - 1e-6).abs() < f64::EPSILON
             ),
             "unexpected variant: {strategy:?}"
+        );
+    }
+
+    #[test]
+    fn test_parse_domination_missing_epsilon_errors() {
+        let cfg = RowSelectionConfig {
+            enabled: Some(true),
+            method: Some("domination".to_string()),
+            threshold: None,
+            check_frequency: Some(10),
+            cut_activity_tolerance: None,
+            max_active_per_stage: None,
+            memory_window: None,
+            domination_epsilon: None,
+            basis_activity_window: None,
+        };
+        let result = parse_cut_selection_config(&cfg);
+        assert!(
+            result.is_err(),
+            "domination without domination_epsilon must error"
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("domination_epsilon"),
+            "error must mention domination_epsilon, got: {msg}"
         );
     }
 

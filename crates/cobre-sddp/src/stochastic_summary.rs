@@ -61,7 +61,7 @@ impl ArOrderSummary {
     /// # Examples
     ///
     /// ```
-    /// use cobre_sddp::stochastic_summary::ArOrderSummary;
+    /// use cobre_sddp::ArOrderSummary;
     ///
     /// let s = ArOrderSummary {
     ///     method: "AIC".into(),
@@ -476,11 +476,10 @@ mod tests {
             max_storage_hm3: 100.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 0.95,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
             tailrace: None,

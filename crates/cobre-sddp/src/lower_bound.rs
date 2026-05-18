@@ -117,6 +117,11 @@ pub struct LbEvalScratch {
     pub effective_eta_buf: Vec<f64>,
     /// Per-hydro zero-target vector for truncation precompute.
     pub zero_targets_buf: Vec<f64>,
+    /// Uniform per-opening probabilities passed to the risk measure during
+    /// rank-0 aggregation. Resized and refilled per call to
+    /// `lb_aggregate_and_broadcast`; capacity is reused across iterations to
+    /// avoid the per-iteration allocation flagged by the architecture audit.
+    pub uniform_prob_buf: Vec<f64>,
 }
 
 impl LbEvalScratch {
@@ -137,6 +142,7 @@ impl LbEvalScratch {
             par_inflow_buf: Vec::new(),
             effective_eta_buf: Vec::new(),
             zero_targets_buf: Vec::new(),
+            uniform_prob_buf: Vec::new(),
         }
     }
 }
@@ -195,7 +201,7 @@ impl<'a> LbEvalScratchBundle<'a> {
     }
 }
 
-/// Phase 1 — rank-0 buffer pre-population and append-only LP management.
+/// Step 1 — rank-0 buffer pre-population and append-only LP management.
 ///
 /// Pre-populates the constant NCS column-bound index/lower buffers (same across
 /// all openings at a given stage) in `scratch` and performs the append-only LP
@@ -273,7 +279,7 @@ fn lb_init_rank0<S: SolverInterface>(
     }
 }
 
-/// Phase 2 — truncation precompute and per-opening LP evaluation.
+/// Step 2 — truncation precompute and per-opening LP evaluation.
 ///
 /// Precomputes the PAR lag matrix and eta floor (constant across openings), then
 /// iterates over all stage-0 openings. For each opening: evaluates PAR inflows,
@@ -305,8 +311,7 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
     // across openings (same initial_state, same stage 0).
     let needs_truncation = matches!(
         spec.inflow_method,
-        InflowNonNegativityMethod::Truncation
-            | InflowNonNegativityMethod::TruncationWithPenalty { .. }
+        InflowNonNegativityMethod::Truncation | InflowNonNegativityMethod::TruncationWithPenalty
     );
 
     // Resolve the PAR LP once; used for both truncation and z-inflow RHS.
@@ -366,7 +371,7 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
         compute_effective_eta(
             raw_noise,
             n_hydros,
-            spec.inflow_method,
+            *spec.inflow_method,
             &scratch.par_inflow_buf,
             &scratch.eta_floor_buf,
             &mut scratch.effective_eta_buf,
@@ -459,18 +464,27 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
 /// probabilities, scales by [`COST_SCALE_FACTOR`], then broadcasts the scalar
 /// lower bound from rank 0 to all other ranks.
 ///
+/// `scratch.uniform_prob_buf` is resized and refilled in-place every call so
+/// the per-iteration allocation pattern (`vec![1/n; n]`) is amortized to a
+/// capacity-only growth on the first call.
+///
 /// # Errors
 ///
 /// Returns [`SddpError::Communication`] if the broadcast fails.
 fn lb_aggregate_and_broadcast<C: Communicator>(
     objectives: &[f64],
     risk_measure: &RiskMeasure,
+    scratch: &mut LbEvalScratch,
     comm: &C,
 ) -> Result<f64, SddpError> {
     #[allow(clippy::cast_precision_loss)]
     let uniform_prob = 1.0_f64 / objectives.len() as f64;
-    let mut lb = risk_measure.evaluate_risk(objectives, &vec![uniform_prob; objectives.len()])
-        * COST_SCALE_FACTOR;
+    scratch.uniform_prob_buf.clear();
+    scratch
+        .uniform_prob_buf
+        .resize(objectives.len(), uniform_prob);
+    let mut lb =
+        risk_measure.evaluate_risk(objectives, &scratch.uniform_prob_buf) * COST_SCALE_FACTOR;
     comm.broadcast(std::slice::from_mut(&mut lb), 0)
         .map_err(SddpError::from)?;
     Ok(lb)
@@ -547,7 +561,7 @@ pub fn evaluate_lower_bound<S: SolverInterface, C: Communicator>(
         )?;
 
         // Phase 3: risk-measure aggregation + broadcast.
-        lb = lb_aggregate_and_broadcast(&objectives, spec.risk_measure, comm)?;
+        lb = lb_aggregate_and_broadcast(&objectives, spec.risk_measure, scratch.lb_scratch, comm)?;
         return Ok(lb);
     }
 
@@ -1501,7 +1515,7 @@ mod tests {
             ncs_max_gen: &[],
             block_count: 1,
             ncs_generation: 0..0,
-            inflow_method: &InflowNonNegativityMethod::TruncationWithPenalty { cost: 100.0 },
+            inflow_method: &InflowNonNegativityMethod::TruncationWithPenalty,
         };
         let (mut row_batch_result, mut lb_scratch_result) = make_lb_locals();
         let mut bundle_result = LbEvalScratchBundle::from_scratch_fields(

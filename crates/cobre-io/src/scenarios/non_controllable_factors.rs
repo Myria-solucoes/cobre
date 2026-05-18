@@ -46,6 +46,7 @@ use crate::scenarios::BlockFactor;
 /// Top-level intermediate type for `non_controllable_factors.json`.
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RawNcsFactorsFile {
     /// `$schema` field — informational, not validated.
     #[serde(rename = "$schema")]
@@ -58,6 +59,7 @@ pub(crate) struct RawNcsFactorsFile {
 /// Intermediate type for a single NCS factor entry (one NCS-stage pair).
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 struct RawNcsFactorEntry {
     /// NCS entity identifier.
     ncs_id: i32,
@@ -70,6 +72,7 @@ struct RawNcsFactorEntry {
 /// Intermediate type for a single block factor.
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 struct RawBlockFactor {
     /// Block identifier.
     block_id: i32,

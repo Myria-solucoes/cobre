@@ -1,6 +1,6 @@
-//! Pipeline orchestrator for the five-layer validation and `System` construction pipeline.
+//! Pipeline orchestrator for the six-layer validation and `System` construction pipeline.
 //!
-//! [`run_pipeline`] and [`run_pipeline_with_report`] wire together all five validation
+//! [`run_pipeline`] and [`run_pipeline_with_report`] wire together all six validation
 //! layers, the resolution step, the scenario assembly step, and `SystemBuilder::build`
 //! into single callables that either return a fully-validated [`cobre_core::System`] or a
 //! [`LoadError`] explaining what went wrong.
@@ -24,19 +24,22 @@ use crate::{
     validation::{
         ValidationContext,
         dimensional::validate_dimensional_consistency,
+        productivity_resolution::validate_productivity_resolution,
         referential::validate_referential_integrity,
+        scalar_parameters::validate_scalar_parameters,
         schema::validate_schema,
         semantic::{validate_semantic_hydro_thermal, validate_semantic_stages_penalties_scenarios},
         structural::validate_structure,
     },
 };
 
+use crate::{CaseArtifacts, LoadedCase};
 use cobre_core::System;
 use std::path::Path;
 
 /// Run the complete loading pipeline for a case directory.
 ///
-/// Executes all five validation layers, the three-tier resolution step, scenario
+/// Executes all six validation layers, the three-tier resolution step, scenario
 /// assembly, and `SystemBuilder::build`. Returns `Ok(System)` when every layer
 /// succeeds, or the first `Err(LoadError)` encountered. Warnings collected during
 /// validation are silently discarded; use [`run_pipeline_with_report`] to retrieve them.
@@ -46,9 +49,8 @@ use std::path::Path;
 /// - [`LoadError::IoError`] / [`LoadError::ParseError`] — file read or JSON/Parquet
 ///   parse failure in Layer 2.
 /// - [`LoadError::ConstraintError`] — one or more validation errors collected by
-///   Layers 1-5, or `SystemBuilder::build` rejection.
+///   Layers 1-6, or `SystemBuilder::build` rejection.
 /// - [`LoadError::SchemaError`] — AR coefficient count mismatch in scenario assembly.
-#[allow(clippy::too_many_lines)]
 pub(crate) fn run_pipeline(path: &Path) -> Result<System, LoadError> {
     run_pipeline_with_report(path).map(|(system, _report)| system)
 }
@@ -62,10 +64,27 @@ pub(crate) fn run_pipeline(path: &Path) -> Result<System, LoadError> {
 /// # Errors
 ///
 /// Same error conditions as [`run_pipeline`].
-#[allow(clippy::too_many_lines)]
 pub(crate) fn run_pipeline_with_report(
     path: &Path,
 ) -> Result<(System, ValidationReport), LoadError> {
+    run_pipeline_with_artifacts(path).map(|(loaded, report)| (loaded.system, report))
+}
+
+/// Run the complete loading pipeline and return the validated [`System`] in a
+/// [`LoadedCase`] bundle alongside the auxiliary [`CaseArtifacts`] rows and a
+/// [`ValidationReport`] of any collected warnings.
+///
+/// This is the canonical pipeline; the simpler `run_pipeline` /
+/// `run_pipeline_with_report` entry points delegate here and strip what they
+/// don't need.
+///
+/// # Errors
+///
+/// Same error conditions as [`run_pipeline`].
+#[allow(clippy::too_many_lines)]
+pub(crate) fn run_pipeline_with_artifacts(
+    path: &Path,
+) -> Result<(LoadedCase, ValidationReport), LoadError> {
     let mut ctx = ValidationContext::new();
 
     // Layer 1 — structural validation (required files present on disk).
@@ -88,6 +107,19 @@ pub(crate) fn run_pipeline_with_report(
     validate_dimensional_consistency(&data, &mut ctx);
     validate_semantic_hydro_thermal(&data, &mut ctx);
     validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
+
+    // Layer 6 — cross-file resolution and cross-validation.
+    validate_productivity_resolution(&data, &mut ctx);
+    // Scalar-parameter cross-validation: Computed hydro_id existence, PerStage
+    // length, id/name uniqueness. n_stages is the count of study stages (id >= 0);
+    // this matches what `build_resolved_parameters` consumes downstream.
+    let n_study_stages = data.stages.stages.iter().filter(|s| s.id >= 0).count();
+    validate_scalar_parameters(
+        &data.scalar_parameters,
+        &data.hydros,
+        n_study_stages,
+        &mut ctx,
+    );
 
     // Capture warnings before consuming the context. Errors cause early return.
     let report = generate_report(&ctx);
@@ -173,6 +205,20 @@ pub(crate) fn run_pipeline_with_report(
     )?;
     let load_models = assemble_load_models(data.load_seasonal_stats);
 
+    // ── Auxiliary artifacts ───────────────────────────────────────────────────
+    //
+    // Move the already-parsed/validated rows out of `ParsedData` before
+    // `SystemBuilder::build` consumes the rest. Downstream consumers receive
+    // these via [`CaseArtifacts`] instead of re-opening the files from disk.
+    let artifacts = CaseArtifacts {
+        file_manifest: manifest,
+        hydro_geometry: data.hydro_geometry,
+        production_models: data.production_models,
+        hydro_energy_productivity: data.hydro_energy_productivity_rows,
+        fpha_hyperplanes: data.fpha_hyperplanes,
+        scalar_parameters: data.scalar_parameters,
+    };
+
     // ── System construction ───────────────────────────────────────────────────
 
     let system = SystemBuilder::new()
@@ -211,5 +257,5 @@ pub(crate) fn run_pipeline_with_report(
                 .join("\n"),
         })?;
 
-    Ok((system, report))
+    Ok((LoadedCase { system, artifacts }, report))
 }

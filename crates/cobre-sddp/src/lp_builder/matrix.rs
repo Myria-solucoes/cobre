@@ -1,5 +1,4 @@
-use cobre_core::entities::hydro::HydroGenerationModel;
-use cobre_core::{ConstraintSense, Stage};
+use cobre_core::{CoefficientRef, ConstraintSense, Stage};
 
 use crate::generic_constraints::resolve_variable_ref;
 use crate::hydro_models::{EvaporationModel, ResolvedProductionModel};
@@ -903,8 +902,8 @@ pub(super) fn fill_load_balance_entries(
                 }
             }
         } else {
-            // Constant productivity: use the resolved per-stage production model,
-            // which accounts for hydro_production_models.json overrides.
+            // Constant productivity: use the resolved per-stage production model
+            // from hydro_production_models.json.
             let rho = match ctx.production_models.model(h_idx, stage_idx) {
                 ResolvedProductionModel::ConstantProductivity { productivity } => *productivity,
                 ResolvedProductionModel::Fpha { .. } => {
@@ -1236,7 +1235,13 @@ pub(super) fn fill_generic_constraint_entries(
                 &positions,
             );
             for (col, multiplier) in pairs {
-                col_entries[col].push((row, term.coefficient * multiplier));
+                let coef = match term.coefficient {
+                    CoefficientRef::Literal(v) => v,
+                    CoefficientRef::Parameter(param_id) => {
+                        ctx.resolved_parameters.get(param_id, stage_idx)
+                    }
+                };
+                col_entries[col].push((row, coef * term.scale * multiplier));
             }
         }
 
@@ -1419,27 +1424,14 @@ pub(super) fn fill_operational_violation_entries(
             }
         } else {
             // Constant productivity: gen_k = rho * q_k (MW).
-            let rho = match &ctx.hydros[h_idx].generation_model {
-                HydroGenerationModel::ConstantProductivity {
-                    productivity_mw_per_m3s,
-                }
-                | HydroGenerationModel::LinearizedHead {
-                    productivity_mw_per_m3s,
-                } => *productivity_mw_per_m3s,
-                HydroGenerationModel::Fpha => {
-                    // Entity model is Fpha but resolved model at this stage is
-                    // ConstantProductivity (fallback). Extract rho from the resolved model.
-                    if let ResolvedProductionModel::ConstantProductivity { productivity } =
-                        ctx.production_models.model(h_idx, stage_idx)
-                    {
-                        *productivity
-                    } else {
-                        debug_assert!(
-                            false,
-                            "Fpha entity model with non-Fpha resolved model and no local index for hydro {h_idx}"
-                        );
-                        0.0
-                    }
+            // Always read rho from the resolved per-stage production model.
+            let rho = match ctx.production_models.model(h_idx, stage_idx) {
+                ResolvedProductionModel::ConstantProductivity { productivity } => *productivity,
+                ResolvedProductionModel::Fpha { .. } => {
+                    unreachable!(
+                        "Fpha resolved model in ConstantProductivity LP path for hydro \
+                         {h_idx}; validate production model assignment upstream"
+                    );
                 }
             };
             for blk in 0..n_blks {
@@ -1504,4 +1496,501 @@ pub(super) fn assemble_csc(col_entries: &[Vec<(usize, f64)>]) -> (Vec<i32>, Vec<
     col_starts.push(offset);
 
     (col_starts, row_indices, values)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Unit tests: parameter resolution in the LP builder
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+#[allow(
+    clippy::too_many_lines,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::float_cmp
+)]
+mod parameter_resolution_tests {
+    use cobre_core::{
+        BoundsCountsSpec, BoundsDefaults, Bus, BusStagePenalties, ConstraintExpression,
+        ConstraintSense, ContractStageBounds, DeficitSegment, EntityId, GenericConstraint,
+        HydroStageBounds, HydroStagePenalties, LineStageBounds, LineStagePenalties,
+        NcsStagePenalties, ParameterKind, PenaltiesCountsSpec, PenaltiesDefaults,
+        PumpingStageBounds, ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedPenalties,
+        ScalarParameter, SlackConfig, SystemBuilder, ThermalStageBounds,
+    };
+    use cobre_core::{LinearTerm, VariableRef};
+    use cobre_stochastic::normal::precompute::PrecomputedNormal;
+    use cobre_stochastic::par::precompute::PrecomputedPar;
+    use std::collections::HashMap;
+
+    use crate::energy_conversion::{EnergyConversionSet, build_hydro_energy_productivity_override};
+    use crate::hydro_models::PrepareHydroModelsResult;
+    use crate::inflow_method::InflowNonNegativityMethod;
+    use crate::resolved_parameters::build_resolved_parameters;
+
+    /// Return all CSC values stored at `(col, row)` in the template.
+    fn csc_entries_at(t: &cobre_solver::StageTemplate, col: usize, row: usize) -> Vec<f64> {
+        let start = t.col_starts[col] as usize;
+        let end = t.col_starts[col + 1] as usize;
+        t.row_indices[start..end]
+            .iter()
+            .zip(t.values[start..end].iter())
+            .filter_map(|(&r, &v)| if r as usize == row { Some(v) } else { None })
+            .collect()
+    }
+
+    fn default_hydro_bounds() -> HydroStageBounds {
+        HydroStageBounds {
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 200.0,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 250.0,
+            max_diversion_m3s: None,
+            filling_inflow_m3s: 0.0,
+            water_withdrawal_m3s: 0.0,
+        }
+    }
+
+    fn default_hydro_penalties() -> HydroStagePenalties {
+        HydroStagePenalties {
+            spillage_cost: 0.01,
+            diversion_cost: 0.0,
+            fpha_turbined_cost: 0.0,
+            storage_violation_below_cost: 0.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost: 0.0,
+            outflow_violation_below_cost: 0.0,
+            outflow_violation_above_cost: 0.0,
+            generation_violation_below_cost: 0.0,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 1000.0,
+        }
+    }
+
+    /// Build a one-bus, one-thermal system with `n_stages` stages and one
+    /// generic constraint. Each stage has a single block of 744 hours.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    fn one_thermal_n_stages(
+        n_stages: usize,
+        thermal_entity_id: EntityId,
+        constraints: Vec<GenericConstraint>,
+        bounds: ResolvedGenericConstraintBounds,
+    ) -> cobre_core::System {
+        use chrono::NaiveDate;
+        use cobre_core::entities::thermal::Thermal;
+        use cobre_core::scenario::LoadModel;
+        use cobre_core::temporal::{
+            Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
+            StageStateConfig,
+        };
+
+        let bus = Bus {
+            id: EntityId(1),
+            name: "B1".to_string(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 500.0,
+            }],
+            excess_cost: 0.0,
+        };
+
+        let thermal = Thermal {
+            id: thermal_entity_id,
+            name: "T1".to_string(),
+            bus_id: EntityId(1),
+            min_generation_mw: 0.0,
+            max_generation_mw: 100.0,
+            cost_per_mwh: 50.0,
+            gnl_config: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+        };
+
+        let stages: Vec<Stage> = (0..n_stages)
+            .map(|i| Stage {
+                index: i,
+                id: i as i32,
+                start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                season_id: Some(0),
+                blocks: vec![Block {
+                    index: 0,
+                    name: "BLK0".to_string(),
+                    duration_hours: 744.0,
+                }],
+                block_mode: BlockMode::Parallel,
+                state_config: StageStateConfig {
+                    storage: false,
+                    inflow_lags: false,
+                },
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::Saa,
+                },
+            })
+            .collect();
+
+        let load_models: Vec<_> = (0..n_stages)
+            .map(|i| LoadModel {
+                bus_id: EntityId(1),
+                stage_id: i as i32,
+                mean_mw: 100.0,
+                std_mw: 0.0,
+            })
+            .collect();
+
+        let resolved_bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 0,
+                n_thermals: 1,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages,
+            },
+            &BoundsDefaults {
+                hydro: default_hydro_bounds(),
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 100.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 0,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages,
+            },
+            &PenaltiesDefaults {
+                hydro: default_hydro_penalties(),
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .thermals(vec![thermal])
+            .stages(stages)
+            .load_models(load_models)
+            .bounds(resolved_bounds)
+            .penalties(penalties)
+            .generic_constraints(constraints)
+            .resolved_generic_bounds(bounds)
+            .build()
+            .expect("one_thermal_n_stages: valid system")
+    }
+
+    /// Build templates for the given system using the supplied `ResolvedParameters`.
+    fn make_templates(
+        system: &cobre_core::System,
+        resolved_params: &crate::resolved_parameters::ResolvedParameters,
+    ) -> Vec<cobre_solver::StageTemplate> {
+        let production = PrepareHydroModelsResult::default_from_system(system).production;
+        let evaporation = PrepareHydroModelsResult::default_from_system(system).evaporation;
+        crate::lp_builder::build_stage_templates(
+            system,
+            InflowNonNegativityMethod::None,
+            &PrecomputedPar::default(),
+            &PrecomputedNormal::default(),
+            &production,
+            &evaporation,
+            resolved_params,
+        )
+        .expect("make_templates: valid")
+        .templates
+    }
+
+    /// Build an empty `ResolvedParameters` table (no parameters) with a given
+    /// stage-to-season mapping.
+    fn empty_resolved_params(n_stages: usize) -> crate::resolved_parameters::ResolvedParameters {
+        let stage_to_season: Vec<i32> = vec![0; n_stages];
+        let ec = EnergyConversionSet::new(vec![], vec![], 0, n_stages);
+        let override_table =
+            build_hydro_energy_productivity_override(vec![]).expect("empty override table");
+        build_resolved_parameters(&[], &ec, &override_table, &[], &stage_to_season, n_stages)
+            .expect("empty_resolved_params: valid")
+    }
+
+    /// Build a `ResolvedParameters` table containing a single `Constant` parameter.
+    fn constant_param_resolved(
+        param_id: EntityId,
+        value: f64,
+        n_stages: usize,
+    ) -> crate::resolved_parameters::ResolvedParameters {
+        let stage_to_season: Vec<i32> = vec![0; n_stages];
+        let ec = EnergyConversionSet::new(vec![], vec![], 0, n_stages);
+        let override_table =
+            build_hydro_energy_productivity_override(vec![]).expect("empty override table");
+        let params = vec![ScalarParameter {
+            id: param_id,
+            name: format!("p{}", param_id.0),
+            kind: ParameterKind::Constant { value },
+        }];
+        build_resolved_parameters(
+            &params,
+            &ec,
+            &override_table,
+            &[],
+            &stage_to_season,
+            n_stages,
+        )
+        .expect("constant_param_resolved: valid")
+    }
+
+    /// Build a `ResolvedParameters` table containing a single `PerStage` parameter.
+    fn per_stage_param_resolved(
+        param_id: EntityId,
+        values: Vec<f64>,
+    ) -> crate::resolved_parameters::ResolvedParameters {
+        let n_stages = values.len();
+        let stage_to_season: Vec<i32> = vec![0; n_stages];
+        let ec = EnergyConversionSet::new(vec![], vec![], 0, n_stages);
+        let override_table =
+            build_hydro_energy_productivity_override(vec![]).expect("empty override table");
+        let params = vec![ScalarParameter {
+            id: param_id,
+            name: format!("p{}", param_id.0),
+            kind: ParameterKind::PerStage { values },
+        }];
+        build_resolved_parameters(
+            &params,
+            &ec,
+            &override_table,
+            &[],
+            &stage_to_season,
+            n_stages,
+        )
+        .expect("per_stage_param_resolved: valid")
+    }
+
+    /// Make a generic constraint with a single `Parameter` term over a thermal.
+    fn parameter_constraint(
+        constraint_id: EntityId,
+        param_id: EntityId,
+        scale: f64,
+        thermal_id: EntityId,
+    ) -> GenericConstraint {
+        GenericConstraint {
+            id: constraint_id,
+            name: format!("gc_{}", constraint_id.0),
+            description: None,
+            expression: ConstraintExpression {
+                terms: vec![LinearTerm::parameter(
+                    param_id,
+                    scale,
+                    VariableRef::ThermalGeneration {
+                        thermal_id,
+                        block_id: None,
+                    },
+                )],
+            },
+            sense: ConstraintSense::LessEqual,
+            slack: SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+        }
+    }
+
+    /// Make a generic constraint with a single `Literal` term over a thermal.
+    fn literal_constraint(
+        constraint_id: EntityId,
+        coef: f64,
+        scale: f64,
+        thermal_id: EntityId,
+    ) -> GenericConstraint {
+        GenericConstraint {
+            id: constraint_id,
+            name: format!("gc_lit_{}", constraint_id.0),
+            description: None,
+            expression: ConstraintExpression {
+                terms: vec![LinearTerm {
+                    coefficient: cobre_core::CoefficientRef::Literal(coef),
+                    scale,
+                    variable: VariableRef::ThermalGeneration {
+                        thermal_id,
+                        block_id: None,
+                    },
+                }],
+            },
+            sense: ConstraintSense::LessEqual,
+            slack: SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+        }
+    }
+
+    /// Build a `ResolvedGenericConstraintBounds` for a single constraint active
+    /// at all `n_stages` stages (bound value `50.0`).
+    fn bounds_for_n_stages(
+        constraint_id: EntityId,
+        n_stages: usize,
+    ) -> ResolvedGenericConstraintBounds {
+        let id_map: HashMap<i32, usize> = [(constraint_id.0, 0)].into_iter().collect();
+        let rows: Vec<(i32, i32, Option<i32>, f64)> = (0..n_stages)
+            .map(|s| (constraint_id.0, s as i32, None, 50.0_f64))
+            .collect();
+        ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter())
+    }
+
+    // ── Layout constants for 1-bus, 1-thermal, 1-block, 0-hydro ──────────────
+    //
+    // theta=col 0, decision_start=col 1
+    // thermal col 0 block 0 → col 1
+    // load_balance row 0 → generic constraint row at row 1
+    const THERMAL_COL: usize = 1;
+    const GENERIC_ROW: usize = 1;
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Test 1: single stage, constant parameter, coefficient = param * scale * 1
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// A `CoefficientRef::Parameter` term is resolved against `ResolvedParameters`
+    /// at LP-build time.
+    ///
+    /// Fixture: EntityId(7) → 3.0 (constant), scale 2.0.
+    /// Expected CSC value: 3.0 * 2.0 * 1.0 = 6.0.
+    #[test]
+    fn parameter_coefficient_is_resolved_at_lp_build() {
+        let param_id = EntityId(7);
+        let thermal_id = EntityId(2);
+        let constraint_id = EntityId(10);
+        let scale = 2.0_f64;
+        let param_value = 3.0_f64;
+
+        let constraint = parameter_constraint(constraint_id, param_id, scale, thermal_id);
+        let generic_bounds = bounds_for_n_stages(constraint_id, 1);
+
+        let system = one_thermal_n_stages(1, thermal_id, vec![constraint], generic_bounds);
+        let resolved = constant_param_resolved(param_id, param_value, 1);
+        let templates = make_templates(&system, &resolved);
+
+        let t = &templates[0];
+        let entries = csc_entries_at(t, THERMAL_COL, GENERIC_ROW);
+        assert!(
+            !entries.is_empty(),
+            "no CSC entry at (col={THERMAL_COL}, row={GENERIC_ROW}) for parameter term"
+        );
+        let total: f64 = entries.iter().sum();
+        let expected = param_value * scale; // multiplier=1.0
+        assert_eq!(
+            total.to_bits(),
+            expected.to_bits(),
+            "expected {expected} (bit-exact), got {total}"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Test 2: three stages, per-stage parameter, each stage gets its own value
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// When the parameter has per-stage values, each stage template receives
+    /// the stage-specific resolved coefficient.
+    ///
+    /// Fixture: EntityId(7) → [3.0, 7.0, 11.0], scale 2.0.
+    /// Expected CSC values: stage 0 → 6.0, stage 1 → 14.0, stage 2 → 22.0.
+    #[test]
+    fn parameter_coefficient_per_stage_changes_lp() {
+        let param_id = EntityId(7);
+        let thermal_id = EntityId(2);
+        let constraint_id = EntityId(10);
+        let scale = 2.0_f64;
+        let per_stage_values = vec![3.0_f64, 7.0, 11.0];
+        let n_stages = per_stage_values.len();
+
+        let constraint = parameter_constraint(constraint_id, param_id, scale, thermal_id);
+        let generic_bounds = bounds_for_n_stages(constraint_id, n_stages);
+
+        let system = one_thermal_n_stages(n_stages, thermal_id, vec![constraint], generic_bounds);
+        let resolved = per_stage_param_resolved(param_id, per_stage_values.clone());
+        let templates = make_templates(&system, &resolved);
+
+        for (stage_idx, &param_val) in per_stage_values.iter().enumerate() {
+            let t = &templates[stage_idx];
+            let entries = csc_entries_at(t, THERMAL_COL, GENERIC_ROW);
+            assert!(
+                !entries.is_empty(),
+                "no CSC entry at (col={THERMAL_COL}, row={GENERIC_ROW}) for stage {stage_idx}"
+            );
+            let total: f64 = entries.iter().sum();
+            let expected = param_val * scale; // multiplier=1.0
+            assert_eq!(
+                total.to_bits(),
+                expected.to_bits(),
+                "stage {stage_idx}: expected {expected} (bit-exact), got {total}"
+            );
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Test 3: regression — Literal coefficients still work after wiring
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// `CoefficientRef::Literal(5.0)` with scale 3.0 must produce a CSC entry
+    /// of exactly `5.0 * 3.0 * 1.0 = 15.0`, unchanged by the parameter-resolution
+    /// wiring.
+    #[test]
+    fn literal_coefficient_still_works_after_wiring() {
+        let thermal_id = EntityId(2);
+        let constraint_id = EntityId(10);
+        let coef = 5.0_f64;
+        let scale = 3.0_f64;
+
+        let constraint = literal_constraint(constraint_id, coef, scale, thermal_id);
+        let generic_bounds = bounds_for_n_stages(constraint_id, 1);
+
+        let system = one_thermal_n_stages(1, thermal_id, vec![constraint], generic_bounds);
+        let resolved = empty_resolved_params(1);
+        let templates = make_templates(&system, &resolved);
+
+        let t = &templates[0];
+        let entries = csc_entries_at(t, THERMAL_COL, GENERIC_ROW);
+        assert!(
+            !entries.is_empty(),
+            "no CSC entry at (col={THERMAL_COL}, row={GENERIC_ROW}) for literal term"
+        );
+        let total: f64 = entries.iter().sum();
+        let expected = coef * scale; // multiplier=1.0
+        assert_eq!(
+            total.to_bits(),
+            expected.to_bits(),
+            "expected {expected} (bit-exact), got {total}"
+        );
+    }
 }

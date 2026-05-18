@@ -52,6 +52,14 @@ pub enum Phase {
 ///
 /// Constructed per-call inside each driver's inner loop; never stored across
 /// solves.
+///
+/// Several fields (`baked_template`, `horizon_is_terminal`,
+/// `terminal_has_boundary_cuts`) are populated by drivers for forward-pass
+/// gating but are not consumed by the current `run_stage_solve` body. They
+/// remain as deliberate fan-in points for future per-phase specialisation;
+/// keeping them on the struct keeps the wire-up cost zero when the gates
+/// move into the solve path.
+#[allow(dead_code)]
 pub struct StageInputs<'a> {
     /// Per-stage LP layout and noise scaling parameters.
     pub stage_context: &'a StageContext<'a>,
@@ -101,6 +109,10 @@ pub struct StageInputs<'a> {
 /// variants carry identical data for now; they exist so that later we can
 /// specialize per-phase fields (e.g., add `captured_basis` to `Forward` only)
 /// without a breaking re-shape.
+///
+/// `recon_stats` is captured for diagnostic export but is not currently read
+/// by production code outside this module's tests.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum StageOutcome<'solver> {
     /// Outcome for the forward pass.

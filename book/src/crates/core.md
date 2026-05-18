@@ -199,7 +199,7 @@ Fields: `id`, `name`, `bus_id`, `entry_stage_id`, `exit_stage_id`,
 
 | Enum                   | Variants                                                                                                 | Purpose                                               |
 | ---------------------- | -------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
-| `HydroGenerationModel` | `ConstantProductivity { productivity_mw_per_m3s }`, `LinearizedHead { productivity_mw_per_m3s }`, `Fpha` | Production function for turbine power computation     |
+| `HydroGenerationModel` | `ConstantProductivity`, `LinearizedHead`, `Fpha`                                                        | Production function for turbine power computation     |
 | `TailraceModel`        | `Polynomial { coefficients: Vec<f64> }`, `Piecewise { points: Vec<TailracePoint> }`                      | Downstream water level as a function of total outflow |
 | `HydraulicLossesModel` | `Factor { value }`, `Constant { value_m }`                                                               | Head loss in penstock and draft tube                  |
 | `EfficiencyModel`      | `Constant { value }`                                                                                     | Turbine-generator efficiency                          |

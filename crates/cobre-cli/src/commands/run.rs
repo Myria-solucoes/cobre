@@ -24,17 +24,9 @@ use cobre_comm::{
     Communicator, ExecutionTopology, ReduceOp, TopologyProvider, create_communicator,
 };
 use cobre_core::{System, TrainingEvent};
-use cobre_io::output::{
-    write_correlation_json, write_fitting_report, write_inflow_annual_component,
-    write_inflow_ar_coefficients, write_inflow_seasonal_stats, write_load_seasonal_stats,
-    write_noise_openings,
-};
-use cobre_io::scenarios::LoadSeasonalStatsRow;
 use cobre_sddp::{
     EstimationReport, PrepareHydroModelsResult, PrepareStochasticResult, StudySetup,
-    build_hydro_model_summary, estimation_report_to_fitting_report,
-    inflow_models_to_annual_component_rows, inflow_models_to_ar_rows, inflow_models_to_stats_rows,
-    prepare_hydro_models, prepare_stochastic,
+    build_hydro_model_summary, prepare_hydro_models, prepare_stochastic,
     setup::{ConstructionConfig, build_ncs_factor_entries, load_load_factors_for_stochastic},
 };
 use cobre_solver::HighsSolver;
@@ -96,6 +88,7 @@ type LoadedCase = (
     PrepareHydroModelsResult,
     BroadcastConfig,
     cobre_io::Config,
+    Vec<cobre_core::ScalarParameter>,
 );
 
 /// Load case and config on rank 0, capturing errors for MPI collective participation.
@@ -116,7 +109,14 @@ fn load_case_and_config(
     if !quiet {
         let _ = stderr.write_line(&format!("Loading case: {}", args.case_dir.display()));
     }
-    let system = cobre_io::load_case(&args.case_dir)?;
+    // Single-source case load: `load_case_with_artifacts` runs the full
+    // validation pipeline once and returns both the System and the
+    // already-parsed parquet/JSON rows (production models, hydro geometry,
+    // FPHA hyperplanes, scalar parameters). Downstream consumers
+    // (`prepare_hydro_models_from_artifacts`, ConstructionConfig) receive
+    // these rows directly instead of re-reading the same files from disk.
+    let cobre_io::LoadedCase { system, artifacts } =
+        cobre_io::load_case_with_artifacts(&args.case_dir)?;
     let config_path = args.case_dir.join("config.json");
     let config = cobre_io::parse_config(&config_path)?;
     let bcast = BroadcastConfig::from_config(&config)?;
@@ -130,8 +130,15 @@ fn load_case_and_config(
     )
     .map_err(CliError::from)?;
     let hydro_models =
-        prepare_hydro_models(&prepared.system, &args.case_dir).map_err(CliError::from)?;
-    Ok((prepared, hydro_models, bcast, config))
+        cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts(&prepared.system, &artifacts)
+            .map_err(CliError::from)?;
+    Ok((
+        prepared,
+        hydro_models,
+        bcast,
+        config,
+        artifacts.scalar_parameters,
+    ))
 }
 
 /// Shared context for execute phases (communicator, output, topology, etc.).
@@ -225,6 +232,9 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
         policy_mode,
     } = broadcast_and_build_setup(ctx, args)?;
 
+    // Emit soft consistency warnings for non-FPHA hydros whose stored
+    // `ρ_eq_stored` diverges from the implied `ρ_esp = ρ_eq_stored / h_eq`.
+    // Warnings are purely diagnostic — they do not abort the run.
     // Pre-training outputs (estimation artifacts, scaling report) run
     // regardless of training_enabled — they are data preparation outputs.
     run_pre_training(
@@ -605,10 +615,11 @@ fn broadcast_and_build_setup(
         root_estimation_path,
         raw_bcast_tree,
         root_hydro_models,
+        raw_scalar_parameters,
         load_err,
     ) = if ctx.is_root {
         match load_case_and_config(args, ctx.quiet, &ctx.stderr) {
-            Ok((prepared, hydro_models, bcast, config)) => {
+            Ok((prepared, hydro_models, bcast, config, scalar_parameters)) => {
                 let bcast_tree = if prepared.stochastic.provenance().opening_tree
                     == ComponentProvenance::UserSupplied
                 {
@@ -627,6 +638,10 @@ fn broadcast_and_build_setup(
                     estimation_report,
                     estimation_path,
                 } = prepared;
+                let bcast_params: Vec<cobre_io::BroadcastScalarParameter> = scalar_parameters
+                    .iter()
+                    .map(cobre_io::BroadcastScalarParameter::from)
+                    .collect();
                 (
                     Some(system),
                     Some(bcast),
@@ -636,19 +651,32 @@ fn broadcast_and_build_setup(
                     Some(estimation_path),
                     Some(bcast_tree),
                     Some(hydro_models),
+                    Some(bcast_params),
                     None,
                 )
             }
-            Err(e) => (None, None, None, None, None, None, None, None, Some(e)),
+            Err(e) => (
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(e),
+            ),
         }
     } else {
-        (None, None, None, None, None, None, None, None, None)
+        (None, None, None, None, None, None, None, None, None, None)
     };
     let root_estimation_report: Option<EstimationReport> = root_estimation_report;
     let root_estimation_path: Option<cobre_sddp::EstimationPath> = root_estimation_path;
 
     let system_result = broadcast_value(raw_system, &ctx.comm);
     let bcast_config_result = broadcast_value(raw_bcast_config, &ctx.comm);
+    let scalar_parameters_result = broadcast_value(raw_scalar_parameters, &ctx.comm);
     let root_hydro_models: Option<PrepareHydroModelsResult> = root_hydro_models;
 
     let tree_result = broadcast_value(raw_bcast_tree, &ctx.comm);
@@ -807,7 +835,17 @@ fn broadcast_and_build_setup(
 
     let training_enabled = bcast_config.training_enabled;
     let policy_mode = bcast_config.policy_mode;
-    let setup = build_study_setup(&system, &mut bcast_config, stochastic, hydro_models)?;
+    let scalar_parameters: Vec<cobre_core::ScalarParameter> = scalar_parameters_result?
+        .into_iter()
+        .map(cobre_core::ScalarParameter::from)
+        .collect();
+    let setup = build_study_setup(
+        &system,
+        &mut bcast_config,
+        stochastic,
+        hydro_models,
+        scalar_parameters,
+    )?;
 
     Ok(LoadBroadcastResult {
         system,
@@ -821,11 +859,13 @@ fn broadcast_and_build_setup(
 }
 
 /// Construct `StudySetup` on all ranks from broadcast parameters.
+#[allow(clippy::needless_pass_by_value)]
 fn build_study_setup(
     system: &System,
     bcast_config: &mut BroadcastConfig,
     stochastic: cobre_stochastic::StochasticContext,
     hydro_models: PrepareHydroModelsResult,
+    scalar_parameters: Vec<cobre_core::ScalarParameter>,
 ) -> Result<StudySetup, CliError> {
     let stopping_rule_set = stopping_rules_from_broadcast(bcast_config);
     let cut_selection = bcast_config.cut_selection.take();
@@ -836,12 +876,13 @@ fn build_study_setup(
         n_scenarios: bcast_config.n_scenarios,
         io_channel_capacity: usize::try_from(bcast_config.io_channel_capacity).unwrap_or(64),
         policy_path: bcast_config.policy_path.clone(),
-        inflow_method: bcast_config.inflow_method.clone(),
+        inflow_method: bcast_config.inflow_method,
         cut_selection,
         cut_activity_tolerance: bcast_config.cut_activity_tolerance,
         basis_activity_window: bcast_config.basis_activity_window,
         budget: bcast_config.budget,
         export_states: bcast_config.export_states,
+        scalar_parameters,
     };
     StudySetup::from_broadcast_params(
         system,
@@ -854,7 +895,6 @@ fn build_study_setup(
     .map_err(CliError::from)
 }
 
-/// Print summaries, export stochastic artifacts, and write the scaling report.
 fn run_pre_training(
     ctx: &RunContext<impl Communicator>,
     system: &System,
@@ -890,13 +930,22 @@ fn run_pre_training(
     }
 
     if ctx.is_root && root_config.is_some_and(|c| c.exports.stochastic) {
-        export_stochastic_artifacts(
+        if !ctx.quiet {
+            let _ = ctx.stderr.write_line("Exporting stochastic artifacts...");
+        }
+        let stderr = &ctx.stderr;
+        let quiet = ctx.quiet;
+        let mut on_warning = |msg: &str| {
+            if !quiet {
+                let _ = stderr.write_line(&format!("warning: stochastic export failed ({msg})"));
+            }
+        };
+        cobre_sddp::orchestration::export_stochastic_artifacts(
             &ctx.output_dir,
             &setup.stochastic,
             system,
             root_estimation_report,
-            ctx.quiet,
-            &ctx.stderr,
+            &mut on_warning,
         );
     }
 
@@ -1647,17 +1696,18 @@ fn write_training_outputs(args: &WriteTrainingArgs<'_>) -> Result<(), CliError> 
     let write_start = std::time::Instant::now();
 
     let policy_dir = args.output_dir.join(&args.setup.policy_path);
-    crate::policy_io::write_checkpoint(
+    cobre_sddp::orchestration::write_checkpoint(
         &policy_dir,
         &args.setup.fcf,
         args.training_result,
-        &crate::policy_io::CheckpointParams {
+        &cobre_sddp::orchestration::CheckpointParams {
             max_iterations: args.setup.loop_params.max_iterations,
             forward_passes: args.setup.loop_params.forward_passes,
             seed: args.setup.loop_params.seed,
             export_states: args.config.exports.states,
         },
-    )?;
+    )
+    .map_err(CliError::from)?;
 
     cobre_io::write_training_results(
         args.output_dir,
@@ -1774,133 +1824,6 @@ fn write_simulation_outputs(args: &WriteSimulationArgs<'_>) -> Result<(), CliErr
     }
 
     Ok(())
-}
-
-/// Write all applicable stochastic preprocessing artifacts to `{output_dir}/stochastic/`.
-///
-/// Called on rank 0 only when `--export-stochastic` is set (or `exports.stochastic = true`
-/// in config). Each writer call is independent: failure is logged as a warning on stderr
-/// and does not prevent the remaining files or training from proceeding.
-///
-/// Files written:
-/// - `noise_openings.parquet` — always
-/// - `inflow_seasonal_stats.parquet` — always
-/// - `inflow_ar_coefficients.parquet` — always
-/// - `correlation.json` — always
-/// - `load_seasonal_stats.parquet` — only when `system.load_models()` contains any model with `std_mw > 0`
-/// - `fitting_report.json` — only when `estimation_report` is `Some`
-fn export_stochastic_artifacts(
-    output_dir: &Path,
-    stochastic: &cobre_stochastic::StochasticContext,
-    system: &System,
-    estimation_report: Option<&EstimationReport>,
-    quiet: bool,
-    stderr: &Term,
-) {
-    use cobre_core::scenario::LoadModel;
-
-    let stochastic_dir = output_dir.join("stochastic");
-
-    if !quiet {
-        let _ = stderr.write_line("Exporting stochastic artifacts...");
-    }
-
-    if let Err(e) = write_noise_openings(
-        &stochastic_dir.join("noise_openings.parquet"),
-        stochastic.opening_tree(),
-    ) {
-        if !quiet {
-            let _ = stderr.write_line(&format!(
-                "warning: stochastic export failed (noise_openings): {e}"
-            ));
-        }
-    }
-
-    let stats_rows = inflow_models_to_stats_rows(system.inflow_models());
-    if let Err(e) = write_inflow_seasonal_stats(
-        &stochastic_dir.join("inflow_seasonal_stats.parquet"),
-        &stats_rows,
-    ) {
-        if !quiet {
-            let _ = stderr.write_line(&format!(
-                "warning: stochastic export failed (inflow_seasonal_stats): {e}"
-            ));
-        }
-    }
-
-    let ar_rows = inflow_models_to_ar_rows(system.inflow_models());
-    if let Err(e) = write_inflow_ar_coefficients(
-        &stochastic_dir.join("inflow_ar_coefficients.parquet"),
-        &ar_rows,
-    ) {
-        if !quiet {
-            let _ = stderr.write_line(&format!(
-                "warning: stochastic export failed (inflow_ar_coefficients): {e}"
-            ));
-        }
-    }
-
-    let annual_rows = inflow_models_to_annual_component_rows(system.inflow_models());
-    if let Err(e) = write_inflow_annual_component(
-        &stochastic_dir.join("inflow_annual_component.parquet"),
-        &annual_rows,
-    ) {
-        if !quiet {
-            let _ = stderr.write_line(&format!(
-                "warning: stochastic export failed (inflow_annual_component): {e}"
-            ));
-        }
-    }
-
-    if let Err(e) = write_correlation_json(
-        &stochastic_dir.join("correlation.json"),
-        system.correlation(),
-    ) {
-        if !quiet {
-            let _ = stderr.write_line(&format!(
-                "warning: stochastic export failed (correlation): {e}"
-            ));
-        }
-    }
-
-    let has_stochastic_load = system
-        .load_models()
-        .iter()
-        .any(|m: &LoadModel| m.std_mw > 0.0);
-    if has_stochastic_load {
-        let load_rows: Vec<LoadSeasonalStatsRow> = system
-            .load_models()
-            .iter()
-            .map(|m| LoadSeasonalStatsRow {
-                bus_id: m.bus_id,
-                stage_id: m.stage_id,
-                mean_mw: m.mean_mw,
-                std_mw: m.std_mw,
-            })
-            .collect();
-        if let Err(e) = write_load_seasonal_stats(
-            &stochastic_dir.join("load_seasonal_stats.parquet"),
-            &load_rows,
-        ) {
-            if !quiet {
-                let _ = stderr.write_line(&format!(
-                    "warning: stochastic export failed (load_seasonal_stats): {e}"
-                ));
-            }
-        }
-    }
-
-    if let Some(report) = estimation_report {
-        let fitting = estimation_report_to_fitting_report(report);
-        if let Err(e) = write_fitting_report(&stochastic_dir.join("fitting_report.json"), &fitting)
-        {
-            if !quiet {
-                let _ = stderr.write_line(&format!(
-                    "warning: stochastic export failed (fitting_report): {e}"
-                ));
-            }
-        }
-    }
 }
 
 #[cfg(test)]

@@ -56,6 +56,7 @@ use crate::LoadError;
 /// Top-level intermediate type for `thermals.json` (serde only, not re-exported).
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RawThermalFile {
     /// `$schema` field — informational, not validated.
     #[serde(rename = "$schema")]
@@ -67,6 +68,7 @@ pub(crate) struct RawThermalFile {
 /// Intermediate type for a single thermal plant entry.
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RawThermal {
     /// Thermal plant identifier. Must be unique within the file.
     id: i32,
@@ -92,6 +94,7 @@ pub(crate) struct RawThermal {
 /// Intermediate type for the generation bounds sub-object.
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RawThermalGeneration {
     /// Minimum generation (minimum stable load) [MW].
     min_mw: f64,
@@ -102,6 +105,7 @@ pub(crate) struct RawThermalGeneration {
 /// Intermediate type for GNL configuration.
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RawGnlConfig {
     /// Number of stages of dispatch anticipation.
     lag_stages: i32,

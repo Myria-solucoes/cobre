@@ -16,7 +16,6 @@
       },
       "generation": {
         "model": "constant_productivity",
-        "productivity_mw_per_m3s": 1.0,
         "min_turbined_m3s": 0.0,
         "max_turbined_m3s": 30.0,
         "min_generation_mw": 0.0,
@@ -38,7 +37,6 @@
       },
       "generation": {
         "model": "constant_productivity",
-        "productivity_mw_per_m3s": 1.0,
         "min_turbined_m3s": 0.0,
         "max_turbined_m3s": 40.0,
         "min_generation_mw": 0.0,

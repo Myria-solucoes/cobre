@@ -37,12 +37,13 @@
 #
 # Explicitly excluded files:
 #
-#   cobre-io/src/output/policy.rs — This file serialises the policy checkpoint
-#     format (FlatBuffers schema SS3.1). The schema field names (cut_id,
-#     cut_intercept, PolicyCutRecord, StageCutsPayload, etc.) are part of the
-#     persisted binary format and cannot be renamed without a format-version
-#     bump. Renaming is tracked as tech debt in docs/ROADMAP.md under
-#     "Policy format genericity". Until that work is done, policy.rs is
+#   cobre-io/src/output/policy/{mod,records,codec,checkpoint}.rs — These files
+#     serialise the policy checkpoint format (FlatBuffers schema SS3.1). The
+#     schema field names (cut_id, cut_intercept, PolicyCutRecord,
+#     StageCutsPayload, etc.) are part of the persisted binary format and
+#     cannot be renamed without a format-version bump. Renaming is tracked as
+#     tech debt in docs/ROADMAP.md under "Policy format genericity". Until that
+#     work is done, all files in the output/policy/ directory module are
 #     excluded from this gate.
 #
 # Exit codes:
@@ -70,8 +71,19 @@ SCAN_DIRS=(
 )
 
 # Files to explicitly exclude from the scan (relative to REPO_ROOT).
+#
+# The output/policy/ directory serialises the policy checkpoint format
+# (FlatBuffers schema SS3.1). The schema field names (cut_id, cut_intercept,
+# PolicyCutRecord, StageCutsPayload, etc.) are part of the persisted binary
+# format and cannot be renamed without a format-version bump. Renaming is
+# tracked as tech debt in docs/ROADMAP.md under "Policy format genericity".
+# Until that work is done, all four submodule files in output/policy/ are
+# excluded from this gate.
 EXCLUDED_FILES=(
-    "crates/cobre-io/src/output/policy.rs"
+    "crates/cobre-io/src/output/policy/mod.rs"
+    "crates/cobre-io/src/output/policy/records.rs"
+    "crates/cobre-io/src/output/policy/codec.rs"
+    "crates/cobre-io/src/output/policy/checkpoint.rs"
 )
 
 # Build the grep ERE pattern.

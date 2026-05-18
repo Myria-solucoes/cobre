@@ -15,8 +15,7 @@
   },
   "modeling": {
     "inflow_non_negativity": {
-      "method": "penalty",
-      "penalty_cost": 500.0
+      "method": "penalty"
     }
   }
 }

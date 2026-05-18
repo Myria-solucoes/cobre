@@ -51,14 +51,15 @@ use std::path::Path;
 
 use cobre_core::{
     EntityId, Stage, System,
-    entities::hydro::HydroGenerationModel,
     scenario::{SamplingScheme, ScenarioSource},
 };
+use cobre_io::build_hydro_reference_volume_fractions;
 use cobre_stochastic::{ExternalScenarioLibrary, HistoricalScenarioLibrary, StochasticContext};
 
 use crate::{
     config::{CutManagementConfig, EventParams},
     cut::FutureCostFunction,
+    energy_conversion::{EnergyConversionSet, build_energy_conversion_set},
     error::SddpError,
     horizon_mode::HorizonMode,
     hydro_models::{EvaporationModel, PrepareHydroModelsResult, ResolvedProductionModel},
@@ -160,6 +161,33 @@ pub struct StudySetup {
     /// time and passed to `WorkspaceSizing` so that downstream scratch buffers are
     /// allocated at the correct capacity. Zero for uniform-resolution studies.
     pub(crate) downstream_par_order: usize,
+
+    /// Pre-computed energy-conversion scalars for every `(hydro, stage)` pair.
+    ///
+    /// Holds `ρ_eq` (equivalent productivity), `V_ref`, `Q_ref`, and `ρ_acum`
+    /// (accumulated cascade productivity). Built once at setup time from the
+    /// system's hydros, cascade topology, and reference-volume resolver.
+    /// Consumed by the energy-balance LP constraints and ENA/EARM extraction.
+    pub(crate) energy_conversion: EnergyConversionSet,
+
+    /// `V_min` (`min_storage_hm3`) per hydro, in declaration order.
+    ///
+    /// Pre-computed once at setup time and threaded into the simulation
+    /// pipeline for stored-energy calculations.
+    pub(crate) hydro_min_storage_hm3: Vec<f64>,
+
+    /// Pre-materialised lookup table mapping `(parameter_id, stage_idx)` → `f64`.
+    ///
+    /// Built once at setup time from the assembled [`cobre_core::ScalarParameter`]
+    /// slice and the energy-conversion / hydro data. Consumed by the LP builder
+    /// when resolving [`cobre_core::CoefficientRef::Parameter`] references.
+    ///
+    /// Until the scalar-parameter loader is fully wired into
+    /// `from_broadcast_params`, the table is built from an empty slice and
+    /// only parameters with no `CoefficientRef::Parameter` terms are affected.
+    /// Retained for MPI broadcast (upcoming broadcast integration).
+    #[allow(dead_code)]
+    pub(crate) resolved_parameters: crate::resolved_parameters::ResolvedParameters,
 }
 
 impl StudySetup {
@@ -253,15 +281,57 @@ impl StudySetup {
             basis_activity_window,
             budget,
             export_states,
+            scalar_parameters,
         } = config;
+
+        // Build the per-(hydro, stage) energy-conversion set and resolved
+        // parameter table before template construction so the LP builder can
+        // look up CoefficientRef::Parameter values.
+        //
+        // The stage-to-season mapping uses `season_id.unwrap_or(0)` so that
+        // stages without a season assignment (None) collapse to season 0 —
+        // consistent with all other season-indexed lookups.
+        let n_stages_pre = system.stages().iter().filter(|s| s.id >= 0).count();
+        let stage_to_season: Vec<i32> = system
+            .stages()
+            .iter()
+            .filter(|s| s.id >= 0)
+            .map(|s| i32::try_from(s.season_id.unwrap_or(0)).unwrap_or(0))
+            .collect();
+        let reference_volume_fractions = build_hydro_reference_volume_fractions(
+            Vec::new(),
+            0.65,
+            system.hydros(),
+            &stage_to_season,
+        )?;
+        let energy_conversion = build_energy_conversion_set(
+            system.hydros(),
+            n_stages_pre,
+            system.cascade(),
+            &reference_volume_fractions,
+            &std::collections::HashMap::<cobre_core::EntityId, Vec<cobre_io::HydroGeometryRow>>::new(),
+            Some(&hydro_models.productivity_override),
+            Some(&hydro_models.production),
+        )
+        .map_err(|e| SddpError::Validation(e.to_string()))?;
+        let resolved_parameters = crate::resolved_parameters::build_resolved_parameters(
+            &scalar_parameters,
+            &energy_conversion,
+            &hydro_models.productivity_override,
+            system.hydros(),
+            &stage_to_season,
+            n_stages_pre,
+        )
+        .map_err(|e| SddpError::Validation(e.to_string()))?;
 
         let mut stage_templates = build_stage_templates(
             system,
-            &inflow_method,
+            inflow_method,
             stochastic.par(),
             stochastic.normal(),
             &hydro_models.production,
             &hydro_models.evaporation,
+            &resolved_parameters,
         )?;
 
         let scaling_report =
@@ -616,6 +686,9 @@ impl StudySetup {
             },
         };
 
+        let hydro_min_storage_hm3: Vec<f64> =
+            system.hydros().iter().map(|h| h.min_storage_hm3).collect();
+
         Ok(Self {
             stage_data: stage_data::StageData {
                 stage_templates,
@@ -663,6 +736,9 @@ impl StudySetup {
             },
             recent_observation_seed,
             downstream_par_order,
+            energy_conversion,
+            hydro_min_storage_hm3,
+            resolved_parameters,
         })
     }
 }
@@ -697,19 +773,7 @@ fn max_iterations_from_rules(rules: &StoppingRuleSet) -> u64 {
 fn build_entity_counts(system: &System) -> EntityCounts {
     EntityCounts {
         hydro_ids: system.hydros().iter().map(|h| h.id.0).collect(),
-        hydro_productivities: system
-            .hydros()
-            .iter()
-            .map(|h| match &h.generation_model {
-                HydroGenerationModel::ConstantProductivity {
-                    productivity_mw_per_m3s,
-                }
-                | HydroGenerationModel::LinearizedHead {
-                    productivity_mw_per_m3s,
-                } => *productivity_mw_per_m3s,
-                HydroGenerationModel::Fpha => 0.0,
-            })
-            .collect(),
+        hydro_productivities: vec![0.0; system.hydros().len()],
         thermal_ids: system.thermals().iter().map(|t| t.id.0).collect(),
         line_ids: system.lines().iter().map(|l| l.id.0).collect(),
         bus_ids: system.buses().iter().map(|b| b.id.0).collect(),
@@ -774,7 +838,9 @@ fn build_initial_state(system: &System, indexer: &StageIndexer) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::StudySetup;
-    use crate::hydro_models::PrepareHydroModelsResult;
+    use crate::hydro_models::{
+        PrepareHydroModelsResult, ProductionModelSet, ResolvedProductionModel,
+    };
     use crate::indexer::StageIndexer;
 
     use cobre_core::{
@@ -797,8 +863,9 @@ mod tests {
         },
     };
     use cobre_io::config::{
-        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig, ModelingConfig,
-        PolicyConfig, RawClassConfigEntry, RawScenarioSourceConfig, RowSelectionConfig,
+        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+        InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
+        RawClassConfigEntry, RawScenarioSourceConfig, RowSelectionConfig,
         SimulationConfig as IoSimulationConfig, StoppingRuleConfig, TrainingConfig,
         TrainingSolverConfig, UpperBoundEvaluationConfig,
     };
@@ -849,11 +916,10 @@ mod tests {
             max_storage_hm3: 200.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 2.5,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 250.0,
             tailrace: None,
@@ -1040,14 +1106,231 @@ mod tests {
             .expect("minimal_system: valid")
     }
 
+    /// Variant of [`minimal_system`] whose single hydro is FPHA without any
+    /// VHA rows or `specific_productivity_mw_per_m3s_per_m`, so the energy
+    /// conversion gate must reject it.
+    #[allow(
+        clippy::too_many_lines,
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::items_after_statements
+    )]
+    fn minimal_fpha_misconfigured_system(n_stages: usize) -> cobre_core::System {
+        use chrono::NaiveDate;
+
+        let bus = Bus {
+            id: EntityId(1),
+            name: "B1".to_string(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 500.0,
+            }],
+            excess_cost: 0.0,
+        };
+
+        let thermal = Thermal {
+            id: EntityId(2),
+            name: "T1".to_string(),
+            bus_id: EntityId(1),
+            min_generation_mw: 0.0,
+            max_generation_mw: 100.0,
+            cost_per_mwh: 50.0,
+            gnl_config: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+        };
+
+        let hydro = Hydro {
+            id: EntityId(3),
+            name: "H_FPHA_BAD".to_string(),
+            bus_id: EntityId(1),
+            downstream_id: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 200.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::Fpha,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 250.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: HydroPenalties {
+                spillage_cost: 0.01,
+                diversion_cost: 0.0,
+                fpha_turbined_cost: 0.0,
+                storage_violation_below_cost: 0.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            },
+        };
+
+        let stages: Vec<Stage> = (0..n_stages)
+            .map(|i| Stage {
+                index: i,
+                id: i as i32,
+                start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                season_id: None,
+                blocks: vec![Block {
+                    index: 0,
+                    name: "S".to_string(),
+                    duration_hours: 744.0,
+                }],
+                block_mode: BlockMode::Parallel,
+                state_config: StageStateConfig {
+                    storage: true,
+                    inflow_lags: false,
+                },
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::Saa,
+                },
+            })
+            .collect();
+
+        let inflow_models: Vec<InflowModel> = (0..n_stages)
+            .map(|i| InflowModel {
+                hydro_id: EntityId(3),
+                stage_id: i as i32,
+                mean_m3s: 80.0,
+                std_m3s: 20.0,
+                ar_coefficients: vec![],
+                residual_std_ratio: 1.0,
+                annual: None,
+            })
+            .collect();
+
+        let load_models: Vec<LoadModel> = (0..n_stages)
+            .map(|i| LoadModel {
+                bus_id: EntityId(1),
+                stage_id: i as i32,
+                mean_mw: 100.0,
+                std_mw: 0.0,
+            })
+            .collect();
+
+        let n_st = n_stages.max(1);
+
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 1,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: n_st,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 200.0,
+                    min_turbined_m3s: 0.0,
+                    max_turbined_m3s: 100.0,
+                    min_outflow_m3s: 0.0,
+                    max_outflow_m3s: None,
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 250.0,
+                    max_diversion_m3s: None,
+                    filling_inflow_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 100.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 1,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: n_st,
+            },
+            &PenaltiesDefaults {
+                hydro: HydroStagePenalties {
+                    spillage_cost: 0.01,
+                    diversion_cost: 0.0,
+                    fpha_turbined_cost: 0.0,
+                    storage_violation_below_cost: 500.0,
+                    filling_target_violation_cost: 0.0,
+                    turbined_violation_below_cost: 0.0,
+                    outflow_violation_below_cost: 0.0,
+                    outflow_violation_above_cost: 0.0,
+                    generation_violation_below_cost: 0.0,
+                    evaporation_violation_cost: 0.0,
+                    water_withdrawal_violation_cost: 0.0,
+                    water_withdrawal_violation_pos_cost: 0.0,
+                    water_withdrawal_violation_neg_cost: 0.0,
+                    evaporation_violation_pos_cost: 0.0,
+                    evaporation_violation_neg_cost: 0.0,
+                    inflow_nonnegativity_cost: 1000.0,
+                },
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .thermals(vec![thermal])
+            .hydros(vec![hydro])
+            .stages(stages)
+            .inflow_models(inflow_models)
+            .load_models(load_models)
+            .bounds(bounds)
+            .penalties(penalties)
+            .build()
+            .expect("minimal_fpha_misconfigured_system: valid")
+    }
+
     /// Build a minimal valid [`Config`] with a single iteration-limit stopping rule.
     fn minimal_config(forward_passes: u32, max_iterations: u32) -> Config {
         Config {
             schema: None,
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
-                    method: "penalty".to_string(),
-                    penalty_cost: 1000.0,
+                    method: CfgInflowMethod::Penalty,
                 },
             },
             training: TrainingConfig {
@@ -1058,8 +1341,6 @@ mod tests {
                     limit: max_iterations,
                 }]),
                 stopping_mode: "any".to_string(),
-                cut_formulation: None,
-                forward_pass: None,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 scenario_source: None,
@@ -1069,6 +1350,7 @@ mod tests {
             simulation: IoSimulationConfig::default(),
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
+            energy: cobre_io::EnergyConfig::default(),
         }
     }
 
@@ -1764,17 +2046,17 @@ mod tests {
         use super::{DEFAULT_FORWARD_PASSES, DEFAULT_SEED, StudyParams};
         use crate::stopping_rule::StoppingMode;
         use cobre_io::config::{
-            Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig, ModelingConfig,
-            PolicyConfig, RowSelectionConfig, SimulationConfig as IoSimulationConfig,
-            TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
+            Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+            InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
+            RowSelectionConfig, SimulationConfig as IoSimulationConfig, TrainingConfig,
+            TrainingSolverConfig, UpperBoundEvaluationConfig,
         };
 
         let config = Config {
             schema: None,
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
-                    method: "none".to_string(),
-                    penalty_cost: 0.0,
+                    method: CfgInflowMethod::None,
                 },
             },
             training: TrainingConfig {
@@ -1783,8 +2065,6 @@ mod tests {
                 forward_passes: None,
                 stopping_rules: None,
                 stopping_mode: "any".to_string(),
-                cut_formulation: None,
-                forward_pass: None,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 scenario_source: None,
@@ -1794,6 +2074,7 @@ mod tests {
             simulation: IoSimulationConfig::default(),
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
+            energy: cobre_io::EnergyConfig::default(),
         };
 
         let params = StudyParams::from_config(&config).expect("from_config");
@@ -1841,17 +2122,17 @@ mod tests {
         use super::StudyParams;
         use crate::stopping_rule::{StoppingMode, StoppingRule};
         use cobre_io::config::{
-            Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig, ModelingConfig,
-            PolicyConfig, RowSelectionConfig, SimulationConfig as IoSimulationConfig,
-            StoppingRuleConfig, TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
+            Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+            InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
+            RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
+            TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
         };
 
         let config = Config {
             schema: None,
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
-                    method: "penalty".to_string(),
-                    penalty_cost: 999.0,
+                    method: CfgInflowMethod::Penalty,
                 },
             },
             training: TrainingConfig {
@@ -1863,8 +2144,6 @@ mod tests {
                     StoppingRuleConfig::TimeLimit { seconds: 60.0 },
                 ]),
                 stopping_mode: "all".to_string(),
-                cut_formulation: None,
-                forward_pass: None,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 scenario_source: None,
@@ -1881,6 +2160,7 @@ mod tests {
             },
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
+            energy: cobre_io::EnergyConfig::default(),
         };
 
         let params = StudyParams::from_config(&config).expect("from_config");
@@ -1936,17 +2216,17 @@ mod tests {
     /// Build a minimal [`cobre_io::Config`] with no estimation or seed overrides.
     fn minimal_prepare_config() -> cobre_io::Config {
         use cobre_io::config::{
-            Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig, ModelingConfig,
-            PolicyConfig, RowSelectionConfig, SimulationConfig as IoSimulationConfig,
-            TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
+            Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+            InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
+            RowSelectionConfig, SimulationConfig as IoSimulationConfig, TrainingConfig,
+            TrainingSolverConfig, UpperBoundEvaluationConfig,
         };
 
         Config {
             schema: None,
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
-                    method: "none".to_string(),
-                    penalty_cost: 0.0,
+                    method: CfgInflowMethod::None,
                 },
             },
             training: TrainingConfig {
@@ -1955,8 +2235,6 @@ mod tests {
                 forward_passes: None,
                 stopping_rules: None,
                 stopping_mode: "any".to_string(),
-                cut_formulation: None,
-                forward_pass: None,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 scenario_source: None,
@@ -1966,6 +2244,7 @@ mod tests {
             simulation: IoSimulationConfig::default(),
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
+            energy: cobre_io::EnergyConfig::default(),
         }
     }
 
@@ -2142,11 +2421,10 @@ mod tests {
             max_storage_hm3: 200.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 2.5,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 250.0,
             tailrace: None,
@@ -2438,6 +2716,107 @@ mod tests {
         }
     }
 
+    /// Given a valid `StudySetup`, `energy_conversion()` returns a set with
+    /// the correct dimensions and a non-zero accumulated productivity where
+    /// expected (the system hydro has `ρ_eq=2.5`, and no downstream, so
+    /// `ρ_acum=2.5` at every stage).
+    #[test]
+    fn energy_conversion_accessor_returns_built_set() {
+        let system = minimal_system(2);
+        let config = minimal_config(1, 5);
+        let stochastic = build_stochastic_context(
+            &system,
+            42,
+            None,
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::InSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .expect("stochastic context");
+
+        // Build a PrepareHydroModelsResult with productivity=2.5 for the single hydro.
+        // `default_from_system` uses 0.0 as a placeholder; here we supply the
+        // specific value that the assertion checks against.
+        let n_study_stages = system.stages().iter().filter(|s| s.id >= 0).count();
+        let hydro_models_result = {
+            let mut result = PrepareHydroModelsResult::default_from_system(&system);
+            let pm = ProductionModelSet::new(
+                vec![vec![
+                    ResolvedProductionModel::ConstantProductivity {
+                        productivity: 2.5
+                    };
+                    n_study_stages
+                ]],
+                1,
+                n_study_stages,
+            );
+            result.production = pm;
+            result
+        };
+
+        let setup =
+            StudySetup::new(&system, &config, stochastic, hydro_models_result).expect("setup");
+
+        let ec = setup.energy_conversion();
+        assert_eq!(ec.n_hydros(), system.hydros().len());
+        // The minimal system has 2 study stages and 1 hydro (ConstantProductivity,
+        // productivity=2.5, no downstream). ρ_acum must equal ρ_eq = 2.5.
+        for s in 0..ec.n_stages() {
+            assert!(
+                (ec.accumulated_productivity(0, s) - 2.5).abs() < f64::EPSILON,
+                "stage {s}: expected ρ_acum=2.5, got {}",
+                ec.accumulated_productivity(0, s)
+            );
+        }
+    }
+
+    /// Given a system whose single hydro is FPHA but lacks VHA geometry and
+    /// `specific_productivity_mw_per_m3s_per_m`, `StudySetup::new` must
+    /// propagate the energy-conversion gate failure as an error whose chain
+    /// contains `EnergyConversionError::FphaMissingEquivalentProductivity`.
+    #[test]
+    fn study_setup_propagates_fpha_missing_equivalent_productivity() {
+        let system = minimal_fpha_misconfigured_system(2);
+        let config = minimal_config(1, 5);
+        let stochastic = build_stochastic_context(
+            &system,
+            42,
+            None,
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::InSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .expect("stochastic context");
+
+        let err = StudySetup::new(
+            &system,
+            &config,
+            stochastic,
+            PrepareHydroModelsResult::default_from_system(&system),
+        )
+        .expect_err("setup must reject misconfigured FPHA hydro");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cannot derive ρ_eq"),
+            "error must come from FphaMissingEquivalentProductivity Display; got: {msg}"
+        );
+        assert!(
+            msg.contains("H_FPHA_BAD"),
+            "error must mention the offending hydro by name; got: {msg}"
+        );
+    }
+
     /// Build a `StageIndexer` for lag tests: N hydros, L lags, no equipment columns.
     fn indexer_for_lag_test(hydro_count: usize, max_par_order: usize) -> StageIndexer {
         StageIndexer::new(hydro_count, max_par_order)
@@ -2482,11 +2861,10 @@ mod tests {
             max_storage_hm3: 200.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 2.5,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 250.0,
             tailrace: None,
@@ -3003,11 +3381,10 @@ mod tests {
             max_storage_hm3: 200.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 2.5,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 250.0,
             tailrace: None,
@@ -3277,11 +3654,10 @@ mod tests {
             max_storage_hm3: 200.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 2.5,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 250.0,
             tailrace: None,
@@ -3533,11 +3909,10 @@ mod tests {
             max_storage_hm3: 200.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 2.5,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 250.0,
             tailrace: None,
@@ -3807,11 +4182,10 @@ mod tests {
             max_storage_hm3: 200.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 2.5,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 250.0,
             tailrace: None,
@@ -4108,11 +4482,10 @@ mod tests {
             max_storage_hm3: 200.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 2.5,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 250.0,
             tailrace: None,

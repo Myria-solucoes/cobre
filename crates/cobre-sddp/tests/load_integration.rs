@@ -195,11 +195,10 @@ fn build_system_with_load(
         max_storage_hm3: 100.0,
         min_outflow_m3s: 0.0,
         max_outflow_m3s: None,
-        generation_model: HydroGenerationModel::ConstantProductivity {
-            productivity_mw_per_m3s: 1.0,
-        },
+        generation_model: HydroGenerationModel::ConstantProductivity,
         min_turbined_m3s: 0.0,
         max_turbined_m3s: 100.0,
+        specific_productivity_mw_per_m3s_per_m: None,
         min_generation_mw: 0.0,
         max_generation_mw: 100.0,
         tailrace: None,
@@ -426,7 +425,7 @@ fn test_stochastic_load_training_completes() {
             budget: None,
             cut_activity_tolerance: 0.0,
             warm_start_cuts: 0,
-            basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+            basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
             risk_measures: risk_measures.clone(),
         },
         events: EventConfig {
@@ -577,7 +576,7 @@ fn test_deterministic_load_training_matches_baseline() {
                 budget: None,
                 cut_activity_tolerance: 0.0,
                 warm_start_cuts: 0,
-                basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+                basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 risk_measures: risk_measures.clone(),
             },
             events: EventConfig {
@@ -658,7 +657,7 @@ fn test_stochastic_load_seed_determinism() {
                 budget: None,
                 cut_activity_tolerance: 0.0,
                 warm_start_cuts: 0,
-                basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+                basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 risk_measures: risk_measures.clone(),
             },
             events: EventConfig {

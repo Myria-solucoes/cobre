@@ -173,11 +173,10 @@ combine:
 
 Controls the optional post-training simulation phase.
 
-| Field           | Type      | Default   | Description                                                                                    |
-| --------------- | --------- | --------- | ---------------------------------------------------------------------------------------------- |
-| `enabled`       | boolean   | `false`   | Enable the simulation phase after training.                                                    |
-| `num_scenarios` | integer   | `2000`    | Number of independent Monte Carlo simulation scenarios to evaluate.                            |
-| `policy_type`   | `"outer"` | `"outer"` | Policy representation for simulation. `"outer"` uses the piecewise-linear envelope (row pool). |
+| Field           | Type    | Default | Description                                                         |
+| --------------- | ------- | ------- | ------------------------------------------------------------------- |
+| `enabled`       | boolean | `false` | Enable the simulation phase after training.                         |
+| `num_scenarios` | integer | `2000`  | Number of independent Monte Carlo simulation scenarios to evaluate. |
 
 When `simulation.enabled` is `false` or `num_scenarios` is `0`, the simulation
 phase is skipped entirely.
@@ -244,18 +243,18 @@ Controls physical modeling options.
 
 ### `inflow_non_negativity`
 
-| Field          | Type   | Default     | Description                                                                                                       |
-| -------------- | ------ | ----------- | ----------------------------------------------------------------------------------------------------------------- |
-| `method`       | string | `"penalty"` | One of `"none"`, `"penalty"`, `"truncation"`, or `"truncation_with_penalty"`.                                     |
-| `penalty_cost` | float  | `1000.0`    | Penalty coefficient applied to negative inflow slack when `method` is `"penalty"` or `"truncation_with_penalty"`. |
+| Field    | Type   | Default     | Description                                                                   |
+| -------- | ------ | ----------- | ----------------------------------------------------------------------------- |
+| `method` | string | `"penalty"` | One of `"none"`, `"penalty"`, `"truncation"`, or `"truncation_with_penalty"`. |
 
 - `"none"` -- no treatment; negative inflows are passed through to the LP.
-- `"penalty"` -- adds a penalty variable to the LP that penalizes negative inflow
-  draws at the specified cost per unit.
+- `"penalty"` -- adds a slack variable to the LP that absorbs negative inflow
+  realisations. The slack carries a per-hydro objective cost from
+  `penalties.json::hydro.inflow_nonnegativity_cost`.
 - `"truncation"` -- clamps negative PAR model draws to zero before applying noise.
 - `"truncation_with_penalty"` -- combines both: clamps the inflow to zero and adds
-  a bounded slack variable penalised at `penalty_cost`, providing a smooth backstop
-  for extreme tail realisations.
+  a bounded slack variable penalised by `penalties.json::hydro.inflow_nonnegativity_cost`,
+  providing a smooth backstop for extreme tail realisations.
 
 Example:
 
@@ -263,8 +262,7 @@ Example:
 {
   "modeling": {
     "inflow_non_negativity": {
-      "method": "penalty",
-      "penalty_cost": 100.0
+      "method": "penalty"
     }
   }
 }
@@ -288,9 +286,9 @@ of each stage, see
 | ------------------------ | ------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `enabled`                | boolean | `false` | Enable row pruning.                                                                                                                                                                                                                                                                                                                     |
 | `method`                 | string  | --      | Selection method: `"level1"`, `"lml1"`, or `"domination"`.                                                                                                                                                                                                                                                                              |
-| `threshold`              | integer | `0`     | Activity threshold for Level1: deactivate rows with `active_count <= threshold`.                                                                                                                                                                                                                                                        |
-| `memory_window`          | integer | `null`  | Sliding window for LML1: deactivate rows not active within this many iterations. Overrides `threshold`.                                                                                                                                                                                                                                 |
-| `domination_epsilon`     | float   | `1e-6`  | Tolerance for domination comparisons (Dominated method).                                                                                                                                                                                                                                                                                |
+| `threshold`              | integer | `0`     | Activity threshold for the `"level1"` method: deactivate rows with `active_count <= threshold`. Ignored by `"lml1"` and `"domination"`.                                                                                                                                                                                                 |
+| `memory_window`          | integer | --      | Sliding window for the `"lml1"` method: deactivate rows not active within this many iterations. **Required** when `method = "lml1"`.                                                                                                                                                                                                    |
+| `domination_epsilon`     | float   | --      | Tolerance for domination comparisons. **Required** when `method = "domination"`.                                                                                                                                                                                                                                                        |
 | `check_frequency`        | integer | `1`     | Iterations between pruning checks (Stage 1).                                                                                                                                                                                                                                                                                            |
 | `cut_activity_tolerance` | float   | `1e-6`  | Minimum dual multiplier for a row to count as binding.                                                                                                                                                                                                                                                                                  |
 | `basis_activity_window`  | integer | `5`     | Sliding-window size (1-31 iterations) for tracking recent row binding activity. Controls the warm-start classifier: rows bound within the last `basis_activity_window` iterations are guessed tight on basis reconstruction. See [Performance Accelerators — Basis Reconstruction](./performance-accelerators.md#basis-reconstruction). |
@@ -302,12 +300,11 @@ of each stage, see
   binding count at or below `threshold`). Least aggressive; preserves
   convergence guarantee.
 - `"lml1"` -- deactivates rows that have not been binding within a sliding
-  window of `memory_window` iterations (falls back to `threshold` if
-  `memory_window` is not set).
+  window of `memory_window` iterations. `memory_window` is required.
 - `"domination"` -- deactivates rows that are dominated at every visited
   forward-pass trial point. Most aggressive; requires the visited-states
-  archive (always collected during training). The `domination_epsilon`
-  parameter controls the tolerance for domination comparisons.
+  archive (always collected during training). `domination_epsilon` is required
+  and controls the tolerance for domination comparisons.
 
 Example with both pipeline stages:
 
@@ -334,12 +331,12 @@ Controls the PAR(p) model estimation pipeline. When the case provides
 `inflow_history.parquet`, Cobre can automatically estimate AR coefficients
 instead of requiring pre-computed `inflow_ar_coefficients.parquet`.
 
-| Field                         | Type    | Default  | Description                                                                      |
-| ----------------------------- | ------- | -------- | -------------------------------------------------------------------------------- |
-| `max_order`                   | integer | `6`      | Maximum lag order considered during autoregressive model fitting.                |
-| `order_selection`             | string  | `"pacf"` | Order selection criterion: `"pacf"` (PACF-based), `"pacf_annual"` (PACF with annual component), or `"fixed"` (deprecated; mapped to `"pacf"`). |
-| `min_observations_per_season` | integer | `30`     | Minimum observations per (entity, season) group to proceed with estimation.      |
-| `max_coefficient_magnitude`   | float   | `null`   | Safety net: reduce to order 0 if any coefficient exceeds this magnitude.         |
+| Field                         | Type    | Default  | Description                                                                                       |
+| ----------------------------- | ------- | -------- | ------------------------------------------------------------------------------------------------- |
+| `max_order`                   | integer | `6`      | Maximum lag order considered during autoregressive model fitting.                                 |
+| `order_selection`             | string  | `"pacf"` | Order selection criterion: `"pacf"` (PACF-based) or `"pacf_annual"` (PACF with annual component). |
+| `min_observations_per_season` | integer | `30`     | Minimum observations per (entity, season) group to proceed with estimation.                       |
+| `max_coefficient_magnitude`   | float   | `null`   | Safety net: reduce to order 0 if any coefficient exceeds this magnitude.                          |
 
 Example:
 
@@ -575,8 +572,7 @@ Controls which outputs are written to the results directory.
   },
   "modeling": {
     "inflow_non_negativity": {
-      "method": "penalty",
-      "penalty_cost": 1000.0
+      "method": "penalty"
     }
   },
   "simulation": {
@@ -588,11 +584,8 @@ Controls which outputs are written to the results directory.
     "mode": "fresh"
   },
   "exports": {
-    "training": true,
-    "cuts": true,
     "states": false,
-    "simulation": true,
-    "compression": "zstd"
+    "stochastic": false
   }
 }
 ```
@@ -605,17 +598,16 @@ The `Config` struct supports additional sections not documented on this page.
 These fields are deserialized from `config.json` when present but are intended
 for advanced use cases and may change between releases:
 
-| Section                           | Purpose                                                                                                  |
-| --------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| `upper_bound_evaluation`          | Inner approximation upper-bound evaluation settings                                                      |
-| `training.cut_formulation`        | Cut formulation variant (single-cut or multi-cut)                                                        |
-| `training.forward_pass.pass_type` | Forward pass strategy selection                                                                          |
-| `training.solver`                 | LP solver options (see [Solver Safeguards](./performance-accelerators.md#solver-safeguards) for details) |
-| `simulation.io_channel_capacity`  | Async I/O channel buffer size for simulation output writing                                              |
+| Section                          | Purpose                                                                                                  |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `upper_bound_evaluation`         | Inner approximation upper-bound evaluation settings                                                      |
+| `training.solver`                | LP solver options (see [Solver Safeguards](./performance-accelerators.md#solver-safeguards) for details) |
+| `simulation.io_channel_capacity` | Async I/O channel buffer size for simulation output writing                                              |
 
-All fields have defaults and can be omitted. For the complete list of fields
-and their types, see the `Config` struct in the
-[cobre-io API docs](https://docs.rs/cobre-io).
+All fields have defaults and can be omitted. Every JSON input file rejects
+unknown keys, so misspelled fields raise a parse error rather than being
+silently ignored. For the complete list of fields and their types, see the
+`Config` struct in the [cobre-io API docs](https://docs.rs/cobre-io).
 
 ---
 

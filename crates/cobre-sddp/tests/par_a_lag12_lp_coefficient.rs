@@ -130,11 +130,10 @@ fn build_par_a_fixture() -> (cobre_core::System, PrecomputedPar) {
             max_storage_hm3: 500.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 1.0,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 200.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 200.0,
             tailrace: None,
@@ -391,11 +390,10 @@ fn build_classical_fixture() -> (cobre_core::System, PrecomputedPar) {
             max_storage_hm3: 500.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 1.0,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 200.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 200.0,
             tailrace: None,
@@ -638,11 +636,12 @@ fn lag_11_lp_coefficient_equals_psi_hat_over_twelve() {
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
     let templates = build_stage_templates(
         &system,
-        &InflowNonNegativityMethod::None,
+        InflowNonNegativityMethod::None,
         &par_lp,
         &PrecomputedNormal::default(),
         &hydro_models.production,
         &hydro_models.evaporation,
+        &cobre_sddp::ResolvedParameters::default(),
     )
     .expect("build_stage_templates must succeed for the PAR(2)-A fixture");
 
@@ -703,11 +702,12 @@ fn lag_0_lp_coefficient_combines_ar_and_annual() {
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
     let templates = build_stage_templates(
         &system,
-        &InflowNonNegativityMethod::None,
+        InflowNonNegativityMethod::None,
         &par_lp,
         &PrecomputedNormal::default(),
         &hydro_models.production,
         &hydro_models.evaporation,
+        &cobre_sddp::ResolvedParameters::default(),
     )
     .expect("build_stage_templates must succeed for the PAR(2)-A fixture");
 
@@ -765,11 +765,12 @@ fn classical_par_has_no_lag_11_column() {
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
     let templates = build_stage_templates(
         &system,
-        &InflowNonNegativityMethod::None,
+        InflowNonNegativityMethod::None,
         &par_lp,
         &PrecomputedNormal::default(),
         &hydro_models.production,
         &hydro_models.evaporation,
+        &cobre_sddp::ResolvedParameters::default(),
     )
     .expect("build_stage_templates must succeed for the classical PAR(2) fixture");
 

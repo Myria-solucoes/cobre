@@ -1,0 +1,230 @@
+{
+  "$defs": {
+    "ComputedParameter": {
+      "description": "A Cobre-computed quantity indexed by hydro plant.\n\nEach variant names one of the seven scalar quantities that the resolver\nderives from hydro geometry and operational data. All variants carry a\nsingle `hydro_id` field identifying the hydro plant.\n\n# Examples\n\n```\nuse cobre_core::{ComputedParameter, EntityId};\n\nlet param = ComputedParameter::EquivalentProductivity {\n    hydro_id: EntityId(1),\n};\n\n// ComputedParameter is Copy:\nlet copy = param;\nassert_eq!(param, copy);\n```",
+      "oneOf": [
+        {
+          "description": "Equivalent productivity coefficient (`ρ_eq`).",
+          "properties": {
+            "hydro_id": {
+              "$ref": "#/$defs/EntityId",
+              "description": "Hydro plant identifier."
+            },
+            "tag": {
+              "const": "equivalent_productivity",
+              "type": "string"
+            }
+          },
+          "required": [
+            "tag",
+            "hydro_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Accumulated productivity coefficient (`ρ_acum`).",
+          "properties": {
+            "hydro_id": {
+              "$ref": "#/$defs/EntityId",
+              "description": "Hydro plant identifier."
+            },
+            "tag": {
+              "const": "accumulated_productivity",
+              "type": "string"
+            }
+          },
+          "required": [
+            "tag",
+            "hydro_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Reference reservoir volume (`V_ref`).",
+          "properties": {
+            "hydro_id": {
+              "$ref": "#/$defs/EntityId",
+              "description": "Hydro plant identifier."
+            },
+            "tag": {
+              "const": "reference_volume",
+              "type": "string"
+            }
+          },
+          "required": [
+            "tag",
+            "hydro_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Reference turbine flow (`q_ref`).",
+          "properties": {
+            "hydro_id": {
+              "$ref": "#/$defs/EntityId",
+              "description": "Hydro plant identifier."
+            },
+            "tag": {
+              "const": "reference_turbine",
+              "type": "string"
+            }
+          },
+          "required": [
+            "tag",
+            "hydro_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Minimum operational storage (`V_min`).",
+          "properties": {
+            "hydro_id": {
+              "$ref": "#/$defs/EntityId",
+              "description": "Hydro plant identifier."
+            },
+            "tag": {
+              "const": "min_storage",
+              "type": "string"
+            }
+          },
+          "required": [
+            "tag",
+            "hydro_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Maximum operational storage (`V_max`).",
+          "properties": {
+            "hydro_id": {
+              "$ref": "#/$defs/EntityId",
+              "description": "Hydro plant identifier."
+            },
+            "tag": {
+              "const": "max_storage",
+              "type": "string"
+            }
+          },
+          "required": [
+            "tag",
+            "hydro_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Specific productivity (`ρ_esp`).",
+          "properties": {
+            "hydro_id": {
+              "$ref": "#/$defs/EntityId",
+              "description": "Hydro plant identifier."
+            },
+            "tag": {
+              "const": "specific_productivity",
+              "type": "string"
+            }
+          },
+          "required": [
+            "tag",
+            "hydro_id"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "EntityId": {
+      "description": "Strongly-typed entity identifier.\n\nWraps the `i32` identifier from JSON input files. The newtype pattern prevents\naccidental confusion between entity IDs and collection indices (`usize`), which\nis a common source of bugs in systems with both ID-based lookup and index-based\naccess. `EntityId` is used as the key in `HashMap<EntityId, usize>` lookup tables\nand as the value in cross-reference fields (e.g., `Hydro::bus_id`, `Line::source_bus_id`).\n\nWhy `i32` and not `String`: All JSON entity schemas use integer IDs (`i32`). Integer\nkeys are cheaper to hash, compare, and copy than strings — important because\n`EntityId` appears in every lookup table and cross-reference field. If a future\ninput format requires string IDs, the newtype boundary isolates the change to\n`EntityId`'s internal representation and its `From`/`Into` impls.\n\n# Examples\n\n```\nuse cobre_core::EntityId;\n\nlet id: EntityId = EntityId::from(42);\nassert_eq!(id.to_string(), \"42\");\n\nlet raw: i32 = i32::from(id);\nassert_eq!(raw, 42);\n```",
+      "format": "int32",
+      "type": "integer"
+    },
+    "ScalarParameterJsonEntry": {
+      "additionalProperties": false,
+      "description": "Per-entry intermediate representation.\n\n`#[serde(deny_unknown_fields)]` ensures that any unknown field (e.g. a\nstale `\"values_source\"`) causes an immediate parse error with the field name\nin the message, rather than being silently ignored.",
+      "properties": {
+        "computed_spec": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ComputedParameter"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Computed-parameter specification. Required when `kind == \"computed\"`;\nmust be absent for all other kinds."
+        },
+        "id": {
+          "description": "Stable numeric identifier; unique within the file.",
+          "format": "int32",
+          "type": "integer"
+        },
+        "kind": {
+          "description": "Discriminator: `\"constant\"`, `\"per_stage\"`, `\"seasonal\"`, or `\"computed\"`.\nThe presence of `value` / `values` / `computed_spec` is determined by\nthis field at parse time.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Human-readable name; unique within the file. Used as the `@name` reference\nfrom `generic_constraints.json`.",
+          "type": "string"
+        },
+        "value": {
+          "description": "Scalar value. Required when `kind == \"constant\"`; must be absent for all\nother kinds.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "values": {
+          "description": "`[[key, value], ...]` pairs. Required when `kind == \"per_stage\"` (keys are\nstage ids, must be a contiguous range starting at 0) or\n`kind == \"seasonal\"` (keys are season ids, must be unique). Must be absent\nfor `\"constant\"` and `\"computed\"`.",
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "format": "int32",
+                "type": "integer"
+              },
+              {
+                "format": "double",
+                "type": "number"
+              }
+            ],
+            "type": "array"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "kind"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Top-level JSON wrapper.\n\n`#[serde(deny_unknown_fields)]` is intentionally omitted at this level so that\n`\"$schema\"` and similar JSON schema tooling keys are tolerated.  Unknown fields\nare only rejected at the per-entry level via [`ScalarParameterJsonEntry`].",
+  "properties": {
+    "$schema": {
+      "default": null,
+      "description": "`$schema` field — informational, not validated.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "scalar_parameters": {
+      "description": "Array of scalar parameter entries.",
+      "items": {
+        "$ref": "#/$defs/ScalarParameterJsonEntry"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "scalar_parameters"
+  ],
+  "title": "ScalarParametersFile",
+  "type": "object"
+}

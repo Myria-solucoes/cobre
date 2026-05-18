@@ -371,7 +371,6 @@ Create `my_study/system/hydros.json`:
       },
       "generation": {
         "model": "constant_productivity",
-        "productivity_mw_per_m3s": 1.0,
         "min_turbined_m3s": 0.0,
         "max_turbined_m3s": 50.0,
         "min_generation_mw": 0.0,
@@ -398,10 +397,9 @@ non-zero `min_outflow_m3s` would represent a minimum ecological flow requirement
 The `generation` block uses `"constant_productivity"`, the simplest of the three
 supported turbine models. The other two — `"linearized_head"` and `"fpha"` (four-
 piece hyperplane approximation) — model head-dependent productivity for variable-
-head plants. The `productivity_mw_per_m3s` factor converts turbined flow to
-generated power. Here 1 m³/s yields 1 MW. Real plants typically have productivity
-factors between 0.5 and 10 depending on the head height. For details on all three
-models, see [Hydro Plants](../guide/hydro-plants.md).
+head plants. The productivity coefficient that converts turbined flow to generated
+power is supplied in `system/hydro_production_models.json`. For details on all
+three models, see [Hydro Plants](../guide/hydro-plants.md).
 
 ---
 

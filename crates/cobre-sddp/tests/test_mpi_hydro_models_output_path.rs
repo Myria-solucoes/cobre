@@ -12,7 +12,7 @@
 
 use std::path::Path;
 
-use cobre_sddp::hydro_models::prepare_hydro_models;
+use cobre_sddp::prepare_hydro_models;
 
 fn d07_case_dir() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

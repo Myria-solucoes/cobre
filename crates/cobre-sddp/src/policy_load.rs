@@ -28,7 +28,12 @@ use crate::workspace::CapturedBasis;
 /// Returns [`SddpError::Validation`] if `warm_start_counts.len() != num_stages`.
 ///
 /// [`FutureCostFunction::new`]: crate::FutureCostFunction::new
-pub fn resolve_warm_start_counts(
+///
+/// Currently unused in production code — the active warm-start path consumes
+/// `metadata.warm_start_counts` directly. Retained for the planned
+/// checkpoint-migration tool and is exercised by this module's own tests.
+#[allow(dead_code)]
+pub(crate) fn resolve_warm_start_counts(
     metadata: &PolicyCheckpointMetadata,
     num_stages: usize,
 ) -> Result<Vec<u32>, SddpError> {

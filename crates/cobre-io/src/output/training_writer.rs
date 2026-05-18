@@ -6,7 +6,8 @@
 //! - `training/convergence.parquet` — one row per iteration, capturing
 //!   bounds, gap, row-pool statistics, timing, and resource usage.
 //! - `training/timing/iterations.parquet` — per-iteration timing breakdown
-//!   (currently placeholder zeros — per-phase timing is not yet collected).
+//!   with measured wall-clock milliseconds for each solver phase (forward pass,
+//!   backward pass, pool selection, collective communication, and related stages).
 //!
 //! The writer runs on rank 0 only, after training completes.  Both files
 //! are written atomically: the data is written to a `.tmp` suffix first,

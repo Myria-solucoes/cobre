@@ -24,7 +24,7 @@ use crate::{
 pub(crate) fn compute_effective_eta(
     raw_noise: &[f64],
     n_hydros: usize,
-    inflow_method: &InflowNonNegativityMethod,
+    inflow_method: InflowNonNegativityMethod,
     par_inflows: &[f64],
     eta_floor: &[f64],
     effective_eta: &mut Vec<f64>,
@@ -33,7 +33,7 @@ pub(crate) fn compute_effective_eta(
 
     match inflow_method {
         InflowNonNegativityMethod::Truncation
-        | InflowNonNegativityMethod::TruncationWithPenalty { .. } => {
+        | InflowNonNegativityMethod::TruncationWithPenalty => {
             let has_negative = par_inflows.iter().take(n_hydros).any(|&a| a < 0.0);
             for h in 0..n_hydros {
                 let eta = raw_noise[h];
@@ -45,7 +45,7 @@ pub(crate) fn compute_effective_eta(
                 effective_eta.push(clamped);
             }
         }
-        InflowNonNegativityMethod::None | InflowNonNegativityMethod::Penalty { .. } => {
+        InflowNonNegativityMethod::None | InflowNonNegativityMethod::Penalty => {
             effective_eta.extend_from_slice(&raw_noise[..n_hydros]);
         }
     }
@@ -87,7 +87,7 @@ pub(crate) fn transform_inflow_noise(
     // compute_effective_eta (it copies raw eta directly).
     match inflow_method {
         InflowNonNegativityMethod::Truncation
-        | InflowNonNegativityMethod::TruncationWithPenalty { .. } => {
+        | InflowNonNegativityMethod::TruncationWithPenalty => {
             let max_order = indexer.max_par_order;
             let lag_len = max_order * n_hydros;
             scratch.lag_matrix_buf.clear();
@@ -123,14 +123,14 @@ pub(crate) fn transform_inflow_noise(
                 );
             }
         }
-        InflowNonNegativityMethod::None | InflowNonNegativityMethod::Penalty { .. } => {}
+        InflowNonNegativityMethod::None | InflowNonNegativityMethod::Penalty => {}
     }
 
     // Unified: compute effective eta then build RHS for all methods.
     compute_effective_eta(
         raw_noise,
         n_hydros,
-        inflow_method,
+        *inflow_method,
         &scratch.par_inflow_buf,
         &scratch.eta_floor_buf,
         &mut scratch.effective_eta_buf,
@@ -616,11 +616,10 @@ mod tests {
             max_storage_hm3: 100.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 1.0,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
             tailrace: None,
@@ -768,11 +767,10 @@ mod tests {
             max_storage_hm3: 100.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 1.0,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
             tailrace: None,
@@ -1234,7 +1232,7 @@ mod tests {
         compute_effective_eta(
             &raw_noise,
             2,
-            &InflowNonNegativityMethod::None,
+            InflowNonNegativityMethod::None,
             &par_inflows,
             &eta_floor,
             &mut effective,
@@ -1251,7 +1249,7 @@ mod tests {
         compute_effective_eta(
             &raw_noise,
             2,
-            &InflowNonNegativityMethod::Penalty { cost: 100.0 },
+            InflowNonNegativityMethod::Penalty,
             &par_inflows,
             &eta_floor,
             &mut effective,
@@ -1269,7 +1267,7 @@ mod tests {
         compute_effective_eta(
             &raw_noise,
             2,
-            &InflowNonNegativityMethod::Truncation,
+            InflowNonNegativityMethod::Truncation,
             &par_inflows,
             &eta_floor,
             &mut effective,
@@ -1289,7 +1287,7 @@ mod tests {
         compute_effective_eta(
             &raw_noise,
             2,
-            &InflowNonNegativityMethod::Truncation,
+            InflowNonNegativityMethod::Truncation,
             &par_inflows,
             &eta_floor,
             &mut effective,
@@ -1307,7 +1305,7 @@ mod tests {
         compute_effective_eta(
             &raw_noise,
             2,
-            &InflowNonNegativityMethod::TruncationWithPenalty { cost: 100.0 },
+            InflowNonNegativityMethod::TruncationWithPenalty,
             &par_inflows,
             &eta_floor,
             &mut effective,

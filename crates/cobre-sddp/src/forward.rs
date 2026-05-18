@@ -671,7 +671,7 @@ pub struct ForwardPassBatch<'a> {
     /// Activity-window size for the basis-reconstruction classifier (1..=31).
     ///
     /// Forwarded verbatim from [`crate::config::CutManagementConfig::basis_activity_window`]
-    /// and threaded through `StageKey` into [`crate::stage_solve::StageInputs`].
+    /// and threaded through `StageKey` into the stage-solve inputs.
     pub basis_activity_window: u32,
 }
 
@@ -1484,11 +1484,10 @@ mod tests {
             max_storage_hm3: 100.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 1.0,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
             tailrace: None,
@@ -3142,11 +3141,10 @@ mod tests {
             max_storage_hm3: 100.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 1.0,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
             tailrace: None,
@@ -3285,7 +3283,7 @@ mod tests {
     /// the `noise_buf` from the workspace after the call.
     fn run_single_stage_forward(
         stochastic: &StochasticContext,
-        inflow_method: &InflowNonNegativityMethod,
+        inflow_method: InflowNonNegativityMethod,
         base_rhs: f64,
         noise_scale_val: f64,
     ) -> Vec<f64> {
@@ -3351,7 +3349,7 @@ mod tests {
             &TrainingContext {
                 horizon: &horizon,
                 indexer: &indexer,
-                inflow_method,
+                inflow_method: &inflow_method,
                 stochastic,
                 initial_state: &initial_state,
                 inflow_scheme: SamplingScheme::InSample,
@@ -3412,7 +3410,7 @@ mod tests {
 
         let noise_buf_truncation = run_single_stage_forward(
             &stochastic,
-            &InflowNonNegativityMethod::Truncation,
+            InflowNonNegativityMethod::Truncation,
             base_rhs,
             noise_scale_val,
         );
@@ -3445,13 +3443,13 @@ mod tests {
 
         let noise_buf_truncation = run_single_stage_forward(
             &stochastic,
-            &InflowNonNegativityMethod::Truncation,
+            InflowNonNegativityMethod::Truncation,
             base_rhs,
             noise_scale_val,
         );
         let noise_buf_none = run_single_stage_forward(
             &stochastic,
-            &InflowNonNegativityMethod::None,
+            InflowNonNegativityMethod::None,
             base_rhs,
             noise_scale_val,
         );
@@ -3619,11 +3617,10 @@ mod tests {
             max_storage_hm3: 100.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 1.0,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
             tailrace: None,

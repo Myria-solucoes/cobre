@@ -1,5 +1,6 @@
 //! `StudyParams`, `ConstructionConfig`, and associated constants extracted from `setup/mod.rs`.
 
+use cobre_core::ScalarParameter;
 use cobre_io::config::StoppingRuleConfig;
 
 use crate::{
@@ -83,26 +84,26 @@ impl StudyParams {
         let stopping_rules: Vec<StoppingRule> = rule_configs
             .into_iter()
             .map(|c| match c {
-                StoppingRuleConfig::IterationLimit { limit } => StoppingRule::IterationLimit {
+                StoppingRuleConfig::IterationLimit { limit } => Ok(StoppingRule::IterationLimit {
                     limit: u64::from(limit),
-                },
-                StoppingRuleConfig::TimeLimit { seconds } => StoppingRule::TimeLimit { seconds },
+                }),
+                StoppingRuleConfig::TimeLimit { seconds } => {
+                    Ok(StoppingRule::TimeLimit { seconds })
+                }
                 StoppingRuleConfig::BoundStalling {
                     iterations,
                     tolerance,
-                } => StoppingRule::BoundStalling {
+                } => Ok(StoppingRule::BoundStalling {
                     iterations: u64::from(iterations),
                     tolerance,
-                },
-                StoppingRuleConfig::Simulation { .. } => {
-                    // Not implemented in the minimal viable solver; fold into
-                    // an iteration limit so the stopping rule set is valid.
-                    StoppingRule::IterationLimit {
-                        limit: DEFAULT_MAX_ITERATIONS,
-                    }
-                }
+                }),
+                StoppingRuleConfig::Simulation { .. } => Err(SddpError::Validation(
+                    "simulation-based stopping rule is not yet implemented; \
+                     use iteration_limit, time_limit, or bound_stalling"
+                        .to_string(),
+                )),
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
 
         let stopping_mode = if config.training.stopping_mode.eq_ignore_ascii_case("all") {
             StoppingMode::All
@@ -200,6 +201,7 @@ impl StudyParams {
             basis_activity_window: self.basis_activity_window,
             budget: self.budget,
             export_states: false,
+            scalar_parameters: Vec::new(),
         }
     }
 }
@@ -249,6 +251,11 @@ pub struct ConstructionConfig {
     /// cut selection strategy. Defaults to `false`; set based on
     /// `exports.states`.
     pub export_states: bool,
+    /// Loaded `system/scalar_parameters.json` entries, or empty when the file is
+    /// absent or the manifest flag `system_scalar_parameters_json` is `false`.
+    /// Consumed by `build_resolved_parameters` to populate the per-`(parameter_id,
+    /// stage_idx)` lookup table used by the LP builder.
+    pub scalar_parameters: Vec<ScalarParameter>,
 }
 
 #[cfg(test)]
@@ -258,9 +265,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use cobre_io::config::{
-        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig, ModelingConfig,
-        PolicyConfig, RowSelectionConfig, SimulationConfig as IoSimulationConfig,
-        StoppingRuleConfig, TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
+        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+        InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
+        RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
+        TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
     };
     use tracing::{Event, Level, Metadata, Subscriber, span};
 
@@ -338,8 +346,7 @@ mod tests {
             schema: None,
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
-                    method: "penalty".to_string(),
-                    penalty_cost: 1000.0,
+                    method: CfgInflowMethod::Penalty,
                 },
             },
             training: TrainingConfig {
@@ -348,8 +355,6 @@ mod tests {
                 forward_passes: Some(1),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),
                 stopping_mode: "any".to_string(),
-                cut_formulation: None,
-                forward_pass: None,
                 cut_selection: RowSelectionConfig {
                     basis_activity_window: window,
                     ..RowSelectionConfig::default()
@@ -362,6 +367,7 @@ mod tests {
             simulation: IoSimulationConfig::default(),
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
+            energy: cobre_io::EnergyConfig::default(),
         }
     }
 
@@ -416,8 +422,7 @@ mod tests {
             schema: None,
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
-                    method: "penalty".to_string(),
-                    penalty_cost: 1000.0,
+                    method: CfgInflowMethod::Penalty,
                 },
             },
             training: TrainingConfig {
@@ -426,8 +431,6 @@ mod tests {
                 forward_passes: Some(2),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),
                 stopping_mode: "any".to_string(),
-                cut_formulation: None,
-                forward_pass: None,
                 cut_selection: RowSelectionConfig {
                     max_active_per_stage: Some(1),
                     ..RowSelectionConfig::default()
@@ -440,7 +443,68 @@ mod tests {
             simulation: IoSimulationConfig::default(),
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
+            energy: cobre_io::EnergyConfig::default(),
         }
+    }
+
+    /// Build a minimal `cobre_io::Config` whose stopping rules contain a
+    /// `Simulation` entry.
+    fn config_with_simulation_stopping_rule() -> Config {
+        Config {
+            schema: None,
+            modeling: ModelingConfig {
+                inflow_non_negativity: InflowNonNegativityConfig {
+                    method: CfgInflowMethod::Penalty,
+                },
+            },
+            training: TrainingConfig {
+                enabled: true,
+                tree_seed: Some(42),
+                forward_passes: Some(1),
+                stopping_rules: Some(vec![StoppingRuleConfig::Simulation {
+                    replications: 100,
+                    period: 12,
+                    bound_window: 10,
+                    distance_tol: 0.05,
+                    bound_tol: 0.01,
+                }]),
+                stopping_mode: "any".to_string(),
+                cut_selection: RowSelectionConfig::default(),
+                solver: TrainingSolverConfig::default(),
+                scenario_source: None,
+            },
+            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
+            policy: PolicyConfig::default(),
+            simulation: IoSimulationConfig::default(),
+            exports: ExportsConfig::default(),
+            estimation: EstimationConfig::default(),
+            energy: cobre_io::EnergyConfig::default(),
+        }
+    }
+
+    /// AC: `from_config` must return `SddpError::Validation` when the stopping
+    /// rules list contains a `simulation_based` entry, because the feature is
+    /// not yet implemented. Silent no-op (fold into iteration limit) is
+    /// forbidden.
+    #[test]
+    fn from_config_rejects_simulation_stopping_rule() {
+        use crate::SddpError;
+
+        let err = StudyParams::from_config(&config_with_simulation_stopping_rule())
+            .expect_err("Simulation stopping rule must be rejected");
+        assert!(
+            matches!(err, SddpError::Validation(_)),
+            "expected SddpError::Validation, got: {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("simulation-based stopping rule"),
+            "error message must mention 'simulation-based stopping rule'; got: {msg}"
+        );
+        assert!(
+            msg.contains("not yet implemented"),
+            "error message must say 'not yet implemented'; got: {msg}"
+        );
     }
 
     /// AC: when `max_active_per_stage` is less than `forward_passes`, `StudyParams::from_config`

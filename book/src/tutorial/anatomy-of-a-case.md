@@ -351,7 +351,6 @@ electricity), and optional cascade linkage to downstream plants.
       },
       "generation": {
         "model": "constant_productivity",
-        "productivity_mw_per_m3s": 1.0,
         "min_turbined_m3s": 0.0,
         "max_turbined_m3s": 50.0,
         "min_generation_mw": 0.0,
@@ -373,10 +372,9 @@ The `outflow` block limits total outflow (turbined + spilled) to 50 m³/s maximu
 This is a physical constraint representing the river channel capacity below the dam.
 
 The `generation` block uses `"constant_productivity"`, the simplest turbine model:
-generation (MW) equals turbined flow (m³/s) times the `productivity_mw_per_m3s`
-factor. Here the factor is 1.0, so 1 m³/s of turbined flow yields 1 MW. The
-turbine can pass between 0 and 50 m³/s, and the resulting generation is bounded
-between 0 and 50 MW.
+generation (MW) equals turbined flow (m³/s) times the productivity coefficient
+from `system/hydro_production_models.json`. The turbine can pass between 0 and
+50 m³/s, and the resulting generation is bounded between 0 and 50 MW.
 
 ---
 

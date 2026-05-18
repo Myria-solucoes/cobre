@@ -24,9 +24,16 @@
 //!
 //! ```text
 //! expression ::= term (('+' | '-') term)*
-//! term       ::= coefficient '*' variable | variable | number
+//! term       ::= coefficient '*' '@' name '*' variable
+//!              | '@' name '*' variable
+//!              | coefficient '*' variable
+//!              | variable
 //! variable   ::= var_name '(' entity_id (',' block_id)? ')'
 //! ```
+//!
+//! `@name` references are looked up in `name_to_id` supplied by the caller.
+//! Until the parameter loader is wired, callers pass `&HashMap::new()` and
+//! expressions must not contain `@name` tokens.
 //!
 //! All 20 variable names from the variable catalog are recognised. Block-specific
 //! variables accept an optional second argument; stage-only variables (`hydro_storage`,
@@ -51,7 +58,7 @@ use cobre_core::{
     VariableRef,
 };
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::LoadError;
@@ -63,6 +70,7 @@ use crate::LoadError;
 /// Private — only used during deserialization. Not re-exported.
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RawGenericConstraintsFile {
     /// `$schema` field — informational, not validated.
     #[serde(rename = "$schema")]
@@ -75,6 +83,7 @@ pub(crate) struct RawGenericConstraintsFile {
 /// Intermediate type for a single constraint entry.
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 struct RawConstraint {
     /// Constraint identifier. Must be unique within the file.
     id: i32,
@@ -98,6 +107,7 @@ struct RawConstraint {
 /// Intermediate type for the slack configuration.
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 struct RawSlackConfig {
     /// Whether a slack variable is allowed.
     enabled: bool,
@@ -126,43 +136,63 @@ struct RawSlackConfig {
 /// | `slack.enabled = true` with absent or <= 0 penalty | [`LoadError::SchemaError`] |
 /// | Expression syntax error                        | [`LoadError::SchemaError`] |
 /// | Unknown variable name in expression            | [`LoadError::SchemaError`] |
+/// | `@name` reference not found in `name_to_id`   | [`LoadError::SchemaError`] |
+///
+/// # Parameters
+///
+/// `name_to_id` maps parameter definition names to their [`EntityId`]. Pass
+/// `&HashMap::new()` when no parameters have been loaded; expressions that
+/// contain `@name` tokens will then fail with a schema error. The real mapping
+/// is wired in by the caller once the parameter loader output is available.
 ///
 /// # Examples
 ///
 /// ```no_run
 /// use cobre_io::constraints::parse_generic_constraints;
+/// use std::collections::HashMap;
 /// use std::path::Path;
 ///
 /// let constraints = parse_generic_constraints(
-///     Path::new("case/constraints/generic_constraints.json")
+///     Path::new("case/constraints/generic_constraints.json"),
+///     &HashMap::new(),
 /// ).expect("valid generic constraints file");
 /// println!("loaded {} generic constraints", constraints.len());
 /// ```
-pub fn parse_generic_constraints(path: &Path) -> Result<Vec<GenericConstraint>, LoadError> {
+#[allow(clippy::implicit_hasher)]
+pub fn parse_generic_constraints(
+    path: &Path,
+    name_to_id: &HashMap<String, EntityId>,
+) -> Result<Vec<GenericConstraint>, LoadError> {
     let raw_text = std::fs::read_to_string(path).map_err(|e| LoadError::io(path, e))?;
 
     let raw: RawGenericConstraintsFile =
         serde_json::from_str(&raw_text).map_err(|e| LoadError::parse(path, e.to_string()))?;
 
-    validate_raw(&raw, path)?;
+    validate_raw(&raw, path, name_to_id)?;
 
-    convert(raw, path)
+    convert(raw, path, name_to_id)
 }
 
 // ── Validation ────────────────────────────────────────────────────────────────
 
 /// Validate all invariants on the raw deserialized constraint data.
-fn validate_raw(raw: &RawGenericConstraintsFile, path: &Path) -> Result<(), LoadError> {
+fn validate_raw(
+    raw: &RawGenericConstraintsFile,
+    path: &Path,
+    name_to_id: &HashMap<String, EntityId>,
+) -> Result<(), LoadError> {
     validate_no_duplicate_ids(&raw.constraints, path)?;
     for (i, constraint) in raw.constraints.iter().enumerate() {
         validate_sense(&constraint.sense, i, path)?;
         validate_slack(&constraint.slack, i, path)?;
         // Expression is validated here to get accurate field paths; actual
         // parsed result is discarded — re-parsed during convert().
-        parse_expression(&constraint.expression).map_err(|msg| LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: format!("constraints[{i}].expression"),
-            message: msg,
+        parse_expression(&constraint.expression, name_to_id).map_err(|msg| {
+            LoadError::SchemaError {
+                path: path.to_path_buf(),
+                field: format!("constraints[{i}].expression"),
+                message: msg,
+            }
         })?;
     }
     Ok(())
@@ -232,16 +262,18 @@ fn validate_slack(
 fn convert(
     raw: RawGenericConstraintsFile,
     path: &Path,
+    name_to_id: &HashMap<String, EntityId>,
 ) -> Result<Vec<GenericConstraint>, LoadError> {
     let mut result = Vec::with_capacity(raw.constraints.len());
 
     for (i, c) in raw.constraints.into_iter().enumerate() {
         // Expression already validated; re-parse is infallible at this stage.
-        let expression = parse_expression(&c.expression).map_err(|msg| LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: format!("constraints[{i}].expression"),
-            message: msg,
-        })?;
+        let expression =
+            parse_expression(&c.expression, name_to_id).map_err(|msg| LoadError::SchemaError {
+                path: path.to_path_buf(),
+                field: format!("constraints[{i}].expression"),
+                message: msg,
+            })?;
 
         let sense = match c.sense.as_str() {
             ">=" => ConstraintSense::GreaterEqual,
@@ -285,16 +317,27 @@ fn convert(
 /// Grammar (spec SS3):
 /// ```text
 /// expression ::= term (('+' | '-') term)*
-/// term       ::= coefficient '*' variable | variable | number
+/// term       ::= coefficient '*' '@' name '*' variable
+///              | '@' name '*' variable
+///              | coefficient '*' variable
+///              | variable
 /// variable   ::= var_name '(' entity_id (',' block_id)? ')'
 /// ```
+///
+/// `@name` tokens are resolved against `name_to_id`. Pass `&HashMap::new()`
+/// when no parameters have been loaded; any `@name` token will then produce a
+/// schema error. Once the parameter loader is wired, the real mapping is passed
+/// instead.
 ///
 /// Returns `Err(String)` with a human-readable error message on parse failure.
 /// The caller wraps this in `LoadError::SchemaError` with the appropriate
 /// field path.
-pub(crate) fn parse_expression(input: &str) -> Result<ConstraintExpression, String> {
+pub(crate) fn parse_expression(
+    input: &str,
+    name_to_id: &HashMap<String, EntityId>,
+) -> Result<ConstraintExpression, String> {
     let tokens = tokenize(input)?;
-    let terms = parse_terms(&tokens)?;
+    let terms = parse_terms(&tokens, name_to_id)?;
     Ok(ConstraintExpression { terms })
 }
 
@@ -319,6 +362,8 @@ enum Token {
     Number(f64),
     /// An identifier: variable name.
     Ident(String),
+    /// A `@name` parameter reference. The `String` holds the identifier after `@`.
+    ParamRef(String),
 }
 
 /// Tokenize an expression string into a `Vec<Token>`.
@@ -392,6 +437,22 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 let ident: String = chars[start..i].iter().collect();
                 tokens.push(Token::Ident(ident));
             }
+            '@' => {
+                // Parse a parameter reference: `@` followed immediately by an identifier.
+                let at_pos = i;
+                i += 1; // consume `@`
+                if i >= chars.len() || !(chars[i].is_alphabetic() || chars[i] == '_') {
+                    return Err(format!(
+                        "@ must be followed by an identifier at position {at_pos}"
+                    ));
+                }
+                let start = i;
+                while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                    i += 1;
+                }
+                let name: String = chars[start..i].iter().collect();
+                tokens.push(Token::ParamRef(name));
+            }
             other => {
                 return Err(format!("unexpected character '{other}' at position {i}"));
             }
@@ -408,9 +469,15 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
 /// Grammar:
 /// ```text
 /// expression ::= term (('+' | '-') term)*
-/// term       ::= coefficient '*' variable | variable
+/// term       ::= coefficient '*' '@' name '*' variable
+///              | '@' name '*' variable
+///              | coefficient '*' variable
+///              | variable
 /// ```
-fn parse_terms(tokens: &[Token]) -> Result<Vec<LinearTerm>, String> {
+fn parse_terms(
+    tokens: &[Token],
+    name_to_id: &HashMap<String, EntityId>,
+) -> Result<Vec<LinearTerm>, String> {
     if tokens.is_empty() {
         return Err("expression must not be empty".to_string());
     }
@@ -430,12 +497,18 @@ fn parse_terms(tokens: &[Token]) -> Result<Vec<LinearTerm>, String> {
                 sign = -1.0;
                 pos += 1;
             }
-            _ => {}
+            Token::Number(_)
+            | Token::Ident(_)
+            | Token::ParamRef(_)
+            | Token::Star
+            | Token::LParen
+            | Token::RParen
+            | Token::Comma => {}
         }
     }
 
     // Parse the first term.
-    let (term, next_pos) = parse_single_term(tokens, pos, sign)?;
+    let (term, next_pos) = parse_single_term(tokens, pos, sign, name_to_id)?;
     terms.push(term);
     pos = next_pos;
 
@@ -452,7 +525,7 @@ fn parse_terms(tokens: &[Token]) -> Result<Vec<LinearTerm>, String> {
         };
         pos += 1;
 
-        let (term, next_pos) = parse_single_term(tokens, pos, op_sign)?;
+        let (term, next_pos) = parse_single_term(tokens, pos, op_sign, name_to_id)?;
         terms.push(term);
         pos = next_pos;
     }
@@ -462,15 +535,18 @@ fn parse_terms(tokens: &[Token]) -> Result<Vec<LinearTerm>, String> {
 
 /// Parse one term starting at `tokens[pos]` with the given sign prefix.
 ///
-/// A term is either:
-/// - `coefficient '*' variable(...)` — explicit coefficient
-/// - `variable(...)` — implicit coefficient 1.0 (multiplied by sign)
+/// A term is one of:
+/// - `coefficient '*' '@' name '*' variable(...)` — literal scale and parameter coefficient
+/// - `'@' name '*' variable(...)` — parameter coefficient with implicit scale 1.0
+/// - `coefficient '*' variable(...)` — explicit literal coefficient
+/// - `variable(...)` — implicit literal coefficient 1.0 (multiplied by sign)
 ///
 /// Returns the parsed `LinearTerm` and the new token position after the term.
 fn parse_single_term(
     tokens: &[Token],
     pos: usize,
     sign: f64,
+    name_to_id: &HashMap<String, EntityId>,
 ) -> Result<(LinearTerm, usize), String> {
     if pos >= tokens.len() {
         return Err(format!(
@@ -480,8 +556,8 @@ fn parse_single_term(
 
     match &tokens[pos] {
         Token::Number(coeff_val) => {
-            // Coefficient followed by '*' and then a variable reference.
-            let coefficient = coeff_val * sign;
+            // Leading numeric literal. Next must be `*`.
+            let literal = *coeff_val * sign;
             let next = pos + 1;
 
             if next >= tokens.len() {
@@ -496,36 +572,79 @@ fn parse_single_term(
                 ));
             }
 
-            let var_pos = next + 1;
-            if var_pos >= tokens.len() {
-                return Err("expected variable name after '*', got end of expression".to_string());
+            let after_star = next + 1;
+            if after_star >= tokens.len() {
+                return Err(
+                    "expected variable name or @parameter after '*', got end of expression"
+                        .to_string(),
+                );
             }
 
+            // Peek: is the next token a `@name`?
+            if let Token::ParamRef(name) = &tokens[after_star] {
+                // Shape: `literal '*' '@' name '*' variable`
+                let name = name.clone();
+                let id = resolve_param_ref(&name, name_to_id)?;
+                let star2 = after_star + 1;
+                if star2 >= tokens.len() || tokens[star2] != Token::Star {
+                    return Err(format!(
+                        "expected '*' after \"@{name}\" in parameter term, got {:?}",
+                        tokens.get(star2)
+                    ));
+                }
+                let var_pos = star2 + 1;
+                let (variable, end_pos) = parse_variable_ref(tokens, var_pos)?;
+                Ok((LinearTerm::parameter(id, literal, variable), end_pos))
+            } else {
+                // Shape: `literal '*' variable`
+                let (variable, end_pos) = parse_variable_ref(tokens, after_star)?;
+                Ok((LinearTerm::literal(literal, variable), end_pos))
+            }
+        }
+        Token::ParamRef(name) => {
+            // Shape: `'@' name '*' variable`
+            let name = name.clone();
+            let id = resolve_param_ref(&name, name_to_id)?;
+            let star = pos + 1;
+            if star >= tokens.len() || tokens[star] != Token::Star {
+                return Err(format!(
+                    "parameter \"@{name}\" must multiply a variable, e.g. \"@{name} * hydro_generation(0)\""
+                ));
+            }
+            let var_pos = star + 1;
+            if var_pos >= tokens.len() {
+                return Err(format!(
+                    "parameter \"@{name}\" must multiply a variable, e.g. \"@{name} * hydro_generation(0)\""
+                ));
+            }
+            // Guard against two consecutive @name tokens: `@a * @b * x`
+            if let Token::ParamRef(second) = &tokens[var_pos] {
+                return Err(format!(
+                    "only one @parameter reference is allowed per term; found \"@{name}\" and \"@{second}\""
+                ));
+            }
             let (variable, end_pos) = parse_variable_ref(tokens, var_pos)?;
-            Ok((
-                LinearTerm {
-                    coefficient,
-                    variable,
-                },
-                end_pos,
-            ))
+            Ok((LinearTerm::parameter(id, sign, variable), end_pos))
         }
         Token::Ident(_) => {
-            // Variable reference with implicit coefficient 1.0 × sign.
-            let coefficient = sign;
+            // Variable reference with implicit literal coefficient 1.0 × sign.
             let (variable, end_pos) = parse_variable_ref(tokens, pos)?;
-            Ok((
-                LinearTerm {
-                    coefficient,
-                    variable,
-                },
-                end_pos,
-            ))
+            Ok((LinearTerm::literal(sign, variable), end_pos))
         }
         other => Err(format!(
             "expected a coefficient or variable name at position {pos}, got {other:?}"
         )),
     }
+}
+
+/// Look up `name` in `name_to_id`, returning its [`EntityId`] or a descriptive error.
+fn resolve_param_ref(
+    name: &str,
+    name_to_id: &HashMap<String, EntityId>,
+) -> Result<EntityId, String> {
+    name_to_id.get(name).copied().ok_or_else(|| {
+        format!("unknown parameter \"@{name}\": no definition with this name was loaded")
+    })
 }
 
 // ── Integer conversion helpers ────────────────────────────────────────────────
@@ -787,6 +906,7 @@ fn build_variable_ref(
 )]
 mod tests {
     use super::*;
+    use cobre_core::CoefficientRef;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -796,6 +916,27 @@ mod tests {
         let mut f = NamedTempFile::new().expect("tempfile");
         f.write_all(content.as_bytes()).expect("write");
         f
+    }
+
+    fn lit(term: &LinearTerm) -> f64 {
+        match term.coefficient {
+            CoefficientRef::Literal(v) => v,
+            CoefficientRef::Parameter(_) => panic!("expected literal"),
+        }
+    }
+
+    fn param_id(term: &LinearTerm) -> EntityId {
+        match term.coefficient {
+            CoefficientRef::Parameter(id) => id,
+            CoefficientRef::Literal(_) => panic!("expected Parameter coefficient"),
+        }
+    }
+
+    fn one_param_table() -> std::collections::HashMap<String, EntityId> {
+        let mut m = std::collections::HashMap::new();
+        m.insert("rho_eq".to_string(), EntityId(7));
+        m.insert("rho".to_string(), EntityId(7));
+        m
     }
 
     const VALID_JSON: &str = r#"{
@@ -822,9 +963,9 @@ mod tests {
     /// AC-1: Simple single-term expression with implicit coefficient.
     #[test]
     fn test_expr_simple_single_term() {
-        let expr = parse_expression("hydro_generation(10)").unwrap();
+        let expr = parse_expression("hydro_generation(10)", &HashMap::new()).unwrap();
         assert_eq!(expr.terms.len(), 1);
-        assert!((expr.terms[0].coefficient - 1.0).abs() < f64::EPSILON);
+        assert!((lit(&expr.terms[0]) - 1.0).abs() < f64::EPSILON);
         assert_eq!(
             expr.terms[0].variable,
             VariableRef::HydroGeneration {
@@ -837,9 +978,13 @@ mod tests {
     /// Addition: two terms, both coefficient 1.0.
     #[test]
     fn test_expr_addition_two_terms() {
-        let expr = parse_expression("hydro_generation(10) + hydro_generation(11)").unwrap();
+        let expr = parse_expression(
+            "hydro_generation(10) + hydro_generation(11)",
+            &HashMap::new(),
+        )
+        .unwrap();
         assert_eq!(expr.terms.len(), 2);
-        assert!((expr.terms[0].coefficient - 1.0).abs() < f64::EPSILON);
+        assert!((lit(&expr.terms[0]) - 1.0).abs() < f64::EPSILON);
         assert_eq!(
             expr.terms[0].variable,
             VariableRef::HydroGeneration {
@@ -847,7 +992,7 @@ mod tests {
                 block_id: None,
             }
         );
-        assert!((expr.terms[1].coefficient - 1.0).abs() < f64::EPSILON);
+        assert!((lit(&expr.terms[1]) - 1.0).abs() < f64::EPSILON);
         assert_eq!(
             expr.terms[1].variable,
             VariableRef::HydroGeneration {
@@ -860,9 +1005,13 @@ mod tests {
     /// AC-2: Coefficient with `*` and subtraction (negation of second term).
     #[test]
     fn test_expr_coefficient_and_subtraction() {
-        let expr = parse_expression("2.5 * thermal_generation(5) - hydro_generation(3)").unwrap();
+        let expr = parse_expression(
+            "2.5 * thermal_generation(5) - hydro_generation(3)",
+            &HashMap::new(),
+        )
+        .unwrap();
         assert_eq!(expr.terms.len(), 2);
-        assert!((expr.terms[0].coefficient - 2.5).abs() < 1e-10);
+        assert!((lit(&expr.terms[0]) - 2.5).abs() < 1e-10);
         assert_eq!(
             expr.terms[0].variable,
             VariableRef::ThermalGeneration {
@@ -870,7 +1019,7 @@ mod tests {
                 block_id: None,
             }
         );
-        assert!((expr.terms[1].coefficient - (-1.0)).abs() < f64::EPSILON);
+        assert!((lit(&expr.terms[1]) - (-1.0)).abs() < f64::EPSILON);
         assert_eq!(
             expr.terms[1].variable,
             VariableRef::HydroGeneration {
@@ -883,16 +1032,20 @@ mod tests {
     /// Subtraction: second term has coefficient -1.0.
     #[test]
     fn test_expr_subtraction_negates_coefficient() {
-        let expr = parse_expression("thermal_generation(5) - hydro_generation(3)").unwrap();
+        let expr = parse_expression(
+            "thermal_generation(5) - hydro_generation(3)",
+            &HashMap::new(),
+        )
+        .unwrap();
         assert_eq!(expr.terms.len(), 2);
-        assert!((expr.terms[0].coefficient - 1.0).abs() < f64::EPSILON);
-        assert!((expr.terms[1].coefficient - (-1.0)).abs() < f64::EPSILON);
+        assert!((lit(&expr.terms[0]) - 1.0).abs() < f64::EPSILON);
+        assert!((lit(&expr.terms[1]) - (-1.0)).abs() < f64::EPSILON);
     }
 
     /// Block-specific variable: `hydro_turbined(5, 0)` → `block_id: Some(0)`.
     #[test]
     fn test_expr_block_specific_variable() {
-        let expr = parse_expression("hydro_turbined(5, 0)").unwrap();
+        let expr = parse_expression("hydro_turbined(5, 0)", &HashMap::new()).unwrap();
         assert_eq!(expr.terms.len(), 1);
         assert_eq!(
             expr.terms[0].variable,
@@ -906,7 +1059,7 @@ mod tests {
     /// Block-specific line_exchange: `line_exchange(0, 1)` → `block_id: Some(1)`.
     #[test]
     fn test_expr_line_exchange_with_block() {
-        let expr = parse_expression("line_exchange(0, 1)").unwrap();
+        let expr = parse_expression("line_exchange(0, 1)", &HashMap::new()).unwrap();
         assert_eq!(expr.terms.len(), 1);
         assert_eq!(
             expr.terms[0].variable,
@@ -920,7 +1073,7 @@ mod tests {
     /// Stage-only variable: `hydro_storage(7)` → no block.
     #[test]
     fn test_expr_stage_only_hydro_storage() {
-        let expr = parse_expression("hydro_storage(7)").unwrap();
+        let expr = parse_expression("hydro_storage(7)", &HashMap::new()).unwrap();
         assert_eq!(expr.terms.len(), 1);
         assert_eq!(
             expr.terms[0].variable,
@@ -933,7 +1086,7 @@ mod tests {
     /// Stage-only variable with block argument → error.
     #[test]
     fn test_expr_stage_only_with_block_is_error() {
-        let err = parse_expression("hydro_storage(7, 0)").unwrap_err();
+        let err = parse_expression("hydro_storage(7, 0)", &HashMap::new()).unwrap_err();
         assert!(
             err.contains("does not accept a block argument"),
             "expected block argument error, got: {err}"
@@ -943,7 +1096,7 @@ mod tests {
     /// AC-3: Unknown variable name → error.
     #[test]
     fn test_expr_unknown_variable_name() {
-        let err = parse_expression("invalid_var(0)").unwrap_err();
+        let err = parse_expression("invalid_var(0)", &HashMap::new()).unwrap_err();
         assert!(
             err.contains("unknown variable name"),
             "expected unknown variable error, got: {err}"
@@ -953,7 +1106,7 @@ mod tests {
     /// Missing closing parenthesis → error.
     #[test]
     fn test_expr_missing_closing_paren() {
-        let err = parse_expression("hydro_generation(10").unwrap_err();
+        let err = parse_expression("hydro_generation(10", &HashMap::new()).unwrap_err();
         assert!(
             err.contains("expected ')'") || err.contains("unexpected end"),
             "expected paren error, got: {err}"
@@ -963,14 +1116,14 @@ mod tests {
     /// Empty expression → error.
     #[test]
     fn test_expr_empty_is_error() {
-        let err = parse_expression("").unwrap_err();
+        let err = parse_expression("", &HashMap::new()).unwrap_err();
         assert!(
             err.contains("empty"),
             "expected empty expression error, got: {err}"
         );
     }
 
-    /// All 19 variable types are recognised.
+    /// All 20 variable types are recognised.
     #[test]
     fn test_expr_all_19_variable_types_recognised() {
         let cases: &[(&str, VariableRef)] = &[
@@ -1116,7 +1269,7 @@ mod tests {
         assert_eq!(cases.len(), 20, "must have exactly 20 variable types");
 
         for (input, expected) in cases {
-            let expr = parse_expression(input)
+            let expr = parse_expression(input, &HashMap::new())
                 .unwrap_or_else(|e| panic!("parse failed for \"{input}\": {e}"));
             assert_eq!(expr.terms.len(), 1, "single term for \"{input}\"");
             assert_eq!(
@@ -1126,13 +1279,110 @@ mod tests {
         }
     }
 
+    // ── @name parameter reference unit tests ─────────────────────────────────
+
+    /// AC-1: `@rho_eq * hydro_generation(0)` with implicit scale 1.0.
+    #[test]
+    fn parses_param_ref_implicit_scale() {
+        let tbl = one_param_table();
+        let expr = parse_expression("@rho_eq * hydro_generation(0)", &tbl).unwrap();
+        assert_eq!(expr.terms.len(), 1);
+        assert_eq!(param_id(&expr.terms[0]), EntityId(7));
+        assert!((expr.terms[0].scale - 1.0).abs() < f64::EPSILON);
+        assert_eq!(
+            expr.terms[0].variable,
+            VariableRef::HydroGeneration {
+                hydro_id: EntityId(0),
+                block_id: None,
+            }
+        );
+    }
+
+    /// AC-2: `2.5 * @rho_eq * hydro_generation(0)` with explicit literal scale.
+    #[test]
+    fn parses_param_ref_with_literal_scale() {
+        let tbl = one_param_table();
+        let expr = parse_expression("2.5 * @rho_eq * hydro_generation(0)", &tbl).unwrap();
+        assert_eq!(expr.terms.len(), 1);
+        assert_eq!(param_id(&expr.terms[0]), EntityId(7));
+        assert!((expr.terms[0].scale - 2.5).abs() < 1e-10);
+    }
+
+    /// AC-3: Unknown `@name` produces an error naming the identifier.
+    #[test]
+    fn unknown_param_ref_returns_named_error() {
+        let err = parse_expression("@unknown * hydro_generation(0)", &HashMap::new()).unwrap_err();
+        assert!(
+            err.contains("unknown parameter"),
+            "error should contain 'unknown parameter', got: {err}"
+        );
+        assert!(
+            err.contains("@unknown"),
+            "error should name the offending ref, got: {err}"
+        );
+    }
+
+    /// AC-4: `@rho_eq` without a following `*` and variable is an error.
+    #[test]
+    fn bare_param_ref_without_variable_is_error() {
+        let tbl = one_param_table();
+        let err = parse_expression("@rho_eq + hydro_generation(0)", &tbl).unwrap_err();
+        assert!(
+            err.contains("must multiply a variable"),
+            "error should say 'must multiply a variable', got: {err}"
+        );
+    }
+
+    /// Minus sign before `@name` negates the scale (AC-5 in ticket).
+    #[test]
+    fn param_ref_after_minus_negates_scale() {
+        let tbl = one_param_table();
+        let expr =
+            parse_expression("thermal_generation(5) - @rho * hydro_generation(3)", &tbl).unwrap();
+        assert_eq!(expr.terms.len(), 2);
+        // First term: literal coefficient 1.0
+        assert!((lit(&expr.terms[0]) - 1.0).abs() < f64::EPSILON);
+        // Second term: parameter coefficient with scale -1.0
+        assert_eq!(param_id(&expr.terms[1]), EntityId(7));
+        assert!((expr.terms[1].scale - (-1.0)).abs() < f64::EPSILON);
+        assert_eq!(
+            expr.terms[1].variable,
+            VariableRef::HydroGeneration {
+                hydro_id: EntityId(3),
+                block_id: None,
+            }
+        );
+    }
+
+    /// Two `@name` references in a single term is rejected.
+    #[test]
+    fn two_param_refs_in_one_term_is_error() {
+        let mut tbl = one_param_table();
+        tbl.insert("b".to_string(), EntityId(8));
+        let err = parse_expression("@rho_eq * @b * hydro_generation(0)", &tbl).unwrap_err();
+        assert!(
+            err.contains("only one @parameter reference"),
+            "error should say 'only one @parameter reference', got: {err}"
+        );
+    }
+
+    /// `2.0 * @rho * hydro_generation(0)` yields scale 2.0 and Parameter coefficient.
+    #[test]
+    fn nested_literal_and_param_ref() {
+        let tbl = one_param_table();
+        let expr = parse_expression("2.0 * @rho * hydro_generation(0)", &tbl).unwrap();
+        assert_eq!(expr.terms.len(), 1);
+        assert_eq!(param_id(&expr.terms[0]), EntityId(7));
+        assert!((expr.terms[0].scale - 2.0).abs() < f64::EPSILON);
+    }
+
     // ── parse_generic_constraints integration tests ───────────────────────────
 
     /// Valid 2-constraint file. First has 2 hydro_generation terms.
     #[test]
     fn test_parse_valid_two_constraints() {
         let f = write_json(VALID_JSON);
-        let result = parse_generic_constraints(f.path()).unwrap();
+        let result = parse_generic_constraints(f.path(), &HashMap::new()).unwrap();
 
         // Should be 2 constraints, sorted by id ascending: 0, 1.
         assert_eq!(result.len(), 2);
@@ -1143,7 +1393,7 @@ mod tests {
         // After sorting, result[1] is the "min_hydro" constraint.
         let min_hydro = &result[1];
         assert_eq!(min_hydro.expression.terms.len(), 2);
-        assert!((min_hydro.expression.terms[0].coefficient - 1.0).abs() < f64::EPSILON);
+        assert!((lit(&min_hydro.expression.terms[0]) - 1.0).abs() < f64::EPSILON);
         assert_eq!(
             min_hydro.expression.terms[0].variable,
             VariableRef::HydroGeneration {
@@ -1165,12 +1415,13 @@ mod tests {
     #[test]
     fn test_parse_coefficient_and_subtraction_expression() {
         let f = write_json(VALID_JSON);
-        let result = parse_generic_constraints(f.path()).unwrap();
+        let result = parse_generic_constraints(f.path(), &HashMap::new()).unwrap();
 
         // result[0] is id=0 "max_thermal"
         let max_thermal = &result[0];
         assert_eq!(max_thermal.expression.terms.len(), 2);
-        assert!((max_thermal.expression.terms[0].coefficient - 2.5).abs() < 1e-10);
+        assert!((lit(&max_thermal.expression.terms[0]) - 2.5).abs() < 1e-10);
+        assert!((max_thermal.expression.terms[0].scale - 1.0).abs() < f64::EPSILON);
         assert_eq!(
             max_thermal.expression.terms[0].variable,
             VariableRef::ThermalGeneration {
@@ -1178,7 +1429,8 @@ mod tests {
                 block_id: None,
             }
         );
-        assert!((max_thermal.expression.terms[1].coefficient - (-1.0)).abs() < f64::EPSILON);
+        assert!((lit(&max_thermal.expression.terms[1]) - (-1.0)).abs() < f64::EPSILON);
+        assert!((max_thermal.expression.terms[1].scale - 1.0).abs() < f64::EPSILON);
         assert_eq!(
             max_thermal.expression.terms[1].variable,
             VariableRef::HydroGeneration {
@@ -1187,6 +1439,72 @@ mod tests {
             }
         );
         assert_eq!(max_thermal.sense, ConstraintSense::LessEqual);
+    }
+
+    /// AC-5 (ticket): JSON file with `@rho_eq` in expression parses correctly.
+    #[test]
+    fn test_parse_param_ref_in_json_constraint() {
+        let json = r#"{
+  "constraints": [
+    {
+      "id": 0,
+      "name": "mixed",
+      "expression": "thermal_generation(5) - @rho_eq * hydro_generation(3)",
+      "sense": ">=",
+      "slack": { "enabled": false }
+    }
+  ]
+}"#;
+        let f = write_json(json);
+        let tbl = one_param_table();
+        let result = parse_generic_constraints(f.path(), &tbl).unwrap();
+        assert_eq!(result.len(), 1);
+        let expr = &result[0].expression;
+        assert_eq!(expr.terms.len(), 2);
+        // First term: literal 1.0
+        assert!((lit(&expr.terms[0]) - 1.0).abs() < f64::EPSILON);
+        // Second term: parameter with scale -1.0
+        assert_eq!(param_id(&expr.terms[1]), EntityId(7));
+        assert!((expr.terms[1].scale - (-1.0)).abs() < f64::EPSILON);
+        assert_eq!(
+            expr.terms[1].variable,
+            VariableRef::HydroGeneration {
+                hydro_id: EntityId(3),
+                block_id: None,
+            }
+        );
+    }
+
+    /// Unknown `@param` in JSON expression → SchemaError with "expression" field and
+    /// "unknown parameter" in the message.
+    #[test]
+    fn test_parse_unknown_param_returns_schema_error() {
+        let json = r#"{
+  "constraints": [
+    {
+      "id": 0,
+      "name": "bad_ref",
+      "expression": "@missing * hydro_generation(0)",
+      "sense": ">=",
+      "slack": { "enabled": false }
+    }
+  ]
+}"#;
+        let f = write_json(json);
+        let err = parse_generic_constraints(f.path(), &HashMap::new()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert!(
+                    field.contains("expression"),
+                    "field should contain 'expression', got: {field}"
+                );
+                assert!(
+                    message.contains("unknown parameter"),
+                    "message should contain 'unknown parameter', got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
     }
 
     /// Invalid expression → SchemaError with "expression" in field.
@@ -1204,7 +1522,7 @@ mod tests {
   ]
 }"#;
         let f = write_json(json);
-        let err = parse_generic_constraints(f.path()).unwrap_err();
+        let err = parse_generic_constraints(f.path(), &HashMap::new()).unwrap_err();
         match &err {
             LoadError::SchemaError { field, message, .. } => {
                 assert!(
@@ -1242,7 +1560,7 @@ mod tests {
   ]
 }"#;
         let f = write_json(json);
-        let err = parse_generic_constraints(f.path()).unwrap_err();
+        let err = parse_generic_constraints(f.path(), &HashMap::new()).unwrap_err();
         match &err {
             LoadError::SchemaError { field, message, .. } => {
                 assert!(
@@ -1273,7 +1591,7 @@ mod tests {
   ]
 }"#;
         let f = write_json(json);
-        let err = parse_generic_constraints(f.path()).unwrap_err();
+        let err = parse_generic_constraints(f.path(), &HashMap::new()).unwrap_err();
         match &err {
             LoadError::SchemaError { field, message, .. } => {
                 assert!(
@@ -1304,7 +1622,7 @@ mod tests {
   ]
 }"#;
         let f = write_json(json);
-        let err = parse_generic_constraints(f.path()).unwrap_err();
+        let err = parse_generic_constraints(f.path(), &HashMap::new()).unwrap_err();
         match &err {
             LoadError::SchemaError { field, .. } => {
                 assert!(
@@ -1323,7 +1641,7 @@ mod tests {
     fn test_parse_empty_constraints_array() {
         let json = r#"{ "constraints": [] }"#;
         let f = write_json(json);
-        let result = parse_generic_constraints(f.path()).unwrap();
+        let result = parse_generic_constraints(f.path(), &HashMap::new()).unwrap();
         assert!(result.is_empty());
     }
 
@@ -1356,7 +1674,7 @@ mod tests {
   ]
 }"#;
         let f = write_json(json);
-        let result = parse_generic_constraints(f.path()).unwrap();
+        let result = parse_generic_constraints(f.path(), &HashMap::new()).unwrap();
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].id, EntityId(0));
         assert_eq!(result[1].id, EntityId(2));
@@ -1378,7 +1696,7 @@ mod tests {
   ]
 }"#;
         let f = write_json(json);
-        let result = parse_generic_constraints(f.path()).unwrap();
+        let result = parse_generic_constraints(f.path(), &HashMap::new()).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "net_exchange");
         assert_eq!(result[0].expression.terms.len(), 1);
@@ -1406,7 +1724,7 @@ mod tests {
   ]
 }"#;
         let f = write_json(json);
-        let err = parse_generic_constraints(f.path()).unwrap_err();
+        let err = parse_generic_constraints(f.path(), &HashMap::new()).unwrap_err();
         match &err {
             LoadError::SchemaError { field, message, .. } => {
                 assert!(
@@ -1437,7 +1755,7 @@ mod tests {
   ]
 }"#;
         let f = write_json(json);
-        let result = parse_generic_constraints(f.path()).unwrap();
+        let result = parse_generic_constraints(f.path(), &HashMap::new()).unwrap();
         assert_eq!(result.len(), 1);
         assert!(result[0].description.is_none());
     }

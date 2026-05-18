@@ -5,6 +5,7 @@ use cobre_core::scenario::SamplingScheme;
 use crate::{
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
+    energy_conversion::EnergyConversionSet,
     simulation::SimulationConfig,
 };
 
@@ -38,6 +39,16 @@ impl StudySetup {
     // ─────────────────────────────────────────────────────────────────────
     // Context builders — span multiple sub-structs
     // ─────────────────────────────────────────────────────────────────────
+
+    /// Return the pre-computed [`EnergyConversionSet`] for this study.
+    ///
+    /// Provides `ρ_eq`, `V_ref`, `Q_ref`, and `ρ_acum` (accumulated cascade
+    /// productivity) for every `(hydro, stage)` pair. Consumed by the
+    /// energy-balance LP constraints and ENA/EARM extraction.
+    #[must_use]
+    pub fn energy_conversion(&self) -> &EnergyConversionSet {
+        &self.energy_conversion
+    }
 
     /// Return a reference to the simulation configuration.
     #[must_use]

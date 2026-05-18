@@ -22,7 +22,9 @@
 use crate::{
     config::Config,
     constraints::{exchange_factors::RawExchangeFactorsFile, generic::RawGenericConstraintsFile},
-    extensions::production_models::RawProductionModelFile,
+    extensions::{
+        production_models::RawProductionModelFile, scalar_parameters::ScalarParametersFile,
+    },
     initial_conditions::RawInitialConditions,
     penalties::RawPenalties,
     scenarios::{
@@ -64,6 +66,7 @@ use crate::{
 /// | `correlation.schema.json`             | `scenarios/correlation.json`           |
 /// | `initial_conditions.schema.json`      | `initial_conditions.json`              |
 /// | `production_models.schema.json`       | `system/hydro_production_models.json`  |
+/// | `scalar_parameters.schema.json`       | `system/scalar_parameters.json`        |
 ///
 /// # Errors
 ///
@@ -78,7 +81,7 @@ use crate::{
 /// use cobre_io::schema::generate_schemas;
 ///
 /// let schemas = generate_schemas().expect("schema generation must not fail");
-/// assert!(schemas.len() >= 17);
+/// assert!(schemas.len() >= 18);
 /// let config_schema = schemas.iter().find(|(name, _)| name == "config.schema.json");
 /// assert!(config_schema.is_some());
 /// ```
@@ -133,6 +136,10 @@ pub fn generate_schemas() -> Result<Vec<(String, serde_json::Value)>, serde_json
         (
             "production_models.schema.json",
             schemars::schema_for!(RawProductionModelFile),
+        ),
+        (
+            "scalar_parameters.schema.json",
+            schemars::schema_for!(ScalarParametersFile),
         ),
     ];
 

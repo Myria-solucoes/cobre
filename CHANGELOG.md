@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-05-18
+
 ### Added
 
 - Reserved three new crate names in the workspace as placeholders for
@@ -17,6 +19,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cobre-emt` (electromagnetic transient analysis). Each ships as an
   empty library following the existing `cobre-tui` reservation pattern
   and is not yet implemented.
+
+- Five new columns in `simulation/hydros.parquet`, populated for every
+  `(stage, block, hydro)` row:
+  - `equivalent_productivity_mw_per_m3s` (MW/(m³/s)) — equivalent
+    productivity `ρ_eq`. For `ConstantProductivity` and
+    `LinearizedHead` hydros it is the stored input scalar; for FPHA
+    hydros it is derived from VHA geometry, the specific productivity
+    `ρ_esp`, and the reference operating point `(V_ref, Q_ref)`.
+  - `accumulated_productivity_mw_per_m3s` (MW/(m³/s)) — accumulated
+    productivity `ρ_acum`: the sum of `ρ_eq` over each hydro and every
+    plant downstream of it along the cascade.
+  - `incremental_inflow_energy_mw` (MW) — incremental natural inflow
+    expressed as energy, computed as
+    `ρ_acum · incremental_inflow_m3s`.
+  - `stored_energy_initial_mwh` (MWh) — stored reservoir energy at the
+    start of the block,
+    `(storage_initial_hm3 − min_storage_hm3) · ρ_acum · 10⁶ / 3600`.
+  - `stored_energy_final_mwh` (MWh) — stored reservoir energy at the
+    end of the block, using the same formula with the final storage.
 
 ### Removed
 
@@ -28,6 +49,173 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   estimation pipeline. The wired path
   (`apply_annual_prepass_reductions` → `reduce_entity_orders_annual`)
   remains the single source of truth.
+
+- Column `productivity_mw_per_m3s` from `simulation/hydros.parquet`. The
+  column was `null` for FPHA hydros and duplicated input for non-FPHA
+  hydros. It is replaced by the five always-populated energy columns
+  listed above.
+
+- Inline `productivity_mw_per_m3s` field on
+  `system/hydros.json` `generation` blocks. The per-stage
+  productivity coefficient is now authored on every
+  `stage_ranges[]` or `seasons[]` entry in
+  `system/hydro_production_models.json` under the same key.
+  Cases that previously omitted
+  `system/hydro_production_models.json` and relied on the
+  entity-level scalar must now ship the file with one entry per
+  hydro.
+
+- Input files `system/scalar_parameter_definitions.parquet` and
+  `system/scalar_parameter_values.parquet`. Scalar parameters
+  for generic constraints (`@name` references) are now authored
+  in a single `system/scalar_parameters.json` carrying one
+  object per parameter with a `kind` discriminator and
+  kind-specific payload (`value`, `values`, or
+  `computed_spec`).
+
+- Several `config.json` fields whose values were no longer wired to any
+  downstream consumer: `modeling.inflow_non_negativity.penalty_cost` (the
+  per-hydro slack cost is now sourced exclusively from
+  `penalties.json::hydro.inflow_nonnegativity_cost`),
+  `training.cut_formulation`, `training.forward_pass`,
+  `simulation.policy_type`, `simulation.output_mode`, `simulation.output_path`,
+  and the legacy export flags
+  (`training`, `cuts`, `vertices`, `simulation`, `forward_detail`,
+  `backward_detail`, `compression`) under `exports`. Any case still carrying
+  these keys is rejected at parse with an `unknown field` error.
+
+- The `"fixed"` value of `estimation.order_selection`. Only `"pacf"` and
+  `"pacf_annual"` remain valid; the alias was previously accepted and silently
+  mapped to `"pacf"`.
+
+- The `version` field on `penalties.json`. The field was parsed but never
+  consulted; schema-version gating is enforced via the `$schema` URL instead.
+
+### Changed
+
+- `system/hydro_production_models.json` —
+  `productivity_mw_per_m3s` is now optional for
+  `constant_productivity` and `linearized_head` models. Omit the
+  field (or set it to `null`) when the value is supplied per stage
+  by `system/hydro_energy_productivity.parquet`.
+
+- Productivity validation relaxed from strictly positive (`> 0.0`)
+  to non-negative (`>= 0.0`) for `productivity_mw_per_m3s` in
+  `system/hydro_production_models.json`,
+  `equivalent_productivity_mw_per_m3s` in
+  `system/hydro_energy_productivity.parquet`, and
+  `specific_productivity_mw_per_m3s_per_m` in the same parquet.
+  A value of `0.0` is accepted as a planned-outage marker for the
+  affected `(hydro, stage)`; the LP treats these coefficients as
+  multipliers, so zero produces zero generation without any
+  division-by-zero hazard. Negative values are still rejected.
+
+- `config.json::modeling.inflow_non_negativity.method` is now a typed
+  enum with four valid values (`"none"`, `"truncation"`, `"penalty"`,
+  `"truncation_with_penalty"`). Unrecognised strings were previously
+  silently coerced to `"none"`; they are now rejected at parse.
+
+- `config.json::training.cut_selection.threshold` is consulted only
+  when `method = "level1"` (it is the activity-count cutoff for cut
+  deactivation). The `"lml1"` and `"domination"` methods no longer
+  fall back to `threshold`; they now require `memory_window` and
+  `domination_epsilon` respectively, and reject configurations that
+  omit them.
+
+### Breaking Changes
+
+**Output schema** — `simulation/hydros.parquet` grows from 31 to 35
+columns. The column `productivity_mw_per_m3s` is removed; five new
+non-nullable `Float64` columns are added after `generation_mwh`:
+`equivalent_productivity_mw_per_m3s`,
+`accumulated_productivity_mw_per_m3s`, `incremental_inflow_energy_mw`,
+`stored_energy_initial_mwh`, `stored_energy_final_mwh`. The
+accompanying `variables.csv` dictionary file is updated to reflect the
+new columns and drops the entry for the removed one.
+
+**FPHA validation** — Studies that declare a hydro with
+`generation_model: "fpha"` must now supply either VHA geometry plus
+`specific_productivity_mw_per_m3s_per_m`, or (when the optional
+`system/hydro_energy_productivity.parquet` override is in place) a
+per-`(hydro, stage)` `equivalent_productivity` entry. Cases that
+previously loaded with neither source now fail fast at setup time with
+an error that names the offending plant and lists the three accepted
+remediations.
+
+**Hydro productivity authoring** — Studies must remove
+`productivity_mw_per_m3s` from every `hydros.json` `generation`
+block and supply the same value via a
+`system/hydro_production_models.json` entry. For non-FPHA models
+(`constant_productivity`, `linearized_head`) the field is
+positive when present on every `stage_ranges[]` / `seasons[]`
+entry, and may be omitted (or `null`) to defer to the parquet
+override (see the next entry). The previous opt-in
+`productivity_override` key on those entries is renamed to
+`productivity_mw_per_m3s`; the override semantics (replace the
+entity-level base value) no longer apply because there is no
+longer an entity-level base value.
+
+**Productivity resolution across files** — The
+`equivalent_productivity_mw_per_m3s` column in
+`system/hydro_energy_productivity.parquet` now applies to **all**
+hydro generation models, not only FPHA. A row supplying this value
+for a non-FPHA hydro is honoured as the equivalent productivity
+ρ_eq for that `(hydro, stage)` instead of being silently ignored.
+Studies that supplied a value for the same `(hydro, stage)` pair
+in both `system/hydro_production_models.json`
+(`productivity_mw_per_m3s`) and `system/hydro_energy_productivity.parquet`
+(`equivalent_productivity_mw_per_m3s`) are now rejected at load time
+with a schema error naming both files. Studies that supplied a value
+in neither file for a non-FPHA `(hydro, stage)` pair are likewise
+rejected with a clear coverage-gap error, rather than failing deeper
+in the SDDP setup layer.
+
+**Scalar parameters file format** — The pair of input parquet
+files `system/scalar_parameter_definitions.parquet` and
+`system/scalar_parameter_values.parquet` is removed. Studies
+that use scalar parameters in generic constraints must now ship
+`system/scalar_parameters.json` instead. The new file uses one
+array entry per parameter with a `kind` discriminator
+(`constant`, `per_stage`, `seasonal`, or `computed`) and a
+kind-specific payload. Authoring order is preserved at parse
+time; LP coefficients are unaffected by authoring order
+(parameters are looked up by `id` at LP-build time).
+
+**Strict JSON parsing** — every input JSON file (`config.json`,
+`penalties.json`, `stages.json`, `initial_conditions.json`, and every
+file under `system/`, `constraints/`, and `scenarios/`) now rejects
+unknown top-level and per-entry fields with a hard parse error.
+Misspellings (`"max_outflow"` vs `"max_outflow_m3s"`) and stale
+configuration keys from earlier releases that previously survived
+silently must be fixed before a case will load. The error message
+names the unrecognised field.
+
+**Migration**
+
+- Replace reads of `productivity_mw_per_m3s` with
+  `equivalent_productivity_mw_per_m3s`. For `ConstantProductivity` and
+  `LinearizedHead` hydros the numeric value is identical to the
+  previous column; for FPHA hydros it is the derived `ρ_eq`
+  (previously `null`).
+- Notebooks and dashboards that filtered out the old `null` values for
+  FPHA hydros can now treat all hydros uniformly.
+- Downstream consumers that need accumulated cascade productivity,
+  energy-units inflows, or reservoir energy state should read from the
+  four new columns instead of computing them externally.
+- Remove `productivity_mw_per_m3s` from every `generation` block
+  in `system/hydros.json`; transfer the same numeric value into
+  the matching entry in `system/hydro_production_models.json`
+  under the same key.
+- Rename any `productivity_override` keys in
+  `system/hydro_production_models.json` to
+  `productivity_mw_per_m3s`. The values do not change; the
+  positive-value validation rule still applies, but the
+  override-versus-default distinction is gone.
+- Replace `system/scalar_parameter_definitions.parquet` and
+  `system/scalar_parameter_values.parquet` with a single
+  `system/scalar_parameters.json` (see the schema at
+  `book/src/schemas/scalar_parameters.schema.json` and the
+  authoring guide at `book/src/guide/scalar-parameters.md`).
 
 ## [0.5.1] - 2026-04-28
 
@@ -1212,14 +1400,14 @@ disappears from `cobre.results.load_policy` per-cut dicts.
 
 ### Added
 
-- Phase 1 (cobre-core): Entity model (Bus, Line, Thermal, Hydro, Contract, PumpingStation, NonControllable), system registry, topology validation, three-tier penalty resolution
-- Phase 2 (cobre-io): Case loader with five-layer validation, JSON/Parquet parsing for 33 input types, penalty/bound resolution
-- Phase 3 (cobre-solver): LP solver abstraction with HiGHS backend, warm-start support, conformance tests
-- Phase 4 (cobre-comm): Communicator trait with LocalBackend and FerrompiBackend, compile-time feature selection
-- Phase 5 (cobre-stochastic): PAR(p) preprocessing, SipHash seed derivation, Cholesky correlation, opening trees, InSample sampling
-- Phase 6 (cobre-sddp): SDDP training loop with forward/backward pass, Benders cuts, stopping rule set, convergence monitoring
-- Phase 7 (cobre-sddp + cobre-io): Simulation pipeline with MPI aggregation, Hive-partitioned Parquet output, FlatBuffers policy checkpoint
-- Phase 8 (cobre-cli): Command-line interface with `run`, `validate`, `report`, `version` subcommands, progress bars, exit codes
+- Entity model and core (cobre-core): Bus, Line, Thermal, Hydro, Contract, PumpingStation, NonControllable types; system registry; topology validation; three-tier penalty resolution
+- Case loader (cobre-io): five-layer validation; JSON/Parquet parsing for 33 input types; penalty/bound resolution
+- LP solver abstraction (cobre-solver): HiGHS backend; warm-start support; conformance tests
+- Communication layer (cobre-comm): Communicator trait with LocalBackend and FerrompiBackend; compile-time feature selection
+- Stochastic preprocessing (cobre-stochastic): PAR(p) preprocessing; SipHash seed derivation; Cholesky correlation; opening trees; InSample sampling
+- SDDP training loop (cobre-sddp): forward/backward pass; Benders cuts; stopping rule set; convergence monitoring
+- Simulation pipeline (cobre-sddp + cobre-io): MPI aggregation; Hive-partitioned Parquet output; FlatBuffers policy checkpoint
+- Command-line interface (cobre-cli): `run`, `validate`, `report`, `version` subcommands; progress bars; exit codes
 
 ## [0.0.1] - 2026-02-23
 

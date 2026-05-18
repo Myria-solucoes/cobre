@@ -55,6 +55,7 @@ use cobre_sddp::{
     config::{CutManagementConfig, EventConfig, LoopConfig},
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
+    energy_conversion::{EnergyConversion, EnergyConversionSet},
     horizon_mode::HorizonMode,
     hydro_models::PrepareHydroModelsResult,
     indexer::StageIndexer,
@@ -184,11 +185,10 @@ fn build_system() -> cobre_core::System {
         max_storage_hm3: 50.0,
         min_outflow_m3s: 0.0,
         max_outflow_m3s: None,
-        generation_model: HydroGenerationModel::ConstantProductivity {
-            productivity_mw_per_m3s: 1.0,
-        },
+        generation_model: HydroGenerationModel::ConstantProductivity,
         min_turbined_m3s: 0.0,
         max_turbined_m3s: 50.0,
+        specific_productivity_mw_per_m3s_per_m: None,
         min_generation_mw: 0.0,
         max_generation_mw: 50.0,
         tailrace: None,
@@ -400,7 +400,7 @@ fn build_stochastic() -> StochasticContext {
 
 /// All resources needed to run training and simulation.
 struct Fixture {
-    stage_templates: cobre_sddp::lp_builder::StageTemplates,
+    stage_templates: cobre_sddp::StageTemplates,
     stochastic: StochasticContext,
     indexer: StageIndexer,
     initial_state: Vec<f64>,
@@ -411,7 +411,7 @@ struct Fixture {
 }
 
 fn build_fixture() -> Fixture {
-    build_fixture_with_method(InflowNonNegativityMethod::Penalty { cost: 1000.0 })
+    build_fixture_with_method(InflowNonNegativityMethod::Penalty)
 }
 
 fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixture {
@@ -432,11 +432,12 @@ fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixtur
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
     let stage_templates = build_stage_templates(
         &system,
-        &inflow_method,
+        inflow_method,
         &par_lp,
         &cobre_stochastic::normal::precompute::PrecomputedNormal::default(),
         &hydro_models.production,
         &hydro_models.evaporation,
+        &cobre_sddp::ResolvedParameters::default(),
     )
     .expect("no FPHA plants in integration test fixture");
     let stochastic = build_stochastic();
@@ -500,7 +501,7 @@ fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixtur
 fn train_fixture(
     fx: &Fixture,
     iterations: u64,
-) -> Result<cobre_sddp::training::TrainingOutcome, cobre_sddp::SddpError> {
+) -> Result<cobre_sddp::TrainingOutcome, cobre_sddp::SddpError> {
     let n_stages = fx.stage_templates.templates.len();
     let mut fcf = FutureCostFunction::new(n_stages, fx.indexer.n_state, 1, 20, &vec![0; n_stages]);
     let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
@@ -549,7 +550,7 @@ fn train_fixture(
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+                basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: fx.risk_measures.clone(),
             },
@@ -587,7 +588,7 @@ fn train_fixture(
 fn simulate_fixture(
     fx: &Fixture,
     fcf: &FutureCostFunction,
-) -> Result<Vec<cobre_sddp::simulation::SimulationScenarioResult>, cobre_sddp::SimulationError> {
+) -> Result<Vec<cobre_sddp::SimulationScenarioResult>, cobre_sddp::SimulationError> {
     let (result_tx, result_rx) = mpsc::sync_channel(32);
 
     let collector_thread = std::thread::spawn(move || {
@@ -621,6 +622,18 @@ fn simulate_fixture(
         .iter()
         .map(Vec::len)
         .collect();
+
+    let zero_ec = EnergyConversion {
+        equivalent_productivity_mw_per_m3s: 0.0,
+        reference_volume_hm3: 0.0,
+        reference_outflow_m3s: 0.0,
+    };
+    let ec = EnergyConversionSet::new(
+        vec![vec![zero_ec; N_STAGES]; N_HYDROS],
+        vec![vec![0.0_f64; N_STAGES]; N_HYDROS],
+        N_HYDROS,
+        N_STAGES,
+    );
 
     simulate(
         &mut sim_workspaces,
@@ -661,7 +674,7 @@ fn simulate_fixture(
         &SimulationConfig {
             n_scenarios: 20,
             io_channel_capacity: 32,
-            basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+            basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
         },
         SimulationOutputSpec {
             result_tx: &result_tx,
@@ -674,6 +687,8 @@ fn simulate_fixture(
             ncs_entity_ids_per_stage: &[],
             diversion_upstream: &HashMap::new(),
             hydro_productivities_per_stage: &fx.stage_templates.hydro_productivities_per_stage,
+            energy_conversion: &ec,
+            hydro_min_storage_hm3: &[0.0; N_HYDROS],
             event_sender: None,
         },
         None,
@@ -787,9 +802,7 @@ fn test_simulation_slack_output_populated() {
 /// 3. Noise is clamped (same as Truncation mode).
 #[test]
 fn truncation_with_penalty_training_completes() {
-    let fx = build_fixture_with_method(InflowNonNegativityMethod::TruncationWithPenalty {
-        cost: 1000.0,
-    });
+    let fx = build_fixture_with_method(InflowNonNegativityMethod::TruncationWithPenalty);
 
     // Verify the method has slack columns.
     assert!(
@@ -888,7 +901,7 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
         .unwrap();
 
     // Build templates.
-    let inflow_method = InflowNonNegativityMethod::Penalty { cost: 100.0 };
+    let inflow_method = InflowNonNegativityMethod::Penalty;
     let par_lp = PrecomputedPar::build(
         system.inflow_models(),
         &system
@@ -903,11 +916,12 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
     let templates = build_stage_templates(
         &system,
-        &inflow_method,
+        inflow_method,
         &par_lp,
         &cobre_stochastic::normal::precompute::PrecomputedNormal::default(),
         &hydro_models.production,
         &hydro_models.evaporation,
+        &cobre_sddp::ResolvedParameters::default(),
     )
     .expect("build_stage_templates must succeed");
 

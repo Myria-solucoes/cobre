@@ -214,6 +214,12 @@ impl From<cobre_sddp::SddpError> for CliError {
             cobre_sddp::SddpError::Stochastic(stoch_err) => Self::Internal {
                 message: stoch_err.to_string(),
             },
+            cobre_sddp::SddpError::WireVersionMismatch { encoded, expected } => Self::Internal {
+                message: format!(
+                    "wire format version mismatch: encoded={encoded}, expected={expected}; \
+                     restart all ranks with the same binary"
+                ),
+            },
         }
     }
 }

@@ -114,7 +114,7 @@ impl Communicator for StubComm {
 /// Returns the `TrainingResult`.
 fn run_case_from_dir(case_dir: &Path) -> cobre_sddp::TrainingResult {
     use cobre_io::parse_config;
-    use cobre_sddp::hydro_models::prepare_hydro_models;
+    use cobre_sddp::prepare_hydro_models;
 
     let config_path = case_dir.join("config.json");
     let config = parse_config(&config_path).expect("config must parse");
@@ -182,11 +182,10 @@ fn make_hydro(raw_id: i32) -> Hydro {
         max_storage_hm3: 100.0,
         min_outflow_m3s: 0.0,
         max_outflow_m3s: None,
-        generation_model: HydroGenerationModel::ConstantProductivity {
-            productivity_mw_per_m3s: 1.0,
-        },
+        generation_model: HydroGenerationModel::ConstantProductivity,
         min_turbined_m3s: 0.0,
         max_turbined_m3s: 100.0,
+        specific_productivity_mw_per_m3s_per_m: None,
         min_generation_mw: 0.0,
         max_generation_mw: 100.0,
         tailrace: None,
@@ -517,9 +516,10 @@ fn run_programmatic(
         inflow_method,
         cut_selection: None,
         cut_activity_tolerance: 0.0,
-        basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
         budget: None,
         export_states: false,
+        scalar_parameters: Vec::new(),
     };
     let mut setup =
         StudySetup::from_broadcast_params(system, stochastic, config, hydro_models, source, source)
@@ -846,9 +846,10 @@ fn run_with_setup(
         inflow_method: InflowNonNegativityMethod::None,
         cut_selection: None,
         cut_activity_tolerance: 0.0,
-        basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
         budget: None,
         export_states: false,
+        scalar_parameters: Vec::new(),
     };
     let mut setup =
         StudySetup::from_broadcast_params(system, stochastic, config, hydro_models, source, source)

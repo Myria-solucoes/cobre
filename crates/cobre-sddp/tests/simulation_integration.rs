@@ -45,6 +45,7 @@ use cobre_sddp::{
     config::{CutManagementConfig, EventConfig, LoopConfig},
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
+    energy_conversion::{EnergyConversion, EnergyConversionSet},
     horizon_mode::HorizonMode,
     indexer::StageIndexer,
     inflow_method::InflowNonNegativityMethod,
@@ -179,11 +180,10 @@ fn make_stochastic_context(n_stages: usize, n_openings: usize) -> StochasticCont
         max_storage_hm3: 100.0,
         min_outflow_m3s: 0.0,
         max_outflow_m3s: None,
-        generation_model: HydroGenerationModel::ConstantProductivity {
-            productivity_mw_per_m3s: 1.0,
-        },
+        generation_model: HydroGenerationModel::ConstantProductivity,
         min_turbined_m3s: 0.0,
         max_turbined_m3s: 100.0,
+        specific_productivity_mw_per_m3s_per_m: None,
         min_generation_mw: 0.0,
         max_generation_mw: 100.0,
         tailrace: None,
@@ -389,8 +389,6 @@ fn make_config() -> Config {
             forward_passes: Some(1),
             stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 3 }]),
             stopping_mode: "any".to_string(),
-            cut_formulation: None,
-            forward_pass: None,
             cut_selection: RowSelectionConfig::default(),
             solver: TrainingSolverConfig::default(),
             scenario_source: None,
@@ -406,14 +404,12 @@ fn make_config() -> Config {
         simulation: IoSimulationConfig {
             enabled: false,
             num_scenarios: 0,
-            policy_type: "outer".to_string(),
-            output_path: None,
-            output_mode: None,
             io_channel_capacity: 64,
             scenario_source: None,
         },
         exports: ExportsConfig::default(),
         estimation: cobre_io::EstimationConfig::default(),
+        energy: cobre_io::EnergyConfig::default(),
     }
 }
 
@@ -441,11 +437,10 @@ fn make_system() -> cobre_core::System {
         max_storage_hm3: 100.0,
         min_outflow_m3s: 0.0,
         max_outflow_m3s: None,
-        generation_model: HydroGenerationModel::ConstantProductivity {
-            productivity_mw_per_m3s: 1.0,
-        },
+        generation_model: HydroGenerationModel::ConstantProductivity,
         min_turbined_m3s: 0.0,
         max_turbined_m3s: 100.0,
+        specific_productivity_mw_per_m3s_per_m: None,
         min_generation_mw: 0.0,
         max_generation_mw: 100.0,
         tailrace: None,
@@ -571,7 +566,7 @@ fn train_simulate_write_cycle() {
             budget: None,
             cut_activity_tolerance: 0.0,
             warm_start_cuts: 0,
-            basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+            basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
             risk_measures: fx.risk_measures.clone(),
         },
         events: EventConfig {
@@ -717,7 +712,7 @@ fn train_simulate_write_cycle() {
     let sim_config = SimulationConfig {
         n_scenarios: 2,
         io_channel_capacity: 4,
-        basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
 
     let entity_counts = EntityCounts {
@@ -750,6 +745,18 @@ fn train_simulate_write_cycle() {
             ..WorkspaceSizing::default()
         },
     )];
+
+    let zero_ec = EnergyConversion {
+        equivalent_productivity_mw_per_m3s: 0.0,
+        reference_volume_hm3: 0.0,
+        reference_outflow_m3s: 0.0,
+    };
+    let ec = EnergyConversionSet::new(
+        vec![vec![zero_ec; fx.n_stages]; 1],
+        vec![vec![0.0_f64; fx.n_stages]; 1],
+        1,
+        fx.n_stages,
+    );
 
     simulate(
         &mut sim_workspaces,
@@ -799,6 +806,8 @@ fn train_simulate_write_cycle() {
             ncs_entity_ids_per_stage: &[],
             diversion_upstream: &HashMap::new(),
             hydro_productivities_per_stage: &vec![vec![1.0]; fx.n_stages],
+            energy_conversion: &ec,
+            hydro_min_storage_hm3: &[0.0],
             event_sender: None,
         },
         None,
@@ -1012,11 +1021,10 @@ fn make_min_outflow_system() -> cobre_core::System {
         max_storage_hm3: 200.0,
         min_outflow_m3s: 50.0,
         max_outflow_m3s: None,
-        generation_model: HydroGenerationModel::ConstantProductivity {
-            productivity_mw_per_m3s: 1.0,
-        },
+        generation_model: HydroGenerationModel::ConstantProductivity,
         min_turbined_m3s: 0.0,
         max_turbined_m3s: 100.0,
+        specific_productivity_mw_per_m3s_per_m: None,
         min_generation_mw: 0.0,
         max_generation_mw: 100.0,
         tailrace: None,
@@ -1220,23 +1228,23 @@ fn make_min_outflow_system() -> cobre_core::System {
 /// operational violation slack propagates correctly to the output.
 #[test]
 fn simulation_min_outflow_slack_extracted_from_primal() {
-    use cobre_sddp::lp_builder::build_stage_templates;
+    use cobre_sddp::build_stage_templates;
 
     let system = make_min_outflow_system();
     let n_stages = 2;
 
     let stochastic = make_stochastic_context(n_stages, 1);
 
-    let hydro_models =
-        cobre_sddp::hydro_models::PrepareHydroModelsResult::default_from_system(&system);
+    let hydro_models = cobre_sddp::PrepareHydroModelsResult::default_from_system(&system);
 
     let templates_result = build_stage_templates(
         &system,
-        &InflowNonNegativityMethod::None,
+        InflowNonNegativityMethod::None,
         stochastic.par(),
         stochastic.normal(),
         &hydro_models.production,
         &hydro_models.evaporation,
+        &cobre_sddp::ResolvedParameters::default(),
     )
     .expect("build_stage_templates must succeed");
 
@@ -1337,7 +1345,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
             budget: None,
             cut_activity_tolerance: 0.0,
             warm_start_cuts: 0,
-            basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+            basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -1378,7 +1386,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
     let sim_config = SimulationConfig {
         n_scenarios: 1,
         io_channel_capacity: 4,
-        basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
 
     let entity_counts = EntityCounts {
@@ -1419,6 +1427,18 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
         },
     )];
 
+    let zero_ec2 = EnergyConversion {
+        equivalent_productivity_mw_per_m3s: 0.0,
+        reference_volume_hm3: 0.0,
+        reference_outflow_m3s: 0.0,
+    };
+    let ec2 = EnergyConversionSet::new(
+        vec![vec![zero_ec2; n_stages]; 1],
+        vec![vec![0.0_f64; n_stages]; 1],
+        1,
+        n_stages,
+    );
+
     simulate(
         &mut sim_workspaces,
         &stage_ctx,
@@ -1452,6 +1472,8 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
             ncs_entity_ids_per_stage: &[],
             diversion_upstream: &HashMap::new(),
             hydro_productivities_per_stage: &hydro_productivities_per_stage,
+            energy_conversion: &ec2,
+            hydro_min_storage_hm3: &[0.0],
             event_sender: None,
         },
         None,

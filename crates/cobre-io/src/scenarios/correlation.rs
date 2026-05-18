@@ -86,6 +86,7 @@ use crate::LoadError;
 /// `profiles` map.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RawCorrelationFile {
     /// JSON schema URI — informational, not validated.
     #[serde(rename = "$schema")]
@@ -111,6 +112,7 @@ pub(crate) struct RawCorrelationFile {
 /// A named correlation profile containing one or more correlation groups.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawProfile {
     /// Groups of correlated entities, each with a correlation matrix.
     correlation_groups: Vec<RawCorrelationGroup>,
@@ -127,6 +129,7 @@ struct RawProfile {
 /// columns) must equal the number of `entities`.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawCorrelationGroup {
     /// Human-readable group label.
     name: String,
@@ -147,6 +150,7 @@ struct RawCorrelationGroup {
 /// Reference to a single entity within a correlation group.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawEntity {
     /// Entity type tag. Valid values: `"inflow"` (hydro inflow series),
     /// `"load"` (bus load), `"ncs"` (non-controllable source availability).
@@ -160,6 +164,7 @@ struct RawEntity {
 /// Maps a stage to the named correlation profile active for that stage.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawScheduleEntry {
     /// Stage index (0-based) this entry applies to.
     stage_id: i32,

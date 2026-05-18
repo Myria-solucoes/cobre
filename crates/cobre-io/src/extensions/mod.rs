@@ -26,15 +26,24 @@
 //! multi-row semantic constraints are deferred to Layer 5.
 
 pub mod fpha_hyperplanes;
+pub mod hydro_energy_productivity;
 pub mod hydro_geometry;
+pub mod hydro_reference_volumes;
 pub mod production_models;
+pub mod scalar_parameters;
 
 pub use fpha_hyperplanes::{FphaHyperplaneRow, parse_fpha_hyperplanes};
+pub use hydro_energy_productivity::{HydroEnergyProductivityRow, parse_hydro_energy_productivity};
 pub use hydro_geometry::{HydroGeometryRow, parse_hydro_geometry};
+pub use hydro_reference_volumes::{
+    HydroReferenceVolumeFractionRow, HydroReferenceVolumeFractions,
+    build_hydro_reference_volume_fractions, parse_hydro_reference_volume_fractions,
+};
 pub use production_models::{
     FittingWindow, FphaColumnLayout, ProductionModelConfig, SeasonConfig, SelectionMode,
     StageRange, parse_production_models,
 };
+pub use scalar_parameters::{load_scalar_parameters_json, parse_scalar_parameters_json};
 
 use crate::LoadError;
 use std::path::Path;
@@ -122,6 +131,52 @@ pub fn load_fpha_hyperplanes(path: Option<&Path>) -> Result<Vec<FphaHyperplaneRo
     }
 }
 
+/// Load `system/hydro_reference_volume_fractions.parquet` when the path is
+/// known, or return an empty `Vec` when the file is absent (optional file).
+///
+/// # Errors
+///
+/// Propagates [`LoadError`] from
+/// [`parse_hydro_reference_volume_fractions`] when `path` is `Some`.
+pub fn load_hydro_reference_volume_fractions(
+    path: Option<&Path>,
+) -> Result<Vec<HydroReferenceVolumeFractionRow>, LoadError> {
+    match path {
+        None => Ok(Vec::new()),
+        Some(p) => parse_hydro_reference_volume_fractions(p),
+    }
+}
+
+/// Load `system/hydro_energy_productivity.parquet` when the path is known, or
+/// return an empty `Vec` when the file is absent (optional file).
+///
+/// This wrapper is the standard entry point used by the loading pipeline. When
+/// `path` is `None` (the structural validation step found no file at the expected
+/// location), it returns `Ok(Vec::new())` without touching the filesystem.
+///
+/// # Errors
+///
+/// Propagates [`LoadError`] from [`parse_hydro_energy_productivity`] when
+/// `path` is `Some`.
+///
+/// # Examples
+///
+/// ```
+/// use cobre_io::extensions::load_hydro_energy_productivity;
+///
+/// // No file present — returns empty vec.
+/// let rows = load_hydro_energy_productivity(None).expect("no file is fine");
+/// assert!(rows.is_empty());
+/// ```
+pub fn load_hydro_energy_productivity(
+    path: Option<&Path>,
+) -> Result<Vec<HydroEnergyProductivityRow>, LoadError> {
+    match path {
+        None => Ok(Vec::new()),
+        Some(p) => parse_hydro_energy_productivity(p),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::doc_markdown, clippy::unwrap_used, clippy::panic)]
 mod tests {
@@ -145,6 +200,13 @@ mod tests {
     #[test]
     fn test_load_hydro_geometry_none_returns_empty() {
         let result = load_hydro_geometry(None).unwrap();
+        assert!(result.is_empty(), "expected empty vec for None path");
+    }
+
+    /// `load_hydro_energy_productivity(None)` returns `Ok(Vec::new())` without I/O.
+    #[test]
+    fn test_load_hydro_energy_productivity_none_returns_empty() {
+        let result = load_hydro_energy_productivity(None).unwrap();
         assert!(result.is_empty(), "expected empty vec for None path");
     }
 }

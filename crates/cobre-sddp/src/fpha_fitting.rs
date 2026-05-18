@@ -2741,6 +2741,7 @@ mod tests {
             generation_model: HydroGenerationModel::Fpha,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 12_600.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 14_000.0,
             tailrace: None,
@@ -4377,6 +4378,7 @@ mod tests {
             generation_model: HydroGenerationModel::Fpha,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 3_000.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 1_000.0,
             tailrace: Some(TailraceModel::Polynomial {
@@ -4519,6 +4521,7 @@ mod tests {
             generation_model: HydroGenerationModel::Fpha,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 1_000.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 4_000.0,
             tailrace: None,

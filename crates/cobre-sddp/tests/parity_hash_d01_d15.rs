@@ -58,7 +58,9 @@ use std::sync::mpsc;
 use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::{TrainingEvent, scenario::ScenarioSource};
 use cobre_sddp::{
-    StudySetup, aggregate_simulation, hydro_models::prepare_hydro_models, setup::prepare_stochastic,
+    StudySetup, aggregate_simulation,
+    hydro_models::prepare_hydro_models,
+    setup::{StudyParams, prepare_stochastic},
 };
 use cobre_solver::highs::HighsSolver;
 use sha2::{Digest, Sha256};
@@ -143,7 +145,7 @@ fn baseline_path(case: &str) -> std::path::PathBuf {
 fn compute_parity_hash(
     convergence_updates: &[(u64, f64, f64, f64, f64)],
     setup: &StudySetup,
-    mut scenario_results: Vec<cobre_sddp::simulation::SimulationScenarioResult>,
+    mut scenario_results: Vec<cobre_sddp::SimulationScenarioResult>,
 ) -> String {
     let mut hasher = Sha256::new();
 
@@ -319,8 +321,31 @@ fn run_case(label: &str) {
     // Use a small fixed scenario count for determinism and speed.
     config_with_sim.simulation.num_scenarios = 1;
 
-    let mut setup = StudySetup::new(&system, &config_with_sim, stochastic, hydro_models)
-        .expect("StudySetup must build");
+    // The `hydro_energy_productivity.parquet` override is already folded into
+    // `hydro_models.productivity_override` by the caller's
+    // `prepare_hydro_models` invocation, so this helper does no parquet I/O.
+
+    let sentinel = Path::new("config.json");
+    let training_source = config_with_sim
+        .training_scenario_source(sentinel)
+        .expect("training_scenario_source must parse");
+    let simulation_source = config_with_sim
+        .simulation_scenario_source(sentinel)
+        .expect("simulation_scenario_source must parse");
+
+    let params =
+        StudyParams::from_config(&config_with_sim).expect("StudyParams::from_config must succeed");
+    let construction = params.into_construction_config();
+
+    let mut setup = StudySetup::from_broadcast_params(
+        &system,
+        stochastic,
+        construction,
+        hydro_models,
+        &training_source,
+        &simulation_source,
+    )
+    .expect("StudySetup must build");
 
     let comm = StubComm;
     let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");

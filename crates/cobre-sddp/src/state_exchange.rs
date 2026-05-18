@@ -67,8 +67,8 @@ use crate::{error::SddpError, trajectory::TrajectoryRecord};
 ///
 /// ```rust
 /// use cobre_comm::LocalBackend;
-/// use cobre_sddp::state_exchange::ExchangeBuffers;
-/// use cobre_sddp::trajectory::TrajectoryRecord;
+/// use cobre_sddp::ExchangeBuffers;
+/// use cobre_sddp::TrajectoryRecord;
 ///
 /// // Three scenarios, two-element state vectors, single rank.
 /// let mut bufs = ExchangeBuffers::new(2, 3, 1);
@@ -132,6 +132,12 @@ pub struct ExchangeBuffers {
     real_total: usize,
 }
 
+// Several constructors and accessors on `ExchangeBuffers` (`new`,
+// `gathered_states`, `local_count`, `total_scenarios`) are part of the
+// stable shape callers may want for inspection or for the uniform-rank
+// distribution path. Production drivers go through `with_actual_counts`
+// and pack helpers; these are retained for symmetry and tests.
+#[allow(dead_code)]
 impl ExchangeBuffers {
     /// Construct pre-allocated exchange buffers for the given topology.
     ///

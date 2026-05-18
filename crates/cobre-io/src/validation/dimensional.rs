@@ -243,7 +243,7 @@ fn collect_head_dependent_hydro_ids(
     for hydro in hydros {
         if matches!(
             hydro.generation_model,
-            HydroGenerationModel::Fpha | HydroGenerationModel::LinearizedHead { .. }
+            HydroGenerationModel::Fpha | HydroGenerationModel::LinearizedHead
         ) {
             ids.insert(hydro.id.0);
         }
@@ -339,6 +339,7 @@ mod tests {
             generation_model,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 500.0,
             tailrace: None,
@@ -509,8 +510,6 @@ mod tests {
                 forward_passes: Some(10),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 100 }]),
                 stopping_mode: "any".to_string(),
-                cut_formulation: None,
-                forward_pass: None,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 scenario_source: None,
@@ -520,6 +519,7 @@ mod tests {
             simulation: SimulationConfig::default(),
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
+            energy: crate::EnergyConfig::default(),
         };
 
         ParsedData {
@@ -570,7 +570,9 @@ mod tests {
             energy_contracts: vec![],
             hydro_geometry: vec![],
             production_models: vec![],
+            hydro_energy_productivity_rows: vec![],
             fpha_hyperplanes: vec![],
+            scalar_parameters: vec![],
             inflow_history: vec![],
             inflow_seasonal_stats: vec![],
             inflow_ar_coefficients: vec![],
@@ -610,22 +612,8 @@ mod tests {
 
         // 2 hydros, 2 study stages — all 4 (hydro, stage) pairs present.
         data.hydros = vec![
-            make_hydro(
-                1,
-                HydroGenerationModel::ConstantProductivity {
-                    productivity_mw_per_m3s: 0.9,
-                },
-                None,
-                None,
-            ),
-            make_hydro(
-                2,
-                HydroGenerationModel::ConstantProductivity {
-                    productivity_mw_per_m3s: 0.9,
-                },
-                None,
-                None,
-            ),
+            make_hydro(1, HydroGenerationModel::ConstantProductivity, None, None),
+            make_hydro(2, HydroGenerationModel::ConstantProductivity, None, None),
         ];
         data.inflow_seasonal_stats = vec![
             inflow_stats_row(1, 0),
@@ -654,30 +642,9 @@ mod tests {
         let mut data = base_parsed_data();
 
         data.hydros = vec![
-            make_hydro(
-                1,
-                HydroGenerationModel::ConstantProductivity {
-                    productivity_mw_per_m3s: 0.9,
-                },
-                None,
-                None,
-            ),
-            make_hydro(
-                2,
-                HydroGenerationModel::ConstantProductivity {
-                    productivity_mw_per_m3s: 0.9,
-                },
-                None,
-                None,
-            ),
-            make_hydro(
-                3,
-                HydroGenerationModel::ConstantProductivity {
-                    productivity_mw_per_m3s: 0.9,
-                },
-                None,
-                None,
-            ),
+            make_hydro(1, HydroGenerationModel::ConstantProductivity, None, None),
+            make_hydro(2, HydroGenerationModel::ConstantProductivity, None, None),
+            make_hydro(3, HydroGenerationModel::ConstantProductivity, None, None),
         ];
 
         // Hydro 2 is missing stage 1.
@@ -846,14 +813,7 @@ mod tests {
 
         data.hydros = vec![
             make_hydro(1, HydroGenerationModel::Fpha, None, None),
-            make_hydro(
-                2,
-                HydroGenerationModel::ConstantProductivity {
-                    productivity_mw_per_m3s: 0.9,
-                },
-                None,
-                None,
-            ),
+            make_hydro(2, HydroGenerationModel::ConstantProductivity, None, None),
         ];
 
         // Only hydro 2 has a hyperplane row — hydro 1 (FPHA) is missing.
@@ -896,9 +856,7 @@ mod tests {
         // Hydro enters service at stage 1: only stage 1 requires inflow stats.
         data.hydros = vec![make_hydro(
             1,
-            HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 0.9,
-            },
+            HydroGenerationModel::ConstantProductivity,
             Some(1), // enters service at stage 1
             None,
         )];
@@ -927,9 +885,7 @@ mod tests {
         // Hydro exits at stage 1 (exclusive): only stage 0 requires inflow stats.
         data.hydros = vec![make_hydro(
             1,
-            HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 0.9,
-            },
+            HydroGenerationModel::ConstantProductivity,
             None,
             Some(1), // decommissioned at stage 1 (exclusive)
         )];
@@ -962,9 +918,7 @@ mod tests {
 
         data.hydros = vec![make_hydro(
             1,
-            HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 0.9,
-            },
+            HydroGenerationModel::ConstantProductivity,
             None,
             None,
         )];
@@ -1063,9 +1017,7 @@ mod tests {
 
         data.hydros = vec![make_hydro(
             1,
-            HydroGenerationModel::LinearizedHead {
-                productivity_mw_per_m3s: 0.9,
-            },
+            HydroGenerationModel::LinearizedHead,
             None,
             None,
         )];
@@ -1096,9 +1048,7 @@ mod tests {
         // Trigger rule 1 violation: hydro 1 missing stage 1.
         data.hydros = vec![make_hydro(
             1,
-            HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 0.9,
-            },
+            HydroGenerationModel::ConstantProductivity,
             None,
             None,
         )];

@@ -274,19 +274,16 @@ impl PyHydro {
 
     /// Power output per unit of turbined flow [MW/(m³/s)].
     ///
-    /// Returns the productivity value when the generation model is
-    /// `ConstantProductivity` or `LinearizedHead`. Returns `None` for the
-    /// `Fpha` model, which does not use a single productivity coefficient.
+    /// The inline productivity scalar has moved to
+    /// `system/hydro_production_models.json` and is now resolved per-stage.
+    /// This getter retains its signature for ABI continuity but always
+    /// returns `None`.
     #[getter]
     fn productivity_mw_per_m3s(&self) -> Option<f64> {
-        match &self.inner.generation_model {
-            cobre_core::HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s,
-            }
-            | cobre_core::HydroGenerationModel::LinearizedHead {
-                productivity_mw_per_m3s,
-            } => Some(*productivity_mw_per_m3s),
-            cobre_core::HydroGenerationModel::Fpha => None,
+        match self.inner.generation_model {
+            cobre_core::HydroGenerationModel::ConstantProductivity
+            | cobre_core::HydroGenerationModel::LinearizedHead
+            | cobre_core::HydroGenerationModel::Fpha => None,
         }
     }
 

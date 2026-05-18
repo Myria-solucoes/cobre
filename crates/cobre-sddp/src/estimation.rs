@@ -3041,11 +3041,10 @@ mod tests {
             max_storage_hm3: 5000.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 0.9,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 1000.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 900.0,
             tailrace: None,
@@ -3473,8 +3472,7 @@ mod tests {
         "simulation": { "enabled": false, "num_scenarios": 0, "io_channel_capacity": 16 },
         "modeling": {},
         "policy": {},
-        "exports": {},
-        "output": {}
+        "exports": {}
     }"#;
 
     fn create_required_files(case_dir: &std::path::Path) {
@@ -5282,11 +5280,10 @@ mod tests {
             max_storage_hm3: 5000.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 0.9,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 1000.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 900.0,
             tailrace: None,
@@ -5525,11 +5522,10 @@ mod tests {
             max_storage_hm3: 5000.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 0.9,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 1000.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 900.0,
             tailrace: None,

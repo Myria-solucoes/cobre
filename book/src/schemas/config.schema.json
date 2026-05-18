@@ -1,6 +1,7 @@
 {
   "$defs": {
     "BoundaryPolicy": {
+      "additionalProperties": false,
       "description": "Boundary-row configuration for terminal-stage FCF coupling.\n\nWhen present, the solver loads rows from a source Cobre policy\ncheckpoint and injects them as fixed boundary conditions at the\nterminal stage of the current study.",
       "properties": {
         "path": {
@@ -21,6 +22,7 @@
       "type": "object"
     },
     "CheckpointingConfig": {
+      "additionalProperties": false,
       "description": "Checkpoint settings (`config.json → policy.checkpointing`).",
       "properties": {
         "compress": {
@@ -70,7 +72,21 @@
       },
       "type": "object"
     },
+    "EnergyConfig": {
+      "additionalProperties": false,
+      "description": "Energy conversion settings (`config.json → energy`).\n\nControls reservoir reference-volume computation for FPHA hydros.\n`V_ref = V_min + fraction · (V_max − V_min)` is the reference storage\nused to evaluate the equivalent head `h_eq` (and thereby `ρ_eq`).\nPer-plant per-season overrides are loaded from\n`system/hydro_reference_volume_fractions.parquet`.",
+      "properties": {
+        "reference_volume_fraction": {
+          "default": 0.65,
+          "description": "Case-wide default fraction in `(0.0, 1.0]` used when no per-`(hydro,\nseason)` override applies. `V_ref = V_min + fraction · (V_max − V_min)`.\nDefault 0.65 (NEWAVE convention).",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "type": "object"
+    },
     "EstimationConfig": {
+      "additionalProperties": false,
       "description": "Time series estimation settings (`config.json → estimation`).\n\nControls automatic parameter estimation when historical inflow data is\nprovided without explicit model statistics or coefficients.",
       "properties": {
         "max_coefficient_magnitude": {
@@ -105,7 +121,8 @@
       "type": "object"
     },
     "ExportsConfig": {
-      "description": "Export flags controlling which outputs are written to disk\n(`config.json → exports`).\n\nOnly the two flags with active consumers are retained. Keys for removed\nfields (`training`, `cuts`, `vertices`, `simulation`, `forward_detail`,\n`backward_detail`, `compression`) are silently ignored when present in\nlegacy `config.json` files.",
+      "additionalProperties": false,
+      "description": "Export flags controlling which outputs are written to disk\n(`config.json → exports`).\n\nOnly the two active fields are accepted. Legacy keys (`training`, `cuts`,\n`vertices`, `simulation`, `forward_detail`, `backward_detail`,\n`compression`) must be removed from existing `config.json` files before\nloading — they are now rejected as unknown fields.",
       "properties": {
         "states": {
           "default": false,
@@ -120,37 +137,45 @@
       },
       "type": "object"
     },
-    "ForwardPassConfig": {
-      "description": "Forward pass mode configuration.",
-      "properties": {
-        "type": {
-          "description": "Forward pass type: `\"default\"` or other variants.",
-          "type": "string"
-        }
-      },
-      "required": [
-        "type"
-      ],
-      "type": "object"
-    },
     "InflowNonNegativityConfig": {
+      "additionalProperties": false,
       "description": "Inflow non-negativity treatment settings.",
       "properties": {
         "method": {
+          "$ref": "#/$defs/InflowNonNegativityMethod",
           "default": "penalty",
-          "description": "Method: `\"none\"`, `\"penalty\"`, or `\"truncation\"`.",
-          "type": "string"
-        },
-        "penalty_cost": {
-          "default": 1000.0,
-          "description": "Penalty coefficient $c^{inf}$ applied when `method` is `\"penalty\"`.\n\n**Deprecated:** Use `penalties.json` -> `hydro.inflow_nonnegativity_cost`\ninstead. When both are specified, the penalty cascade takes precedence.\nThis field is retained for backward compatibility with existing cases\nthat do not yet have `inflow_nonnegativity_cost` in their `penalties.json`.",
-          "format": "double",
-          "type": "number"
+          "description": "Method: `\"none\"`, `\"truncation\"`, `\"penalty\"`, or `\"truncation_with_penalty\"`.\n\nDefault: `\"penalty\"`. The penalty objective coefficient is always sourced from\n`penalties.json → hydro.inflow_nonnegativity_cost` (default 1000.0 when absent)."
         }
       },
       "type": "object"
     },
+    "InflowNonNegativityMethod": {
+      "description": "Method string for inflow non-negativity enforcement.\n\nAccepted values in `config.json → modeling.inflow_non_negativity.method`:\n\n- `\"none\"` — no enforcement; PAR(p) inflows may be negative.\n- `\"truncation\"` — clamp negative PAR(p) inflows to zero before LP patching.\n- `\"penalty\"` — add slack columns with `inflow_nonnegativity_cost` objective\n  coefficient (sourced from `penalties.json → hydro.inflow_nonnegativity_cost`).\n- `\"truncation_with_penalty\"` — combine both: clamp noise *and* add slack columns.",
+      "oneOf": [
+        {
+          "const": "none",
+          "description": "No inflow non-negativity enforcement.",
+          "type": "string"
+        },
+        {
+          "const": "truncation",
+          "description": "Truncation-based enforcement only (no slack columns).",
+          "type": "string"
+        },
+        {
+          "const": "penalty",
+          "description": "Penalty-based enforcement via slack columns.\n\nObjective coefficient is `penalties.json → hydro.inflow_nonnegativity_cost`.",
+          "type": "string"
+        },
+        {
+          "const": "truncation_with_penalty",
+          "description": "Combined truncation and penalty enforcement.",
+          "type": "string"
+        }
+      ]
+    },
     "LipschitzConfig": {
+      "additionalProperties": false,
       "description": "Lipschitz constant settings for inner approximation.",
       "properties": {
         "fallback_value": {
@@ -183,13 +208,13 @@
       "type": "object"
     },
     "ModelingConfig": {
+      "additionalProperties": false,
       "description": "Modeling options (`config.json → modeling`).",
       "properties": {
         "inflow_non_negativity": {
           "$ref": "#/$defs/InflowNonNegativityConfig",
           "default": {
-            "method": "penalty",
-            "penalty_cost": 1000.0
+            "method": "penalty"
           },
           "description": "Strategy for handling non-negative inflow constraints."
         }
@@ -197,7 +222,7 @@
       "type": "object"
     },
     "OrderSelectionMethod": {
-      "description": "Order selection criterion for autoregressive model fitting.\n\nControls how the lag order is chosen when fitting a time series model.\nTwo variants are accepted:\n\n- `\"pacf\"` — classical periodic Yule-Walker with PACF-based order\n  selection. Default.\n- `\"pacf_annual\"` — extends `\"pacf\"` with an annual component (PAR(p)-A),\n  adding one extra coefficient ψ per (entity, season) that multiplies\n  the rolling 12-month average of past observations.\n\nThe legacy `\"fixed\"` JSON value is deprecated; it is accepted for\nbackwards compatibility but mapped to `Pacf` at parse time with a warning.",
+      "description": "Order selection criterion for autoregressive model fitting.\n\nControls how the lag order is chosen when fitting a time series model.\nTwo variants are accepted:\n\n- `\"pacf\"` — classical periodic Yule-Walker with PACF-based order\n  selection. Default.\n- `\"pacf_annual\"` — extends `\"pacf\"` with an annual component (PAR(p)-A),\n  adding one extra coefficient ψ per (entity, season) that multiplies\n  the rolling 12-month average of past observations.",
       "oneOf": [
         {
           "const": "pacf",
@@ -212,6 +237,7 @@
       ]
     },
     "PolicyConfig": {
+      "additionalProperties": false,
       "description": "Policy directory settings (`config.json → policy`).",
       "properties": {
         "boundary": {
@@ -323,6 +349,7 @@
       "description": "Intermediate serde type for `historical_years` in `config.json`.\n\nHandles two JSON representations via `#[serde(untagged)]`:\n- Array: `[1940, 1953, 1971]` → [`RawHistoricalYearsConfig::List`]\n- Object: `{\"from\": 1940, \"to\": 2010}` → [`RawHistoricalYearsConfig::Range`]\n\nThe `List` variant must be declared first so serde tries it before `Range`\n(an integer array is tried before an object)."
     },
     "RawScenarioSourceConfig": {
+      "additionalProperties": false,
       "description": "Intermediate serde type for per-class scenario source configuration in `config.json`.\n\nScoped to `config.json` fields (`training.scenario_source` /\n`simulation.scenario_source`).",
       "properties": {
         "historical_years": {
@@ -386,11 +413,12 @@
       "type": "object"
     },
     "RowSelectionConfig": {
+      "additionalProperties": false,
       "description": "Row-selection settings (`config.json → training.cut_selection`).",
       "properties": {
         "basis_activity_window": {
           "default": null,
-          "description": "Activity-window size for the basis-reconstruction classifier and\nScheme 1 sort popcount. Bit `i` of `activity_window` counts toward the\nclassifier and popcount mask when `i < basis_activity_window`.\n\nValidated range: 1..=31. Default when absent: 5.",
+          "description": "Width (in iterations) of the sliding observation window used to track\nwhich constraint rows have been recently active.\n\nA larger window retains activity information over a longer recent\nhistory, making row-selection decisions less sensitive to short-term\nfluctuations. A smaller window is more responsive to recent changes in\nthe active set.\n\nValidated range: 1..=31. Default when absent: 5.",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -410,7 +438,7 @@
         },
         "cut_activity_tolerance": {
           "default": null,
-          "description": "Minimum dual multiplier for a row to count as binding.",
+          "description": "Minimum dual multiplier magnitude for a constraint row to be counted as\nbinding at a given solution point.\n\nRows whose dual value falls below this threshold are treated as inactive\nin activity-tracking computations. Increase to reduce noise from\nnear-zero duals; decrease to be more inclusive.",
           "format": "double",
           "type": [
             "number",
@@ -419,7 +447,7 @@
         },
         "domination_epsilon": {
           "default": null,
-          "description": "Epsilon for the `\"domination\"` method.\n\nOverrides `threshold` when the method is `\"domination\"`. Accepts\nfractional values (e.g., `1e-6`) unlike the integer-limited `threshold`.",
+          "description": "Epsilon for the `\"domination\"` method.\n\nRequired when `method = \"domination\"`. Accepts fractional values\n(e.g., `1e-6`).",
           "format": "double",
           "type": [
             "number",
@@ -436,7 +464,7 @@
         },
         "max_active_per_stage": {
           "default": null,
-          "description": "Maximum number of active rows per stage (stage 2 of the row-selection\npipeline — hard cap on LP size).\n\nWhen `Some(n)`, the training loop enforces a hard cap of `n` active rows\nper stage after strategy selection has completed. Rows are evicted in\norder of staleness (`last_active_iter` ascending), tie-broken by usage\nfrequency (`active_count` ascending). Rows generated in the current\niteration are never evicted.\n\nWhen `None` (the default), no hard cap is enforced.",
+          "description": "Row budget per stage: maximum number of constraint rows allowed to be\nactive in a single stage's LP.\n\nWhen `Some(n)`, the training loop enforces a hard cap of `n` active rows\nper stage after the pruning strategy has been applied. Rows are evicted\nin order of staleness (least recently active first), tie-broken by\noverall usage frequency (least frequently active first). Rows added in\nthe current iteration are never evicted.\n\nWhen `None` (the default), no hard cap is enforced.",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -446,7 +474,7 @@
         },
         "memory_window": {
           "default": null,
-          "description": "Memory window size for the `\"lml1\"` method (iterations).\n\nOverrides `threshold` when the method is `\"lml1\"`. Ignored for other methods.",
+          "description": "Memory window size for the `\"lml1\"` method (iterations).\n\nRequired when `method = \"lml1\"`. Ignored for other methods.",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -464,7 +492,7 @@
         },
         "threshold": {
           "default": null,
-          "description": "Generic threshold (deprecated — prefer method-specific fields below).\n\nInterpretation depends on the method:\n- `\"level1\"`: minimum iterations before first pruning pass\n- `\"lml1\"`: memory window size (iterations)\n- `\"domination\"`: epsilon for domination test (integer-limited)\n\nUse `memory_window` for lml1 and `domination_epsilon` for domination\nto avoid the integer limitation. This field is retained for backwards\ncompatibility.",
+          "description": "Activity-count threshold for the `\"level1\"` row-selection method.\n\nA row is deactivated when its `active_count <= threshold`. Typical\nvalue: 0 (deactivate only fully-inactive rows). Ignored by the\n`\"lml1\"` and `\"domination\"` methods.",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -476,6 +504,7 @@
       "type": "object"
     },
     "SimulationConfig": {
+      "additionalProperties": false,
       "description": "Post-training simulation settings (`config.json → simulation`).",
       "properties": {
         "enabled": {
@@ -496,27 +525,6 @@
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
-        },
-        "output_mode": {
-          "default": null,
-          "description": "Output mode: `\"streaming\"` or `\"batched\"`.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "output_path": {
-          "default": null,
-          "description": "Directory for simulation output files.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "policy_type": {
-          "default": "outer",
-          "description": "Policy representation: `\"outer\"` (envelope rows) or `\"inner\"` (vertices).",
-          "type": "string"
         },
         "scenario_source": {
           "anyOf": [
@@ -650,16 +658,9 @@
       ]
     },
     "TrainingConfig": {
-      "description": "Training parameters (`config.json → training`).\n\n`forward_passes` and `stopping_rules` are mandatory — the loader returns\n[`LoadError::SchemaError`] if either is absent.",
+      "additionalProperties": false,
+      "description": "Training parameters (`config.json → training`).\n\n`forward_passes` and `stopping_rules` are mandatory — the loader returns\n[`crate::LoadError::SchemaError`] if either is absent.",
       "properties": {
-        "cut_formulation": {
-          "default": null,
-          "description": "Row formulation: `\"single\"` or `\"multi\"`.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "cut_selection": {
           "$ref": "#/$defs/RowSelectionConfig",
           "default": {
@@ -679,18 +680,6 @@
           "default": true,
           "description": "Enable the training phase. When `false`, skip directly to simulation.",
           "type": "boolean"
-        },
-        "forward_pass": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ForwardPassConfig"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Forward pass configuration."
         },
         "forward_passes": {
           "description": "Number of forward-pass scenario trajectories $M$ per iteration.\n\n**Mandatory** — no default. The loader rejects any config that omits this field.",
@@ -749,6 +738,7 @@
       "type": "object"
     },
     "TrainingSolverConfig": {
+      "additionalProperties": false,
       "description": "LP solver retry settings (`config.json → training.solver`).",
       "properties": {
         "retry_max_attempts": {
@@ -768,6 +758,7 @@
       "type": "object"
     },
     "UpperBoundEvaluationConfig": {
+      "additionalProperties": false,
       "description": "Upper-bound evaluation settings (`config.json → upper_bound_evaluation`).",
       "properties": {
         "enabled": {
@@ -812,6 +803,7 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "description": "Top-level deserialized representation of `config.json`.\n\nAll sections except `training` are optional; their defaults are applied by\nserde when the section is absent from the JSON.",
   "properties": {
     "$schema": {
@@ -820,6 +812,13 @@
         "string",
         "null"
       ]
+    },
+    "energy": {
+      "$ref": "#/$defs/EnergyConfig",
+      "default": {
+        "reference_volume_fraction": 0.65
+      },
+      "description": "Energy conversion settings (reference volume fraction for FPHA hydros)."
     },
     "estimation": {
       "$ref": "#/$defs/EstimationConfig",
@@ -843,8 +842,7 @@
       "$ref": "#/$defs/ModelingConfig",
       "default": {
         "inflow_non_negativity": {
-          "method": "penalty",
-          "penalty_cost": 1000.0
+          "method": "penalty"
         }
       },
       "description": "Modeling options (inflow non-negativity treatment)."
@@ -872,9 +870,6 @@
         "enabled": false,
         "io_channel_capacity": 64,
         "num_scenarios": 2000,
-        "output_mode": null,
-        "output_path": null,
-        "policy_type": "outer",
         "scenario_source": null
       },
       "description": "Post-training simulation settings."

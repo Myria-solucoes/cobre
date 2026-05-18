@@ -1,0 +1,826 @@
+//! Parsing for the scalar parameters JSON case file.
+//!
+//! ## JSON schema (`system/scalar_parameters.json`)
+//!
+//! The case file stores scalar parameters as a JSON object with a single
+//! top-level key `"scalar_parameters"` whose value is an array of parameter
+//! objects. Each parameter object has `"id"`, `"name"`, and `"kind"` fields,
+//! plus kind-specific payload fields at the same level:
+//!
+//! ```json
+//! {
+//!   "scalar_parameters": [
+//!     { "id": 1, "name": "discount_rate", "kind": "constant", "value": 0.05 },
+//!     { "id": 2, "name": "demand", "kind": "per_stage",
+//!       "values": [[0, 100.0], [1, 110.0], [2, 105.0]] },
+//!     { "id": 3, "name": "wet_season_factor", "kind": "seasonal",
+//!       "values": [[0, 1.2], [1, 0.8]] },
+//!     { "id": 4, "name": "hydro_prod", "kind": "computed",
+//!       "computed_spec": { "tag": "equivalent_productivity", "hydro_id": 7 } }
+//!   ]
+//! }
+//! ```
+//!
+//! All variant discriminators (`kind`, `tag`) use `snake_case`.
+//!
+//! ### `kind` variants and payload fields
+//!
+//! | `kind`      | Extra fields                                                          |
+//! | ----------- | --------------------------------------------------------------------- |
+//! | `constant`  | `"value": <f64>` — one value for all stages                          |
+//! | `per_stage` | `"values": [[stage_id, value], ...]` — contiguous from 0, sorted     |
+//! | `seasonal`  | `"values": [[season_id, value], ...]`                                 |
+//! | `computed`  | `"computed_spec": { "tag": "<variant>", "hydro_id": <int> }`         |
+//!
+//! ### `per_stage` contiguity rule
+//!
+//! The `stage_id` integers in a `"per_stage"` `"values"` array must form a
+//! contiguous range starting at `0` (i.e. `[0, 1, 2, …, N-1]`).  Duplicate
+//! `stage_id` keys and gaps are both rejected at parse time.  The in-memory
+//! representation strips the stage indices and stores a dense `Vec<f64>`.
+//!
+//! ### `seasonal` uniqueness rule
+//!
+//! Duplicate `season_id` keys within a single `"seasonal"` `"values"` array
+//! are rejected at parse time.  This is an authoring error; the parser does
+//! **not** silently deduplicate.
+//!
+//! ### `computed_spec` tag values
+//!
+//! | `tag`                     | Meaning                                  |
+//! | ------------------------- | ---------------------------------------- |
+//! | `equivalent_productivity` | Equivalent productivity coefficient      |
+//! | `accumulated_productivity`| Accumulated productivity coefficient     |
+//! | `reference_volume`        | Reference reservoir volume               |
+//! | `reference_turbine`       | Reference turbine flow                   |
+//! | `min_storage`             | Minimum operational storage              |
+//! | `max_storage`             | Maximum operational storage              |
+//! | `specific_productivity`   | Specific productivity                    |
+//!
+//! ## Rejection rules
+//!
+//! The parser rejects with [`crate::LoadError::SchemaError`]:
+//!
+//! - Duplicate `id` across entries.
+//! - Duplicate `name` across entries (case-sensitive).
+//! - Empty `name` or `name` with leading/trailing whitespace.
+//! - `"seasonal"` entries with duplicate `season_id` keys.
+//! - `"per_stage"` entries whose `stage_id` keys are not a contiguous range
+//!   from 0, or that contain duplicates.
+//! - Non-finite `value` fields (NaN, ±∞).
+//! - Unknown JSON fields (caught by `#[serde(deny_unknown_fields)]`); for
+//!   example, a stale `"values_source"` field from an old fixture is rejected.
+//!
+//! Top-level parse failures (malformed JSON) return
+//! [`crate::LoadError::ParseError`].  I/O failures return
+//! [`crate::LoadError`].
+//!
+//! ## Output ordering
+//!
+//! The returned `Vec<ScalarParameter>` is sorted ascending by `id.0`,
+//! regardless of the order entries appear in the file.
+
+use std::collections::HashSet;
+use std::path::Path;
+
+use cobre_core::{ComputedParameter, EntityId, ParameterKind, ScalarParameter};
+use serde::Deserialize;
+
+use crate::LoadError;
+
+// ── Private JSON intermediate types ──────────────────────────────────────────
+//
+// We cannot directly deserialize `ScalarParameter` from the flat JSON schema
+// because `ParameterKind`'s serde implementation expects kind-specific fields
+// to be nested inside a `"kind"` object, while the JSON schema places all
+// payload fields (`"value"`, `"values"`, `"computed_spec"`) at the same level
+// as `"id"` and `"name"`.
+//
+// `#[serde(flatten)]` on a `ParameterKind` field also does not cooperate with
+// `#[serde(tag = "kind")]` in serde's current implementation.
+//
+// We therefore use these private intermediate types with inline fields, then
+// perform explicit validation and conversion in `parse_scalar_parameters_json`.
+
+/// Top-level JSON wrapper.
+///
+/// `#[serde(deny_unknown_fields)]` is intentionally omitted at this level so that
+/// `"$schema"` and similar JSON schema tooling keys are tolerated.  Unknown fields
+/// are only rejected at the per-entry level via [`ScalarParameterJsonEntry`].
+#[derive(Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) struct ScalarParametersFile {
+    /// `$schema` field — informational, not validated.
+    #[serde(rename = "$schema", default)]
+    _schema: Option<String>,
+    /// Array of scalar parameter entries.
+    scalar_parameters: Vec<ScalarParameterJsonEntry>,
+}
+
+/// Per-entry intermediate representation.
+///
+/// `#[serde(deny_unknown_fields)]` ensures that any unknown field (e.g. a
+/// stale `"values_source"`) causes an immediate parse error with the field name
+/// in the message, rather than being silently ignored.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) struct ScalarParameterJsonEntry {
+    /// Stable numeric identifier; unique within the file.
+    id: i32,
+    /// Human-readable name; unique within the file. Used as the `@name` reference
+    /// from `generic_constraints.json`.
+    name: String,
+    /// Discriminator: `"constant"`, `"per_stage"`, `"seasonal"`, or `"computed"`.
+    /// The presence of `value` / `values` / `computed_spec` is determined by
+    /// this field at parse time.
+    kind: String,
+    /// Scalar value. Required when `kind == "constant"`; must be absent for all
+    /// other kinds.
+    value: Option<f64>,
+    /// `[[key, value], ...]` pairs. Required when `kind == "per_stage"` (keys are
+    /// stage ids, must be a contiguous range starting at 0) or
+    /// `kind == "seasonal"` (keys are season ids, must be unique). Must be absent
+    /// for `"constant"` and `"computed"`.
+    values: Option<Vec<(i32, f64)>>,
+    /// Computed-parameter specification. Required when `kind == "computed"`;
+    /// must be absent for all other kinds.
+    computed_spec: Option<ComputedParameter>,
+}
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
+/// Parse `system/scalar_parameters.json` and return a fully-assembled,
+/// sorted parameter vector.
+///
+/// Reads the JSON file at `path`, validates all entries against the rejection
+/// rules documented in this module, and returns a `Vec<ScalarParameter>` sorted
+/// ascending by `id.0`.
+///
+/// # Errors
+///
+/// | Condition                                     | Error variant                  |
+/// | --------------------------------------------- | ------------------------------ |
+/// | File not found or permission denied           | [`LoadError`]              |
+/// | Malformed JSON                                | [`LoadError::ParseError`]      |
+/// | Unknown JSON field in any entry               | [`LoadError::ParseError`]      |
+/// | Duplicate `id` across entries                 | [`LoadError::SchemaError`]     |
+/// | Duplicate `name` across entries               | [`LoadError::SchemaError`]     |
+/// | Empty or whitespace-trimmed `name`            | [`LoadError::SchemaError`]     |
+/// | Duplicate `season_id` in `"seasonal"` values  | [`LoadError::SchemaError`]     |
+/// | Non-contiguous `stage_id` in `"per_stage"`    | [`LoadError::SchemaError`]     |
+/// | Duplicate `stage_id` in `"per_stage"` values  | [`LoadError::SchemaError`]     |
+/// | Non-finite numeric value                      | [`LoadError::SchemaError`]     |
+///
+/// # Examples
+///
+/// ```no_run
+/// use cobre_io::parse_scalar_parameters_json;
+/// use std::path::Path;
+///
+/// let params = parse_scalar_parameters_json(
+///     Path::new("system/scalar_parameters.json")
+/// ).expect("valid parameters file");
+/// println!("loaded {} parameters", params.len());
+/// ```
+pub fn parse_scalar_parameters_json(path: &Path) -> Result<Vec<ScalarParameter>, LoadError> {
+    let text = std::fs::read_to_string(path).map_err(|e| LoadError::io(path, e))?;
+
+    let file: ScalarParametersFile =
+        serde_json::from_str(&text).map_err(|e| LoadError::parse(path, e.to_string()))?;
+
+    let entries = file.scalar_parameters;
+    let mut seen_ids: HashSet<i32> = HashSet::with_capacity(entries.len());
+    let mut seen_names: HashSet<String> = HashSet::with_capacity(entries.len());
+    let mut result: Vec<ScalarParameter> = Vec::with_capacity(entries.len());
+
+    for (i, entry) in entries.into_iter().enumerate() {
+        // ── id uniqueness ───────────────────────────────────────────────────
+        if !seen_ids.insert(entry.id) {
+            return Err(LoadError::SchemaError {
+                path: path.to_path_buf(),
+                field: format!("scalar_parameters[{i}].id"),
+                message: format!("duplicate id {}", entry.id),
+            });
+        }
+
+        // ── name: non-empty, no leading/trailing whitespace ─────────────────
+        if entry.name.is_empty() {
+            return Err(LoadError::SchemaError {
+                path: path.to_path_buf(),
+                field: format!("scalar_parameters[{i}].name"),
+                message: "name must not be empty".to_string(),
+            });
+        }
+        if entry.name != entry.name.trim() {
+            return Err(LoadError::SchemaError {
+                path: path.to_path_buf(),
+                field: format!("scalar_parameters[{i}].name"),
+                message: format!(
+                    "name must not have leading or trailing whitespace, got {:?}",
+                    entry.name
+                ),
+            });
+        }
+
+        // ── name uniqueness (case-sensitive) ────────────────────────────────
+        if !seen_names.insert(entry.name.clone()) {
+            return Err(LoadError::SchemaError {
+                path: path.to_path_buf(),
+                field: format!("scalar_parameters[{i}].name"),
+                message: format!("duplicate name {:?}", entry.name),
+            });
+        }
+
+        // ── Convert entry to ScalarParameter ───────────────────────────────
+        let kind = convert_entry_to_kind(i, &entry, path)?;
+
+        result.push(ScalarParameter {
+            id: EntityId(entry.id),
+            name: entry.name,
+            kind,
+        });
+    }
+
+    // ── Sort ascending by id.0 ──────────────────────────────────────────────
+    result.sort_by_key(|p| p.id.0);
+
+    Ok(result)
+}
+
+/// Load `system/scalar_parameters.json` relative to `case_dir`.
+///
+/// Resolves the path as `case_dir.join("system/scalar_parameters.json")` and
+/// delegates to [`parse_scalar_parameters_json`].
+///
+/// # Errors
+///
+/// Propagates [`LoadError`] from [`parse_scalar_parameters_json`].
+///
+/// # Examples
+///
+/// ```no_run
+/// use cobre_io::load_scalar_parameters_json;
+/// use std::path::Path;
+///
+/// let params = load_scalar_parameters_json(Path::new("/path/to/case"))
+///     .expect("valid parameters file");
+/// println!("loaded {} parameters", params.len());
+/// ```
+pub fn load_scalar_parameters_json(case_dir: &Path) -> Result<Vec<ScalarParameter>, LoadError> {
+    parse_scalar_parameters_json(&case_dir.join("system/scalar_parameters.json"))
+}
+
+// ── Private conversion helpers ────────────────────────────────────────────────
+
+/// Convert a single `ScalarParameterJsonEntry` into a `ParameterKind`,
+/// performing all per-kind validations.
+fn convert_entry_to_kind(
+    i: usize,
+    entry: &ScalarParameterJsonEntry,
+    path: &Path,
+) -> Result<ParameterKind, LoadError> {
+    match entry.kind.as_str() {
+        "constant" => convert_constant(i, entry, path),
+        "per_stage" => convert_per_stage(i, entry, path),
+        "seasonal" => convert_seasonal(i, entry, path),
+        "computed" => convert_computed(i, entry, path),
+        other => Err(LoadError::SchemaError {
+            path: path.to_path_buf(),
+            field: format!("scalar_parameters[{i}].kind"),
+            message: format!(
+                "unknown kind {other:?}; legal values are: constant, per_stage, seasonal, computed"
+            ),
+        }),
+    }
+}
+
+/// Build a `ParameterKind::Constant` from an entry, validating field presence
+/// and finiteness.
+fn convert_constant(
+    i: usize,
+    entry: &ScalarParameterJsonEntry,
+    path: &Path,
+) -> Result<ParameterKind, LoadError> {
+    let value = entry.value.ok_or_else(|| LoadError::SchemaError {
+        path: path.to_path_buf(),
+        field: format!("scalar_parameters[{i}].value"),
+        message: "\"constant\" kind requires a \"value\" field".to_string(),
+    })?;
+    if !value.is_finite() {
+        return Err(LoadError::SchemaError {
+            path: path.to_path_buf(),
+            field: format!("scalar_parameters[{i}].value"),
+            message: format!("value must be finite, got {value}"),
+        });
+    }
+    Ok(ParameterKind::Constant { value })
+}
+
+/// Build a `ParameterKind::PerStage` from an entry.
+///
+/// Validates:
+/// - `"values"` field is present and non-empty.
+/// - No duplicate `stage_id` keys.
+/// - `stage_id` keys form a contiguous range starting at 0.
+/// - All values are finite.
+fn convert_per_stage(
+    i: usize,
+    entry: &ScalarParameterJsonEntry,
+    path: &Path,
+) -> Result<ParameterKind, LoadError> {
+    let pairs = entry
+        .values
+        .as_deref()
+        .ok_or_else(|| LoadError::SchemaError {
+            path: path.to_path_buf(),
+            field: format!("scalar_parameters[{i}].values"),
+            message: "\"per_stage\" kind requires a \"values\" field".to_string(),
+        })?;
+
+    if pairs.is_empty() {
+        return Err(LoadError::SchemaError {
+            path: path.to_path_buf(),
+            field: format!("scalar_parameters[{i}].values"),
+            message: "\"per_stage\" kind requires at least one entry".to_string(),
+        });
+    }
+
+    // Sort by stage_id for validation.
+    let mut sorted: Vec<(i32, f64)> = pairs.to_vec();
+    sorted.sort_by_key(|(k, _)| *k);
+
+    // Check for duplicates (adjacent after sort).
+    for window in sorted.windows(2) {
+        if window[0].0 == window[1].0 {
+            return Err(LoadError::SchemaError {
+                path: path.to_path_buf(),
+                field: format!("scalar_parameters[{i}].values"),
+                message: format!("duplicate stage_id {} in per_stage values", window[0].0),
+            });
+        }
+    }
+
+    // Check contiguity from 0.
+    for (expected, &(actual, _)) in sorted.iter().enumerate() {
+        let expected_i32 = i32::try_from(expected).unwrap_or(i32::MAX);
+        if actual != expected_i32 {
+            return Err(LoadError::SchemaError {
+                path: path.to_path_buf(),
+                field: format!("scalar_parameters[{i}].values"),
+                message: format!(
+                    "per_stage values must have contiguous stage_ids starting at 0; \
+                     expected stage_id {expected_i32} but got {actual}"
+                ),
+            });
+        }
+    }
+
+    // Check all values are finite.
+    for &(stage_id, v) in &sorted {
+        if !v.is_finite() {
+            return Err(LoadError::SchemaError {
+                path: path.to_path_buf(),
+                field: format!("scalar_parameters[{i}].values"),
+                message: format!("value for stage_id {stage_id} must be finite, got {v}"),
+            });
+        }
+    }
+
+    let dense: Vec<f64> = sorted.into_iter().map(|(_, v)| v).collect();
+    Ok(ParameterKind::PerStage { values: dense })
+}
+
+/// Build a `ParameterKind::Seasonal` from an entry.
+///
+/// Validates:
+/// - `"values"` field is present and non-empty.
+/// - No duplicate `season_id` keys.
+/// - All values are finite.
+fn convert_seasonal(
+    i: usize,
+    entry: &ScalarParameterJsonEntry,
+    path: &Path,
+) -> Result<ParameterKind, LoadError> {
+    let pairs = entry
+        .values
+        .as_deref()
+        .ok_or_else(|| LoadError::SchemaError {
+            path: path.to_path_buf(),
+            field: format!("scalar_parameters[{i}].values"),
+            message: "\"seasonal\" kind requires a \"values\" field".to_string(),
+        })?;
+
+    if pairs.is_empty() {
+        return Err(LoadError::SchemaError {
+            path: path.to_path_buf(),
+            field: format!("scalar_parameters[{i}].values"),
+            message: "\"seasonal\" kind requires at least one entry".to_string(),
+        });
+    }
+
+    // Check for duplicate season_ids explicitly (before calling new_seasonal,
+    // which silently dedups).  Duplicates in user-authored files are errors.
+    let mut seen_seasons: HashSet<i32> = HashSet::new();
+    for &(season_id, v) in pairs {
+        if !seen_seasons.insert(season_id) {
+            return Err(LoadError::SchemaError {
+                path: path.to_path_buf(),
+                field: format!("scalar_parameters[{i}].values"),
+                message: format!("duplicate season_id {season_id} in seasonal values"),
+            });
+        }
+        if !v.is_finite() {
+            return Err(LoadError::SchemaError {
+                path: path.to_path_buf(),
+                field: format!("scalar_parameters[{i}].values"),
+                message: format!("value for season_id {season_id} must be finite, got {v}"),
+            });
+        }
+    }
+
+    // new_seasonal sorts by season_id; no dedup is needed (we rejected dups above).
+    Ok(ParameterKind::new_seasonal(pairs.to_vec()))
+}
+
+/// Build a `ParameterKind::Computed` from an entry.
+///
+/// Validates that `"computed_spec"` is present.
+fn convert_computed(
+    i: usize,
+    entry: &ScalarParameterJsonEntry,
+    path: &Path,
+) -> Result<ParameterKind, LoadError> {
+    let computed_spec = entry.computed_spec.ok_or_else(|| LoadError::SchemaError {
+        path: path.to_path_buf(),
+        field: format!("scalar_parameters[{i}].computed_spec"),
+        message: "\"computed\" kind requires a \"computed_spec\" field".to_string(),
+    })?;
+    Ok(ParameterKind::Computed { computed_spec })
+}
+
+// ── Unit tests ────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+#[allow(
+    clippy::doc_markdown,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::too_many_lines,
+    clippy::unwrap_used
+)]
+mod tests {
+    use std::io::Write;
+
+    use super::*;
+    use cobre_core::EntityId;
+    use tempfile::NamedTempFile;
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /// Write a JSON string to a temporary file and return the file handle.
+    fn write_json(content: &str) -> NamedTempFile {
+        let mut tmp = NamedTempFile::new().expect("tempfile");
+        tmp.write_all(content.as_bytes()).expect("write JSON");
+        tmp
+    }
+
+    // ── Test 1: happy path — all four variants ─────────────────────────────────
+
+    /// A file containing one entry of each kind round-trips correctly.
+    #[test]
+    fn scalar_parameters_json_happy_path_all_four_variants() {
+        let json = r#"{
+            "scalar_parameters": [
+                { "id": 1, "name": "const_p", "kind": "constant", "value": 3.6 },
+                { "id": 2, "name": "stage_p", "kind": "per_stage",
+                  "values": [[0, 1.0], [1, 2.0], [2, 3.0]] },
+                { "id": 3, "name": "season_p", "kind": "seasonal",
+                  "values": [[2, 0.8], [1, 1.2]] },
+                { "id": 4, "name": "computed_p", "kind": "computed",
+                  "computed_spec": { "tag": "equivalent_productivity", "hydro_id": 7 } }
+            ]
+        }"#;
+        let tmp = write_json(json);
+        let params = parse_scalar_parameters_json(tmp.path()).unwrap();
+
+        assert_eq!(params.len(), 4);
+        // Sorted by id ascending.
+        assert_eq!(params[0].id, EntityId(1));
+        assert_eq!(params[0].kind, ParameterKind::Constant { value: 3.6 });
+
+        assert_eq!(params[1].id, EntityId(2));
+        assert_eq!(
+            params[1].kind,
+            ParameterKind::PerStage {
+                values: vec![1.0, 2.0, 3.0]
+            }
+        );
+
+        assert_eq!(params[2].id, EntityId(3));
+        // new_seasonal sorts ascending by season_id.
+        assert_eq!(
+            params[2].kind,
+            ParameterKind::Seasonal {
+                values: vec![(1, 1.2), (2, 0.8)]
+            }
+        );
+
+        assert_eq!(params[3].id, EntityId(4));
+        assert_eq!(
+            params[3].kind,
+            ParameterKind::Computed {
+                computed_spec: ComputedParameter::EquivalentProductivity {
+                    hydro_id: EntityId(7)
+                }
+            }
+        );
+    }
+
+    // ── Test 2: duplicate id rejected ─────────────────────────────────────────
+
+    #[test]
+    fn scalar_parameters_json_rejects_duplicate_id() {
+        let json = r#"{
+            "scalar_parameters": [
+                { "id": 1, "name": "a", "kind": "constant", "value": 3.6 },
+                { "id": 1, "name": "b", "kind": "constant", "value": 4.0 }
+            ]
+        }"#;
+        let tmp = write_json(json);
+        let err = parse_scalar_parameters_json(tmp.path()).unwrap_err();
+        match err {
+            LoadError::SchemaError { message, .. } => {
+                assert!(
+                    message.contains("duplicate id"),
+                    "message should contain 'duplicate id', got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    // ── Test 3: duplicate name rejected ───────────────────────────────────────
+
+    #[test]
+    fn scalar_parameters_json_rejects_duplicate_name() {
+        let json = r#"{
+            "scalar_parameters": [
+                { "id": 1, "name": "rho_eq_h1", "kind": "constant", "value": 3.6 },
+                { "id": 2, "name": "rho_eq_h1", "kind": "constant", "value": 4.0 }
+            ]
+        }"#;
+        let tmp = write_json(json);
+        let err = parse_scalar_parameters_json(tmp.path()).unwrap_err();
+        match err {
+            LoadError::SchemaError { message, .. } => {
+                assert!(
+                    message.contains("duplicate name"),
+                    "message should contain 'duplicate name', got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    // ── Test 4: empty name rejected ────────────────────────────────────────────
+
+    #[test]
+    fn scalar_parameters_json_rejects_empty_name() {
+        let json = r#"{
+            "scalar_parameters": [
+                { "id": 1, "name": "", "kind": "constant", "value": 3.6 }
+            ]
+        }"#;
+        let tmp = write_json(json);
+        let err = parse_scalar_parameters_json(tmp.path()).unwrap_err();
+        match err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert!(
+                    field.contains("name"),
+                    "field should contain 'name', got: {field}"
+                );
+                assert!(
+                    message.contains("empty"),
+                    "message should mention 'empty', got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    // ── Test 5: whitespace name rejected ──────────────────────────────────────
+
+    #[test]
+    fn scalar_parameters_json_rejects_whitespace_name() {
+        let json = r#"{
+            "scalar_parameters": [
+                { "id": 1, "name": " rho ", "kind": "constant", "value": 3.6 }
+            ]
+        }"#;
+        let tmp = write_json(json);
+        let err = parse_scalar_parameters_json(tmp.path()).unwrap_err();
+        match err {
+            LoadError::SchemaError { field, .. } => {
+                assert!(
+                    field.contains("name"),
+                    "field should contain 'name', got: {field}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    // ── Test 6: seasonal duplicate keys rejected ───────────────────────────────
+
+    #[test]
+    fn scalar_parameters_json_rejects_seasonal_duplicate_keys() {
+        let json = r#"{
+            "scalar_parameters": [
+                { "id": 1, "name": "s", "kind": "seasonal",
+                  "values": [[1, 0.5], [1, 0.6]] }
+            ]
+        }"#;
+        let tmp = write_json(json);
+        let err = parse_scalar_parameters_json(tmp.path()).unwrap_err();
+        match err {
+            LoadError::SchemaError { message, .. } => {
+                assert!(
+                    message.contains("duplicate season_id"),
+                    "message should contain 'duplicate season_id', got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    // ── Test 7: per_stage non-contiguous keys rejected ─────────────────────────
+
+    #[test]
+    fn scalar_parameters_json_rejects_per_stage_non_contiguous_keys() {
+        let json = r#"{
+            "scalar_parameters": [
+                { "id": 1, "name": "p", "kind": "per_stage",
+                  "values": [[0, 1.0], [2, 2.0]] }
+            ]
+        }"#;
+        let tmp = write_json(json);
+        let err = parse_scalar_parameters_json(tmp.path()).unwrap_err();
+        match err {
+            LoadError::SchemaError { message, .. } => {
+                assert!(
+                    message.contains("contiguous") || message.contains("non-contiguous"),
+                    "message should mention contiguity, got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    // ── Test 8: per_stage duplicate keys rejected ──────────────────────────────
+
+    #[test]
+    fn scalar_parameters_json_rejects_per_stage_duplicate_keys() {
+        let json = r#"{
+            "scalar_parameters": [
+                { "id": 1, "name": "p", "kind": "per_stage",
+                  "values": [[0, 1.0], [0, 2.0], [1, 3.0]] }
+            ]
+        }"#;
+        let tmp = write_json(json);
+        let err = parse_scalar_parameters_json(tmp.path()).unwrap_err();
+        match err {
+            LoadError::SchemaError { message, .. } => {
+                assert!(
+                    message.contains("duplicate stage_id"),
+                    "message should contain 'duplicate stage_id', got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    // ── Test 9: non-finite value rejected ─────────────────────────────────────
+
+    #[test]
+    fn scalar_parameters_json_rejects_non_finite_value() {
+        // JSON does not natively support NaN or Infinity; serde_json will fail
+        // to parse them from JSON syntax.  We instead test with a constant kind
+        // whose value is provided as a special string that serde_json rejects.
+        // For coverage of the runtime check (in case a future JSON extension
+        // passes NaN through), we test the internal conversion function directly.
+        let result = convert_constant(
+            0,
+            &ScalarParameterJsonEntry {
+                id: 1,
+                name: "p".to_string(),
+                kind: "constant".to_string(),
+                value: Some(f64::NAN),
+                values: None,
+                computed_spec: None,
+            },
+            std::path::Path::new("/test.json"),
+        );
+        assert!(result.is_err(), "NaN constant value should be rejected");
+        let err = result.unwrap_err();
+        match err {
+            LoadError::SchemaError { message, .. } => {
+                assert!(
+                    message.contains("finite"),
+                    "message should mention 'finite', got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    // ── Test 10: unknown field (`values_source`) rejected ──────────────────────
+
+    #[test]
+    fn scalar_parameters_json_rejects_unknown_field() {
+        let json = r#"{
+            "scalar_parameters": [
+                { "id": 1, "name": "a", "kind": "constant", "value": 3.6,
+                  "values_source": "sidecar" }
+            ]
+        }"#;
+        let tmp = write_json(json);
+        let err = parse_scalar_parameters_json(tmp.path()).unwrap_err();
+        // deny_unknown_fields causes serde_json to return a parse error
+        // whose message contains the unknown field name.
+        match err {
+            LoadError::ParseError { message, .. } => {
+                assert!(
+                    message.contains("values_source") || message.contains("unknown field"),
+                    "message should mention 'values_source' or 'unknown field', got: {message}"
+                );
+            }
+            other => panic!("expected ParseError for unknown field, got: {other:?}"),
+        }
+    }
+
+    // ── Test 11: declaration-order invariance ──────────────────────────────────
+
+    /// Entries declared in id order [3, 1, 2] must be returned sorted [1, 2, 3].
+    #[test]
+    fn scalar_parameters_json_normalizes_declaration_order() {
+        let json = r#"{
+            "scalar_parameters": [
+                { "id": 3, "name": "third", "kind": "constant", "value": 3.0 },
+                { "id": 1, "name": "first",  "kind": "constant", "value": 1.0 },
+                { "id": 2, "name": "second", "kind": "constant", "value": 2.0 }
+            ]
+        }"#;
+        let tmp = write_json(json);
+        let params = parse_scalar_parameters_json(tmp.path()).unwrap();
+
+        assert_eq!(params.len(), 3);
+        assert_eq!(params[0].id, EntityId(1));
+        assert_eq!(params[1].id, EntityId(2));
+        assert_eq!(params[2].id, EntityId(3));
+    }
+
+    // ── Test 12: per_stage empty values rejected ───────────────────────────────
+
+    #[test]
+    fn scalar_parameters_json_rejects_per_stage_empty_values() {
+        let json = r#"{
+            "scalar_parameters": [
+                { "id": 1, "name": "p", "kind": "per_stage", "values": [] }
+            ]
+        }"#;
+        let tmp = write_json(json);
+        let err = parse_scalar_parameters_json(tmp.path()).unwrap_err();
+        match err {
+            LoadError::SchemaError { message, .. } => {
+                assert!(
+                    message.contains("at least one entry"),
+                    "message should mention 'at least one entry', got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    // ── Test 13: seasonal empty values rejected ────────────────────────────────
+
+    #[test]
+    fn scalar_parameters_json_rejects_seasonal_empty_values() {
+        let json = r#"{
+            "scalar_parameters": [
+                { "id": 1, "name": "s", "kind": "seasonal", "values": [] }
+            ]
+        }"#;
+        let tmp = write_json(json);
+        let err = parse_scalar_parameters_json(tmp.path()).unwrap_err();
+        match err {
+            LoadError::SchemaError { message, .. } => {
+                assert!(
+                    message.contains("at least one entry"),
+                    "message should mention 'at least one entry', got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+}

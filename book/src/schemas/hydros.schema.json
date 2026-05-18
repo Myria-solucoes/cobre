@@ -1,6 +1,7 @@
 {
   "$defs": {
     "RawDiversionChannel": {
+      "additionalProperties": false,
       "description": "Intermediate type for the `diversion` sub-object.",
       "properties": {
         "downstream_id": {
@@ -45,6 +46,7 @@
       ]
     },
     "RawEvaporation": {
+      "additionalProperties": false,
       "description": "Intermediate type for the `evaporation` sub-object.",
       "properties": {
         "coefficients_mm": {
@@ -74,6 +76,7 @@
       "type": "object"
     },
     "RawFillingConfig": {
+      "additionalProperties": false,
       "description": "Intermediate type for the `filling` sub-object.",
       "properties": {
         "filling_inflow_m3s": {
@@ -94,10 +97,11 @@
       "type": "object"
     },
     "RawGeneration": {
-      "description": "Tagged-union intermediate type for the `generation` sub-object.\n\nUses `#[serde(tag = \"model\")]` (internally-tagged) to dispatch on the\n`\"model\"` field value. Each variant carries only the fields relevant to\nthat model — notably, `Fpha` does NOT have `productivity_mw_per_m3s`.",
+      "description": "Tagged-union intermediate type for the `generation` sub-object.\n\nUses `#[serde(tag = \"model\")]` (internally-tagged) to dispatch on the\n`\"model\"` field value. Each variant carries only the fields relevant to\nthat model. The `productivity_mw_per_m3s` field is NOT accepted here —\nproductivity coefficients are read from `system/hydro_production_models.json`\nand are associated per `(hydro, stage)` outside this file.\nA `hydros.json` input that includes `productivity_mw_per_m3s` in its\n`generation` block will be rejected with a parse error.",
       "oneOf": [
         {
-          "description": "Constant productivity: `power = productivity * turbined_m3s`.",
+          "additionalProperties": false,
+          "description": "Constant productivity: `power = productivity * turbined_m3s`.\n\nThe productivity coefficient is read from\n`system/hydro_production_models.json` per `(hydro, stage)`. It is not\naccepted in `hydros.json`; supplying `productivity_mw_per_m3s` here\nproduces a hard parse error.",
           "properties": {
             "max_generation_mw": {
               "description": "Maximum electrical generation [MW].",
@@ -122,16 +126,10 @@
             "model": {
               "const": "constant_productivity",
               "type": "string"
-            },
-            "productivity_mw_per_m3s": {
-              "description": "Power output per unit of turbined flow [MW/(m³/s)].",
-              "format": "double",
-              "type": "number"
             }
           },
           "required": [
             "model",
-            "productivity_mw_per_m3s",
             "min_turbined_m3s",
             "max_turbined_m3s",
             "min_generation_mw",
@@ -140,7 +138,8 @@
           "type": "object"
         },
         {
-          "description": "Head-dependent productivity linearized around an operating point.",
+          "additionalProperties": false,
+          "description": "Head-dependent productivity linearized around an operating point.\n\nThe productivity coefficient is read from\n`system/hydro_production_models.json` per `(hydro, stage)`. It is not\naccepted in `hydros.json`; supplying `productivity_mw_per_m3s` here\nproduces a hard parse error.",
           "properties": {
             "max_generation_mw": {
               "description": "Maximum electrical generation [MW].",
@@ -165,16 +164,10 @@
             "model": {
               "const": "linearized_head",
               "type": "string"
-            },
-            "productivity_mw_per_m3s": {
-              "description": "Nominal power output per unit of turbined flow at reference head [MW/(m³/s)].",
-              "format": "double",
-              "type": "number"
             }
           },
           "required": [
             "model",
-            "productivity_mw_per_m3s",
             "min_turbined_m3s",
             "max_turbined_m3s",
             "min_generation_mw",
@@ -183,7 +176,8 @@
           "type": "object"
         },
         {
-          "description": "Full production function with head-area-productivity tables (FPHA model).\n\nDoes NOT have `productivity_mw_per_m3s` — FPHA computes head-dependent\nproductivity from internal tables.",
+          "additionalProperties": false,
+          "description": "Full production function with head-area-productivity tables (FPHA model).\n\nProductivity is derived from the FPHA tables in\n`system/hydro_production_models.json`. The `productivity_mw_per_m3s`\nfield is not accepted here or in any other `generation` variant.",
           "properties": {
             "max_generation_mw": {
               "description": "Maximum electrical generation [MW].",
@@ -265,6 +259,7 @@
       ]
     },
     "RawHydro": {
+      "additionalProperties": false,
       "description": "Intermediate type for a single hydro plant entry.",
       "properties": {
         "bus_id": {
@@ -385,6 +380,15 @@
           "$ref": "#/$defs/RawReservoir",
           "description": "Reservoir storage bounds."
         },
+        "specific_productivity_mw_per_m3s_per_m": {
+          "default": null,
+          "description": "Specific productivity `ρ_esp` \\[MW / ((m³/s) · m)\\].\n\n**Resolution cascade** (first source that supplies a non-`null` value wins):\n\n1. Per-`(hydro, stage)` row in `system/hydro_energy_productivity.parquet`\n   (loaded at study setup time by the solver).\n2. This field — a single value applied uniformly across all stages.\n\nAbsent or `null` means this fallback level is skipped.  If the cascade\nfinds no value for a hydro whose generation model requires one\n(`constant_productivity` or `linearized_head`), study setup fails with an\nexplicit error.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "tailrace": {
           "anyOf": [
             {
@@ -408,6 +412,7 @@
       "type": "object"
     },
     "RawHydroPenaltyOverrides": {
+      "additionalProperties": false,
       "description": "Intermediate type for entity-level hydro penalty overrides.\n\nAll 11 fields are `Option<f64>`. Absent fields default to `None`,\nmeaning the global default for that penalty is used.\n\nJSON field names mirror `HydroPenalties` and `HydroPenaltyOverrides` field names.",
       "properties": {
         "diversion_cost": {
@@ -510,6 +515,7 @@
       "type": "object"
     },
     "RawOutflow": {
+      "additionalProperties": false,
       "description": "Intermediate type for the `outflow` sub-object.",
       "properties": {
         "max_outflow_m3s": {
@@ -532,6 +538,7 @@
       "type": "object"
     },
     "RawReservoir": {
+      "additionalProperties": false,
       "description": "Intermediate type for the `reservoir` sub-object.",
       "properties": {
         "max_storage_hm3": {
@@ -600,6 +607,7 @@
       ]
     },
     "RawTailracePoint": {
+      "additionalProperties": false,
       "description": "Intermediate type for a single piecewise tailrace breakpoint.",
       "properties": {
         "height_m": {
@@ -621,6 +629,7 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "description": "Top-level intermediate type for `hydros.json`.\n\nPrivate — only used during deserialization. Not re-exported.",
   "properties": {
     "$schema": {

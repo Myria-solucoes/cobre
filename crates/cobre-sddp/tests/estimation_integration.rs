@@ -1,6 +1,6 @@
 //! Integration tests for the estimation pipeline.
 //!
-//! Exercises [`cobre_sddp::estimation::estimate_from_history`] end-to-end with a
+//! Exercises [`cobre_sddp::estimate_from_history`] end-to-end with a
 //! real temporary case directory, a synthetic `inflow_history.parquet`, and
 //! minimal supporting files. Covers acceptance criteria C2 (fixed-order)
 //!
@@ -39,7 +39,7 @@ use cobre_core::{
     },
 };
 use cobre_io::Config;
-use cobre_sddp::estimation::estimate_from_history;
+use cobre_sddp::estimate_from_history;
 use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
 
@@ -132,12 +132,11 @@ fn write_inflow_history(path: &Path) {
 fn config_json(order_selection: &str, max_order: u32) -> String {
     format!(
         r#"{{
-            "training": {{ "seed": 42 }},
+            "training": {{ "tree_seed": 42 }},
             "simulation": {{ "enabled": false, "num_scenarios": 0, "io_channel_capacity": 16 }},
             "modeling": {{}},
             "policy": {{}},
             "exports": {{}},
-            "output": {{}},
             "estimation": {{
                 "order_selection": "{order_selection}",
                 "max_order": {max_order},
@@ -209,11 +208,10 @@ fn build_system_with_one_hydro() -> cobre_core::System {
         max_storage_hm3: 5000.0,
         min_outflow_m3s: 0.0,
         max_outflow_m3s: None,
-        generation_model: HydroGenerationModel::ConstantProductivity {
-            productivity_mw_per_m3s: 0.9,
-        },
+        generation_model: HydroGenerationModel::ConstantProductivity,
         min_turbined_m3s: 0.0,
         max_turbined_m3s: 1000.0,
+        specific_productivity_mw_per_m3s_per_m: None,
         min_generation_mw: 0.0,
         max_generation_mw: 900.0,
         tailrace: None,
@@ -304,9 +302,9 @@ fn parse_config(case_dir: &Path) -> Config {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-/// C2 — Fixed-order estimation: `estimate_from_history` with
-/// `estimation.order_selection = "fixed"` and `estimation.max_order = 2`
-/// produces one `InflowModel` per (hydro, stage) pair with `ar_order() == 2`
+/// C2 — PACF estimation with `max_order = 2`: `estimate_from_history` with
+/// `estimation.order_selection = "pacf"` and `estimation.max_order = 2`
+/// produces one `InflowModel` per (hydro, stage) pair with `ar_order() <= 2`
 /// and finite, positive `mean_m3s` and `std_m3s`.
 ///
 /// Setup:
@@ -320,7 +318,7 @@ fn test_estimate_from_history_fixed_order() {
     let dir = TempDir::new().unwrap();
     let case_dir = dir.path();
 
-    create_minimal_case_skeleton(case_dir, "fixed", 2);
+    create_minimal_case_skeleton(case_dir, "pacf", 2);
     write_inflow_history(&case_dir.join("scenarios/inflow_history.parquet"));
 
     let system = build_system_with_one_hydro();
@@ -590,11 +588,10 @@ fn build_system_for_par1(n_hydros: usize) -> cobre_core::System {
             max_storage_hm3: 5000.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 0.9,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 1000.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 900.0,
             tailrace: None,
@@ -705,7 +702,7 @@ fn test_estimation_round_trip_par1() {
     let dir = TempDir::new().unwrap();
     let case_dir = dir.path();
 
-    create_minimal_case_skeleton(case_dir, "fixed", 1);
+    create_minimal_case_skeleton(case_dir, "pacf", 1);
     write_par1_inflow_history(&case_dir.join("scenarios/inflow_history.parquet"), 1);
 
     let system = build_system_for_par1(1);
@@ -911,7 +908,7 @@ fn test_partial_estimation_end_to_end() {
     // Verify the correct path was taken.
     assert_eq!(
         path,
-        cobre_sddp::estimation::EstimationPath::PartialEstimation,
+        cobre_sddp::EstimationPath::PartialEstimation,
         "expected PartialEstimation path, got {path:?}"
     );
 
@@ -968,7 +965,7 @@ fn test_estimation_round_trip_two_hydros() {
     let dir = TempDir::new().unwrap();
     let case_dir = dir.path();
 
-    create_minimal_case_skeleton(case_dir, "fixed", 1);
+    create_minimal_case_skeleton(case_dir, "pacf", 1);
     write_par1_inflow_history(&case_dir.join("scenarios/inflow_history.parquet"), N_HYDROS);
 
     let system = build_system_for_par1(N_HYDROS);

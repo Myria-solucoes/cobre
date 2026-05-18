@@ -16,16 +16,21 @@ categories = ["science", "simulation"]
 default = []
 ## Enable `serde::Serialize`/`serde::Deserialize` for all public types.
 ##
-## When enabled, activates `chrono/serde` so that `NaiveDate` fields (added in
-## Phase 2) also implement the serde traits. Required by `cobre-io` for JSON
-## input loading and by MPI broadcast via `postcard`.
+## When enabled, activates `chrono/serde` so that `NaiveDate` fields also
+## implement the serde traits. Required by `cobre-io` for JSON input loading
+## and by MPI broadcast via `postcard`.
 serde = ["dep:serde", "chrono/serde"]
+## Enable `schemars::JsonSchema` for public types that are referenced from
+## auto-generated JSON Schemas (e.g. `ComputedParameter` embedded in
+## `system/scalar_parameters.json`). Implies the `serde` feature.
+schema = ["serde", "dep:schemars"]
 
 [dependencies]
-## `NaiveDate` is used in `Stage` and `SeasonDefinition` types (added in Phase 2).
-## Kept as a mandatory dependency because date handling is core domain data.
+## `NaiveDate` is used in `Stage` and `SeasonDefinition` types. Kept as a
+## mandatory dependency because date handling is core domain data.
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"], optional = true }
+schemars = { version = "1", optional = true }
 
 [dev-dependencies]
 serde_json = { version = "1", optional = false }

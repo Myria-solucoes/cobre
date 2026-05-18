@@ -1,6 +1,7 @@
 {
   "$defs": {
     "RawFittingWindow": {
+      "additionalProperties": false,
       "description": "Volume fitting window restricting the range used for FPHA hyperplane\ncomputation.\n\nAbsolute bounds (`volume_min_hm3` / `volume_max_hm3`) and percentile bounds\n(`volume_min_percentile` / `volume_max_percentile`) are mutually exclusive:\nset one pair or the other, not both for the same bound.",
       "properties": {
         "volume_max_hm3": {
@@ -39,6 +40,7 @@
       "type": "object"
     },
     "RawFphaColumnLayout": {
+      "additionalProperties": false,
       "description": "Configuration for the FPHA production function model.",
       "properties": {
         "fitting_window": {
@@ -158,6 +160,7 @@
       "type": "object"
     },
     "RawSeasonConfig": {
+      "additionalProperties": false,
       "description": "Season-specific model descriptor for the `seasonal` selection mode.",
       "properties": {
         "fpha_config": {
@@ -175,8 +178,8 @@
           "description": "Model name: `\"constant_productivity\"`, `\"linearized_head\"`, or `\"fpha\"`.",
           "type": "string"
         },
-        "productivity_override": {
-          "description": "Optional productivity override [MW/(m³/s)]. When present, replaces the\nentity's base `productivity_mw_per_m3s` for this season. Only valid\nfor `\"constant_productivity\"` and `\"linearized_head\"` models. Must be\npositive when present.",
+        "productivity_mw_per_m3s": {
+          "description": "Per-season productivity coefficient [MW/(m³/s)]. Optional for\n`\"constant_productivity\"` and `\"linearized_head\"` models; when absent or\nnull the value is expected from `system/hydro_energy_productivity.parquet`.\nWhen present must be `> 0.0` and finite. Must be absent or null for `\"fpha\"`.",
           "format": "double",
           "type": [
             "number",
@@ -196,6 +199,7 @@
       "type": "object"
     },
     "RawStageRange": {
+      "additionalProperties": false,
       "description": "Stage range descriptor for the `stage_ranges` selection mode.",
       "properties": {
         "end_stage_id": {
@@ -221,8 +225,8 @@
           "description": "Model name: `\"constant_productivity\"`, `\"linearized_head\"`, or `\"fpha\"`.",
           "type": "string"
         },
-        "productivity_override": {
-          "description": "Optional productivity override [MW/(m³/s)]. When present, replaces the\nentity's base `productivity_mw_per_m3s` for this stage range. Only\nvalid for `\"constant_productivity\"` and `\"linearized_head\"` models.\nMust be positive when present.",
+        "productivity_mw_per_m3s": {
+          "description": "Per-stage productivity coefficient [MW/(m³/s)]. Optional for\n`\"constant_productivity\"` and `\"linearized_head\"` models; when absent or\nnull the value is expected from `system/hydro_energy_productivity.parquet`.\nWhen present must be `> 0.0` and finite. Must be absent or null for `\"fpha\"`.",
           "format": "double",
           "type": [
             "number",
@@ -243,6 +247,7 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "description": "Per-hydro production model configuration loaded from\n`system/hydro_production_models.json`.\n\nSpecifies how the hydro production function (HPF) model variant is selected\nfor each stage or season. Two selection modes are supported:\n\n- `stage_ranges`: maps each stage to a model via explicit `[start, end]`\n  intervals.\n- `seasonal`: maps each stage to a model via its season index, with a\n  fallback default.\n\nEach hydro may appear at most once. Results are sorted by `hydro_id`\nascending.",
   "properties": {
     "$schema": {

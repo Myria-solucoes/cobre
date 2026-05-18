@@ -19,6 +19,8 @@
 - [Building a Case](./tutorial/building-a-system.md)
 - [System Modeling](./guide/system-modeling.md)
   - [Hydro Plants](./guide/hydro-plants.md)
+  - [Energy Variables](./guide/energy-variables.md)
+  - [Scalar Parameters](./guide/scalar-parameters.md)
   - [Thermal Units](./guide/thermal-units.md)
   - [Network Topology](./guide/network-topology.md)
   - [Stochastic Modeling](./guide/stochastic-modeling.md)

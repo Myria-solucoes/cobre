@@ -235,7 +235,6 @@ pub fn make_multi_entity_case(dir: &TempDir) {
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
             "generation": {
                 "model": "constant_productivity",
-                "productivity_mw_per_m3s": 1.0,
                 "min_turbined_m3s": 0.0,
                 "max_turbined_m3s": 200.0,
                 "min_generation_mw": 0.0,
@@ -258,6 +257,28 @@ pub fn make_multi_entity_case(dir: &TempDir) {
             "bus_id": 2,
             "cost_per_mwh": 80.0,
             "generation": { "min_mw": 0.0, "max_mw": 300.0 }
+        }
+    ]
+}"#,
+    );
+
+    // Production model for hydro_id=1 covering both study stages.
+    write_file(
+        root,
+        "system/hydro_production_models.json",
+        r#"{
+    "production_models": [
+        {
+            "hydro_id": 1,
+            "selection_mode": "stage_ranges",
+            "stage_ranges": [
+                {
+                    "start_stage_id": 0,
+                    "end_stage_id": null,
+                    "model": "constant_productivity",
+                    "productivity_mw_per_m3s": 0.9
+                }
+            ]
         }
     ]
 }"#,
@@ -289,7 +310,6 @@ pub fn make_referential_violation_case(dir: &TempDir) {
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
             "generation": {
                 "model": "constant_productivity",
-                "productivity_mw_per_m3s": 1.0,
                 "min_turbined_m3s": 0.0,
                 "max_turbined_m3s": 200.0,
                 "min_generation_mw": 0.0,

@@ -1,6 +1,7 @@
 {
   "$defs": {
     "RawBlock": {
+      "additionalProperties": false,
       "description": "Intermediate type for one load block.",
       "properties": {
         "hours": {
@@ -27,6 +28,7 @@
       "type": "object"
     },
     "RawCVarParams": {
+      "additionalProperties": false,
       "description": "`CVaR` parameters nested inside the `cvar` key.",
       "properties": {
         "alpha": {
@@ -47,6 +49,7 @@
       "type": "object"
     },
     "RawPolicyGraph": {
+      "additionalProperties": false,
       "description": "Intermediate type for the `policy_graph` sub-object.",
       "properties": {
         "annual_discount_rate": {
@@ -73,6 +76,7 @@
       "type": "object"
     },
     "RawPreStudyStage": {
+      "additionalProperties": false,
       "description": "Intermediate type for a pre-study stage entry (negative IDs).",
       "properties": {
         "end_date": {
@@ -129,6 +133,7 @@
       "description": "Intermediate untagged union for the `risk_measure` field.\n\nThe JSON value can be:\n- A string: `\"expectation\"`\n- An object: `{\"cvar\": {\"alpha\": 0.95, \"lambda\": 0.5}}`\n\n`#[serde(untagged)]` tries each variant in declaration order.\nThe `Expectation` string variant must come first so it is tried before\nthe `CVaR` object variant.\n\nThe inner string of `Expectation` is not read after deserialization;\npresence of the variant alone signals `StageRiskConfig::Expectation`."
     },
     "RawSeasonDefinitions": {
+      "additionalProperties": false,
       "description": "Intermediate type for the `season_definitions` sub-object.",
       "properties": {
         "cycle_type": {
@@ -150,6 +155,7 @@
       "type": "object"
     },
     "RawSeasonEntry": {
+      "additionalProperties": false,
       "description": "Intermediate type for one season entry.",
       "properties": {
         "day_end": {
@@ -207,6 +213,7 @@
       "type": "object"
     },
     "RawStage": {
+      "additionalProperties": false,
       "description": "Intermediate type for a study stage entry.",
       "properties": {
         "block_mode": {
@@ -281,6 +288,7 @@
       "type": "object"
     },
     "RawStateVariables": {
+      "additionalProperties": false,
       "description": "Intermediate type for the `state_variables` sub-object.",
       "properties": {
         "inflow_lags": {
@@ -297,6 +305,7 @@
       "type": "object"
     },
     "RawTransition": {
+      "additionalProperties": false,
       "description": "Intermediate type for one policy graph transition.",
       "properties": {
         "annual_discount_rate_override": {
@@ -333,6 +342,7 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "description": "Top-level intermediate type for `stages.json`.\n\nPrivate — only used during deserialization. Not re-exported.",
   "properties": {
     "$schema": {

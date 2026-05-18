@@ -25,9 +25,9 @@ use crate::output::error::OutputError;
 use crate::output::parquet_config::ParquetWriterConfig;
 use crate::output::schemas::{
     buses_schema, contracts_schema, convergence_schema, costs_schema, exchanges_schema,
-    generic_violations_schema, hydros_schema, inflow_lags_schema, iteration_timing_schema,
-    non_controllables_schema, pumping_stations_schema, rank_timing_schema, retry_histogram_schema,
-    row_selection_schema, solver_iterations_schema, thermals_schema,
+    generic_violations_schema, hydro_energy_productivity_schema, hydros_schema, inflow_lags_schema,
+    iteration_timing_schema, non_controllables_schema, pumping_stations_schema, rank_timing_schema,
+    retry_histogram_schema, row_selection_schema, solver_iterations_schema, thermals_schema,
 };
 
 // ─── Entity type codes (SS3) ─────────────────────────────────────────────────
@@ -282,6 +282,10 @@ fn write_variables_csv(path: &Path) -> Result<(), OutputError> {
         ("cut_selection", row_selection_schema()),
         ("solver_iterations", solver_iterations_schema()),
         ("retry_histogram", retry_histogram_schema()),
+        (
+            "hydro_energy_productivity",
+            hydro_energy_productivity_schema(),
+        ),
     ];
 
     for (schema_name, schema) in schemas {
@@ -314,8 +318,11 @@ fn arrow_type_str(dt: &DataType) -> &'static str {
         DataType::Int8 => "i8",
         DataType::Int32 => "i32",
         DataType::Int64 => "i64",
+        DataType::UInt32 => "u32",
+        DataType::UInt64 => "u64",
         DataType::Float64 => "f64",
         DataType::Boolean => "bool",
+        DataType::Utf8 => "string",
         _ => "unknown",
     }
 }
@@ -323,7 +330,7 @@ fn arrow_type_str(dt: &DataType) -> &'static str {
 /// Return the physical unit string for a given (file, column) pair.
 ///
 /// Returns `""` for dimensionless columns or columns without a defined unit.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::match_same_arms)]
 fn unit_for(file: &str, column: &str) -> &'static str {
     // Columns whose unit is independent of which file they appear in.
     match column {
@@ -442,7 +449,11 @@ fn unit_for(file: &str, column: &str) -> &'static str {
     match (file, column) {
         (_, "total_cost" | "pumping_cost" | "spillage_cost" | "exchange_cost") => "$",
         ("hydros", "water_value_per_hm3") => "$/hm3",
-        ("hydros", "productivity_mw_per_m3s") => "MW/(m3/s)",
+        ("hydros", "equivalent_productivity_mw_per_m3s") => "MW/(m3/s)",
+        ("hydros", "accumulated_productivity_mw_per_m3s") => "MW/(m3/s)",
+        ("hydros", "incremental_inflow_energy_mw") => "MW",
+        ("hydros", "stored_energy_initial_mwh") => "MWh",
+        ("hydros", "stored_energy_final_mwh") => "MWh",
         ("hydros", "generation_slack_mw") => "MW",
         _ => "",
     }
@@ -497,7 +508,17 @@ fn description_for(file: &str, column: &str) -> &'static str {
         ("hydros", "storage_final_hm3") => "Reservoir storage at end of stage",
         ("hydros", "generation_mw") => "Hydro generation",
         ("hydros", "generation_mwh") => "Hydro energy generated",
-        ("hydros", "productivity_mw_per_m3s") => "Effective productivity (nullable)",
+        ("hydros", "equivalent_productivity_mw_per_m3s") => {
+            "Equivalent productivity `ρ_eq` (always populated)"
+        }
+        ("hydros", "accumulated_productivity_mw_per_m3s") => {
+            "Accumulated productivity `ρ_acum` along downstream cascade"
+        }
+        ("hydros", "incremental_inflow_energy_mw") => {
+            "Incremental natural energy inflow (`ρ_acum` · incremental inflow)"
+        }
+        ("hydros", "stored_energy_initial_mwh") => "Stored energy at start of block",
+        ("hydros", "stored_energy_final_mwh") => "Stored energy at end of block",
         ("hydros", "spillage_cost") => "Spillage regularization cost",
         ("hydros", "water_value_per_hm3") => "Marginal water value",
         ("hydros", "storage_binding_code") => "Storage bound binding code",
@@ -1117,11 +1138,10 @@ mod tests {
             max_storage_hm3: 100.0,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 0.9,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 50.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 45.0,
             tailrace: None,
@@ -1453,8 +1473,8 @@ mod tests {
 
         let row_count = rdr.records().count();
         assert_eq!(
-            row_count, 196,
-            "variables.csv must have exactly 196 data rows (one per column across all schemas)"
+            row_count, 206,
+            "variables.csv must have exactly 206 data rows (one per column across all schemas)"
         );
     }
 
@@ -1670,5 +1690,68 @@ mod tests {
             serde_json::json!("1.0"),
             "state_dictionary must have version \"1.0\""
         );
+    }
+
+    // ── dictionary unit/description tests ────────────────────────────────────
+
+    #[test]
+    fn new_energy_columns_have_units() {
+        assert_eq!(
+            unit_for("hydros", "equivalent_productivity_mw_per_m3s"),
+            "MW/(m3/s)"
+        );
+        assert_eq!(
+            unit_for("hydros", "accumulated_productivity_mw_per_m3s"),
+            "MW/(m3/s)"
+        );
+        assert_eq!(unit_for("hydros", "incremental_inflow_energy_mw"), "MW");
+        assert_eq!(unit_for("hydros", "stored_energy_initial_mwh"), "MWh");
+        assert_eq!(unit_for("hydros", "stored_energy_final_mwh"), "MWh");
+    }
+
+    #[test]
+    fn new_energy_columns_have_descriptions() {
+        assert!(
+            !description_for("hydros", "equivalent_productivity_mw_per_m3s").is_empty(),
+            "equivalent_productivity_mw_per_m3s must have a description"
+        );
+        assert!(
+            !description_for("hydros", "accumulated_productivity_mw_per_m3s").is_empty(),
+            "accumulated_productivity_mw_per_m3s must have a description"
+        );
+        assert!(
+            !description_for("hydros", "incremental_inflow_energy_mw").is_empty(),
+            "incremental_inflow_energy_mw must have a description"
+        );
+        assert!(
+            !description_for("hydros", "stored_energy_initial_mwh").is_empty(),
+            "stored_energy_initial_mwh must have a description"
+        );
+        assert!(
+            !description_for("hydros", "stored_energy_final_mwh").is_empty(),
+            "stored_energy_final_mwh must have a description"
+        );
+    }
+
+    #[test]
+    fn old_productivity_field_returns_default_unit() {
+        assert_eq!(
+            unit_for("hydros", "productivity_mw_per_m3s"),
+            "",
+            "removed column must fall through to the default empty-string arm"
+        );
+    }
+
+    #[test]
+    fn every_hydros_schema_column_has_description() {
+        let schema = hydros_schema();
+        for field in schema.fields() {
+            let desc = description_for("hydros", field.name());
+            assert!(
+                !desc.is_empty(),
+                "hydros column '{}' has no description in description_for",
+                field.name()
+            );
+        }
     }
 }

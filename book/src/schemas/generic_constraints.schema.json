@@ -1,6 +1,7 @@
 {
   "$defs": {
     "RawConstraint": {
+      "additionalProperties": false,
       "description": "Intermediate type for a single constraint entry.",
       "properties": {
         "description": {
@@ -42,6 +43,7 @@
       "type": "object"
     },
     "RawSlackConfig": {
+      "additionalProperties": false,
       "description": "Intermediate type for the slack configuration.",
       "properties": {
         "enabled": {
@@ -64,6 +66,7 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "description": "Top-level intermediate type for `generic_constraints.json`.\n\nPrivate — only used during deserialization. Not re-exported.",
   "properties": {
     "$schema": {

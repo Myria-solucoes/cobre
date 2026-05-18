@@ -371,7 +371,21 @@ pub struct HydroModelSummary {
 #[derive(Debug)]
 pub struct PrepareHydroModelsResult {
     /// Resolved production models for all (hydro, stage) pairs.
+    ///
+    /// For non-FPHA hydros, the per-stage `productivity` already reflects the
+    /// `system/hydro_energy_productivity.parquet` override when supplied.
+    /// Downstream consumers (LP builder, energy conversion) read `productivity`
+    /// from this set as the single source of truth.
     pub production: ProductionModelSet,
+    /// Per-`(hydro, stage)` override table parsed from
+    /// `system/hydro_energy_productivity.parquet`. Empty when the file is absent.
+    ///
+    /// Carried alongside `production` because the FPHA derivation in
+    /// [`crate::energy_conversion::build_energy_conversion_set`] still needs the
+    /// raw override entries (`equivalent_productivity`, `reference_volume`,
+    /// `reference_outflow`) to override its VHA + `ρ_esp` derivation. For
+    /// non-FPHA hydros the override is already baked into `production`.
+    pub productivity_override: crate::energy_conversion::HydroEnergyProductivityOverride,
     /// Resolved evaporation models for all hydro plants.
     pub evaporation: EvaporationModelSet,
     /// Provenance records for all hydro plants.
@@ -413,17 +427,13 @@ impl PrepareHydroModelsResult {
         let production_models: Vec<Vec<ResolvedProductionModel>> = system
             .hydros()
             .iter()
-            .map(|hydro| {
-                let productivity = match &hydro.generation_model {
-                    HydroGenerationModel::ConstantProductivity {
-                        productivity_mw_per_m3s,
-                    }
-                    | HydroGenerationModel::LinearizedHead {
-                        productivity_mw_per_m3s,
-                    } => *productivity_mw_per_m3s,
-                    HydroGenerationModel::Fpha => 0.0,
-                };
-                vec![ResolvedProductionModel::ConstantProductivity { productivity }; n_stages]
+            .map(|_hydro| {
+                // Non-FPHA entity models have no inline productivity after the
+                // HydroGenerationModel refactor; the coefficient lives solely in
+                // hydro_production_models.json. Use 0.0 as a placeholder — this
+                // factory is only used in tests and on non-root MPI ranks that
+                // reconstruct the result from a broadcast payload (not from scratch).
+                vec![ResolvedProductionModel::ConstantProductivity { productivity: 0.0 }; n_stages]
             })
             .collect();
 
@@ -455,6 +465,8 @@ impl PrepareHydroModelsResult {
 
         Self {
             production,
+            productivity_override:
+                crate::energy_conversion::HydroEnergyProductivityOverride::default(),
             evaporation,
             provenance: HydroModelProvenance {
                 production_sources,
@@ -613,13 +625,33 @@ pub fn prepare_hydro_models(
     system: &System,
     case_dir: &Path,
 ) -> Result<PrepareHydroModelsResult, SddpError> {
-    let (production, production_sources, kappa_warnings, fpha_export_rows) =
-        resolve_production_models(system, case_dir)?;
+    let artifacts = load_artifacts_for_hydro_models(case_dir)?;
+    prepare_hydro_models_from_artifacts(system, &artifacts)
+}
+
+/// Variant of [`prepare_hydro_models`] that consumes a pre-parsed
+/// [`cobre_io::CaseArtifacts`] bundle instead of re-reading the case
+/// directory from disk.
+///
+/// Use this from any pipeline that has already called
+/// [`cobre_io::load_case_with_artifacts`]; it avoids the duplicate parsing
+/// and parallel validation paths the audit (CR-3) flagged.
+///
+/// # Errors
+///
+/// Same conditions as [`prepare_hydro_models`].
+pub fn prepare_hydro_models_from_artifacts(
+    system: &System,
+    artifacts: &cobre_io::CaseArtifacts,
+) -> Result<PrepareHydroModelsResult, SddpError> {
+    let (production, productivity_override, production_sources, kappa_warnings, fpha_export_rows) =
+        resolve_production_models_from_artifacts(system, artifacts)?;
     let (evaporation, evaporation_sources, evaporation_reference_sources) =
-        resolve_evaporation_models(system, case_dir)?;
+        resolve_evaporation_models_from_artifacts(system, artifacts)?;
 
     Ok(PrepareHydroModelsResult {
         production,
+        productivity_override,
         evaporation,
         provenance: HydroModelProvenance {
             production_sources,
@@ -628,6 +660,51 @@ pub fn prepare_hydro_models(
         },
         kappa_warnings,
         fpha_export_rows,
+    })
+}
+
+/// Build a [`cobre_io::CaseArtifacts`] containing the rows
+/// [`prepare_hydro_models_from_artifacts`] needs, by reading the case
+/// directory directly.
+///
+/// Used to back the legacy [`prepare_hydro_models`] signature; production
+/// pipelines should call [`cobre_io::load_case_with_artifacts`] instead so
+/// the full validation runs once.
+fn load_artifacts_for_hydro_models(case_dir: &Path) -> Result<cobre_io::CaseArtifacts, SddpError> {
+    let mut ctx = cobre_io::ValidationContext::new();
+    let manifest = cobre_io::validate_structure(case_dir, &mut ctx);
+
+    let prod_path = if manifest.system_hydro_production_models_json {
+        Some(case_dir.join("system").join("hydro_production_models.json"))
+    } else {
+        None
+    };
+    let geom_path = if manifest.system_hydro_geometry_parquet {
+        Some(case_dir.join("system").join("hydro_geometry.parquet"))
+    } else {
+        None
+    };
+    let fpha_path = if manifest.system_fpha_hyperplanes_parquet {
+        Some(case_dir.join("system").join("fpha_hyperplanes.parquet"))
+    } else {
+        None
+    };
+    let prod_eff_path = case_dir
+        .join("system")
+        .join("hydro_energy_productivity.parquet");
+    let prod_eff_path_opt = if prod_eff_path.exists() {
+        Some(prod_eff_path.as_path())
+    } else {
+        None
+    };
+
+    Ok(cobre_io::CaseArtifacts {
+        file_manifest: manifest,
+        hydro_geometry: cobre_io::extensions::load_hydro_geometry(geom_path.as_deref())?,
+        production_models: cobre_io::extensions::load_production_models(prod_path.as_deref())?,
+        hydro_energy_productivity: cobre_io::load_hydro_energy_productivity(prod_eff_path_opt)?,
+        fpha_hyperplanes: cobre_io::extensions::load_fpha_hyperplanes(fpha_path.as_deref())?,
+        scalar_parameters: Vec::new(),
     })
 }
 
@@ -641,6 +718,7 @@ pub fn prepare_hydro_models(
 /// `resolve_production_models` never performs any I/O.
 type ResolveProductionResult = (
     ProductionModelSet,
+    crate::energy_conversion::HydroEnergyProductivityOverride,
     Vec<(EntityId, ProductionModelSource)>,
     Vec<(String, f64)>,
     Vec<cobre_io::FphaHyperplaneRow>,
@@ -695,37 +773,55 @@ pub fn resolve_production_models(
     system: &System,
     case_dir: &Path,
 ) -> Result<ResolveProductionResult, SddpError> {
-    // ── Step 1: check whether the optional config file is present ─────────────
-    let mut ctx = cobre_io::ValidationContext::new();
-    let manifest = cobre_io::validate_structure(case_dir, &mut ctx);
-    let config_path = if manifest.system_hydro_production_models_json {
-        Some(case_dir.join("system").join("hydro_production_models.json"))
-    } else {
-        None
-    };
+    let artifacts = load_artifacts_for_hydro_models(case_dir)?;
+    resolve_production_models_from_artifacts(system, &artifacts)
+}
 
-    // ── Step 2: load production model configs ─────────────────────────────────
-    let prod_configs: Vec<ProductionModelConfig> =
-        cobre_io::extensions::load_production_models(config_path.as_deref())?;
+/// Variant of [`resolve_production_models`] that consumes a pre-parsed
+/// [`cobre_io::CaseArtifacts`] bundle.
+///
+/// # Errors
+///
+/// Same conditions as [`resolve_production_models`].
+pub fn resolve_production_models_from_artifacts(
+    system: &System,
+    artifacts: &cobre_io::CaseArtifacts,
+) -> Result<ResolveProductionResult, SddpError> {
+    // ── Step 1b: build the per-(hydro, stage) ρ_eq override from the
+    //            already-parsed rows.
+    let override_table = crate::energy_conversion::build_hydro_energy_productivity_override(
+        artifacts.hydro_energy_productivity.clone(),
+    )
+    .map_err(|e| SddpError::Validation(e.to_string()))?;
+
+    // ── Step 2: production model configs ─────────────────────────────────────
+    // Borrow from the artifacts bundle; no clone of the config rows is
+    // needed because the per-hydro maps below only need references.
+    let prod_configs: &[ProductionModelConfig] = &artifacts.production_models;
 
     // ── Step 3: build O(1) lookup: hydro_id → config ─────────────────────────
     let config_map: HashMap<EntityId, &ProductionModelConfig> =
         prod_configs.iter().map(|c| (c.hydro_id, c)).collect();
 
-    // ── Step 4/5/6: load and index precomputed FPHA hyperplane rows ───────────
-    let hyperplane_rows = load_precomputed_hyperplanes(&prod_configs, &manifest, case_dir)?;
+    // ── Step 4/5/6: index precomputed FPHA hyperplane rows ───────────────────
     let mut hyperplane_map: HashMap<(EntityId, Option<i32>), Vec<&FphaHyperplaneRow>> =
         HashMap::new();
-    for row in &hyperplane_rows {
-        hyperplane_map
-            .entry((row.hydro_id, row.stage_id))
-            .or_default()
-            .push(row);
+    if prod_configs.iter().any(config_uses_precomputed_fpha) {
+        for row in &artifacts.fpha_hyperplanes {
+            hyperplane_map
+                .entry((row.hydro_id, row.stage_id))
+                .or_default()
+                .push(row);
+        }
     }
 
-    // ── Step 4b/5b/6b: load and index geometry rows for computed-source hydros ─
-    let geometry_rows = load_geometry_rows(&prod_configs, &manifest, case_dir)?;
-    let geometry_map = build_geometry_map(&geometry_rows);
+    // ── Step 4b/5b/6b: index geometry rows for computed-source hydros ───────
+    let geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> =
+        if prod_configs.iter().any(config_uses_computed_fpha) {
+            build_geometry_map(&artifacts.hydro_geometry)
+        } else {
+            HashMap::new()
+        };
 
     // ── Step 7: collect study stages (id >= 0) in canonical order ────────────
     let study_stages: Vec<&cobre_core::temporal::Stage> =
@@ -784,6 +880,7 @@ pub fn resolve_production_models(
                 source,
                 &hyperplane_map,
                 cached_computed_planes.as_deref(),
+                Some(&override_table),
             )?;
             stage_models.push(model);
         }
@@ -792,49 +889,7 @@ pub fn resolve_production_models(
     }
 
     let set = ProductionModelSet::new(all_models, n_hydros, n_stages);
-    Ok((set, provenance, kappa_warnings, export_rows))
-}
-
-/// Load precomputed FPHA hyperplane rows from disk when any config uses `source: "precomputed"`.
-///
-/// Returns an empty vector when no precomputed hyperplanes are needed.
-fn load_precomputed_hyperplanes(
-    prod_configs: &[ProductionModelConfig],
-    manifest: &cobre_io::FileManifest,
-    case_dir: &Path,
-) -> Result<Vec<FphaHyperplaneRow>, SddpError> {
-    if !prod_configs.iter().any(config_uses_precomputed_fpha) {
-        return Ok(Vec::new());
-    }
-    let hp_path = if manifest.system_fpha_hyperplanes_parquet {
-        Some(case_dir.join("system").join("fpha_hyperplanes.parquet"))
-    } else {
-        None
-    };
-    Ok(cobre_io::extensions::load_fpha_hyperplanes(
-        hp_path.as_deref(),
-    )?)
-}
-
-/// Load geometry rows from disk when any config uses `source: "computed"`.
-///
-/// Returns an empty vector when no computed-source hydros exist.
-fn load_geometry_rows(
-    prod_configs: &[ProductionModelConfig],
-    manifest: &cobre_io::FileManifest,
-    case_dir: &Path,
-) -> Result<Vec<HydroGeometryRow>, SddpError> {
-    if !prod_configs.iter().any(config_uses_computed_fpha) {
-        return Ok(Vec::new());
-    }
-    let geo_path = if manifest.system_hydro_geometry_parquet {
-        Some(case_dir.join("system").join("hydro_geometry.parquet"))
-    } else {
-        None
-    };
-    Ok(cobre_io::extensions::load_hydro_geometry(
-        geo_path.as_deref(),
-    )?)
+    Ok((set, override_table, provenance, kappa_warnings, export_rows))
 }
 
 /// Build an `O(1)` geometry map: `hydro_id → sorted geometry row references`.
@@ -1061,8 +1116,7 @@ fn determine_source(
     } else {
         // No config entry: use HydroGenerationModel from entity.
         match &hydro.generation_model {
-            HydroGenerationModel::ConstantProductivity { .. }
-            | HydroGenerationModel::LinearizedHead { .. } => {
+            HydroGenerationModel::ConstantProductivity | HydroGenerationModel::LinearizedHead => {
                 Ok(ProductionModelSource::DefaultConstant)
             }
             HydroGenerationModel::Fpha => Err(SddpError::Validation(format!(
@@ -1088,7 +1142,16 @@ fn resolve_stage_model(
     source: ProductionModelSource,
     hyperplane_map: &HashMap<(EntityId, Option<i32>), Vec<&FphaHyperplaneRow>>,
     cached_computed_planes: Option<&[FphaPlane]>,
+    productivity_override: Option<&crate::energy_conversion::HydroEnergyProductivityOverride>,
 ) -> Result<ResolvedProductionModel, SddpError> {
+    // Look up the parquet override for non-FPHA (hydro, stage) productivity.
+    // Cross-file resolution (cobre_io::validation::productivity_resolution)
+    // rejects the case where both JSON and parquet supply a value, so this
+    // lookup never silently masks a JSON-supplied value at load time.
+    let stage_idx = usize::try_from(stage.id.max(0)).unwrap_or(0);
+    let parquet_productivity =
+        productivity_override.and_then(|o| o.equivalent_productivity(hydro.id, stage_idx));
+
     if let Some(config) = config_entry {
         let model_info = find_model_for_stage(config, stage);
 
@@ -1113,29 +1176,40 @@ fn resolve_stage_model(
                 build_fpha_model(hydro, stage, source, hyperplane_map)
             }
         } else {
-            // "constant_productivity" or "linearized_head" from config:
-            // use override if provided, otherwise entity productivity.
-            let productivity = model_info
-                .and_then(|(_, ovr)| ovr)
-                .unwrap_or_else(|| entity_productivity(hydro));
+            // "constant_productivity" or "linearized_head" from config.
+            //
+            // Resolution order (matches build_energy_conversion_set): parquet
+            // override first, JSON productivity fallback. Load-time validation
+            // in cobre_io::validation::productivity_resolution guarantees that
+            // exactly one source supplies the value, so a None outcome here
+            // would indicate a validator gap.
+            let productivity = parquet_productivity
+                .or_else(|| model_info.and_then(|(_, p)| p))
+                .unwrap_or_else(|| {
+                    debug_assert!(
+                        false,
+                        "non-FPHA {}/{} reached resolve_stage_model with productivity=None; \
+                         see cobre_io::validation::productivity_resolution",
+                        hydro.name, stage.id
+                    );
+                    0.0
+                });
             Ok(ResolvedProductionModel::ConstantProductivity { productivity })
         }
     } else {
-        // No config entry: use entity generation model.
-        match &hydro.generation_model {
-            HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s,
-            }
-            | HydroGenerationModel::LinearizedHead {
-                productivity_mw_per_m3s,
-            } => Ok(ResolvedProductionModel::ConstantProductivity {
-                productivity: *productivity_mw_per_m3s,
-            }),
-            // Fpha without config is already rejected by determine_source().
-            HydroGenerationModel::Fpha => unreachable!(
-                "Fpha entity without config entry should have been rejected in determine_source"
-            ),
-        }
+        // No JSON config entry at all for this hydro. Use the parquet override
+        // when present; otherwise fall through to the sentinel (validator
+        // already rejected this case at load time).
+        let productivity = parquet_productivity.unwrap_or_else(|| {
+            debug_assert!(
+                false,
+                "non-FPHA {}/{} reached resolve_stage_model with productivity=None; \
+                 see cobre_io::validation::productivity_resolution",
+                hydro.name, stage.id
+            );
+            0.0
+        });
+        Ok(ResolvedProductionModel::ConstantProductivity { productivity })
     }
 }
 
@@ -1154,7 +1228,7 @@ fn find_model_for_stage(
                 let after_start = stage.id >= range.start_stage_id;
                 let before_end = range.end_stage_id.is_none_or(|end| stage.id <= end);
                 if after_start && before_end {
-                    return Some((range.model.clone(), range.productivity_override));
+                    return Some((range.model.clone(), range.productivity_mw_per_m3s));
                 }
             }
             None
@@ -1168,7 +1242,7 @@ fn find_model_for_stage(
                     // season.season_id is i32; stage.season_id is usize.
                     // Convert usize to i32 for comparison to avoid cast_sign_loss.
                     if i32::try_from(season_id).is_ok_and(|sid| sid == season.season_id) {
-                        return Some((season.model.clone(), season.productivity_override));
+                        return Some((season.model.clone(), season.productivity_mw_per_m3s));
                     }
                 }
             }
@@ -1176,27 +1250,6 @@ fn find_model_for_stage(
             // Default model has no override.
             Some((default_model.clone(), None))
         }
-    }
-}
-
-/// Return the productivity field from the hydro entity regardless of which
-/// `HydroGenerationModel` variant is active.
-///
-/// Used when a config entry explicitly assigns `"constant_productivity"` or
-/// `"linearized_head"` to a stage that would otherwise use the entity model.
-fn entity_productivity(hydro: &cobre_core::entities::hydro::Hydro) -> f64 {
-    match &hydro.generation_model {
-        HydroGenerationModel::ConstantProductivity {
-            productivity_mw_per_m3s,
-        }
-        | HydroGenerationModel::LinearizedHead {
-            productivity_mw_per_m3s,
-        } => *productivity_mw_per_m3s,
-        // Fpha entity model has no productivity scalar — use 0.0 as a safe
-        // placeholder; this case is only reached when the config explicitly
-        // assigns a non-FPHA model to a stage for an Fpha entity, which is
-        // unusual but not an error (the caller chose to override via config).
-        HydroGenerationModel::Fpha => 0.0,
     }
 }
 
@@ -1354,6 +1407,28 @@ pub fn resolve_evaporation_models(
     ),
     SddpError,
 > {
+    let artifacts = load_artifacts_for_hydro_models(case_dir)?;
+    resolve_evaporation_models_from_artifacts(system, &artifacts)
+}
+
+/// Variant of [`resolve_evaporation_models`] that consumes a pre-parsed
+/// [`cobre_io::CaseArtifacts`] bundle.
+///
+/// # Errors
+///
+/// Same conditions as [`resolve_evaporation_models`].
+#[allow(clippy::type_complexity)]
+pub fn resolve_evaporation_models_from_artifacts(
+    system: &System,
+    artifacts: &cobre_io::CaseArtifacts,
+) -> Result<
+    (
+        EvaporationModelSet,
+        Vec<(EntityId, EvaporationSource)>,
+        Vec<(EntityId, EvaporationReferenceSource)>,
+    ),
+    SddpError,
+> {
     // ── Step 1: scan for any hydro that needs evaporation ─────────────────────
     let any_evaporation = system
         .hydros()
@@ -1384,20 +1459,13 @@ pub fn resolve_evaporation_models(
         ));
     }
 
-    // ── Step 3: load hydro_geometry.parquet ───────────────────────────────────
-    let mut ctx = cobre_io::ValidationContext::new();
-    let manifest = cobre_io::validate_structure(case_dir, &mut ctx);
-    let geometry_path = if manifest.system_hydro_geometry_parquet {
-        Some(case_dir.join("system").join("hydro_geometry.parquet"))
-    } else {
-        None
-    };
-    let geometry_rows = cobre_io::extensions::load_hydro_geometry(geometry_path.as_deref())?;
+    // ── Step 3: use pre-parsed hydro_geometry rows from the artifacts bundle ─
+    let geometry_rows: &[HydroGeometryRow] = &artifacts.hydro_geometry;
 
     // ── Step 4: group geometry rows by hydro_id ───────────────────────────────
     let mut geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
         HashMap::new();
-    for row in &geometry_rows {
+    for row in geometry_rows {
         geometry_map.entry(row.hydro_id).or_default().push(row);
     }
     // Sort each hydro's rows by volume_hm3 ascending (should already be sorted,
@@ -1791,6 +1859,7 @@ mod tests {
             generation_model: model,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 500.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 1000.0,
             tailrace: None,
@@ -1836,7 +1905,7 @@ mod tests {
                         max_planes_per_hydro: None,
                         fitting_window: None,
                     }),
-                    productivity_override: None,
+                    productivity_mw_per_m3s: None,
                 }],
             },
         }
@@ -1858,7 +1927,7 @@ mod tests {
                         max_planes_per_hydro: None,
                         fitting_window: None,
                     }),
-                    productivity_override: None,
+                    productivity_mw_per_m3s: None,
                 }],
             },
         }
@@ -1866,77 +1935,31 @@ mod tests {
 
     // ── resolve_production_models unit tests (in-memory, no disk I/O) ─────────
 
-    /// All-constant system with no config file: all hydros → DefaultConstant provenance.
+    /// Non-FPHA hydros without any config entry produce
+    /// `DefaultConstant` provenance from `determine_source`. The
+    /// downstream sentinel behaviour in `resolve_stage_model` is exercised
+    /// by `test_resolve_stage_model_returns_sentinel_when_no_config_entry`.
     #[test]
     fn all_constant_no_config_returns_default_constant_provenance() {
-        let hydro0 = make_hydro(
-            0,
-            HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 0.9,
-            },
-        );
-        let hydro1 = make_hydro(
-            1,
-            HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 0.8,
-            },
-        );
+        let hydro0 = make_hydro(0, HydroGenerationModel::ConstantProductivity);
+        let hydro1 = make_hydro(1, HydroGenerationModel::ConstantProductivity);
 
-        let stage = make_stage(0);
-
-        // Test determine_source: no config entry, ConstantProductivity entity model.
         let src0 = determine_source(&hydro0, None).expect("should succeed");
         let src1 = determine_source(&hydro1, None).expect("should succeed");
         assert_eq!(src0, ProductionModelSource::DefaultConstant);
         assert_eq!(src1, ProductionModelSource::DefaultConstant);
-
-        // Test resolve_stage_model: constant productivity should come from entity.
-        let empty_map = std::collections::HashMap::new();
-        let model0 = super::resolve_stage_model(
-            &hydro0,
-            &stage,
-            None,
-            ProductionModelSource::DefaultConstant,
-            &empty_map,
-            None,
-        )
-        .expect("should succeed");
-        assert!(
-            matches!(model0, ResolvedProductionModel::ConstantProductivity { productivity }
-                if (productivity - 0.9).abs() < f64::EPSILON),
-            "expected ConstantProductivity 0.9, got {model0:?}"
-        );
     }
 
-    /// LinearizedHead entity model without config → ConstantProductivity with the productivity field.
+    /// `LinearizedHead` entities without a config entry produce
+    /// `DefaultConstant` provenance from `determine_source`. The downstream
+    /// sentinel behaviour in `resolve_stage_model` is exercised by
+    /// `test_resolve_stage_model_returns_sentinel_when_no_config_entry`.
     #[test]
     fn linearized_head_entity_resolves_to_constant_productivity() {
-        let hydro = make_hydro(
-            0,
-            HydroGenerationModel::LinearizedHead {
-                productivity_mw_per_m3s: 0.75,
-            },
-        );
-        let stage = make_stage(0);
+        let hydro = make_hydro(0, HydroGenerationModel::LinearizedHead);
 
         let src = determine_source(&hydro, None).expect("should succeed");
         assert_eq!(src, ProductionModelSource::DefaultConstant);
-
-        let empty_map = std::collections::HashMap::new();
-        let model = super::resolve_stage_model(
-            &hydro,
-            &stage,
-            None,
-            ProductionModelSource::DefaultConstant,
-            &empty_map,
-            None,
-        )
-        .expect("should succeed");
-        assert!(
-            matches!(model, ResolvedProductionModel::ConstantProductivity { productivity }
-                if (productivity - 0.75).abs() < f64::EPSILON),
-            "LinearizedHead should resolve to ConstantProductivity 0.75, got {model:?}"
-        );
     }
 
     /// Fpha entity model without config → validation error.
@@ -2075,7 +2098,7 @@ mod tests {
                         max_planes_per_hydro: None,
                         fitting_window: None,
                     }),
-                    productivity_override: None,
+                    productivity_mw_per_m3s: None,
                 }],
             },
         };
@@ -2454,7 +2477,7 @@ mod tests {
                     end_stage_id: Some(10),
                     model: "fpha".to_string(),
                     fpha_config: None,
-                    productivity_override: None,
+                    productivity_mw_per_m3s: None,
                 }],
             },
         };
@@ -2477,7 +2500,7 @@ mod tests {
                     end_stage_id: None,
                     model: "constant_productivity".to_string(),
                     fpha_config: None,
-                    productivity_override: None,
+                    productivity_mw_per_m3s: None,
                 }],
             },
         };
@@ -2497,12 +2520,7 @@ mod tests {
     /// resolve_stage_model uses productivity_override when present.
     #[test]
     fn resolve_stage_model_uses_productivity_override() {
-        let hydro = make_hydro(
-            0,
-            HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 0.9,
-            },
-        );
+        let hydro = make_hydro(0, HydroGenerationModel::ConstantProductivity);
         let stage = make_stage(0);
         let config = ProductionModelConfig {
             hydro_id: EntityId::from(0),
@@ -2512,7 +2530,7 @@ mod tests {
                     end_stage_id: None,
                     model: "constant_productivity".to_string(),
                     fpha_config: None,
-                    productivity_override: Some(0.55),
+                    productivity_mw_per_m3s: Some(0.55),
                 }],
             },
         };
@@ -2523,6 +2541,7 @@ mod tests {
             Some(&config),
             ProductionModelSource::DefaultConstant,
             &empty_map,
+            None,
             None,
         )
         .expect("should succeed");
@@ -2533,15 +2552,101 @@ mod tests {
         );
     }
 
-    /// resolve_stage_model falls back to entity productivity when override is None.
+    /// When the JSON config entry exists but its `productivity_mw_per_m3s`
+    /// field is `None`, `resolve_stage_model` returns a sentinel
+    /// `ConstantProductivity { productivity: 0.0 }`. The build site in
+    /// `build_energy_conversion_set` consults the parquet override and
+    /// overwrites the sentinel with the user-supplied value.
+    ///
+    /// In debug builds the sentinel path is gated by a `debug_assert!` that
+    /// catches mis-configured cases that escape load-time validation in
+    /// `cobre_io::validation::productivity_resolution`. In release builds the
+    /// `debug_assert!` is compiled out and the function returns the sentinel
+    /// directly.
     #[test]
-    fn resolve_stage_model_uses_entity_productivity_when_no_override() {
-        let hydro = make_hydro(
-            0,
-            HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 0.9,
+    fn test_resolve_stage_model_returns_sentinel_when_json_lacks_productivity() {
+        let hydro = make_hydro(0, HydroGenerationModel::ConstantProductivity);
+        let stage = make_stage(0);
+        // Config entry exists but productivity is missing — the parquet
+        // override is the supplier in production.
+        let config = ProductionModelConfig {
+            hydro_id: EntityId::from(0),
+            selection_mode: SelectionMode::StageRanges {
+                ranges: vec![StageRange {
+                    start_stage_id: 0,
+                    end_stage_id: None,
+                    model: "constant_productivity".to_string(),
+                    fpha_config: None,
+                    productivity_mw_per_m3s: None,
+                }],
             },
-        );
+        };
+        let empty_map = std::collections::HashMap::new();
+
+        #[cfg(debug_assertions)]
+        {
+            // Debug build: the `debug_assert!` fires and the call panics.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                super::resolve_stage_model(
+                    &hydro,
+                    &stage,
+                    Some(&config),
+                    ProductionModelSource::DefaultConstant,
+                    &empty_map,
+                    None,
+                    None,
+                )
+            }));
+            let panic_payload = result
+                .expect_err("debug build must panic via debug_assert! when productivity is None");
+            let msg = panic_payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| {
+                    panic_payload
+                        .downcast_ref::<&str>()
+                        .map(|s| (*s).to_owned())
+                })
+                .unwrap_or_default();
+            assert!(
+                msg.contains("Hydro0") && msg.contains("validation::productivity_resolution"),
+                "panic message must name the hydro and the validator; got: {msg}"
+            );
+        }
+
+        #[cfg(not(debug_assertions))]
+        {
+            // Release build: the assert is compiled out and the function
+            // returns the sentinel directly.
+            let model = super::resolve_stage_model(
+                &hydro,
+                &stage,
+                Some(&config),
+                ProductionModelSource::DefaultConstant,
+                &empty_map,
+                None,
+                None,
+            )
+            .expect("release build returns sentinel");
+            assert!(
+                matches!(
+                    model,
+                    ResolvedProductionModel::ConstantProductivity { productivity }
+                    if productivity == 0.0
+                ),
+                "release build must return ConstantProductivity {{ productivity: 0.0 }}; got {model:?}"
+            );
+        }
+    }
+
+    /// When the JSON has no productivity and the parquet override supplies a
+    /// value, `resolve_stage_model` returns that value as the resolved
+    /// `ConstantProductivity { productivity }`. This is the path the LP
+    /// coefficient flows through for non-FPHA hydros authored entirely via the
+    /// parquet.
+    #[test]
+    fn test_resolve_stage_model_uses_parquet_override_when_json_omits_productivity() {
+        let hydro = make_hydro(0, HydroGenerationModel::ConstantProductivity);
         let stage = make_stage(0);
         let config = ProductionModelConfig {
             hydro_id: EntityId::from(0),
@@ -2551,11 +2656,24 @@ mod tests {
                     end_stage_id: None,
                     model: "constant_productivity".to_string(),
                     fpha_config: None,
-                    productivity_override: None,
+                    productivity_mw_per_m3s: None,
                 }],
             },
         };
         let empty_map = std::collections::HashMap::new();
+        let override_table =
+            crate::energy_conversion::build_hydro_energy_productivity_override(vec![
+                cobre_io::HydroEnergyProductivityRow {
+                    hydro_id: EntityId::from(0),
+                    stage_id: Some(0),
+                    equivalent_productivity_mw_per_m3s: Some(0.42),
+                    reference_volume_hm3: None,
+                    reference_outflow_m3s: None,
+                    specific_productivity_mw_per_m3s_per_m: None,
+                },
+            ])
+            .expect("override builds");
+
         let model = super::resolve_stage_model(
             &hydro,
             &stage,
@@ -2563,13 +2681,81 @@ mod tests {
             ProductionModelSource::DefaultConstant,
             &empty_map,
             None,
+            Some(&override_table),
         )
-        .expect("should succeed");
+        .expect("resolve succeeds");
         assert!(
-            matches!(model, ResolvedProductionModel::ConstantProductivity { productivity }
-                if (productivity - 0.9).abs() < f64::EPSILON),
-            "expected ConstantProductivity 0.9 (entity), got {model:?}"
+            matches!(
+                model,
+                ResolvedProductionModel::ConstantProductivity { productivity }
+                if (productivity - 0.42).abs() < 1e-12
+            ),
+            "override value must reach the resolved model; got {model:?}"
         );
+    }
+
+    /// When no JSON config entry exists at all for a non-FPHA hydro,
+    /// `resolve_stage_model` returns the same sentinel. Load-time validation
+    /// in `cobre_io::validation::productivity_resolution` is responsible for
+    /// catching missing entries; this branch trusts that invariant in release
+    /// builds and is guarded by a `debug_assert!` in debug builds.
+    #[test]
+    fn test_resolve_stage_model_returns_sentinel_when_no_config_entry() {
+        let hydro = make_hydro(7, HydroGenerationModel::ConstantProductivity);
+        let stage = make_stage(3);
+        let empty_map = std::collections::HashMap::new();
+
+        #[cfg(debug_assertions)]
+        {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                super::resolve_stage_model(
+                    &hydro,
+                    &stage,
+                    None,
+                    ProductionModelSource::DefaultConstant,
+                    &empty_map,
+                    None,
+                    None,
+                )
+            }));
+            let panic_payload = result
+                .expect_err("debug build must panic via debug_assert! when no config entry exists");
+            let msg = panic_payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| {
+                    panic_payload
+                        .downcast_ref::<&str>()
+                        .map(|s| (*s).to_owned())
+                })
+                .unwrap_or_default();
+            assert!(
+                msg.contains("Hydro7") && msg.contains("validation::productivity_resolution"),
+                "panic message must name the hydro and the validator; got: {msg}"
+            );
+        }
+
+        #[cfg(not(debug_assertions))]
+        {
+            let model = super::resolve_stage_model(
+                &hydro,
+                &stage,
+                None,
+                ProductionModelSource::DefaultConstant,
+                &empty_map,
+                None,
+                None,
+            )
+            .expect("release build returns sentinel");
+            assert!(
+                matches!(
+                    model,
+                    ResolvedProductionModel::ConstantProductivity { productivity }
+                    if productivity == 0.0
+                ),
+                "release build must return ConstantProductivity {{ productivity: 0.0 }}; got {model:?}"
+            );
+        }
     }
 
     /// find_model_for_stage returns override in tuple.
@@ -2583,7 +2769,7 @@ mod tests {
                     end_stage_id: None,
                     model: "constant_productivity".to_string(),
                     fpha_config: None,
-                    productivity_override: Some(0.75),
+                    productivity_mw_per_m3s: Some(0.75),
                 }],
             },
         };
@@ -2607,7 +2793,7 @@ mod tests {
                     season_id: 1,
                     model: "constant_productivity".to_string(),
                     fpha_config: None,
-                    productivity_override: Some(0.60),
+                    productivity_mw_per_m3s: Some(0.60),
                 }],
             },
         };
@@ -2736,6 +2922,8 @@ mod tests {
         let evap_set = EvaporationModelSet::new(vec![EvaporationModel::None]);
         let result = PrepareHydroModelsResult {
             production: prod_set,
+            productivity_override:
+                crate::energy_conversion::HydroEnergyProductivityOverride::default(),
             evaporation: evap_set,
             provenance: prov,
             kappa_warnings: Vec::new(),
@@ -3145,11 +3333,10 @@ mod tests {
             max_storage_hm3: max_storage,
             min_outflow_m3s: 0.0,
             max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity {
-                productivity_mw_per_m3s: 0.9,
-            },
+            generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 500.0,
+            specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 1000.0,
             tailrace: None,
@@ -3693,14 +3880,7 @@ mod tests {
         let hydro_ids = [1i32, 2, 3];
         let hydros = hydro_ids
             .iter()
-            .map(|&id| {
-                make_hydro(
-                    id,
-                    HydroGenerationModel::ConstantProductivity {
-                        productivity_mw_per_m3s: 0.95,
-                    },
-                )
-            })
+            .map(|&id| make_hydro(id, HydroGenerationModel::ConstantProductivity))
             .collect();
         let system = make_system_for_summary(hydros);
 
@@ -3745,6 +3925,8 @@ mod tests {
 
         let result = PrepareHydroModelsResult {
             production,
+            productivity_override:
+                crate::energy_conversion::HydroEnergyProductivityOverride::default(),
             evaporation: EvaporationModelSet::new(evap_models),
             provenance: HydroModelProvenance {
                 production_sources,
@@ -3847,6 +4029,8 @@ mod tests {
             hydro_ids.iter().map(|_| EvaporationModel::None).collect();
         PrepareHydroModelsResult {
             production,
+            productivity_override:
+                crate::energy_conversion::HydroEnergyProductivityOverride::default(),
             evaporation: EvaporationModelSet::new(evap_models),
             provenance: HydroModelProvenance {
                 production_sources,
@@ -3923,6 +4107,8 @@ mod tests {
             all_ids.iter().map(|_| EvaporationModel::None).collect();
         PrepareHydroModelsResult {
             production,
+            productivity_override:
+                crate::energy_conversion::HydroEnergyProductivityOverride::default(),
             evaporation: EvaporationModelSet::new(evap_models),
             provenance: HydroModelProvenance {
                 production_sources,
@@ -3989,6 +4175,8 @@ mod tests {
             .collect();
         PrepareHydroModelsResult {
             production,
+            productivity_override:
+                crate::energy_conversion::HydroEnergyProductivityOverride::default(),
             evaporation: EvaporationModelSet::new(evap_models),
             provenance: HydroModelProvenance {
                 production_sources,
@@ -4006,14 +4194,7 @@ mod tests {
         let hydro_ids = [1i32, 2, 3, 4];
         let hydros = hydro_ids
             .iter()
-            .map(|&id| {
-                make_hydro(
-                    id,
-                    HydroGenerationModel::ConstantProductivity {
-                        productivity_mw_per_m3s: 0.95,
-                    },
-                )
-            })
+            .map(|&id| make_hydro(id, HydroGenerationModel::ConstantProductivity))
             .collect();
         let system = make_system_for_summary(hydros);
         let result = make_result_all_constant(&hydro_ids);
@@ -4046,14 +4227,7 @@ mod tests {
         let all_ids = [1i32, 2, 3, 4];
         let hydros = all_ids
             .iter()
-            .map(|&id| {
-                make_hydro(
-                    id,
-                    HydroGenerationModel::ConstantProductivity {
-                        productivity_mw_per_m3s: 0.95,
-                    },
-                )
-            })
+            .map(|&id| make_hydro(id, HydroGenerationModel::ConstantProductivity))
             .collect();
         let system = make_system_for_summary(hydros);
         let result = make_result_mixed(&constant_ids, &fpha_ids, 5);
@@ -4090,14 +4264,7 @@ mod tests {
         let all_ids = [1i32, 2, 3, 4];
         let hydros = all_ids
             .iter()
-            .map(|&id| {
-                make_hydro(
-                    id,
-                    HydroGenerationModel::ConstantProductivity {
-                        productivity_mw_per_m3s: 0.95,
-                    },
-                )
-            })
+            .map(|&id| make_hydro(id, HydroGenerationModel::ConstantProductivity))
             .collect();
         let system = make_system_for_summary(hydros);
 
@@ -4184,6 +4351,8 @@ mod tests {
             .collect();
         let result = PrepareHydroModelsResult {
             production,
+            productivity_override:
+                crate::energy_conversion::HydroEnergyProductivityOverride::default(),
             evaporation: EvaporationModelSet::new(evap_models),
             provenance: HydroModelProvenance {
                 production_sources,
@@ -4210,14 +4379,7 @@ mod tests {
         let evap_ids = [1i32, 3];
         let hydros = hydro_ids
             .iter()
-            .map(|&id| {
-                make_hydro(
-                    id,
-                    HydroGenerationModel::ConstantProductivity {
-                        productivity_mw_per_m3s: 0.95,
-                    },
-                )
-            })
+            .map(|&id| make_hydro(id, HydroGenerationModel::ConstantProductivity))
             .collect();
         let system = make_system_for_summary(hydros);
         let result = make_result_with_evaporation(&hydro_ids, &evap_ids);
@@ -4343,6 +4505,7 @@ mod tests {
             ProductionModelSource::ComputedFromGeometry,
             &empty_hyperplane_map,
             Some(planes),
+            None,
         )
         .expect("resolve_stage_model must succeed for ComputedFromGeometry with cached planes");
 
@@ -4421,6 +4584,7 @@ mod tests {
             src0,
             &hyperplane_map,
             None,
+            None,
         )
         .expect("resolve_stage_model must succeed for hydro 0 (precomputed)");
 
@@ -4434,6 +4598,7 @@ mod tests {
             src1,
             &empty_hyperplane_map,
             Some(&computed_fit.planes),
+            None,
         )
         .expect("resolve_stage_model must succeed for hydro 1 (computed)");
 
@@ -4495,6 +4660,7 @@ mod tests {
                     ProductionModelSource::ComputedFromGeometry,
                     &empty_hyperplane_map,
                     Some(&cached_fit.planes),
+                    None,
                 )
                 .expect("resolve_stage_model must succeed");
                 match model {
@@ -4559,6 +4725,8 @@ mod tests {
 
         let result = PrepareHydroModelsResult {
             production,
+            productivity_override:
+                crate::energy_conversion::HydroEnergyProductivityOverride::default(),
             evaporation: EvaporationModelSet::new(vec![EvaporationModel::None]),
             provenance: HydroModelProvenance {
                 production_sources: vec![(

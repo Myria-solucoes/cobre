@@ -43,6 +43,7 @@ use cobre_sddp::{
     config::{CutManagementConfig, EventConfig, LoopConfig},
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
+    energy_conversion::{EnergyConversion, EnergyConversionSet},
     forward::{ForwardResult, sync_forward},
     horizon_mode::HorizonMode,
     indexer::StageIndexer,
@@ -234,11 +235,10 @@ fn make_stochastic_context_3h(n_stages: usize) -> StochasticContext {
         max_storage_hm3: 100.0,
         min_outflow_m3s: 0.0,
         max_outflow_m3s: None,
-        generation_model: HydroGenerationModel::ConstantProductivity {
-            productivity_mw_per_m3s: 1.0,
-        },
+        generation_model: HydroGenerationModel::ConstantProductivity,
         min_turbined_m3s: 0.0,
         max_turbined_m3s: 100.0,
+        specific_productivity_mw_per_m3s_per_m: None,
         min_generation_mw: 0.0,
         max_generation_mw: 100.0,
         tailrace: None,
@@ -508,7 +508,7 @@ fn run_training(
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+            basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
             warm_start_cuts: 0,
             risk_measures: fx.risk_measures.clone(),
         },
@@ -588,11 +588,11 @@ fn run_simulation(
     fx: &Fixture3H,
     fcf: &FutureCostFunction,
     n_scenarios: u32,
-) -> Vec<(u32, f64, cobre_sddp::simulation::ScenarioCategoryCosts)> {
+) -> Vec<(u32, f64, cobre_sddp::ScenarioCategoryCosts)> {
     let sim_config = SimulationConfig {
         n_scenarios,
         io_channel_capacity: 64,
-        basis_activity_window: cobre_sddp::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let entity_counts = EntityCounts {
         hydro_ids: vec![1, 2, 3],
@@ -604,6 +604,18 @@ fn run_simulation(
         contract_ids: vec![],
         non_controllable_ids: vec![],
     };
+
+    let zero_ec = EnergyConversion {
+        equivalent_productivity_mw_per_m3s: 0.0,
+        reference_volume_hm3: 0.0,
+        reference_outflow_m3s: 0.0,
+    };
+    let ec = EnergyConversionSet::new(
+        vec![vec![zero_ec; fx.n_stages]; 3],
+        vec![vec![0.0_f64; fx.n_stages]; 3],
+        3,
+        fx.n_stages,
+    );
 
     // Build a workspace pool of `n_workspaces` independently allocated workspaces.
     let mut workspaces: Vec<SolverWorkspace<MockSolver3H>> = (0..n_workspaces)
@@ -693,6 +705,8 @@ fn run_simulation(
                     ncs_entity_ids_per_stage: &[],
                     diversion_upstream: &HashMap::new(),
                     hydro_productivities_per_stage: &vec![vec![1.0, 1.0, 1.0]; fx.n_stages],
+                    energy_conversion: &ec,
+                    hydro_min_storage_hm3: &[0.0; 3],
                     event_sender: None,
                 },
                 None,

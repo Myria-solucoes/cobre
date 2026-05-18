@@ -25,20 +25,14 @@
 //! // Represents: hydro_generation(10) + hydro_generation(11)
 //! let expr = ConstraintExpression {
 //!     terms: vec![
-//!         LinearTerm {
-//!             coefficient: 1.0,
-//!             variable: VariableRef::HydroGeneration {
-//!                 hydro_id: EntityId(10),
-//!                 block_id: None,
-//!             },
-//!         },
-//!         LinearTerm {
-//!             coefficient: 1.0,
-//!             variable: VariableRef::HydroGeneration {
-//!                 hydro_id: EntityId(11),
-//!                 block_id: None,
-//!             },
-//!         },
+//!         LinearTerm::literal(1.0, VariableRef::HydroGeneration {
+//!             hydro_id: EntityId(10),
+//!             block_id: None,
+//!         }),
+//!         LinearTerm::literal(1.0, VariableRef::HydroGeneration {
+//!             hydro_id: EntityId(11),
+//!             block_id: None,
+//!         }),
 //!     ],
 //! };
 //!
@@ -56,6 +50,7 @@
 //! assert_eq!(gc.expression.terms.len(), 2);
 //! ```
 
+use crate::CoefficientRef;
 use crate::EntityId;
 
 /// Reference to a single LP variable in a generic constraint expression.
@@ -212,17 +207,55 @@ pub enum VariableRef {
     },
 }
 
-/// One term in a linear constraint expression: `coefficient * variable`.
+/// One term in a linear constraint expression: `coefficient * scale * variable`.
 ///
-/// The expression is `coefficient × variable_ref`. A coefficient of `1.0`
-/// represents an unweighted variable reference.
+/// The LP coefficient is `resolve(coefficient, stage) * scale`, where `resolve`
+/// returns the parameter's stage-resolved scalar for
+/// `CoefficientRef::Parameter(id)` or the literal value for
+/// `CoefficientRef::Literal(v)`. Resolution for `Parameter` variants is
+/// implemented by the resolver layer; until then only `Literal` is produced by
+/// the parser.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct LinearTerm {
-    /// Scalar multiplier for the variable reference.
-    pub coefficient: f64,
+    /// Coefficient reference. `Literal(f64)` carries an inline constant;
+    /// `Parameter(EntityId)` references a `ScalarParameter` resolved per
+    /// stage at LP build time.
+    pub coefficient: CoefficientRef,
+    /// Multiplicative scale applied after the coefficient is resolved.
+    /// Defaults to `1.0` via `LinearTerm::literal(_, _)` and is set
+    /// explicitly when constructing `LinearTerm` literals directly.
+    pub scale: f64,
     /// The LP variable being referenced.
     pub variable: VariableRef,
+}
+
+impl LinearTerm {
+    /// Construct a `LinearTerm` whose coefficient is the literal `coef`,
+    /// with `scale = 1.0`. The common case during expression parsing.
+    #[must_use]
+    pub fn literal(coef: f64, variable: VariableRef) -> Self {
+        Self {
+            coefficient: CoefficientRef::Literal(coef),
+            scale: 1.0,
+            variable,
+        }
+    }
+
+    /// Construct a `LinearTerm` whose coefficient is a named parameter reference.
+    ///
+    /// The `scale` argument carries the literal multiplier from the expression
+    /// (e.g. `2.5` for `"2.5 * @rho_eq * x"`, or `sign` for `"@rho_eq * x"`).
+    /// Resolution of the parameter to a concrete `f64` per stage happens at
+    /// LP-build time.
+    #[must_use]
+    pub fn parameter(id: crate::EntityId, scale: f64, variable: VariableRef) -> Self {
+        Self {
+            coefficient: CoefficientRef::Parameter(id),
+            scale,
+            variable,
+        }
+    }
 }
 
 /// Parsed linear constraint expression.
@@ -460,20 +493,20 @@ mod tests {
     fn test_generic_constraint_construction() {
         let expr = ConstraintExpression {
             terms: vec![
-                LinearTerm {
-                    coefficient: 1.0,
-                    variable: VariableRef::HydroGeneration {
+                LinearTerm::literal(
+                    1.0,
+                    VariableRef::HydroGeneration {
                         hydro_id: EntityId(10),
                         block_id: None,
                     },
-                },
-                LinearTerm {
-                    coefficient: 1.0,
-                    variable: VariableRef::HydroGeneration {
+                ),
+                LinearTerm::literal(
+                    1.0,
+                    VariableRef::HydroGeneration {
                         hydro_id: EntityId(11),
                         block_id: None,
                     },
-                },
+                ),
             ],
         };
 
@@ -515,18 +548,57 @@ mod tests {
         assert_ne!(ConstraintSense::LessEqual, ConstraintSense::Equal);
     }
 
+    fn lit(term: &LinearTerm) -> f64 {
+        match term.coefficient {
+            CoefficientRef::Literal(v) => v,
+            CoefficientRef::Parameter(_) => panic!("expected literal"),
+        }
+    }
+
     #[test]
     fn test_linear_term_with_coefficient() {
-        let term = LinearTerm {
-            coefficient: 2.5,
-            variable: VariableRef::ThermalGeneration {
+        let term = LinearTerm::literal(
+            2.5,
+            VariableRef::ThermalGeneration {
                 thermal_id: EntityId(5),
                 block_id: None,
             },
-        };
-        assert_eq!(term.coefficient, 2.5);
+        );
+        assert!((lit(&term) - 2.5).abs() < f64::EPSILON);
         let debug = format!("{:?}", term.variable);
         assert!(debug.contains("ThermalGeneration"));
+    }
+
+    #[test]
+    fn linear_term_literal_constructor() {
+        let term = LinearTerm::literal(
+            3.0,
+            VariableRef::ThermalGeneration {
+                thermal_id: EntityId(1),
+                block_id: None,
+            },
+        );
+        assert_eq!(term.coefficient, CoefficientRef::Literal(3.0));
+        assert!((term.scale - 1.0).abs() < f64::EPSILON);
+        assert_eq!(
+            term.variable,
+            VariableRef::ThermalGeneration {
+                thermal_id: EntityId(1),
+                block_id: None,
+            }
+        );
+    }
+
+    #[test]
+    fn linear_term_explicit_scale() {
+        let term = LinearTerm {
+            coefficient: CoefficientRef::Literal(2.0),
+            scale: 0.5,
+            variable: VariableRef::HydroStorage {
+                hydro_id: EntityId(1),
+            },
+        };
+        assert!((term.scale - 0.5).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -551,20 +623,20 @@ mod tests {
             description: None,
             expression: ConstraintExpression {
                 terms: vec![
-                    LinearTerm {
-                        coefficient: 1.0,
-                        variable: VariableRef::HydroGeneration {
+                    LinearTerm::literal(
+                        1.0,
+                        VariableRef::HydroGeneration {
                             hydro_id: EntityId(10),
                             block_id: None,
                         },
-                    },
-                    LinearTerm {
-                        coefficient: 1.0,
-                        variable: VariableRef::HydroGeneration {
+                    ),
+                    LinearTerm::literal(
+                        1.0,
+                        VariableRef::HydroGeneration {
                             hydro_id: EntityId(11),
                             block_id: None,
                         },
-                    },
+                    ),
                 ],
             },
             sense: ConstraintSense::GreaterEqual,

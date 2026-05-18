@@ -145,7 +145,6 @@ in the `blocks` array.
       },
       "generation": {
         "model": "constant_productivity",
-        "productivity_mw_per_m3s": 1.0,
         "min_turbined_m3s": 0.0,
         "max_turbined_m3s": 50.0,
         "min_generation_mw": 0.0,
@@ -161,8 +160,8 @@ can hold 0–1000 hm³. Total outflow (turbined plus spilled) is capped at 50 m�
 representing the physical river channel capacity below the dam.
 
 The `constant_productivity` turbine model converts flow to power linearly:
-power (MW) = flow (m³/s) × `productivity_mw_per_m3s`. With a factor of 1.0,
-turbining 30 m³/s yields exactly 30 MW. More accurate production functions use
+power (MW) = flow (m³/s) × productivity coefficient from
+`system/hydro_production_models.json`. More accurate production functions use
 the FPHA model with a reservoir geometry table, but constant productivity is
 sufficient for this tutorial system.
 
