@@ -386,7 +386,11 @@ impl BackwardPassState {
         }
 
         let mut cuts_generated: usize = 0;
-        let mut stage_stats: Vec<(usize, Vec<StageWorkerOpeningDelta>)> = Vec::new();
+        // Pre-size to (num_stages - 1) so the push loop below does not grow the
+        // outer Vec mid-iteration. The bound is exact: one entry per stage in
+        // the backward sweep `(0..num_stages-1).rev()`.
+        let mut stage_stats: Vec<(usize, Vec<StageWorkerOpeningDelta>)> =
+            Vec::with_capacity(num_stages.saturating_sub(1));
         let mut state_exchange_ms: u64 = 0;
         let mut cut_batch_build_ms: u64 = 0;
         let mut setup_ms: u64 = 0;
@@ -643,7 +647,11 @@ impl BackwardPassState {
             n_ranks * n_workers_local,
             bwd_max_openings,
         );
-        let mut entries: Vec<StageWorkerOpeningDelta> = Vec::new();
+        // Upper bound on push count: every (rank, worker, opening) tuple may
+        // contribute one entry. Pre-sizing eliminates the log(n) growth
+        // reallocations during the triple-nested fill loop below.
+        let mut entries: Vec<StageWorkerOpeningDelta> =
+            Vec::with_capacity(n_ranks * n_workers_local * n_openings);
         for r in 0..n_ranks {
             let rank_i32 = i32::try_from(r).map_err(|_| {
                 SddpError::Validation(format!(

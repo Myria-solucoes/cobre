@@ -642,8 +642,11 @@ impl ForwardPassState {
 /// - `worker_records`: mutable slice of [`TrajectoryRecord`] for this worker's
 ///   scenarios. Length is `n_local * num_stages`.
 /// - `basis_slice`: mutable view into the basis warm-start store for this worker.
-/// - `per_stage_stats`: mutable slice of per-stage [`SolverStatsDelta`]
-///   accumulators. Length is `num_stages`. Values are accumulated in-place.
+/// - `per_stage_stats`: mutable per-stage [`SolverStatsDelta`] accumulator
+///   vector. Length is `num_stages` on entry; values are accumulated in-place.
+///   At return the vector is taken via `mem::take` into the result so the
+///   allocation is recycled across iterations (no per-worker per-iteration
+///   reallocation).
 /// - `params`: shared read-only bundle of all captures for this parallel region.
 ///
 /// # Errors
@@ -655,7 +658,7 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
     ws: &mut SolverWorkspace<S>,
     worker_records: &mut [TrajectoryRecord],
     basis_slice: &mut BasisStoreSliceMut<'_>,
-    per_stage_stats: &mut [SolverStatsDelta],
+    per_stage_stats: &mut Vec<SolverStatsDelta>,
     params: &ForwardWorkerParams<'_>,
 ) -> Result<ForwardWorkerResult, SddpError> {
     let worker_wall_start = Instant::now();
@@ -796,7 +799,11 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
         // mem::take so the allocation survives across training iterations.
         trajectory_costs: std::mem::take(&mut ws.scratch.trajectory_costs_buf),
         local_solves,
-        per_stage_stats: per_stage_stats.to_vec(),
+        // mem::take recycles the per-worker, per-stage accumulator Vec back
+        // into ForwardWorkerResult; post_process_worker_results pushes it
+        // onto self.worker_stage_stats so the allocation persists across
+        // training iterations.
+        per_stage_stats: std::mem::take(per_stage_stats),
     })
 }
 
