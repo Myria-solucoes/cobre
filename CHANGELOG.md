@@ -9,6 +9,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-05-18
+
+### Fixed
+
+- The linearised evaporation flow variable `Q_ev` is now bounded
+  symmetrically `[-q_max, +q_max]` instead of `[0, q_max]`, where
+  `q_max = |k_evap0 + k_evap_v · v_max| · margin`. Previously, when
+  the per-stage net evaporation coefficient `c_ev[month]` was negative
+  (net rainfall over the lake surface exceeds open-water evaporation,
+  common in 5–7 months/year on tropical and subtropical basins), the
+  upper bound clamped to zero and the equality row forced the
+  over-evaporation slack to absorb the imbalance at every wet-month
+  stage of every scenario. Negative `Q_ev` values now flow into the
+  storage continuity equation as net rainfall input, and the violation
+  slacks fire only on genuine modelling infeasibility. Cases with
+  all-positive monthly coefficients are unaffected (bit-identical
+  output).
+
+- `evaporation_m3s` in `simulation/hydros.parquet` is now a signed
+  value: positive entries continue to represent net evaporative loss,
+  while negative entries represent net rainfall input absorbed by the
+  reservoir. Downstream consumers that filtered or asserted
+  `evaporation_m3s >= 0` will need to be updated.
+
+### Changed
+
+- The `HydroEvaporation` variable in
+  `cobre_core::generic_constraint::VariableRef` is documented as a
+  signed net-flow quantity rather than an outflow-only quantity.
+  Generic constraints referencing it that previously assumed
+  non-negativity may need their bounds revisited.
+
+- Docstring corrections in `LinearizedEvaporation`,
+  `EvaporationIndices`, and the `penalty_overrides` schema reference:
+  the linearised coefficients `k_evap0`, `k_evap_v`, and the violation
+  slacks `f_evap_plus`/`f_evap_minus` are stage-averaged flows in m³/s,
+  not volumes in hm³ as the documentation previously claimed. No
+  runtime behaviour change.
+
+### Added
+
+- New deterministic regression case `d17-evaporation-mixed-sign`
+  exercising a single-hydro four-stage horizon spanning Oct → Jan with
+  monthly evaporation coefficients that switch sign across stages.
+  Guarded by `parity_hash_d17` (byte stability) and
+  `d17_signed_evaporation::d17_evaporation_is_signed_per_month`
+  (explicit sign assertions per stage).
+
 ## [0.6.0] - 2026-05-18
 
 ### Added
