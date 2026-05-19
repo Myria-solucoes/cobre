@@ -1,4 +1,4 @@
-//! Parity hash harness for deterministic cases D01–D15 (14 cases; D12 is absent).
+//! Parity hash harness for deterministic cases D01–D17 (D12 and D16 are absent).
 //!
 //! Computes a SHA-256 digest over a whitelist of semantic fields from each
 //! case's training + simulation output. On first run with `COBRE_PARITY_REGEN=1`
@@ -289,6 +289,7 @@ fn case_dir(label: &str) -> std::path::PathBuf {
         "D13" => "d13-generic-constraint",
         "D14" => "d14-block-factors",
         "D15" => "d15-non-controllable-source",
+        "D17" => "d17-evaporation-mixed-sign",
         other => panic!("unknown case label: {other}"),
     };
     // Integration tests run from the crate root; fixtures live at
@@ -424,7 +425,7 @@ fn run_case(label: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// Individual test functions — 14 cases, D12 absent
+// Individual test functions — D01–D17, with D12 and D16 absent
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -551,4 +552,13 @@ fn parity_hash_d14() {
 )]
 fn parity_hash_d15() {
     run_case("D15");
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+fn parity_hash_d17() {
+    run_case("D17");
 }

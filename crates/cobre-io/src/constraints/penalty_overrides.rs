@@ -40,12 +40,12 @@
 //! | `outflow_violation_below_cost`    | DOUBLE | No       | Outflow below-min violation (USD/m³/s)|
 //! | `outflow_violation_above_cost`    | DOUBLE | No       | Outflow above-max violation (USD/m³/s)|
 //! | `generation_violation_below_cost` | DOUBLE | No       | Generation below-min violation (USD/MW)|
-//! | `evaporation_violation_cost`                 | DOUBLE | No       | Evaporation violation (USD/hm³)              |
+//! | `evaporation_violation_cost`                 | DOUBLE | No       | Evaporation violation (USD/m³/s)             |
 //! | `water_withdrawal_violation_cost`            | DOUBLE | No       | Water withdrawal violation (USD/m³/s)        |
 //! | `water_withdrawal_violation_pos_cost`        | DOUBLE | No       | Over-withdrawal violation (USD/m³/s)         |
 //! | `water_withdrawal_violation_neg_cost`        | DOUBLE | No       | Under-withdrawal violation (USD/m³/s)        |
-//! | `evaporation_violation_pos_cost`             | DOUBLE | No       | Over-evaporation violation (USD/hm³)         |
-//! | `evaporation_violation_neg_cost`             | DOUBLE | No       | Under-evaporation violation (USD/hm³)        |
+//! | `evaporation_violation_pos_cost`             | DOUBLE | No       | Over-evaporation violation (USD/m³/s)        |
+//! | `evaporation_violation_neg_cost`             | DOUBLE | No       | Under-evaporation violation (USD/m³/s)       |
 //! | `inflow_nonnegativity_cost`                  | DOUBLE | No       | Inflow non-negativity cost (USD/m³/s)        |
 //!
 //! ### `penalty_overrides_ncs`

@@ -3544,35 +3544,42 @@ fn evap_col_bounds_and_objective() {
     let col_f_plus = t.num_cols - 3 - 5 * t.n_hydro;
     let col_f_minus = t.num_cols - 2 - 5 * t.n_hydro;
 
-    // All three columns have lower bound 0.0.
-    for &col in &[col_q_ev, col_f_plus, col_f_minus] {
-        assert_eq!(
-            t.col_lower[col], 0.0,
-            "evap column {col} lower bound must be 0.0, got {}",
-            t.col_lower[col]
-        );
-        assert_eq!(
-            t.objective[col], 0.0,
-            "evap column {col} objective must be 0.0, got {}",
-            t.objective[col]
-        );
-    }
-
-    // Q_ev has a physical upper bound: max(0, k_evap0 + k_evap_v * v_max) * 2.0.
-    // k_evap0 = 1.5, k_evap_v = 0.0, v_max = 200.0 → bound = 1.5 * 2.0 = 3.0.
+    // Q_ev is free-signed: [-q_max, +q_max] where q_max = |k_evap0 + k_evap_v * v_max| * margin.
+    // k_evap0 = 1.5, k_evap_v = 0.0, v_max = 200.0 → q_max = 1.5 * 2.0 = 3.0.
     let expected_q_ev_bound = 1.5 * Q_EV_SAFETY_MARGIN;
+    assert!(
+        (t.col_lower[col_q_ev] - (-expected_q_ev_bound)).abs() < 1e-12,
+        "Q_ev lower bound must be {}, got {}",
+        -expected_q_ev_bound,
+        t.col_lower[col_q_ev]
+    );
     assert!(
         (t.col_upper[col_q_ev] - expected_q_ev_bound).abs() < 1e-12,
         "Q_ev upper bound must be {expected_q_ev_bound}, got {}",
         t.col_upper[col_q_ev]
     );
+    assert_eq!(
+        t.objective[col_q_ev], 0.0,
+        "Q_ev objective must be 0.0, got {}",
+        t.objective[col_q_ev]
+    );
 
-    // Slack columns f_plus and f_minus remain unbounded.
+    // Slack columns f_plus and f_minus retain [0, +inf] bounds with zero objective.
     for &col in &[col_f_plus, col_f_minus] {
+        assert_eq!(
+            t.col_lower[col], 0.0,
+            "evap slack column {col} lower bound must be 0.0, got {}",
+            t.col_lower[col]
+        );
         assert!(
             t.col_upper[col].is_infinite() && t.col_upper[col] > 0.0,
             "evap slack column {col} upper bound must be +inf, got {}",
             t.col_upper[col]
+        );
+        assert_eq!(
+            t.objective[col], 0.0,
+            "evap slack column {col} objective must be 0.0, got {}",
+            t.objective[col]
         );
     }
 }
@@ -4553,15 +4560,15 @@ fn evap_q_ev_objective_is_zero() {
     );
 }
 
-/// LP with 1 evaporation hydro is solvable (`HiGHS` returns
-/// `Optimal`) and the `Q_ev` value is non-negative after fixing `v_in = 1000.0 hm3`.
+/// LP with 1 evaporation hydro is solvable (`HiGHS` returns `Optimal`) after
+/// fixing `v_in = 1000.0 hm3`.
 ///
 /// System: 1 bus, 1 hydro, `k_evap0 = 1.0`, `k_evap_v = 0.02`.
-/// The LP is solved with `v_in = 1000 hm3`; the linearised evaporation
-/// constraint is `Q_ev = k_evap0 + k_evap_v/2 * (v + v_in)`.
-/// With `v_in` fixed at 1000, the RHS is at least 1 mm, so `Q_ev >= 0`.
+/// With all-positive coefficients and `v_in` fixed at 1000 hm3, the
+/// linearised equality forces `Q_ev = k_evap0 + (k_evap_v / 2) · (v + v_in)`,
+/// whose minimum at `v = v_min = 0` is `1.0 + 0.01 · 1000 = 11.0`.
 #[test]
-fn evap_lp_solvable_and_q_ev_nonnegative() {
+fn evap_lp_solvable_and_q_ev_positive_coefficients() {
     use cobre_solver::{HighsSolver, RowBatch, SolverInterface};
 
     let system = evap_hydro_system_with_violation_cost(730.0, 500.0);
@@ -4604,9 +4611,13 @@ fn evap_lp_solvable_and_q_ev_nonnegative() {
     let col_q_ev = template.num_cols - 4 - 5 * template.n_hydro;
     let q_ev = view.primal[col_q_ev];
 
+    // Tight lower bound: Q_ev >= k_evap0 + (k_evap_v / 2) · v_min + (k_evap_v / 2) · v_in
+    //                         >= 1.0   + 0.0                       + 0.01 · 1000 = 11.0.
+    // A loose threshold (`q_ev > -1e-8`) would silently pass a sign-convention
+    // regression that flipped the bound; assert the structurally-forced minimum.
     assert!(
-        q_ev >= -1e-8,
-        "Q_ev must be non-negative after solving, got {q_ev}"
+        q_ev > 10.0,
+        "Q_ev must reflect the positive linearised target (>= 11.0), got {q_ev}"
     );
 }
 
@@ -4820,10 +4831,10 @@ fn evap_bound_prevents_dump_valve() {
     let f_minus = view.primal[col_f_minus];
     let spillage = view.primal[col_spillage];
 
-    // Q_ev must respect the physical bound.
+    // Q_ev must respect the symmetric magnitude bound.
     // k_evap0=2.0, k_evap_v=0.0001, max_storage_hm3=2000.0
-    // q_ev_max = max(0, 2.0 + 0.0001*2000) * 2.0 = 2.2 * 2.0 = 4.4
-    let q_ev_max = (2.0 + 0.0001 * 2_000.0) * Q_EV_SAFETY_MARGIN;
+    // q_ev_max = |2.0 + 0.0001*2000| * 2.0 = 2.2 * 2.0 = 4.4
+    let q_ev_max = (2.0 + 0.0001 * 2_000.0_f64).abs() * Q_EV_SAFETY_MARGIN;
     assert!(
         q_ev <= q_ev_max + 1e-8,
         "Q_ev must be bounded by physical limit {q_ev_max}, got {q_ev}"

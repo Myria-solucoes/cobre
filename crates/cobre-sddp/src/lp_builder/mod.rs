@@ -163,10 +163,15 @@ pub(crate) const M3S_TO_HM3: f64 = 3_600.0 / 1_000_000.0; // multiply by hours t
 /// this factor at the reporting boundary to recover original units.
 pub(crate) const COST_SCALE_FACTOR: f64 = 1_000.0;
 
-/// Safety margin applied to the physical upper bound on the evaporation flow
-/// variable `Q_ev`.  The bound is `(k_evap0 + k_evap_v * v_max).max(0) * margin`.
-/// A 2x margin accounts for linearization approximation error (the actual
-/// area-volume curve may exceed the linear estimate near `v_max`).
+/// Safety margin applied symmetrically to the magnitude bound on the evaporation
+/// flow variable `Q_ev`.  The bound is `[-q_max, +q_max]` where
+/// `q_max = |k_evap0 + k_evap_v * v_max| * margin`.  A 2x margin accounts for
+/// linearization approximation error: the actual area-volume curve may exceed
+/// the linear estimate near `v_max` in either direction, so the same factor
+/// covers both the positive case (true evaporation underestimated at high
+/// storage) and the negative case (net rainfall input underestimated at high
+/// storage).  A negative `Q_ev` value represents net rainfall input (inflow)
+/// rather than evaporative outflow.
 pub(crate) const Q_EV_SAFETY_MARGIN: f64 = 2.0;
 
 // ---------------------------------------------------------------------------

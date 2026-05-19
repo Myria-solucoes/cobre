@@ -107,7 +107,9 @@ pub enum VariableRef {
         /// Block index. `None` = sum over all blocks; `Some(i)` = block `i`.
         block_id: Option<usize>,
     },
-    /// Evaporation flow from a hydro reservoir (m³/s). Stage-level, not block-specific.
+    /// Signed evaporation flow from a hydro reservoir (m³/s). Stage-level, not
+    /// block-specific. Positive values represent net evaporative outflow;
+    /// negative values represent net rainfall input absorbed by the reservoir.
     HydroEvaporation {
         /// Hydro plant identifier.
         hydro_id: EntityId,

@@ -171,19 +171,22 @@ impl ProductionModelSet {
 
 /// Linearized evaporation coefficients for one (hydro, stage) pair.
 ///
-/// The evaporation volume (hm³) is approximated as:
+/// The stage-averaged evaporation flow (m³/s) is approximated as:
 ///
 /// ```text
-/// evap = k_evap0 + k_evap_v * (V - V_ref)
+/// Q_ev = k_evap0 + k_evap_v * (V - V_ref)
 /// ```
 ///
 /// where `V` is the reservoir volume (hm³) and `V_ref` is the reference volume
 /// for each stage stored in [`EvaporationModel::Linearized::reference_volumes_hm3`].
+/// The coefficients absorb the `1 / (3.6 · stage_hours)` factor that converts
+/// the `c_ev · A(V)` volume per month (mm·km²/month) into the stage-averaged
+/// flow consumed by the water balance row.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LinearizedEvaporation {
-    /// Constant term of the linearized evaporation (hm³).
+    /// Constant term of the linearized evaporation flow (m³/s).
     pub k_evap0: f64,
-    /// Volume-dependent slope of the linearized evaporation (hm³/hm³ = dimensionless).
+    /// Volume-dependent slope of the linearized evaporation flow ((m³/s)/hm³).
     pub k_evap_v: f64,
 }
 

@@ -305,10 +305,13 @@ fn fill_fpha_generation_columns(
 
 /// Evaporation columns: 3 per evaporation hydro (`Q_ev`, `f_evap_plus`, `f_evap_minus`).
 ///
-/// All columns are stage-level (not per-block) and lie in `[0, +inf)`.
-/// `Q_ev` carries zero objective cost (evaporation flow itself is not penalised).
-/// `f_evap_plus` and `f_evap_minus` carry `evaporation_violation_cost * total_stage_hours`
-/// so that the solver is penalised for violating the linearised evaporation constraint.
+/// All three columns are stage-level (not per-block).  `Q_ev` is bounded
+/// symmetrically `[-q_max, +q_max]` so a negative value can absorb net
+/// rainfall input on the lake surface; `f_evap_plus` and `f_evap_minus` are
+/// bounded `[0, +inf)`.  `Q_ev` carries zero objective cost (evaporation
+/// flow itself is not penalised).  `f_evap_plus` and `f_evap_minus` carry
+/// `evaporation_violation_cost * total_stage_hours` so that the solver is
+/// penalised for violating the linearised evaporation constraint.
 fn fill_evaporation_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -320,19 +323,25 @@ fn fill_evaporation_columns(
         let col_q_ev = layout.col_evap_start + local_idx * 3;
         let col_f_plus = layout.col_evap_start + local_idx * 3 + 1;
         let col_f_minus = layout.col_evap_start + local_idx * 3 + 2;
-        bufs.col_lower[col_q_ev] = 0.0;
-        // Physical upper bound: linearized evaporation at maximum storage.
-        // Q_ev_max = max(0, k_evap0 + k_evap_v * v_max) * safety_margin.
-        // Negative coefficients (net condensation) are clamped to zero.
-        if let EvaporationModel::Linearized { coefficients, .. } =
-            ctx.evaporation_models.model(h_idx)
-        {
-            let coeff = &coefficients[stage_idx];
-            let hb = ctx.bounds.hydro_bounds(h_idx, stage_idx);
-            let q_ev_max = (coeff.k_evap0 + coeff.k_evap_v * hb.max_storage_hm3).max(0.0);
-            bufs.col_upper[col_q_ev] = q_ev_max * Q_EV_SAFETY_MARGIN;
-        } else {
-            bufs.col_upper[col_q_ev] = 0.0;
+        // Signed flow: negative Q_ev reads as net rainfall input (inflow).
+        // Bound: [-q_max, +q_max] where q_max = |k_evap0 + k_evap_v * v_max| * margin.
+        match ctx.evaporation_models.model(h_idx) {
+            EvaporationModel::Linearized { coefficients, .. } => {
+                let coeff = &coefficients[stage_idx];
+                let hb = ctx.bounds.hydro_bounds(h_idx, stage_idx);
+                let q_max_abs = (coeff.k_evap0 + coeff.k_evap_v * hb.max_storage_hm3).abs()
+                    * Q_EV_SAFETY_MARGIN;
+                bufs.col_lower[col_q_ev] = -q_max_abs;
+                bufs.col_upper[col_q_ev] = q_max_abs;
+            }
+            EvaporationModel::None => {
+                // Should never happen: evap_hydro_indices only contains linearized hydros.
+                debug_assert!(
+                    false,
+                    "evap_hydro_indices contains hydro {h_idx} but model is None"
+                );
+                continue;
+            }
         }
         bufs.col_lower[col_f_plus] = 0.0;
         bufs.col_upper[col_f_plus] = f64::INFINITY;
