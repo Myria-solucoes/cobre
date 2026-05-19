@@ -606,8 +606,11 @@ the turbine converts 93% of available hydraulic power to electrical output.
 
 ### Evaporation
 
-The `evaporation` block models water loss from the reservoir surface due to
-evaporation. When absent, no evaporation is modeled.
+The `evaporation` block models the net water flux at the reservoir surface.
+When absent, no evaporation is modeled. Coefficients are **signed**: positive
+values represent net evaporative loss, negative values represent net rainfall
+input on the lake surface (precipitation on the reservoir exceeds open-water
+evaporation, common in wet months of tropical and subtropical basins).
 
 ```json
 "evaporation": {
@@ -624,7 +627,7 @@ evaporation. When absent, no evaporation is modeled.
 
 | Field                   | Type  | Required | Description                                                                                                                                                                                                                                  |
 | ----------------------- | ----- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `coefficients_mm`       | array | Yes      | Exactly 12 values, one per calendar month (index 0 = January, index 11 = December). Values are in mm/month. The evaporated volume is computed from reservoir area.                                                                           |
+| `coefficients_mm`       | array | Yes      | Exactly 12 values, one per calendar month (index 0 = January, index 11 = December). Values are in mm/month and may be negative (net rainfall on the lake surface). The net flux is computed from reservoir area.                             |
 | `reference_volumes_hm3` | array | No       | Exactly 12 reference volumes [hm³] used as linearization points for evaporation, one per month. Must be within `[min_storage_hm3, max_storage_hm3]`. When absent, the algorithm uses its own default (e.g., mid-point of the storage range). |
 
 ### Diversion Channel
