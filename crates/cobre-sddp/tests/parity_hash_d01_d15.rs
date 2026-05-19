@@ -1,4 +1,4 @@
-//! Parity hash harness for deterministic cases D01–D15 (14 cases; D12 is absent).
+//! Parity hash harness for deterministic cases D01–D17 (D12 and D16 are absent).
 //!
 //! Computes a SHA-256 digest over a whitelist of semantic fields from each
 //! case's training + simulation output. On first run with `COBRE_PARITY_REGEN=1`
@@ -425,7 +425,7 @@ fn run_case(label: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// Individual test functions — 14 cases, D12 absent
+// Individual test functions — D01–D17, with D12 and D16 absent
 // ---------------------------------------------------------------------------
 
 #[test]

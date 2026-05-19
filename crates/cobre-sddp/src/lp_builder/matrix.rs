@@ -305,10 +305,13 @@ fn fill_fpha_generation_columns(
 
 /// Evaporation columns: 3 per evaporation hydro (`Q_ev`, `f_evap_plus`, `f_evap_minus`).
 ///
-/// All columns are stage-level (not per-block) and lie in `[0, +inf)`.
-/// `Q_ev` carries zero objective cost (evaporation flow itself is not penalised).
-/// `f_evap_plus` and `f_evap_minus` carry `evaporation_violation_cost * total_stage_hours`
-/// so that the solver is penalised for violating the linearised evaporation constraint.
+/// All three columns are stage-level (not per-block).  `Q_ev` is bounded
+/// symmetrically `[-q_max, +q_max]` so a negative value can absorb net
+/// rainfall input on the lake surface; `f_evap_plus` and `f_evap_minus` are
+/// bounded `[0, +inf)`.  `Q_ev` carries zero objective cost (evaporation
+/// flow itself is not penalised).  `f_evap_plus` and `f_evap_minus` carry
+/// `evaporation_violation_cost * total_stage_hours` so that the solver is
+/// penalised for violating the linearised evaporation constraint.
 fn fill_evaporation_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -337,6 +340,7 @@ fn fill_evaporation_columns(
                     false,
                     "evap_hydro_indices contains hydro {h_idx} but model is None"
                 );
+                continue;
             }
         }
         bufs.col_lower[col_f_plus] = 0.0;

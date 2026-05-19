@@ -4565,7 +4565,8 @@ fn evap_q_ev_objective_is_zero() {
 ///
 /// System: 1 bus, 1 hydro, `k_evap0 = 1.0`, `k_evap_v = 0.02`.
 /// With all-positive coefficients and `v_in` fixed at 1000 hm3, the
-/// linearised evaporation RHS is positive so the solver returns `Q_ev > 0`.
+/// linearised equality forces `Q_ev = k_evap0 + (k_evap_v / 2) · (v + v_in)`,
+/// whose minimum at `v = v_min = 0` is `1.0 + 0.01 · 1000 = 11.0`.
 #[test]
 fn evap_lp_solvable_and_q_ev_positive_coefficients() {
     use cobre_solver::{HighsSolver, RowBatch, SolverInterface};
@@ -4610,9 +4611,13 @@ fn evap_lp_solvable_and_q_ev_positive_coefficients() {
     let col_q_ev = template.num_cols - 4 - 5 * template.n_hydro;
     let q_ev = view.primal[col_q_ev];
 
+    // Tight lower bound: Q_ev >= k_evap0 + (k_evap_v / 2) · v_min + (k_evap_v / 2) · v_in
+    //                         >= 1.0   + 0.0                       + 0.01 · 1000 = 11.0.
+    // A loose threshold (`q_ev > -1e-8`) would silently pass a sign-convention
+    // regression that flipped the bound; assert the structurally-forced minimum.
     assert!(
-        q_ev > -1e-8,
-        "Q_ev must be positive with all-positive coefficients, got {q_ev}"
+        q_ev > 10.0,
+        "Q_ev must reflect the positive linearised target (>= 11.0), got {q_ev}"
     );
 }
 
