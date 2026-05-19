@@ -73,6 +73,9 @@ pub struct LbEvalSpec<'a> {
     /// Maximum generation (MW) per stochastic NCS entity, sorted by entity ID.
     /// Length equals the number of stochastic NCS entities. Empty when none exist.
     pub ncs_max_gen: &'a [f64],
+    /// Per-stochastic-NCS curtailment policy, aligned 1:1 with
+    /// [`Self::ncs_max_gen`]. `false` pins the column to availability.
+    pub ncs_allow_curtailment: &'a [bool],
     /// Number of blocks at stage 0.
     pub block_count: usize,
     /// Column range for NCS generation variables in the stage-0 LP.
@@ -223,9 +226,11 @@ fn lb_init_rank0<S: SolverInterface>(
     scratch.ncs_col_indices_buf.clear();
     scratch.ncs_col_lower_buf.clear();
 
-    // Pre-populate index/lower buffers for NCS column bound patching.
-    // These are constant across openings (same stage, same block count),
-    // so we build them once before the opening loop.
+    // Pre-populate the indices buffer for NCS column bound patching. Indices
+    // are constant across openings (same stage, same block count) so we build
+    // them once before the opening loop. The lower/upper buffers are rebuilt
+    // per opening by `transform_ncs_noise` because both bounds scale with the
+    // per-scenario availability realization.
     if let Some(stoch) = spec.stochastic {
         let n_stochastic_ncs = stoch.n_stochastic_ncs();
         if n_stochastic_ncs > 0 && !spec.ncs_generation.is_empty() {
@@ -234,7 +239,6 @@ fn lb_init_rank0<S: SolverInterface>(
                     scratch
                         .ncs_col_indices_buf
                         .push(spec.ncs_generation.start + ncs_idx * spec.block_count + blk);
-                    scratch.ncs_col_lower_buf.push(0.0);
                 }
             }
         }
@@ -432,10 +436,14 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
                     0,
                     spec.block_count,
                     spec.ncs_max_gen,
+                    spec.ncs_allow_curtailment,
+                    &mut scratch.ncs_col_lower_buf,
                     &mut scratch.ncs_col_upper_buf,
                 );
-                // ncs_col_indices_buf and ncs_col_lower_buf were pre-populated
-                // in lb_init_rank0 — no rebuild needed here.
+                // `ncs_col_indices_buf` was pre-populated in `lb_init_rank0`
+                // (constant across openings). Both lower and upper bounds are
+                // rebuilt above by `transform_ncs_noise` because both scale
+                // with the per-scenario availability realization.
                 solver.set_col_bounds(
                     &scratch.ncs_col_indices_buf,
                     &scratch.ncs_col_lower_buf,
@@ -937,6 +945,7 @@ mod tests {
             stochastic: None,
             n_load_buses: 0,
             ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
             block_count: 1,
             ncs_generation: 0..0,
             inflow_method: &InflowNonNegativityMethod::None,
@@ -990,6 +999,7 @@ mod tests {
             stochastic: None,
             n_load_buses: 0,
             ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
             block_count: 1,
             ncs_generation: 0..0,
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1050,6 +1060,7 @@ mod tests {
             stochastic: None,
             n_load_buses: 0,
             ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
             block_count: 1,
             ncs_generation: 0..0,
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1107,6 +1118,7 @@ mod tests {
             stochastic: None,
             n_load_buses: 0,
             ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
             block_count: 1,
             ncs_generation: 0..0,
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1160,6 +1172,7 @@ mod tests {
             stochastic: None,
             n_load_buses: 0,
             ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
             block_count: 1,
             ncs_generation: 0..0,
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1211,6 +1224,7 @@ mod tests {
             stochastic: None,
             n_load_buses: 0,
             ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
             block_count: 1,
             ncs_generation: 0..0,
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1269,6 +1283,7 @@ mod tests {
             stochastic: None,
             n_load_buses: 0,
             ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
             block_count: 1,
             ncs_generation: 0..0,
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1324,6 +1339,7 @@ mod tests {
             stochastic: None,
             n_load_buses: 0,
             ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
             block_count: 1,
             ncs_generation: 0..0,
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1405,6 +1421,7 @@ mod tests {
             stochastic: None,
             n_load_buses: 0,
             ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
             block_count: 1,
             ncs_generation: 0..0,
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1462,6 +1479,7 @@ mod tests {
             stochastic: None,
             n_load_buses: 0,
             ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
             block_count: 1,
             ncs_generation: 0..0,
             inflow_method: &InflowNonNegativityMethod::Truncation,
@@ -1513,6 +1531,7 @@ mod tests {
             stochastic: None,
             n_load_buses: 0,
             ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
             block_count: 1,
             ncs_generation: 0..0,
             inflow_method: &InflowNonNegativityMethod::TruncationWithPenalty,
@@ -1598,6 +1617,7 @@ mod tests {
             entry_stage_id: None,
             exit_stage_id: None,
             max_generation_mw: 100.0,
+            allow_curtailment: true,
             curtailment_cost: 0.0,
         };
 
@@ -1710,6 +1730,7 @@ mod tests {
 
         let indexer = StageIndexer::new(0, 0);
         let ncs_max_gen = vec![100.0_f64; n_ncs];
+        let ncs_allow_curtailment = vec![true; n_ncs];
 
         let spec = LbEvalSpec {
             template: &template,
@@ -1721,6 +1742,7 @@ mod tests {
             stochastic: Some(&stoch),
             n_load_buses: 0,
             ncs_max_gen: &ncs_max_gen,
+            ncs_allow_curtailment: &ncs_allow_curtailment,
             block_count,
             ncs_generation: 0..block_count,
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1799,6 +1821,7 @@ mod tests {
             stochastic: None,
             n_load_buses: 0,
             ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
             block_count: 1,
             ncs_generation: 0..0,
             inflow_method: &InflowNonNegativityMethod::None,

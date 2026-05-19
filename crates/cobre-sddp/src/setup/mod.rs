@@ -100,6 +100,12 @@ pub struct StudySetup {
     pub(crate) ncs_entity_ids_per_stage: Vec<Vec<i32>>,
     /// Max generation \[MW\] per stochastic NCS entity, sorted by entity ID.
     pub(crate) ncs_max_gen: Vec<f64>,
+    /// Whether each stochastic NCS entity may be curtailed, sorted by entity
+    /// ID. Aligned 1:1 with [`Self::ncs_max_gen`]. `true` (default) =
+    /// curtailable (LP can dispatch in `[0, max × α × factor]`); `false` =
+    /// must-run (`col_lower = col_upper = max × α × factor` for every
+    /// scenario, matching NEWAVE's `geracao_usinas_nao_simuladas` pre-netting).
+    pub(crate) ncs_allow_curtailment: Vec<bool>,
 
     /// Sampling schemes and pre-built libraries for training and simulation phases.
     ///
@@ -459,23 +465,24 @@ impl StudySetup {
             })
             .collect();
 
-        let ncs_max_gen: Vec<f64> = {
+        let (ncs_max_gen, ncs_allow_curtailment): (Vec<f64>, Vec<bool>) = {
             let stoch_ncs_ids = stochastic.ncs_entity_ids();
-            let mut result = Vec::with_capacity(stoch_ncs_ids.len());
+            let mut max_v = Vec::with_capacity(stoch_ncs_ids.len());
+            let mut allow_v = Vec::with_capacity(stoch_ncs_ids.len());
             for ncs_id in stoch_ncs_ids {
-                let max_gen = system
+                let ncs = system
                     .non_controllable_sources()
                     .iter()
                     .find(|n| n.id == *ncs_id)
-                    .map(|n| n.max_generation_mw)
                     .ok_or_else(|| {
                         SddpError::Validation(format!(
                             "stochastic NCS entity {ncs_id:?} not found in system non_controllable_sources"
                         ))
                     })?;
-                result.push(max_gen);
+                max_v.push(ncs.max_generation_mw);
+                allow_v.push(ncs.allow_curtailment);
             }
-            result
+            (max_v, allow_v)
         };
 
         let block_counts_per_stage: Vec<usize> = stage_templates
@@ -706,6 +713,7 @@ impl StudySetup {
             hydro_models,
             ncs_entity_ids_per_stage,
             ncs_max_gen,
+            ncs_allow_curtailment,
             scenario_libraries,
             loop_params: crate::config::LoopParams {
                 seed,
@@ -4224,6 +4232,7 @@ mod tests {
             entry_stage_id: None,
             exit_stage_id: None,
             max_generation_mw: 100.0,
+            allow_curtailment: true,
             curtailment_cost: 0.01,
         };
 

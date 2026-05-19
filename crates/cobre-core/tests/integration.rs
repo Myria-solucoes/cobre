@@ -158,6 +158,7 @@ fn make_ncs(id: i32, bus_id: i32) -> NonControllableSource {
         entry_stage_id: None,
         exit_stage_id: None,
         max_generation_mw: 80.0,
+        allow_curtailment: true,
         curtailment_cost: 5.0,
     }
 }

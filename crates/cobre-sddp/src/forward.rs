@@ -850,6 +850,8 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
             t,
             ctx.block_counts_per_stage[t],
             ctx.ncs_max_gen,
+            ctx.ncs_allow_curtailment,
+            &mut ws.scratch.ncs_col_lower_buf,
             &mut ws.scratch.ncs_col_upper_buf,
         );
     }
@@ -881,25 +883,23 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         &ws.patch_buf.lower[..pc],
         &ws.patch_buf.upper[..pc],
     );
-    // Patch NCS column upper bounds with per-scenario availability.
+    // Patch NCS column bounds with per-scenario availability. Both lower
+    // and upper buffers were rebuilt by `transform_ncs_noise` above; only
+    // the indices buffer is lazy-built when the size changes (i.e., on a
+    // stage transition).
     if n_stochastic_ncs > 0 && !indexer.ncs_generation.is_empty() {
         let n_blks = ctx.block_counts_per_stage[t];
         let expected_len = n_stochastic_ncs * n_blks;
-        // Only rebuild index/lower buffers when the size changes (i.e., on a stage
-        // transition). Within a single stage the indices are constant across scenarios.
         if ws.scratch.ncs_col_indices_buf.len() != expected_len {
             ws.scratch.ncs_col_indices_buf.clear();
-            ws.scratch.ncs_col_lower_buf.clear();
             for ncs_idx in 0..n_stochastic_ncs {
                 for blk in 0..n_blks {
                     ws.scratch
                         .ncs_col_indices_buf
                         .push(indexer.ncs_generation.start + ncs_idx * n_blks + blk);
-                    ws.scratch.ncs_col_lower_buf.push(0.0);
                 }
             }
         }
-        // ncs_col_upper_buf was populated by transform_ncs_noise above.
         ws.solver.set_col_bounds(
             &ws.scratch.ncs_col_indices_buf,
             &ws.scratch.ncs_col_lower_buf,
@@ -2001,6 +2001,7 @@ mod tests {
             load_bus_indices: &[],
             block_counts_per_stage: &[1usize, 1, 1],
             ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
             discount_factors: &[],
             cumulative_discount_factors: &[],
             stage_lag_transitions: &[],
@@ -2125,6 +2126,7 @@ mod tests {
             load_bus_indices: &[],
             block_counts_per_stage: &[1usize, 1, 1],
             ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
             discount_factors: &[],
             cumulative_discount_factors: &[],
             stage_lag_transitions: &[],
@@ -2255,6 +2257,7 @@ mod tests {
             load_bus_indices: &[],
             block_counts_per_stage: &[1usize, 1, 1],
             ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
             discount_factors: &[],
             cumulative_discount_factors: &[],
             stage_lag_transitions: &[],
@@ -2702,6 +2705,7 @@ mod tests {
             load_bus_indices: &[],
             block_counts_per_stage: &[1usize, 1, 1],
             ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
             discount_factors: &[],
             cumulative_discount_factors: &[],
             stage_lag_transitions: &[],
@@ -2866,6 +2870,7 @@ mod tests {
             load_bus_indices: &[],
             block_counts_per_stage: &[1usize, 1, 1],
             ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
             discount_factors: &[],
             cumulative_discount_factors: &[],
             stage_lag_transitions: &[],
@@ -3020,6 +3025,7 @@ mod tests {
             load_bus_indices: &[],
             block_counts_per_stage: &[1usize, 1, 1],
             ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
             discount_factors: &[],
             cumulative_discount_factors: &[],
             stage_lag_transitions: &[],
@@ -3312,6 +3318,7 @@ mod tests {
             load_bus_indices: &[],
             block_counts_per_stage: &[1usize],
             ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
             discount_factors: &[],
             cumulative_discount_factors: &[],
             stage_lag_transitions: &[],
@@ -3527,6 +3534,7 @@ mod tests {
             load_bus_indices: &[],
             block_counts_per_stage: &[1usize, 1, 1],
             ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
             discount_factors: &[],
             cumulative_discount_factors: &[],
             stage_lag_transitions: &[],
@@ -3772,6 +3780,7 @@ mod tests {
             load_bus_indices: &[],
             block_counts_per_stage: &[1usize, 1, 1],
             ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
             discount_factors: &[],
             cumulative_discount_factors: &[],
             stage_lag_transitions: &[],
@@ -3917,6 +3926,7 @@ mod tests {
             load_bus_indices: &load_bus_indices,
             block_counts_per_stage: &block_counts_per_stage,
             ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
             discount_factors: &[],
             cumulative_discount_factors: &[],
             stage_lag_transitions: &[],
@@ -4057,6 +4067,7 @@ mod tests {
             load_bus_indices: &load_bus_indices,
             block_counts_per_stage: &block_counts_per_stage,
             ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
             discount_factors: &[],
             cumulative_discount_factors: &[],
             stage_lag_transitions: &[],
@@ -4156,6 +4167,7 @@ mod tests {
             load_bus_indices: &[],
             block_counts_per_stage: &[1, 1, 1],
             ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
             discount_factors: &[],
             cumulative_discount_factors: &[],
             stage_lag_transitions: &[],

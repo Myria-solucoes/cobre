@@ -52,6 +52,13 @@ use std::path::Path;
 
 use crate::LoadError;
 
+/// Default value for [`RawNcs::allow_curtailment`] when the field is omitted
+/// from the JSON entry. Matches the historical Cobre behaviour where every NCS
+/// source is curtailable unless the operator opts out.
+fn default_allow_curtailment() -> bool {
+    true
+}
+
 /// Top-level intermediate type for `non_controllable_sources.json` (serde only, not re-exported).
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -83,6 +90,18 @@ pub(crate) struct RawNcs {
     exit_stage_id: Option<i32>,
     /// Maximum generation (installed capacity) [MW].
     max_generation_mw: f64,
+    /// Whether the LP is allowed to curtail this source.
+    ///
+    /// `true` (default) — the LP may curtail dispatch within
+    /// `[0, max_generation_mw × availability]` at `curtailment_cost`.
+    ///
+    /// `false` — must-run: dispatch is pinned to the realized availability
+    /// every scenario (`col_lower = col_upper`). Use this for NEWAVE-derived
+    /// `geracao_usinas_nao_simuladas` aggregates (PCH, PCT, EOL, UFV, MMGD)
+    /// that the source model pre-nets from MERC; this restores parity with
+    /// NEWAVE's dispatch convention.
+    #[serde(default = "default_allow_curtailment")]
+    allow_curtailment: bool,
     /// Optional entity-level curtailment cost override [$/`MWh`].
     /// When absent, falls back to global `ncs_curtailment_cost`.
     #[serde(default)]
@@ -193,6 +212,7 @@ fn convert_ncs(raw: RawNcsFile, global: &GlobalPenaltyDefaults) -> Vec<NonContro
                 entry_stage_id: raw_ncs.entry_stage_id,
                 exit_stage_id: raw_ncs.exit_stage_id,
                 max_generation_mw: raw_ncs.max_generation_mw,
+                allow_curtailment: raw_ncs.allow_curtailment,
                 curtailment_cost,
             }
         })
@@ -312,6 +332,41 @@ mod tests {
             "expected global curtailment_cost 0.005, got {}",
             sources[1].curtailment_cost
         );
+
+        // Neither source supplied allow_curtailment → both default to true.
+        assert!(sources[0].allow_curtailment);
+        assert!(sources[1].allow_curtailment);
+    }
+
+    /// `allow_curtailment` is parsed through to the resolved entity when
+    /// supplied; `false` is the must-run case used for NEWAVE-derived
+    /// `geracao_usinas_nao_simuladas` aggregates.
+    #[test]
+    fn test_parse_allow_curtailment() {
+        let json = r#"{
+          "non_controllable_sources": [
+            {
+              "id": 0,
+              "name": "PCH NE Aggregate",
+              "bus_id": 0,
+              "max_generation_mw": 120.0,
+              "allow_curtailment": false
+            },
+            {
+              "id": 1,
+              "name": "Wind NE Partial",
+              "bus_id": 0,
+              "max_generation_mw": 300.0,
+              "allow_curtailment": true
+            }
+          ]
+        }"#;
+        let f = write_json(json);
+        let global = make_global();
+        let sources = parse_non_controllable_sources(f.path(), &global).unwrap();
+
+        assert!(!sources[0].allow_curtailment, "must-run source");
+        assert!(sources[1].allow_curtailment, "curtailable source");
     }
 
     // ── AC: duplicate ID detection ─────────────────────────────────────────────

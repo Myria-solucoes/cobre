@@ -520,9 +520,20 @@ fn fill_generation_below_columns(
 
 /// NCS generation columns: one per active NCS per block.
 ///
-/// `col_lower[col] = 0.0` (from vec initialisation).
+/// `col_lower[col] = if ncs.allow_curtailment { 0 } else { col_upper[col] }`.
 /// `col_upper[col] = available_gen * ncs_factor`.
 /// `objective[col] = -curtailment_cost * block_hours` (negative incentivises generation).
+///
+/// These template values govern only when NCS noise is **non-stochastic**
+/// (`n_stochastic_ncs == 0`). When stochastic NCS is active, both bounds
+/// are rebuilt per scenario by `transform_ncs_noise` to scale with the
+/// realized availability ratio `α = clamp(mean + std·η, 0, 1)`; the
+/// template values are overwritten via `set_col_bounds` before each stage
+/// solve. With `allow_curtailment == true` (the default) the column is
+/// fully curtailable (bit-identical to the pre-flag behaviour); with
+/// `allow_curtailment == false` the column is pinned to the available
+/// level on every stage (must-run, matching NEWAVE's
+/// `geracao_usinas_nao_simuladas` pre-netting convention).
 fn fill_ncs_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -538,7 +549,9 @@ fn fill_ncs_columns(
         for blk in 0..layout.n_blks {
             let col = layout.col_ncs_start + ncs_local * layout.n_blks + blk;
             let factor = ctx.resolved_ncs_factors.factor(ncs_sys_idx, stage_idx, blk);
-            bufs.col_upper[col] = avail_gen * factor;
+            let upper = avail_gen * factor;
+            bufs.col_upper[col] = upper;
+            bufs.col_lower[col] = if ncs.allow_curtailment { 0.0 } else { upper };
             let block_hours = stage.blocks[blk].duration_hours;
             bufs.objective[col] = -ncs.curtailment_cost * block_hours;
         }

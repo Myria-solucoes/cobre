@@ -69,6 +69,7 @@ impl StudySetup {
             load_bus_indices: &self.stage_data.stage_templates.load_bus_indices,
             block_counts_per_stage: &self.stage_data.block_counts_per_stage,
             ncs_max_gen: &self.ncs_max_gen,
+            ncs_allow_curtailment: &self.ncs_allow_curtailment,
             discount_factors: &self.stage_data.stage_templates.discount_factors,
             cumulative_discount_factors: &self
                 .stage_data

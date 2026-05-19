@@ -1002,6 +1002,7 @@ fn build_mixed_system(
         entry_stage_id: None,
         exit_stage_id: None,
         max_generation_mw: 30.0,
+        allow_curtailment: true,
         curtailment_cost: 0.0,
     };
     let stages: Vec<Stage> = (0..3).map(|i| make_monthly_stage(i, 5)).collect();
@@ -1305,6 +1306,7 @@ fn build_external_ncs_system(
         entry_stage_id: None,
         exit_stage_id: None,
         max_generation_mw: 30.0,
+        allow_curtailment: true,
         curtailment_cost: 0.0,
     };
     let stages: Vec<Stage> = (0..3).map(|i| make_monthly_stage(i, 5)).collect();

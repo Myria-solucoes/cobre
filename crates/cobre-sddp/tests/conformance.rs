@@ -840,6 +840,7 @@ mod lb_conformance {
             stochastic: None,
             n_load_buses: 0,
             ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
             block_count: 1,
             ncs_generation: 0..0,
             inflow_method: &InflowNonNegativityMethod::None,

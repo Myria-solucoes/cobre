@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- New `allow_curtailment: bool` field on `NonControllableSource` (default
+  `true`, preserving existing case behaviour). When set to `false` on an
+  entity, the LP pins its generation column to the realized availability
+  on every scenario: lower and upper column bounds both equal
+  `max_generation_mw * alpha * block_factor`, where
+  `alpha = clamp(mean + std*eta, 0, 1)` is the per-(stage, scenario)
+  availability ratio drawn from `non_controllable_stats.parquet` and
+  `block_factor` is the per-(stage, block) shape factor from
+  `non_controllable_factors.json`. Use this on NEWAVE-derived
+  `geracao_usinas_nao_simuladas` aggregates (PCH, PCT, EOL, UFV, MMGD)
+  that the source model pre-nets from `MERC`; with the default Cobre
+  schema the LP was free to curtail these because curtailment is one of
+  the cheapest LP slacks, leading on the bundled deterministic 1983 case
+  to ≈ 18 % of total NCS supply being curtailed, a ≈ +15 % hydro-dispatch
+  swing, and ≈ −23 % spillage versus NEWAVE. Setting
+  `allow_curtailment = false` on the must-run aggregates restores
+  dispatch parity with NEWAVE while preserving per-source observability
+  in the simulation outputs. JSON schema accepts the field as optional;
+  absent → `true`.
+
 ### Fixed
 
 - `ClassSampler::Historical::apply_initial_state` no longer overwrites the

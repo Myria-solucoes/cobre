@@ -391,6 +391,7 @@ mod tests {
             load_bus_indices: &[],
             block_counts_per_stage: &[],
             ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
             discount_factors: &[],
             cumulative_discount_factors: &[],
             stage_lag_transitions: &[],

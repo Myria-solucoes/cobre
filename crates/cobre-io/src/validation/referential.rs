@@ -1203,6 +1203,7 @@ mod tests {
             entry_stage_id: None,
             exit_stage_id: None,
             max_generation_mw: 50.0,
+            allow_curtailment: true,
             curtailment_cost: 1.0,
         }
     }
