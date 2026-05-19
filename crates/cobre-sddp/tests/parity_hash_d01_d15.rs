@@ -289,6 +289,7 @@ fn case_dir(label: &str) -> std::path::PathBuf {
         "D13" => "d13-generic-constraint",
         "D14" => "d14-block-factors",
         "D15" => "d15-non-controllable-source",
+        "D17" => "d17-evaporation-mixed-sign",
         other => panic!("unknown case label: {other}"),
     };
     // Integration tests run from the crate root; fixtures live at
@@ -551,4 +552,13 @@ fn parity_hash_d14() {
 )]
 fn parity_hash_d15() {
     run_case("D15");
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+fn parity_hash_d17() {
+    run_case("D17");
 }
