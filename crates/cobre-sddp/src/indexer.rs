@@ -95,11 +95,11 @@ use cobre_solver::StageTemplate;
 /// a single hydro within a stage LP.  Columns are stage-level (not per-block).
 #[derive(Debug, Clone, Copy)]
 pub struct EvaporationIndices {
-    /// Column index of the evaporation volume variable `Q_ev_h` (hm³).
+    /// Column index of the stage-averaged evaporation flow variable `Q_ev_h` (m³/s).
     pub q_ev_col: usize,
-    /// Column index of the positive violation slack `f_evap_plus_h` (hm³).
+    /// Column index of the positive violation slack `f_evap_plus_h` (m³/s).
     pub f_evap_plus_col: usize,
-    /// Column index of the negative violation slack `f_evap_minus_h` (hm³).
+    /// Column index of the negative violation slack `f_evap_minus_h` (m³/s).
     pub f_evap_minus_col: usize,
     /// Row index of the evaporation equality constraint.
     pub evap_row: usize,
