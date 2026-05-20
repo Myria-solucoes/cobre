@@ -27,12 +27,8 @@
 //! lag index 1 is lag-2, and so on.
 //!
 //! These are the raw historical inflow values at the `max_order` stages
-//! immediately before the window starts (BR6 specification). They are
-//! retained for diagnostics and parity inspection; they are NOT injected
-//! into the solver state vector. Per NEWAVE's `TENDENCIA HIDROLOGICA`
-//! convention, the initial inflow lags come from
-//! `initial_conditions.past_inflows` for every scenario regardless of the
-//! historical window being replayed.
+//! immediately before the window starts (BR6 specification), used by
+//! `apply_initial_state` to seed the solver state vector.
 //!
 //! [`PrecomputedPar`]: crate::par::precompute::PrecomputedPar
 

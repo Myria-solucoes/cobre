@@ -156,6 +156,9 @@ const EXTERNAL_SELECTION_BASE_SEED: u64 = 0x6578_7465_726e_616c; // b"external" 
 impl ClassSampler<'_> {
     /// Compute the deterministic historical window index for the given request.
     ///
+    /// Uses the same hash domain as [`ClassSampler::fill`] for `Historical` so
+    /// that `apply_initial_state` and `fill` always select the same window.
+    ///
     /// The result is `derive_forward_seed(HISTORICAL_SELECTION_BASE_SEED,
     /// req.iteration, req.scenario, 0) % n_windows`.
     #[allow(clippy::cast_possible_truncation)]
@@ -169,28 +172,47 @@ impl ClassSampler<'_> {
         (hash as usize) % n_windows
     }
 
-    /// No-op hook reserved for future per-class initial-state injection.
+    /// Inject the pre-study lag values for the selected historical window into
+    /// the solver state vector.
     ///
-    /// All current variants — `InSample`, `OutOfSample`, `Historical`, and
-    /// `External` — leave the caller-supplied state vector untouched. The
-    /// historical-replay scheme deliberately does NOT inject window-preceding
-    /// lag values: matching NEWAVE's `TENDENCIA HIDROLOGICA` convention, the
-    /// initial inflow lags come from `initial_conditions.past_inflows`
-    /// (analogous to `vazpast.dat`) for every scenario regardless of which
-    /// historical window is being replayed. The historical window contributes
-    /// only the standardized noise residuals via [`ClassSampler::fill`]; never
-    /// the initial-state lags.
+    /// For `Historical`: writes `library.lag_slice(window_idx)` into
+    /// `state[lag_offset..lag_offset + max_order * n_hydros]`. The window index
+    /// is derived by the same deterministic hash as [`ClassSampler::fill`] so
+    /// that both methods always refer to the same window for a given
+    /// `(iteration, scenario)`.
     ///
-    /// This convention guarantees that forward simulations and the
-    /// lower-bound / backward-pass evaluators all consume the same `x_0`,
-    /// keeping the reported convergence gap meaningful on historical-replay
-    /// cases.
+    /// For `InSample`, `OutOfSample`, and `External`: this is a no-op — the
+    /// initial state is already correct for these schemes (no lag injection
+    /// needed).
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if
+    /// `state.len() < lag_offset + library.max_order() * library.n_hydros()`
+    /// for the `Historical` variant.
     pub fn apply_initial_state(
         &self,
-        _req: &ClassSampleRequest,
-        _state: &mut [f64],
-        _lag_offset: usize,
+        req: &ClassSampleRequest,
+        state: &mut [f64],
+        lag_offset: usize,
     ) {
+        match self {
+            ClassSampler::Historical { library } => {
+                let window_idx = Self::select_historical_window(req, library.n_windows());
+                let lag_data = library.lag_slice(window_idx);
+                debug_assert!(
+                    state.len() >= lag_offset + lag_data.len(),
+                    "state too short for lag injection: state.len()={}, \
+                     lag_offset={lag_offset}, lag_data.len()={}",
+                    state.len(),
+                    lag_data.len(),
+                );
+                state[lag_offset..lag_offset + lag_data.len()].copy_from_slice(lag_data);
+            }
+            ClassSampler::InSample { .. }
+            | ClassSampler::OutOfSample { .. }
+            | ClassSampler::External { .. } => {}
+        }
     }
 
     /// Fill `output` with noise for the given `(iteration, scenario, stage)` triple.
@@ -754,61 +776,52 @@ mod tests {
     }
 
     #[test]
-    fn test_historical_apply_initial_state_noop() {
-        // Historical::apply_initial_state must not touch the caller-supplied
-        // state vector. Matching NEWAVE's `TENDENCIA HIDROLOGICA` convention,
-        // the initial inflow lags come from `initial_conditions.past_inflows`
-        // and are owned by the caller; the historical window contributes only
-        // standardized noise residuals via `fill`. See
-        // `docs/findings/historical-replay-lag-injection.md` in cobre-bridge.
+    fn test_historical_apply_initial_state_copies_lags() {
         let lib = make_historical_library_with_lags();
         let sampler = ClassSampler::Historical { library: &lib };
 
-        for scenario in 0..20_u32 {
-            let req = ClassSampleRequest {
-                iteration: 0,
-                scenario,
-                stage: 0,
-                stage_idx: 0,
-                total_scenarios: 20,
-                noise_group_id: 0,
-            };
+        // Use scenario=0 and find the expected window via the same hash.
+        let req = ClassSampleRequest {
+            iteration: 0,
+            scenario: 0,
+            stage: 0,
+            stage_idx: 0,
+            total_scenarios: 10,
+            noise_group_id: 0,
+        };
 
-            let lag_offset = 5;
-            let lag_len = lib.max_order() * lib.n_hydros();
-            let total_len = u32::try_from(lag_offset + lag_len + 3).unwrap();
-            let original: Vec<f64> = (0..total_len).map(|i| 1.0 + f64::from(i)).collect();
-            let mut state = original.clone();
+        let lag_offset = 5;
+        let lag_len = lib.max_order() * lib.n_hydros(); // 4
+        let mut state = vec![0.0f64; lag_offset + lag_len + 3];
+        state[0] = 99.0; // sentinel: should be untouched
+        state[lag_offset + lag_len] = 77.0; // sentinel: should be untouched
 
-            sampler.apply_initial_state(&req, &mut state, lag_offset);
+        sampler.apply_initial_state(&req, &mut state, lag_offset);
 
-            assert_eq!(
-                state, original,
-                "Historical::apply_initial_state must be a no-op for scenario={scenario}"
-            );
+        // Compute expected window using the shared helper path.
+        let window_idx = ClassSampler::select_historical_window(&req, lib.n_windows());
+        let expected_lags = lib.lag_slice(window_idx);
 
-            // And the lag slice that the buggy implementation used to inject
-            // must be distinguishable from the caller-supplied state, so this
-            // test is a real assertion about non-overwriting.
-            let window_idx = ClassSampler::select_historical_window(&req, lib.n_windows());
-            let lag_data = lib.lag_slice(window_idx);
-            assert_ne!(
-                &state[lag_offset..lag_offset + lag_len],
-                lag_data,
-                "test setup precondition: caller-supplied state must differ from \
-                 library lag_slice so the no-op assertion is meaningful \
-                 (scenario={scenario})"
-            );
-        }
+        assert_eq!(
+            &state[lag_offset..lag_offset + lag_len],
+            expected_lags,
+            "apply_initial_state must copy lag_slice for the selected window"
+        );
+        // Sentinels must be untouched.
+        assert_eq!(state[0], 99.0, "bytes before lag_offset must be untouched");
+        assert_eq!(
+            state[lag_offset + lag_len],
+            77.0,
+            "bytes after lag region must be untouched"
+        );
     }
 
     #[test]
-    fn test_historical_fill_window_selection_still_deterministic() {
-        // Sanity check: removing the lag-injection arm from apply_initial_state
-        // must not affect the window-selection hash used by fill().
+    fn test_historical_apply_initial_state_consistent_with_fill() {
+        // Both fill() and apply_initial_state() must select the same window for
+        // a given (iteration, scenario).
         let lib = make_historical_library_with_lags();
         let sampler = ClassSampler::Historical { library: &lib };
-        let mut perm = vec![0usize; 20];
 
         for scenario in 0..20_u32 {
             let req = ClassSampleRequest {
@@ -819,14 +832,28 @@ mod tests {
                 total_scenarios: 20,
                 noise_group_id: 0,
             };
+
+            // Derive the window index via the shared helper.
             let window_via_helper = ClassSampler::select_historical_window(&req, lib.n_windows());
 
+            // fill() uses the same helper internally.
             let mut output = vec![0.0f64; lib.n_hydros()];
+            let mut perm = vec![0usize; 20];
             sampler.fill(&req, &mut output, &mut perm).unwrap();
             let expected_eta = lib.eta_slice(window_via_helper, req.stage_idx);
             assert_eq!(
                 &output, expected_eta,
-                "fill() must use select_historical_window for scenario={scenario}"
+                "fill() must use the same window as select_historical_window for scenario={scenario}"
+            );
+
+            // apply_initial_state() must inject lags from the same window.
+            let lag_len = lib.max_order() * lib.n_hydros();
+            let mut state = vec![0.0f64; lag_len];
+            sampler.apply_initial_state(&req, &mut state, 0);
+            let expected_lags = lib.lag_slice(window_via_helper);
+            assert_eq!(
+                &state, expected_lags,
+                "apply_initial_state() must use same window as fill() for scenario={scenario}"
             );
         }
     }
