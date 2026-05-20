@@ -563,6 +563,8 @@ impl StudySetup {
                     &stages,
                     stochastic.par(),
                     system.policy_graph().season_map.as_ref(),
+                    &system.initial_conditions().past_inflows,
+                    &stage_lag_transitions,
                     training_source.historical_years.as_ref(),
                     forward_passes,
                 )?)
@@ -624,6 +626,8 @@ impl StudySetup {
                 &stages,
                 stochastic.par(),
                 system.policy_graph().season_map.as_ref(),
+                &system.initial_conditions().past_inflows,
+                &stage_lag_transitions,
                 simulation_source.historical_years.as_ref(),
                 forward_passes,
             )?)

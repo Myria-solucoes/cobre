@@ -779,6 +779,12 @@ fn broadcast_and_build_setup(
                     max_order,
                     window_years.clone(),
                 );
+                // Pass past_inflows so the η-inversion rolling chain is seeded
+                // from the same x₀ as the forward pass (TENDENCIA HIDROLOGICA
+                // convention). stage_lag_transitions is empty here — the
+                // hardcoded uniform-monthly fallback inside
+                // standardize_historical_windows is correct for all historical
+                // studies (monthly grid only; see TODO(historical-replay-non-monthly)).
                 cobre_stochastic::standardize_historical_windows(
                     &mut lib,
                     system.inflow_history(),
@@ -787,6 +793,8 @@ fn broadcast_and_build_setup(
                     &par,
                     &window_years,
                     system.policy_graph().season_map.as_ref(),
+                    &system.initial_conditions().past_inflows,
+                    &[],
                 );
                 Some(lib)
             } else {

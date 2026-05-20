@@ -87,6 +87,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `Historical` scheme will see different forward upper bounds and
   meaningful gap closure to cut tightness.
 
+- **Historical η inversion re-rooted at `past_inflows` (LB/UB x₀ sharing).**
+  `standardize_historical_windows` previously inverted the PAR noise residual
+  η for each window stage using `window_pre_study_lags` as the lag state seed
+  — i.e. the raw historical inflows from the year before each window year.
+  After commit dc96030 (`apply_initial_state` no-op), the SDDP forward pass
+  starts every scenario from `initial_conditions.past_inflows` (the
+  user-supplied x₀), not from the window-preceding lags. The two paths
+  therefore built their lag chains from different x₀, producing a
+  systematic per-stage offset `z_h = target + Σψ·(past_inflows −
+window_lag)` that propagated through all stages and prevented exact
+  historical replay even at stage 0 after d0e4a42. The fix re-roots the
+  inversion on a rolling lag chain seeded from `past_inflows`, following the
+  same accumulate/finalize pattern as `standardize_external_inflow`. The
+  rolling chain is advanced each month via `StageLagTransition`; uniform-
+  monthly transitions are used by default, with noop transitions (produced
+  by an empty `SeasonMap`) falling back to uniform-monthly in the inner loop.
+  A `past_inflows_digest: u64` field (SipHash-1-3 of all `past_inflows`
+  values) is stored on `HistoricalScenarioLibrary` to enable stale-library
+  detection when `past_inflows` change between calls. A `debug_assert!`
+  guard fires when `stage_lag_transitions` contain non-trivial (non-monthly)
+  entries, marking `TODO(historical-replay-non-monthly)` for future work on
+  sub-monthly and multi-monthly study configurations.
+  `build_historical_inflow_library` and `build_opening_tree_library` both
+  forward `past_inflows` and `stage_lag_transitions` to
+  `standardize_historical_windows`. After the fix, every historical-scheme
+  forward pass that starts from `past_inflows` reconstructs the raw
+  historical observation to within floating-point precision at every stage,
+  restoring LB/UB consistency at x₀. New tests T2–T6 in
+  `crates/cobre-stochastic/tests/par_a_historical_replay.rs` pin the
+  invariant for differing `past_inflows`, AR(0), truncated lag vectors,
+  multi-window cases, and the non-trivial-transition guard.
+
 ## [0.6.1] - 2026-05-18
 
 ### Fixed
