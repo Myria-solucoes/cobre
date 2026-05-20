@@ -86,7 +86,7 @@ pub struct PenaltiesOverrides<'a> {
 /// let penalties = HydroPenalties {
 ///     spillage_cost: 0.01,
 ///     diversion_cost: 0.02,
-///     fpha_turbined_cost: 0.03,
+///     turbined_cost: 0.03,
 ///     storage_violation_below_cost: 1000.0,
 ///     filling_target_violation_cost: 5000.0,
 ///     turbined_violation_below_cost: 500.0,
@@ -134,7 +134,7 @@ pub struct PenaltiesOverrides<'a> {
 ///     hydro_id: EntityId::from(0),
 ///     stage_id: 1,
 ///     spillage_cost: Some(0.05),
-///     fpha_turbined_cost: None,
+///     turbined_cost: None,
 ///     diversion_cost: None,
 ///     storage_violation_below_cost: None,
 ///     filling_target_violation_cost: None,
@@ -217,7 +217,7 @@ pub fn resolve_penalties(
         HydroStagePenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
-            fpha_turbined_cost: 0.0,
+            turbined_cost: 0.0,
             storage_violation_below_cost: 0.0,
             filling_target_violation_cost: 0.0,
             turbined_violation_below_cost: 0.0,
@@ -338,8 +338,8 @@ pub fn resolve_penalties(
         if let Some(v) = row.diversion_cost {
             cell.diversion_cost = v;
         }
-        if let Some(v) = row.fpha_turbined_cost {
-            cell.fpha_turbined_cost = v;
+        if let Some(v) = row.turbined_cost {
+            cell.turbined_cost = v;
         }
         if let Some(v) = row.storage_violation_below_cost {
             cell.storage_violation_below_cost = v;
@@ -435,7 +435,7 @@ fn hydro_stage_penalties(hydro: &Hydro) -> HydroStagePenalties {
     HydroStagePenalties {
         spillage_cost: p.spillage_cost,
         diversion_cost: p.diversion_cost,
-        fpha_turbined_cost: p.fpha_turbined_cost,
+        turbined_cost: p.turbined_cost,
         storage_violation_below_cost: p.storage_violation_below_cost,
         filling_target_violation_cost: p.filling_target_violation_cost,
         turbined_violation_below_cost: p.turbined_violation_below_cost,
@@ -532,7 +532,7 @@ mod tests {
             penalties: HydroPenalties {
                 spillage_cost: penalty_value,
                 diversion_cost: penalty_value,
-                fpha_turbined_cost: penalty_value,
+                turbined_cost: penalty_value,
                 storage_violation_below_cost: penalty_value,
                 filling_target_violation_cost: penalty_value,
                 turbined_violation_below_cost: penalty_value,
@@ -579,7 +579,7 @@ mod tests {
             penalties: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.02,
-                fpha_turbined_cost: 0.03,
+                turbined_cost: 0.03,
                 storage_violation_below_cost: 1000.0,
                 filling_target_violation_cost: 5000.0,
                 turbined_violation_below_cost: 500.0,
@@ -642,7 +642,7 @@ mod tests {
             hydro_id: EntityId::from(hydro_id),
             stage_id,
             spillage_cost: None,
-            fpha_turbined_cost: None,
+            turbined_cost: None,
             diversion_cost: None,
             storage_violation_below_cost: None,
             filling_target_violation_cost: None,
@@ -728,7 +728,7 @@ mod tests {
             hydro_id: EntityId::from(0),
             stage_id: 0,
             spillage_cost: Some(11.0),
-            fpha_turbined_cost: Some(22.0),
+            turbined_cost: Some(22.0),
             diversion_cost: Some(33.0),
             storage_violation_below_cost: Some(44.0),
             filling_target_violation_cost: Some(55.0),
@@ -749,7 +749,7 @@ mod tests {
 
         let cell = result.hydro_penalties(0, 0);
         assert!((cell.spillage_cost - 11.0).abs() < f64::EPSILON);
-        assert!((cell.fpha_turbined_cost - 22.0).abs() < f64::EPSILON);
+        assert!((cell.turbined_cost - 22.0).abs() < f64::EPSILON);
         assert!((cell.diversion_cost - 33.0).abs() < f64::EPSILON);
         assert!((cell.storage_violation_below_cost - 44.0).abs() < f64::EPSILON);
         assert!((cell.filling_target_violation_cost - 55.0).abs() < f64::EPSILON);
@@ -792,7 +792,7 @@ mod tests {
 
         // Unchanged fields retain entity-level values from make_hydro_distinct_penalties.
         assert!((cell.diversion_cost - 0.02).abs() < f64::EPSILON);
-        assert!((cell.fpha_turbined_cost - 0.03).abs() < f64::EPSILON);
+        assert!((cell.turbined_cost - 0.03).abs() < f64::EPSILON);
         assert!((cell.turbined_violation_below_cost - 500.0).abs() < f64::EPSILON);
         assert!((cell.outflow_violation_below_cost - 400.0).abs() < f64::EPSILON);
         assert!((cell.outflow_violation_above_cost - 300.0).abs() < f64::EPSILON);
@@ -1073,7 +1073,7 @@ mod tests {
         // All other 10 fields retain entity-level values from make_hydro_distinct_penalties.
         assert!((cell.spillage_cost - 0.01).abs() < f64::EPSILON);
         assert!((cell.diversion_cost - 0.02).abs() < f64::EPSILON);
-        assert!((cell.fpha_turbined_cost - 0.03).abs() < f64::EPSILON);
+        assert!((cell.turbined_cost - 0.03).abs() < f64::EPSILON);
         assert!((cell.storage_violation_below_cost - 1000.0).abs() < f64::EPSILON);
         assert!((cell.turbined_violation_below_cost - 500.0).abs() < f64::EPSILON);
         assert!((cell.outflow_violation_below_cost - 400.0).abs() < f64::EPSILON);

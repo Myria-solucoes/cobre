@@ -949,7 +949,7 @@ mod tests {
             penalties: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 0.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -1034,7 +1034,7 @@ mod tests {
             HydroStagePenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 500.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -1184,7 +1184,7 @@ mod tests {
             penalties: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 0.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -1305,7 +1305,7 @@ mod tests {
                 hydro: HydroStagePenalties {
                     spillage_cost: 0.01,
                     diversion_cost: 0.0,
-                    fpha_turbined_cost: 0.0,
+                    turbined_cost: 0.0,
                     storage_violation_below_cost: 500.0,
                     filling_target_violation_cost: 0.0,
                     turbined_violation_below_cost: 0.0,
@@ -2454,7 +2454,7 @@ mod tests {
             penalties: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 0.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -2586,7 +2586,7 @@ mod tests {
                 hydro: HydroStagePenalties {
                     spillage_cost: 0.01,
                     diversion_cost: 0.0,
-                    fpha_turbined_cost: 0.0,
+                    turbined_cost: 0.0,
                     storage_violation_below_cost: 500.0,
                     filling_target_violation_cost: 0.0,
                     turbined_violation_below_cost: 0.0,
@@ -2894,7 +2894,7 @@ mod tests {
             penalties: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 0.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -2985,7 +2985,7 @@ mod tests {
             HydroStagePenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 500.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -3348,7 +3348,7 @@ mod tests {
             HydroStagePenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 500.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -3414,7 +3414,7 @@ mod tests {
             penalties: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 0.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -3687,7 +3687,7 @@ mod tests {
             penalties: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 0.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -3804,7 +3804,7 @@ mod tests {
                 hydro: HydroStagePenalties {
                     spillage_cost: 0.01,
                     diversion_cost: 0.0,
-                    fpha_turbined_cost: 0.0,
+                    turbined_cost: 0.0,
                     storage_violation_below_cost: 500.0,
                     filling_target_violation_cost: 0.0,
                     turbined_violation_below_cost: 0.0,
@@ -3942,7 +3942,7 @@ mod tests {
             penalties: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 0.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -4073,7 +4073,7 @@ mod tests {
                 hydro: HydroStagePenalties {
                     spillage_cost: 0.01,
                     diversion_cost: 0.0,
-                    fpha_turbined_cost: 0.0,
+                    turbined_cost: 0.0,
                     storage_violation_below_cost: 500.0,
                     filling_target_violation_cost: 0.0,
                     turbined_violation_below_cost: 0.0,
@@ -4215,7 +4215,7 @@ mod tests {
             penalties: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 0.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -4369,7 +4369,7 @@ mod tests {
                 hydro: HydroStagePenalties {
                     spillage_cost: 0.01,
                     diversion_cost: 0.0,
-                    fpha_turbined_cost: 0.0,
+                    turbined_cost: 0.0,
                     storage_violation_below_cost: 500.0,
                     filling_target_violation_cost: 0.0,
                     turbined_violation_below_cost: 0.0,
@@ -4516,7 +4516,7 @@ mod tests {
             penalties: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 0.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -4634,7 +4634,7 @@ mod tests {
                 hydro: HydroStagePenalties {
                     spillage_cost: 0.01,
                     diversion_cost: 0.0,
-                    fpha_turbined_cost: 0.0,
+                    turbined_cost: 0.0,
                     storage_violation_below_cost: 500.0,
                     filling_target_violation_cost: 0.0,
                     turbined_violation_below_cost: 0.0,

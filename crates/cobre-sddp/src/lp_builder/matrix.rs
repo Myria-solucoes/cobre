@@ -99,7 +99,9 @@ fn fill_theta_column(idx: &StageIndexer, bufs: &mut ColumnBufs<'_>) {
 ///
 /// For constant-productivity hydros, caps turbine flow so that
 /// `productivity * turbined <= max_generation_mw` (derated capacity).
-/// For FPHA hydros, carries the `fpha_turbined_cost` in the objective.
+/// Carries `turbined_cost * block_hours` in the objective on every hydro's
+/// turbine column regardless of production model — matches NEWAVE behavior
+/// where the turbined cost applies to every plant, not only FPHA hydros.
 fn fill_turbine_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -111,7 +113,6 @@ fn fill_turbine_columns(
         let hb = ctx.bounds.hydro_bounds(h_idx, stage_idx);
         let hp = ctx.penalties.hydro_penalties(h_idx, stage_idx);
         let model = ctx.production_models.model(h_idx, stage_idx);
-        let is_fpha = matches!(model, ResolvedProductionModel::Fpha { .. });
         let turb_upper = match model {
             ResolvedProductionModel::ConstantProductivity { productivity }
                 if *productivity > 0.0 =>
@@ -124,10 +125,8 @@ fn fill_turbine_columns(
             let col = layout.col_turbine_start + h_idx * layout.n_blks + blk;
             bufs.col_lower[col] = 0.0;
             bufs.col_upper[col] = turb_upper;
-            if is_fpha {
-                let block_hours = stage.blocks[blk].duration_hours;
-                bufs.objective[col] = hp.fpha_turbined_cost * block_hours;
-            }
+            let block_hours = stage.blocks[blk].duration_hours;
+            bufs.objective[col] = hp.turbined_cost * block_hours;
         }
     }
 }
@@ -285,8 +284,8 @@ fn fill_inflow_slack_columns(
 
 /// FPHA generation columns (`g_{h,k}`): one per FPHA hydro per block.
 ///
-/// Bounds: `[0, max_generation_mw]`.  Objective: `0.0` (`fpha_turbined_cost`
-/// goes on the turbine column).
+/// Bounds: `[0, max_generation_mw]`.  Objective: `0.0` (the global
+/// `turbined_cost` is applied on the turbine column for every hydro).
 fn fill_fpha_generation_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -1549,7 +1548,7 @@ mod parameter_resolution_tests {
     use cobre_stochastic::par::precompute::PrecomputedPar;
     use std::collections::HashMap;
 
-    use crate::energy_conversion::{EnergyConversionSet, build_hydro_energy_productivity_override};
+    use crate::energy_conversion::{build_hydro_energy_productivity_override, EnergyConversionSet};
     use crate::hydro_models::PrepareHydroModelsResult;
     use crate::inflow_method::InflowNonNegativityMethod;
     use crate::resolved_parameters::build_resolved_parameters;
@@ -1585,7 +1584,7 @@ mod parameter_resolution_tests {
         HydroStagePenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
-            fpha_turbined_cost: 0.0,
+            turbined_cost: 0.0,
             storage_violation_below_cost: 0.0,
             filling_target_violation_cost: 0.0,
             turbined_violation_below_cost: 0.0,

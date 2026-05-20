@@ -370,7 +370,7 @@ pub(crate) struct RawHydroPenaltyOverrides {
     #[serde(default)]
     diversion_cost: Option<f64>,
     #[serde(default)]
-    fpha_turbined_cost: Option<f64>,
+    turbined_cost: Option<f64>,
     #[serde(default)]
     storage_violation_below_cost: Option<f64>,
     #[serde(default)]
@@ -871,7 +871,7 @@ fn convert_penalty_overrides(raw: RawHydroPenaltyOverrides) -> HydroPenaltyOverr
     HydroPenaltyOverrides {
         spillage_cost: raw.spillage_cost,
         diversion_cost: raw.diversion_cost,
-        fpha_turbined_cost: raw.fpha_turbined_cost,
+        turbined_cost: raw.turbined_cost,
         storage_violation_below_cost: raw.storage_violation_below_cost,
         filling_target_violation_cost: raw.filling_target_violation_cost,
         turbined_violation_below_cost: raw.turbined_violation_below_cost,
@@ -945,7 +945,7 @@ mod tests {
             line_exchange_cost: 2.0,
             hydro: HydroPenalties {
                 spillage_cost: 0.01,
-                fpha_turbined_cost: 0.05,
+                turbined_cost: 0.05,
                 diversion_cost: 0.1,
                 storage_violation_below_cost: 10_000.0,
                 filling_target_violation_cost: 50_000.0,
@@ -1306,7 +1306,7 @@ mod tests {
         let p = &hydros[0].penalties;
         assert!((p.spillage_cost - g.spillage_cost).abs() < f64::EPSILON);
         assert!((p.diversion_cost - g.diversion_cost).abs() < f64::EPSILON);
-        assert!((p.fpha_turbined_cost - g.fpha_turbined_cost).abs() < f64::EPSILON);
+        assert!((p.turbined_cost - g.turbined_cost).abs() < f64::EPSILON);
         assert!(
             (p.storage_violation_below_cost - g.storage_violation_below_cost).abs() < f64::EPSILON
         );

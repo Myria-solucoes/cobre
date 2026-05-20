@@ -275,7 +275,7 @@ have `depth_mw: null` (unbounded).
 | `bus`                     | `excess_cost`                     | number         | Cost per MWh of excess injection (USD/MWh)                 |
 | `line`                    | `exchange_cost`                   | number         | Cost per MWh of inter-bus exchange flow (USD/MWh)          |
 | `hydro`                   | `spillage_cost`                   | number         | Spillage penalty                                           |
-| `hydro`                   | `fpha_turbined_cost`              | number         | FPHA turbined flow violation penalty                       |
+| `hydro`                   | `turbined_cost`                   | number         | Turbined flow regularization cost (applied to every hydro) |
 | `hydro`                   | `diversion_cost`                  | number         | Diversion flow penalty                                     |
 | `hydro`                   | `storage_violation_below_cost`    | number         | Storage below-minimum violation penalty                    |
 | `hydro`                   | `filling_target_violation_cost`   | number         | Filling target violation penalty                           |
@@ -302,7 +302,7 @@ have `depth_mw: null` (unbounded).
   "line": { "exchange_cost": 2.0 },
   "hydro": {
     "spillage_cost": 0.01,
-    "fpha_turbined_cost": 0.05,
+    "turbined_cost": 0.05,
     "diversion_cost": 0.1,
     "storage_violation_below_cost": 10000.0,
     "filling_target_violation_cost": 50000.0,
@@ -607,7 +607,7 @@ global default from `penalties.json` is used. The following fields are supported
 | Field within `penalties`              | Optional | Description                                                                                                                               |
 | ------------------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | `spillage_cost`                       | Yes      | Spillage penalty ($/m³/s).                                                                                                                |
-| `fpha_turbined_cost`                  | Yes      | FPHA turbined flow violation penalty.                                                                                                     |
+| `turbined_cost`                       | Yes      | Turbined flow regularization cost; applied to every hydro's turbine column in the LP objective.                                           |
 | `diversion_cost`                      | Yes      | Diversion flow penalty.                                                                                                                   |
 | `storage_violation_below_cost`        | Yes      | Storage below-minimum violation penalty.                                                                                                  |
 | `filling_target_violation_cost`       | Yes      | Filling target violation penalty.                                                                                                         |
@@ -1302,7 +1302,7 @@ overridden per stage for buses.
 | `hydro_id`                        | INT32  | Yes      | Hydro plant ID                              |
 | `stage_id`                        | INT32  | Yes      | Stage ID                                    |
 | `spillage_cost`                   | DOUBLE | No       | Spillage penalty override                   |
-| `fpha_turbined_cost`              | DOUBLE | No       | FPHA turbined flow violation override       |
+| `turbined_cost`                   | DOUBLE | No       | Turbined cost override                      |
 | `diversion_cost`                  | DOUBLE | No       | Diversion penalty override                  |
 | `storage_violation_below_cost`    | DOUBLE | No       | Storage below-minimum violation override    |
 | `filling_target_violation_cost`   | DOUBLE | No       | Filling target violation override           |

@@ -706,7 +706,7 @@ Stage and block-level cost breakdown. One row per (stage, block) pair. 26 column
 | `inflow_penalty_cost`          | Float64 | No       | Cost of inflow non-negativity slack (numerical penalty).                       |
 | `generic_violation_cost`       | Float64 | No       | Cost of generic constraint violations.                                         |
 | `spillage_cost`                | Float64 | No       | Cost of reservoir spillage.                                                    |
-| `fpha_turbined_cost`           | Float64 | No       | Turbined flow penalty from the future-production hydro approximation.          |
+| `turbined_cost`           | Float64 | No       | Turbined flow penalty from the future-production hydro approximation.          |
 | `curtailment_cost`             | Float64 | No       | Cost of non-controllable source curtailment.                                   |
 | `exchange_cost`                | Float64 | No       | Transmission exchange cost component.                                          |
 | `pumping_cost`                 | Float64 | No       | Pumping station energy cost component.                                         |

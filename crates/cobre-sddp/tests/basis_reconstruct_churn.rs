@@ -49,7 +49,7 @@ use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::scenario::ScenarioSource;
 use cobre_io::config::StoppingRuleConfig;
 use cobre_sddp::{
-    SolverStatsDelta, StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic,
+    hydro_models::prepare_hydro_models, setup::prepare_stochastic, SolverStatsDelta, StudySetup,
 };
 use cobre_solver::highs::HighsSolver;
 
@@ -206,9 +206,11 @@ fn basis_reconstruct_churn() {
     const HI_SIMPLEX: u64 = PINNED_SIMPLEX_ITERS * 105 / 100; // floor of 1.05×pin
 
     // AC-6: lower-bound pin (float-exact).
-    // Pinned from local run 2026-04-17 (commit b866acb9).
+    // Re-pinned 2026-05-20 after extending `turbined_cost` to every hydro's
+    // turbine column (previously FPHA-only). The fixture's constant-productivity
+    // hydros now pay turbined regularization too, lifting the LB by ~0.10 %.
     // The lower bound is deterministic for a fixed SDDP seed and scenario count.
-    const PINNED_FINAL_LB: f64 = 1.390_333_333_333_335e6;
+    const PINNED_FINAL_LB: f64 = 1_391_697.766_666_667;
 
     let case_dir = d03_case_dir();
     let config_path = case_dir.join("config.json");

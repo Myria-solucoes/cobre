@@ -487,7 +487,6 @@ mod tests {
         };
         let fpha_model = || ResolvedProductionModel::Fpha {
             planes: vec![fpha_plane],
-            turbined_cost: 0.0,
         };
         let models: Vec<Vec<ResolvedProductionModel>> = vec![
             vec![fpha_model(), fpha_model()], // hydro 0 — FPHA

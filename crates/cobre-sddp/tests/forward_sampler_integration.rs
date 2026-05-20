@@ -198,7 +198,7 @@ fn make_hydro(raw_id: i32) -> Hydro {
         penalties: HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
-            fpha_turbined_cost: 0.0,
+            turbined_cost: 0.0,
             storage_violation_below_cost: 0.0,
             filling_target_violation_cost: 0.0,
             turbined_violation_below_cost: 0.0,
@@ -236,7 +236,7 @@ fn hydro_stage_penalties() -> HydroStagePenalties {
     HydroStagePenalties {
         spillage_cost: 0.0,
         diversion_cost: 0.0,
-        fpha_turbined_cost: 0.0,
+        turbined_cost: 0.0,
         storage_violation_below_cost: 0.0,
         filling_target_violation_cost: 0.0,
         turbined_violation_below_cost: 0.0,

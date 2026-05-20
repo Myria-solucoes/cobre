@@ -32,7 +32,7 @@
 //! | `hydro_id`                        | INT32  | Yes      | Hydro plant ID                       |
 //! | `stage_id`                        | INT32  | Yes      | Stage ID                             |
 //! | `spillage_cost`                   | DOUBLE | No       | Spillage penalty (USD/m³/s)          |
-//! | `fpha_turbined_cost`              | DOUBLE | No       | FPHA turbined violation (USD/m³/s)   |
+//! | `turbined_cost`                   | DOUBLE | No       | Turbined regularization cost (USD/MWh) |
 //! | `diversion_cost`                  | DOUBLE | No       | Diversion penalty (USD/m³/s)         |
 //! | `storage_violation_below_cost`    | DOUBLE | No       | Storage below-min violation (USD/hm³)|
 //! | `filling_target_violation_cost`   | DOUBLE | No       | Filling target violation (USD/hm³)   |
@@ -80,8 +80,8 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::fs::File;
 use std::path::Path;
 
-use crate::LoadError;
 use crate::parquet_helpers::{extract_optional_float64, extract_required_int32};
+use crate::LoadError;
 
 // ── Row types ─────────────────────────────────────────────────────────────────
 
@@ -164,7 +164,7 @@ pub struct LinePenaltyOverrideRow {
 ///     hydro_id: EntityId::from(5),
 ///     stage_id: 2,
 ///     spillage_cost: Some(0.01),
-///     fpha_turbined_cost: None,
+///     turbined_cost: None,
 ///     diversion_cost: None,
 ///     storage_violation_below_cost: Some(9999.0),
 ///     filling_target_violation_cost: None,
@@ -182,7 +182,7 @@ pub struct LinePenaltyOverrideRow {
 /// };
 /// assert_eq!(row.hydro_id, EntityId::from(5));
 /// assert_eq!(row.spillage_cost, Some(0.01));
-/// assert!(row.fpha_turbined_cost.is_none());
+/// assert!(row.turbined_cost.is_none());
 /// ```
 #[allow(clippy::struct_field_names)]
 #[derive(Debug, Clone, PartialEq)]
@@ -193,8 +193,8 @@ pub struct HydroPenaltyOverrideRow {
     pub stage_id: i32,
     /// Spillage penalty override.
     pub spillage_cost: Option<f64>,
-    /// FPHA turbined penalty override.
-    pub fpha_turbined_cost: Option<f64>,
+    /// Turbined regularization cost override.
+    pub turbined_cost: Option<f64>,
     /// Diversion penalty override.
     pub diversion_cost: Option<f64>,
     /// Storage violation override.
@@ -524,7 +524,7 @@ pub fn parse_penalty_overrides_hydro(
 
         // ── Optional penalty columns (all 16) ────────────────────────────────
         let spillage_cost_col = extract_optional_float64(&batch, "spillage_cost", path)?;
-        let fpha_turbined_cost_col = extract_optional_float64(&batch, "fpha_turbined_cost", path)?;
+        let turbined_cost_col = extract_optional_float64(&batch, "turbined_cost", path)?;
         let diversion_cost_col = extract_optional_float64(&batch, "diversion_cost", path)?;
         let storage_violation_below_cost_col =
             extract_optional_float64(&batch, "storage_violation_below_cost", path)?;
@@ -567,7 +567,7 @@ pub fn parse_penalty_overrides_hydro(
             let spillage_cost = spillage_cost_col
                 .filter(|col| !col.is_null(i))
                 .map(|col| col.value(i));
-            let fpha_turbined_cost = fpha_turbined_cost_col
+            let turbined_cost = turbined_cost_col
                 .filter(|col| !col.is_null(i))
                 .map(|col| col.value(i));
             let diversion_cost = diversion_cost_col
@@ -621,10 +621,10 @@ pub fn parse_penalty_overrides_hydro(
                 path,
             )?;
             validate_optional_positive(
-                fpha_turbined_cost,
+                turbined_cost,
                 "penalty_overrides_hydro",
                 row_idx,
-                "fpha_turbined_cost",
+                "turbined_cost",
                 path,
             )?;
             validate_optional_positive(
@@ -730,7 +730,7 @@ pub fn parse_penalty_overrides_hydro(
                 hydro_id,
                 stage_id,
                 spillage_cost,
-                fpha_turbined_cost,
+                turbined_cost,
                 diversion_cost,
                 storage_violation_below_cost,
                 filling_target_violation_cost,
@@ -1157,7 +1157,7 @@ mod tests {
             Field::new("hydro_id", DataType::Int32, false),
             Field::new("stage_id", DataType::Int32, false),
             Field::new("spillage_cost", DataType::Float64, true),
-            Field::new("fpha_turbined_cost", DataType::Float64, true),
+            Field::new("turbined_cost", DataType::Float64, true),
             Field::new("diversion_cost", DataType::Float64, true),
             Field::new("storage_violation_below_cost", DataType::Float64, true),
             Field::new("filling_target_violation_cost", DataType::Float64, true),
@@ -1202,7 +1202,7 @@ mod tests {
         assert_eq!(rows[0].hydro_id, EntityId::from(7));
         assert_eq!(rows[0].stage_id, 0);
         assert!((rows[0].spillage_cost.unwrap() - 0.01).abs() < f64::EPSILON);
-        assert!(rows[0].fpha_turbined_cost.is_none());
+        assert!(rows[0].turbined_cost.is_none());
         assert!(rows[0].diversion_cost.is_none());
         assert!((rows[0].storage_violation_below_cost.unwrap() - 9999.0).abs() < f64::EPSILON);
         assert!(rows[0].filling_target_violation_cost.is_none());
@@ -1250,7 +1250,7 @@ mod tests {
         assert_eq!(r.hydro_id, EntityId::from(2));
         assert_eq!(r.stage_id, 0);
         assert!(r.spillage_cost.is_some());
-        assert!(r.fpha_turbined_cost.is_some());
+        assert!(r.turbined_cost.is_some());
         assert!(r.diversion_cost.is_none());
         assert!(r.storage_violation_below_cost.is_some());
         assert!(r.filling_target_violation_cost.is_some());
@@ -1286,7 +1286,7 @@ mod tests {
 
         assert_eq!(rows.len(), 2);
         // The other 9 columns absent from schema -> all None.
-        assert!(rows[0].fpha_turbined_cost.is_none());
+        assert!(rows[0].turbined_cost.is_none());
         assert!(rows[0].diversion_cost.is_none());
         assert!(rows[0].filling_target_violation_cost.is_none());
         assert!(rows[0].turbined_violation_below_cost.is_none());

@@ -32,15 +32,16 @@ use std::sync::mpsc;
 use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::scenario::ScenarioSource;
 use cobre_io::{
-    PolicyCheckpointMetadata, PolicyCutRecord, StageCutsPayload, write_policy_checkpoint,
+    write_policy_checkpoint, PolicyCheckpointMetadata, PolicyCutRecord, StageCutsPayload,
 };
 use cobre_sddp::{
-    StudySetup, aggregate_simulation,
+    aggregate_simulation,
     hydro_models::prepare_hydro_models,
-    setup::{StudyParams, prepare_stochastic},
+    setup::{prepare_stochastic, StudyParams},
+    StudySetup,
 };
-use cobre_solver::SolverInterface;
 use cobre_solver::highs::HighsSolver;
+use cobre_solver::SolverInterface;
 
 mod common;
 
@@ -407,8 +408,14 @@ fn d02_single_hydro() {
 /// Three-stage cascade hydrothermal dispatch (2 hydros in series).
 /// Combined capacity 70 MW < demand 75 MW. Cascade coupling: H1 receives H0's
 /// discharge. Terminal stages: full capacity (thermal = 5 MW). Stage 0 binding
-/// storage constraints yield thermal ≈ 28.09 MW. Total cost = 4,171,000/3 $.
-pub const D03_EXPECTED_COST: f64 = 4_171_000.0 / 3.0;
+/// storage constraints yield thermal ≈ 28.09 MW.
+///
+/// Analytical thermal + deficit cost is `4_171_000 / 3 ≈ 1_390_333.33`. With
+/// `turbined_cost` applied to every hydro's turbine column (matches NEWAVE),
+/// the deterministic LB adds a fixed regularization contribution that lifts
+/// the total by `+1_364.4333…` (= turbined_cost × turbined MWh summed over
+/// stages and blocks for both hydros).
+pub const D03_EXPECTED_COST: f64 = 1_391_697.766_666_667_3;
 
 #[cfg_attr(
     not(feature = "slow-tests"),

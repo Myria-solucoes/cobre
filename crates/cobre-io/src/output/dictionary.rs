@@ -14,13 +14,12 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Float64Builder, Int8Builder, Int32Builder, RecordBatch};
+use arrow::array::{Float64Builder, Int32Builder, Int8Builder, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use cobre_core::System;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 
-use crate::Config;
 use crate::output::error::OutputError;
 use crate::output::parquet_config::ParquetWriterConfig;
 use crate::output::schemas::{
@@ -29,6 +28,7 @@ use crate::output::schemas::{
     iteration_timing_schema, non_controllables_schema, pumping_stations_schema, rank_timing_schema,
     retry_histogram_schema, row_selection_schema, solver_iterations_schema, thermals_schema,
 };
+use crate::Config;
 
 // ─── Entity type codes (SS3) ─────────────────────────────────────────────────
 
@@ -405,7 +405,7 @@ fn unit_for(file: &str, column: &str) -> &'static str {
         | "inflow_penalty_cost"
         | "generic_violation_cost"
         | "spillage_cost"
-        | "fpha_turbined_cost"
+        | "turbined_cost"
         | "curtailment_cost"
         | "exchange_cost"
         | "pumping_cost"
@@ -488,7 +488,7 @@ fn description_for(file: &str, column: &str) -> &'static str {
         ("costs", "inflow_penalty_cost") => "Total inflow non-negativity penalty",
         ("costs", "generic_violation_cost") => "Total generic constraint violation cost",
         ("costs", "spillage_cost") => "Total spillage regularization cost",
-        ("costs", "fpha_turbined_cost") => "Total FPHA turbined regularization cost",
+        ("costs", "turbined_cost") => "Total turbined regularization cost",
         ("costs", "curtailment_cost") => "Total curtailment cost",
         ("costs", "exchange_cost") => "Total exchange regularization cost",
         ("costs", "pumping_cost") => "Total pumping cost",
@@ -1094,13 +1094,13 @@ mod tests {
     use super::*;
     use chrono::NaiveDate;
     use cobre_core::{
-        Block, BlockMode, Bus, DeficitSegment, EntityId, Hydro, HydroGenerationModel,
-        HydroPenalties, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
-        StageStateConfig, SystemBuilder, Thermal,
         resolved::{
             BoundsCountsSpec, BoundsDefaults, ContractStageBounds, HydroStageBounds,
             LineStageBounds, PumpingStageBounds, ResolvedBounds, ThermalStageBounds,
         },
+        Block, BlockMode, Bus, DeficitSegment, EntityId, Hydro, HydroGenerationModel,
+        HydroPenalties, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
+        StageStateConfig, SystemBuilder, Thermal,
     };
 
     // ── Fixtures ─────────────────────────────────────────────────────────────
@@ -1109,7 +1109,7 @@ mod tests {
         HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
-            fpha_turbined_cost: 0.0,
+            turbined_cost: 0.0,
             storage_violation_below_cost: 0.0,
             filling_target_violation_cost: 0.0,
             turbined_violation_below_cost: 0.0,

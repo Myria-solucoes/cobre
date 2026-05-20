@@ -101,7 +101,7 @@ fn default_hydro_penalties() -> HydroStagePenalties {
     HydroStagePenalties {
         spillage_cost: 0.01,
         diversion_cost: 0.0,
-        fpha_turbined_cost: 0.0,
+        turbined_cost: 0.0,
         storage_violation_below_cost: 0.0,
         filling_target_violation_cost: 0.0,
         turbined_violation_below_cost: 0.0,
@@ -288,7 +288,7 @@ fn one_hydro_system(n_stages: usize, lag_order: usize) -> cobre_core::System {
         penalties: HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
-            fpha_turbined_cost: 0.0,
+            turbined_cost: 0.0,
             storage_violation_below_cost: 0.0,
             filling_target_violation_cost: 0.0,
             turbined_violation_below_cost: 0.0,
@@ -797,10 +797,10 @@ fn spillage_objective_nonzero_for_nonzero_penalty() {
 }
 
 /// Build a 1-bus, 1-FPHA-hydro, 1-stage system with `n_planes` FPHA planes,
-/// a given `fpha_turbined_cost`, and custom block durations.
+/// a given `turbined_cost`, and custom block durations.
 ///
 /// This is a variant of `one_fpha_hydro_system` that allows injecting an
-/// arbitrary `fpha_turbined_cost` and specifying the stage blocks.
+/// arbitrary `turbined_cost` and specifying the stage blocks.
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
@@ -808,7 +808,7 @@ fn spillage_objective_nonzero_for_nonzero_penalty() {
 )]
 fn fpha_system_with_turbined_cost(
     n_planes: usize,
-    fpha_turbined_cost: f64,
+    turbined_cost: f64,
     block_durations_hours: &[f64],
 ) -> (cobre_core::System, ProductionModelSet) {
     use chrono::NaiveDate;
@@ -858,7 +858,7 @@ fn fpha_system_with_turbined_cost(
         penalties: HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
-            fpha_turbined_cost,
+            turbined_cost,
             storage_violation_below_cost: 0.0,
             filling_target_violation_cost: 0.0,
             turbined_violation_below_cost: 0.0,
@@ -977,7 +977,7 @@ fn fpha_system_with_turbined_cost(
             hydro: HydroStagePenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
-                fpha_turbined_cost,
+                turbined_cost,
                 storage_violation_below_cost: 0.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -1018,20 +1018,17 @@ fn fpha_system_with_turbined_cost(
         gamma_s: 0.1,
     };
     let planes = vec![plane; n_planes];
-    let models = vec![vec![ResolvedProductionModel::Fpha {
-        planes,
-        turbined_cost: 0.0,
-    }]];
+    let models = vec![vec![ResolvedProductionModel::Fpha { planes }]];
     let production = ProductionModelSet::new(models, 1, 1);
 
     (system, production)
 }
 
-// ---- fpha_turbined_cost tests -------------------------------------------
+// ---- turbined_cost tests -------------------------------------------
 
 #[test]
-fn fpha_turbined_cost_applied_to_fpha_turbine_column() {
-    // AC-1: 1 FPHA hydro with fpha_turbined_cost = 0.5 $/MWh, 1 block of 720h.
+fn turbined_cost_applied_to_fpha_turbine_column() {
+    // AC-1: 1 FPHA hydro with turbined_cost = 0.5 $/MWh, 1 block of 720h.
     // Expected turbine column objective: 0.5 * 720 = 360.0.
     //
     // Column layout (N=1, L=0, K=1, no penalty):
@@ -1060,35 +1057,9 @@ fn fpha_turbined_cost_applied_to_fpha_turbine_column() {
 }
 
 #[test]
-fn constant_hydro_turbine_column_has_zero_objective() {
-    // AC-2: constant-productivity hydro must have objective coefficient 0.0
-    // on its turbine column regardless of block duration.
-    //
-    // Column layout (N=1, L=0, K=1): col_turbine_start = 4.
-    let system = one_hydro_system(1, 0);
-    let result = build_stage_templates(
-        &system,
-        no_penalty_config(),
-        &PrecomputedPar::default(),
-        &PrecomputedNormal::default(),
-        &default_production(&system),
-        &default_evaporation(&system),
-        &ResolvedParameters::default(),
-    )
-    .expect("constant productivity ok");
-    let t = &result.templates[0];
-    let turbine_col = 4_usize;
-    assert_eq!(
-        t.objective[turbine_col], 0.0,
-        "constant hydro turbine column must have zero objective, got {}",
-        t.objective[turbine_col]
-    );
-}
-
-#[test]
-fn fpha_turbined_cost_multi_block_uses_per_block_hours() {
+fn turbined_cost_multi_block_uses_per_block_hours() {
     // AC-3: 2-block stage — each turbine column carries cost * its own block_hours.
-    // fpha_turbined_cost = 1.0 $/MWh, block 0 = 300h, block 1 = 420h.
+    // turbined_cost = 1.0 $/MWh, block 0 = 300h, block 1 = 420h.
     //
     // Column layout (N=1, L=0, K=2, no penalty):
     //   theta = N*(3+L) = 3, decision_start = 4, col_turbine_start = 4
@@ -1123,18 +1094,18 @@ fn fpha_turbined_cost_multi_block_uses_per_block_hours() {
 }
 
 #[test]
-fn fpha_turbined_cost_mixed_system_only_fpha_hydros_carry_cost() {
-    // AC-3: In a mixed system (2 constant + 2 FPHA), only the FPHA hydros'
-    // turbine columns carry the fpha_turbined_cost objective.
+fn turbined_cost_mixed_system_all_hydros_carry_cost() {
+    // AC-3: In a mixed system (2 constant + 2 FPHA), every hydro's turbine
+    // column carries the `turbined_cost * block_hours` objective coefficient.
     //
-    // We reuse four_hydro_mixed_system() but override fpha_turbined_cost.
+    // We reuse four_hydro_mixed_system() but override turbined_cost.
     let (system, production) = four_hydro_mixed_system();
 
-    // Rebuild penalties with non-zero fpha_turbined_cost.
+    // Rebuild penalties with non-zero turbined_cost.
     let hydro_pen = HydroStagePenalties {
         spillage_cost: 0.01,
         diversion_cost: 0.0,
-        fpha_turbined_cost: 1.0,
+        turbined_cost: 1.0,
         storage_violation_below_cost: 0.0,
         filling_target_violation_cost: 0.0,
         turbined_violation_below_cost: 0.0,
@@ -1197,30 +1168,15 @@ fn fpha_turbined_cost_mixed_system_only_fpha_hydros_carry_cost() {
     let col_turbine_start = 13;
     let block_hours = 744.0;
 
-    // Hydros 0, 1 are ConstantProductivity → objective = 0.0.
-    assert!(
-        t.objective[col_turbine_start].abs() < 1e-12,
-        "constant hydro 0 turbine objective should be 0.0, got {}",
-        t.objective[col_turbine_start]
-    );
-    assert!(
-        t.objective[col_turbine_start + 1].abs() < 1e-12,
-        "constant hydro 1 turbine objective should be 0.0, got {}",
-        t.objective[col_turbine_start + 1]
-    );
-
-    // Hydros 2, 3 are FPHA → objective = 1.0 * 744.0 / COST_SCALE_FACTOR.
-    let expected_fpha = block_hours / COST_SCALE_FACTOR;
-    assert!(
-        (t.objective[col_turbine_start + 2] - expected_fpha).abs() < 1e-15,
-        "FPHA hydro 2 turbine objective should be {expected_fpha}, got {}",
-        t.objective[col_turbine_start + 2]
-    );
-    assert!(
-        (t.objective[col_turbine_start + 3] - expected_fpha).abs() < 1e-15,
-        "FPHA hydro 3 turbine objective should be {expected_fpha}, got {}",
-        t.objective[col_turbine_start + 3]
-    );
+    // All four hydros (2 constant + 2 FPHA) carry the same cost.
+    let expected = 1.0 * block_hours / COST_SCALE_FACTOR;
+    for h in 0..4 {
+        assert!(
+            (t.objective[col_turbine_start + h] - expected).abs() < 1e-15,
+            "hydro {h} turbine objective should be {expected}, got {}",
+            t.objective[col_turbine_start + h]
+        );
+    }
 }
 
 #[test]
@@ -1341,7 +1297,7 @@ fn test_fpha_model_accepted() {
         penalties: HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
-            fpha_turbined_cost: 0.0,
+            turbined_cost: 0.0,
             storage_violation_below_cost: 0.0,
             filling_target_violation_cost: 0.0,
             turbined_violation_below_cost: 0.0,
@@ -1998,7 +1954,7 @@ fn two_bus_system_with_stochastic_load(
             penalties: HydroPenalties {
                 spillage_cost: 0.0,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 0.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -2287,7 +2243,7 @@ fn one_fpha_hydro_system(n_planes: usize) -> (cobre_core::System, ProductionMode
         penalties: HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
-            fpha_turbined_cost: 0.0,
+            turbined_cost: 0.0,
             storage_violation_below_cost: 0.0,
             filling_target_violation_cost: 0.0,
             turbined_violation_below_cost: 0.0,
@@ -2424,10 +2380,7 @@ fn one_fpha_hydro_system(n_planes: usize) -> (cobre_core::System, ProductionMode
         gamma_s: 0.1,
     };
     let planes = vec![plane; n_planes];
-    let models = vec![vec![ResolvedProductionModel::Fpha {
-        planes,
-        turbined_cost: 0.0,
-    }]];
+    let models = vec![vec![ResolvedProductionModel::Fpha { planes }]];
     let production = ProductionModelSet::new(models, 1, 1);
 
     (system, production)
@@ -2467,7 +2420,7 @@ fn four_hydro_mixed_system() -> (cobre_core::System, ProductionModelSet) {
     let hydro_penalties = HydroPenalties {
         spillage_cost: 0.01,
         diversion_cost: 0.0,
-        fpha_turbined_cost: 0.0,
+        turbined_cost: 0.0,
         storage_violation_below_cost: 0.0,
         filling_target_violation_cost: 0.0,
         turbined_violation_below_cost: 0.0,
@@ -2633,11 +2586,9 @@ fn four_hydro_mixed_system() -> (cobre_core::System, ProductionModelSet) {
         vec![ResolvedProductionModel::ConstantProductivity { productivity: 3.0 }],
         vec![ResolvedProductionModel::Fpha {
             planes: fpha_planes.clone(),
-            turbined_cost: 0.0,
         }],
         vec![ResolvedProductionModel::Fpha {
             planes: fpha_planes,
-            turbined_cost: 0.0,
         }],
     ];
     let production = ProductionModelSet::new(models, 4, 1);
@@ -2979,10 +2930,7 @@ fn fpha_solve_system() -> (cobre_core::System, ProductionModelSet) {
         };
         3
     ];
-    let models = vec![vec![ResolvedProductionModel::Fpha {
-        planes,
-        turbined_cost: 0.0,
-    }]];
+    let models = vec![vec![ResolvedProductionModel::Fpha { planes }]];
     let production = ProductionModelSet::new(models, 1, 1);
     // Reuse the one_fpha_hydro_system fixture (max_storage=500, max_turbine=150,
     // max_generation=300, load=200 MW) but replace its planes via production above.
@@ -3180,7 +3128,6 @@ fn fpha_solve_storage_fixing_dual_differs_from_constant() {
     let fpha_production = ProductionModelSet::new(
         vec![vec![ResolvedProductionModel::Fpha {
             planes: tight_planes,
-            turbined_cost: 0.0,
         }]],
         1,
         1,
@@ -4041,7 +3988,7 @@ fn evap_water_balance_only_second_hydro_has_evap() {
     let hp = HydroPenalties {
         spillage_cost: 0.01,
         diversion_cost: 0.0,
-        fpha_turbined_cost: 0.0,
+        turbined_cost: 0.0,
         storage_violation_below_cost: 0.0,
         filling_target_violation_cost: 0.0,
         turbined_violation_below_cost: 0.0,
@@ -4332,7 +4279,7 @@ fn evap_hydro_system_with_violation_cost(
         penalties: HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
-            fpha_turbined_cost: 0.0,
+            turbined_cost: 0.0,
             storage_violation_below_cost: 0.0,
             filling_target_violation_cost: 0.0,
             turbined_violation_below_cost: 0.0,
@@ -4445,7 +4392,7 @@ fn evap_hydro_system_with_violation_cost(
             hydro: HydroStagePenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 0.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -5410,7 +5357,7 @@ fn one_hydro_system_with_withdrawal(
         penalties: HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
-            fpha_turbined_cost: 0.0,
+            turbined_cost: 0.0,
             storage_violation_below_cost: 0.0,
             filling_target_violation_cost: 0.0,
             turbined_violation_below_cost: 0.0,
@@ -5538,7 +5485,7 @@ fn one_hydro_system_with_withdrawal(
             hydro: HydroStagePenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 0.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -5868,7 +5815,7 @@ fn two_hydro_withdrawal_slack_entries_per_hydro() {
         penalties: HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
-            fpha_turbined_cost: 0.0,
+            turbined_cost: 0.0,
             storage_violation_below_cost: 0.0,
             filling_target_violation_cost: 0.0,
             turbined_violation_below_cost: 0.0,
@@ -5986,7 +5933,7 @@ fn two_hydro_withdrawal_slack_entries_per_hydro() {
     let hydro_penalties_default = HydroStagePenalties {
         spillage_cost: 0.01,
         diversion_cost: 0.0,
-        fpha_turbined_cost: 0.0,
+        turbined_cost: 0.0,
         storage_violation_below_cost: 0.0,
         filling_target_violation_cost: 0.0,
         turbined_violation_below_cost: 0.0,
@@ -6138,7 +6085,7 @@ fn three_hydro_num_cols_includes_three_withdrawal_slacks() {
         penalties: HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
-            fpha_turbined_cost: 0.0,
+            turbined_cost: 0.0,
             storage_violation_below_cost: 0.0,
             filling_target_violation_cost: 0.0,
             turbined_violation_below_cost: 0.0,
@@ -6254,7 +6201,7 @@ fn three_hydro_num_cols_includes_three_withdrawal_slacks() {
             hydro: HydroStagePenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 0.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -7159,13 +7106,13 @@ fn generic_constraint_thermal_equal_two_slacks() {
 #[allow(clippy::cast_possible_wrap)]
 fn generic_constraint_two_hydros_sum_csc_entries() {
     use chrono::NaiveDate;
-    use cobre_core::ResolvedGenericConstraintBounds;
     use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
     use cobre_core::scenario::{InflowModel, LoadModel};
     use cobre_core::temporal::{
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
         StageStateConfig,
     };
+    use cobre_core::ResolvedGenericConstraintBounds;
     use cobre_core::{
         ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
         VariableRef,
@@ -7204,7 +7151,7 @@ fn generic_constraint_two_hydros_sum_csc_entries() {
         penalties: HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
-            fpha_turbined_cost: 0.0,
+            turbined_cost: 0.0,
             storage_violation_below_cost: 0.0,
             filling_target_violation_cost: 0.0,
             turbined_violation_below_cost: 0.0,
@@ -7649,7 +7596,7 @@ fn one_hydro_active_violations(n_stages: usize) -> cobre_core::System {
         penalties: HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
-            fpha_turbined_cost: 0.0,
+            turbined_cost: 0.0,
             storage_violation_below_cost: 0.0,
             filling_target_violation_cost: 0.0,
             turbined_violation_below_cost: 1000.0,
@@ -7775,7 +7722,7 @@ fn one_hydro_active_violations(n_stages: usize) -> cobre_core::System {
             hydro: HydroStagePenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 0.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 1000.0,
@@ -8646,7 +8593,7 @@ fn two_hydro_par_system(
         penalties: HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
-            fpha_turbined_cost: 0.0,
+            turbined_cost: 0.0,
             storage_violation_below_cost: 0.0,
             filling_target_violation_cost: 0.0,
             turbined_violation_below_cost: 0.0,

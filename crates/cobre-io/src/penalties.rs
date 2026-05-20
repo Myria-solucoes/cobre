@@ -15,7 +15,7 @@
 //! After deserializing, three invariants are checked before conversion:
 //!
 //! 1. Every scalar penalty value is strictly positive (> 0.0), except
-//!    `hydro.fpha_turbined_cost` which may be zero (valid for constant-head plants
+//!    `hydro.turbined_cost` which may be zero (valid for constant-head plants
 //!    where `gamma_v = 0` and there is no volume-dependent regularization needed).
 //! 2. The last deficit segment has `depth_mw: null` (unbounded final segment).
 //! 3. Deficit segment costs are monotonically increasing.
@@ -97,7 +97,7 @@ pub(crate) struct RawLinePenalties {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawHydroPenalties {
     spillage_cost: f64,
-    fpha_turbined_cost: f64,
+    turbined_cost: f64,
     diversion_cost: f64,
     storage_violation_below_cost: f64,
     filling_target_violation_cost: f64,
@@ -258,13 +258,13 @@ fn validate_line(raw: &RawPenalties, path: &Path) -> Result<(), LoadError> {
 fn validate_hydro(raw: &RawPenalties, path: &Path) -> Result<(), LoadError> {
     let h = &raw.hydro;
 
-    // fpha_turbined_cost is non-negative (>= 0): zero is valid for constant-head
+    // turbined_cost is non-negative (>= 0): zero is valid for constant-head
     // plants where there is no volume-dependent production term (gamma_v = 0).
-    if h.fpha_turbined_cost < 0.0 {
+    if h.turbined_cost < 0.0 {
         return Err(LoadError::SchemaError {
             path: path.to_path_buf(),
-            field: "hydro.fpha_turbined_cost".to_string(),
-            message: format!("penalty value must be >= 0.0, got {}", h.fpha_turbined_cost),
+            field: "hydro.turbined_cost".to_string(),
+            message: format!("penalty value must be >= 0.0, got {}", h.turbined_cost),
         });
     }
 
@@ -350,7 +350,7 @@ fn convert(raw: RawPenalties) -> GlobalPenaltyDefaults {
 
     let hydro = HydroPenalties {
         spillage_cost: raw.hydro.spillage_cost,
-        fpha_turbined_cost: raw.hydro.fpha_turbined_cost,
+        turbined_cost: raw.hydro.turbined_cost,
         diversion_cost: raw.hydro.diversion_cost,
         storage_violation_below_cost: raw.hydro.storage_violation_below_cost,
         filling_target_violation_cost: raw.hydro.filling_target_violation_cost,
@@ -420,7 +420,7 @@ mod tests {
       },
       "hydro": {
         "spillage_cost": 0.01,
-        "fpha_turbined_cost": 0.05,
+        "turbined_cost": 0.05,
         "diversion_cost": 0.1,
         "storage_violation_below_cost": 10000.0,
         "filling_target_violation_cost": 50000.0,
@@ -466,7 +466,7 @@ mod tests {
 
         // Hydro
         assert!((defaults.hydro.spillage_cost - 0.01).abs() < f64::EPSILON);
-        assert!((defaults.hydro.fpha_turbined_cost - 0.05).abs() < f64::EPSILON);
+        assert!((defaults.hydro.turbined_cost - 0.05).abs() < f64::EPSILON);
         assert!((defaults.hydro.diversion_cost - 0.1).abs() < f64::EPSILON);
         assert!((defaults.hydro.storage_violation_below_cost - 10_000.0).abs() < f64::EPSILON);
         assert!((defaults.hydro.filling_target_violation_cost - 50_000.0).abs() < f64::EPSILON);
@@ -503,7 +503,7 @@ mod tests {
             line_exchange_cost: 2.0,
             hydro: HydroPenalties {
                 spillage_cost: 0.01,
-                fpha_turbined_cost: 0.05,
+                turbined_cost: 0.05,
                 diversion_cost: 0.1,
                 storage_violation_below_cost: 10_000.0,
                 filling_target_violation_cost: 50_000.0,
@@ -538,7 +538,7 @@ mod tests {
           },
           "line": { "exchange_cost": 2.0 },
           "hydro": {
-            "spillage_cost": 0.01, "fpha_turbined_cost": 0.05,
+            "spillage_cost": 0.01, "turbined_cost": 0.05,
             "diversion_cost": 0.1, "storage_violation_below_cost": 10000.0,
             "filling_target_violation_cost": 50000.0,
             "turbined_violation_below_cost": 500.0,
@@ -581,7 +581,7 @@ mod tests {
           },
           "line": { "exchange_cost": 2.0 },
           "hydro": {
-            "spillage_cost": 0.01, "fpha_turbined_cost": 0.05,
+            "spillage_cost": 0.01, "turbined_cost": 0.05,
             "diversion_cost": 0.1, "storage_violation_below_cost": 10000.0,
             "filling_target_violation_cost": 50000.0,
             "turbined_violation_below_cost": 500.0,
@@ -624,7 +624,7 @@ mod tests {
           },
           "line": { "exchange_cost": 2.0 },
           "hydro": {
-            "spillage_cost": 0.01, "fpha_turbined_cost": 0.05,
+            "spillage_cost": 0.01, "turbined_cost": 0.05,
             "diversion_cost": 0.1, "storage_violation_below_cost": 10000.0,
             "filling_target_violation_cost": 50000.0,
             "turbined_violation_below_cost": 500.0,
@@ -683,7 +683,7 @@ mod tests {
           },
           "line": { "exchange_cost": 2.0 },
           "hydro": {
-            "spillage_cost": 0.01, "fpha_turbined_cost": 0.05,
+            "spillage_cost": 0.01, "turbined_cost": 0.05,
             "diversion_cost": 0.1, "storage_violation_below_cost": 10000.0,
             "filling_target_violation_cost": 50000.0,
             "turbined_violation_below_cost": 500.0,
@@ -764,7 +764,7 @@ mod tests {
           "line": { "exchange_cost": 2.0 },
           "hydro": {
             "spillage_cost": -0.01,
-            "fpha_turbined_cost": 0.05,
+            "turbined_cost": 0.05,
             "diversion_cost": 0.1, "storage_violation_below_cost": 10000.0,
             "filling_target_violation_cost": 50000.0,
             "turbined_violation_below_cost": 500.0,
@@ -790,10 +790,10 @@ mod tests {
         }
     }
 
-    /// `fpha_turbined_cost` == 0.0 is valid (constant-head plants have no
+    /// `turbined_cost` == 0.0 is valid (constant-head plants have no
     /// volume-dependent regularization need).
     #[test]
-    fn test_parse_penalties_fpha_turbined_cost_zero_valid() {
+    fn test_parse_penalties_turbined_cost_zero_valid() {
         let json = r#"{
           "bus": {
             "deficit_segments": [{ "depth_mw": null, "cost": 1000.0 }],
@@ -801,7 +801,7 @@ mod tests {
           },
           "line": { "exchange_cost": 2.0 },
           "hydro": {
-            "spillage_cost": 0.01, "fpha_turbined_cost": 0.0,
+            "spillage_cost": 0.01, "turbined_cost": 0.0,
             "diversion_cost": 0.1, "storage_violation_below_cost": 10000.0,
             "filling_target_violation_cost": 50000.0,
             "turbined_violation_below_cost": 500.0,
@@ -816,17 +816,17 @@ mod tests {
 
         let f = write_json(json);
         let defaults = parse_penalties(f.path())
-            .expect("fpha_turbined_cost = 0.0 should be valid for constant-head plants");
+            .expect("turbined_cost = 0.0 should be valid for constant-head plants");
         assert!(
-            (defaults.hydro.fpha_turbined_cost - 0.0).abs() < f64::EPSILON,
-            "fpha_turbined_cost should be 0.0, got: {}",
-            defaults.hydro.fpha_turbined_cost
+            (defaults.hydro.turbined_cost - 0.0).abs() < f64::EPSILON,
+            "turbined_cost should be 0.0, got: {}",
+            defaults.hydro.turbined_cost
         );
     }
 
-    /// Negative `fpha_turbined_cost` is rejected with `SchemaError` naming the field.
+    /// Negative `turbined_cost` is rejected with `SchemaError` naming the field.
     #[test]
-    fn test_parse_penalties_fpha_turbined_cost_negative_invalid() {
+    fn test_parse_penalties_turbined_cost_negative_invalid() {
         let json = r#"{
           "bus": {
             "deficit_segments": [{ "depth_mw": null, "cost": 1000.0 }],
@@ -834,7 +834,7 @@ mod tests {
           },
           "line": { "exchange_cost": 2.0 },
           "hydro": {
-            "spillage_cost": 0.01, "fpha_turbined_cost": -0.01,
+            "spillage_cost": 0.01, "turbined_cost": -0.01,
             "diversion_cost": 0.1, "storage_violation_below_cost": 10000.0,
             "filling_target_violation_cost": 50000.0,
             "turbined_violation_below_cost": 500.0,
@@ -852,8 +852,8 @@ mod tests {
         match &err {
             LoadError::SchemaError { field, message, .. } => {
                 assert!(
-                    field.contains("fpha_turbined_cost"),
-                    "field should name fpha_turbined_cost, got: {field}"
+                    field.contains("turbined_cost"),
+                    "field should name turbined_cost, got: {field}"
                 );
                 assert!(
                     message.contains(">= 0.0"),
@@ -879,7 +879,7 @@ mod tests {
           },
           "line": { "exchange_cost": 2.0 },
           "hydro": {
-            "spillage_cost": 0.01, "fpha_turbined_cost": 0.05,
+            "spillage_cost": 0.01, "turbined_cost": 0.05,
             "diversion_cost": 0.1, "storage_violation_below_cost": 10000.0,
             "filling_target_violation_cost": 50000.0,
             "turbined_violation_below_cost": 500.0,
@@ -915,7 +915,7 @@ mod tests {
           },
           "line": { "exchange_cost": 2.0 },
           "hydro": {
-            "spillage_cost": 0.01, "fpha_turbined_cost": 0.05,
+            "spillage_cost": 0.01, "turbined_cost": 0.05,
             "diversion_cost": 0.1, "storage_violation_below_cost": 10000.0,
             "filling_target_violation_cost": 50000.0,
             "turbined_violation_below_cost": 500.0,

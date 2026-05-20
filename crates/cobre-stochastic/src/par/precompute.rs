@@ -53,7 +53,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use cobre_core::{EntityId, scenario::InflowModel, temporal::Stage};
+use cobre_core::{scenario::InflowModel, temporal::Stage, EntityId};
 
 use crate::StochasticError;
 
@@ -348,7 +348,7 @@ impl PrecomputedPar {
     /// `orders[hydro]..max_order` are `0.0`. For a hydro **with** an annual
     /// component, all 12 positions (= `max_order`) may carry the `ψ̂/12` term and
     /// are therefore meaningful. Use [`Self::effective_lag_count`] to obtain the
-    /// correct meaningful-slot count for cut construction.
+    /// authoritative meaningful-slot count for downstream consumers.
     ///
     /// # Panics
     ///
@@ -377,7 +377,7 @@ impl PrecomputedPar {
     /// Returns the classical AR order `p` — the number of lag positions holding
     /// explicit AR coefficients `φ̂_j`. For PAR(p)-A hydros, lag slots
     /// `p..max_order` additionally carry `ψ̂/12`; use [`Self::effective_lag_count`]
-    /// to obtain the correct slot count for cut construction.
+    /// to obtain the meaningful-slot count for downstream consumers.
     ///
     /// # Panics
     ///
@@ -392,17 +392,18 @@ impl PrecomputedPar {
         self.orders[hydro]
     }
 
-    /// Number of lag-state slots that may carry non-zero cut coefficients for
+    /// Number of lag-state slots that may carry non-zero `ψ` coefficients for
     /// the given series element.
     ///
-    /// This is the authoritative count for building sparse cut rows:
+    /// This is the authoritative meaningful-slot count for any downstream
+    /// consumer that builds sparse layouts over lag state:
     ///
     /// - **Classical PAR(p)** (no annual component on this hydro): returns
     ///   `order(hydro)`. Lag slots beyond the AR order are structurally zero.
     /// - **PAR(p)-A** (annual component present on this hydro): returns
     ///   `max_order` (= 12 for a standard monthly study). All 12 slots carry
-    ///   the `ψ̂/12` annual term, so omitting them from the cut row shifts the
-    ///   hyperplane above the true LP value and produces over-estimating cuts.
+    ///   the `ψ̂/12` annual term and must be tracked by consumers that
+    ///   linearise against the AR-dynamics row.
     ///
     /// Equivalent to `psi_slice(_, hydro).len()` when trimmed to meaningful
     /// entries, but cheaper to call.
@@ -428,8 +429,8 @@ impl PrecomputedPar {
     ///
     /// Returns `true` iff at least one [`InflowModel`] for this hydro was built
     /// with `annual: Some(_)`. When `true`, lag slots `order(hydro)..max_order`
-    /// carry the `ψ̂/12` annual contribution and must be included in cut rows
-    /// (see [`Self::effective_lag_count`]).
+    /// carry the `ψ̂/12` annual contribution and must be tracked by lag-aware
+    /// downstream consumers (see [`Self::effective_lag_count`]).
     ///
     /// # Panics
     ///
@@ -718,15 +719,15 @@ fn fill_stage_arrays(
 mod tests {
     use chrono::NaiveDate;
     use cobre_core::{
-        EntityId,
         scenario::InflowModel,
         temporal::{
             Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
             StageStateConfig,
         },
+        EntityId,
     };
 
-    use super::{PrecomputedPar, resolve_season_id};
+    use super::{resolve_season_id, PrecomputedPar};
 
     fn make_stage(index: usize, id: i32, season_id: Option<usize>) -> Stage {
         Stage {

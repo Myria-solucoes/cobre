@@ -439,14 +439,6 @@
             "null"
           ]
         },
-        "fpha_turbined_cost": {
-          "default": null,
-          "format": "double",
-          "type": [
-            "number",
-            "null"
-          ]
-        },
         "generation_violation_below_cost": {
           "default": null,
           "format": "double",
@@ -488,6 +480,14 @@
           ]
         },
         "storage_violation_below_cost": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "turbined_cost": {
           "default": null,
           "format": "double",
           "type": [

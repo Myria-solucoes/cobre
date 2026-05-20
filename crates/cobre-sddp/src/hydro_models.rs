@@ -20,13 +20,13 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use cobre_core::{EntityId, System, entities::hydro::HydroGenerationModel};
+use cobre_core::{entities::hydro::HydroGenerationModel, EntityId, System};
 use cobre_io::extensions::{
     FphaColumnLayout, FphaHyperplaneRow, HydroGeometryRow, ProductionModelConfig, SelectionMode,
 };
 
+use crate::fpha_fitting::{fit_fpha_planes, FphaFitResult};
 use crate::SddpError;
-use crate::fpha_fitting::{FphaFitResult, fit_fpha_planes};
 
 // ── Hyperplane types ──────────────────────────────────────────────────────────
 
@@ -76,8 +76,6 @@ pub enum ResolvedProductionModel {
     Fpha {
         /// Ordered set of hyperplanes; each constrains the generation variable.
         planes: Vec<FphaPlane>,
-        /// Penalty cost for turbined flow under the FPHA model (cost/m³/s).
-        turbined_cost: f64,
     },
 }
 
@@ -1170,11 +1168,7 @@ fn resolve_stage_model(
                         ))
                     })?
                     .to_vec();
-                let turbined_cost = hydro.penalties.fpha_turbined_cost;
-                Ok(ResolvedProductionModel::Fpha {
-                    planes,
-                    turbined_cost,
-                })
+                Ok(ResolvedProductionModel::Fpha { planes })
             } else {
                 build_fpha_model(hydro, stage, source, hyperplane_map)
             }
@@ -1298,11 +1292,7 @@ fn build_fpha_model(
         });
     }
 
-    let turbined_cost = hydro.penalties.fpha_turbined_cost;
-    Ok(ResolvedProductionModel::Fpha {
-        planes,
-        turbined_cost,
-    })
+    Ok(ResolvedProductionModel::Fpha { planes })
 }
 
 /// Validate the physical constraints for one `FphaHyperplaneRow`.
@@ -1776,14 +1766,14 @@ mod tests {
 
     use chrono::NaiveDate;
     use cobre_core::{
-        Bus, DeficitSegment, EfficiencyModel, EntityId, HydraulicLossesModel, SystemBuilder,
-        TailraceModel,
         entities::hydro::{HydroGenerationModel, HydroPenalties},
         scenario::CorrelationModel,
         temporal::{
             Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
             StageStateConfig,
         },
+        Bus, DeficitSegment, EfficiencyModel, EntityId, HydraulicLossesModel, SystemBuilder,
+        TailraceModel,
     };
     use cobre_io::extensions::{
         FphaColumnLayout, FphaHyperplaneRow, HydroGeometryRow, ProductionModelConfig, SeasonConfig,
@@ -1791,12 +1781,12 @@ mod tests {
     };
 
     use super::{
+        build_fpha_model, build_hydro_model_summary, determine_source, find_fpha_config_for_stage,
+        find_model_for_stage, validate_computed_prerequisites, validate_hyperplane_row,
         EvaporationModel, EvaporationModelSet, EvaporationReferenceSource, EvaporationSource,
         FphaHydroDetail, FphaPlane, HydroModelProvenance, HydroModelSummary, LinearizedEvaporation,
         PrepareHydroModelsResult, ProductionModelSet, ProductionModelSource,
-        ResolvedProductionModel, build_fpha_model, build_hydro_model_summary, determine_source,
-        find_fpha_config_for_stage, find_model_for_stage, validate_computed_prerequisites,
-        validate_hyperplane_row,
+        ResolvedProductionModel,
     };
 
     // ── Test helpers ──────────────────────────────────────────────────────────
@@ -1830,7 +1820,7 @@ mod tests {
         HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
-            fpha_turbined_cost: 0.0,
+            turbined_cost: 0.0,
             storage_violation_below_cost: 0.0,
             filling_target_violation_cost: 0.0,
             turbined_violation_below_cost: 0.0,
@@ -2422,7 +2412,6 @@ mod tests {
                         gamma_q: 0.85,
                         gamma_s: -0.01,
                     }],
-                    turbined_cost: 0.05,
                 })
                 .collect();
             all_models.push(row);
@@ -2865,7 +2854,6 @@ mod tests {
 
         let model_fpha = ResolvedProductionModel::Fpha {
             planes: vec![plane],
-            turbined_cost: 0.01,
         };
         let _ = format!("{model_fpha:?}");
 
@@ -2951,7 +2939,6 @@ mod tests {
                         gamma_q: -0.5,
                         gamma_s: -0.2,
                     }],
-                    turbined_cost: 0.005,
                 },
             ],
             vec![
@@ -2970,7 +2957,6 @@ mod tests {
                             gamma_s: -0.15,
                         },
                     ],
-                    turbined_cost: 0.01,
                 },
                 ResolvedProductionModel::ConstantProductivity { productivity: 0.80 },
                 ResolvedProductionModel::ConstantProductivity { productivity: 0.85 },
@@ -3386,11 +3372,9 @@ mod tests {
         );
         assert!(!models.has_evaporation(), "has_evaporation() must be false");
         assert_eq!(provenance.len(), 2);
-        assert!(
-            provenance
-                .iter()
-                .all(|(_, src)| *src == EvaporationSource::NotModeled)
-        );
+        assert!(provenance
+            .iter()
+            .all(|(_, src)| *src == EvaporationSource::NotModeled));
     }
 
     /// resolve_evaporation_models core logic: known geometry + coefficient gives correct k_evap0 and k_evap_v.
@@ -4077,7 +4061,6 @@ mod tests {
                         if *is_fpha {
                             ResolvedProductionModel::Fpha {
                                 planes: vec![fpha_plane; n_planes],
-                                turbined_cost: 0.0,
                             }
                         } else {
                             ResolvedProductionModel::ConstantProductivity { productivity: 0.95 }
@@ -4294,7 +4277,6 @@ mod tests {
                         if *is_fpha {
                             ResolvedProductionModel::Fpha {
                                 planes: vec![fpha_plane; 5],
-                                turbined_cost: 0.0,
                             }
                         } else {
                             ResolvedProductionModel::ConstantProductivity { productivity: 0.95 }
@@ -4720,7 +4702,6 @@ mod tests {
         let production = ProductionModelSet::new(
             vec![vec![ResolvedProductionModel::Fpha {
                 planes: vec![fpha_plane; n_planes],
-                turbined_cost: 0.0,
             }]],
             1,
             1,

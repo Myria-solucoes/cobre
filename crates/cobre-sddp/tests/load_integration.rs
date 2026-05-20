@@ -211,7 +211,7 @@ fn build_system_with_load(
         penalties: HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
-            fpha_turbined_cost: 0.0,
+            turbined_cost: 0.0,
             storage_violation_below_cost: 0.0,
             filling_target_violation_cost: 0.0,
             turbined_violation_below_cost: 0.0,

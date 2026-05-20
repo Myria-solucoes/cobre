@@ -91,7 +91,7 @@ all fields — required and optional — for a single plant:
       "penalties": {
         "spillage_cost": 0.01,
         "diversion_cost": 0.1,
-        "fpha_turbined_cost": 0.05,
+        "turbined_cost": 0.05,
         "storage_violation_below_cost": 10000.0,
         "filling_target_violation_cost": 50000.0,
         "turbined_violation_below_cost": 500.0,
@@ -684,7 +684,7 @@ solver to avoid infeasible or undesirable operating states.
 "penalties": {
   "spillage_cost": 0.01,
   "diversion_cost": 0.1,
-  "fpha_turbined_cost": 0.05,
+  "turbined_cost": 0.05,
   "storage_violation_below_cost": 10000.0,
   "filling_target_violation_cost": 50000.0,
   "turbined_violation_below_cost": 500.0,
@@ -705,7 +705,7 @@ solver to avoid infeasible or undesirable operating states.
 | ------------------------------------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `spillage_cost`                       | $/m³/s | Penalty per m³/s of water spilled. Setting this low (e.g., 0.01) makes spillage the least-cost way to relieve a flood situation. Setting it high penalizes wasted water in water-scarce scenarios. |
 | `diversion_cost`                      | $/m³/s | Penalty per m³/s of diverted flow exceeding the diversion channel capacity.                                                                                                                        |
-| `fpha_turbined_cost`                  | $/MWh  | Penalty per MWh of turbined generation in the FPHA approximation. Not used by `constant_productivity`.                                                                                             |
+| `turbined_cost`                       | $/MWh  | Regularization cost per MWh of turbined generation; applied to every hydro's turbine column regardless of production model.                                                                        |
 | `storage_violation_below_cost`        | $/hm³  | Penalty per hm³ of storage below `min_storage_hm3`. Should be set high (thousands) to make violations a last resort.                                                                               |
 | `filling_target_violation_cost`       | $/hm³  | Penalty per hm³ of storage below the filling target. Only active when a `filling` block is present.                                                                                                |
 | `turbined_violation_below_cost`       | $/m³/s | Penalty per m³/s of turbined flow below `min_turbined_m3s`. Applied per block.                                                                                                                     |

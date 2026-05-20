@@ -259,7 +259,7 @@ mod tests {
         HydroPenalties {
             spillage_cost: 1.0,
             diversion_cost: 1.0,
-            fpha_turbined_cost: 1.0,
+            turbined_cost: 1.0,
             storage_violation_below_cost: 1.0,
             filling_target_violation_cost: 1.0,
             turbined_violation_below_cost: 1.0,
