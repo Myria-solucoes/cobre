@@ -31,8 +31,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in the simulation outputs. JSON schema accepts the field as optional;
   absent → `true`.
 
+### Changed
+
+- **API (breaking, PAR primitives)**: dropped the explicit `order: usize`
+  parameter from `evaluate_par`, `evaluate_par_inflow`, `solve_par_noise`, and
+  removed the equivalent `par.order(h)` inner-loop bound from
+  `evaluate_par_batch` / `solve_par_noise_batch` / `solve_par_noises` /
+  `evaluate_par_inflows`. All four primitives now iterate the full
+  `psi.iter()` slice (via `psi.len()` in the batch variants), and require
+  `lags.len() >= psi.len()`. `psi.len()` is the authoritative number of lag
+  terms in the model — equal to the AR order for classical PAR(p) and to 12
+  when PAR(p)-A annual is active (the materialised annual coefficient is
+  spread across the extra positions in `PrecomputedPar::psi_slice`). Callers
+  that previously truncated to AR order silently dropped the annual
+  contribution; see the matching `Fixed` entry below.
+
 ### Fixed
 
+- **PAR(p)-A annual was silently dropped at standardisation time when the
+  scheme was `historical` or `external`.** `standardize_historical_windows`
+  (and the analogous external path) built their per-hydro `lag_buf` only up
+  to `par.order(h)` lag slots and passed `order_h` as the iteration bound to
+  `solve_par_noise`. With PAR-A active, `PrecomputedPar::psi_slice` returns
+  12 entries (AR coefficients in slots `0..order`, plus the spread annual
+  coefficient `ψ̂/12` in slots `order..12`), all of which the LP loads via
+  `lp_builder/matrix.rs:834-841`. The standardised `η` therefore omitted the
+  annual contribution from lags `order..12`, while the LP applied it in
+  full — so forward replays produced biased inflows even when the stage-0
+  lag state matched the window's pre-study lags exactly. Worst-case observed
+  on the bundled NEWAVE 1983-anchored case (Camargos, AR(4) +
+  annual_coefficient ≈ −0.225): a ≈ 11 % shortfall vs the raw historical
+  observation. After the fix, the same case reconstructs every hydro at
+  stage 0 to within 10⁻¹² of the historical observation. The fix combines
+  the API change above with two callsite updates that now fill the full
+  `psi.len()` lag slots in `standardize_historical_windows` and
+  `standardize_external_inflow`. New regression test
+  `crates/cobre-stochastic/tests/par_a_historical_replay.rs` pins the
+  invariant directly.
 - `ClassSampler::Historical::apply_initial_state` no longer overwrites the
   inflow-lag portion of the stage-0 state vector with the window-preceding
   raw historical inflows. Previously, the forward pass replayed the lag

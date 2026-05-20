@@ -475,8 +475,15 @@ pub fn standardize_historical_windows(
                 );
                 let target = lookup(h, obs_year, season_id);
 
-                let order_h = par.order(h);
-                for (l, slot) in lag_buf.iter_mut().enumerate().take(order_h) {
+                let det_base = par.deterministic_base(t, h);
+                let psi = par.psi_slice(t, h);
+                let sigma = par.sigma(t, h);
+
+                // Fill one lag slot per `psi` entry so PAR(p)-A annual
+                // contributions (spread across the widened `psi` slice in
+                // `PrecomputedPar`) participate in the η inversion. Restricting
+                // to `par.order(h)` would silently drop the annual term.
+                for (l, slot) in lag_buf.iter_mut().enumerate().take(psi.len()) {
                     debug_assert!(
                         max_order + t > l,
                         "lag index underflow: t={t}, l={l}, max_order={max_order}",
@@ -495,11 +502,7 @@ pub fn standardize_historical_windows(
                     *slot = lookup(h, lag_year, lag_season_id);
                 }
 
-                let det_base = par.deterministic_base(t, h);
-                let psi = par.psi_slice(t, h);
-                let sigma = par.sigma(t, h);
-
-                let eta = solve_par_noise(det_base, psi, order_h, &lag_buf, sigma, target);
+                let eta = solve_par_noise(det_base, psi, &lag_buf, sigma, target);
 
                 eta_slice[h] = eta;
             }
