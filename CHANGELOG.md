@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-05-20
+
 ### Added
 
 - New `allow_curtailment: bool` field on `NonControllableSource` (default
@@ -30,9 +32,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dispatch parity with NEWAVE while preserving per-source observability
   in the simulation outputs. JSON schema accepts the field as optional;
   absent → `true`.
+- `ModelProvenanceReport.historical_library_past_inflows_digest: Option<u64>`
+  records a SipHash-1-3 fingerprint of `initial_conditions.past_inflows`
+  when the historical scenario scheme is active. Downstream consumers can
+  compare the stored digest against the current `past_inflows` to detect
+  a stale historical library that needs re-standardisation. Serialised
+  under `#[serde(skip_serializing_if)]` so non-historical runs keep their
+  JSON provenance unchanged. The cobre-python production path populates
+  the field from `setup.scenario_libraries.training.historical`.
 
 ### Changed
 
+- **API (breaking, hydro penalty rename)**: `HydroPenalties.fpha_turbined_cost`
+  is renamed to `HydroPenalties.turbined_cost`, cascading through
+  `RawHydroPenalties`, the `penalty_overrides.parquet` column, the output
+  schemas, and the `simulation_writer` record. The turbined-flow
+  regularisation cost is now applied universally to every hydro's turbine
+  column in the LP objective (previously gated behind `is_fpha` in
+  `fill_turbine_columns`, so constant-productivity plants paid nothing and
+  diverged from NEWAVE). The dead `turbined_cost` field on
+  `ResolvedProductionModel::Fpha` is dropped (the cost now lives in the
+  penalty cascade). A latent extraction bug is fixed in the process:
+  `SimulationCostResult.turbined_cost` was summing `primal*obj` over
+  `indexer.generation` (FPHA generation columns, objective = 0), so the
+  field was silently zero in real runs; it now sums over `indexer.turbine`
+  where the cost lives. JSON schemas regenerated via `cobre schema export`
+  with no hand edits. Two LB regression pins shift by ≈ 0.10 % under the
+  new universal cost (`basis_reconstruct_churn::PINNED_FINAL_LB`,
+  `deterministic::D03_EXPECTED_COST`).
 - **API (breaking, PAR primitives)**: dropped the explicit `order: usize`
   parameter from `evaluate_par`, `evaluate_par_inflow`, `solve_par_noise`, and
   removed the equivalent `par.order(h)` inner-loop bound from
@@ -48,6 +75,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **PAR(p)-A annual coefficients were omitted from the cut sparse mask,
+  producing over-estimating Benders cuts and LB > UB at convergence.**
+  `StudySetup::new` was passing `par.order(h)` (the classical AR order) as
+  the per-hydro lag-state-slot count to `StageIndexer::set_nonzero_mask`.
+  With PAR(p)-A active, `PrecomputedPar::psi_slice` widens to
+  `max_order = 12` and the standardised annual coefficient `ψ̂/12` fills
+  positions `p..12`. The LP loads all 12 psi entries into the AR-dynamics
+  row, but the cut sparse mask omitted state coefficients on lag slots
+  `p..12` — so cut rows built via `build_cut_row_batch_into` were missing
+  the trailing state dependencies. At the visited state this shifted the
+  cut hyperplane above the true LP value, producing systematically
+  over-estimating cuts. On the bundled NEWAVE 1983 case (Camargos
+  AR(4)+A on every hydro), the gap converged to LB > UB by ≈ 7 % with 41
+  of 50 iterations recording negative gaps; disabling annual via
+  `order_selection = pacf` collapsed the gap to 0.05 %. After the fix the
+  same case with `pacf_annual` converges to 0.003 % final gap with zero
+  negative-gap iterations across all 50. `PrecomputedPar` now records a
+  per-hydro `has_annual: Box<[bool]>` at build time and exposes
+  `effective_lag_count(h)` (returns `max_order` when `has_annual[h]`,
+  else `orders[h]`); `StageIndexer::set_nonzero_mask`'s `ar_orders`
+  parameter is renamed to `lag_counts` to reflect its true meaning. New
+  regression test `nonzero_mask_par_a_includes_full_psi_stride` pins
+  the contract. This is the direct analog of the η-inversion bug fixed
+  above — same `order`-vs-`psi.len()` confusion, cut-construction path
+  instead of standardisation path.
 - **PAR(p)-A annual was silently dropped at standardisation time when the
   scheme was `historical` or `external`.** `standardize_historical_windows`
   (and the analogous external path) built their per-hydro `lag_buf` only up
