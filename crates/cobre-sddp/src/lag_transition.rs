@@ -309,6 +309,7 @@ pub(crate) fn compute_monthly_transition(
 /// Invalid inputs (stages outside any season, empty season maps) produce
 /// zero-weight entries. Upstream validation in `cobre-io` rejects structurally
 /// invalid inputs before this function is called.
+#[must_use]
 pub fn precompute_stage_lag_transitions(
     stages: &[Stage],
     season_map: &SeasonMap,
@@ -518,6 +519,7 @@ fn compute_downstream_transitions(
 ///
 /// Every stage receives exactly one group ID. The returned `Vec<u32>` has the
 /// same length as `stages`.
+#[must_use]
 pub fn precompute_noise_groups(stages: &[Stage]) -> Vec<u32> {
     let mut group_map: HashMap<(usize, i32), u32> = HashMap::new();
     let mut next_group_id: u32 = 0;

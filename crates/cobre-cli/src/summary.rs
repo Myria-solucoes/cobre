@@ -1449,6 +1449,7 @@ mod tests {
             ar_method: Some("PACF".to_string()),
             ar_max_order: Some(6),
             white_noise_fallbacks: vec![],
+            historical_library_past_inflows_digest: None,
         }
     }
 
@@ -1463,6 +1464,7 @@ mod tests {
             ar_method: None,
             ar_max_order: None,
             white_noise_fallbacks: vec![],
+            historical_library_past_inflows_digest: None,
         }
     }
 
@@ -1553,6 +1555,7 @@ mod tests {
             ar_method: None,
             ar_max_order: None,
             white_noise_fallbacks: vec![],
+            historical_library_past_inflows_digest: None,
         };
         let s = format_provenance_summary_string(&report);
         assert!(

@@ -71,6 +71,7 @@ impl fmt::Display for ProvenanceSource {
 ///     ar_method: Some("AIC".to_string()),
 ///     ar_max_order: Some(2),
 ///     white_noise_fallbacks: vec![],
+///     historical_library_past_inflows_digest: None,
 /// };
 /// let json = serde_json::to_string_pretty(&report).unwrap();
 /// assert!(json.contains("\"full_estimation\""));
@@ -99,6 +100,17 @@ pub struct ModelProvenanceReport {
     /// `residual_std_ratio = 1.0`). Populated only by
     /// [`EstimationPath::PartialEstimation`]; empty otherwise.
     pub white_noise_fallbacks: Vec<i32>,
+    /// SipHash-1-3 fingerprint of the `initial_conditions.past_inflows` values
+    /// used to seed the rolling η-inversion chain of the historical scenario
+    /// library, when one was built.
+    ///
+    /// `None` when the historical inflow scheme is not active (no
+    /// `HistoricalScenarioLibrary` was built). When `Some(d)`, a stale-library
+    /// detector can fingerprint the current `past_inflows` and compare; a
+    /// mismatch means η was inverted against a different x₀ and replay is no
+    /// longer exact.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub historical_library_past_inflows_digest: Option<u64>,
 }
 
 // ── build_provenance_report ───────────────────────────────────────────────────
@@ -189,6 +201,7 @@ pub fn build_provenance_report(
         ar_method,
         ar_max_order,
         white_noise_fallbacks,
+        historical_library_past_inflows_digest: None,
     }
 }
 
@@ -274,6 +287,58 @@ mod tests {
     }
 
     // ── Path mapping tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn build_provenance_report_omits_historical_digest_by_default() {
+        let report = build_provenance_report(
+            EstimationPath::FullEstimation,
+            None,
+            &prov_all_generated(),
+            2,
+        );
+        assert!(
+            report.historical_library_past_inflows_digest.is_none(),
+            "builder must leave historical_library_past_inflows_digest unset; \
+             callers populate it from setup.scenario_libraries.training.historical \
+             when the historical scheme is active"
+        );
+    }
+
+    #[test]
+    fn historical_digest_field_round_trips_through_json() {
+        let mut report = build_provenance_report(
+            EstimationPath::FullEstimation,
+            None,
+            &prov_all_generated(),
+            1,
+        );
+        let digest: u64 = 0xDEAD_BEEF_CAFE_F00D;
+        report.historical_library_past_inflows_digest = Some(digest);
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(
+            json.contains("historical_library_past_inflows_digest"),
+            "JSON must surface the digest field when populated: {json}"
+        );
+        assert!(
+            json.contains(&digest.to_string()),
+            "JSON must serialize the digest as a decimal u64 ({digest}); got: {json}"
+        );
+    }
+
+    #[test]
+    fn historical_digest_field_omitted_when_none() {
+        let report = build_provenance_report(
+            EstimationPath::Deterministic,
+            None,
+            &prov_not_applicable(),
+            0,
+        );
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(
+            !json.contains("historical_library_past_inflows_digest"),
+            "JSON must NOT include digest field when None (Option::is_none skip): {json}"
+        );
+    }
 
     #[test]
     fn deterministic_path_both_na() {
