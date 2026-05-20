@@ -7106,13 +7106,13 @@ fn generic_constraint_thermal_equal_two_slacks() {
 #[allow(clippy::cast_possible_wrap)]
 fn generic_constraint_two_hydros_sum_csc_entries() {
     use chrono::NaiveDate;
+    use cobre_core::ResolvedGenericConstraintBounds;
     use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
     use cobre_core::scenario::{InflowModel, LoadModel};
     use cobre_core::temporal::{
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
         StageStateConfig,
     };
-    use cobre_core::ResolvedGenericConstraintBounds;
     use cobre_core::{
         ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
         VariableRef,

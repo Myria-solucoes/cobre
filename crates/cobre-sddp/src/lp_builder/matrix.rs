@@ -1548,7 +1548,7 @@ mod parameter_resolution_tests {
     use cobre_stochastic::par::precompute::PrecomputedPar;
     use std::collections::HashMap;
 
-    use crate::energy_conversion::{build_hydro_energy_productivity_override, EnergyConversionSet};
+    use crate::energy_conversion::{EnergyConversionSet, build_hydro_energy_productivity_override};
     use crate::hydro_models::PrepareHydroModelsResult;
     use crate::inflow_method::InflowNonNegativityMethod;
     use crate::resolved_parameters::build_resolved_parameters;
