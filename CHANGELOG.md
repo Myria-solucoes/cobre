@@ -46,23 +46,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that previously truncated to AR order silently dropped the annual
   contribution; see the matching `Fixed` entry below.
 
-- `ClassSampler::Historical::apply_initial_state` once again overwrites the
-  stage-0 inflow-lag portion of the state vector with the window's pre-study
-  raw historical inflows, matching the behavior present before the
-  short-lived no-op refactor. With the PAR(p)-A annual standardisation bug
-  fixed (see `Fixed` below), forward simulations under the `historical`
-  scheme now reconstruct the raw historical observation at every stage when
-  the chosen window is replayed — required for NEWAVE `TIPO SIMUL.FINAL=2`
-  parity. Caveat: this re-introduces an asymmetry against the
-  lower-bound / backward-pass evaluators on training-side historical-replay
-  runs (those evaluators still read from `initial_conditions.past_inflows`),
-  which can manifest as a negative SDDP gap that does not close with
-  iteration count on stochastic historical training. A
-  per-`scenario_source` configuration option to choose the initial-lag
-  source independently for training and simulation is planned; until it
-  lands, deterministic single-window historical training should set
-  `initial_conditions.past_inflows` to the window's pre-study lags directly.
-
 ### Fixed
 
 - **PAR(p)-A annual was silently dropped at standardisation time when the
@@ -85,6 +68,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `standardize_external_inflow`. New regression test
   `crates/cobre-stochastic/tests/par_a_historical_replay.rs` pins the
   invariant directly.
+- `ClassSampler::Historical::apply_initial_state` no longer overwrites the
+  inflow-lag portion of the stage-0 state vector with the window-preceding
+  raw historical inflows. Previously, the forward pass replayed the lag
+  state of the historical year being sampled (e.g. when scenario `m`
+  replayed 1983, the forward LP started from the 1982-Q4 lag values), while
+  the lower-bound and backward-pass evaluators kept the user-supplied
+  `initial_conditions.past_inflows` lags. The two paths therefore evaluated
+  V₀ at different `x_0` on every historical-replay case, producing a
+  structural, typically negative SDDP gap (≈ −19 % on the bundled
+  NEWAVE-derived 1983 deterministic case) that did not close with
+  iteration count. The historical window now contributes only its
+  standardized noise residuals via `fill`; the initial inflow lags come
+  uniformly from `initial_conditions.past_inflows` for every scenario,
+  matching NEWAVE's `TENDENCIA HIDROLOGICA` convention. Cases using
+  `InSample`, `OutOfSample`, or `External` schemes are unaffected
+  (bit-identical output — those variants were already no-ops). Cases using
+  the `Historical` scheme will see different forward upper bounds and
+  meaningful gap closure to cut tightness.
 
 ## [0.6.1] - 2026-05-18
 

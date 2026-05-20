@@ -182,16 +182,20 @@ pub struct SampleRequest<'b> {
 }
 
 impl ForwardSampler<'_> {
-    /// Inject pre-study lag values for historical windows into the stage-0 state
-    /// vector before the stage loop begins.
+    /// Per-class initial-state injection hook called once before the stage-0
+    /// solve.
     ///
-    /// Delegates to each class sampler's `apply_initial_state`. Only
-    /// `ClassSampler::Historical` performs any work; all other variants are
-    /// no-ops. Load and NCS class samplers are called for consistency but are
-    /// always no-ops because neither class has inflow lag state.
+    /// Delegates to each class sampler's `apply_initial_state`. All current
+    /// variants — including `Historical` — are no-ops: the initial inflow
+    /// lags are owned by the caller (sourced from
+    /// `initial_conditions.past_inflows`, analogous to NEWAVE's `vazpast.dat`)
+    /// and must remain identical across all scenarios so that forward,
+    /// backward, and lower-bound paths consume the same `x_0`.
     ///
-    /// The `lag_offset` is an absolute index into `state` computed by the caller
-    /// from the `StageIndexer`.
+    /// The hook is retained for future per-class state-vector preparation
+    /// (e.g. injecting class-specific RAM caches); the `lag_offset` is an
+    /// absolute index into `state` computed by the caller from the
+    /// `StageIndexer`.
     pub fn apply_initial_state(
         &self,
         req: &ClassSampleRequest,
