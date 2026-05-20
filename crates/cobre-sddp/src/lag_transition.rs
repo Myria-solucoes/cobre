@@ -20,7 +20,7 @@ use cobre_core::{
 /// Pre-computed seed values for the lag accumulator, derived from
 /// [`RecentObservation`] data in [`cobre_core::InitialConditions`].
 ///
-/// Computed once at setup time by [`compute_recent_observation_seed`] and
+/// Computed once at setup time by `compute_recent_observation_seed` and
 /// stored in [`crate::setup::StudySetup`]. Applied at every trajectory start
 /// (forward pass and simulation pipeline) instead of zero-filling the
 /// accumulator.
@@ -889,9 +889,9 @@ mod tests {
     // -----------------------------------------------------------------------
 
     use cobre_core::{
-        EntityId,
         entities::hydro::{HydroGenerationModel, HydroPenalties},
         initial_conditions::RecentObservation,
+        EntityId,
     };
 
     fn make_hydro(id: i32) -> Hydro {
