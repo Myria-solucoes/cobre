@@ -419,13 +419,18 @@ impl StudySetup {
         // z-inflow column and row ranges are set by StageIndexer::new at
         // fixed offset N*(1+L), no per-stage wiring needed.
 
-        // Build per-hydro AR orders from the precomputed PAR model. When the
-        // PAR has hydros with AR order < max_par_order, the mask enables
-        // sparse cut rows in `build_cut_row_batch_into`.
+        // Build the per-hydro lag-state-slot count for the cut sparse mask.
+        // When PAR(p)-A annual is active on a hydro, this is `max_par_order`
+        // (the widened psi stride); otherwise it is the classical AR order.
+        // Using `par.order(h)` here would silently truncate the cut row's state
+        // coefficients on lag slots that carry the annual `ψ̂/12` term and
+        // produce over-estimating cuts (analogue of d0e4a42).
         if indexer.max_par_order > 0 && stochastic.par().n_hydros() > 0 {
             let par = stochastic.par();
-            let ar_orders: Vec<usize> = (0..par.n_hydros()).map(|h| par.order(h)).collect();
-            indexer.set_nonzero_mask(&ar_orders);
+            let effective_lag_counts: Vec<usize> = (0..par.n_hydros())
+                .map(|h| par.effective_lag_count(h))
+                .collect();
+            indexer.set_nonzero_mask(&effective_lag_counts);
         }
 
         let initial_state = build_initial_state(system, &indexer);
