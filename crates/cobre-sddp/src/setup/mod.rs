@@ -38,20 +38,20 @@ pub mod stochastic_pipeline;
 pub(crate) mod template_postprocess;
 
 pub use params::{
-    ConstructionConfig, DEFAULT_FORWARD_PASSES, DEFAULT_MAX_ITERATIONS, DEFAULT_SEED, StudyParams,
+    ConstructionConfig, StudyParams, DEFAULT_FORWARD_PASSES, DEFAULT_MAX_ITERATIONS, DEFAULT_SEED,
 };
 pub use scenario_library_set::{PhaseLibraries, ScenarioLibraries};
 pub use stage_data::StageData;
 pub use stochastic_pipeline::{
-    PrepareStochasticResult, build_ncs_factor_entries, load_load_factors_for_stochastic,
-    prepare_stochastic,
+    build_ncs_factor_entries, load_load_factors_for_stochastic, prepare_stochastic,
+    PrepareStochasticResult,
 };
 
 use std::path::Path;
 
 use cobre_core::{
-    EntityId, Stage, System,
     scenario::{SamplingScheme, ScenarioSource},
+    EntityId, Stage, System,
 };
 use cobre_io::build_hydro_reference_volume_fractions;
 use cobre_stochastic::{ExternalScenarioLibrary, HistoricalScenarioLibrary, StochasticContext};
@@ -59,7 +59,7 @@ use cobre_stochastic::{ExternalScenarioLibrary, HistoricalScenarioLibrary, Stoch
 use crate::{
     config::{CutManagementConfig, EventParams},
     cut::FutureCostFunction,
-    energy_conversion::{EnergyConversionSet, build_energy_conversion_set},
+    energy_conversion::{build_energy_conversion_set, EnergyConversionSet},
     error::SddpError,
     horizon_mode::HorizonMode,
     hydro_models::{EvaporationModel, PrepareHydroModelsResult, ResolvedProductionModel},
@@ -391,6 +391,13 @@ impl StudySetup {
             n_blks: n_blks_stage0,
             has_inflow_penalty,
             max_deficit_segments,
+            // Anticipated thermals are wired by a later ticket in epic 04;
+            // this call site produces an empty anticipated block (parity with
+            // pre-anticipated behaviour) until that ticket lands.
+            n_anticipated: 0,
+            k_max: 0,
+            anticipated_lead_stages: vec![],
+            anticipated_thermal_indices: vec![],
         };
         let fpha_cfg = crate::indexer::FphaColumnLayout {
             hydro_indices: fpha_hydro_indices,
@@ -425,12 +432,21 @@ impl StudySetup {
         // Using `par.order(h)` here would silently truncate the cut row's state
         // coefficients on lag slots that carry the annual `ψ̂/12` term and
         // produce over-estimating cuts (analogue of d0e4a42).
-        if indexer.max_par_order > 0 && stochastic.par().n_hydros() > 0 {
+        if (indexer.max_par_order > 0 && stochastic.par().n_hydros() > 0)
+            || indexer.n_anticipated > 0
+        {
             let par = stochastic.par();
-            let effective_lag_counts: Vec<usize> = (0..par.n_hydros())
-                .map(|h| par.effective_lag_count(h))
-                .collect();
-            indexer.set_nonzero_mask(&effective_lag_counts);
+            let effective_lag_counts: Vec<usize> = if indexer.max_par_order > 0 {
+                (0..par.n_hydros())
+                    .map(|h| par.effective_lag_count(h))
+                    .collect()
+            } else {
+                vec![0; indexer.hydro_count]
+            };
+            // Clone to release the immutable borrow on `indexer` before the
+            // mutable `set_nonzero_mask` call below.
+            let anticipated_k: Vec<usize> = indexer.anticipated_lead_stages.clone();
+            indexer.set_nonzero_mask(&effective_lag_counts, &anticipated_k);
         }
 
         let initial_state = build_initial_state(system, &indexer);
@@ -861,13 +877,6 @@ mod tests {
     use crate::indexer::StageIndexer;
 
     use cobre_core::{
-        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, HydroStageBounds,
-        HydroStagePenalties, LineStageBounds, LineStagePenalties, NcsStagePenalties,
-        PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
-        ResolvedPenalties, ThermalStageBounds,
-    };
-    use cobre_core::{
-        EntityId, SystemBuilder,
         entities::{
             bus::{Bus, DeficitSegment},
             hydro::{Hydro, HydroGenerationModel, HydroPenalties},
@@ -878,6 +887,13 @@ mod tests {
             Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
             StageStateConfig,
         },
+        EntityId, SystemBuilder,
+    };
+    use cobre_core::{
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, HydroStageBounds,
+        HydroStagePenalties, LineStageBounds, LineStagePenalties, NcsStagePenalties,
+        PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
+        ResolvedPenalties, ThermalStageBounds,
     };
     use cobre_io::config::{
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
@@ -886,7 +902,7 @@ mod tests {
         SimulationConfig as IoSimulationConfig, StoppingRuleConfig, TrainingConfig,
         TrainingSolverConfig, UpperBoundEvaluationConfig,
     };
-    use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
+    use cobre_stochastic::{build_stochastic_context, ClassSchemes, OpeningTreeInputs};
 
     /// Build a minimal system with 1 bus, 1 thermal, 1 hydro, and `n_stages`
     /// study stages (each with 1 block). All bounds and penalties are set to
@@ -2060,7 +2076,7 @@ mod tests {
     /// default values for all fields.
     #[test]
     fn study_params_from_config_defaults() {
-        use super::{DEFAULT_FORWARD_PASSES, DEFAULT_SEED, StudyParams};
+        use super::{StudyParams, DEFAULT_FORWARD_PASSES, DEFAULT_SEED};
         use crate::stopping_rule::StoppingMode;
         use cobre_io::config::{
             Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
@@ -4164,9 +4180,9 @@ mod tests {
         use chrono::NaiveDate;
         use cobre_core::scenario::InflowModel as CoreInflowModel;
         use cobre_core::{
-            NonControllableSource,
             scenario::{ExternalNcsRow, NcsModel},
             system::SystemBuilder,
+            NonControllableSource,
         };
 
         let bus = Bus {

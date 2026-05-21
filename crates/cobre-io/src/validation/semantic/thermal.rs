@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use cobre_core::{AnticipatedCommitmentHistory, EntityId};
 
-use super::super::{schema::ParsedData, ErrorKind, ValidationContext};
+use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 
 pub(super) fn check_thermal_generation_bounds(data: &ParsedData, ctx: &mut ValidationContext) {
     for thermal in &data.thermals {
@@ -219,7 +219,7 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
     clippy::cast_sign_loss
 )]
 mod tests {
-    use cobre_core::{entities::AnticipatedConfig, AnticipatedCommitmentHistory, EntityId};
+    use cobre_core::{AnticipatedCommitmentHistory, EntityId, entities::AnticipatedConfig};
 
     use super::super::test_support::*;
     use super::super::validate_semantic_hydro_thermal;
@@ -320,7 +320,10 @@ mod tests {
             "file path should reference initial_conditions, got: {file}"
         );
         let entity = relevant[0].entity.as_deref().unwrap_or("");
-        assert!(entity.contains("initial_conditions.past_anticipated_commitments"), "entity should contain 'initial_conditions.past_anticipated_commitments', got: {entity}");
+        assert!(
+            entity.contains("initial_conditions.past_anticipated_commitments"),
+            "entity should contain 'initial_conditions.past_anticipated_commitments', got: {entity}"
+        );
     }
 
     // ── AC-3: history entry for non-anticipated thermal ───────────────────────

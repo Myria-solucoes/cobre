@@ -461,6 +461,10 @@ mod tests {
                 n_blks: 3,
                 has_inflow_penalty: false,
                 max_deficit_segments: 2,
+                n_anticipated: 0,
+                k_max: 0,
+                anticipated_lead_stages: vec![],
+                anticipated_thermal_indices: vec![],
             },
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![0, 2],
@@ -891,6 +895,10 @@ mod tests {
                 n_blks: 1,
                 has_inflow_penalty: false,
                 max_deficit_segments: 1,
+                n_anticipated: 0,
+                k_max: 0,
+                anticipated_lead_stages: vec![],
+                anticipated_thermal_indices: vec![],
             },
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
@@ -950,6 +958,10 @@ mod tests {
                 n_blks: 1,
                 has_inflow_penalty: false,
                 max_deficit_segments: 1,
+                n_anticipated: 0,
+                k_max: 0,
+                anticipated_lead_stages: vec![],
+                anticipated_thermal_indices: vec![],
             },
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],

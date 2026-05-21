@@ -942,6 +942,10 @@ fn indexer_constraint_inventory() {
             n_blks: 2,
             has_inflow_penalty: true,
             max_deficit_segments: 2,
+            n_anticipated: 0,
+            k_max: 0,
+            anticipated_lead_stages: vec![],
+            anticipated_thermal_indices: vec![],
         },
         &FphaColumnLayout {
             hydro_indices: vec![0],
@@ -1068,6 +1072,10 @@ fn constraint_extraction_regression_guard() {
             n_blks: 1,
             has_inflow_penalty: true,
             max_deficit_segments: 1,
+            n_anticipated: 0,
+            k_max: 0,
+            anticipated_lead_stages: vec![],
+            anticipated_thermal_indices: vec![],
         },
         &FphaColumnLayout {
             hydro_indices: vec![0],

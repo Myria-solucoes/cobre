@@ -1263,6 +1263,10 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
             n_blks: 1,
             has_inflow_penalty: false,
             max_deficit_segments: 1,
+            n_anticipated: 0,
+            k_max: 0,
+            anticipated_lead_stages: vec![],
+            anticipated_thermal_indices: vec![],
         },
         &cobre_sddp::indexer::FphaColumnLayout {
             hydro_indices: vec![],

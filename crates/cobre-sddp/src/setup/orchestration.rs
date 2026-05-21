@@ -1,8 +1,8 @@
 //! Orchestration methods: train, simulate, and workspace pool construction.
 
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Sender, SyncSender};
+use std::sync::Arc;
 
 use cobre_comm::Communicator;
 use cobre_core::TrainingEvent;
@@ -13,8 +13,8 @@ use crate::{
     context::{StageContext, TrainingContext},
     error::SddpError,
     simulation::{
-        SimulationOutputSpec, error::SimulationError, pipeline::SimulationRunResult,
-        types::SimulationScenarioResult,
+        error::SimulationError, pipeline::SimulationRunResult, types::SimulationScenarioResult,
+        SimulationOutputSpec,
     },
     training::{TrainingOutcome, TrainingResult},
     workspace::{CapturedBasis, SolverWorkspace, WorkspacePool, WorkspaceSizing},

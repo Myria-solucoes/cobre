@@ -57,7 +57,7 @@ fn sparse_full_mask_equals_dense() {
 
     // Sparse indexer: mask covers all indices (both hydros at full AR order)
     let mut sparse_indexer = StageIndexer::new(n_hydro, max_par_order);
-    sparse_indexer.set_nonzero_mask(&[max_par_order, max_par_order]);
+    sparse_indexer.set_nonzero_mask(&[max_par_order, max_par_order], &[]);
     assert_eq!(
         sparse_indexer.nonzero_state_indices.len(),
         n_state,
@@ -146,7 +146,7 @@ fn sparse_partial_mask_produces_correct_subset() {
 
     // Mixed AR orders: [0, 1, 2] → some lag slots are zero
     let mut indexer = StageIndexer::new(n_hydro, max_par_order);
-    indexer.set_nonzero_mask(&[0, 1, 2]);
+    indexer.set_nonzero_mask(&[0, 1, 2], &[]);
     // Expected mask: storage [0,1,2] + lag0 for h1,h2 [4,5] + lag1 for h2 [8]
     // = [0, 1, 2, 4, 5, 8]
     let mask = &indexer.nonzero_state_indices;
@@ -214,7 +214,7 @@ fn sparse_dense_with_scaling() {
 
     let dense_indexer = StageIndexer::new(n_hydro, max_par_order);
     let mut sparse_indexer = StageIndexer::new(n_hydro, max_par_order);
-    sparse_indexer.set_nonzero_mask(&[max_par_order, max_par_order]);
+    sparse_indexer.set_nonzero_mask(&[max_par_order, max_par_order], &[]);
 
     let mut fcf = FutureCostFunction::new(2, n_state, 1, 1, &[0; 2]);
     let coeffs = vec![10.0, -20.0, 30.0, -40.0];

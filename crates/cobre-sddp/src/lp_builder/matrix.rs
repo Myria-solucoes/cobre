@@ -1206,6 +1206,10 @@ pub(super) fn fill_generic_constraint_entries(
             n_blks: layout.n_blks,
             has_inflow_penalty: ctx.has_penalty,
             max_deficit_segments: layout.max_deficit_segments,
+            n_anticipated: 0,
+            k_max: 0,
+            anticipated_lead_stages: vec![],
+            anticipated_thermal_indices: vec![],
         },
         &crate::indexer::FphaColumnLayout {
             hydro_indices: layout.fpha_hydro_indices.clone(),
