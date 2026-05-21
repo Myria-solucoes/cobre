@@ -2,7 +2,6 @@ use cobre_core::{CoefficientRef, ConstraintSense, Stage};
 
 use crate::generic_constraints::resolve_variable_ref;
 use crate::hydro_models::{EvaporationModel, ResolvedProductionModel};
-use crate::indexer::StageIndexer;
 
 use super::layout::{StageLayout, TemplateBuildCtx};
 use super::{M3S_TO_HM3, Q_EV_SAFETY_MARGIN};
@@ -27,7 +26,6 @@ pub(super) fn fill_stage_columns(
     stage_idx: usize,
     layout: &StageLayout,
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-    let idx = StageIndexer::new(ctx.n_hydros, ctx.max_par_order);
     let mut col_lower = vec![0.0_f64; layout.num_cols];
     let mut col_upper = vec![f64::INFINITY; layout.num_cols];
     let mut objective = vec![0.0_f64; layout.num_cols];
@@ -38,13 +36,17 @@ pub(super) fn fill_stage_columns(
         objective: &mut objective,
     };
 
-    fill_storage_columns(ctx, stage_idx, &idx, layout, b);
-    fill_ar_lag_columns(&idx, b);
-    fill_theta_column(&idx, b);
+    fill_storage_columns(ctx, stage_idx, layout, b);
+    fill_ar_lag_columns(layout, b);
+    fill_anticipated_state_columns(layout, b);
+    fill_theta_column(layout, b);
     fill_turbine_columns(ctx, stage, stage_idx, layout, b);
     fill_spillage_columns(ctx, stage, stage_idx, layout, b);
     fill_diversion_columns(ctx, stage, stage_idx, layout, b);
     fill_thermal_columns(ctx, stage, stage_idx, layout, b);
+    fill_anticipated_decision_columns(ctx, stage_idx, layout, b);
+    fill_anticipated_decision_objective(ctx, stage_idx, layout, b);
+    zero_anticipated_delivery_thermal_cost(ctx, stage_idx, layout, b);
     fill_line_columns(ctx, stage, stage_idx, layout, b);
     fill_deficit_and_excess_columns(ctx, stage, stage_idx, layout, b);
     fill_inflow_slack_columns(ctx, stage_idx, layout, total_stage_hours, b);
@@ -66,7 +68,6 @@ pub(super) fn fill_stage_columns(
 fn fill_storage_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
-    idx: &StageIndexer,
     layout: &StageLayout,
     bufs: &mut ColumnBufs<'_>,
 ) {
@@ -74,25 +75,43 @@ fn fill_storage_columns(
         let hb = ctx.bounds.hydro_bounds(h_idx, stage_idx);
         bufs.col_lower[h_idx] = hb.min_storage_hm3;
         bufs.col_upper[h_idx] = hb.max_storage_hm3;
-        bufs.col_lower[idx.storage_in.start + h_idx] = f64::NEG_INFINITY;
-        bufs.col_upper[idx.storage_in.start + h_idx] = f64::INFINITY;
+        bufs.col_lower[layout.col_storage_in_start + h_idx] = f64::NEG_INFINITY;
+        bufs.col_upper[layout.col_storage_in_start + h_idx] = f64::INFINITY;
     }
 }
 
 /// AR lag columns: unconstrained (signed).
-fn fill_ar_lag_columns(idx: &StageIndexer, bufs: &mut ColumnBufs<'_>) {
-    for lag_col in idx.inflow_lags.clone() {
+fn fill_ar_lag_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
+    let n_lag_cols = layout.lag_order * layout.n_h;
+    for lag_col in layout.col_inflow_lags_start..layout.col_inflow_lags_start + n_lag_cols {
         bufs.col_lower[lag_col] = f64::NEG_INFINITY;
         bufs.col_upper[lag_col] = f64::INFINITY;
     }
 }
 
+/// Anticipated-state columns: unconstrained (free variables fixed by state-fixing rows).
+///
+/// Writes `(-INF, +INF)` on every `n_ant_state` anticipated-state columns.
+/// These columns are fixed at solve time by the `n_ant_state` state-fixing equality
+/// rows (row RHS is patched in epic-06). Mirror of `fill_ar_lag_columns`.
+///
+/// No-op when `n_anticipated == 0` (`n_ant_state == 0`).
+fn fill_anticipated_state_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
+    for slot in 0..layout.k_max {
+        for plant in 0..layout.n_anticipated {
+            let col = layout.col_anticipated_state_start + slot * layout.n_anticipated + plant;
+            bufs.col_lower[col] = f64::NEG_INFINITY;
+            bufs.col_upper[col] = f64::INFINITY;
+        }
+    }
+}
+
 /// Theta column: bounded below by zero so iteration-1 LPs with empty cut pools
 /// are bounded rather than unbounded.
-fn fill_theta_column(idx: &StageIndexer, bufs: &mut ColumnBufs<'_>) {
-    bufs.col_lower[idx.theta] = 0.0;
-    bufs.col_upper[idx.theta] = f64::INFINITY;
-    bufs.objective[idx.theta] = 1.0;
+fn fill_theta_column(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
+    bufs.col_lower[layout.col_theta] = 0.0;
+    bufs.col_upper[layout.col_theta] = f64::INFINITY;
+    bufs.objective[layout.col_theta] = 1.0;
 }
 
 /// Turbine columns per hydro per block.
@@ -193,6 +212,127 @@ fn fill_thermal_columns(
             bufs.col_upper[col] = tb.max_generation_mw;
             let block_hours = stage.blocks[blk].duration_hours;
             bufs.objective[col] = marginal_cost_per_mwh * block_hours;
+        }
+    }
+}
+
+/// Anticipated-decision columns: one per anticipated thermal, stage-level.
+///
+/// For each anticipated plant `i` at decision stage `t`:
+/// - If `t + K_i <= n_stages` (active): bounds come from `thermal_bounds(thermal_idx, t + K_i)`,
+///   the delivery-stage bounds.
+/// - Else (inactive, `t + K_i > n_stages`): bounds are `[0, 0]`; the presolver eliminates.
+///
+/// Objective coefficients are NOT set here; they are filled by a separate pass.
+fn fill_anticipated_decision_columns(
+    ctx: &TemplateBuildCtx<'_>,
+    stage_idx: usize,
+    layout: &StageLayout,
+    bufs: &mut ColumnBufs<'_>,
+) {
+    let n_stages = ctx.bounds.n_stages();
+    for local_idx in 0..ctx.n_anticipated {
+        let k_i = ctx.anticipated_lead_stages[local_idx];
+        let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
+        let col = layout.col_anticipated_decision_start + local_idx;
+        // Horizon gate: active iff t + K_i <= n_stages.
+        // saturating_add is safe; n_stages and k_i fit in usize without overflow.
+        if stage_idx.saturating_add(k_i) <= n_stages {
+            let delivery_stage = stage_idx + k_i;
+            let tb = ctx.bounds.thermal_bounds(thermal_idx, delivery_stage);
+            bufs.col_lower[col] = tb.min_generation_mw;
+            bufs.col_upper[col] = tb.max_generation_mw;
+        } else {
+            // Inactive: bounds [0, 0]; the presolver will eliminate.
+            bufs.col_lower[col] = 0.0;
+            bufs.col_upper[col] = 0.0;
+        }
+        // Objective coefficient is set by ticket-022; leave at 0.0
+        // (already the vec initialization default).
+    }
+}
+
+/// Set NPV-discounted objective coefficients for anticipated-decision columns.
+///
+/// For each anticipated plant `i` active at decision stage `t`
+/// (i.e. `t + K_i <= n_stages`), writes:
+///
+/// ```text
+/// objective[col_anticipated_decision_start + i] =
+///     cost_per_mwh(thermal_idx, delivery_stage)
+///     * total_hours_per_stage[delivery_stage]
+///     * cumulative_discount_factors[delivery_stage]
+/// ```
+///
+/// This encodes the present-value cost of committing one MW at stage `t`
+/// for delivery at stage `t + K_i`. Inactive plants leave objective at `0.0`
+/// (the vec initialisation default); their `[0, 0]` bounds make the LP effect
+/// identical to not having the column.
+///
+/// The written coefficient is UNSCALED: the caller (`build_single_stage_template`)
+/// divides every non-theta objective entry by `COST_SCALE_FACTOR` after this
+/// function returns.
+fn fill_anticipated_decision_objective(
+    ctx: &TemplateBuildCtx<'_>,
+    stage_idx: usize,
+    layout: &StageLayout,
+    bufs: &mut ColumnBufs<'_>,
+) {
+    let n_stages = ctx.bounds.n_stages();
+    for local_idx in 0..ctx.n_anticipated {
+        let k_i = ctx.anticipated_lead_stages[local_idx];
+        let col = layout.col_anticipated_decision_start + local_idx;
+        // Horizon gate matches fill_anticipated_decision_columns.
+        if stage_idx.saturating_add(k_i) <= n_stages {
+            let delivery_stage = stage_idx + k_i;
+            let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
+            let tb = ctx.bounds.thermal_bounds(thermal_idx, delivery_stage);
+            let delivery_hours = ctx.total_hours_per_stage[delivery_stage];
+            let d_factor = ctx.cumulative_discount_factors[delivery_stage];
+            bufs.objective[col] = tb.cost_per_mwh * delivery_hours * d_factor;
+        }
+        // Inactive plants: objective stays at 0.0 (the vec default).
+        // The bounds [0, 0] from fill_anticipated_decision_columns ensure the
+        // column has no LP effect regardless of objective value.
+    }
+}
+
+/// Zero out per-block thermal objective coefficients for anticipated thermals
+/// at their delivery stages.
+///
+/// At every stage `t` that is a delivery stage for anticipated plant `i`
+/// (predicate: `K_i <= stage_idx`, identical to
+/// `anticipated_fishing_active_at_stage`), the thermal's per-block generation
+/// cost is zeroed. This prevents double-counting: the generation is already
+/// priced at the decision stage via `fill_anticipated_decision_objective`; the
+/// delivery-stage LP must consume it at zero marginal cost.
+///
+/// Must be called AFTER `fill_thermal_columns`, which writes the standard
+/// non-zero cost for all thermals at all stages. This function overwrites that
+/// cost for anticipated thermals at their delivery stages only.
+///
+/// The assignment `= 0.0` (not `*= 0.0`) is deliberate: a clean write that
+/// survives floating-point anomalies. Dividing zero by `COST_SCALE_FACTOR`
+/// (the post-loop in `build_single_stage_template`) still gives zero.
+fn zero_anticipated_delivery_thermal_cost(
+    ctx: &TemplateBuildCtx<'_>,
+    stage_idx: usize,
+    layout: &StageLayout,
+    bufs: &mut ColumnBufs<'_>,
+) {
+    let n_blks = layout.n_blks;
+    for local_idx in 0..ctx.n_anticipated {
+        let k_i = ctx.anticipated_lead_stages[local_idx];
+        // Delivery stages: those where a past decision has matured.
+        // Predicate k_i <= stage_idx identifies active plants, matching the
+        // fishing-row constraint construction so both use the same active set.
+        if k_i > stage_idx {
+            continue;
+        }
+        let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
+        for blk in 0..n_blks {
+            let col = layout.col_thermal_start + thermal_idx * n_blks + blk;
+            bufs.objective[col] = 0.0;
         }
     }
 }
@@ -678,6 +818,17 @@ pub(super) fn fill_stage_rows(
         &mut row_upper,
     );
 
+    // Anticipated-fishing equality rows: one per active anticipated plant (K_i <= stage_idx).
+    // Row bounds 0 == 0; actual coefficients are filled in build_stage_matrix_entries.
+    fill_anticipated_fishing_rows(
+        ctx,
+        stage,
+        stage_idx,
+        layout,
+        &mut row_lower,
+        &mut row_upper,
+    );
+
     // Z-inflow definition rows: equality constraints with RHS = base_h (m3/s).
     // The base is the deterministic PAR base inflow (before noise), NOT multiplied
     // by zeta and NOT reduced by withdrawal. The noise component (sigma * eta) is
@@ -755,6 +906,149 @@ fn fill_operational_violation_rows(
     }
 }
 
+/// Fill row bounds for anticipated-fishing equality constraints.
+///
+/// For each anticipated plant `i` with `K_i <= stage_idx`, sets one row to equality
+/// `0 == 0`. The fishing constraint balances per-block thermal generation (`MWh`) against
+/// the committed power level in the `anticipated_state` slot (`MW` × `block_hours_total` = `MWh`).
+///
+/// When `n_anticipated == 0` or no plant has matured (`K_i > stage_idx` for all plants),
+/// this function is a no-op: `n_anticipated_fishing_rows == 0`.
+pub(super) fn fill_anticipated_fishing_rows(
+    ctx: &TemplateBuildCtx<'_>,
+    _stage: &Stage,
+    stage_idx: usize,
+    layout: &StageLayout,
+    row_lower: &mut [f64],
+    row_upper: &mut [f64],
+) {
+    let mut active_pos: usize = 0;
+    for &k_i in &ctx.anticipated_lead_stages {
+        if k_i > stage_idx {
+            continue;
+        }
+        let row = layout.row_anticipated_fishing_start + active_pos;
+        // Equality constraint: LHS == 0 (both bounds set to 0.0).
+        row_lower[row] = 0.0;
+        row_upper[row] = 0.0;
+        active_pos += 1;
+    }
+    debug_assert_eq!(
+        active_pos, layout.n_anticipated_fishing_rows,
+        "fill_anticipated_fishing_rows: active_pos mismatch at stage {stage_idx}"
+    );
+}
+
+/// Fill CSC matrix entries for anticipated-fishing equality constraints.
+///
+/// For each active anticipated plant `i` at delivery stage `t` (i.e. `K_i <= stage_idx`),
+/// writes:
+/// - `(row, +block_hours[blk])` on each per-block thermal column
+///   `col_thermal_start + thermal_idx * n_blks + blk` (`LHS`, `MWh`).
+/// - `(row, -block_hours_total)` on the anticipated-state slot-0 column
+///   `col_anticipated_state_start + local_idx` (`RHS` coupling: `MW` × h = `MWh`).
+///
+/// The constraint enforces that the total generated energy (sum over blocks) equals
+/// the committed power level (slot 0 content) scaled to `MWh`.
+///
+/// When `n_anticipated == 0` or no plant has matured, this function is a no-op.
+pub(super) fn fill_anticipated_fishing_entries(
+    ctx: &TemplateBuildCtx<'_>,
+    stage: &Stage,
+    stage_idx: usize,
+    layout: &StageLayout,
+    col_entries: &mut [Vec<(usize, f64)>],
+) {
+    let n_blks = layout.n_blks;
+    let mut active_pos: usize = 0;
+    for (local_idx, &k_i) in ctx.anticipated_lead_stages.iter().enumerate() {
+        if k_i > stage_idx {
+            continue;
+        }
+        let row = layout.row_anticipated_fishing_start + active_pos;
+        let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
+        // LHS: sum_{blk} block_hours[blk] * gt_i^(t, blk)   (converts MW → MWh per block).
+        let mut block_hours_total: f64 = 0.0;
+        for blk in 0..n_blks {
+            let col_gen = layout.col_thermal_start + thermal_idx * n_blks + blk;
+            let block_hours = stage.blocks[blk].duration_hours;
+            col_entries[col_gen].push((row, block_hours));
+            block_hours_total += block_hours;
+        }
+        // RHS coupling: anticipated_state[slot 0, plant local_idx] carries committed MW.
+        // Coefficient = -block_hours_total so both sides are in MWh.
+        // Slot-major layout: slot 0 → col_anticipated_state_start + 0 * n_anticipated + local_idx
+        //                             = col_anticipated_state_start + local_idx.
+        let col_state = layout.col_anticipated_state_start + local_idx;
+        col_entries[col_state].push((row, -block_hours_total));
+        active_pos += 1;
+    }
+    debug_assert_eq!(
+        active_pos, layout.n_anticipated_fishing_rows,
+        "fill_anticipated_fishing_entries: active_pos mismatch at stage {stage_idx}"
+    );
+}
+
+/// Fill the anticipated-state-fixing CSC diagonal entries.
+///
+/// For each `(slot, plant)` pair in `[0, k_max) × [0, n_anticipated)`, pushes
+/// `+1.0` on column `col_anticipated_state_start + slot * n_anticipated + plant`
+/// at row `row_anticipated_state_fixing_start + slot * n_anticipated + plant`.
+///
+/// This pins each anticipated-state ring-buffer slot to its corresponding state-fixing
+/// equality row (mirror of the storage-fixing and lag-fixing diagonals in
+/// `fill_state_and_water_entries`). Row bounds default to `0 == 0` (initialised
+/// in `fill_stage_rows`); the RHS is patched at solve time in epic-06.
+///
+/// No-op when `n_anticipated == 0` (`n_ant_state == 0`, loops execute zero times).
+fn fill_anticipated_state_fixing_entries(
+    layout: &StageLayout,
+    col_entries: &mut [Vec<(usize, f64)>],
+) {
+    for slot in 0..layout.k_max {
+        for plant in 0..layout.n_anticipated {
+            let col = layout.col_anticipated_state_start + slot * layout.n_anticipated + plant;
+            let row =
+                layout.row_anticipated_state_fixing_start + slot * layout.n_anticipated + plant;
+            col_entries[col].push((row, 1.0));
+        }
+    }
+}
+
+/// Fill the anticipated-decision → state-slot WRITE CSC entries.
+///
+/// At the decision stage `t`, the anticipated-decision column for plant `i`
+/// contributes `+1.0` to the state-fixing row for slot `K_i - 1` (the newest slot
+/// in the ring buffer). This encodes the "decision is written to the top of the
+/// ring buffer" semantics.
+///
+/// Only active plants are wired: a plant is active iff `stage_idx + K_i <= n_stages`.
+/// Inactive plants have column bounds `[0, 0]`, so no entry is needed — and omitting
+/// the entry avoids noise in CSC inspection.
+///
+/// No-op when `n_anticipated == 0` or when every plant is inactive at `stage_idx`.
+fn fill_anticipated_decision_state_write_entries(
+    ctx: &TemplateBuildCtx<'_>,
+    stage_idx: usize,
+    layout: &StageLayout,
+    col_entries: &mut [Vec<(usize, f64)>],
+) {
+    let n_stages = ctx.bounds.n_stages();
+    for local_idx in 0..ctx.n_anticipated {
+        let k_i = ctx.anticipated_lead_stages[local_idx];
+        // Active iff t + K_i <= n_stages (same gate as fill_anticipated_decision_columns).
+        if stage_idx.saturating_add(k_i) > n_stages {
+            continue;
+        }
+        // K_i >= 1 enforced by epic-02 IO validators; K_i - 1 >= 0 is always safe.
+        let slot = k_i - 1;
+        let col = layout.col_anticipated_decision_start + local_idx;
+        let row =
+            layout.row_anticipated_state_fixing_start + slot * layout.n_anticipated + local_idx;
+        col_entries[col].push((row, 1.0));
+    }
+}
+
 /// Build the CSC matrix entries for one stage.
 ///
 /// Returns one `Vec<(row, value)>` per column. Entries within each column are
@@ -771,23 +1065,24 @@ pub(super) fn fill_state_and_water_entries(
     layout: &StageLayout,
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
-    let idx = StageIndexer::new(ctx.n_hydros, ctx.max_par_order);
     let n_h = layout.n_h;
     let n_blks = layout.n_blks;
     let lag_order = layout.lag_order;
     let zeta = layout.zeta;
     let row_water = layout.row_water_balance_start;
+    let col_storage_in_start = layout.col_storage_in_start;
+    let col_inflow_lags_start = layout.col_inflow_lags_start;
 
     // State rows: storage-fixing (incoming storage column → row h).
     for h in 0..n_h {
-        let col = idx.storage_in.start + h;
+        let col = col_storage_in_start + h;
         col_entries[col].push((h, 1.0));
     }
 
     // State rows: lag-fixing (lag column → diagonal row).
     for lag in 0..lag_order {
         for h in 0..n_h {
-            let col = idx.inflow_lags.start + lag * n_h + h;
+            let col = col_inflow_lags_start + lag * n_h + h;
             let row = n_h + lag * n_h + h;
             col_entries[col].push((row, 1.0));
         }
@@ -800,7 +1095,7 @@ pub(super) fn fill_state_and_water_entries(
         let hydro = &ctx.hydros[h_idx];
         let row = row_water + h_idx;
         col_entries[h_idx].push((row, 1.0));
-        col_entries[idx.storage_in.start + h_idx].push((row, -1.0));
+        col_entries[col_storage_in_start + h_idx].push((row, -1.0));
         for blk in 0..n_blks {
             let tau_h = stage.blocks[blk].duration_hours * M3S_TO_HM3;
             let col_turbine = layout.col_turbine_start + h_idx * n_blks + blk;
@@ -833,7 +1128,7 @@ pub(super) fn fill_state_and_water_entries(
             let psi = ctx.par_lp.psi_slice(stage_idx, h_idx);
             for (lag, &psi_val) in psi.iter().enumerate() {
                 if psi_val != 0.0 && lag < lag_order {
-                    let col = idx.inflow_lags.start + lag * n_h + h_idx;
+                    let col = col_inflow_lags_start + lag * n_h + h_idx;
                     col_entries[col].push((row, -zeta * psi_val));
                 }
             }
@@ -1018,8 +1313,8 @@ pub(super) fn fill_fpha_entries(
     layout: &StageLayout,
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
-    let idx = StageIndexer::new(ctx.n_hydros, ctx.max_par_order);
     let n_blks = layout.n_blks;
+    let col_storage_in_start = layout.col_storage_in_start;
 
     for (local_idx, &h_idx) in layout.fpha_hydro_indices.iter().enumerate() {
         let model = ctx.production_models.model(h_idx, stage_idx);
@@ -1039,7 +1334,7 @@ pub(super) fn fill_fpha_entries(
         for blk in 0..n_blks {
             // Column indices for this hydro/block.
             let col_v = h_idx; // outgoing storage column
-            let col_v_in = idx.storage_in.start + h_idx; // incoming storage column
+            let col_v_in = col_storage_in_start + h_idx; // incoming storage column
             let col_q = layout.col_turbine_start + h_idx * n_blks + blk;
             let col_s = layout.col_spillage_start + h_idx * n_blks + blk;
             let col_g = layout.col_generation_start + local_idx * n_blks + blk;
@@ -1086,7 +1381,7 @@ pub(super) fn fill_evaporation_entries(
     layout: &StageLayout,
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
-    let idx = StageIndexer::new(ctx.n_hydros, ctx.max_par_order);
+    let col_storage_in_start = layout.col_storage_in_start;
 
     for (local_idx, &h_idx) in layout.evap_hydro_indices.iter().enumerate() {
         let coeff = match ctx.evaporation_models.model(h_idx) {
@@ -1117,7 +1412,7 @@ pub(super) fn fill_evaporation_entries(
         let col_f_plus = layout.col_evap_start + local_idx * 3 + 1;
         let col_f_minus = layout.col_evap_start + local_idx * 3 + 2;
         let col_v = h_idx; // outgoing storage column
-        let col_v_in = idx.storage_in.start + h_idx; // incoming storage column
+        let col_v_in = col_storage_in_start + h_idx; // incoming storage column
 
         let row = layout.row_evap_start + local_idx;
 
@@ -1206,10 +1501,10 @@ pub(super) fn fill_generic_constraint_entries(
             n_blks: layout.n_blks,
             has_inflow_penalty: ctx.has_penalty,
             max_deficit_segments: layout.max_deficit_segments,
-            n_anticipated: 0,
-            k_max: 0,
-            anticipated_lead_stages: vec![],
-            anticipated_thermal_indices: vec![],
+            n_anticipated: ctx.n_anticipated,
+            k_max: ctx.k_max,
+            anticipated_lead_stages: ctx.anticipated_lead_stages.clone(),
+            anticipated_thermal_indices: ctx.anticipated_thermal_indices.clone(),
         },
         &crate::indexer::FphaColumnLayout {
             hydro_indices: layout.fpha_hydro_indices.clone(),
@@ -1351,7 +1646,7 @@ pub(super) fn fill_z_inflow_entries(
 ) {
     let n_h = layout.n_h;
     let lag_order = layout.lag_order;
-    let idx = StageIndexer::new(n_h, lag_order);
+    let col_inflow_lags_start = layout.col_inflow_lags_start;
 
     for h_idx in 0..n_h {
         let row = layout.row_z_inflow_start + h_idx;
@@ -1367,7 +1662,7 @@ pub(super) fn fill_z_inflow_entries(
             let psi = ctx.par_lp.psi_slice(stage_idx, h_idx);
             for (lag, &psi_val) in psi.iter().enumerate() {
                 if psi_val != 0.0 && lag < lag_order {
-                    let col = idx.inflow_lags.start + lag * n_h + h_idx;
+                    let col = col_inflow_lags_start + lag * n_h + h_idx;
                     col_entries[col].push((row, -psi_val));
                 }
             }
@@ -1484,12 +1779,15 @@ pub(super) fn build_stage_matrix_entries(
     let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
 
     fill_state_and_water_entries(ctx, stage, stage_idx, layout, &mut col_entries);
+    fill_anticipated_state_fixing_entries(layout, &mut col_entries);
+    fill_anticipated_decision_state_write_entries(ctx, stage_idx, layout, &mut col_entries);
     fill_load_balance_entries(ctx, stage_idx, layout, &mut col_entries);
     fill_ncs_load_balance_entries(ctx, layout, &mut col_entries);
     fill_fpha_entries(ctx, stage_idx, layout, &mut col_entries);
     fill_evaporation_entries(ctx, stage_idx, layout, &mut col_entries);
     fill_z_inflow_entries(ctx, stage_idx, layout, &mut col_entries);
     fill_operational_violation_entries(ctx, stage, stage_idx, layout, &mut col_entries);
+    fill_anticipated_fishing_entries(ctx, stage, stage_idx, layout, &mut col_entries);
 
     col_entries
 }
@@ -1552,7 +1850,7 @@ mod parameter_resolution_tests {
     use cobre_stochastic::par::precompute::PrecomputedPar;
     use std::collections::HashMap;
 
-    use crate::energy_conversion::{EnergyConversionSet, build_hydro_energy_productivity_override};
+    use crate::energy_conversion::{build_hydro_energy_productivity_override, EnergyConversionSet};
     use crate::hydro_models::PrepareHydroModelsResult;
     use crate::inflow_method::InflowNonNegativityMethod;
     use crate::resolved_parameters::build_resolved_parameters;

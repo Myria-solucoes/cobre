@@ -7,12 +7,14 @@ use cobre_stochastic::par::precompute::PrecomputedPar;
 
 use crate::error::SddpError;
 use crate::hydro_models::{EvaporationModelSet, ProductionModelSet, ResolvedProductionModel};
-use crate::indexer::StageIndexer;
 use crate::inflow_method::InflowNonNegativityMethod;
 use crate::resolved_parameters::ResolvedParameters;
+use crate::setup::template_postprocess::{
+    compute_cumulative_discount_factors, compute_per_stage_discount_factors,
+};
 
 use super::layout::{StageLayout, TemplateBuildCtx};
-use super::{COST_SCALE_FACTOR, GenericConstraintRowEntry, matrix, scaling};
+use super::{matrix, scaling, GenericConstraintRowEntry, COST_SCALE_FACTOR};
 
 /// Outcome of [`build_stage_templates`]: one [`StageTemplate`] per study stage
 /// plus the per-stage `base_rows` offsets needed by `PatchBuffer`.
@@ -124,8 +126,12 @@ pub struct StageTemplates {
     /// `cumulative_discount_factors[t] = cumulative_discount_factors[t-1] * discount_factors[t-1]`
     /// for `t >= 1`.
     ///
-    /// Length equals `templates.len()`. The present value of stage `t`'s
-    /// immediate cost is `cumulative_discount_factors[t] * immediate_cost_t`.
+    /// Length equals `templates.len() + 1`. The extra entry at index `n_stages`
+    /// supports anticipated-thermal delivery lookups when `delivery_stage ==
+    /// n_stages` (an anticipated decision made at the last decision stage
+    /// `t = n_stages - K_i` delivers at the terminal boundary). The present
+    /// value of stage `t`'s immediate cost is
+    /// `cumulative_discount_factors[t] * immediate_cost_t`.
     pub cumulative_discount_factors: Vec<f64>,
 }
 
@@ -188,7 +194,10 @@ pub(super) fn build_single_stage_template(
     // If theta were also divided by K its objective coefficient would become
     // 1/K, making the LP objective `stage_cost/K + (1/K)*theta` which, after
     // multiplication by K, gives `stage_cost + future_cost/K` -- wrong.
-    let theta_col = StageIndexer::new(ctx.n_hydros, ctx.max_par_order).theta;
+    // Use `layout.col_theta` so the correct index is read from the augmented
+    // indexer even when `n_anticipated > 0` shifts theta past the anticipated
+    // state block.
+    let theta_col = layout.col_theta;
     for (i, coeff) in objective.iter_mut().enumerate() {
         if i != theta_col {
             *coeff /= COST_SCALE_FACTOR;
@@ -533,6 +542,20 @@ fn build_template_build_ctx<'a>(
         .unwrap_or(0)
         .max(par_lp.max_order());
 
+    // Compute anticipated-thermal metadata in declaration order.
+    // For each thermal with `anticipated_config.is_some()`, record its global
+    // index and per-plant lead_stages (K_i).
+    let mut anticipated_thermal_indices: Vec<usize> = Vec::new();
+    let mut anticipated_lead_stages: Vec<usize> = Vec::new();
+    for (t_idx, thermal) in system.thermals().iter().enumerate() {
+        if let Some(cfg) = thermal.anticipated_config.as_ref() {
+            anticipated_thermal_indices.push(t_idx);
+            anticipated_lead_stages.push(usize::try_from(cfg.lead_stages).unwrap_or(usize::MAX));
+        }
+    }
+    let n_anticipated = anticipated_thermal_indices.len();
+    let k_max = anticipated_lead_stages.iter().copied().max().unwrap_or(0);
+
     // Precompute diversion upstream map: maps target hydro ID -> list of source
     // hydro indices that divert water to it. O(1) lookup in water balance loop.
     // Cloned so the map is available both for LP construction (ctx) and for the
@@ -547,6 +570,37 @@ fn build_template_build_ctx<'a>(
         }
     }
     let diversion_upstream_output = diversion_upstream.clone();
+
+    // Pre-compute discount factors and total stage hours before the per-stage
+    // template loop so that `fill_anticipated_decision_objective` can read them
+    // from the ctx at LP build time (before postprocess_templates runs).
+    let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
+    let per_stage_discount =
+        compute_per_stage_discount_factors(&study_stages, system.policy_graph());
+    // cumulative_discount_factors has length n_study_stages + 1 so that
+    // delivery_stage == n_stages is a valid index (see AC-2/AC-6).
+    let cumulative_discount_factors = compute_cumulative_discount_factors(&per_stage_discount);
+    // total_hours_per_stage also has length n_study_stages + 1 so that
+    // fill_anticipated_decision_objective can read total_hours[delivery_stage]
+    // when delivery_stage == n_stages (the horizon boundary; AC-2).
+    // The extra entry mirrors the last stage's hours (same block structure).
+    let mut total_hours_per_stage: Vec<f64> = study_stages
+        .iter()
+        .map(|s| s.blocks.iter().map(|b| b.duration_hours).sum())
+        .collect();
+    let last_stage_hours = total_hours_per_stage.last().copied().unwrap_or(0.0);
+    total_hours_per_stage.push(last_stage_hours);
+
+    debug_assert_eq!(
+        cumulative_discount_factors.len(),
+        study_stages.len() + 1,
+        "cumulative_discount_factors length must be n_study_stages + 1"
+    );
+    debug_assert_eq!(
+        total_hours_per_stage.len(),
+        study_stages.len() + 1,
+        "total_hours_per_stage length must be n_study_stages + 1"
+    );
 
     let ctx = TemplateBuildCtx {
         hydros,
@@ -578,7 +632,13 @@ fn build_template_build_ctx<'a>(
         n_lines: system.lines().len(),
         n_buses: buses.len(),
         max_par_order,
+        n_anticipated,
+        k_max,
+        anticipated_lead_stages,
+        anticipated_thermal_indices,
         has_penalty: n_hydros > 0 && inflow_method.has_slack_columns(),
+        cumulative_discount_factors,
+        total_hours_per_stage,
     };
 
     (ctx, load_bus_indices, diversion_upstream_output)
@@ -651,6 +711,325 @@ fn assemble_stage_templates_output(
         hydro_productivities_per_stage,
         discount_factors,
         // Cumulative factors default to 1.0; overwritten by setup.rs.
-        cumulative_discount_factors: vec![1.0; n_study],
+        // Length is `n_study + 1`: the extra trailing entry supports
+        // anticipated-thermal delivery lookups when `delivery_stage == n_stages`.
+        cumulative_discount_factors: vec![1.0; n_study + 1],
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap
+)]
+mod tests {
+    use chrono::NaiveDate;
+    use cobre_core::{
+        AnticipatedConfig, Block, BlockMode, BoundsCountsSpec, BoundsDefaults, Bus,
+        BusStagePenalties, ContractStageBounds, DeficitSegment, EntityId, HydroStageBounds,
+        HydroStagePenalties, LineStageBounds, LineStagePenalties, LoadModel, NcsStagePenalties,
+        NoiseMethod, PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
+        ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig,
+        SystemBuilder, Thermal, ThermalStageBounds,
+    };
+    use cobre_stochastic::par::precompute::PrecomputedPar;
+
+    use crate::hydro_models::PrepareHydroModelsResult;
+    use crate::inflow_method::InflowNonNegativityMethod;
+    use crate::resolved_parameters::ResolvedParameters;
+
+    // ── Fixtures ─────────────────────────────────────────────────────────────
+
+    fn default_hydro_bounds() -> HydroStageBounds {
+        HydroStageBounds {
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 200.0,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 250.0,
+            max_diversion_m3s: None,
+            filling_inflow_m3s: 0.0,
+            water_withdrawal_m3s: 0.0,
+        }
+    }
+
+    fn default_hydro_penalties() -> HydroStagePenalties {
+        HydroStagePenalties {
+            spillage_cost: 0.01,
+            diversion_cost: 0.0,
+            turbined_cost: 0.0,
+            storage_violation_below_cost: 0.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost: 0.0,
+            outflow_violation_below_cost: 0.0,
+            outflow_violation_above_cost: 0.0,
+            generation_violation_below_cost: 0.0,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 1000.0,
+        }
+    }
+
+    /// Build a one-bus system with exactly the thermals provided.
+    ///
+    /// Uses one study stage with a single block of 744 hours and no hydros.
+    fn system_with_thermals(thermals: Vec<Thermal>) -> cobre_core::System {
+        let n_thermals = thermals.len();
+        let n_stages = 1_usize;
+
+        let bus = Bus {
+            id: EntityId(1),
+            name: "B1".to_string(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 500.0,
+            }],
+            excess_cost: 0.0,
+        };
+
+        let stages: Vec<Stage> = vec![Stage {
+            index: 0,
+            id: 0,
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            season_id: Some(0),
+            blocks: vec![Block {
+                index: 0,
+                name: "BLK0".to_string(),
+                duration_hours: 744.0,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: false,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        }];
+
+        let load_models = vec![LoadModel {
+            bus_id: EntityId(1),
+            stage_id: 0,
+            mean_mw: 100.0,
+            std_mw: 0.0,
+        }];
+
+        // k_max for the anticipated thermals in this system
+        let k_max = thermals
+            .iter()
+            .filter_map(|t| t.anticipated_config.as_ref())
+            .map(|c| c.lead_stages as usize)
+            .max()
+            .unwrap_or(0);
+
+        let resolved_bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 0,
+                n_thermals,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages,
+                k_max,
+            },
+            &BoundsDefaults {
+                hydro: default_hydro_bounds(),
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 100.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 0,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages,
+            },
+            &PenaltiesDefaults {
+                hydro: default_hydro_penalties(),
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .thermals(thermals)
+            .stages(stages)
+            .load_models(load_models)
+            .bounds(resolved_bounds)
+            .penalties(penalties)
+            .build()
+            .expect("system_with_thermals: valid system")
+    }
+
+    /// Build empty [`ResolvedParameters`] (no parameters).
+    fn empty_resolved_params() -> ResolvedParameters {
+        ResolvedParameters {
+            per_param: vec![],
+            id_to_slot: vec![],
+        }
+    }
+
+    // ── AC-1 ─────────────────────────────────────────────────────────────────
+
+    /// AC-1: `build_template_build_ctx` populates anticipated metadata for a
+    /// system with `T_a`(K=2), `T_b`(no anticipated), `T_c`(K=3).
+    ///
+    /// Expected: `n_anticipated`=2, `k_max`=3, `anticipated_lead_stages`=[2,3],
+    /// `anticipated_thermal_indices`=[0,2].
+    #[test]
+    fn build_template_build_ctx_populates_anticipated_metadata() {
+        let thermals = vec![
+            Thermal {
+                id: EntityId(1),
+                name: "T_a".to_string(),
+                bus_id: EntityId(1),
+                entry_stage_id: None,
+                exit_stage_id: None,
+                cost_per_mwh: 10.0,
+                min_generation_mw: 0.0,
+                max_generation_mw: 100.0,
+                anticipated_config: Some(AnticipatedConfig { lead_stages: 2 }),
+            },
+            Thermal {
+                id: EntityId(2),
+                name: "T_b".to_string(),
+                bus_id: EntityId(1),
+                entry_stage_id: None,
+                exit_stage_id: None,
+                cost_per_mwh: 20.0,
+                min_generation_mw: 0.0,
+                max_generation_mw: 100.0,
+                anticipated_config: None,
+            },
+            Thermal {
+                id: EntityId(3),
+                name: "T_c".to_string(),
+                bus_id: EntityId(1),
+                entry_stage_id: None,
+                exit_stage_id: None,
+                cost_per_mwh: 30.0,
+                min_generation_mw: 0.0,
+                max_generation_mw: 100.0,
+                anticipated_config: Some(AnticipatedConfig { lead_stages: 3 }),
+            },
+        ];
+        let system = system_with_thermals(thermals);
+        let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
+        let par_lp = PrecomputedPar::default();
+        let resolved_params = empty_resolved_params();
+
+        let (ctx, _, _) = super::build_template_build_ctx(
+            &system,
+            InflowNonNegativityMethod::None,
+            &par_lp,
+            &hydro_result.production,
+            &hydro_result.evaporation,
+            &resolved_params,
+        );
+
+        assert_eq!(ctx.n_anticipated, 2, "n_anticipated");
+        assert_eq!(ctx.k_max, 3, "k_max");
+        assert_eq!(
+            ctx.anticipated_lead_stages,
+            vec![2, 3],
+            "anticipated_lead_stages"
+        );
+        assert_eq!(
+            ctx.anticipated_thermal_indices,
+            vec![0, 2],
+            "anticipated_thermal_indices"
+        );
+    }
+
+    // ── AC-2 ─────────────────────────────────────────────────────────────────
+
+    /// AC-2: `build_template_build_ctx` returns zeroed metadata when no
+    /// thermal has `anticipated_config`.
+    #[test]
+    fn build_template_build_ctx_zero_anticipated_when_none() {
+        let thermals = vec![
+            Thermal {
+                id: EntityId(1),
+                name: "T1".to_string(),
+                bus_id: EntityId(1),
+                entry_stage_id: None,
+                exit_stage_id: None,
+                cost_per_mwh: 10.0,
+                min_generation_mw: 0.0,
+                max_generation_mw: 100.0,
+                anticipated_config: None,
+            },
+            Thermal {
+                id: EntityId(2),
+                name: "T2".to_string(),
+                bus_id: EntityId(1),
+                entry_stage_id: None,
+                exit_stage_id: None,
+                cost_per_mwh: 20.0,
+                min_generation_mw: 0.0,
+                max_generation_mw: 100.0,
+                anticipated_config: None,
+            },
+        ];
+        let system = system_with_thermals(thermals);
+        let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
+        let par_lp = PrecomputedPar::default();
+        let resolved_params = empty_resolved_params();
+
+        let (ctx, _, _) = super::build_template_build_ctx(
+            &system,
+            InflowNonNegativityMethod::None,
+            &par_lp,
+            &hydro_result.production,
+            &hydro_result.evaporation,
+            &resolved_params,
+        );
+
+        assert_eq!(ctx.n_anticipated, 0, "n_anticipated");
+        assert_eq!(ctx.k_max, 0, "k_max");
+        assert!(
+            ctx.anticipated_lead_stages.is_empty(),
+            "anticipated_lead_stages"
+        );
+        assert!(
+            ctx.anticipated_thermal_indices.is_empty(),
+            "anticipated_thermal_indices"
+        );
     }
 }

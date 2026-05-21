@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use cobre_core::{AnticipatedCommitmentHistory, EntityId};
 
-use super::super::{schema::ParsedData, ErrorKind, ValidationContext};
+use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 
 pub(super) fn check_thermal_generation_bounds(data: &ParsedData, ctx: &mut ValidationContext) {
     for thermal in &data.thermals {
@@ -258,7 +258,7 @@ pub(super) fn check_thermal_bounds_override_stage_range(
     clippy::cast_sign_loss
 )]
 mod tests {
-    use cobre_core::{entities::AnticipatedConfig, AnticipatedCommitmentHistory, EntityId};
+    use cobre_core::{AnticipatedCommitmentHistory, EntityId, entities::AnticipatedConfig};
 
     use super::super::test_support::*;
     use super::super::validate_semantic_hydro_thermal;
