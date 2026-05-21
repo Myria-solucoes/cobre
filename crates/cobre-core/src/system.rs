@@ -2264,6 +2264,7 @@ mod tests {
             }],
             filling_storage: vec![],
             past_inflows: vec![],
+            past_anticipated_commitments: vec![],
             recent_observations: vec![],
         };
 

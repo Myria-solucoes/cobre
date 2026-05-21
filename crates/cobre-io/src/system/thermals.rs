@@ -105,8 +105,11 @@ pub(crate) struct RawThermalGeneration {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawAnticipatedConfig {
-    /// Number of stages of dispatch anticipation.
-    lead_stages: i32,
+    /// Number of stages of dispatch anticipation. Must be ≥ 1.
+    ///
+    /// Using `u32` here causes serde to reject negative JSON literals with a
+    /// `ParseError` before validation runs.
+    lead_stages: u32,
 }
 
 /// Load and validate `system/thermals.json` from `path`.
@@ -115,9 +118,14 @@ pub(crate) struct RawAnticipatedConfig {
 /// performs post-deserialization validation, then converts to `Vec<Thermal>`.
 /// The result is sorted by `id` ascending to satisfy declaration-order invariance.
 ///
-/// `anticipated_config` is parsed but NOT rejected at this layer. Cross-reference
-/// validation (e.g., `bus_id` existence in the bus registry) is deferred to
-/// Layer 3.
+/// Parse-time validation for `anticipated_config`:
+/// - `lead_stages >= 1`
+///
+/// Semantic validation (cross-field, requires knowledge of `T` and the
+/// entity registry) is performed by `validation::semantic::thermal`.
+///
+/// Cross-reference validation (e.g., `bus_id` existence in the bus registry)
+/// is deferred to Layer 3.
 ///
 /// # Errors
 ///
@@ -129,6 +137,8 @@ pub(crate) struct RawAnticipatedConfig {
 /// | Negative `cost_per_mwh`                             | [`LoadError::SchemaError`] |
 /// | Negative `min_generation_mw` or `max_generation_mw` | [`LoadError::SchemaError`] |
 /// | `max_generation_mw < min_generation_mw`             | [`LoadError::SchemaError`] |
+/// | `lead_stages` is a negative integer in JSON         | [`LoadError::ParseError`]  |
+/// | `lead_stages == 0`                                  | [`LoadError::SchemaError`] |
 ///
 /// # Examples
 ///
@@ -156,6 +166,7 @@ fn validate_raw_thermals(raw: &RawThermalFile, path: &Path) -> Result<(), LoadEr
     for (i, thermal) in raw.thermals.iter().enumerate() {
         validate_cost_per_mwh(thermal.cost_per_mwh, i, path)?;
         validate_generation_bounds(&thermal.generation, i, path)?;
+        validate_anticipated_config(thermal.anticipated_config.as_ref(), i, path)?;
     }
     Ok(())
 }
@@ -192,6 +203,28 @@ fn validate_cost_per_mwh(
             field: format!("thermals[{thermal_index}].cost_per_mwh"),
             message: format!("cost_per_mwh must be >= 0.0, got {cost_per_mwh}"),
         });
+    }
+    Ok(())
+}
+
+/// Validate `anticipated_config` for thermal at `thermal_index`.
+///
+/// Checks: `lead_stages >= 1` when `anticipated_config` is present.
+/// Negative values are rejected earlier by serde (the field is `u32`), so
+/// the only remaining failure mode here is `lead_stages == 0`.
+fn validate_anticipated_config(
+    config: Option<&RawAnticipatedConfig>,
+    thermal_index: usize,
+    path: &Path,
+) -> Result<(), LoadError> {
+    if let Some(cfg) = config {
+        if cfg.lead_stages == 0 {
+            return Err(LoadError::SchemaError {
+                path: path.to_path_buf(),
+                field: format!("thermals[{thermal_index}].anticipated_config.lead_stages"),
+                message: "lead_stages must be >= 1, got 0".to_string(),
+            });
+        }
     }
     Ok(())
 }
@@ -709,6 +742,102 @@ mod tests {
         let thermals = parse_thermals(f.path()).unwrap();
         assert_eq!(thermals[0].entry_stage_id, None);
         assert_eq!(thermals[0].exit_stage_id, None);
+    }
+
+    // ── AC: anticipated_config.lead_stages validation ────────────────────────
+
+    /// `anticipated_config.lead_stages == 0` → `SchemaError` with the precise
+    /// field path and "must be >= 1, got 0" in the message.
+    #[test]
+    fn test_anticipated_lead_stages_zero_rejected() {
+        let json = r#"{
+          "thermals": [
+            {
+              "id": 0, "name": "Alpha", "bus_id": 0,
+              "cost_per_mwh": 50.0,
+              "generation": { "min_mw": 0.0, "max_mw": 100.0 },
+              "anticipated_config": { "lead_stages": 0 }
+            }
+          ]
+        }"#;
+        let f = write_json(json);
+        let err = parse_thermals(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert_eq!(
+                    field, "thermals[0].anticipated_config.lead_stages",
+                    "field mismatch: {field}"
+                );
+                assert!(
+                    message.contains("must be >= 1"),
+                    "message should contain 'must be >= 1', got: {message}"
+                );
+                assert!(
+                    message.contains("got 0"),
+                    "message should contain 'got 0', got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// `anticipated_config.lead_stages == -3` → `ParseError` from serde
+    /// (the field is `u32`, so negative JSON literals are rejected at
+    /// deserialise time before validation runs).
+    ///
+    /// Serde's error message includes the rejected integer value and the
+    /// expected type (`u32`); it identifies the field by line/column position
+    /// rather than by name.
+    #[test]
+    fn test_anticipated_lead_stages_negative_rejected_by_serde() {
+        let json = r#"{
+          "thermals": [
+            {
+              "id": 0, "name": "Alpha", "bus_id": 0,
+              "cost_per_mwh": 50.0,
+              "generation": { "min_mw": 0.0, "max_mw": 100.0 },
+              "anticipated_config": { "lead_stages": -3 }
+            }
+          ]
+        }"#;
+        let f = write_json(json);
+        let err = parse_thermals(f.path()).unwrap_err();
+        match &err {
+            LoadError::ParseError { message, .. } => {
+                assert!(
+                    message.contains("-3"),
+                    "message should mention '-3', got: {message}"
+                );
+                assert!(
+                    message.contains("u32"),
+                    "message should mention 'u32', got: {message}"
+                );
+            }
+            other => panic!("expected ParseError, got: {other:?}"),
+        }
+    }
+
+    /// `anticipated_config.lead_stages == 1` is the minimum accepted value
+    /// and parses successfully.
+    #[test]
+    fn test_anticipated_lead_stages_one_accepted() {
+        let json = r#"{
+          "thermals": [
+            {
+              "id": 0, "name": "Alpha", "bus_id": 0,
+              "cost_per_mwh": 50.0,
+              "generation": { "min_mw": 0.0, "max_mw": 100.0 },
+              "anticipated_config": { "lead_stages": 1 }
+            }
+          ]
+        }"#;
+        let f = write_json(json);
+        let thermals = parse_thermals(f.path()).unwrap();
+        assert_eq!(thermals.len(), 1);
+        assert_eq!(
+            thermals[0].anticipated_config,
+            Some(AnticipatedConfig { lead_stages: 1 })
+        );
     }
 
     /// `min_mw == max_mw` (degenerate range) is valid.

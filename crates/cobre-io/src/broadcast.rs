@@ -328,8 +328,9 @@ pub fn deserialize_parameters(bytes: &[u8]) -> Result<Vec<ScalarParameter>, Load
 mod tests {
     use super::*;
     use cobre_core::{
-        Bus, ComputedParameter, DeficitSegment, EntityId, Hydro, HydroGenerationModel,
-        HydroPenalties, ParameterKind, ScalarParameter, SystemBuilder, Thermal,
+        AnticipatedCommitmentHistory, Bus, ComputedParameter, DeficitSegment, EntityId, Hydro,
+        HydroGenerationModel, HydroPenalties, InitialConditions, ParameterKind, ScalarParameter,
+        SystemBuilder, Thermal,
     };
 
     fn minimal_bus(id: i32) -> Bus {
@@ -514,11 +515,6 @@ mod tests {
         ]
     }
 
-    // Full round-trip of all four ParameterKind variants through the postcard
-    // wire format. The broadcast mirror types (BroadcastScalarParameter,
-    // BroadcastParameterKind, BroadcastComputedParameter) provide a tag-free
-    // representation that postcard can serialize natively; the conversion in
-    // and out preserves the in-memory shape.
     #[test]
     fn round_trip_all_four_parameter_kinds() {
         let original = four_kinds_fixture();
@@ -552,5 +548,71 @@ mod tests {
         let err = result.unwrap_err();
         assert!(matches!(err, LoadError::ParseError { .. }));
         assert!(err.to_string().contains("<broadcast>"));
+    }
+
+    /// `InitialConditions` with `past_anticipated_commitments` survives postcard
+    /// round-trip end-to-end, covering the MPI broadcast path.
+    #[test]
+    fn test_broadcast_initial_conditions_round_trips_past_anticipated_commitments() {
+        let original = InitialConditions {
+            storage: vec![],
+            filling_storage: vec![],
+            past_inflows: vec![],
+            past_anticipated_commitments: vec![
+                AnticipatedCommitmentHistory {
+                    thermal_id: EntityId(1),
+                    values_mw: vec![120.0, 180.0],
+                },
+                AnticipatedCommitmentHistory {
+                    thermal_id: EntityId(7),
+                    values_mw: vec![50.0, 75.0, 100.0, 200.0],
+                },
+            ],
+            recent_observations: vec![],
+        };
+
+        let bytes = postcard::to_allocvec(&original).unwrap();
+        assert!(!bytes.is_empty());
+
+        let restored: InitialConditions = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(restored, original);
+        assert_eq!(restored.past_anticipated_commitments.len(), 2);
+        assert_eq!(
+            restored.past_anticipated_commitments[0].thermal_id,
+            EntityId(1)
+        );
+        assert_eq!(
+            restored.past_anticipated_commitments[0].values_mw,
+            vec![120.0, 180.0]
+        );
+        assert_eq!(
+            restored.past_anticipated_commitments[1].thermal_id,
+            EntityId(7)
+        );
+        assert_eq!(
+            restored.past_anticipated_commitments[1].values_mw,
+            vec![50.0, 75.0, 100.0, 200.0]
+        );
+    }
+
+    /// Given an `InitialConditions` with an empty `past_anticipated_commitments`
+    /// vec, when serialized via postcard and deserialized back, the result has
+    /// an empty vec (no panics, no wire-format corruption).
+    #[test]
+    fn test_broadcast_initial_conditions_empty_past_anticipated_commitments() {
+        let original = InitialConditions {
+            storage: vec![],
+            filling_storage: vec![],
+            past_inflows: vec![],
+            past_anticipated_commitments: vec![],
+            recent_observations: vec![],
+        };
+
+        let bytes = postcard::to_allocvec(&original).unwrap();
+        assert!(!bytes.is_empty());
+
+        let restored: InitialConditions = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(restored, original);
+        assert!(restored.past_anticipated_commitments.is_empty());
     }
 }

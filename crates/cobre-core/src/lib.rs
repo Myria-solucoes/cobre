@@ -64,7 +64,8 @@ pub use generic_constraint::{
     ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
 };
 pub use initial_conditions::{
-    HydroPastInflows, HydroStorage, InitialConditions, RecentObservation,
+    AnticipatedCommitmentHistory, HydroPastInflows, HydroStorage, InitialConditions,
+    RecentObservation,
 };
 pub use parameters::{CoefficientRef, ComputedParameter, ParameterKind, ScalarParameter};
 pub use penalty::{

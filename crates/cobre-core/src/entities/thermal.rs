@@ -8,12 +8,15 @@ use crate::EntityId;
 
 /// Anticipated dispatch configuration for thermal plants requiring advance commitment.
 ///
-/// Plants with `lead_stages > 0` commit `lead_stages` stages before generation.
+/// Plants with `lead_stages >= 1` commit `lead_stages` stages before generation.
+/// The field is `u32` so that negative JSON literals are rejected at serde
+/// deserialise time with a `ParseError`; zero is rejected by the semantic
+/// validator with a `SchemaError`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AnticipatedConfig {
-    /// Number of stages of dispatch anticipation.
-    pub lead_stages: i32,
+    /// Number of stages of dispatch anticipation. Must be ≥ 1.
+    pub lead_stages: u32,
 }
 
 /// Thermal power plant with a scalar marginal cost.
@@ -70,9 +73,9 @@ mod tests {
         assert_eq!(thermal.bus_id, EntityId::from(10));
         assert_eq!(thermal.entry_stage_id, None);
         assert_eq!(thermal.exit_stage_id, None);
-        assert!((thermal.cost_per_mwh - 50.0).abs() < f64::EPSILON);
-        assert!((thermal.min_generation_mw - 0.0).abs() < f64::EPSILON);
-        assert!((thermal.max_generation_mw - 657.0).abs() < f64::EPSILON);
+        assert_eq!(thermal.cost_per_mwh, 50.0);
+        assert_eq!(thermal.min_generation_mw, 0.0);
+        assert_eq!(thermal.max_generation_mw, 657.0);
         assert_eq!(thermal.anticipated_config, None);
     }
 
@@ -96,6 +99,12 @@ mod tests {
         );
         assert_eq!(thermal.entry_stage_id, Some(1));
         assert_eq!(thermal.exit_stage_id, Some(120));
+    }
+
+    #[test]
+    fn test_anticipated_config_lead_stages_as_usize_5() {
+        let config = AnticipatedConfig { lead_stages: 5 };
+        assert_eq!(config.lead_stages as usize, 5_usize);
     }
 
     #[cfg(feature = "serde")]
