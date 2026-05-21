@@ -184,6 +184,7 @@ fn one_bus_system(n_stages: usize) -> cobre_core::System {
             n_pumping: 0,
             n_contracts: 0,
             n_stages: n_st,
+            k_max: 0,
         },
         &BoundsDefaults {
             hydro: default_hydro_bounds(),
@@ -363,6 +364,7 @@ fn one_hydro_system(n_stages: usize, lag_order: usize) -> cobre_core::System {
             n_pumping: 0,
             n_contracts: 0,
             n_stages: n_st,
+            k_max: 0,
         },
         &BoundsDefaults {
             hydro: default_hydro_bounds(),
@@ -929,6 +931,7 @@ fn fpha_system_with_turbined_cost(
             n_pumping: 0,
             n_contracts: 0,
             n_stages: 1,
+            k_max: 0,
         },
         &BoundsDefaults {
             hydro: HydroStageBounds {
@@ -1362,6 +1365,7 @@ fn test_fpha_model_accepted() {
             n_pumping: 0,
             n_contracts: 0,
             n_stages: 1,
+            k_max: 0,
         },
         &BoundsDefaults {
             hydro: default_hydro_bounds(),
@@ -2015,6 +2019,7 @@ fn two_bus_system_with_stochastic_load(
             n_pumping: 0,
             n_contracts: 0,
             n_stages: n_st,
+            k_max: 0,
         },
         &BoundsDefaults {
             hydro: default_hydro_bounds(),
@@ -2308,6 +2313,7 @@ fn one_fpha_hydro_system(n_planes: usize) -> (cobre_core::System, ProductionMode
             n_pumping: 0,
             n_contracts: 0,
             n_stages: 1,
+            k_max: 0,
         },
         &BoundsDefaults {
             hydro: HydroStageBounds {
@@ -2521,6 +2527,7 @@ fn four_hydro_mixed_system() -> (cobre_core::System, ProductionModelSet) {
             n_pumping: 0,
             n_contracts: 0,
             n_stages: 1,
+            k_max: 0,
         },
         &BoundsDefaults {
             hydro: default_hydro_bounds(),
@@ -4078,6 +4085,7 @@ fn evap_water_balance_only_second_hydro_has_evap() {
             n_pumping: 0,
             n_contracts: 0,
             n_stages: 1,
+            k_max: 0,
         },
         &BoundsDefaults {
             hydro: default_hydro_bounds(),
@@ -4344,6 +4352,7 @@ fn evap_hydro_system_with_violation_cost(
             n_pumping: 0,
             n_contracts: 0,
             n_stages: 1,
+            k_max: 0,
         },
         &BoundsDefaults {
             hydro: HydroStageBounds {
@@ -4853,6 +4862,7 @@ fn multi_segment_system(buses: Vec<Bus>, block_hours: f64) -> cobre_core::System
             n_pumping: 0,
             n_contracts: n_buses,
             n_stages: 1,
+            k_max: 0,
         },
         &BoundsDefaults {
             hydro: default_hydro_bounds(),
@@ -4997,6 +5007,7 @@ fn test_multi_segment_deficit_column_count() {
             n_pumping: 0,
             n_contracts: 2,
             n_stages: 1,
+            k_max: 0,
         },
         &BoundsDefaults {
             hydro: default_hydro_bounds(),
@@ -5432,6 +5443,7 @@ fn one_hydro_system_with_withdrawal(
             n_pumping: 0,
             n_contracts: 0,
             n_stages: n_st,
+            k_max: 0,
         },
         &BoundsDefaults {
             hydro: HydroStageBounds {
@@ -5904,6 +5916,7 @@ fn two_hydro_withdrawal_slack_entries_per_hydro() {
             n_pumping: 0,
             n_contracts: 0,
             n_stages: 1,
+            k_max: 0,
         },
         &BoundsDefaults {
             hydro: hydro_bounds_default,
@@ -6153,6 +6166,7 @@ fn three_hydro_num_cols_includes_three_withdrawal_slacks() {
             n_pumping: 0,
             n_contracts: 0,
             n_stages: 1,
+            k_max: 0,
         },
         &BoundsDefaults {
             hydro: HydroStageBounds {
@@ -6350,6 +6364,7 @@ fn one_bus_system_n_blks(n_blks: usize) -> cobre_core::System {
             n_pumping: 0,
             n_contracts: 0,
             n_stages: 1,
+            k_max: 0,
         },
         &BoundsDefaults {
             hydro: default_hydro_bounds(),
@@ -6712,6 +6727,7 @@ fn one_bus_system_n_blks_with_generic(
             n_pumping: 0,
             n_contracts: 0,
             n_stages: 1,
+            k_max: 0,
         },
         &BoundsDefaults {
             hydro: default_hydro_bounds(),
@@ -7275,6 +7291,7 @@ fn generic_constraint_two_hydros_sum_csc_entries() {
             n_pumping: 0,
             n_contracts: 0,
             n_stages: 1,
+            k_max: 0,
         },
         &BoundsDefaults {
             hydro: // n_stages
@@ -7484,6 +7501,7 @@ fn one_bus_one_thermal_system(
             n_pumping: 0,
             n_contracts: 0,
             n_stages: 1,
+            k_max: 0,
         },
         &BoundsDefaults {
             hydro: default_hydro_bounds(),
@@ -7675,6 +7693,7 @@ fn one_hydro_active_violations(n_stages: usize) -> cobre_core::System {
             n_pumping: 0,
             n_contracts: 0,
             n_stages: n_st,
+            k_max: 0,
         },
         &BoundsDefaults {
             hydro: HydroStageBounds {
@@ -8712,6 +8731,7 @@ fn two_hydro_par_system(
             n_pumping: 0,
             n_contracts: 0,
             n_stages: 1,
+            k_max: 0,
         },
         &BoundsDefaults {
             hydro: default_hydro_bounds(),

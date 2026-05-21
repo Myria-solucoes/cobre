@@ -299,6 +299,7 @@ fn build_system() -> cobre_core::System {
         0,
             n_stages: // n_contracts
         N_STAGES,
+            k_max: 0,
         },
         &BoundsDefaults {
             hydro: hydro_bounds_default,

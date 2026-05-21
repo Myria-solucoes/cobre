@@ -1686,6 +1686,7 @@ mod parameter_resolution_tests {
                 n_pumping: 0,
                 n_contracts: 0,
                 n_stages,
+                k_max: 0,
             },
             &BoundsDefaults {
                 hydro: default_hydro_bounds(),

@@ -23,6 +23,7 @@
 //! |13 | `min_generation_mw <= max_generation_mw` (thermal)| `system/thermals.json`                | `InvalidValue`         |
 //! |14 | Anticipated thermal `lead_stages` within study horizon and lifecycle bounds | `system/thermals.json` | `BusinessRuleViolation` |
 //! |15 | Anticipated thermals bijection with `past_anticipated_commitments` entries  | `initial_conditions.json` | `BusinessRuleViolation` |
+//! |16 | Thermal `thermal_bounds.parquet` override `stage_id` within `[0, n_stages)` | `constraints/thermal_bounds.parquet` | `BusinessRuleViolation` |
 //!
 //! ## Layer 5b rules (stages, penalties, and scenario domain) — `validate_semantic_stages_penalties_scenarios`
 //!
@@ -84,6 +85,7 @@ pub(crate) fn validate_semantic_hydro_thermal(data: &ParsedData, ctx: &mut Valid
     hydro::check_fpha_constraints(data, ctx);
     thermal::check_thermal_generation_bounds(data, ctx);
     thermal::check_anticipated_thermals(data, ctx);
+    thermal::check_thermal_bounds_override_stage_range(data, ctx);
 }
 
 // ── validate_semantic_stages_penalties_scenarios ──────────────────────────────

@@ -3,8 +3,8 @@
 use cobre_core::System;
 
 use crate::scaling_report::{
-    build_scaling_report, compute_coefficient_range, summarize_scale_factors, LpDimensions,
-    StageScalingReport,
+    LpDimensions, StageScalingReport, build_scaling_report, compute_coefficient_range,
+    summarize_scale_factors,
 };
 use crate::{indexer::StageIndexer, lp_builder, lp_builder::StageTemplates};
 

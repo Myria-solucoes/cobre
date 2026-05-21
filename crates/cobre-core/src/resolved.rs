@@ -566,7 +566,13 @@ impl ResolvedPenalties {
 /// Populated by `cobre-io` after base bounds are overlaid with stage-specific
 /// overrides. Provides O(1) lookup via direct array indexing.
 ///
-/// Internal layout: `data[entity_idx * n_stages + stage_idx]`.
+/// Internal layout: most tables use `data[entity_idx * n_stages + stage_idx]`.
+/// The `thermal` table uses an extended stride
+/// `data[thermal_idx * thermal_stage_axis_len + stage_idx]` with
+/// `thermal_stage_axis_len = n_stages + k_max`, where `k_max` is the maximum
+/// lead-stages across anticipated thermals. The padded region
+/// `[n_stages, n_stages + k_max)` is reserved for delivery-stage lookups by
+/// anticipated-decision columns.
 ///
 /// # Examples
 ///
@@ -590,7 +596,7 @@ impl ResolvedPenalties {
 /// let contract_default = ContractStageBounds { min_mw: 0.0, max_mw: 50.0, price_per_mwh: 80.0 };
 ///
 /// let table = ResolvedBounds::new(
-///     &BoundsCountsSpec { n_hydros: 2, n_thermals: 1, n_lines: 1, n_pumping: 1, n_contracts: 1, n_stages: 3 },
+///     &BoundsCountsSpec { n_hydros: 2, n_thermals: 1, n_lines: 1, n_pumping: 1, n_contracts: 1, n_stages: 3, k_max: 0 },
 ///     &BoundsDefaults { hydro: hydro_default, thermal: thermal_default, line: line_default, pumping: pumping_default, contract: contract_default },
 /// );
 ///
@@ -602,9 +608,22 @@ impl ResolvedPenalties {
 pub struct ResolvedBounds {
     /// Total number of stages. Used to compute flat indices.
     n_stages: usize,
+    /// Stride used to index the `thermal` Vec; equals `n_stages + k_max`.
+    ///
+    /// Stored as a denormalized scalar so the hot-path accessors do not need
+    /// to recompute it from a `BoundsCountsSpec` (which is not retained).
+    #[cfg_attr(feature = "serde", serde(default))]
+    thermal_stage_axis_len: usize,
     /// Flat `n_hydros * n_stages` array indexed `[hydro_idx * n_stages + stage_idx]`.
     hydro: Vec<HydroStageBounds>,
-    /// Flat `n_thermals * n_stages` array indexed `[thermal_idx * n_stages + stage_idx]`.
+    /// Flat `n_thermals * (n_stages + k_max)` array indexed
+    /// `[thermal_idx * thermal_stage_axis_len + stage_idx]`.
+    ///
+    /// The stage axis is asymmetric relative to the other entity tables: it is
+    /// extended by `k_max` cells per thermal to host delivery-stage values for
+    /// anticipated-decision columns. Indices `[0, n_stages)` are the regular
+    /// study horizon; indices `[n_stages, n_stages + k_max)` are the padded
+    /// region.
     thermal: Vec<ThermalStageBounds>,
     /// Flat `n_lines * n_stages` array indexed `[line_idx * n_stages + stage_idx]`.
     line: Vec<LineStageBounds>,
@@ -629,6 +648,9 @@ pub struct BoundsCountsSpec {
     pub n_contracts: usize,
     /// Number of time stages.
     pub n_stages: usize,
+    /// Maximum lead-stages `K_max` across anticipated thermals; the thermal
+    /// Vec stage axis is sized `n_stages + k_max`. Zero means no padding.
+    pub k_max: usize,
 }
 
 /// Default per-stage bound values for each entity type.
@@ -665,6 +687,7 @@ impl ResolvedBounds {
     pub fn empty() -> Self {
         Self {
             n_stages: 0,
+            thermal_stage_axis_len: 0,
             hydro: Vec::new(),
             thermal: Vec::new(),
             line: Vec::new(),
@@ -683,10 +706,12 @@ impl ResolvedBounds {
     /// * `defaults` — default per-stage bound values grouped into [`BoundsDefaults`]
     #[must_use]
     pub fn new(counts: &BoundsCountsSpec, defaults: &BoundsDefaults) -> Self {
+        let thermal_axis = counts.n_stages + counts.k_max;
         Self {
             n_stages: counts.n_stages,
+            thermal_stage_axis_len: thermal_axis,
             hydro: vec![defaults.hydro; counts.n_hydros * counts.n_stages],
-            thermal: vec![defaults.thermal; counts.n_thermals * counts.n_stages],
+            thermal: vec![defaults.thermal; counts.n_thermals * thermal_axis],
             line: vec![defaults.line; counts.n_lines * counts.n_stages],
             pumping: vec![defaults.pumping; counts.n_pumping * counts.n_stages],
             contract: vec![defaults.contract; counts.n_contracts * counts.n_stages],
@@ -707,10 +732,14 @@ impl ResolvedBounds {
     }
 
     /// Return the resolved bounds for a thermal unit at a specific stage.
+    ///
+    /// `stage_index` is valid in `[0, thermal_stage_axis_len())`, which equals
+    /// `n_stages() + k_max`. Indices `>= n_stages()` access the padded region
+    /// reserved for delivery-stage lookups by anticipated-decision columns.
     #[inline]
     #[must_use]
     pub fn thermal_bounds(&self, thermal_index: usize, stage_index: usize) -> ThermalStageBounds {
-        self.thermal[thermal_index * self.n_stages + stage_index]
+        self.thermal[thermal_index * self.thermal_stage_axis_len + stage_index]
     }
 
     /// Return the resolved bounds for a transmission line at a specific stage.
@@ -752,13 +781,17 @@ impl ResolvedBounds {
     }
 
     /// Return a mutable reference to the thermal bounds cell for in-place update.
+    ///
+    /// `stage_index` is valid in `[0, thermal_stage_axis_len())`. Indices
+    /// `>= n_stages()` write into the padded region reserved for
+    /// delivery-stage lookups by anticipated-decision columns.
     #[inline]
     pub fn thermal_bounds_mut(
         &mut self,
         thermal_index: usize,
         stage_index: usize,
     ) -> &mut ThermalStageBounds {
-        let idx = thermal_index * self.n_stages + stage_index;
+        let idx = thermal_index * self.thermal_stage_axis_len + stage_index;
         &mut self.thermal[idx]
     }
 
@@ -800,6 +833,19 @@ impl ResolvedBounds {
     #[must_use]
     pub fn n_stages(&self) -> usize {
         self.n_stages
+    }
+
+    /// Return the stride used to index the thermal Vec.
+    ///
+    /// Equals `n_stages() + k_max`, where `k_max` is the maximum lead-stages
+    /// across anticipated thermals. When `k_max == 0` this equals
+    /// `n_stages()`. The thermal table reserves indices
+    /// `[n_stages(), thermal_stage_axis_len())` for delivery-stage lookups by
+    /// anticipated-decision columns.
+    #[inline]
+    #[must_use]
+    pub fn thermal_stage_axis_len(&self) -> usize {
+        self.thermal_stage_axis_len
     }
 }
 
@@ -1691,6 +1737,7 @@ mod tests {
                 n_pumping: 1,
                 n_contracts: 1,
                 n_stages: 3,
+                k_max: 0,
             },
             &BoundsDefaults {
                 hydro: hb,
@@ -1747,6 +1794,7 @@ mod tests {
                 n_pumping: 1,
                 n_contracts: 1,
                 n_stages: 3,
+                k_max: 0,
             },
             &BoundsDefaults {
                 hydro: hb,
@@ -1769,6 +1817,318 @@ mod tests {
         table.thermal_bounds_mut(0, 2).max_generation_mw = 150.0;
         assert!((table.thermal_bounds(0, 2).max_generation_mw - 150.0).abs() < f64::EPSILON);
         assert!((table.thermal_bounds(0, 0).max_generation_mw - 200.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_thermal_stage_axis_extends_with_k_max() {
+        let tb = ThermalStageBounds {
+            min_generation_mw: 0.0,
+            max_generation_mw: 100.0,
+            cost_per_mwh: 0.0,
+        };
+        let table = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 0,
+                n_thermals: 2,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: 3,
+                k_max: 2,
+            },
+            &BoundsDefaults {
+                hydro: zero_hydro_default_for_tests(),
+                thermal: tb,
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        assert_eq!(table.thermal_stage_axis_len(), 5);
+        // Padded region inherits the default ThermalStageBounds.
+        let padded = table.thermal_bounds(1, 4);
+        assert!((padded.max_generation_mw - 100.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_thermal_stage_axis_zero_k_max_unchanged() {
+        let tb = ThermalStageBounds {
+            min_generation_mw: 0.0,
+            max_generation_mw: 50.0,
+            cost_per_mwh: 0.0,
+        };
+        let table = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 0,
+                n_thermals: 1,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: 4,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: zero_hydro_default_for_tests(),
+                thermal: tb,
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        assert_eq!(table.thermal_stage_axis_len(), table.n_stages());
+        // Last valid horizon stage still works.
+        let last = table.thermal_bounds(0, 3);
+        assert!((last.max_generation_mw - 50.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_empty_bounds_has_zero_thermal_axis() {
+        let empty = ResolvedBounds::empty();
+        assert_eq!(empty.thermal_stage_axis_len(), 0);
+        assert_eq!(empty.n_stages(), 0);
+    }
+
+    // ─── ticket-019 boundary tests for thermal-bounds padding ─────────────────
+    //
+    // These tests pin down the lookup contract at the four boundary stage
+    // indices that epic-05 LP-template wiring will exercise:
+    //
+    //   * `T - 1` — last study stage (real, possibly overridden).
+    //   * `T`     — first padded stage (must inherit plant base).
+    //   * `T + K - 1` — last padded stage (still plant base).
+    //   * `T + K` — one past the padding (panics in debug builds).
+    //
+    // The per-thermal base-fill semantics are verified in
+    // `crates/cobre-io/src/resolution/bounds.rs::tests` because that file owns
+    // `Thermal` entity construction; this module only verifies the uniform
+    // `BoundsDefaults.thermal` fill behavior.
+
+    /// Sentinel default used by ticket-019 boundary tests. Values are picked
+    /// so an off-by-one read returns a value that does not collide with any
+    /// plausible production default.
+    const T_DEFAULT: ThermalStageBounds = ThermalStageBounds {
+        min_generation_mw: 7.0,
+        max_generation_mw: 77.0,
+        cost_per_mwh: 7.7,
+    };
+
+    /// Construct a `ResolvedBounds` with one thermal entity, the given
+    /// `n_stages` / `k_max`, and `T_DEFAULT` as the thermal default. Other
+    /// entity types are zero-sized.
+    fn make_bounds_for_boundary_tests(n_stages: usize, k_max: usize) -> ResolvedBounds {
+        ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 0,
+                n_thermals: 1,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages,
+                k_max,
+            },
+            &BoundsDefaults {
+                hydro: zero_hydro_default_for_tests(),
+                thermal: T_DEFAULT,
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        )
+    }
+
+    /// `T - 1`: writing a distinctive value via `thermal_bounds_mut` at the
+    /// last study stage and reading it back via `thermal_bounds` must return
+    /// the written value — the padding region must not shadow study stages.
+    #[test]
+    fn test_thermal_bounds_at_last_study_stage() {
+        let mut table = make_bounds_for_boundary_tests(5, 3);
+        let written = ThermalStageBounds {
+            min_generation_mw: 11.0,
+            max_generation_mw: 111.0,
+            cost_per_mwh: 1.1,
+        };
+        *table.thermal_bounds_mut(0, 4) = written;
+        let read = table.thermal_bounds(0, 4);
+        assert!((read.min_generation_mw - 11.0).abs() < f64::EPSILON);
+        assert!((read.max_generation_mw - 111.0).abs() < f64::EPSILON);
+        assert!((read.cost_per_mwh - 1.1).abs() < f64::EPSILON);
+    }
+
+    /// `T`: the first padded stage must contain the uniform thermal default
+    /// after `ResolvedBounds::new` — no spillover from any non-existent prior
+    /// override and no zero-initialization regression.
+    #[test]
+    fn test_thermal_bounds_at_first_padded_stage() {
+        let table = make_bounds_for_boundary_tests(5, 3);
+        let padded = table.thermal_bounds(0, 5);
+        assert!((padded.min_generation_mw - T_DEFAULT.min_generation_mw).abs() < f64::EPSILON);
+        assert!((padded.max_generation_mw - T_DEFAULT.max_generation_mw).abs() < f64::EPSILON);
+        assert!((padded.cost_per_mwh - T_DEFAULT.cost_per_mwh).abs() < f64::EPSILON);
+    }
+
+    /// `T + K_max - 1`: the last padded stage must still return the uniform
+    /// thermal default — the padded region is contiguous and uniform.
+    #[test]
+    fn test_thermal_bounds_at_last_padded_stage() {
+        let table = make_bounds_for_boundary_tests(5, 3);
+        // 5 + 3 - 1 == 7
+        let padded = table.thermal_bounds(0, 7);
+        assert!((padded.min_generation_mw - T_DEFAULT.min_generation_mw).abs() < f64::EPSILON);
+        assert!((padded.max_generation_mw - T_DEFAULT.max_generation_mw).abs() < f64::EPSILON);
+        assert!((padded.cost_per_mwh - T_DEFAULT.cost_per_mwh).abs() < f64::EPSILON);
+    }
+
+    /// `T + K_max`: one past the padding region must panic in debug builds.
+    /// Gated by `#[cfg(debug_assertions)]` because release builds may silently
+    /// read adjacent memory via `Vec` indexing (see `thermal_bounds` docs).
+    #[test]
+    #[cfg(debug_assertions)]
+    fn test_thermal_bounds_out_of_range_panics_in_debug() {
+        let table = make_bounds_for_boundary_tests(5, 3);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // 5 + 3 == 8: one past the last valid padded stage.
+            let _ = table.thermal_bounds(0, 8);
+        }));
+        assert!(
+            result.is_err(),
+            "thermal_bounds(0, 8) must panic in debug builds when n_stages=5, k_max=3"
+        );
+    }
+
+    /// `n_stages()` returns the *study horizon* length, not the padded axis.
+    /// The padded region is internal to the thermal storage; consumers that
+    /// iterate the study horizon (forward/backward passes, simulation) must
+    /// continue to see `n_stages() == 5`.
+    #[test]
+    fn test_n_stages_unchanged_with_padding() {
+        let table = make_bounds_for_boundary_tests(5, 3);
+        assert_eq!(table.n_stages(), 5);
+    }
+
+    /// `thermal_stage_axis_len()` returns `n_stages + k_max`. This is the
+    /// public accessor anticipated-decision consumers use to validate that
+    /// `t + K_i` lookups remain in-range.
+    #[test]
+    fn test_thermal_stage_axis_len_equals_n_plus_k_max() {
+        let table = make_bounds_for_boundary_tests(5, 3);
+        assert_eq!(table.thermal_stage_axis_len(), 8);
+    }
+
+    /// Parameter-sweep invariant test (epic-03 `anticipated_invariants`
+    /// pattern). Asserts `thermal_stage_axis_len() == n_stages + k_max` across
+    /// a 3 x 4 x 3 grid of configurations. The coverage gate at the end
+    /// confirms every combination was reached.
+    mod bounds_padding_invariants {
+        use super::*;
+
+        #[test]
+        fn axis_len_matches_n_plus_k_max() {
+            let n_stages_grid = [0_usize, 1, 5];
+            let k_max_grid = [0_usize, 1, 3, 10];
+            let n_thermals_grid = [0_usize, 1, 5];
+
+            let mut count: usize = 0;
+            for &n_stages in &n_stages_grid {
+                for &k_max in &k_max_grid {
+                    for &n_thermals in &n_thermals_grid {
+                        let table = ResolvedBounds::new(
+                            &BoundsCountsSpec {
+                                n_hydros: 0,
+                                n_thermals,
+                                n_lines: 0,
+                                n_pumping: 0,
+                                n_contracts: 0,
+                                n_stages,
+                                k_max,
+                            },
+                            &BoundsDefaults {
+                                hydro: zero_hydro_default_for_tests(),
+                                thermal: T_DEFAULT,
+                                line: LineStageBounds {
+                                    direct_mw: 0.0,
+                                    reverse_mw: 0.0,
+                                },
+                                pumping: PumpingStageBounds {
+                                    min_flow_m3s: 0.0,
+                                    max_flow_m3s: 0.0,
+                                },
+                                contract: ContractStageBounds {
+                                    min_mw: 0.0,
+                                    max_mw: 0.0,
+                                    price_per_mwh: 0.0,
+                                },
+                            },
+                        );
+                        assert_eq!(
+                            table.thermal_stage_axis_len(),
+                            n_stages + k_max,
+                            "axis_len mismatch at (n_stages={n_stages}, k_max={k_max}, n_thermals={n_thermals})"
+                        );
+                        assert_eq!(
+                            table.n_stages(),
+                            n_stages,
+                            "n_stages mismatch at (n_stages={n_stages}, k_max={k_max}, n_thermals={n_thermals})"
+                        );
+                        count += 1;
+                    }
+                }
+            }
+            // Coverage gate: 3 * 4 * 3 == 36 combinations expected; assert the
+            // documented minimum of 27 just to guard against accidental loop
+            // truncation if the grids are edited.
+            assert!(
+                count >= 27,
+                "expected at least 27 sweep combinations, got {count}"
+            );
+        }
+    }
+
+    /// Helper returning a zero-valued [`HydroStageBounds`] for tests that do
+    /// not exercise the hydro entity table.
+    fn zero_hydro_default_for_tests() -> HydroStageBounds {
+        HydroStageBounds {
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 0.0,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 0.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 0.0,
+            max_diversion_m3s: None,
+            filling_inflow_m3s: 0.0,
+            water_withdrawal_m3s: 0.0,
+        }
     }
 
     #[test]
@@ -1853,6 +2213,7 @@ mod tests {
                 n_pumping: 1,
                 n_contracts: 1,
                 n_stages: 3,
+                k_max: 0,
             },
             &BoundsDefaults {
                 hydro: hb,
@@ -1864,6 +2225,63 @@ mod tests {
         );
         let json = serde_json::to_string(&original).expect("serialize");
         let restored: ResolvedBounds = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(original, restored);
+    }
+
+    /// Roundtrip with a non-zero `k_max`: guards against silent data loss in
+    /// the `thermal_stage_axis_len` field. With `serde(default)` on that
+    /// field, an absent JSON key would deserialize back to `0`, aliasing all
+    /// thermals to thermal 0's cells. This test ensures the field is actually
+    /// serialized.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_resolved_bounds_serde_roundtrip_with_padding() {
+        let hb = make_hydro_bounds();
+        let tb = ThermalStageBounds {
+            min_generation_mw: 0.0,
+            max_generation_mw: 200.0,
+            cost_per_mwh: 60.0,
+        };
+        let lb = LineStageBounds {
+            direct_mw: 50.0,
+            reverse_mw: 50.0,
+        };
+        let pb = PumpingStageBounds {
+            min_flow_m3s: 0.0,
+            max_flow_m3s: 20.0,
+        };
+        let cb = ContractStageBounds {
+            min_mw: 0.0,
+            max_mw: 50.0,
+            price_per_mwh: 80.0,
+        };
+
+        let original = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 2,
+                n_lines: 1,
+                n_pumping: 1,
+                n_contracts: 1,
+                n_stages: 3,
+                k_max: 2,
+            },
+            &BoundsDefaults {
+                hydro: hb,
+                thermal: tb,
+                line: lb,
+                pumping: pb,
+                contract: cb,
+            },
+        );
+        assert_eq!(original.thermal_stage_axis_len(), 5);
+        let json = serde_json::to_string(&original).expect("serialize");
+        let restored: ResolvedBounds = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            restored.thermal_stage_axis_len(),
+            original.thermal_stage_axis_len(),
+            "thermal_stage_axis_len must survive serde roundtrip"
+        );
         assert_eq!(original, restored);
     }
 

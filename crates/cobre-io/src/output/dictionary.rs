@@ -1253,6 +1253,7 @@ mod tests {
                 n_pumping: 0,
                 n_contracts: 0,
                 n_stages: 1,
+                k_max: 0,
             },
             &BoundsDefaults {
                 hydro: hydro_bounds_default,
@@ -1319,6 +1320,7 @@ mod tests {
                 n_pumping: 0,
                 n_contracts: 0,
                 n_stages: 2,
+                k_max: 0,
             },
             &BoundsDefaults {
                 hydro: hydro_bounds_default,

@@ -263,6 +263,7 @@ fn build_resolved_bounds(n_hydros: usize, n_stages: usize) -> ResolvedBounds {
             n_pumping: 0,
             n_contracts: 0,
             n_stages: n_st,
+            k_max: 0,
         },
         &BoundsDefaults {
             hydro: hydro_stage_bounds(),

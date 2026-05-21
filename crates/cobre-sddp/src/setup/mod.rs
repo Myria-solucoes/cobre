@@ -38,20 +38,20 @@ pub mod stochastic_pipeline;
 pub(crate) mod template_postprocess;
 
 pub use params::{
-    ConstructionConfig, StudyParams, DEFAULT_FORWARD_PASSES, DEFAULT_MAX_ITERATIONS, DEFAULT_SEED,
+    ConstructionConfig, DEFAULT_FORWARD_PASSES, DEFAULT_MAX_ITERATIONS, DEFAULT_SEED, StudyParams,
 };
 pub use scenario_library_set::{PhaseLibraries, ScenarioLibraries};
 pub use stage_data::StageData;
 pub use stochastic_pipeline::{
-    build_ncs_factor_entries, load_load_factors_for_stochastic, prepare_stochastic,
-    PrepareStochasticResult,
+    PrepareStochasticResult, build_ncs_factor_entries, load_load_factors_for_stochastic,
+    prepare_stochastic,
 };
 
 use std::path::Path;
 
 use cobre_core::{
-    scenario::{SamplingScheme, ScenarioSource},
     EntityId, Stage, System,
+    scenario::{SamplingScheme, ScenarioSource},
 };
 use cobre_io::build_hydro_reference_volume_fractions;
 use cobre_stochastic::{ExternalScenarioLibrary, HistoricalScenarioLibrary, StochasticContext};
@@ -59,7 +59,7 @@ use cobre_stochastic::{ExternalScenarioLibrary, HistoricalScenarioLibrary, Stoch
 use crate::{
     config::{CutManagementConfig, EventParams},
     cut::FutureCostFunction,
-    energy_conversion::{build_energy_conversion_set, EnergyConversionSet},
+    energy_conversion::{EnergyConversionSet, build_energy_conversion_set},
     error::SddpError,
     horizon_mode::HorizonMode,
     hydro_models::{EvaporationModel, PrepareHydroModelsResult, ResolvedProductionModel},
@@ -382,6 +382,13 @@ impl StudySetup {
             .max()
             .unwrap_or(0);
 
+        let k_max: usize = system
+            .thermals()
+            .iter()
+            .filter_map(|t| t.anticipated_config.as_ref())
+            .map(|c| usize::try_from(c.lead_stages).unwrap_or(usize::MAX))
+            .max()
+            .unwrap_or(0);
         let eq_counts = crate::indexer::EquipmentCounts {
             hydro_count: stage_templates_ref[0].n_hydro,
             max_par_order: stage_templates_ref[0].max_par_order,
@@ -395,7 +402,7 @@ impl StudySetup {
             // this call site produces an empty anticipated block (parity with
             // pre-anticipated behaviour) until that ticket lands.
             n_anticipated: 0,
-            k_max: 0,
+            k_max,
             anticipated_lead_stages: vec![],
             anticipated_thermal_indices: vec![],
         };
@@ -877,6 +884,13 @@ mod tests {
     use crate::indexer::StageIndexer;
 
     use cobre_core::{
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, HydroStageBounds,
+        HydroStagePenalties, LineStageBounds, LineStagePenalties, NcsStagePenalties,
+        PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
+        ResolvedPenalties, ThermalStageBounds,
+    };
+    use cobre_core::{
+        EntityId, SystemBuilder,
         entities::{
             bus::{Bus, DeficitSegment},
             hydro::{Hydro, HydroGenerationModel, HydroPenalties},
@@ -887,13 +901,6 @@ mod tests {
             Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
             StageStateConfig,
         },
-        EntityId, SystemBuilder,
-    };
-    use cobre_core::{
-        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, HydroStageBounds,
-        HydroStagePenalties, LineStageBounds, LineStagePenalties, NcsStagePenalties,
-        PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
-        ResolvedPenalties, ThermalStageBounds,
     };
     use cobre_io::config::{
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
@@ -902,7 +909,7 @@ mod tests {
         SimulationConfig as IoSimulationConfig, StoppingRuleConfig, TrainingConfig,
         TrainingSolverConfig, UpperBoundEvaluationConfig,
     };
-    use cobre_stochastic::{build_stochastic_context, ClassSchemes, OpeningTreeInputs};
+    use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
     /// Build a minimal system with 1 bus, 1 thermal, 1 hydro, and `n_stages`
     /// study stages (each with 1 block). All bounds and penalties are set to
@@ -1080,6 +1087,7 @@ mod tests {
             0,
                 n_stages: // n_contracts
             n_st,
+                k_max: 0,
             },
             &BoundsDefaults {
                 hydro: default_hydro_bounds(),
@@ -1273,6 +1281,7 @@ mod tests {
                 n_pumping: 0,
                 n_contracts: 0,
                 n_stages: n_st,
+                k_max: 0,
             },
             &BoundsDefaults {
                 hydro: HydroStageBounds {
@@ -2076,7 +2085,7 @@ mod tests {
     /// default values for all fields.
     #[test]
     fn study_params_from_config_defaults() {
-        use super::{StudyParams, DEFAULT_FORWARD_PASSES, DEFAULT_SEED};
+        use super::{DEFAULT_FORWARD_PASSES, DEFAULT_SEED, StudyParams};
         use crate::stopping_rule::StoppingMode;
         use cobre_io::config::{
             Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
@@ -2555,6 +2564,7 @@ mod tests {
                 n_pumping: 0,
                 n_contracts: 0,
                 n_stages: n_st,
+                k_max: 0,
             },
             &BoundsDefaults {
                 hydro: HydroStageBounds {
@@ -3026,6 +3036,7 @@ mod tests {
                 n_pumping: 0,
                 n_contracts: 0,
                 n_stages: n_st,
+                k_max: 0,
             },
             &BoundsDefaults {
                 hydro: default_hydro_bounds(),
@@ -3518,6 +3529,7 @@ mod tests {
                 n_pumping: 0,
                 n_contracts: 0,
                 n_stages: n_st,
+                k_max: 0,
             },
             &BoundsDefaults {
                 hydro: default_hydro_bounds(),
@@ -3774,6 +3786,7 @@ mod tests {
                 n_pumping: 0,
                 n_contracts: 0,
                 n_stages: 2,
+                k_max: 0,
             },
             &BoundsDefaults {
                 hydro: HydroStageBounds {
@@ -4043,6 +4056,7 @@ mod tests {
                 n_pumping: 0,
                 n_contracts: 0,
                 n_stages: 2,
+                k_max: 0,
             },
             &BoundsDefaults {
                 hydro: HydroStageBounds {
@@ -4180,9 +4194,9 @@ mod tests {
         use chrono::NaiveDate;
         use cobre_core::scenario::InflowModel as CoreInflowModel;
         use cobre_core::{
+            NonControllableSource,
             scenario::{ExternalNcsRow, NcsModel},
             system::SystemBuilder,
-            NonControllableSource,
         };
 
         let bus = Bus {
@@ -4339,6 +4353,7 @@ mod tests {
                 n_pumping: 0,
                 n_contracts: 0,
                 n_stages: 2,
+                k_max: 0,
             },
             &BoundsDefaults {
                 hydro: HydroStageBounds {
@@ -4604,6 +4619,7 @@ mod tests {
                 n_pumping: 0,
                 n_contracts: 0,
                 n_stages: 2,
+                k_max: 0,
             },
             &BoundsDefaults {
                 hydro: HydroStageBounds {

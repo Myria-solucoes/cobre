@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use cobre_core::{AnticipatedCommitmentHistory, EntityId};
 
-use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
+use super::super::{schema::ParsedData, ErrorKind, ValidationContext};
 
 pub(super) fn check_thermal_generation_bounds(data: &ParsedData, ctx: &mut ValidationContext) {
     for thermal in &data.thermals {
@@ -47,7 +47,9 @@ pub(super) fn check_thermal_generation_bounds(data: &ParsedData, ctx: &mut Valid
 ///    - Each matched `(thermal, history)` pair must satisfy
 ///      `history.values_mw.len() == lead_stages as usize` exactly.
 pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut ValidationContext) {
-    let n_stages = data.stages.stages.len();
+    // Study stages only: pre-study stages have negative IDs and are never
+    // delivery targets for anticipated commitments.
+    let n_stages = data.stages.stages.iter().filter(|s| s.id >= 0).count();
 
     // ── 1. Per-plant horizon window ───────────────────────────────────────────
 
@@ -70,7 +72,7 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
             continue;
         }
 
-        let k_u = usize::try_from(k).unwrap_or(usize::MAX);
+        let k_u = k as usize;
 
         // K > n_stages: plant can never deliver within the study horizon
         if k_u > n_stages {
@@ -166,7 +168,7 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
             }
             Some(history) => {
                 // Check length exactly
-                let expected = usize::try_from(k).unwrap_or(usize::MAX);
+                let expected = k as usize;
                 let actual = history.values_mw.len();
                 if actual != expected {
                     let entity_str = format!(
@@ -208,6 +210,43 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
     }
 }
 
+/// Layer 5a — rejects per-stage thermal bound overrides whose `stage_id` is
+/// outside the study horizon `[0, n_stages)`.
+///
+/// Per epic-04 Decision 7, the thermal-bounds resolution table is padded
+/// with each plant's base entity values for stages `[n_stages, n_stages + K_max)`
+/// to support anticipated-delivery lookups. Overrides in that padded region
+/// would be silently dropped by `resolve_bounds` (the `stage_index` only
+/// covers study stages); this validator surfaces them as a user-visible error.
+pub(super) fn check_thermal_bounds_override_stage_range(
+    data: &ParsedData,
+    ctx: &mut ValidationContext,
+) {
+    // `filter(id >= 0)` counts study stages only, matching the resolver's
+    // `stage_index` (cobre-io/src/pipeline.rs builds it from study stages
+    // only). Pre-study stages with negative IDs are excluded from the
+    // override-table horizon.
+    let n_stages = data.stages.stages.iter().filter(|s| s.id >= 0).count();
+    let n_stages_i = i64::try_from(n_stages).unwrap_or(i64::MAX);
+    for row in &data.thermal_bounds {
+        let s = i64::from(row.stage_id);
+        if s < 0 || s >= n_stages_i {
+            let entity_str = format!("thermal_id={}, stage_id={}", row.thermal_id.0, row.stage_id);
+            ctx.add_error(
+                ErrorKind::BusinessRuleViolation,
+                "constraints/thermal_bounds.parquet",
+                Some(&entity_str),
+                format!(
+                    "Thermal {}: thermal_bounds override at stage_id={} is \
+                     outside the study horizon [0, {}); per-stage thermal \
+                     overrides past the horizon are not allowed",
+                    row.thermal_id.0, row.stage_id, n_stages
+                ),
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -219,7 +258,7 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
     clippy::cast_sign_loss
 )]
 mod tests {
-    use cobre_core::{AnticipatedCommitmentHistory, EntityId, entities::AnticipatedConfig};
+    use cobre_core::{entities::AnticipatedConfig, AnticipatedCommitmentHistory, EntityId};
 
     use super::super::test_support::*;
     use super::super::validate_semantic_hydro_thermal;
@@ -581,5 +620,290 @@ mod tests {
         let mut ctx = ValidationContext::new();
         validate_semantic_hydro_thermal(&data, &mut ctx);
         assert!(!ctx.has_errors());
+    }
+
+    // ── Layer 5a rule 16: thermal_bounds override stage_id within [0, n_stages)
+
+    /// Build a `ThermalBoundsRow` with the given thermal_id and stage_id and
+    /// no override values set.
+    fn make_thermal_bounds_row(thermal_id: i32, stage_id: i32) -> crate::ThermalBoundsRow {
+        crate::ThermalBoundsRow {
+            thermal_id: EntityId::from(thermal_id),
+            stage_id,
+            min_generation_mw: None,
+            max_generation_mw: None,
+            cost_per_mwh: None,
+            block_id: None,
+        }
+    }
+
+    /// Build a `ParsedData` with `n_stages` study stages, one thermal,
+    /// and the given `thermal_bounds` rows.
+    fn make_data_thermal_bounds(
+        n_stages: usize,
+        rows: Vec<crate::ThermalBoundsRow>,
+    ) -> crate::validation::schema::ParsedData {
+        let thermal = make_thermal(1, 0.0, 100.0);
+        let stage_ids: Vec<i32> = (0..n_stages as i32).collect();
+        let mut data = make_data(
+            vec![],
+            vec![thermal],
+            vec![],
+            make_stages(stage_ids),
+            vec![],
+            vec![],
+        );
+        data.thermal_bounds = rows;
+        data
+    }
+
+    /// `n_stages = 5`, row `stage_id = 4` is within `[0, 5)` — accepted.
+    #[test]
+    fn test_thermal_bounds_override_stage_within_horizon_accepted() {
+        let data = make_data_thermal_bounds(5, vec![make_thermal_bounds_row(1, 4)]);
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let errors = ctx.errors();
+        let relevant: Vec<_> = errors
+            .iter()
+            .filter(|e| {
+                e.file
+                    .to_string_lossy()
+                    .contains("constraints/thermal_bounds.parquet")
+            })
+            .collect();
+        assert!(
+            relevant.is_empty(),
+            "expected no thermal_bounds.parquet errors, got: {relevant:?}"
+        );
+    }
+
+    /// `n_stages = 5`, row `stage_id = 5` is the first invalid index — rejected.
+    #[test]
+    fn test_thermal_bounds_override_stage_equals_n_rejected() {
+        let data = make_data_thermal_bounds(5, vec![make_thermal_bounds_row(1, 5)]);
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let errors = ctx.errors();
+        let relevant: Vec<_> = errors
+            .iter()
+            .filter(|e| {
+                e.kind == ErrorKind::BusinessRuleViolation
+                    && e.file
+                        .to_string_lossy()
+                        .contains("constraints/thermal_bounds.parquet")
+            })
+            .collect();
+        assert_eq!(
+            relevant.len(),
+            1,
+            "expected exactly one BusinessRuleViolation, got: {relevant:?}"
+        );
+        let msg = &relevant[0].message;
+        assert!(
+            msg.contains("stage_id=5"),
+            "message should contain 'stage_id=5', got: {msg}"
+        );
+        assert!(
+            msg.contains("[0, 5)"),
+            "message should contain '[0, 5)', got: {msg}"
+        );
+        assert!(
+            msg.contains("not allowed"),
+            "message should contain 'not allowed', got: {msg}"
+        );
+    }
+
+    // Acceptance-boundary case is covered by
+    // `test_thermal_bounds_override_stage_within_horizon_accepted` above and
+    // by `boundary_tests::override_at_t_minus_1_acceptance_boundary` below.
+
+    /// `stage_id = -1` (pre-study stage) — rejected.
+    #[test]
+    fn test_thermal_bounds_override_stage_negative_rejected() {
+        let data = make_data_thermal_bounds(5, vec![make_thermal_bounds_row(1, -1)]);
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let errors = ctx.errors();
+        let relevant: Vec<_> = errors
+            .iter()
+            .filter(|e| {
+                e.kind == ErrorKind::BusinessRuleViolation
+                    && e.file
+                        .to_string_lossy()
+                        .contains("constraints/thermal_bounds.parquet")
+            })
+            .collect();
+        assert_eq!(
+            relevant.len(),
+            1,
+            "expected exactly one BusinessRuleViolation for stage_id=-1, got: {relevant:?}"
+        );
+    }
+
+    /// Three rows, two offending (`stage_id == n_stages` and
+    /// `stage_id > n_stages`), one valid. Exactly two errors are emitted.
+    #[test]
+    fn test_thermal_bounds_override_multiple_offending_rows() {
+        let rows = vec![
+            make_thermal_bounds_row(1, 0), // valid
+            make_thermal_bounds_row(1, 5), // invalid: equals n_stages
+            make_thermal_bounds_row(1, 9), // invalid: past n_stages
+        ];
+        let data = make_data_thermal_bounds(5, rows);
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let errors = ctx.errors();
+        let relevant: Vec<_> = errors
+            .iter()
+            .filter(|e| {
+                e.kind == ErrorKind::BusinessRuleViolation
+                    && e.file
+                        .to_string_lossy()
+                        .contains("constraints/thermal_bounds.parquet")
+            })
+            .collect();
+        assert_eq!(
+            relevant.len(),
+            2,
+            "expected exactly two BusinessRuleViolations, got: {relevant:?}"
+        );
+    }
+
+    /// `n_stages = 0`: the half-open interval `[0, 0)` is empty, so any row
+    /// at any non-negative stage_id is rejected.
+    #[test]
+    fn test_thermal_bounds_override_zero_n_stages_all_rejected() {
+        let data = make_data_thermal_bounds(0, vec![make_thermal_bounds_row(1, 0)]);
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let errors = ctx.errors();
+        let relevant: Vec<_> = errors
+            .iter()
+            .filter(|e| {
+                e.kind == ErrorKind::BusinessRuleViolation
+                    && e.file
+                        .to_string_lossy()
+                        .contains("constraints/thermal_bounds.parquet")
+            })
+            .collect();
+        assert_eq!(
+            relevant.len(),
+            1,
+            "expected exactly one BusinessRuleViolation when n_stages=0, got: {relevant:?}"
+        );
+    }
+
+    // ── ticket-019: boundary_tests sub-module ─────────────────────────────────
+    //
+    // Re-organizes the ticket-018 strict-inequality boundary tests into a
+    // discoverable named sub-module using the
+    // `..._acceptance_boundary` / `..._rejection_boundary` suffix convention
+    // established by epic-03. Each test below mirrors a ticket-018 test (the
+    // originals are preserved above to keep the existing test surface stable
+    // — see ticket-019 §"DO NOT delete the existing ticket-018 tests").
+    //
+    // The predicate under test is the strict-inequality guard `stage_id < 0
+    // || stage_id >= n_stages` in `validate_semantic_hydro_thermal`. The
+    // boundaries are:
+    //
+    //   * acceptance at `stage_id == n_stages - 1` (the last in-horizon row)
+    //   * rejection  at `stage_id == n_stages`     (first out-of-horizon row)
+    //   * rejection  at `stage_id == n_stages + 1` (interior rejection)
+    //   * rejection  at `stage_id < 0`             (negative pre-study)
+    mod boundary_tests {
+        use super::*;
+
+        /// `n_stages = 5`, `stage_id = 4` is within `[0, 5)` — accepted.
+        #[test]
+        fn override_at_t_minus_1_acceptance_boundary() {
+            let data = make_data_thermal_bounds(5, vec![make_thermal_bounds_row(1, 4)]);
+            let mut ctx = ValidationContext::new();
+            validate_semantic_hydro_thermal(&data, &mut ctx);
+            let errors = ctx.errors();
+            let relevant: Vec<_> = errors
+                .iter()
+                .filter(|e| {
+                    e.file
+                        .to_string_lossy()
+                        .contains("constraints/thermal_bounds.parquet")
+                })
+                .collect();
+            assert!(
+                relevant.is_empty(),
+                "stage_id=4 with n_stages=5 must be accepted, got: {relevant:?}"
+            );
+        }
+
+        /// `n_stages = 5`, `stage_id = 5` is the first invalid index — rejected.
+        #[test]
+        fn override_at_t_rejection_boundary() {
+            let data = make_data_thermal_bounds(5, vec![make_thermal_bounds_row(1, 5)]);
+            let mut ctx = ValidationContext::new();
+            validate_semantic_hydro_thermal(&data, &mut ctx);
+            let errors = ctx.errors();
+            let relevant: Vec<_> = errors
+                .iter()
+                .filter(|e| {
+                    e.kind == ErrorKind::BusinessRuleViolation
+                        && e.file
+                            .to_string_lossy()
+                            .contains("constraints/thermal_bounds.parquet")
+                })
+                .collect();
+            assert_eq!(
+                relevant.len(),
+                1,
+                "expected exactly one BusinessRuleViolation at stage_id=5, got: {relevant:?}"
+            );
+        }
+
+        /// `n_stages = 5`, `stage_id = 6` (one past the rejection boundary)
+        /// — rejected. Interior rejection to complement the boundary
+        /// rejection at `stage_id == n_stages`.
+        #[test]
+        fn override_at_t_plus_one_rejection() {
+            let data = make_data_thermal_bounds(5, vec![make_thermal_bounds_row(1, 6)]);
+            let mut ctx = ValidationContext::new();
+            validate_semantic_hydro_thermal(&data, &mut ctx);
+            let errors = ctx.errors();
+            let relevant: Vec<_> = errors
+                .iter()
+                .filter(|e| {
+                    e.kind == ErrorKind::BusinessRuleViolation
+                        && e.file
+                            .to_string_lossy()
+                            .contains("constraints/thermal_bounds.parquet")
+                })
+                .collect();
+            assert_eq!(
+                relevant.len(),
+                1,
+                "expected exactly one BusinessRuleViolation at stage_id=6, got: {relevant:?}"
+            );
+        }
+
+        /// `stage_id = -1` (pre-study) — rejected.
+        #[test]
+        fn override_negative_stage_rejection() {
+            let data = make_data_thermal_bounds(5, vec![make_thermal_bounds_row(1, -1)]);
+            let mut ctx = ValidationContext::new();
+            validate_semantic_hydro_thermal(&data, &mut ctx);
+            let errors = ctx.errors();
+            let relevant: Vec<_> = errors
+                .iter()
+                .filter(|e| {
+                    e.kind == ErrorKind::BusinessRuleViolation
+                        && e.file
+                            .to_string_lossy()
+                            .contains("constraints/thermal_bounds.parquet")
+                })
+                .collect();
+            assert_eq!(
+                relevant.len(),
+                1,
+                "expected exactly one BusinessRuleViolation at stage_id=-1, got: {relevant:?}"
+            );
+        }
     }
 }

@@ -66,6 +66,9 @@ pub struct BoundsOverrides<'a> {
 ///
 /// * `entities` — entity slices grouped into [`BoundsEntitySlices`]
 /// * `n_stages` — total number of study stages
+/// * `k_max` — maximum lead-stages across anticipated thermals; extends the
+///   thermal stage axis to `n_stages + k_max`. Pass `0` when no anticipated
+///   thermals are present (the padded region is then empty)
 /// * `stage_index` — mapping from domain-level `stage_id` to positional 0-based index
 /// * `overrides` — per-entity-type override rows grouped into [`BoundsOverrides`]
 ///
@@ -153,6 +156,7 @@ pub struct BoundsOverrides<'a> {
 ///         contracts: &[],
 ///     },
 ///     3,
+///     0,
 ///     &stage_index,
 ///     &BoundsOverrides {
 ///         hydro: &[override_row],
@@ -179,6 +183,7 @@ pub struct BoundsOverrides<'a> {
 pub fn resolve_bounds(
     entities: &BoundsEntitySlices<'_>,
     n_stages: usize,
+    k_max: usize,
     stage_index: &HashMap<i32, usize>,
     overrides: &BoundsOverrides<'_>,
 ) -> ResolvedBounds {
@@ -286,6 +291,7 @@ pub fn resolve_bounds(
             n_pumping: entities.pumping_stations.len(),
             n_contracts: entities.contracts.len(),
             n_stages: alloc_stages,
+            k_max,
         },
         &cobre_core::BoundsDefaults {
             hydro: hydro_default,
@@ -313,13 +319,17 @@ pub fn resolve_bounds(
         }
     }
 
+    // Thermal cells [0, n_stages) hold the study-horizon base values;
+    // cells [n_stages, n_stages + k_max) hold the same base values to
+    // support LP lookups at delivery stage t + K_i for anticipated thermals.
+    let thermal_axis = n_stages + k_max;
     for (entity_idx, thermal) in entities.thermals.iter().enumerate() {
         let base = ThermalStageBounds {
             min_generation_mw: thermal.min_generation_mw,
             max_generation_mw: thermal.max_generation_mw,
             cost_per_mwh: thermal.cost_per_mwh,
         };
-        for stage_idx in 0..n_stages {
+        for stage_idx in 0..thermal_axis {
             *table.thermal_bounds_mut(entity_idx, stage_idx) = base;
         }
     }
@@ -560,6 +570,7 @@ mod tests {
         pumping_stations: &[PumpingStation],
         contracts: &[EnergyContract],
         n_stages: usize,
+        k_max: usize,
         hydro_overrides: &[HydroBoundsRow],
         thermal_overrides: &[ThermalBoundsRow],
         line_overrides: &[LineBoundsRow],
@@ -575,6 +586,7 @@ mod tests {
                 contracts,
             },
             n_stages,
+            k_max,
             &si(n_stages),
             &super::BoundsOverrides {
                 hydro: hydro_overrides,
@@ -743,6 +755,7 @@ mod tests {
             &pumpings,
             &contracts,
             3,
+            0,
             &[],
             &[],
             &[],
@@ -821,6 +834,7 @@ mod tests {
             &[],
             &[],
             3,
+            0,
             &[override_row],
             &[],
             &[],
@@ -863,7 +877,7 @@ mod tests {
             Some(filling),
         )];
 
-        let result = resolve_bounds(&hydros, &[], &[], &[], &[], 2, &[], &[], &[], &[], &[]);
+        let result = resolve_bounds(&hydros, &[], &[], &[], &[], 2, 0, &[], &[], &[], &[], &[]);
 
         let b = result.hydro_bounds(0, 0);
         assert_eq!(b.max_diversion_m3s, Some(50.0));
@@ -879,7 +893,7 @@ mod tests {
     fn test_hydro_without_diversion() {
         let hydros = vec![make_hydro(0, 10.0, 100.0, None, None, None)];
 
-        let result = resolve_bounds(&hydros, &[], &[], &[], &[], 2, &[], &[], &[], &[], &[]);
+        let result = resolve_bounds(&hydros, &[], &[], &[], &[], 2, 0, &[], &[], &[], &[], &[]);
 
         let b = result.hydro_bounds(0, 0);
         assert!(b.max_diversion_m3s.is_none());
@@ -911,6 +925,7 @@ mod tests {
             &[],
             &[],
             2,
+            0,
             &[],
             &[override_row],
             &[],
@@ -943,6 +958,7 @@ mod tests {
             &[],
             &[],
             3,
+            0,
             &[],
             &[],
             &[override_row],
@@ -981,6 +997,7 @@ mod tests {
             &pumpings,
             &[],
             2,
+            0,
             &[],
             &[],
             &[],
@@ -1017,6 +1034,7 @@ mod tests {
             &[],
             &contracts,
             3,
+            0,
             &[],
             &[],
             &[],
@@ -1054,6 +1072,7 @@ mod tests {
             &[],
             &[],
             2,
+            0,
             &[override_row],
             &[],
             &[],
@@ -1090,6 +1109,7 @@ mod tests {
             &[],
             &[],
             3,
+            0,
             &[],
             &[override_row],
             &[],
@@ -1098,6 +1118,9 @@ mod tests {
         );
 
         assert_eq!(result.n_stages(), 3);
+        // `k_max == 0` parity at the resolver entry point: thermal stage axis
+        // matches `n_stages` when no anticipated thermals are present.
+        assert_eq!(result.thermal_stage_axis_len(), 3);
         // No thermal dimension to query — verifying no panic above is sufficient.
     }
 
@@ -1120,6 +1143,7 @@ mod tests {
             &[],
             &[],
             3,
+            0,
             &[override_row],
             &[],
             &[],
@@ -1158,6 +1182,7 @@ mod tests {
             &[],
             &[],
             2,
+            0,
             &[],
             &[override_row],
             &[],
@@ -1180,7 +1205,7 @@ mod tests {
         };
         let hydros = vec![make_hydro(0, 10.0, 100.0, None, Some(diversion), None)];
 
-        let result = resolve_bounds(&hydros, &[], &[], &[], &[], 1, &[], &[], &[], &[], &[]);
+        let result = resolve_bounds(&hydros, &[], &[], &[], &[], 1, 0, &[], &[], &[], &[], &[]);
 
         let b = result.hydro_bounds(0, 0);
         assert_eq!(b.max_diversion_m3s, Some(50.0));
@@ -1206,6 +1231,7 @@ mod tests {
             &pumpings,
             &contracts,
             2,
+            0,
             &[],
             &[],
             &[],
@@ -1250,6 +1276,7 @@ mod tests {
             &[],
             &contracts,
             3,
+            0,
             &[],
             &[],
             &[],
@@ -1280,6 +1307,7 @@ mod tests {
             &[],
             &[],
             2,
+            0,
             &[override_row],
             &[],
             &[],
@@ -1324,6 +1352,7 @@ mod tests {
             &[],
             &[],
             2,
+            0,
             &[],
             &overrides,
             &[],
@@ -1349,7 +1378,7 @@ mod tests {
         // make_thermal uses cost_per_mwh: 50.0 in the helper.
         let thermals = vec![make_thermal(0, 0.0, 400.0)];
 
-        let result = resolve_bounds(&[], &thermals, &[], &[], &[], 3, &[], &[], &[], &[], &[]);
+        let result = resolve_bounds(&[], &thermals, &[], &[], &[], 3, 0, &[], &[], &[], &[], &[]);
 
         for stage in 0..3 {
             assert!(
@@ -1380,6 +1409,7 @@ mod tests {
             &[],
             &[],
             2,
+            0,
             &[],
             &[override_row],
             &[],
@@ -1410,12 +1440,201 @@ mod tests {
             anticipated_config: None,
         }];
 
-        let result = resolve_bounds(&[], &thermals, &[], &[], &[], 2, &[], &[], &[], &[], &[]);
+        let result = resolve_bounds(&[], &thermals, &[], &[], &[], 2, 0, &[], &[], &[], &[], &[]);
 
         for stage in 0..2 {
             assert!(
                 result.thermal_bounds(0, stage).cost_per_mwh.abs() < f64::EPSILON,
                 "expected cost_per_mwh=0.0 at stage {stage}"
+            );
+        }
+    }
+
+    // ── Tests: padded thermal region (k_max > 0) ──────────────────────────────
+
+    /// Given two thermals with distinct base values, `n_stages = 3`, and
+    /// `k_max = 2`, every padded cell `[3, 5)` for each thermal contains
+    /// that thermal's *own* base values — not a uniform default and not
+    /// thermal 0's values overwriting thermal 1's.
+    #[test]
+    fn test_padded_region_uses_per_thermal_base_values() {
+        let mut t0 = make_thermal(0, 0.0, 100.0);
+        t0.cost_per_mwh = 50.0;
+        let mut t1 = make_thermal(1, 10.0, 200.0);
+        t1.cost_per_mwh = 80.0;
+        let thermals = vec![t0, t1];
+
+        let result = resolve_bounds(&[], &thermals, &[], &[], &[], 3, 2, &[], &[], &[], &[], &[]);
+
+        // Study-horizon cells [0, 3): each thermal's own base values.
+        for stage in 0..3 {
+            let b0 = result.thermal_bounds(0, stage);
+            assert!((b0.min_generation_mw - 0.0).abs() < f64::EPSILON);
+            assert!((b0.max_generation_mw - 100.0).abs() < f64::EPSILON);
+            assert!((b0.cost_per_mwh - 50.0).abs() < f64::EPSILON);
+            let b1 = result.thermal_bounds(1, stage);
+            assert!((b1.min_generation_mw - 10.0).abs() < f64::EPSILON);
+            assert!((b1.max_generation_mw - 200.0).abs() < f64::EPSILON);
+            assert!((b1.cost_per_mwh - 80.0).abs() < f64::EPSILON);
+        }
+
+        // Padded cells [3, 5): each thermal still carries its own base values.
+        for stage in 3..5 {
+            let b0 = result.thermal_bounds(0, stage);
+            assert!((b0.min_generation_mw - 0.0).abs() < f64::EPSILON);
+            assert!((b0.max_generation_mw - 100.0).abs() < f64::EPSILON);
+            assert!((b0.cost_per_mwh - 50.0).abs() < f64::EPSILON);
+            let b1 = result.thermal_bounds(1, stage);
+            assert!((b1.min_generation_mw - 10.0).abs() < f64::EPSILON);
+            assert!((b1.max_generation_mw - 200.0).abs() < f64::EPSILON);
+            assert!((b1.cost_per_mwh - 80.0).abs() < f64::EPSILON);
+        }
+    }
+
+    /// Given `k_max == 0`, behavior is bit-identical to the pre-ticket-017
+    /// baseline: the fill loop iterates `0..n_stages` and no padding cells
+    /// exist.
+    #[test]
+    fn test_k_max_zero_preserves_existing_behavior() {
+        let mut t0 = make_thermal(0, 0.0, 100.0);
+        t0.cost_per_mwh = 50.0;
+        let thermals = vec![t0];
+
+        let result = resolve_bounds(&[], &thermals, &[], &[], &[], 3, 0, &[], &[], &[], &[], &[]);
+
+        for stage in 0..3 {
+            let b = result.thermal_bounds(0, stage);
+            assert!((b.min_generation_mw - 0.0).abs() < f64::EPSILON);
+            assert!((b.max_generation_mw - 100.0).abs() < f64::EPSILON);
+            assert!((b.cost_per_mwh - 50.0).abs() < f64::EPSILON);
+        }
+    }
+
+    /// Given zero thermals and `k_max > 0`, `resolve_bounds` does not panic
+    /// and the thermal stage axis is `n_stages + k_max`.
+    #[test]
+    fn test_padded_region_with_zero_thermals() {
+        let result = resolve_bounds(&[], &[], &[], &[], &[], 4, 3, &[], &[], &[], &[], &[]);
+        assert_eq!(result.thermal_stage_axis_len(), 4 + 3);
+    }
+
+    // ── ticket-019 boundary tests for thermal padding (resolver) ──────────────
+    //
+    // These tests pin down the per-thermal base-fill semantics of the resolver
+    // at the four boundary stage indices that epic-05 consumers will exercise.
+    // The accessor-only invariants (uniform-default fill, `n_stages()`
+    // unchanged, `thermal_stage_axis_len()` extended) live in
+    // `crates/cobre-core/src/resolved.rs::tests`.
+
+    /// Two thermals with distinct `(min, max, cost)` bases, `n_stages = 4`,
+    /// `k_max = 2`, no overrides. The last study stage and both padded stages
+    /// must return each thermal's *own* base values — never the uniform
+    /// `BoundsDefaults.thermal` fallback and never thermal 0's values
+    /// overwriting thermal 1's.
+    #[test]
+    fn test_resolve_bounds_thermal_padded_uses_plant_base() {
+        let mut t0 = make_thermal(0, 0.0, 100.0);
+        t0.cost_per_mwh = 50.0;
+        let mut t1 = make_thermal(1, 10.0, 200.0);
+        t1.cost_per_mwh = 80.0;
+        let thermals = vec![t0, t1];
+
+        let result = resolve_bounds(&[], &thermals, &[], &[], &[], 4, 2, &[], &[], &[], &[], &[]);
+
+        // Last study stage (T - 1 == 3): no override → thermal 0 base.
+        let b0_last_study = result.thermal_bounds(0, 3);
+        assert!((b0_last_study.min_generation_mw - 0.0).abs() < f64::EPSILON);
+        assert!((b0_last_study.max_generation_mw - 100.0).abs() < f64::EPSILON);
+        assert!((b0_last_study.cost_per_mwh - 50.0).abs() < f64::EPSILON);
+
+        // First padded stage (T == 4): thermal 0 base.
+        let b0_first_pad = result.thermal_bounds(0, 4);
+        assert!((b0_first_pad.min_generation_mw - 0.0).abs() < f64::EPSILON);
+        assert!((b0_first_pad.max_generation_mw - 100.0).abs() < f64::EPSILON);
+        assert!((b0_first_pad.cost_per_mwh - 50.0).abs() < f64::EPSILON);
+
+        // Last padded stage (T + K - 1 == 5): thermal 0 base.
+        let b0_last_pad = result.thermal_bounds(0, 5);
+        assert!((b0_last_pad.min_generation_mw - 0.0).abs() < f64::EPSILON);
+        assert!((b0_last_pad.max_generation_mw - 100.0).abs() < f64::EPSILON);
+        assert!((b0_last_pad.cost_per_mwh - 50.0).abs() < f64::EPSILON);
+
+        // First padded stage for thermal 1 must NOT pick up thermal 0's base.
+        let b1_first_pad = result.thermal_bounds(1, 4);
+        assert!(
+            (b1_first_pad.min_generation_mw - 10.0).abs() < f64::EPSILON,
+            "thermal 1 padded min must be 10.0, not 0.0 (thermal 0) or 0.0 (uniform default)"
+        );
+        assert!((b1_first_pad.max_generation_mw - 200.0).abs() < f64::EPSILON);
+        assert!((b1_first_pad.cost_per_mwh - 80.0).abs() < f64::EPSILON);
+    }
+
+    /// One thermal, `n_stages = 4`, `k_max = 2`, override row at the *last*
+    /// study stage (`stage_id = 3`). The override applies at that stage only;
+    /// the padded cells at `T == 4` and `T + 1 == 5` must contain the entity
+    /// base value, not the override (overrides must not leak into padding).
+    #[test]
+    fn test_resolve_bounds_override_at_t_minus_1_applied() {
+        let thermals = vec![make_thermal(0, 0.0, 100.0)];
+        let override_row = ThermalBoundsRow {
+            thermal_id: EntityId::from(0),
+            stage_id: 3,
+            min_generation_mw: None,
+            max_generation_mw: Some(999.0),
+            cost_per_mwh: None,
+            block_id: None,
+        };
+
+        let result = resolve_bounds(
+            &[],
+            &thermals,
+            &[],
+            &[],
+            &[],
+            4,
+            2,
+            &[],
+            &[override_row],
+            &[],
+            &[],
+            &[],
+        );
+
+        // Override applies at T - 1 == 3.
+        assert!(
+            (result.thermal_bounds(0, 3).max_generation_mw - 999.0).abs() < f64::EPSILON,
+            "override at stage_id=3 must be applied"
+        );
+        // Padded cells at T == 4 and T + 1 == 5 carry the entity base value.
+        assert!(
+            (result.thermal_bounds(0, 4).max_generation_mw - 100.0).abs() < f64::EPSILON,
+            "override must NOT leak into first padded stage (T == 4)"
+        );
+        assert!(
+            (result.thermal_bounds(0, 5).max_generation_mw - 100.0).abs() < f64::EPSILON,
+            "override must NOT leak into last padded stage (T + 1 == 5)"
+        );
+    }
+
+    /// `k_max == 0`: the thermal stage axis equals `n_stages` exactly and
+    /// there are no padded cells. Reading at `stage_index == n_stages` panics
+    /// in debug builds (gated by `#[cfg(debug_assertions)]` because release
+    /// builds may silently read adjacent memory via `Vec` indexing).
+    #[test]
+    fn test_resolve_bounds_k_max_zero_no_padded_cells() {
+        let thermals = vec![make_thermal(0, 0.0, 100.0)];
+        let result = resolve_bounds(&[], &thermals, &[], &[], &[], 3, 0, &[], &[], &[], &[], &[]);
+
+        assert_eq!(result.thermal_stage_axis_len(), 3);
+
+        #[cfg(debug_assertions)]
+        {
+            let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = result.thermal_bounds(0, 3);
+            }));
+            assert!(
+                panic_result.is_err(),
+                "thermal_bounds(0, 3) must panic in debug builds when n_stages=3, k_max=0"
             );
         }
     }
