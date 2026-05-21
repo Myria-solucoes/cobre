@@ -625,7 +625,7 @@ fn run_simulation(
                 0,
                 i32::try_from(idx).expect("worker_id fits in i32"),
                 MockSolver3H::new(100.0),
-                PatchBuffer::new(fx.indexer.hydro_count, fx.indexer.max_par_order, 0, 0),
+                PatchBuffer::new(fx.indexer.hydro_count, fx.indexer.max_par_order, 0, 0, 0, 0),
                 fx.indexer.n_state,
                 WorkspaceSizing {
                     hydro_count: fx.indexer.hydro_count,

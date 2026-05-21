@@ -945,6 +945,8 @@ mod tests {
                 indexer.max_par_order,
                 0,
                 0,
+                0,
+                0,
             ),
             current_state: Vec::with_capacity(indexer.n_state),
             scratch: crate::workspace::ScratchBuffers {
@@ -975,6 +977,7 @@ mod tests {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
+                anticipated_state_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),

@@ -287,6 +287,10 @@ fn patch_opening_bounds<S: SolverInterface + Send>(
             &mut ws.scratch.ncs_col_upper_buf,
         );
     }
+    // No shift_anticipated_state call here: the backward pass solves each
+    // opening at a fixed trial point produced by the forward sampler. The
+    // ring-buffer advance happens once in the forward pass; the backward
+    // and simulation paths reuse those slot values without re-shifting.
     ws.patch_buf.fill_forward_patches(
         training_ctx.indexer,
         x_hat,
@@ -960,7 +964,7 @@ mod tests {
             rank: 0,
             worker_id: 0,
             solver,
-            patch_buf: PatchBuffer::new(1, 0, 0, 0),
+            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
             scratch: crate::workspace::ScratchBuffers {
                 noise_buf: Vec::new(),
@@ -990,6 +994,7 @@ mod tests {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
+                anticipated_state_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -2767,7 +2772,7 @@ mod tests {
             rank: 0,
             worker_id: 0,
             solver: solver_1,
-            patch_buf: PatchBuffer::new(1, 0, 0, 0),
+            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
             scratch: crate::workspace::ScratchBuffers {
                 noise_buf: Vec::new(),
@@ -2797,6 +2802,7 @@ mod tests {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
+                anticipated_state_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -2868,7 +2874,7 @@ mod tests {
                 rank: 0,
                 worker_id: idx,
                 solver: MockSolver::always_ok(solution.clone()),
-                patch_buf: PatchBuffer::new(1, 0, 0, 0),
+                patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
                 current_state: Vec::with_capacity(n_state),
                 scratch: crate::workspace::ScratchBuffers {
                     noise_buf: Vec::new(),
@@ -2898,6 +2904,7 @@ mod tests {
                     trajectory_costs_buf: Vec::new(),
                     raw_noise_buf: Vec::new(),
                     perm_scratch: Vec::new(),
+                    anticipated_state_buf: Vec::new(),
                 },
                 scratch_basis: Basis::new(0, 0),
                 backward_accum: BackwardAccumulators::default(),
@@ -3176,7 +3183,7 @@ mod tests {
         let indexer = StageIndexer::new(1, 0); // N=1, L=0, n_state=1
 
         // PatchBuffer: n_hydros=1, max_par_order=0, n_load_buses=1, max_blocks=1.
-        let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 1, 1);
+        let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 1, 1, 0, 0);
 
         // Template: 2 rows (row 0 = state-fixing, row 1 = water-balance).
         // base_rows=[1] → inflow RHS row starts at index 1.
@@ -3253,6 +3260,7 @@ mod tests {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
+                anticipated_state_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -3351,7 +3359,7 @@ mod tests {
         let indexer = StageIndexer::new(1, 0); // N=1, L=0
 
         // PatchBuffer with no load buses: n_load_buses=0, max_blocks=1.
-        let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 0, 0);
+        let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 0, 0, 0, 0);
 
         let template = StageTemplate {
             num_cols: 3,
@@ -3423,6 +3431,7 @@ mod tests {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
+                anticipated_state_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -3516,7 +3525,7 @@ mod tests {
         let stochastic = make_stochastic_context_with_load(n_stages, n_openings, 200.0, 20.0);
         let indexer = StageIndexer::new(1, 0); // N=1, L=0, n_state=1
 
-        let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 1, 1);
+        let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 1, 1, 0, 0);
 
         let template = StageTemplate {
             num_cols: 3,
@@ -3588,6 +3597,7 @@ mod tests {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
+                anticipated_state_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -4349,7 +4359,7 @@ mod tests {
                 rank: 0,
                 worker_id: i32::try_from(idx).expect("worker_id fits in i32"),
                 solver: MockSolver::always_ok(solution.clone()),
-                patch_buf: PatchBuffer::new(1, 0, 0, 0),
+                patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
                 current_state: Vec::with_capacity(n_state),
                 scratch: crate::workspace::ScratchBuffers {
                     noise_buf: Vec::new(),
@@ -4379,6 +4389,7 @@ mod tests {
                     trajectory_costs_buf: Vec::new(),
                     raw_noise_buf: Vec::new(),
                     perm_scratch: Vec::new(),
+                    anticipated_state_buf: Vec::new(),
                 },
                 scratch_basis: Basis::new(0, 0),
                 backward_accum: BackwardAccumulators::default(),
@@ -4711,7 +4722,7 @@ mod tests {
                 rank: 0,
                 worker_id: i32::try_from(idx).expect("idx fits in i32"),
                 solver: MockSolver::always_ok(solution.clone()),
-                patch_buf: PatchBuffer::new(1, 0, 0, 0),
+                patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
                 current_state: Vec::with_capacity(n_state),
                 scratch: crate::workspace::ScratchBuffers {
                     noise_buf: Vec::new(),
@@ -4741,6 +4752,7 @@ mod tests {
                     trajectory_costs_buf: Vec::new(),
                     raw_noise_buf: Vec::new(),
                     perm_scratch: Vec::new(),
+                    anticipated_state_buf: Vec::new(),
                 },
                 scratch_basis: Basis::new(0, 0),
                 backward_accum: BackwardAccumulators::default(),
@@ -4934,7 +4946,7 @@ mod tests {
                 rank: 0,
                 worker_id: i32::try_from(idx).expect("idx fits in i32"),
                 solver: MockSolver::always_ok(solution.clone()),
-                patch_buf: PatchBuffer::new(1, 0, 0, 0),
+                patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
                 current_state: Vec::with_capacity(n_state),
                 scratch: crate::workspace::ScratchBuffers {
                     noise_buf: Vec::new(),
@@ -4964,6 +4976,7 @@ mod tests {
                     trajectory_costs_buf: Vec::new(),
                     raw_noise_buf: Vec::new(),
                     perm_scratch: Vec::new(),
+                    anticipated_state_buf: Vec::new(),
                 },
                 scratch_basis: Basis::new(0, 0),
                 backward_accum: BackwardAccumulators::default(),
@@ -5365,7 +5378,7 @@ mod tests {
                 rank: 0,
                 worker_id: i32::try_from(idx).expect("idx fits i32"),
                 solver: MockSolver::always_ok(solution.clone()),
-                patch_buf: PatchBuffer::new(1, 0, 0, 0),
+                patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
                 current_state: Vec::with_capacity(n_state),
                 scratch: crate::workspace::ScratchBuffers {
                     noise_buf: Vec::new(),
@@ -5395,6 +5408,7 @@ mod tests {
                     trajectory_costs_buf: Vec::new(),
                     raw_noise_buf: Vec::new(),
                     perm_scratch: Vec::new(),
+                    anticipated_state_buf: Vec::new(),
                 },
                 scratch_basis: Basis::new(0, 0),
                 backward_accum: BackwardAccumulators::default(),

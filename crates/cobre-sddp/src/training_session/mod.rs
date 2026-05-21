@@ -173,6 +173,8 @@ impl<'a, S: SolverInterface + Send, C: Communicator> TrainingSession<'a, S, C> {
                 max_local_fwd: ranks.max_local_fwd,
                 total_forward_passes,
                 noise_dim: training_ctx.stochastic.dim(),
+                n_anticipated: indexer.n_anticipated,
+                k_max: indexer.k_max,
             },
             solver_factory,
         )

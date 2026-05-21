@@ -487,7 +487,7 @@ fn single_workspace(solver: MockSolver) -> Vec<SolverWorkspace<MockSolver>> {
         0,
         0,
         solver,
-        PatchBuffer::new(1, 0, 0, 0),
+        PatchBuffer::new(1, 0, 0, 0, 0, 0),
         1,
         WorkspaceSizing {
             hydro_count: 1,
@@ -1327,7 +1327,7 @@ fn test_simulation_parallel_cost_determinism() {
                 0,
                 idx,
                 MockSolver::always_ok(solution.clone()),
-                PatchBuffer::new(1, 0, 0, 0),
+                PatchBuffer::new(1, 0, 0, 0, 0, 0),
                 1,
                 WorkspaceSizing {
                     hydro_count: 1,

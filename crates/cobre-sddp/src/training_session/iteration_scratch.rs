@@ -95,9 +95,10 @@ impl IterationScratch {
 
         // ── Patch buffer ───────────────────────────────────────────────────
         // Standalone patch buffer for the lower bound evaluation which uses
-        // the single `solver` argument directly. Trailing `0, 0` preserve
-        // the pre-refactor argument list verbatim.
-        let patch_buf = PatchBuffer::new(hydro_count, max_par_order, 0, 0);
+        // the single `solver` argument directly. Trailing `0, 0, 0, 0` preserve
+        // the pre-anticipated argument list shape; lower-bound evaluation does
+        // not need anticipated_state_fixing patches.
+        let patch_buf = PatchBuffer::new(hydro_count, max_par_order, 0, 0, 0, 0);
 
         // ── Cut row batch buffers (reused across iterations) ───────────────
         let cut_batches: Vec<RowBatch> = (0..num_stages)

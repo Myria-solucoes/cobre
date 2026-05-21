@@ -14,7 +14,7 @@ use crate::setup::template_postprocess::{
 };
 
 use super::layout::{StageLayout, TemplateBuildCtx};
-use super::{matrix, scaling, GenericConstraintRowEntry, COST_SCALE_FACTOR};
+use super::{COST_SCALE_FACTOR, GenericConstraintRowEntry, matrix, scaling};
 
 /// Outcome of [`build_stage_templates`]: one [`StageTemplate`] per study stage
 /// plus the per-stage `base_rows` offsets needed by `PatchBuffer`.

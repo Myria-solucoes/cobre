@@ -9012,7 +9012,7 @@ fn parameter_coefficient_persists_across_stage_template_uses() {
     let b_max: usize = 3;
 
     let capacity_formula = n * (2 + l) + m * b_max + n;
-    let mut buf = PatchBuffer::new(n, l, m, b_max);
+    let mut buf = PatchBuffer::new(n, l, m, b_max, 0, 0);
 
     // Verify the capacity matches the documented formula.
     assert_eq!(

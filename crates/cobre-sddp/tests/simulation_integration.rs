@@ -735,7 +735,7 @@ fn train_simulate_write_cycle() {
         0,
         0,
         sim_solver,
-        PatchBuffer::new(fx.indexer.hydro_count, fx.indexer.max_par_order, 0, 0),
+        PatchBuffer::new(fx.indexer.hydro_count, fx.indexer.max_par_order, 0, 0, 0, 0),
         fx.indexer.n_state,
         WorkspaceSizing {
             hydro_count: fx.indexer.hydro_count,
@@ -1423,7 +1423,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
         0,
         0,
         sim_solver,
-        PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0),
+        PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0, 0, 0),
         indexer.n_state,
         WorkspaceSizing {
             hydro_count: indexer.hydro_count,

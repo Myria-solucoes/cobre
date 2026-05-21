@@ -1004,6 +1004,15 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         .lag_matrix_buf
         .extend_from_slice(&ws.current_state[lag_start..lag_start + lag_len]);
 
+    // Save incoming anticipated-state slice before overwriting state with primal.
+    // Uses the pre-allocated anticipated_state_buf scratch buffer (no allocation).
+    let ant_start = indexer.anticipated_state.start;
+    let ant_len = indexer.n_anticipated * indexer.k_max;
+    ws.scratch.anticipated_state_buf.clear();
+    ws.scratch
+        .anticipated_state_buf
+        .extend_from_slice(&ws.current_state[ant_start..ant_start + ant_len]);
+
     // Compute shifted lag state once into ws.current_state, then copy to rec.state.
     ws.current_state.clear();
     ws.current_state
@@ -1043,6 +1052,12 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
             n_completed: &mut ws.scratch.downstream_n_completed,
             par_order: downstream_par_order,
         },
+    );
+    crate::noise::shift_anticipated_state(
+        &mut ws.current_state,
+        &ws.scratch.anticipated_state_buf,
+        &unscaled_primal,
+        indexer,
     );
     rec.state.clear();
     rec.state.extend_from_slice(&ws.current_state);
@@ -1868,6 +1883,8 @@ mod tests {
                 indexer.max_par_order,
                 0,
                 0,
+                0,
+                0,
             ),
             current_state: Vec::with_capacity(indexer.n_state),
             scratch: crate::workspace::ScratchBuffers {
@@ -1898,6 +1915,7 @@ mod tests {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
+                anticipated_state_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -3864,7 +3882,7 @@ mod tests {
         let n_load_buses = 1usize;
         let stochastic = make_stochastic_context_1_hydro_1_load_bus(300.0, 30.0);
         let indexer = StageIndexer::new(1, 0);
-        let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, n_load_buses, 1);
+        let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0);
         let mut ws = SolverWorkspace {
             rank: 0,
             worker_id: 0,
@@ -3899,6 +3917,7 @@ mod tests {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
+                anticipated_state_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -4005,7 +4024,7 @@ mod tests {
         let n_load_buses = 1usize;
         let stochastic = make_stochastic_context_1_hydro_1_load_bus(-1000.0, 1.0);
         let indexer = StageIndexer::new(1, 0);
-        let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, n_load_buses, 1);
+        let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0);
         let mut ws = SolverWorkspace {
             rank: 0,
             worker_id: 0,
@@ -4040,6 +4059,7 @@ mod tests {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
+                anticipated_state_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),

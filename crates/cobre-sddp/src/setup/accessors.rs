@@ -6,6 +6,7 @@ use crate::{
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
     energy_conversion::EnergyConversionSet,
+    indexer::StageIndexer,
     simulation::SimulationConfig,
 };
 
@@ -54,6 +55,20 @@ impl StudySetup {
     #[must_use]
     pub fn simulation_config(&self) -> &SimulationConfig {
         &self.simulation_config
+    }
+
+    /// Return a reference to the per-stage LP column/row indexer.
+    ///
+    /// Provides LP layout constants — column and row ranges for every entity
+    /// class (storage, thermal, anticipated state, etc.) — so that callers can
+    /// locate specific primal or state-vector entries without hard-coding
+    /// offsets.
+    ///
+    /// The same indexer applies to every stage (the layout is uniform across
+    /// stages in a study).
+    #[must_use]
+    pub fn stage_indexer(&self) -> &StageIndexer {
+        &self.stage_data.indexer
     }
 
     /// Construct a [`StageContext`] borrowing from this setup.
