@@ -100,6 +100,12 @@ pub struct StudySetup {
     pub(crate) ncs_entity_ids_per_stage: Vec<Vec<i32>>,
     /// Max generation \[MW\] per stochastic NCS entity, sorted by entity ID.
     pub(crate) ncs_max_gen: Vec<f64>,
+    /// Whether each stochastic NCS entity may be curtailed, sorted by entity
+    /// ID. Aligned 1:1 with [`Self::ncs_max_gen`]. `true` (default) =
+    /// curtailable (LP can dispatch in `[0, max × α × factor]`); `false` =
+    /// must-run (`col_lower = col_upper = max × α × factor` for every
+    /// scenario, matching NEWAVE's `geracao_usinas_nao_simuladas` pre-netting).
+    pub(crate) ncs_allow_curtailment: Vec<bool>,
 
     /// Sampling schemes and pre-built libraries for training and simulation phases.
     ///
@@ -413,13 +419,18 @@ impl StudySetup {
         // z-inflow column and row ranges are set by StageIndexer::new at
         // fixed offset N*(1+L), no per-stage wiring needed.
 
-        // Build per-hydro AR orders from the precomputed PAR model. When the
-        // PAR has hydros with AR order < max_par_order, the mask enables
-        // sparse cut rows in `build_cut_row_batch_into`.
+        // Build the per-hydro lag-state-slot count for the cut sparse mask.
+        // When PAR(p)-A annual is active on a hydro, this is `max_par_order`
+        // (the widened psi stride); otherwise it is the classical AR order.
+        // Using `par.order(h)` here would silently truncate the cut row's state
+        // coefficients on lag slots that carry the annual `ψ̂/12` term and
+        // produce over-estimating cuts (analogue of d0e4a42).
         if indexer.max_par_order > 0 && stochastic.par().n_hydros() > 0 {
             let par = stochastic.par();
-            let ar_orders: Vec<usize> = (0..par.n_hydros()).map(|h| par.order(h)).collect();
-            indexer.set_nonzero_mask(&ar_orders);
+            let effective_lag_counts: Vec<usize> = (0..par.n_hydros())
+                .map(|h| par.effective_lag_count(h))
+                .collect();
+            indexer.set_nonzero_mask(&effective_lag_counts);
         }
 
         let initial_state = build_initial_state(system, &indexer);
@@ -459,23 +470,24 @@ impl StudySetup {
             })
             .collect();
 
-        let ncs_max_gen: Vec<f64> = {
+        let (ncs_max_gen, ncs_allow_curtailment): (Vec<f64>, Vec<bool>) = {
             let stoch_ncs_ids = stochastic.ncs_entity_ids();
-            let mut result = Vec::with_capacity(stoch_ncs_ids.len());
+            let mut max_v = Vec::with_capacity(stoch_ncs_ids.len());
+            let mut allow_v = Vec::with_capacity(stoch_ncs_ids.len());
             for ncs_id in stoch_ncs_ids {
-                let max_gen = system
+                let ncs = system
                     .non_controllable_sources()
                     .iter()
                     .find(|n| n.id == *ncs_id)
-                    .map(|n| n.max_generation_mw)
                     .ok_or_else(|| {
                         SddpError::Validation(format!(
                             "stochastic NCS entity {ncs_id:?} not found in system non_controllable_sources"
                         ))
                     })?;
-                result.push(max_gen);
+                max_v.push(ncs.max_generation_mw);
+                allow_v.push(ncs.allow_curtailment);
             }
-            result
+            (max_v, allow_v)
         };
 
         let block_counts_per_stage: Vec<usize> = stage_templates
@@ -556,6 +568,8 @@ impl StudySetup {
                     &stages,
                     stochastic.par(),
                     system.policy_graph().season_map.as_ref(),
+                    &system.initial_conditions().past_inflows,
+                    &stage_lag_transitions,
                     training_source.historical_years.as_ref(),
                     forward_passes,
                 )?)
@@ -617,6 +631,8 @@ impl StudySetup {
                 &stages,
                 stochastic.par(),
                 system.policy_graph().season_map.as_ref(),
+                &system.initial_conditions().past_inflows,
+                &stage_lag_transitions,
                 simulation_source.historical_years.as_ref(),
                 forward_passes,
             )?)
@@ -706,6 +722,7 @@ impl StudySetup {
             hydro_models,
             ncs_entity_ids_per_stage,
             ncs_max_gen,
+            ncs_allow_curtailment,
             scenario_libraries,
             loop_params: crate::config::LoopParams {
                 seed,
@@ -932,7 +949,7 @@ mod tests {
             penalties: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 0.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -1017,7 +1034,7 @@ mod tests {
             HydroStagePenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 500.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -1167,7 +1184,7 @@ mod tests {
             penalties: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 0.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -1288,7 +1305,7 @@ mod tests {
                 hydro: HydroStagePenalties {
                     spillage_cost: 0.01,
                     diversion_cost: 0.0,
-                    fpha_turbined_cost: 0.0,
+                    turbined_cost: 0.0,
                     storage_violation_below_cost: 500.0,
                     filling_target_violation_cost: 0.0,
                     turbined_violation_below_cost: 0.0,
@@ -2437,7 +2454,7 @@ mod tests {
             penalties: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 0.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -2569,7 +2586,7 @@ mod tests {
                 hydro: HydroStagePenalties {
                     spillage_cost: 0.01,
                     diversion_cost: 0.0,
-                    fpha_turbined_cost: 0.0,
+                    turbined_cost: 0.0,
                     storage_violation_below_cost: 500.0,
                     filling_target_violation_cost: 0.0,
                     turbined_violation_below_cost: 0.0,
@@ -2877,7 +2894,7 @@ mod tests {
             penalties: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 0.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -2968,7 +2985,7 @@ mod tests {
             HydroStagePenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 500.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -3331,7 +3348,7 @@ mod tests {
             HydroStagePenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 500.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -3397,7 +3414,7 @@ mod tests {
             penalties: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 0.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -3670,7 +3687,7 @@ mod tests {
             penalties: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 0.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -3787,7 +3804,7 @@ mod tests {
                 hydro: HydroStagePenalties {
                     spillage_cost: 0.01,
                     diversion_cost: 0.0,
-                    fpha_turbined_cost: 0.0,
+                    turbined_cost: 0.0,
                     storage_violation_below_cost: 500.0,
                     filling_target_violation_cost: 0.0,
                     turbined_violation_below_cost: 0.0,
@@ -3925,7 +3942,7 @@ mod tests {
             penalties: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 0.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -4056,7 +4073,7 @@ mod tests {
                 hydro: HydroStagePenalties {
                     spillage_cost: 0.01,
                     diversion_cost: 0.0,
-                    fpha_turbined_cost: 0.0,
+                    turbined_cost: 0.0,
                     storage_violation_below_cost: 500.0,
                     filling_target_violation_cost: 0.0,
                     turbined_violation_below_cost: 0.0,
@@ -4198,7 +4215,7 @@ mod tests {
             penalties: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 0.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -4224,6 +4241,7 @@ mod tests {
             entry_stage_id: None,
             exit_stage_id: None,
             max_generation_mw: 100.0,
+            allow_curtailment: true,
             curtailment_cost: 0.01,
         };
 
@@ -4351,7 +4369,7 @@ mod tests {
                 hydro: HydroStagePenalties {
                     spillage_cost: 0.01,
                     diversion_cost: 0.0,
-                    fpha_turbined_cost: 0.0,
+                    turbined_cost: 0.0,
                     storage_violation_below_cost: 500.0,
                     filling_target_violation_cost: 0.0,
                     turbined_violation_below_cost: 0.0,
@@ -4498,7 +4516,7 @@ mod tests {
             penalties: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 0.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -4616,7 +4634,7 @@ mod tests {
                 hydro: HydroStagePenalties {
                     spillage_cost: 0.01,
                     diversion_cost: 0.0,
-                    fpha_turbined_cost: 0.0,
+                    turbined_cost: 0.0,
                     storage_violation_below_cost: 500.0,
                     filling_target_violation_cost: 0.0,
                     turbined_violation_below_cost: 0.0,

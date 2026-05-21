@@ -262,12 +262,13 @@ impl<'a> SimScenarioLoadSpec<'a> {
     }
 }
 
-/// Patch NCS column upper bounds in the LP solver with per-scenario availability.
+/// Patch NCS column bounds in the LP solver with per-scenario availability.
 ///
-/// Called after `set_row_bounds` and before `solve`. The `ncs_col_upper_buf`
-/// in the workspace scratch must already be populated by `transform_ncs_noise`.
-/// The index and lower buffers are rebuilt lazily: only when the expected size
-/// changes (i.e., on a stage transition), avoiding redundant work within a stage.
+/// Called after `set_row_bounds` and before `solve`. The `ncs_col_lower_buf`
+/// and `ncs_col_upper_buf` in the workspace scratch must already be
+/// populated by `transform_ncs_noise` (both bounds scale with the realized
+/// per-scenario availability ratio). The indices buffer is rebuilt lazily:
+/// only when the expected size changes (i.e., on a stage transition).
 fn apply_ncs_col_bounds<S: SolverInterface>(
     solver: &mut S,
     scratch: &mut crate::workspace::ScratchBuffers,
@@ -278,13 +279,11 @@ fn apply_ncs_col_bounds<S: SolverInterface>(
     let expected_len = n_stochastic_ncs * n_blks;
     if scratch.ncs_col_indices_buf.len() != expected_len {
         scratch.ncs_col_indices_buf.clear();
-        scratch.ncs_col_lower_buf.clear();
         for ncs_idx in 0..n_stochastic_ncs {
             for blk in 0..n_blks {
                 scratch
                     .ncs_col_indices_buf
                     .push(ncs_generation_start + ncs_idx * n_blks + blk);
-                scratch.ncs_col_lower_buf.push(0.0);
             }
         }
     }
@@ -820,6 +819,8 @@ pub(crate) fn process_scenario_stages<S: SolverInterface>(
                 t,
                 ctx.block_counts_per_stage[t],
                 ctx.ncs_max_gen,
+                ctx.ncs_allow_curtailment,
+                &mut ws.scratch.ncs_col_lower_buf,
                 &mut ws.scratch.ncs_col_upper_buf,
             );
         }
@@ -1306,7 +1307,7 @@ mod tests {
             penalties: HydroPenalties {
                 spillage_cost: 0.0,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 0.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -1549,7 +1550,7 @@ mod tests {
             penalties: HydroPenalties {
                 spillage_cost: 0.0,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 0.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -1742,6 +1743,7 @@ mod tests {
                 load_bus_indices: &load_bus_indices,
                 block_counts_per_stage: &block_counts_per_stage,
                 ncs_max_gen: &[],
+                ncs_allow_curtailment: &[],
                 discount_factors: &[],
                 cumulative_discount_factors: &[],
                 stage_lag_transitions: &[],
@@ -1894,6 +1896,7 @@ mod tests {
                 load_bus_indices: &[],
                 block_counts_per_stage: &[1],
                 ncs_max_gen: &[],
+                ncs_allow_curtailment: &[],
                 discount_factors: &[],
                 cumulative_discount_factors: &[],
                 stage_lag_transitions: &[],
@@ -2067,6 +2070,7 @@ mod tests {
                 load_bus_indices: &load_bus_indices,
                 block_counts_per_stage: &block_counts_per_stage,
                 ncs_max_gen: &[],
+                ncs_allow_curtailment: &[],
                 discount_factors: &[],
                 cumulative_discount_factors: &[],
                 stage_lag_transitions: &[],
@@ -2195,7 +2199,7 @@ mod tests {
             penalties: HydroPenalties {
                 spillage_cost: 0.0,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 0.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -2424,6 +2428,7 @@ mod tests {
                 load_bus_indices: &[],
                 block_counts_per_stage: &[n_stages],
                 ncs_max_gen: &[],
+                ncs_allow_curtailment: &[],
                 discount_factors: &[],
                 cumulative_discount_factors: &[],
                 stage_lag_transitions: &[],
@@ -2540,6 +2545,7 @@ mod tests {
                 load_bus_indices: &[],
                 block_counts_per_stage: &[n_stages],
                 ncs_max_gen: &[],
+                ncs_allow_curtailment: &[],
                 discount_factors: &[],
                 cumulative_discount_factors: &[],
                 stage_lag_transitions: &[],

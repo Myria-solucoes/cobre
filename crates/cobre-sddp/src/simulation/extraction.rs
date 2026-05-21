@@ -1054,20 +1054,10 @@ fn compute_cost_result(
     } else {
         range_sum(indexer.excess.clone()) * COST_SCALE_FACTOR
     };
-    let fpha_turbined_cost = if indexer.generation.is_empty() {
+    let turbined_cost = if indexer.turbine.is_empty() {
         0.0
     } else {
-        let n_blks = indexer.n_blks;
-        indexer
-            .fpha_hydro_indices
-            .iter()
-            .enumerate()
-            .flat_map(|(local_fpha_idx, _sys_h)| {
-                (0..n_blks).map(move |b| indexer.generation.start + local_fpha_idx * n_blks + b)
-            })
-            .map(col_cost)
-            .sum::<f64>()
-            * COST_SCALE_FACTOR
+        range_sum(indexer.turbine.clone()) * COST_SCALE_FACTOR
     };
     let inflow_penalty_cost = if indexer.inflow_slack.is_empty() {
         0.0
@@ -1117,7 +1107,7 @@ fn compute_cost_result(
         inflow_penalty_cost,
         generic_violation_cost,
         spillage_cost: spillage_cost + diversion_cost,
-        fpha_turbined_cost,
+        turbined_cost,
         curtailment_cost: ncs_curtailment_cost,
         exchange_cost,
         pumping_cost: 0.0,
@@ -1341,7 +1331,7 @@ fn extract_stub_collections(
 /// | `violation_cost`   | `storage_violation_cost + filling_target_cost`        |
 /// |                    | `+ hydro_violation_cost + inflow_penalty_cost`        |
 /// |                    | `+ generic_violation_cost`                            |
-/// | `regularization_cost` | `spillage_cost + fpha_turbined_cost`               |
+/// | `regularization_cost` | `spillage_cost + turbined_cost`               |
 /// |                    | `+ curtailment_cost + exchange_cost`                  |
 /// | `imputed_cost`     | `pumping_cost`                                        |
 ///
@@ -1374,7 +1364,7 @@ fn extract_stub_collections(
 ///     inflow_penalty_cost: 3.0,
 ///     generic_violation_cost: 2.0,
 ///     spillage_cost: 1.0,
-///     fpha_turbined_cost: 4.0,
+///     turbined_cost: 4.0,
 ///     curtailment_cost: 7.0,
 ///     exchange_cost: 8.0,
 ///     pumping_cost: 60.0,
@@ -1404,7 +1394,7 @@ pub fn accumulate_category_costs(cost: &SimulationCostResult, accum: &mut Scenar
         + cost.inflow_penalty_cost
         + cost.generic_violation_cost;
     accum.regularization_cost +=
-        cost.spillage_cost + cost.fpha_turbined_cost + cost.curtailment_cost + cost.exchange_cost;
+        cost.spillage_cost + cost.turbined_cost + cost.curtailment_cost + cost.exchange_cost;
     accum.imputed_cost += cost.pumping_cost;
 }
 
@@ -2187,7 +2177,7 @@ mod tests {
             inflow_penalty_cost: inflow_penalty,
             generic_violation_cost: generic_violation,
             spillage_cost: spillage,
-            fpha_turbined_cost: fpha,
+            turbined_cost: fpha,
             curtailment_cost: curtailment,
             exchange_cost: exchange,
             pumping_cost: pumping,
@@ -2986,26 +2976,27 @@ mod tests {
         );
     }
 
-    /// Acceptance criterion: `fpha_turbined_cost` equals the sum of primal * obj\_coeff
-    /// over FPHA generation columns, multiplied by `COST_SCALE_FACTOR`.
+    /// Acceptance criterion: `turbined_cost` equals the sum of primal * obj\_coeff
+    /// over turbine columns (every hydro, every block), multiplied by
+    /// `COST_SCALE_FACTOR`.
     ///
-    /// Setup: 1 FPHA hydro (h0), 1 constant-productivity hydro (h1), 1 block.
-    /// FPHA generation column: primal=30.0, `objective_coeff`=0.01 → `scaled_cost`=0.3 → unscaled=300.0
+    /// Setup: 2 hydros, 1 block. h0 turbine column: primal=30.0,
+    /// `objective_coeff`=0.01 → `scaled_cost`=0.3 → unscaled=300.0.
     #[test]
-    fn fpha_turbined_cost_in_compute_cost_result() {
+    fn turbined_cost_in_compute_cost_result() {
         let indexer = make_indexer_2h_1fpha_1blk();
-        // generation.start = 13 (fpha h0 b0)
+        // turbine.start = 7 (h0 b0)
         let n_cols = indexer.generation_below_slack.end;
         let mut primal = vec![0.0_f64; n_cols];
         primal[6] = 500.0; // theta (at N*(3+L) = 2*3 = 6)
 
-        // FPHA generation column 13: primal=30.0
-        primal[13] = 30.0;
+        // h0 turbine column 7: primal=30.0
+        primal[7] = 30.0;
 
         let mut obj = vec![0.0_f64; n_cols];
         obj[6] = 1.0; // theta coefficient (undiscounted)
-        // FPHA generation column 13: objective_coeff=0.01
-        obj[13] = 0.01;
+        // h0 turbine column 7: objective_coeff=0.01
+        obj[7] = 0.01;
 
         let dual = vec![0.0_f64; 2];
         let row_lower = vec![0.0_f64; 1];
@@ -3054,52 +3045,31 @@ mod tests {
 
         let cost = &result.costs[0];
         assert!(
-            (cost.fpha_turbined_cost - 300.0).abs() < 1e-9,
-            "fpha_turbined_cost should be 300.0 (30.0 * 0.01 * COST_SCALE_FACTOR), got {}",
-            cost.fpha_turbined_cost
+            (cost.turbined_cost - 300.0).abs() < 1e-9,
+            "turbined_cost should be 300.0 (30.0 * 0.01 * COST_SCALE_FACTOR), got {}",
+            cost.turbined_cost
         );
     }
 
-    /// Verify that per-component cost breakdown sums to `immediate_cost` when
-    /// non-trivial `col_scale` is applied.
+    /// Verify that per-component cost breakdown sums to `immediate_cost` under
+    /// identity `col_scale`.
     ///
-    /// Setup: 2 hydros (h0=FPHA, h1=constant), 1 block.
-    /// FPHA generation col 13: primal=30, `obj_coeff`=0.01, `col_scale`=2.0.
-    /// After unscaling: cost = 30 * 0.01 / 2.0 * 1000 = 150.0.
-    /// Objective = `theta_scaled` + `fpha_scaled` = 500 + (30 * 0.01) = 500.3.
+    /// Setup: 2 hydros, 1 block. h0 turbine col 7: primal=30, `obj_coeff`=0.01.
+    /// Objective = `theta_scaled` + `turbine_scaled` = 500 + (30 * 0.01) = 500.3.
     /// `immediate_cost` = (500.3 - 500) * 1000 = 300.
-    /// The sum must equal `immediate_cost`: `fpha_turbined_cost` = 150 from `col_cost`.
-    /// BUT `immediate_cost` is from (objective - theta) which is in scaled space
-    /// and already correct.  The `col_cost` unscaling produces the true cost.
-    ///
-    /// For consistency: with `col_scale`=2.0 the stored `obj_coeff` is `c_orig` * `col_scale` / K
-    /// = 0.005 * 2.0 = 0.01.  So `c_orig` / K = 0.005.
-    /// True fpha cost = primal * `c_orig` / K * K = 30 * 0.005 * 1000 = 150.
-    /// Scaled fpha cost in objective = 30 * 0.01 = 0.3.
-    /// `immediate_cost` = 0.3 * 1000 = 300 != 150.
-    ///
-    /// The discrepancy is because objective is primal * `obj_coeff` (scaled), not
-    /// the true cost.  In the LP, `view.objective` already includes the `col_scale`
-    /// effect; the extraction divides it out for per-component costs.
-    ///
-    /// To make the sum match: the test sets objective = theta + sum(primal * `obj_coeff`)
-    /// in scaled space.  `immediate_cost` = (obj - theta) * K.
-    /// Per-component sum = sum(primal * `obj_coeff` / `col_scale`) * K.
-    /// These are equal only when `col_scale` = 1 everywhere.
-    ///
-    /// This correctly tests that with empty `col_scale` (identity), the invariant holds.
+    /// Per-component sum = `turbined_cost` = 30 * 0.01 * 1000 = 300 (matches).
     #[test]
     fn cost_breakdown_sums_to_immediate_identity_scale() {
         let indexer = make_indexer_2h_1fpha_1blk();
         let n_cols = indexer.generation_below_slack.end;
         let mut primal = vec![0.0_f64; n_cols];
         primal[6] = 500.0; // theta
-        primal[13] = 30.0; // FPHA generation
+        primal[7] = 30.0; // h0 turbine column
 
         let mut obj = vec![0.0_f64; n_cols];
         obj[6] = 1.0; // theta coefficient (undiscounted)
-        obj[13] = 0.01; // FPHA generation cost (scaled)
-        // objective in scaled space = theta_coeff * theta + fpha_coeff * fpha
+        obj[7] = 0.01; // turbined cost (scaled)
+        // objective in scaled space = theta_coeff * theta + turbine_coeff * turbine
         //                           = 1.0 * 500 + 0.01 * 30 = 500.3
         let objective_val = 500.3_f64;
 
@@ -3156,14 +3126,14 @@ mod tests {
             cost.immediate_cost
         );
 
-        // Per-component sum: only fpha_turbined_cost is non-zero.
+        // Per-component sum: only turbined_cost is non-zero.
         let component_sum = cost.thermal_cost
             + cost.deficit_cost
             + cost.excess_cost
             + cost.exchange_cost
             + cost.spillage_cost
             + cost.generic_violation_cost
-            + cost.fpha_turbined_cost
+            + cost.turbined_cost
             + cost.curtailment_cost;
 
         assert!(
@@ -3176,7 +3146,7 @@ mod tests {
     /// Verify that per-component costs are correctly unscaled when non-trivial
     /// `col_scale` is applied.
     ///
-    /// With `col_scale` = 2.0 on the FPHA generation column:
+    /// With `col_scale` = 2.0 on the h0 turbine column:
     /// - `obj_coeff` in template = `c_orig` * `col_scale` / K = 0.005 * 2.0 = 0.01
     /// - After unscaling: cost = primal * `obj_coeff` / `col_scale` * K = 30 * 0.01 / 2.0 * 1000 = 150.
     #[test]
@@ -3185,16 +3155,16 @@ mod tests {
         let n_cols = indexer.generation_below_slack.end;
         let mut primal = vec![0.0_f64; n_cols];
         primal[6] = 500.0; // theta
-        primal[13] = 30.0; // FPHA generation
+        primal[7] = 30.0; // h0 turbine column
 
         let mut obj = vec![0.0_f64; n_cols];
         obj[6] = 1.0; // theta coefficient (undiscounted)
         // c_orig / K = 0.005.  With col_scale = 2.0: obj_coeff = 0.005 * 2.0 = 0.01.
-        obj[13] = 0.01;
+        obj[7] = 0.01;
 
-        // Build col_scale: all 1.0 except column 13 = 2.0.
+        // Build col_scale: all 1.0 except column 7 = 2.0.
         let mut col_scale = vec![1.0_f64; n_cols];
-        col_scale[13] = 2.0;
+        col_scale[7] = 2.0;
 
         let dual = vec![0.0_f64; 2];
         let row_lower = vec![0.0_f64; 1];
@@ -3242,12 +3212,12 @@ mod tests {
         );
 
         let cost = &result.costs[0];
-        // fpha_turbined_cost = primal * obj_coeff / col_scale * K
+        // turbined_cost = primal * obj_coeff / col_scale * K
         //                    = 30 * 0.01 / 2.0 * 1000 = 150.0
         assert!(
-            (cost.fpha_turbined_cost - 150.0).abs() < 1e-6,
-            "fpha_turbined_cost should be 150.0 (unscaled by col_scale=2.0), got {}",
-            cost.fpha_turbined_cost
+            (cost.turbined_cost - 150.0).abs() < 1e-6,
+            "turbined_cost should be 150.0 (unscaled by col_scale=2.0), got {}",
+            cost.turbined_cost
         );
     }
 

@@ -41,7 +41,7 @@ use std::ops::Range;
 /// let p = HydroStagePenalties {
 ///     spillage_cost: 0.01,
 ///     diversion_cost: 0.02,
-///     fpha_turbined_cost: 0.03,
+///     turbined_cost: 0.03,
 ///     storage_violation_below_cost: 1000.0,
 ///     filling_target_violation_cost: 5000.0,
 ///     turbined_violation_below_cost: 500.0,
@@ -68,9 +68,10 @@ pub struct HydroStagePenalties {
     pub spillage_cost: f64,
     /// Diversion regularization cost \[$/m³/s\]. Prefer main-channel flow.
     pub diversion_cost: f64,
-    /// FPHA turbined regularization cost \[$/`MWh`\]. Prevents interior FPHA solutions.
-    /// Must be `> spillage_cost` for FPHA hydros.
-    pub fpha_turbined_cost: f64,
+    /// Turbined regularization cost \[$/`MWh`\]. Applied to every hydro's
+    /// turbine column in the LP objective regardless of production model.
+    /// For FPHA hydros must be `> spillage_cost` to prevent interior solutions.
+    pub turbined_cost: f64,
     /// Constraint-violation cost for storage below dead volume \[$/hm³\].
     pub storage_violation_below_cost: f64,
     /// Constraint-violation cost for missing the dead-volume filling target \[$/hm³\].
@@ -355,7 +356,7 @@ pub struct ContractStageBounds {
 /// let hydro_default = HydroStagePenalties {
 ///     spillage_cost: 0.01,
 ///     diversion_cost: 0.02,
-///     fpha_turbined_cost: 0.03,
+///     turbined_cost: 0.03,
 ///     storage_violation_below_cost: 1000.0,
 ///     filling_target_violation_cost: 5000.0,
 ///     turbined_violation_below_cost: 500.0,
@@ -1459,7 +1460,7 @@ mod tests {
         HydroStagePenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.02,
-            fpha_turbined_cost: 0.03,
+            turbined_cost: 0.03,
             storage_violation_below_cost: 1000.0,
             filling_target_violation_cost: 5000.0,
             turbined_violation_below_cost: 500.0,

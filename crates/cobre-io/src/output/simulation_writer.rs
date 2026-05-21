@@ -103,8 +103,8 @@ pub struct CostWriteRecord {
     pub generic_violation_cost: f64,
     /// Spillage regularization cost.
     pub spillage_cost: f64,
-    /// FPHA turbining regularization cost.
-    pub fpha_turbined_cost: f64,
+    /// Turbining regularization cost (applied to every hydro's turbine flow).
+    pub turbined_cost: f64,
     /// Curtailment regularization cost.
     pub curtailment_cost: f64,
     /// Exchange regularization cost.
@@ -774,7 +774,7 @@ fn build_costs_batch<'a>(
     let mut inflow_penalty_cost = Float64Builder::new();
     let mut generic_violation_cost = Float64Builder::new();
     let mut spillage_cost = Float64Builder::new();
-    let mut fpha_turbined_cost = Float64Builder::new();
+    let mut turbined_cost = Float64Builder::new();
     let mut curtailment_cost = Float64Builder::new();
     let mut exchange_cost = Float64Builder::new();
     let mut pumping_cost = Float64Builder::new();
@@ -802,7 +802,7 @@ fn build_costs_batch<'a>(
         inflow_penalty_cost.append_value(r.inflow_penalty_cost);
         generic_violation_cost.append_value(r.generic_violation_cost);
         spillage_cost.append_value(r.spillage_cost);
-        fpha_turbined_cost.append_value(r.fpha_turbined_cost);
+        turbined_cost.append_value(r.turbined_cost);
         curtailment_cost.append_value(r.curtailment_cost);
         exchange_cost.append_value(r.exchange_cost);
         pumping_cost.append_value(r.pumping_cost);
@@ -833,7 +833,7 @@ fn build_costs_batch<'a>(
             Arc::new(inflow_penalty_cost.finish()),
             Arc::new(generic_violation_cost.finish()),
             Arc::new(spillage_cost.finish()),
-            Arc::new(fpha_turbined_cost.finish()),
+            Arc::new(turbined_cost.finish()),
             Arc::new(curtailment_cost.finish()),
             Arc::new(exchange_cost.finish()),
             Arc::new(pumping_cost.finish()),
@@ -1538,7 +1538,7 @@ mod tests {
         HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
-            fpha_turbined_cost: 0.0,
+            turbined_cost: 0.0,
             storage_violation_below_cost: 0.0,
             filling_target_violation_cost: 0.0,
             turbined_violation_below_cost: 0.0,
@@ -1688,7 +1688,7 @@ mod tests {
             inflow_penalty_cost: 0.0,
             generic_violation_cost: 0.0,
             spillage_cost: 5.0,
-            fpha_turbined_cost: 3.0,
+            turbined_cost: 3.0,
             curtailment_cost: 0.0,
             exchange_cost: 2.0,
             pumping_cost: 0.0,

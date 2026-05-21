@@ -33,6 +33,11 @@ pub struct StageContext<'a> {
     /// Maximum generation (MW) per stochastic NCS entity, sorted by entity ID.
     /// Length equals the number of stochastic NCS entities. Empty when none exist.
     pub ncs_max_gen: &'a [f64],
+    /// Per-stochastic-NCS curtailment policy, aligned 1:1 with
+    /// [`Self::ncs_max_gen`]. `true` = the LP can dispatch in `[0, max × α
+    /// × factor]`; `false` = must-run, the LP pins
+    /// `col_lower = col_upper = max × α × factor` for every scenario.
+    pub ncs_allow_curtailment: &'a [bool],
     /// One-step discount factor for the transition departing each stage.
     ///
     /// `discount_factors[t] = 1 / (1 + r)^(Dt / 365.25)` where `r` is the

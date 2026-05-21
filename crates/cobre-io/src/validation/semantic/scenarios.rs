@@ -215,7 +215,7 @@ pub(super) fn check_penalty_ordering(data: &ParsedData, ctx: &mut ValidationCont
 
 // ── Rule 11: FPHA penalty rule ─────────────────────────────────────────────────
 
-/// Checks that FPHA hydros have `fpha_turbined_cost >= 0`.
+/// Checks that FPHA hydros have `turbined_cost >= 0`.
 ///
 /// A zero cost is valid for constant-head plants (e.g., `gamma_v = 0`) where the
 /// LP has no incentive to spill rather than turbine. Negative values are rejected
@@ -224,7 +224,7 @@ pub(super) fn check_fpha_penalty_rule(data: &ParsedData, ctx: &mut ValidationCon
     use cobre_core::entities::HydroGenerationModel;
     for hydro in &data.hydros {
         if hydro.generation_model == HydroGenerationModel::Fpha {
-            let fpha_cost = hydro.penalties.fpha_turbined_cost;
+            let fpha_cost = hydro.penalties.turbined_cost;
             if fpha_cost < 0.0 {
                 let entity_str = format!("Hydro {}", hydro.id.0);
                 ctx.add_error(
@@ -232,7 +232,7 @@ pub(super) fn check_fpha_penalty_rule(data: &ParsedData, ctx: &mut ValidationCon
                     "penalties.json",
                     Some(&entity_str),
                     format!(
-                        "{entity_str}: fpha_turbined_cost ({fpha_cost}) must be non-negative (>= 0) \
+                        "{entity_str}: turbined_cost ({fpha_cost}) must be non-negative (>= 0) \
                          for FPHA hydros; negative values distort LP dispatch"
                     ),
                 );
@@ -851,13 +851,13 @@ mod tests {
 
     // ── Rule 11: FPHA penalty rule ────────────────────────────────────────────
 
-    /// Hydro 3 with Fpha model, `fpha_turbined_cost = -0.01` produces a
-    /// `BusinessRuleViolation` error with "Hydro 3" and "fpha_turbined_cost".
+    /// Hydro 3 with Fpha model, `turbined_cost = -0.01` produces a
+    /// `BusinessRuleViolation` error with "Hydro 3" and "turbined_cost".
     #[test]
     fn test_5b_fpha_penalty_violated() {
         let mut hydro = make_hydro_ordered_penalties(3);
         hydro.generation_model = HydroGenerationModel::Fpha;
-        hydro.penalties.fpha_turbined_cost = -0.01; // invalid: must be >= 0
+        hydro.penalties.turbined_cost = -0.01; // invalid: must be >= 0
         let data = make_data_5b(
             vec![hydro],
             make_stages_5b(vec![0]),
@@ -885,17 +885,17 @@ mod tests {
             "message should contain 'Hydro 3', got: {msg}"
         );
         assert!(
-            msg.contains("fpha_turbined_cost"),
-            "message should contain 'fpha_turbined_cost', got: {msg}"
+            msg.contains("turbined_cost"),
+            "message should contain 'turbined_cost', got: {msg}"
         );
     }
 
-    /// FPHA hydro with `fpha_turbined_cost == 0.0` (constant-head) produces no error.
+    /// FPHA hydro with `turbined_cost == 0.0` (constant-head) produces no error.
     #[test]
     fn test_5b_fpha_penalty_zero_valid() {
         let mut hydro = make_hydro_ordered_penalties(3);
         hydro.generation_model = HydroGenerationModel::Fpha;
-        hydro.penalties.fpha_turbined_cost = 0.0; // valid: constant-head plant
+        hydro.penalties.turbined_cost = 0.0; // valid: constant-head plant
         let data = make_data_5b(
             vec![hydro],
             make_stages_5b(vec![0]),
@@ -913,17 +913,17 @@ mod tests {
             .collect();
         assert!(
             errors.is_empty(),
-            "fpha_turbined_cost == 0.0 should be valid for constant-head plants, \
+            "turbined_cost == 0.0 should be valid for constant-head plants, \
              got: {errors:?}"
         );
     }
 
-    /// FPHA hydro with `fpha_turbined_cost == spillage_cost` produces no error.
+    /// FPHA hydro with `turbined_cost == spillage_cost` produces no error.
     #[test]
     fn test_5b_fpha_penalty_equal_spillage_valid() {
         let mut hydro = make_hydro_ordered_penalties(3);
         hydro.generation_model = HydroGenerationModel::Fpha;
-        hydro.penalties.fpha_turbined_cost = 1.0;
+        hydro.penalties.turbined_cost = 1.0;
         hydro.penalties.spillage_cost = 1.0; // equality is now valid
         let data = make_data_5b(
             vec![hydro],
@@ -942,16 +942,16 @@ mod tests {
             .collect();
         assert!(
             errors.is_empty(),
-            "fpha_turbined_cost == spillage_cost should be valid, got: {errors:?}"
+            "turbined_cost == spillage_cost should be valid, got: {errors:?}"
         );
     }
 
-    /// FPHA hydro with `fpha_turbined_cost > spillage_cost` produces no error.
+    /// FPHA hydro with `turbined_cost > spillage_cost` produces no error.
     #[test]
     fn test_5b_fpha_penalty_valid() {
         let mut hydro = make_hydro_ordered_penalties(4);
         hydro.generation_model = HydroGenerationModel::Fpha;
-        hydro.penalties.fpha_turbined_cost = 2.0;
+        hydro.penalties.turbined_cost = 2.0;
         hydro.penalties.spillage_cost = 1.0;
         let data = make_data_5b(
             vec![hydro],

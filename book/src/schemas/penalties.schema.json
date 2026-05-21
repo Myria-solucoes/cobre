@@ -78,10 +78,6 @@
           "format": "double",
           "type": "number"
         },
-        "fpha_turbined_cost": {
-          "format": "double",
-          "type": "number"
-        },
         "generation_violation_below_cost": {
           "format": "double",
           "type": "number"
@@ -107,6 +103,10 @@
           "type": "number"
         },
         "storage_violation_below_cost": {
+          "format": "double",
+          "type": "number"
+        },
+        "turbined_cost": {
           "format": "double",
           "type": "number"
         },
@@ -137,7 +137,7 @@
       },
       "required": [
         "spillage_cost",
-        "fpha_turbined_cost",
+        "turbined_cost",
         "diversion_cost",
         "storage_violation_below_cost",
         "filling_target_violation_cost",

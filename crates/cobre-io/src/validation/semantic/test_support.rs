@@ -42,7 +42,7 @@ pub(super) fn penalties_all(v: f64) -> HydroPenalties {
     HydroPenalties {
         spillage_cost: v,
         diversion_cost: v,
-        fpha_turbined_cost: v,
+        turbined_cost: v,
         storage_violation_below_cost: v,
         filling_target_violation_cost: v,
         turbined_violation_below_cost: v,
@@ -71,7 +71,7 @@ pub(super) fn minimal_global_penalties() -> GlobalPenaltyDefaults {
         line_exchange_cost: 1.0,
         hydro: HydroPenalties {
             spillage_cost: 1.0,
-            fpha_turbined_cost: 1.0,
+            turbined_cost: 1.0,
             diversion_cost: 1.0,
             storage_violation_below_cost: 1.0,
             filling_target_violation_cost: 1.0,
@@ -322,7 +322,7 @@ pub(super) fn make_hydro_ordered_penalties(id: i32) -> Hydro {
         evaporation_violation_neg_cost: 50.0,
         spillage_cost: 1.0,
         diversion_cost: 1.0,
-        fpha_turbined_cost: 2.0,
+        turbined_cost: 2.0,
         inflow_nonnegativity_cost: 1000.0,
     };
     h

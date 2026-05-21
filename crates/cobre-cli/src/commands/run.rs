@@ -779,6 +779,30 @@ fn broadcast_and_build_setup(
                     max_order,
                     window_years.clone(),
                 );
+                // Pass past_inflows so the η-inversion rolling chain is seeded
+                // from the same x₀ as the forward pass (TENDENCIA HIDROLOGICA
+                // convention). Compute stage_lag_transitions explicitly via the
+                // same helper the production setup path uses, so the broadcast
+                // path stays correct under non-monthly study grids should they
+                // ever land (the in-function uniform-monthly fallback would
+                // silently misroute those).
+                let noop_season_map;
+                let season_map_for_transitions: &cobre_core::temporal::SeasonMap =
+                    if let Some(sm) = system.policy_graph().season_map.as_ref() {
+                        sm
+                    } else {
+                        noop_season_map = cobre_core::temporal::SeasonMap {
+                            cycle_type: cobre_core::temporal::SeasonCycleType::Monthly,
+                            seasons: Vec::new(),
+                        };
+                        &noop_season_map
+                    };
+                let stage_lag_transitions =
+                    cobre_sddp::lag_transition::precompute_stage_lag_transitions(
+                        &study_stages,
+                        season_map_for_transitions,
+                        max_order,
+                    );
                 cobre_stochastic::standardize_historical_windows(
                     &mut lib,
                     system.inflow_history(),
@@ -787,6 +811,8 @@ fn broadcast_and_build_setup(
                     &par,
                     &window_years,
                     system.policy_graph().season_map.as_ref(),
+                    &system.initial_conditions().past_inflows,
+                    &stage_lag_transitions,
                 );
                 Some(lib)
             } else {

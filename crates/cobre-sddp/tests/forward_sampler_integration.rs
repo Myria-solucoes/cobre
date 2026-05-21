@@ -198,7 +198,7 @@ fn make_hydro(raw_id: i32) -> Hydro {
         penalties: HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
-            fpha_turbined_cost: 0.0,
+            turbined_cost: 0.0,
             storage_violation_below_cost: 0.0,
             filling_target_violation_cost: 0.0,
             turbined_violation_below_cost: 0.0,
@@ -236,7 +236,7 @@ fn hydro_stage_penalties() -> HydroStagePenalties {
     HydroStagePenalties {
         spillage_cost: 0.0,
         diversion_cost: 0.0,
-        fpha_turbined_cost: 0.0,
+        turbined_cost: 0.0,
         storage_violation_below_cost: 0.0,
         filling_target_violation_cost: 0.0,
         turbined_violation_below_cost: 0.0,
@@ -1002,6 +1002,7 @@ fn build_mixed_system(
         entry_stage_id: None,
         exit_stage_id: None,
         max_generation_mw: 30.0,
+        allow_curtailment: true,
         curtailment_cost: 0.0,
     };
     let stages: Vec<Stage> = (0..3).map(|i| make_monthly_stage(i, 5)).collect();
@@ -1305,6 +1306,7 @@ fn build_external_ncs_system(
         entry_stage_id: None,
         exit_stage_id: None,
         max_generation_mw: 30.0,
+        allow_curtailment: true,
         curtailment_cost: 0.0,
     };
     let stages: Vec<Stage> = (0..3).map(|i| make_monthly_stage(i, 5)).collect();

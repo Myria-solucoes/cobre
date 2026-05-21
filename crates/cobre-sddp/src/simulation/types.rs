@@ -77,8 +77,8 @@ pub struct SimulationCostResult {
     pub generic_violation_cost: f64,
     /// Regularization cost for reservoir spillage.
     pub spillage_cost: f64,
-    /// Regularization cost for FPHA turbining.
-    pub fpha_turbined_cost: f64,
+    /// Regularization cost for turbining (applied to every hydro's turbine flow).
+    pub turbined_cost: f64,
     /// Regularization cost for non-controllable source curtailment.
     pub curtailment_cost: f64,
     /// Regularization cost for transmission exchange.
@@ -410,7 +410,7 @@ pub struct ScenarioCategoryCosts {
     /// filling_target_cost + hydro_violation_cost + inflow_penalty_cost +
     /// generic_violation_cost`.
     pub violation_cost: f64,
-    /// Sum of regularization costs: `spillage_cost + fpha_turbined_cost +
+    /// Sum of regularization costs: `spillage_cost + turbined_cost +
     /// curtailment_cost + exchange_cost`.
     pub regularization_cost: f64,
     /// Imputed pumping cost: `pumping_cost`.
@@ -561,7 +561,7 @@ mod tests {
             inflow_penalty_cost: 3.0,
             generic_violation_cost: 2.0,
             spillage_cost: 1.0,
-            fpha_turbined_cost: 4.0,
+            turbined_cost: 4.0,
             curtailment_cost: 7.0,
             exchange_cost: 8.0,
             pumping_cost: 60.0,
@@ -583,7 +583,7 @@ mod tests {
         assert_eq!(r.inflow_penalty_cost, 3.0);
         assert_eq!(r.generic_violation_cost, 2.0);
         assert_eq!(r.spillage_cost, 1.0);
-        assert_eq!(r.fpha_turbined_cost, 4.0);
+        assert_eq!(r.turbined_cost, 4.0);
         assert_eq!(r.curtailment_cost, 7.0);
         assert_eq!(r.exchange_cost, 8.0);
         assert_eq!(r.pumping_cost, 60.0);

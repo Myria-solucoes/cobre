@@ -10,13 +10,17 @@
 //! Given precomputed parameters, the output for series `h` at stage `t` is:
 //!
 //! ```text
-//! a_h = deterministic_base + sum_{l=0}^{order-1} psi[l] * lag[l] + sigma * eta
+//! a_h = deterministic_base + sum_{l=0}^{psi.len()-1} psi[l] * lag[l] + sigma * eta
 //! ```
 //!
 //! where:
 //! - `deterministic_base` encodes `mu_m - sum psi_{m,l} * mu_{m-l}` (built by
 //!   [`PrecomputedPar`])
-//! - `psi[l]` are the AR coefficients in original units (lag 1 is at index 0)
+//! - `psi[l]` are the materialised PAR coefficients in original units (lag 1 is
+//!   at index 0); `psi.len()` is the number of lag terms the model uses at this
+//!   stage — classical PAR(p) when no annual component is active, widened to 12
+//!   when PAR(p)-A annual is in effect (annual contribution is spread across
+//!   all 12 positions; see [`PrecomputedPar`])
 //! - `lag[l]` is the observed series value at lag `l+1`
 //! - `sigma` is the residual standard deviation
 //! - `eta` is the standardised noise realisation
@@ -32,8 +36,13 @@ use super::precompute::PrecomputedPar;
 ///
 /// Computes:
 /// ```text
-/// a_h = deterministic_base + sum_{l=0}^{order-1} psi[l] * lags[l] + sigma * eta
+/// a_h = deterministic_base + sum_{l=0}^{psi.len()-1} psi[l] * lags[l] + sigma * eta
 /// ```
+///
+/// All entries of `psi` are model coefficients and participate in the sum: with
+/// classical PAR(p), `psi.len()` equals the AR order; with PAR(p)-A annual,
+/// `psi` is widened to 12 and the annual contribution is spread across the
+/// extra positions. The caller must supply at least `psi.len()` lag values.
 ///
 /// The returned value may be negative (truncation is the caller's
 /// responsibility).
@@ -41,11 +50,10 @@ use super::precompute::PrecomputedPar;
 /// # Parameters
 ///
 /// - `deterministic_base` — the precomputed `b_{h,m(t)} = mu_m - sum psi_{m,l} * mu_{m-l}`
-/// - `psi` — AR coefficients in original units for this (stage, series element) pair;
-///   only `psi[0..order]` are used
-/// - `order` — number of meaningful entries in `psi` (the AR order)
-/// - `lags` — observed series values at lags 1..p; `lags[0]` = lag-1 value,
-///   `lags[1]` = lag-2 value, etc.; must have `lags.len() >= order`
+/// - `psi` — materialised PAR coefficients in original units for this
+///   `(stage, series element)` pair; every entry contributes
+/// - `lags` — observed series values at lags 1..`psi.len()`; `lags[0]` = lag-1
+///   value, `lags[1]` = lag-2 value, etc.; must have `lags.len() >= psi.len()`
 /// - `sigma` — residual standard deviation
 /// - `eta` — standardised noise realisation (post-correlation)
 ///
@@ -56,7 +64,7 @@ use super::precompute::PrecomputedPar;
 /// ```
 /// use cobre_stochastic::evaluate_par;
 ///
-/// let a_h = evaluate_par(100.0, &[], 0, &[], 30.0, 1.5);
+/// let a_h = evaluate_par(100.0, &[], &[], 30.0, 1.5);
 /// assert!((a_h - 145.0).abs() < 1e-10);
 /// ```
 ///
@@ -66,27 +74,26 @@ use super::precompute::PrecomputedPar;
 /// use cobre_stochastic::evaluate_par;
 ///
 /// // a_h = 70.0 + 0.48 * 90.0 + 28.62 * 0.5 = 127.51
-/// let a_h = evaluate_par(70.0, &[0.48], 1, &[90.0], 28.62, 0.5);
+/// let a_h = evaluate_par(70.0, &[0.48], &[90.0], 28.62, 0.5);
 /// assert!((a_h - 127.51).abs() < 1e-10);
 /// ```
 #[must_use]
 pub fn evaluate_par(
     deterministic_base: f64,
     psi: &[f64],
-    order: usize,
     lags: &[f64],
     sigma: f64,
     eta: f64,
 ) -> f64 {
     debug_assert!(
-        lags.len() >= order,
-        "lags.len() ({}) must be >= order ({})",
+        lags.len() >= psi.len(),
+        "lags.len() ({}) must be >= psi.len() ({})",
         lags.len(),
-        order
+        psi.len()
     );
     let mut a_h = deterministic_base;
-    for l in 0..order {
-        a_h += psi[l] * lags[l];
+    for (l, &p) in psi.iter().enumerate() {
+        a_h += p * lags[l];
     }
     a_h + sigma * eta
 }
@@ -106,7 +113,7 @@ pub fn evaluate_par(
 /// #[allow(deprecated)]
 /// use cobre_stochastic::evaluate_par_inflow;
 ///
-/// let a_h = evaluate_par_inflow(100.0, &[], 0, &[], 30.0, 1.5);
+/// let a_h = evaluate_par_inflow(100.0, &[], &[], 30.0, 1.5);
 /// assert!((a_h - 145.0).abs() < 1e-10);
 /// ```
 ///
@@ -117,7 +124,7 @@ pub fn evaluate_par(
 /// use cobre_stochastic::evaluate_par_inflow;
 ///
 /// // a_h = 70.0 + 0.48 * 90.0 + 28.62 * 0.5 = 127.51
-/// let a_h = evaluate_par_inflow(70.0, &[0.48], 1, &[90.0], 28.62, 0.5);
+/// let a_h = evaluate_par_inflow(70.0, &[0.48], &[90.0], 28.62, 0.5);
 /// assert!((a_h - 127.51).abs() < 1e-10);
 /// ```
 #[must_use]
@@ -125,12 +132,11 @@ pub fn evaluate_par(
 pub fn evaluate_par_inflow(
     deterministic_base: f64,
     psi: &[f64],
-    order: usize,
     lags: &[f64],
     sigma: f64,
     eta: f64,
 ) -> f64 {
-    evaluate_par(deterministic_base, psi, order, lags, sigma, eta)
+    evaluate_par(deterministic_base, psi, lags, sigma, eta)
 }
 
 /// Evaluate the PAR(p) model equation for all series elements at a given stage.
@@ -212,11 +218,10 @@ pub fn evaluate_par_batch(
         let base = par_lp.deterministic_base(stage, h);
         let sigma = par_lp.sigma(stage, h);
         let psi = par_lp.psi_slice(stage, h);
-        let order = par_lp.order(h);
 
         let mut a_h = base;
-        for l in 0..order {
-            a_h += psi[l] * lag_matrix[l * n_series + h];
+        for (l, &p) in psi.iter().enumerate() {
+            a_h += p * lag_matrix[l * n_series + h];
         }
         a_h += sigma * noise[h];
         output[h] = a_h;
@@ -304,9 +309,11 @@ pub fn evaluate_par_inflows(
 /// # Parameters
 ///
 /// - `deterministic_base` — the precomputed `b_{h,m(t)} = mu_m - Σ psi_{m,l} * mu_{m-l}`
-/// - `psi` — AR coefficients in original units; only `psi[0..order]` are used
-/// - `order` — number of meaningful entries in `psi` (the AR order)
-/// - `lags` — observed series values at lags 1..p; must have `lags.len() >= order`
+/// - `psi` — materialised PAR coefficients in original units; every entry
+///   contributes (`psi.len()` may exceed the AR order when PAR(p)-A annual is in
+///   effect; see [`evaluate_par`])
+/// - `lags` — observed series values at lags 1..`psi.len()`; must have
+///   `lags.len() >= psi.len()`
 /// - `sigma` — residual standard deviation
 /// - `target` — desired output value to solve for
 ///
@@ -318,7 +325,7 @@ pub fn evaluate_par_inflows(
 /// use cobre_stochastic::solve_par_noise;
 ///
 /// // η = (0.0 - 70.0 - 0.48 * 90.0) / 28.62
-/// let eta = solve_par_noise(70.0, &[0.48], 1, &[90.0], 28.62, 0.0);
+/// let eta = solve_par_noise(70.0, &[0.48], &[90.0], 28.62, 0.0);
 /// let expected = -(70.0 + 0.48 * 90.0) / 28.62;
 /// assert!((eta - expected).abs() < 1e-10);
 /// ```
@@ -329,7 +336,7 @@ pub fn evaluate_par_inflows(
 /// use cobre_stochastic::solve_par_noise;
 ///
 /// // deterministic_value = 100.0 + 0.5 * 50.0 = 125.0; target matches → 0.0
-/// let eta = solve_par_noise(100.0, &[0.5], 1, &[50.0], 0.0, 125.0);
+/// let eta = solve_par_noise(100.0, &[0.5], &[50.0], 0.0, 125.0);
 /// assert_eq!(eta, 0.0_f64);
 /// ```
 ///
@@ -339,27 +346,26 @@ pub fn evaluate_par_inflows(
 /// use cobre_stochastic::solve_par_noise;
 ///
 /// // deterministic_value = 125.0; target = 0.0 → impossible → NEG_INFINITY
-/// let eta = solve_par_noise(100.0, &[0.5], 1, &[50.0], 0.0, 0.0);
+/// let eta = solve_par_noise(100.0, &[0.5], &[50.0], 0.0, 0.0);
 /// assert_eq!(eta, f64::NEG_INFINITY);
 /// ```
 #[must_use]
 pub fn solve_par_noise(
     deterministic_base: f64,
     psi: &[f64],
-    order: usize,
     lags: &[f64],
     sigma: f64,
     target: f64,
 ) -> f64 {
     debug_assert!(
-        lags.len() >= order,
-        "lags.len() ({}) must be >= order ({})",
+        lags.len() >= psi.len(),
+        "lags.len() ({}) must be >= psi.len() ({})",
         lags.len(),
-        order
+        psi.len()
     );
     let mut deterministic_value = deterministic_base;
-    for l in 0..order {
-        deterministic_value += psi[l] * lags[l];
+    for (l, &p) in psi.iter().enumerate() {
+        deterministic_value += p * lags[l];
     }
     if sigma == 0.0 {
         return if (target - deterministic_value).abs() < 1e-10 {
@@ -448,11 +454,10 @@ pub fn solve_par_noise_batch(
         let base = par_lp.deterministic_base(stage, h);
         let sigma = par_lp.sigma(stage, h);
         let psi = par_lp.psi_slice(stage, h);
-        let order = par_lp.order(h);
 
         let mut deterministic_value = base;
-        for l in 0..order {
-            deterministic_value += psi[l] * lag_matrix[l * n_series + h];
+        for (l, &p) in psi.iter().enumerate() {
+            deterministic_value += p * lag_matrix[l * n_series + h];
         }
         if sigma == 0.0 {
             output[h] = if (targets[h] - deterministic_value).abs() < 1e-10 {
@@ -597,7 +602,7 @@ mod tests {
     #[test]
     fn ar0_produces_mean_plus_noise() {
         // a_h = 100.0 + 0 (no lags) + 30.0 * 1.5 = 145.0
-        let a_h = evaluate_par_inflow(100.0, &[], 0, &[], 30.0, 1.5);
+        let a_h = evaluate_par_inflow(100.0, &[], &[], 30.0, 1.5);
         assert!(
             (a_h - 145.0).abs() < 1e-10,
             "AR(0): expected 145.0, got {a_h}"
@@ -607,7 +612,7 @@ mod tests {
     #[test]
     fn ar1_acceptance_criterion() {
         // a_h = 70.0 + 0.48 * 90.0 + 28.62 * 0.5 = 70.0 + 43.2 + 14.31 = 127.51
-        let a_h = evaluate_par_inflow(70.0, &[0.48], 1, &[90.0], 28.62, 0.5);
+        let a_h = evaluate_par_inflow(70.0, &[0.48], &[90.0], 28.62, 0.5);
         assert!(
             (a_h - 127.51).abs() < 1e-10,
             "AR(1): expected 127.51, got {a_h}"
@@ -619,7 +624,7 @@ mod tests {
         // a_h = 50.0 + 0.4 * 80.0 + 0.2 * 60.0 + 20.0 * (-0.5)
         //     = 50.0 + 32.0 + 12.0 - 10.0
         //     = 84.0
-        let a_h = evaluate_par_inflow(50.0, &[0.4, 0.2], 2, &[80.0, 60.0], 20.0, -0.5);
+        let a_h = evaluate_par_inflow(50.0, &[0.4, 0.2], &[80.0, 60.0], 20.0, -0.5);
         assert!(
             (a_h - 84.0).abs() < 1e-10,
             "AR(2): expected 84.0, got {a_h}"
@@ -629,7 +634,7 @@ mod tests {
     #[test]
     fn zero_sigma_returns_deterministic_value() {
         // a_h = 100.0 + 0.3 * 90.0 + 0.0 * anything = 100.0 + 27.0 = 127.0
-        let a_h = evaluate_par_inflow(100.0, &[0.3], 1, &[90.0], 0.0, 999.0);
+        let a_h = evaluate_par_inflow(100.0, &[0.3], &[90.0], 0.0, 999.0);
         assert!(
             (a_h - 127.0).abs() < 1e-10,
             "zero sigma: expected 127.0, got {a_h}"
@@ -640,7 +645,7 @@ mod tests {
     fn negative_noise_can_produce_negative_inflow() {
         // a_h = 10.0 + 0.0 (no lags) + 100.0 * (-1.0) = -90.0
         // Truncation is not this function's responsibility.
-        let a_h = evaluate_par_inflow(10.0, &[], 0, &[], 100.0, -1.0);
+        let a_h = evaluate_par_inflow(10.0, &[], &[], 100.0, -1.0);
         assert!(
             a_h < 0.0,
             "expected negative inflow for large negative noise, got {a_h}"
@@ -649,13 +654,16 @@ mod tests {
     }
 
     #[test]
-    fn order_respected_from_psi_slice_longer_than_order() {
-        // psi has 3 entries but order=1: only psi[0] should be used.
-        // a_h = 50.0 + 0.4 * 80.0 + 20.0 * 0.0 = 50.0 + 32.0 = 82.0
-        let a_h = evaluate_par_inflow(50.0, &[0.4, 0.9, 0.9], 1, &[80.0, 60.0, 40.0], 20.0, 0.0);
+    fn full_psi_slice_participates_when_widened() {
+        // All entries of psi contribute: with PAR(p)-A active, psi.len() exceeds
+        // the AR order and the spread annual coefficient lives at the extra
+        // positions. This test simulates that shape directly.
+        // a_h = 50.0 + 0.4*80.0 + 0.9*60.0 + 0.9*40.0 + 20.0*0.0
+        //     = 50.0 + 32.0 + 54.0 + 36.0 = 172.0
+        let a_h = evaluate_par_inflow(50.0, &[0.4, 0.9, 0.9], &[80.0, 60.0, 40.0], 20.0, 0.0);
         assert!(
-            (a_h - 82.0).abs() < 1e-10,
-            "order truncation: expected 82.0, got {a_h}"
+            (a_h - 172.0).abs() < 1e-10,
+            "full-psi iteration: expected 172.0, got {a_h}"
         );
     }
 
@@ -707,24 +715,24 @@ mod tests {
         evaluate_par_inflows(&par_lp, 1, &lag_matrix, &noise, &mut output);
 
         let n_hydros = par_lp.n_hydros();
-        let order_h0 = par_lp.order(0);
-        let lags_h0: Vec<f64> = (0..order_h0).map(|l| lag_matrix[l * n_hydros]).collect();
+        let psi_h0 = par_lp.psi_slice(1, 0);
+        let lags_h0: Vec<f64> = (0..psi_h0.len())
+            .map(|l| lag_matrix[l * n_hydros])
+            .collect();
         let expected_h0 = evaluate_par_inflow(
             par_lp.deterministic_base(1, 0),
-            par_lp.psi_slice(1, 0),
-            order_h0,
+            psi_h0,
             &lags_h0,
             par_lp.sigma(1, 0),
             noise[0],
         );
-        let order_h1 = par_lp.order(1);
-        let lags_h1: Vec<f64> = (0..order_h1)
+        let psi_h1 = par_lp.psi_slice(1, 1);
+        let lags_h1: Vec<f64> = (0..psi_h1.len())
             .map(|l| lag_matrix[l * n_hydros + 1])
             .collect();
         let expected_h1 = evaluate_par_inflow(
             par_lp.deterministic_base(1, 1),
-            par_lp.psi_slice(1, 1),
-            order_h1,
+            psi_h1,
             &lags_h1,
             par_lp.sigma(1, 1),
             noise[1],
@@ -757,10 +765,11 @@ mod tests {
 
         evaluate_par_inflows(&par_lp, 0, &lag_matrix, &noise, &mut output);
 
+        // max_order=2, so per-hydro lag buffers must be length 2.
+        // Hydro 1 (AR(1)) gets a zero in the unused lag-1 slot — psi[1]==0 there.
         let expected_h0 = evaluate_par_inflow(
             par_lp.deterministic_base(0, 0),
             par_lp.psi_slice(0, 0),
-            par_lp.order(0),
             &[lag0_h0, lag1_h0],
             par_lp.sigma(0, 0),
             noise[0],
@@ -768,8 +777,7 @@ mod tests {
         let expected_h1 = evaluate_par_inflow(
             par_lp.deterministic_base(0, 1),
             par_lp.psi_slice(0, 1),
-            par_lp.order(1),
-            &[lag0_h1],
+            &[lag0_h1, 0.0],
             par_lp.sigma(0, 1),
             noise[1],
         );
@@ -854,7 +862,7 @@ mod tests {
     fn solve_noise_ar1_for_zero_target() {
         // η = (0.0 - 70.0 - 0.48 * 90.0) / 28.62 = -113.2 / 28.62
         let expected = -(70.0_f64 + 0.48 * 90.0) / 28.62;
-        let eta = solve_par_noise(70.0, &[0.48], 1, &[90.0], 28.62, 0.0);
+        let eta = solve_par_noise(70.0, &[0.48], &[90.0], 28.62, 0.0);
         assert!(
             (eta - expected).abs() < 1e-10,
             "AR(1) zero target: expected {expected}, got {eta}"
@@ -869,8 +877,8 @@ mod tests {
         let lags = [90.0_f64];
         let sigma = 28.62_f64;
 
-        let eta = solve_par_noise(det_base, &psi, 1, &lags, sigma, 0.0);
-        let inflow = evaluate_par_inflow(det_base, &psi, 1, &lags, sigma, eta);
+        let eta = solve_par_noise(det_base, &psi, &lags, sigma, 0.0);
+        let inflow = evaluate_par_inflow(det_base, &psi, &lags, sigma, eta);
         assert!(
             inflow.abs() < 1e-10,
             "roundtrip: inflow with solved η must be 0.0, got {inflow}"
@@ -884,8 +892,8 @@ mod tests {
         let lags = [80.0_f64, 60.0];
         let sigma = 20.0_f64;
 
-        let eta = solve_par_noise(det_base, &psi, 2, &lags, sigma, 0.0);
-        let inflow = evaluate_par_inflow(det_base, &psi, 2, &lags, sigma, eta);
+        let eta = solve_par_noise(det_base, &psi, &lags, sigma, 0.0);
+        let inflow = evaluate_par_inflow(det_base, &psi, &lags, sigma, eta);
         assert!(
             inflow.abs() < 1e-10,
             "AR(2) roundtrip: expected 0.0, got {inflow}"
@@ -901,8 +909,8 @@ mod tests {
         let sigma = 28.62_f64;
         let target = 42.0_f64;
 
-        let eta = solve_par_noise(det_base, &psi, 1, &lags, sigma, target);
-        let inflow = evaluate_par_inflow(det_base, &psi, 1, &lags, sigma, eta);
+        let eta = solve_par_noise(det_base, &psi, &lags, sigma, target);
+        let inflow = evaluate_par_inflow(det_base, &psi, &lags, sigma, eta);
         assert!(
             (inflow - target).abs() < 1e-10,
             "roundtrip with target={target}: expected {target}, got {inflow}"
@@ -915,7 +923,7 @@ mod tests {
         let det_base = 120.0_f64;
         let sigma = 40.0_f64;
         let expected = -det_base / sigma;
-        let eta = solve_par_noise(det_base, &[], 0, &[], sigma, 0.0);
+        let eta = solve_par_noise(det_base, &[], &[], sigma, 0.0);
         assert!(
             (eta - expected).abs() < 1e-10,
             "AR(0): expected {expected}, got {eta}"
@@ -924,7 +932,7 @@ mod tests {
 
     #[test]
     fn solve_noise_zero_sigma_returns_neg_infinity() {
-        let eta = solve_par_noise(100.0, &[0.5], 1, &[50.0], 0.0, 0.0);
+        let eta = solve_par_noise(100.0, &[0.5], &[50.0], 0.0, 0.0);
         assert!(
             eta.is_infinite() && eta.is_sign_negative(),
             "zero sigma: expected NEG_INFINITY, got {eta}"
@@ -935,7 +943,7 @@ mod tests {
     #[allow(clippy::float_cmp)]
     fn test_solve_par_noise_sigma_zero_matching_target() {
         // deterministic_value = 100.0 + 0.5 * 50.0 = 125.0; target matches → 0.0
-        let eta = solve_par_noise(100.0, &[0.5], 1, &[50.0], 0.0, 125.0);
+        let eta = solve_par_noise(100.0, &[0.5], &[50.0], 0.0, 125.0);
         assert_eq!(
             eta, 0.0_f64,
             "sigma=0, matching target: expected 0.0, got {eta}"
@@ -946,7 +954,7 @@ mod tests {
     #[allow(clippy::float_cmp)]
     fn test_solve_par_noise_sigma_zero_non_matching_target() {
         // deterministic_value = 125.0; target = 200.0 → residual = 75.0 → NEG_INFINITY
-        let eta = solve_par_noise(100.0, &[0.5], 1, &[50.0], 0.0, 200.0);
+        let eta = solve_par_noise(100.0, &[0.5], &[50.0], 0.0, 200.0);
         assert_eq!(
             eta,
             f64::NEG_INFINITY,
@@ -958,7 +966,7 @@ mod tests {
     #[allow(clippy::float_cmp)]
     fn test_solve_par_noise_sigma_zero_near_matching_target() {
         // deterministic_value = 125.0; target within 1e-11 → still matches
-        let eta = solve_par_noise(100.0, &[0.5], 1, &[50.0], 0.0, 125.0 + 1e-11);
+        let eta = solve_par_noise(100.0, &[0.5], &[50.0], 0.0, 125.0 + 1e-11);
         assert_eq!(
             eta, 0.0_f64,
             "sigma=0, target within 1e-11: expected 0.0, got {eta}"
@@ -1020,7 +1028,7 @@ mod tests {
         // Positive deterministic inflow → need large negative noise to reach zero.
         let det_base = 100.0_f64;
         let sigma = 30.0_f64;
-        let eta = solve_par_noise(det_base, &[], 0, &[], sigma, 0.0);
+        let eta = solve_par_noise(det_base, &[], &[], sigma, 0.0);
         assert!(
             eta < 0.0,
             "positive deterministic inflow: η for zero target must be negative, got {eta}"
@@ -1031,7 +1039,7 @@ mod tests {
     fn solve_noise_negative_deterministic_gives_positive_eta_for_zero() {
         // Negative deterministic inflow → need positive noise to reach zero.
         // η = (0.0 - (-50.0)) / 20.0 = 2.5
-        let eta = solve_par_noise(-50.0, &[], 0, &[], 20.0, 0.0);
+        let eta = solve_par_noise(-50.0, &[], &[], 20.0, 0.0);
         assert!(
             eta > 0.0,
             "negative deterministic inflow: η for zero target must be positive, got {eta}"
@@ -1058,25 +1066,25 @@ mod tests {
         let mut output = vec![0.0_f64; n_hydros];
         solve_par_noises(&par_lp, 0, &lag_matrix, &targets, &mut output);
 
-        // Per-hydro single-call references.
-        let order_h0 = par_lp.order(0);
-        let lags_for_h0: Vec<f64> = (0..order_h0).map(|l| lag_matrix[l * n_hydros]).collect();
+        // Per-hydro single-call references. Lag buffer length = psi.len().
+        let psi_h0 = par_lp.psi_slice(0, 0);
+        let lags_for_h0: Vec<f64> = (0..psi_h0.len())
+            .map(|l| lag_matrix[l * n_hydros])
+            .collect();
         let expected_h0 = solve_par_noise(
             par_lp.deterministic_base(0, 0),
-            par_lp.psi_slice(0, 0),
-            order_h0,
+            psi_h0,
             &lags_for_h0,
             par_lp.sigma(0, 0),
             0.0,
         );
-        let order_h1 = par_lp.order(1);
-        let lags_for_h1: Vec<f64> = (0..order_h1)
+        let psi_h1 = par_lp.psi_slice(0, 1);
+        let lags_for_h1: Vec<f64> = (0..psi_h1.len())
             .map(|l| lag_matrix[l * n_hydros + 1])
             .collect();
         let expected_h1 = solve_par_noise(
             par_lp.deterministic_base(0, 1),
-            par_lp.psi_slice(0, 1),
-            order_h1,
+            psi_h1,
             &lags_for_h1,
             par_lp.sigma(0, 1),
             0.0,
@@ -1153,16 +1161,16 @@ mod tests {
     /// results for the same inputs.
     #[test]
     fn test_evaluate_par_matches_inflow() {
-        type EvalCase<'a> = (f64, &'a [f64], usize, &'a [f64], f64, f64);
+        type EvalCase<'a> = (f64, &'a [f64], &'a [f64], f64, f64);
         let cases: &[EvalCase<'_>] = &[
-            (100.0, &[], 0, &[], 30.0, 1.5),
-            (70.0, &[0.48], 1, &[90.0], 28.62, 0.5),
-            (50.0, &[0.4, 0.2], 2, &[80.0, 60.0], 20.0, -0.5),
-            (100.0, &[0.3], 1, &[90.0], 0.0, 999.0),
+            (100.0, &[], &[], 30.0, 1.5),
+            (70.0, &[0.48], &[90.0], 28.62, 0.5),
+            (50.0, &[0.4, 0.2], &[80.0, 60.0], 20.0, -0.5),
+            (100.0, &[0.3], &[90.0], 0.0, 999.0),
         ];
-        for &(base, psi, order, lags, sigma, eta) in cases {
-            let via_new = evaluate_par(base, psi, order, lags, sigma, eta);
-            let via_old = evaluate_par_inflow(base, psi, order, lags, sigma, eta);
+        for &(base, psi, lags, sigma, eta) in cases {
+            let via_new = evaluate_par(base, psi, lags, sigma, eta);
+            let via_old = evaluate_par_inflow(base, psi, lags, sigma, eta);
             assert_eq!(
                 via_new.to_bits(),
                 via_old.to_bits(),

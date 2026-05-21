@@ -200,6 +200,28 @@ fn build_opening_tree_library(
         max_order,
         window_years.clone(),
     );
+    // Compute stage_lag_transitions so the η-inversion rolling chain matches
+    // the forward-pass lag accumulator. `downstream_par_order = max_order`
+    // ensures the chain is wide enough for all AR lags.
+    let season_map_ref = system.policy_graph().season_map.as_ref();
+    // `precompute_stage_lag_transitions` requires a non-optional &SeasonMap.
+    // When the system has no season_map, supply an empty noop map (same
+    // pattern used in `StudySetup::new`).
+    let noop_season_map;
+    let effective_season_map: &cobre_core::temporal::SeasonMap = if let Some(sm) = season_map_ref {
+        sm
+    } else {
+        noop_season_map = cobre_core::temporal::SeasonMap {
+            cycle_type: cobre_core::temporal::SeasonCycleType::Monthly,
+            seasons: Vec::new(),
+        };
+        &noop_season_map
+    };
+    let stage_lag_transitions = crate::lag_transition::precompute_stage_lag_transitions(
+        &study_stages,
+        effective_season_map,
+        max_order,
+    );
     cobre_stochastic::standardize_historical_windows(
         &mut lib,
         system.inflow_history(),
@@ -207,7 +229,9 @@ fn build_opening_tree_library(
         &study_stages,
         &par,
         &window_years,
-        system.policy_graph().season_map.as_ref(),
+        season_map_ref,
+        &system.initial_conditions().past_inflows,
+        &stage_lag_transitions,
     );
     Ok(Some(lib))
 }

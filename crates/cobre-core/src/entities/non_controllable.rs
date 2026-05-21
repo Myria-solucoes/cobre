@@ -10,9 +10,17 @@ use crate::EntityId;
 
 /// Intermittent generation source that cannot be dispatched.
 ///
-/// A `NonControllableSource` injects all available generation into the network.
-/// If curtailment is permitted, excess generation can be curtailed at a cost of
-/// `curtailment_cost` per `MWh`.
+/// A `NonControllableSource` injects generation into the network up to
+/// `max_generation_mw × α × factor`, where `α` is the per-(stage, scenario)
+/// availability ratio (drawn from the stochastic model) and `factor` is the
+/// per-(stage, block) shape factor.
+///
+/// When `allow_curtailment == true` (the default) the LP may dispatch
+/// anywhere in `[0, max × α × factor]` at the cost of `curtailment_cost`
+/// per curtailed `MWh`. When `allow_curtailment == false` the LP pins
+/// dispatch to the realized availability (`col_lower = col_upper = max × α
+/// × factor`) — the **must-run** regime that mirrors NEWAVE's
+/// `geracao_usinas_nao_simuladas` pre-netting convention.
 ///
 /// Source: `system/non_controllable.json`. See Input System Entities SS1.9.8.
 #[derive(Debug, Clone, PartialEq)]
@@ -30,10 +38,23 @@ pub struct NonControllableSource {
     pub exit_stage_id: Option<i32>,
     /// Maximum generation (installed capacity) \[MW\].
     pub max_generation_mw: f64,
+    /// Whether the LP is allowed to curtail this source.
+    ///
+    /// `true` (default) — fully curtailable: `col_lower = 0`,
+    /// `col_upper = max × α × factor`; the LP pays
+    /// `curtailment_cost × (col_upper − dispatch) × hours` per block.
+    ///
+    /// `false` — must-run: `col_lower = col_upper = max × α × factor`,
+    /// dispatch is pinned to the realized availability for every scenario.
+    /// Models NEWAVE's `geracao_usinas_nao_simuladas` aggregates (PCH, PCT,
+    /// EOL, UFV, MMGD) that are pre-netted from MERC before the dispatch LP
+    /// runs.
+    pub allow_curtailment: bool,
     /// Resolved cost per `MWh` of curtailed generation \[$/`MWh`\].
     ///
     /// This is a resolved field — defaults are applied during loading so this
     /// value is always ready for LP construction without further lookup.
+    /// Unused when `allow_curtailment == false` (no curtailment slack).
     pub curtailment_cost: f64,
 }
 
@@ -50,6 +71,7 @@ mod tests {
             entry_stage_id: None,
             exit_stage_id: None,
             max_generation_mw: 300.0,
+            allow_curtailment: true,
             curtailment_cost: 0.01,
         };
 
@@ -58,6 +80,7 @@ mod tests {
         assert_eq!(source.bus_id, EntityId::from(7));
         assert_eq!(source.entry_stage_id, None);
         assert_eq!(source.exit_stage_id, None);
+        assert!(source.allow_curtailment);
         assert!((source.max_generation_mw - 300.0).abs() < f64::EPSILON);
         assert!((source.curtailment_cost - 0.01).abs() < f64::EPSILON);
     }
@@ -71,9 +94,27 @@ mod tests {
             entry_stage_id: Some(12),
             exit_stage_id: None,
             max_generation_mw: 400.0,
+            allow_curtailment: true,
             curtailment_cost: 5.0,
         };
 
         assert!((source.curtailment_cost - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_non_controllable_must_run() {
+        // allow_curtailment == false models NEWAVE-style must-run aggregates.
+        let source = NonControllableSource {
+            id: EntityId::from(3),
+            name: "PCH Aggregate NE".to_string(),
+            bus_id: EntityId::from(0),
+            entry_stage_id: None,
+            exit_stage_id: None,
+            max_generation_mw: 120.0,
+            allow_curtailment: false,
+            curtailment_cost: 0.0344,
+        };
+
+        assert!(!source.allow_curtailment);
     }
 }

@@ -83,7 +83,7 @@ pub struct BoundsOverrides<'a> {
 /// let penalties = HydroPenalties {
 ///     spillage_cost: 0.01,
 ///     diversion_cost: 0.02,
-///     fpha_turbined_cost: 0.03,
+///     turbined_cost: 0.03,
 ///     storage_violation_below_cost: 1000.0,
 ///     filling_target_violation_cost: 5000.0,
 ///     turbined_violation_below_cost: 500.0,
@@ -592,7 +592,7 @@ mod tests {
         HydroPenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.02,
-            fpha_turbined_cost: 0.03,
+            turbined_cost: 0.03,
             storage_violation_below_cost: 1000.0,
             filling_target_violation_cost: 5000.0,
             turbined_violation_below_cost: 500.0,

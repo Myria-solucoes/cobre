@@ -196,7 +196,7 @@ when your case is working and you want dispatch results.
   },
   "hydro": {
     "spillage_cost": 0.01,
-    "fpha_turbined_cost": 0.05,
+    "turbined_cost": 0.05,
     "diversion_cost": 0.1,
     "storage_violation_below_cost": 10000.0,
     "filling_target_violation_cost": 50000.0,

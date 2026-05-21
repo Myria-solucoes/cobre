@@ -52,8 +52,8 @@ pub struct HydroPenaltyOverrides {
     pub spillage_cost: Option<f64>,
     /// Override for diversion cost [$/m³/s]. `None` = use global default.
     pub diversion_cost: Option<f64>,
-    /// Override for FPHA turbined cost \[$/`MWh`\]. `None` = use global default.
-    pub fpha_turbined_cost: Option<f64>,
+    /// Override for turbined cost \[$/`MWh`\]. `None` = use global default.
+    pub turbined_cost: Option<f64>,
     /// Override for storage violation below cost [$/hm³]. `None` = use global default.
     pub storage_violation_below_cost: Option<f64>,
     /// Override for filling target violation cost [$/hm³]. `None` = use global default.
@@ -97,7 +97,7 @@ pub struct HydroPenaltyOverrides {
 ///     bus_excess_cost: 10.0,
 ///     line_exchange_cost: 5.0,
 ///     hydro: HydroPenalties {
-///         spillage_cost: 0.01, diversion_cost: 0.02, fpha_turbined_cost: 0.03,
+///         spillage_cost: 0.01, diversion_cost: 0.02, turbined_cost: 0.03,
 ///         storage_violation_below_cost: 1.0, filling_target_violation_cost: 2.0,
 ///         turbined_violation_below_cost: 3.0, outflow_violation_below_cost: 4.0,
 ///         outflow_violation_above_cost: 5.0, generation_violation_below_cost: 6.0,
@@ -137,7 +137,7 @@ pub fn resolve_bus_deficit_segments(
 ///     bus_excess_cost: 100.0,
 ///     line_exchange_cost: 5.0,
 ///     hydro: HydroPenalties {
-///         spillage_cost: 0.01, diversion_cost: 0.02, fpha_turbined_cost: 0.03,
+///         spillage_cost: 0.01, diversion_cost: 0.02, turbined_cost: 0.03,
 ///         storage_violation_below_cost: 1.0, filling_target_violation_cost: 2.0,
 ///         turbined_violation_below_cost: 3.0, outflow_violation_below_cost: 4.0,
 ///         outflow_violation_above_cost: 5.0, generation_violation_below_cost: 6.0,
@@ -173,7 +173,7 @@ pub fn resolve_bus_excess_cost(
 ///     bus_excess_cost: 100.0,
 ///     line_exchange_cost: 5.0,
 ///     hydro: HydroPenalties {
-///         spillage_cost: 0.01, diversion_cost: 0.02, fpha_turbined_cost: 0.03,
+///         spillage_cost: 0.01, diversion_cost: 0.02, turbined_cost: 0.03,
 ///         storage_violation_below_cost: 1.0, filling_target_violation_cost: 2.0,
 ///         turbined_violation_below_cost: 3.0, outflow_violation_below_cost: 4.0,
 ///         outflow_violation_above_cost: 5.0, generation_violation_below_cost: 6.0,
@@ -212,7 +212,7 @@ pub fn resolve_line_exchange_cost(
 /// use cobre_core::entities::{DeficitSegment, HydroPenalties};
 ///
 /// let global_hydro = HydroPenalties {
-///     spillage_cost: 0.01, diversion_cost: 0.02, fpha_turbined_cost: 0.03,
+///     spillage_cost: 0.01, diversion_cost: 0.02, turbined_cost: 0.03,
 ///     storage_violation_below_cost: 1.0, filling_target_violation_cost: 2.0,
 ///     turbined_violation_below_cost: 3.0, outflow_violation_below_cost: 4.0,
 ///     outflow_violation_above_cost: 5.0, generation_violation_below_cost: 6.0,
@@ -261,7 +261,7 @@ pub fn resolve_hydro_penalties(
             HydroPenalties {
                 spillage_cost: ov.spillage_cost.unwrap_or(g.spillage_cost),
                 diversion_cost: ov.diversion_cost.unwrap_or(g.diversion_cost),
-                fpha_turbined_cost: ov.fpha_turbined_cost.unwrap_or(g.fpha_turbined_cost),
+                turbined_cost: ov.turbined_cost.unwrap_or(g.turbined_cost),
                 storage_violation_below_cost: ov
                     .storage_violation_below_cost
                     .unwrap_or(g.storage_violation_below_cost),
@@ -317,7 +317,7 @@ pub fn resolve_hydro_penalties(
 ///     bus_excess_cost: 100.0,
 ///     line_exchange_cost: 5.0,
 ///     hydro: HydroPenalties {
-///         spillage_cost: 0.01, diversion_cost: 0.02, fpha_turbined_cost: 0.03,
+///         spillage_cost: 0.01, diversion_cost: 0.02, turbined_cost: 0.03,
 ///         storage_violation_below_cost: 1.0, filling_target_violation_cost: 2.0,
 ///         turbined_violation_below_cost: 3.0, outflow_violation_below_cost: 4.0,
 ///         outflow_violation_above_cost: 5.0, generation_violation_below_cost: 6.0,
@@ -361,7 +361,7 @@ mod tests {
             hydro: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.02,
-                fpha_turbined_cost: 0.03,
+                turbined_cost: 0.03,
                 storage_violation_below_cost: 1.0,
                 filling_target_violation_cost: 2.0,
                 turbined_violation_below_cost: 3.0,
@@ -448,7 +448,7 @@ mod tests {
 
         assert!((result.spillage_cost - 0.05).abs() < f64::EPSILON);
         assert!((result.diversion_cost - 0.02).abs() < f64::EPSILON);
-        assert!((result.fpha_turbined_cost - 0.03).abs() < f64::EPSILON);
+        assert!((result.turbined_cost - 0.03).abs() < f64::EPSILON);
         assert!((result.storage_violation_below_cost - 1.0).abs() < f64::EPSILON);
         assert!((result.filling_target_violation_cost - 2.0).abs() < f64::EPSILON);
         assert!((result.turbined_violation_below_cost - 3.0).abs() < f64::EPSILON);
@@ -470,7 +470,7 @@ mod tests {
         let overrides = HydroPenaltyOverrides {
             spillage_cost: Some(10.0),
             diversion_cost: Some(20.0),
-            fpha_turbined_cost: Some(30.0),
+            turbined_cost: Some(30.0),
             storage_violation_below_cost: Some(40.0),
             filling_target_violation_cost: Some(50.0),
             turbined_violation_below_cost: Some(60.0),
@@ -489,7 +489,7 @@ mod tests {
 
         assert!((result.spillage_cost - 10.0).abs() < f64::EPSILON);
         assert!((result.diversion_cost - 20.0).abs() < f64::EPSILON);
-        assert!((result.fpha_turbined_cost - 30.0).abs() < f64::EPSILON);
+        assert!((result.turbined_cost - 30.0).abs() < f64::EPSILON);
         assert!((result.storage_violation_below_cost - 40.0).abs() < f64::EPSILON);
         assert!((result.filling_target_violation_cost - 50.0).abs() < f64::EPSILON);
         assert!((result.turbined_violation_below_cost - 60.0).abs() < f64::EPSILON);

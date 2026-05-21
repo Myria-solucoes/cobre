@@ -366,8 +366,10 @@ pub fn standardize_external_inflow(
     let mut past_lag_buf = vec![0.0_f64; n_hydros * safe_max_order];
     for pi in past_inflows {
         if let Some(&h_idx) = hydro_index.get(&pi.hydro_id) {
-            let order_h = par.order(h_idx);
-            for (lag, &value) in pi.values_m3s.iter().enumerate().take(order_h) {
+            // Fill up to `max_order` lag slots so PAR(p)-A annual contributions
+            // (spread across the widened `psi` slice) see real lag values, not
+            // zeros. Limited by what the past_inflows entry actually provides.
+            for (lag, &value) in pi.values_m3s.iter().enumerate().take(max_order) {
                 past_lag_buf[h_idx * safe_max_order + lag] = value;
             }
         }
@@ -408,11 +410,12 @@ pub fn standardize_external_inflow(
             // ── Compute eta for each hydro using the current (frozen) lag state ──
             for h in 0..n_hydros {
                 let target = raw_values[t * n_scenarios * n_hydros + scenario * n_hydros + h];
-                let order_h = par.order(h);
 
-                // Build the lag_buf for solve_par_noise from the per-hydro lag state.
-                // lag_state uses lag-major layout: lag_state[h * safe_max_order + l].
-                for (l, slot) in lag_buf.iter_mut().enumerate().take(order_h) {
+                // Build the full-length lag_buf so PAR(p)-A annual contributions
+                // (spread across the widened `psi` slice) participate in the η
+                // inversion. lag_state uses lag-major layout:
+                // lag_state[h * safe_max_order + l].
+                for (l, slot) in lag_buf.iter_mut().enumerate() {
                     *slot = lag_state[h * safe_max_order + l];
                 }
 
@@ -420,7 +423,7 @@ pub fn standardize_external_inflow(
                 let psi = par.psi_slice(t, h);
                 let sigma = par.sigma(t, h);
 
-                let eta = solve_par_noise(det_base, psi, order_h, &lag_buf, sigma, target);
+                let eta = solve_par_noise(det_base, psi, &lag_buf, sigma, target);
 
                 library.eta_slice_mut(t, scenario)[h] = eta;
             }
@@ -1947,11 +1950,10 @@ mod tests {
                 let eta = lib.eta_slice(t, scenario)[0];
                 let det_base = par.deterministic_base(t, 0);
                 let psi = par.psi_slice(t, 0);
-                let order = par.order(0);
                 let sigma = par.sigma(t, 0);
 
                 // evaluate_par with the frozen lag state must reproduce the target.
-                let reconstructed = evaluate_par(det_base, psi, order, &lag_buf, sigma, eta);
+                let reconstructed = evaluate_par(det_base, psi, &lag_buf, sigma, eta);
                 assert!(
                     (reconstructed - target).abs() < 1e-10,
                     "stage={t}, scenario={scenario}: reconstructed={reconstructed:.15}, \

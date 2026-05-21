@@ -458,13 +458,29 @@ pub(crate) struct NcsNoiseOffsets {
     pub n_load_buses: usize,
 }
 
-/// Transform raw NCS noise into per-block column upper bound values.
+/// Transform raw NCS noise into per-block column lower/upper bound values.
 ///
-/// Computes `max_gen * clamp(mean + std * η, 0, 1) * block_factor` for each
-/// NCS entity and block, where `mean` and `std` are dimensionless factors.
+/// For each NCS entity computes a per-scenario availability ratio
+/// `α = clamp(mean + std · η, 0, 1)`, then writes both column bounds:
+///
+/// - `ncs_col_upper_buf[blk] = max_gen · α · block_factor`
+/// - `ncs_col_lower_buf[blk] = if allow_curtailment { 0 } else { upper }`
+///
+/// When `allow_curtailment[i] == false` the lower bound matches the upper
+/// bound so the source is dispatched at exactly the realized availability
+/// on every scenario — the **must-run** regime that mirrors NEWAVE's
+/// `geracao_usinas_nao_simuladas` pre-netting convention. When
+/// `allow_curtailment[i] == true` the lower bound is zero and the LP can
+/// curtail at `curtailment_cost` per `MWh`.
 ///
 /// The `offsets` bundle encodes the raw-noise vector layout (`n_hydros +
 /// n_load_buses` gives the start of the NCS slice).
+///
+/// # Panics
+///
+/// Panics in debug builds when `ncs_allow_curtailment.len() !=
+/// ncs_max_gen.len()` or either slice is shorter than
+/// `stochastic.n_stochastic_ncs()`.
 pub(crate) fn transform_ncs_noise(
     raw_noise: &[f64],
     offsets: &NcsNoiseOffsets,
@@ -472,13 +488,21 @@ pub(crate) fn transform_ncs_noise(
     stage: usize,
     block_count: usize,
     ncs_max_gen: &[f64],
+    ncs_allow_curtailment: &[bool],
+    ncs_col_lower_buf: &mut Vec<f64>,
     ncs_col_upper_buf: &mut Vec<f64>,
 ) {
     let n_stochastic_ncs = stochastic.n_stochastic_ncs();
     ncs_col_upper_buf.clear();
+    ncs_col_lower_buf.clear();
     if n_stochastic_ncs == 0 {
         return;
     }
+    debug_assert_eq!(
+        ncs_allow_curtailment.len(),
+        ncs_max_gen.len(),
+        "ncs_allow_curtailment and ncs_max_gen must have matching length",
+    );
     let ncs_lp = stochastic.ncs_normal();
     let ncs_noise_start = offsets.n_hydros + offsets.n_load_buses;
     for ncs_idx in 0..n_stochastic_ncs {
@@ -486,10 +510,14 @@ pub(crate) fn transform_ncs_noise(
         let mean = ncs_lp.mean(stage, ncs_idx);
         let std = ncs_lp.std(stage, ncs_idx);
         let max_gen = ncs_max_gen[ncs_idx];
-        let realization = max_gen * (mean + std * eta).clamp(0.0, 1.0);
+        let availability_ratio = (mean + std * eta).clamp(0.0, 1.0);
+        let realization = max_gen * availability_ratio;
+        let allow_curtailment = ncs_allow_curtailment[ncs_idx];
         for blk in 0..block_count {
             let factor = ncs_lp.block_factor(stage, ncs_idx, blk);
-            ncs_col_upper_buf.push(realization * factor);
+            let upper = realization * factor;
+            ncs_col_upper_buf.push(upper);
+            ncs_col_lower_buf.push(if allow_curtailment { 0.0 } else { upper });
         }
     }
 }
@@ -632,7 +660,7 @@ mod tests {
             penalties: HydroPenalties {
                 spillage_cost: 0.0,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 0.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -783,7 +811,7 @@ mod tests {
             penalties: HydroPenalties {
                 spillage_cost: 0.0,
                 diversion_cost: 0.0,
-                fpha_turbined_cost: 0.0,
+                turbined_cost: 0.0,
                 storage_violation_below_cost: 0.0,
                 filling_target_violation_cost: 0.0,
                 turbined_violation_below_cost: 0.0,
@@ -911,6 +939,7 @@ mod tests {
             load_bus_indices: &[],
             block_counts_per_stage: &[1],
             ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
             discount_factors: &[],
             cumulative_discount_factors: &[],
             stage_lag_transitions: &[],
@@ -981,6 +1010,7 @@ mod tests {
             load_bus_indices: &[],
             block_counts_per_stage: &[1],
             ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
             discount_factors: &[],
             cumulative_discount_factors: &[],
             stage_lag_transitions: &[],
@@ -1051,6 +1081,7 @@ mod tests {
             load_bus_indices: &[],
             block_counts_per_stage: &[1],
             ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
             discount_factors: &[],
             cumulative_discount_factors: &[],
             stage_lag_transitions: &[],

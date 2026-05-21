@@ -1123,27 +1123,36 @@ impl StageIndexer {
         }
     }
 
-    /// Compute and store the nonzero state index mask from per-hydro AR orders.
+    /// Compute and store the nonzero state index mask from per-hydro lag-state-slot counts.
     ///
-    /// `ar_orders` must have length `hydro_count`. Each entry is the actual AR
-    /// order for that hydro (0 means no AR lags). Indices `[0, N)` (storage)
-    /// are always included. For each hydro `h`, lag indices
+    /// `lag_counts` must have length `hydro_count`. Each entry is the number of
+    /// lag-state slots that may carry non-zero cut coefficients for that hydro
+    /// (0 means no AR lags). Indices `[0, N)` (storage) are always included.
+    /// For each hydro `h`, lag indices
     /// `inflow_lags.start + l * hydro_count + h` are included for
-    /// `l in 0..ar_orders[h]`.
+    /// `l in 0..lag_counts[h]`.
+    ///
+    /// The correct value for `lag_counts[h]` is
+    /// `PrecomputedPar::effective_lag_count(h)`, **not** `PrecomputedPar::order(h)`.
+    /// For PAR(p)-A hydros, `effective_lag_count` equals `max_order` (= 12) so
+    /// that the `ψ̂/12` annual contributions on lag slots `order..max_order` are
+    /// included in cut rows. Using `order(h)` would truncate those slots and
+    /// produce over-estimating cuts.
     ///
     /// After calling, `nonzero_state_indices` is sorted in ascending order and
-    /// has no duplicates. If `max_par_order == 0` or all hydros have full AR
-    /// order, the mask covers all `n_state` indices (equivalent to dense).
+    /// has no duplicates. If `max_par_order == 0` or all hydros use their full
+    /// `max_par_order` slots, the mask covers all `n_state` indices (equivalent
+    /// to dense).
     ///
     /// # Panics (debug builds only)
     ///
-    /// Panics if `ar_orders.len() != hydro_count` or any `ar_orders[h] > max_par_order`.
-    pub fn set_nonzero_mask(&mut self, ar_orders: &[usize]) {
+    /// Panics if `lag_counts.len() != hydro_count` or any `lag_counts[h] > max_par_order`.
+    pub fn set_nonzero_mask(&mut self, lag_counts: &[usize]) {
         debug_assert_eq!(
-            ar_orders.len(),
+            lag_counts.len(),
             self.hydro_count,
-            "ar_orders length {} != hydro_count {}",
-            ar_orders.len(),
+            "lag_counts length {} != hydro_count {}",
+            lag_counts.len(),
             self.hydro_count
         );
 
@@ -1157,13 +1166,13 @@ impl StageIndexer {
         // Lag indices: include only used lags (lag-major layout matching LP).
         // Iterate lag-first, hydro-second to produce sorted indices.
         for lag in 0..self.max_par_order {
-            for (h, &order) in ar_orders.iter().enumerate() {
+            for (h, &lag_count) in lag_counts.iter().enumerate() {
                 debug_assert!(
-                    order <= self.max_par_order,
-                    "ar_orders[{h}] = {order} exceeds max_par_order {}",
+                    lag_count <= self.max_par_order,
+                    "lag_counts[{h}] = {lag_count} exceeds max_par_order {}",
                     self.max_par_order
                 );
-                if lag < order {
+                if lag < lag_count {
                     mask.push(self.inflow_lags.start + lag * self.hydro_count + h);
                 }
             }
@@ -2226,5 +2235,57 @@ mod tests {
         // n_state = 2*(1+3) = 8, mask should have 2 + 2*3 = 8
         assert_eq!(idx.nonzero_state_indices.len(), 8);
         assert_eq!(idx.nonzero_state_indices.len(), idx.n_state);
+    }
+
+    /// Regression test for the PAR(p)-A cut sparse-mask bug.
+    ///
+    /// `lag_counts` (formerly `ar_orders`) is the per-hydro count of lag-state
+    /// slots that may carry non-zero cut coefficients — equal to
+    /// `PrecomputedPar::effective_lag_count(h)`. When PAR(p)-A annual is active
+    /// on a hydro this is `max_par_order` (= 12) even though the classical AR
+    /// order is smaller, because `ψ̂/12` fills the trailing lag slots.
+    ///
+    /// Before the fix at setup/mod.rs (which passed `par.order(h)` here), the
+    /// cut row omitted state coefficients on slots `order..max_par_order`,
+    /// producing over-estimating cuts (LB > UB at convergence).
+    #[test]
+    fn nonzero_mask_par_a_includes_full_psi_stride() {
+        // Two hydros: hydro 0 has classical AR(4); hydro 1 has PAR(4)-A and
+        // therefore uses all 12 lag slots. max_par_order = 12 (widened by
+        // PrecomputedPar when any model has an annual component).
+        let mut idx = StageIndexer::new(2, 12);
+        idx.set_nonzero_mask(&[4, 12]);
+
+        // n_state = 2 * (1 + 12) = 26.
+        // Mask = [storage 0..2] + [lag * 2 + h for lag in 0..lag_count[h]]
+        //      = [0, 1] + [hydro 0 lags 0..4] + [hydro 1 lags 0..12]
+        //      = 2 + 4 + 12 = 18 entries.
+        assert_eq!(
+            idx.nonzero_state_indices.len(),
+            18,
+            "PAR-A hydro must contribute all 12 lag slots to the cut mask; \
+             omitting slots 4..12 (where ψ̂/12 lives) shifts the cut hyperplane \
+             above the LP value at the visited state (over-estimating cuts)."
+        );
+
+        // Storage indices.
+        assert_eq!(&idx.nonzero_state_indices[..2], &[0, 1]);
+
+        // Hydro 0 (lag_count = 4): expect lag slots at indices
+        //   inflow_lags.start + lag * hydro_count + h = 2 + lag*2 + 0 for lag in 0..4
+        // → {2, 4, 6, 8}.
+        // Hydro 1 (lag_count = 12): expect lag slots at indices
+        //   2 + lag*2 + 1 for lag in 0..12 → {3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25}.
+        // Mask is sorted globally. Confirm a few discriminating positions.
+        assert!(
+            idx.nonzero_state_indices.contains(&25),
+            "lag-11 slot for hydro 1 (the trailing PAR-A annual slot) must be in the mask"
+        );
+        assert!(
+            !idx.nonzero_state_indices.contains(&10),
+            "lag-4 slot for hydro 0 (classical AR(4)) must NOT be in the mask"
+        );
+        // Sorted.
+        assert!(idx.nonzero_state_indices.windows(2).all(|w| w[0] < w[1]));
     }
 }

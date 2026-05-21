@@ -9,6 +9,168 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-05-20
+
+### Added
+
+- New `allow_curtailment: bool` field on `NonControllableSource` (default
+  `true`, preserving existing case behaviour). When set to `false` on an
+  entity, the LP pins its generation column to the realized availability
+  on every scenario: lower and upper column bounds both equal
+  `max_generation_mw * alpha * block_factor`, where
+  `alpha = clamp(mean + std*eta, 0, 1)` is the per-(stage, scenario)
+  availability ratio drawn from `non_controllable_stats.parquet` and
+  `block_factor` is the per-(stage, block) shape factor from
+  `non_controllable_factors.json`. Use this on NEWAVE-derived
+  `geracao_usinas_nao_simuladas` aggregates (PCH, PCT, EOL, UFV, MMGD)
+  that the source model pre-nets from `MERC`; with the default Cobre
+  schema the LP was free to curtail these because curtailment is one of
+  the cheapest LP slacks, leading on the bundled deterministic 1983 case
+  to ≈ 18 % of total NCS supply being curtailed, a ≈ +15 % hydro-dispatch
+  swing, and ≈ −23 % spillage versus NEWAVE. Setting
+  `allow_curtailment = false` on the must-run aggregates restores
+  dispatch parity with NEWAVE while preserving per-source observability
+  in the simulation outputs. JSON schema accepts the field as optional;
+  absent → `true`.
+- `ModelProvenanceReport.historical_library_past_inflows_digest: Option<u64>`
+  records a SipHash-1-3 fingerprint of `initial_conditions.past_inflows`
+  when the historical scenario scheme is active. Downstream consumers can
+  compare the stored digest against the current `past_inflows` to detect
+  a stale historical library that needs re-standardisation. Serialised
+  under `#[serde(skip_serializing_if)]` so non-historical runs keep their
+  JSON provenance unchanged. The cobre-python production path populates
+  the field from `setup.scenario_libraries.training.historical`.
+
+### Changed
+
+- **API (breaking, hydro penalty rename)**: `HydroPenalties.fpha_turbined_cost`
+  is renamed to `HydroPenalties.turbined_cost`, cascading through
+  `RawHydroPenalties`, the `penalty_overrides.parquet` column, the output
+  schemas, and the `simulation_writer` record. The turbined-flow
+  regularisation cost is now applied universally to every hydro's turbine
+  column in the LP objective (previously gated behind `is_fpha` in
+  `fill_turbine_columns`, so constant-productivity plants paid nothing and
+  diverged from NEWAVE). The dead `turbined_cost` field on
+  `ResolvedProductionModel::Fpha` is dropped (the cost now lives in the
+  penalty cascade). A latent extraction bug is fixed in the process:
+  `SimulationCostResult.turbined_cost` was summing `primal*obj` over
+  `indexer.generation` (FPHA generation columns, objective = 0), so the
+  field was silently zero in real runs; it now sums over `indexer.turbine`
+  where the cost lives. JSON schemas regenerated via `cobre schema export`
+  with no hand edits. Two LB regression pins shift by ≈ 0.10 % under the
+  new universal cost (`basis_reconstruct_churn::PINNED_FINAL_LB`,
+  `deterministic::D03_EXPECTED_COST`).
+- **API (breaking, PAR primitives)**: dropped the explicit `order: usize`
+  parameter from `evaluate_par`, `evaluate_par_inflow`, `solve_par_noise`, and
+  removed the equivalent `par.order(h)` inner-loop bound from
+  `evaluate_par_batch` / `solve_par_noise_batch` / `solve_par_noises` /
+  `evaluate_par_inflows`. All four primitives now iterate the full
+  `psi.iter()` slice (via `psi.len()` in the batch variants), and require
+  `lags.len() >= psi.len()`. `psi.len()` is the authoritative number of lag
+  terms in the model — equal to the AR order for classical PAR(p) and to 12
+  when PAR(p)-A annual is active (the materialised annual coefficient is
+  spread across the extra positions in `PrecomputedPar::psi_slice`). Callers
+  that previously truncated to AR order silently dropped the annual
+  contribution; see the matching `Fixed` entry below.
+
+### Fixed
+
+- **PAR(p)-A annual coefficients were omitted from the cut sparse mask,
+  producing over-estimating Benders cuts and LB > UB at convergence.**
+  `StudySetup::new` was passing `par.order(h)` (the classical AR order) as
+  the per-hydro lag-state-slot count to `StageIndexer::set_nonzero_mask`.
+  With PAR(p)-A active, `PrecomputedPar::psi_slice` widens to
+  `max_order = 12` and the standardised annual coefficient `ψ̂/12` fills
+  positions `p..12`. The LP loads all 12 psi entries into the AR-dynamics
+  row, but the cut sparse mask omitted state coefficients on lag slots
+  `p..12` — so cut rows built via `build_cut_row_batch_into` were missing
+  the trailing state dependencies. At the visited state this shifted the
+  cut hyperplane above the true LP value, producing systematically
+  over-estimating cuts. On the bundled NEWAVE 1983 case (Camargos
+  AR(4)+A on every hydro), the gap converged to LB > UB by ≈ 7 % with 41
+  of 50 iterations recording negative gaps; disabling annual via
+  `order_selection = pacf` collapsed the gap to 0.05 %. After the fix the
+  same case with `pacf_annual` converges to 0.003 % final gap with zero
+  negative-gap iterations across all 50. `PrecomputedPar` now records a
+  per-hydro `has_annual: Box<[bool]>` at build time and exposes
+  `effective_lag_count(h)` (returns `max_order` when `has_annual[h]`,
+  else `orders[h]`); `StageIndexer::set_nonzero_mask`'s `ar_orders`
+  parameter is renamed to `lag_counts` to reflect its true meaning. New
+  regression test `nonzero_mask_par_a_includes_full_psi_stride` pins
+  the contract. This is the direct analog of the η-inversion bug fixed
+  above — same `order`-vs-`psi.len()` confusion, cut-construction path
+  instead of standardisation path.
+- **PAR(p)-A annual was silently dropped at standardisation time when the
+  scheme was `historical` or `external`.** `standardize_historical_windows`
+  (and the analogous external path) built their per-hydro `lag_buf` only up
+  to `par.order(h)` lag slots and passed `order_h` as the iteration bound to
+  `solve_par_noise`. With PAR-A active, `PrecomputedPar::psi_slice` returns
+  12 entries (AR coefficients in slots `0..order`, plus the spread annual
+  coefficient `ψ̂/12` in slots `order..12`), all of which the LP loads via
+  `lp_builder/matrix.rs:834-841`. The standardised `η` therefore omitted the
+  annual contribution from lags `order..12`, while the LP applied it in
+  full — so forward replays produced biased inflows even when the stage-0
+  lag state matched the window's pre-study lags exactly. Worst-case observed
+  on the bundled NEWAVE 1983-anchored case (Camargos, AR(4) +
+  annual_coefficient ≈ −0.225): a ≈ 11 % shortfall vs the raw historical
+  observation. After the fix, the same case reconstructs every hydro at
+  stage 0 to within 10⁻¹² of the historical observation. The fix combines
+  the API change above with two callsite updates that now fill the full
+  `psi.len()` lag slots in `standardize_historical_windows` and
+  `standardize_external_inflow`. New regression test
+  `crates/cobre-stochastic/tests/par_a_historical_replay.rs` pins the
+  invariant directly.
+- `ClassSampler::Historical::apply_initial_state` no longer overwrites the
+  inflow-lag portion of the stage-0 state vector with the window-preceding
+  raw historical inflows. Previously, the forward pass replayed the lag
+  state of the historical year being sampled (e.g. when scenario `m`
+  replayed 1983, the forward LP started from the 1982-Q4 lag values), while
+  the lower-bound and backward-pass evaluators kept the user-supplied
+  `initial_conditions.past_inflows` lags. The two paths therefore evaluated
+  V₀ at different `x_0` on every historical-replay case, producing a
+  structural, typically negative SDDP gap (≈ −19 % on the bundled
+  NEWAVE-derived 1983 deterministic case) that did not close with
+  iteration count. The historical window now contributes only its
+  standardized noise residuals via `fill`; the initial inflow lags come
+  uniformly from `initial_conditions.past_inflows` for every scenario,
+  matching NEWAVE's `TENDENCIA HIDROLOGICA` convention. Cases using
+  `InSample`, `OutOfSample`, or `External` schemes are unaffected
+  (bit-identical output — those variants were already no-ops). Cases using
+  the `Historical` scheme will see different forward upper bounds and
+  meaningful gap closure to cut tightness.
+
+- **Historical η inversion re-rooted at `past_inflows` (LB/UB x₀ sharing).**
+  `standardize_historical_windows` previously inverted the PAR noise residual
+  η for each window stage using `window_pre_study_lags` as the lag state seed
+  — i.e. the raw historical inflows from the year before each window year.
+  After commit dc96030 (`apply_initial_state` no-op), the SDDP forward pass
+  starts every scenario from `initial_conditions.past_inflows` (the
+  user-supplied x₀), not from the window-preceding lags. The two paths
+  therefore built their lag chains from different x₀, producing a
+  systematic per-stage offset `z_h = target + Σψ·(past_inflows −
+window_lag)` that propagated through all stages and prevented exact
+  historical replay even at stage 0 after d0e4a42. The fix re-roots the
+  inversion on a rolling lag chain seeded from `past_inflows`, following the
+  same accumulate/finalize pattern as `standardize_external_inflow`. The
+  rolling chain is advanced each month via `StageLagTransition`; uniform-
+  monthly transitions are used by default, with noop transitions (produced
+  by an empty `SeasonMap`) falling back to uniform-monthly in the inner loop.
+  A `past_inflows_digest: u64` field (SipHash-1-3 of all `past_inflows`
+  values) is stored on `HistoricalScenarioLibrary` to enable stale-library
+  detection when `past_inflows` change between calls. A `debug_assert!`
+  guard fires when `stage_lag_transitions` contain non-trivial (non-monthly)
+  entries, marking `TODO(historical-replay-non-monthly)` for future work on
+  sub-monthly and multi-monthly study configurations.
+  `build_historical_inflow_library` and `build_opening_tree_library` both
+  forward `past_inflows` and `stage_lag_transitions` to
+  `standardize_historical_windows`. After the fix, every historical-scheme
+  forward pass that starts from `past_inflows` reconstructs the raw
+  historical observation to within floating-point precision at every stage,
+  restoring LB/UB consistency at x₀. New tests T2–T6 in
+  `crates/cobre-stochastic/tests/par_a_historical_replay.rs` pin the
+  invariant for differing `past_inflows`, AR(0), truncated lag vectors,
+  multi-window cases, and the non-trivial-transition guard.
+
 ## [0.6.1] - 2026-05-18
 
 ### Fixed

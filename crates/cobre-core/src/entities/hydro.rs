@@ -59,8 +59,10 @@ pub struct HydroPenalties {
     pub spillage_cost: f64,
     /// Penalty per m³/s of water diverted beyond diversion channel limits \[$/m³/s\].
     pub diversion_cost: f64,
-    /// Penalty per `MWh` of turbined generation used in FPHA approximation \[$/`MWh`\].
-    pub fpha_turbined_cost: f64,
+    /// Penalty per `MWh` of turbined generation, applied to the turbine
+    /// column in the LP objective for every hydro regardless of production
+    /// model \[$/`MWh`\].
+    pub turbined_cost: f64,
     /// Penalty per hm³ of storage below minimum bound \[$/hm³\].
     pub storage_violation_below_cost: f64,
     /// Penalty per hm³ of storage below filling target \[$/hm³\].
@@ -265,7 +267,7 @@ mod tests {
         HydroPenalties {
             spillage_cost: v,
             diversion_cost: v,
-            fpha_turbined_cost: v,
+            turbined_cost: v,
             storage_violation_below_cost: v,
             filling_target_violation_cost: v,
             turbined_violation_below_cost: v,
@@ -472,7 +474,7 @@ mod tests {
         let p = HydroPenalties {
             spillage_cost: 1.0,
             diversion_cost: 2.0,
-            fpha_turbined_cost: 3.0,
+            turbined_cost: 3.0,
             storage_violation_below_cost: 4.0,
             filling_target_violation_cost: 5.0,
             turbined_violation_below_cost: 6.0,
@@ -490,7 +492,7 @@ mod tests {
 
         assert!((p.spillage_cost - 1.0).abs() < f64::EPSILON);
         assert!((p.diversion_cost - 2.0).abs() < f64::EPSILON);
-        assert!((p.fpha_turbined_cost - 3.0).abs() < f64::EPSILON);
+        assert!((p.turbined_cost - 3.0).abs() < f64::EPSILON);
         assert!((p.storage_violation_below_cost - 4.0).abs() < f64::EPSILON);
         assert!((p.filling_target_violation_cost - 5.0).abs() < f64::EPSILON);
         assert!((p.turbined_violation_below_cost - 6.0).abs() < f64::EPSILON);
@@ -555,7 +557,7 @@ mod tests {
             penalties: HydroPenalties {
                 spillage_cost: 0.01,
                 diversion_cost: 0.02,
-                fpha_turbined_cost: 0.03,
+                turbined_cost: 0.03,
                 storage_violation_below_cost: 1.0,
                 filling_target_violation_cost: 2.0,
                 turbined_violation_below_cost: 3.0,

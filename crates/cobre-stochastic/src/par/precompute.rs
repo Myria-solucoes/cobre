@@ -165,6 +165,13 @@ pub struct PrecomputedPar {
     /// `orders[h]` gives the number of meaningful lags in `psi` for series element `h`.
     orders: Box<[usize]>,
 
+    /// Whether each series element has an annual component at any stage.
+    /// Length: `n_series`.
+    /// `has_annual[h]` is `true` iff any [`InflowModel`] with this hydro's `EntityId`
+    /// carries `annual: Some(_)`. Controls whether lag slots beyond `orders[h]`
+    /// can carry non-zero `ψ̂/12` contributions (see [`Self::effective_lag_count`]).
+    has_annual: Box<[bool]>,
+
     /// Number of study stages.
     n_stages: usize,
 
@@ -239,11 +246,16 @@ impl PrecomputedPar {
 
         // Per-hydro AR order (maximum across all stages for that hydro).
         // This reports the original AR order p, not the widened stride.
+        // Also record which hydros have at least one stage with an annual component.
         let mut orders = vec![0usize; n_hydros];
+        let mut has_annual = vec![false; n_hydros];
         for model in inflow_models {
             if let Some(&h_idx) = hydro_index.get(&model.hydro_id) {
                 if model.ar_order() > orders[h_idx] {
                     orders[h_idx] = model.ar_order();
+                }
+                if model.annual.is_some() {
+                    has_annual[h_idx] = true;
                 }
             }
         }
@@ -277,6 +289,7 @@ impl PrecomputedPar {
             sigma: sigma.into_boxed_slice(),
             psi: psi.into_boxed_slice(),
             orders: orders.into_boxed_slice(),
+            has_annual: has_annual.into_boxed_slice(),
             n_stages,
             n_hydros,
             max_order,
@@ -330,9 +343,12 @@ impl PrecomputedPar {
     /// Slice of AR lag coefficients `ψ_{m(t),ℓ}` (original units) for the given
     /// stage and series element indices.
     ///
-    /// The returned slice has length `max_order`. Positions `0..orders[hydro]` contain
-    /// the meaningful coefficients; positions `orders[hydro]..max_order` are `0.0`.
-    /// Use [`Self::order`] to determine how many entries are meaningful.
+    /// The returned slice has length `max_order`. For a hydro **without** an annual
+    /// component, positions `0..orders[hydro]` are meaningful and
+    /// `orders[hydro]..max_order` are `0.0`. For a hydro **with** an annual
+    /// component, all 12 positions (= `max_order`) may carry the `ψ̂/12` term and
+    /// are therefore meaningful. Use [`Self::effective_lag_count`] to obtain the
+    /// authoritative meaningful-slot count for downstream consumers.
     ///
     /// # Panics
     ///
@@ -358,7 +374,10 @@ impl PrecomputedPar {
 
     /// AR order for the given series element (maximum across all stages).
     ///
-    /// Returns the number of meaningful lag entries in `psi_slice` for this series element.
+    /// Returns the classical AR order `p` — the number of lag positions holding
+    /// explicit AR coefficients `φ̂_j`. For PAR(p)-A hydros, lag slots
+    /// `p..max_order` additionally carry `ψ̂/12`; use [`Self::effective_lag_count`]
+    /// to obtain the meaningful-slot count for downstream consumers.
     ///
     /// # Panics
     ///
@@ -371,6 +390,59 @@ impl PrecomputedPar {
             self.n_hydros
         );
         self.orders[hydro]
+    }
+
+    /// Number of lag-state slots that may carry non-zero `ψ` coefficients for
+    /// the given series element.
+    ///
+    /// This is the authoritative meaningful-slot count for any downstream
+    /// consumer that builds sparse layouts over lag state:
+    ///
+    /// - **Classical PAR(p)** (no annual component on this hydro): returns
+    ///   `order(hydro)`. Lag slots beyond the AR order are structurally zero.
+    /// - **PAR(p)-A** (annual component present on this hydro): returns
+    ///   `max_order` (= 12 for a standard monthly study). All 12 slots carry
+    ///   the `ψ̂/12` annual term and must be tracked by consumers that
+    ///   linearise against the AR-dynamics row.
+    ///
+    /// Equivalent to `psi_slice(_, hydro).len()` when trimmed to meaningful
+    /// entries, but cheaper to call.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `hydro >= n_hydros`.
+    #[must_use]
+    pub fn effective_lag_count(&self, hydro: usize) -> usize {
+        debug_assert!(
+            hydro < self.n_hydros,
+            "hydro index {hydro} is out of bounds (n_hydros = {})",
+            self.n_hydros
+        );
+        if self.has_annual[hydro] {
+            self.max_order
+        } else {
+            self.orders[hydro]
+        }
+    }
+
+    /// Whether the given series element has an annual component at any stage.
+    ///
+    /// Returns `true` iff at least one [`InflowModel`] for this hydro was built
+    /// with `annual: Some(_)`. When `true`, lag slots `order(hydro)..max_order`
+    /// carry the `ψ̂/12` annual contribution and must be tracked by lag-aware
+    /// downstream consumers (see [`Self::effective_lag_count`]).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `hydro >= n_hydros`.
+    #[must_use]
+    pub fn has_annual(&self, hydro: usize) -> bool {
+        debug_assert!(
+            hydro < self.n_hydros,
+            "hydro index {hydro} is out of bounds (n_hydros = {})",
+            self.n_hydros
+        );
+        self.has_annual[hydro]
     }
 
     /// Number of study stages.
@@ -403,6 +475,7 @@ impl Default for PrecomputedPar {
             sigma: Box::new([]),
             psi: Box::new([]),
             orders: Box::new([]),
+            has_annual: Box::new([]),
             n_stages: 0,
             n_hydros: 0,
             max_order: 0,

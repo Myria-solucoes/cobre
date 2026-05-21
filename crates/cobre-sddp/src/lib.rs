@@ -50,7 +50,7 @@ pub mod horizon_mode;
 pub mod hydro_models;
 pub mod indexer;
 pub mod inflow_method;
-pub(crate) mod lag_transition;
+pub mod lag_transition;
 pub mod lower_bound;
 pub mod lp_builder;
 pub(crate) mod noise;

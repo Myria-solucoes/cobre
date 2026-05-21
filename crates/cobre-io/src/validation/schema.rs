@@ -801,7 +801,7 @@ fn sentinel_penalties() -> GlobalPenaltyDefaults {
         line_exchange_cost: 1.0,
         hydro: HydroPenalties {
             spillage_cost: 1.0,
-            fpha_turbined_cost: 1.0,
+            turbined_cost: 1.0,
             diversion_cost: 1.0,
             storage_violation_below_cost: 1.0,
             filling_target_violation_cost: 1.0,
@@ -865,7 +865,7 @@ mod tests {
         "line": { "exchange_cost": 2.0 },
         "hydro": {
             "spillage_cost": 0.01,
-            "fpha_turbined_cost": 0.05,
+            "turbined_cost": 0.05,
             "diversion_cost": 0.1,
             "storage_violation_below_cost": 10000.0,
             "filling_target_violation_cost": 50000.0,

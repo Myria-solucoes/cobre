@@ -99,7 +99,9 @@ fn fill_theta_column(idx: &StageIndexer, bufs: &mut ColumnBufs<'_>) {
 ///
 /// For constant-productivity hydros, caps turbine flow so that
 /// `productivity * turbined <= max_generation_mw` (derated capacity).
-/// For FPHA hydros, carries the `fpha_turbined_cost` in the objective.
+/// Carries `turbined_cost * block_hours` in the objective on every hydro's
+/// turbine column regardless of production model — matches NEWAVE behavior
+/// where the turbined cost applies to every plant, not only FPHA hydros.
 fn fill_turbine_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -111,7 +113,6 @@ fn fill_turbine_columns(
         let hb = ctx.bounds.hydro_bounds(h_idx, stage_idx);
         let hp = ctx.penalties.hydro_penalties(h_idx, stage_idx);
         let model = ctx.production_models.model(h_idx, stage_idx);
-        let is_fpha = matches!(model, ResolvedProductionModel::Fpha { .. });
         let turb_upper = match model {
             ResolvedProductionModel::ConstantProductivity { productivity }
                 if *productivity > 0.0 =>
@@ -124,10 +125,8 @@ fn fill_turbine_columns(
             let col = layout.col_turbine_start + h_idx * layout.n_blks + blk;
             bufs.col_lower[col] = 0.0;
             bufs.col_upper[col] = turb_upper;
-            if is_fpha {
-                let block_hours = stage.blocks[blk].duration_hours;
-                bufs.objective[col] = hp.fpha_turbined_cost * block_hours;
-            }
+            let block_hours = stage.blocks[blk].duration_hours;
+            bufs.objective[col] = hp.turbined_cost * block_hours;
         }
     }
 }
@@ -285,8 +284,8 @@ fn fill_inflow_slack_columns(
 
 /// FPHA generation columns (`g_{h,k}`): one per FPHA hydro per block.
 ///
-/// Bounds: `[0, max_generation_mw]`.  Objective: `0.0` (`fpha_turbined_cost`
-/// goes on the turbine column).
+/// Bounds: `[0, max_generation_mw]`.  Objective: `0.0` (the global
+/// `turbined_cost` is applied on the turbine column for every hydro).
 fn fill_fpha_generation_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -520,9 +519,20 @@ fn fill_generation_below_columns(
 
 /// NCS generation columns: one per active NCS per block.
 ///
-/// `col_lower[col] = 0.0` (from vec initialisation).
+/// `col_lower[col] = if ncs.allow_curtailment { 0 } else { col_upper[col] }`.
 /// `col_upper[col] = available_gen * ncs_factor`.
 /// `objective[col] = -curtailment_cost * block_hours` (negative incentivises generation).
+///
+/// These template values govern only when NCS noise is **non-stochastic**
+/// (`n_stochastic_ncs == 0`). When stochastic NCS is active, both bounds
+/// are rebuilt per scenario by `transform_ncs_noise` to scale with the
+/// realized availability ratio `α = clamp(mean + std·η, 0, 1)`; the
+/// template values are overwritten via `set_col_bounds` before each stage
+/// solve. With `allow_curtailment == true` (the default) the column is
+/// fully curtailable (bit-identical to the pre-flag behaviour); with
+/// `allow_curtailment == false` the column is pinned to the available
+/// level on every stage (must-run, matching NEWAVE's
+/// `geracao_usinas_nao_simuladas` pre-netting convention).
 fn fill_ncs_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -538,7 +548,9 @@ fn fill_ncs_columns(
         for blk in 0..layout.n_blks {
             let col = layout.col_ncs_start + ncs_local * layout.n_blks + blk;
             let factor = ctx.resolved_ncs_factors.factor(ncs_sys_idx, stage_idx, blk);
-            bufs.col_upper[col] = avail_gen * factor;
+            let upper = avail_gen * factor;
+            bufs.col_upper[col] = upper;
+            bufs.col_lower[col] = if ncs.allow_curtailment { 0.0 } else { upper };
             let block_hours = stage.blocks[blk].duration_hours;
             bufs.objective[col] = -ncs.curtailment_cost * block_hours;
         }
@@ -1572,7 +1584,7 @@ mod parameter_resolution_tests {
         HydroStagePenalties {
             spillage_cost: 0.01,
             diversion_cost: 0.0,
-            fpha_turbined_cost: 0.0,
+            turbined_cost: 0.0,
             storage_violation_below_cost: 0.0,
             filling_target_violation_cost: 0.0,
             turbined_violation_below_cost: 0.0,

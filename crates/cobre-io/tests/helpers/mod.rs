@@ -49,7 +49,7 @@ pub const VALID_PENALTIES_JSON: &str = r#"{
     "line": { "exchange_cost": 2.0 },
     "hydro": {
         "spillage_cost": 0.01,
-        "fpha_turbined_cost": 0.05,
+        "turbined_cost": 0.05,
         "diversion_cost": 0.1,
         "storage_violation_below_cost": 10000.0,
         "filling_target_violation_cost": 50000.0,

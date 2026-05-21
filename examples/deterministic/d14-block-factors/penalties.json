@@ -6,7 +6,7 @@
   "line": { "exchange_cost": 0.01 },
   "hydro": {
     "spillage_cost": 0.01,
-    "fpha_turbined_cost": 0.01,
+    "turbined_cost": 0.01,
     "diversion_cost": 0.01,
     "storage_violation_below_cost": 10000.0,
     "filling_target_violation_cost": 10000.0,

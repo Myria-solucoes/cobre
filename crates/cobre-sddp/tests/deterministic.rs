@@ -328,8 +328,24 @@ fn write_energy_productivity_override(
 /// Expected total cost for D02 (single hydro, 2 stages, deterministic inflows).
 /// Derivation: κ=2.628, S₀=100hm³, inflows=[40,10]m³/s, demand=80MW.
 /// Terminal stage turbines at 50m³/s capacity. Backward pass shows optimal
-/// storage at stage boundary = 105.12 hm³. Total cost = 23,635,000/9 $.
-pub const D02_EXPECTED_COST: f64 = 23_635_000.0 / 9.0;
+/// storage at stage boundary = 105.12 hm³.
+///
+/// Analytical thermal cost is `23_635_000 / 9 ≈ 2_626_111.11 $`. With
+/// `turbined_cost = 0.01 $/MWh` applied to every hydro's turbine column
+/// (matches NEWAVE, see `lp_builder/matrix.rs::fill_turbine_columns`), the
+/// deterministic LB adds a fixed regularization contribution of
+/// `5_785 / 9 ≈ 642.78 $` (= 0.01 · 730 · (25_000/657 + 50) summed across the
+/// two stages' turbined flows). Total = `23_640_785 / 9 ≈ 2_626_753.89 $`.
+pub const D02_EXPECTED_COST: f64 = 23_640_785.0 / 9.0;
+
+/// Expected total cost for D05 (FPHA constant-head, same physical setup as D02).
+///
+/// D05's `penalties.json` sets `turbined_cost = 0.0`, so the universal
+/// turbined-cost regularization (which lifts D02 by `5_785 / 9 ≈ 642.78 $`)
+/// contributes nothing here. The LB collapses to the pre-regularization
+/// analytical value `23_635_000 / 9 ≈ 2_626_111.11 $` used to validate the
+/// FPHA constant-head encoding against D02's hand-computed cost.
+pub const D05_EXPECTED_COST: f64 = 23_635_000.0 / 9.0;
 
 /// Two-stage pure thermal dispatch. Optimal cost is hand-computable.
 ///
@@ -407,8 +423,14 @@ fn d02_single_hydro() {
 /// Three-stage cascade hydrothermal dispatch (2 hydros in series).
 /// Combined capacity 70 MW < demand 75 MW. Cascade coupling: H1 receives H0's
 /// discharge. Terminal stages: full capacity (thermal = 5 MW). Stage 0 binding
-/// storage constraints yield thermal ≈ 28.09 MW. Total cost = 4,171,000/3 $.
-pub const D03_EXPECTED_COST: f64 = 4_171_000.0 / 3.0;
+/// storage constraints yield thermal ≈ 28.09 MW.
+///
+/// Analytical thermal + deficit cost is `4_171_000 / 3 ≈ 1_390_333.33`. With
+/// `turbined_cost` applied to every hydro's turbine column (matches NEWAVE),
+/// the deterministic LB adds a fixed regularization contribution that lifts
+/// the total by `+1_364.4333…` (= turbined_cost × turbined MWh summed over
+/// stages and blocks for both hydros).
+pub const D03_EXPECTED_COST: f64 = 1_391_697.766_666_667_3;
 
 #[cfg_attr(
     not(feature = "slow-tests"),
@@ -434,8 +456,11 @@ fn d03_two_hydro_cascade() {
 /// Two-stage 2-bus transmission dispatch with line export limit.
 /// B0 has excess hydro capacity and exports via 15 MW line to B1 (deficit region).
 /// H0 covers B0 demand + export (thermal = 0). B1 has 5 MW unmet deficit/stage.
-/// H1 depleted to minimize loss. Total cost ≈ 8,011,330 $.
-pub const D04_EXPECTED_COST: f64 = 5_263_443_883.0 / 657.0;
+/// H1 depleted to minimize loss. Analytical thermal+deficit cost is
+/// `5_263_443_883 / 657 ≈ 8_011_330.11 $`. With the universal `turbined_cost`
+/// regularization applied to both hydros' turbine columns, the LB lifts to
+/// `5_264_062_704 / 657 ≈ 8_012_272.00 $` (delta `≈ 941.89 $`).
+pub const D04_EXPECTED_COST: f64 = 5_264_062_704.0 / 657.0;
 
 #[cfg_attr(
     not(feature = "slow-tests"),
@@ -482,7 +507,7 @@ fn d05_fpha_constant_head() {
     );
 
     let result = run_deterministic(case_dir);
-    assert_cost(result.final_lb, D02_EXPECTED_COST, 1e-6, "D05");
+    assert_cost(result.final_lb, D05_EXPECTED_COST, 1e-6, "D05");
     assert!(
         result.iterations <= 10,
         "D05: iterations={}",
@@ -1241,7 +1266,11 @@ fn d10_inflow_nonnegativity() {
 /// D11 cost > D02 cost (≈ 2,626,111.11 $) because the withdrawal reduces net
 /// inflow from 30 to 20 m3/s, leaving less water for generation across both
 /// stages and requiring significantly more thermal dispatch.
-pub const D11_WATER_WITHDRAWAL_EXPECTED_COST: f64 = 3_930_320_000.0 / 657.0;
+/// Re-pinned after the universal `turbined_cost` regularization: the
+/// analytical thermal+deficit cost `3_930_320_000 / 657 ≈ 5_982_222.22 $`
+/// gains a `≈ 569.78 $` contribution from the turbine-column penalty,
+/// yielding `3_930_694_344 / 657 ≈ 5_982_792.00 $`.
+pub const D11_WATER_WITHDRAWAL_EXPECTED_COST: f64 = 3_930_694_344.0 / 657.0;
 
 /// Two-stage hydrothermal dispatch with water withdrawal applied via hydro bounds.
 ///
@@ -1890,7 +1919,9 @@ fn d16_par1_lag_shift() {
     // The expected cost with correct lag shift differs from the PAR(0)-equivalent
     // cost. With psi=0.5 and initial lag=200, inflows decrease across stages
     // (150, 125, 112.5), producing higher deficits than if the lag never shifted.
-    assert_cost(result.final_lb, 7_756_250.0, 1.0, "D16");
+    // Re-pinned after the universal `turbined_cost` regularization shifted
+    // the LB from `7_756_250.0` by `≈ +2_828.75 $`.
+    assert_cost(result.final_lb, 7_759_078.749_993_78, 1.0, "D16");
 }
 
 /// Regression guard for the model-persistence optimization (S1).
@@ -2095,7 +2126,9 @@ fn d19_multi_hydro_par_truncation() {
 ///
 /// If the lag-major/hydro-major indexing bug regresses, different lag values
 /// are read for each hydro during PAR evaluation, producing a different cost.
-pub const D19_EXPECTED_COST: f64 = 1_332_571.796_891_952_6;
+/// Re-pinned after the universal `turbined_cost` regularization
+/// (previous value `1_332_571.796_891_952_6`, delta `≈ +2_083.38 $`).
+pub const D19_EXPECTED_COST: f64 = 1_334_655.175_543_562_7;
 
 /// Operational violation slacks: 1 hydro with active min_outflow, max_outflow,
 /// min_turbined, and min_generation bounds.
@@ -2168,8 +2201,10 @@ fn d20_operational_violations() {
     );
 }
 
-/// Recorded empirically with initial_storage=10 hm3.
-pub const D20_EXPECTED_COST: f64 = 195_744_444.444_444_48;
+/// Recorded empirically with initial_storage=10 hm3. Re-pinned after the
+/// universal `turbined_cost` regularization (previous value
+/// `195_744_444.444_444_48`, delta `≈ +392.78 $`).
+pub const D20_EXPECTED_COST: f64 = 195_744_837.222_222_24;
 
 /// LP consistency test: cost consistency between outflow violation slacks
 /// and `hydro_violation_cost`. 1 hydro (min_outflow=50 m3/s), 1 thermal,
@@ -2373,7 +2408,9 @@ fn d21_min_outflow_regression() {
 }
 
 /// Recorded empirically with initial_storage=5 hm3 and inflow=10 m3/s.
-pub const D21_EXPECTED_COST: f64 = 285_716_111.111_111_1;
+/// Re-pinned after the universal `turbined_cost` regularization
+/// (previous value `285_716_111.111_111_1`, delta `≈ +159.89 $`).
+pub const D21_EXPECTED_COST: f64 = 285_716_271.0;
 
 /// D22: Multi-block per-block min outflow regression test.
 ///
@@ -2509,7 +2546,9 @@ fn d22_per_block_min_outflow() {
 }
 
 /// Recorded empirically with multi-block (3 blocks) per-block min outflow.
-pub const D22_EXPECTED_COST: f64 = 140_376_666.666_666_66;
+/// Re-pinned after the universal `turbined_cost` regularization
+/// (previous value `140_376_666.666_666_66`, delta `≈ +159.89 $`).
+pub const D22_EXPECTED_COST: f64 = 140_376_826.555_555_58;
 
 /// D23: Bidirectional withdrawal -- over-withdrawal activation.
 ///
@@ -2809,7 +2848,11 @@ fn assert_bus_balance(stage: &cobre_sddp::SimulationStageResult, tolerance: f64,
 /// If the bug were present (using entity rho=1.0 instead of the overrides),
 /// the cost would equal D02: 23635000/9 ~ 2626111.11 $. The difference
 /// (~ $34444) is well above the 1e-4 tolerance, so the test catches the bug.
-pub const D24_EXPECTED_COST: f64 = 23_945_000.0 / 9.0;
+/// Re-pinned after the universal `turbined_cost` regularization: the
+/// analytical thermal cost `23_945_000 / 9 ≈ 2_660_555.56 $` gains the same
+/// `5_785 / 9 ≈ 642.78 $` contribution as D02 (same single-hydro turbined
+/// flows), yielding `23_950_785 / 9 ≈ 2_661_198.33 $`.
+pub const D24_EXPECTED_COST: f64 = 23_950_785.0 / 9.0;
 
 /// D24: Productivity override — per-stage productivity from `hydro_production_models.json`.
 ///
@@ -2926,7 +2969,9 @@ fn d24_productivity_override() {
 /// the stage-0 LP objective, reducing the present value of future costs.
 /// This shifts the optimal dispatch toward less water conservation, yielding
 /// a lower total present-value cost than the undiscounted D02 case.
-const D25_EXPECTED_COST: f64 = 2_611_454.584_787_283;
+/// Re-pinned after the universal `turbined_cost` regularization
+/// (previous value `2_611_454.584_787_283`, delta `≈ +640.12 $`).
+const D25_EXPECTED_COST: f64 = 2_612_094.703_543_594_6;
 
 /// D25: Two-stage single-hydro with 12% annual discount rate.
 ///
@@ -3005,7 +3050,9 @@ fn d25_simulation_discount_factors() {
 
 /// D26 expected lower bound: recorded with corrected forward-prediction fix.
 /// Regression guard against backward-prediction (P5) bug.
-pub const D26_EXPECTED_COST: f64 = 50_607_484.905_810_06;
+/// Re-pinned after the universal `turbined_cost` regularization
+/// (previous value `50_607_484.905_810_06`, delta `≈ +17_830.06 $`).
+pub const D26_EXPECTED_COST: f64 = 50_625_314.970_196_81;
 
 /// D26: PAR(2) estimation from inflow history (regression guard for forward-prediction fix).
 /// Exercises full PAR(p) pipeline with PACF order selection and Yule-Walker fitting.

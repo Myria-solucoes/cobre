@@ -197,13 +197,13 @@ Fields: `id`, `name`, `bus_id`, `entry_stage_id`, `exit_stage_id`,
 
 ### Enums
 
-| Enum                   | Variants                                                                                                 | Purpose                                               |
-| ---------------------- | -------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
-| `HydroGenerationModel` | `ConstantProductivity`, `LinearizedHead`, `Fpha`                                                        | Production function for turbine power computation     |
-| `TailraceModel`        | `Polynomial { coefficients: Vec<f64> }`, `Piecewise { points: Vec<TailracePoint> }`                      | Downstream water level as a function of total outflow |
-| `HydraulicLossesModel` | `Factor { value }`, `Constant { value_m }`                                                               | Head loss in penstock and draft tube                  |
-| `EfficiencyModel`      | `Constant { value }`                                                                                     | Turbine-generator efficiency                          |
-| `ContractType`         | `Import`, `Export`                                                                                       | Energy flow direction for bilateral contracts         |
+| Enum                   | Variants                                                                            | Purpose                                               |
+| ---------------------- | ----------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| `HydroGenerationModel` | `ConstantProductivity`, `LinearizedHead`, `Fpha`                                    | Production function for turbine power computation     |
+| `TailraceModel`        | `Polynomial { coefficients: Vec<f64> }`, `Piecewise { points: Vec<TailracePoint> }` | Downstream water level as a function of total outflow |
+| `HydraulicLossesModel` | `Factor { value }`, `Constant { value_m }`                                          | Head loss in penstock and draft tube                  |
+| `EfficiencyModel`      | `Constant { value }`                                                                | Turbine-generator efficiency                          |
+| `ContractType`         | `Import`, `Export`                                                                  | Energy flow direction for bilateral contracts         |
 
 `ConstantProductivity` is used universally and is the minimal viable model.
 `LinearizedHead` is for high-fidelity analyses where head-dependent terms matter.
@@ -411,7 +411,7 @@ let hydro_p = resolve_hydro_penalties(&entity_overrides, &global);
 | ------------------------------------- | ------ | -------------------------------------------------- |
 | `spillage_cost`                       | $/m³/s | Penalty per m³/s of spillage                       |
 | `diversion_cost`                      | $/m³/s | Penalty per m³/s exceeding diversion channel limit |
-| `fpha_turbined_cost`                  | $/MWh  | Regularization cost for FPHA turbined flow         |
+| `turbined_cost`                       | $/MWh  | Regularization cost for turbined flow (all hydros) |
 | `storage_violation_below_cost`        | $/hm³  | Penalty per hm³ of storage below minimum           |
 | `filling_target_violation_cost`       | $/hm³  | Penalty per hm³ below filling target               |
 | `turbined_violation_below_cost`       | $/m³/s | Penalty per m³/s of turbined flow below minimum    |
@@ -960,7 +960,7 @@ use cobre_core::resolved::{
 let table = ResolvedPenalties::new(
     3, 2, 1, 1, 5,
     HydroStagePenalties { spillage_cost: 0.01, diversion_cost: 0.02,
-                          fpha_turbined_cost: 0.03,
+                          turbined_cost: 0.03,
                           storage_violation_below_cost: 1000.0,
                           filling_target_violation_cost: 5000.0,
                           turbined_violation_below_cost: 500.0,

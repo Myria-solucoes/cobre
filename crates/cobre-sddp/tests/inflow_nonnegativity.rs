@@ -148,7 +148,7 @@ fn build_system() -> cobre_core::System {
     let zero_entity_penalties = HydroPenalties {
         spillage_cost: 0.0,
         diversion_cost: 0.0,
-        fpha_turbined_cost: 0.0,
+        turbined_cost: 0.0,
         storage_violation_below_cost: 0.0,
         filling_target_violation_cost: 0.0,
         turbined_violation_below_cost: 0.0,
@@ -327,7 +327,7 @@ fn build_system() -> cobre_core::System {
     let hydro_penalties_default = HydroStagePenalties {
         spillage_cost: 0.0,
         diversion_cost: 0.0,
-        fpha_turbined_cost: 0.0,
+        turbined_cost: 0.0,
         storage_violation_below_cost: 0.0,
         filling_target_violation_cost: 0.0,
         turbined_violation_below_cost: 0.0,
@@ -526,6 +526,7 @@ fn train_fixture(
         load_bus_indices: &fx.stage_templates.load_bus_indices,
         block_counts_per_stage: &block_counts,
         ncs_max_gen: &[],
+        ncs_allow_curtailment: &[],
         discount_factors: &[],
         cumulative_discount_factors: &[],
         stage_lag_transitions: &[],
@@ -647,6 +648,7 @@ fn simulate_fixture(
             load_bus_indices: &fx.stage_templates.load_bus_indices,
             block_counts_per_stage: &block_counts_sim,
             ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
             discount_factors: &[],
             cumulative_discount_factors: &[],
             stage_lag_transitions: &[],
@@ -848,7 +850,7 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
     let hydro_penalties_default = HydroStagePenalties {
         spillage_cost: 0.0,
         diversion_cost: 0.0,
-        fpha_turbined_cost: 0.0,
+        turbined_cost: 0.0,
         storage_violation_below_cost: 0.0,
         filling_target_violation_cost: 0.0,
         turbined_violation_below_cost: 0.0,

@@ -22,6 +22,12 @@ use crate::SddpError;
 
 /// Build and validate a [`HistoricalScenarioLibrary`] for inflow.
 ///
+/// `past_inflows` and `stage_lag_transitions` seed the rolling η-inversion chain
+/// (mirroring `build_external_inflow_library`). Pass
+/// `system.initial_conditions().past_inflows` and the pre-computed transitions
+/// so that every forward pass starting from `past_inflows` exactly reconstructs
+/// the raw historical observations.
+///
 /// # Errors
 ///
 /// Returns `SddpError::Stochastic` on window discovery or validation failure.
@@ -31,6 +37,8 @@ pub(crate) fn build_historical_inflow_library(
     stages: &[Stage],
     par: &PrecomputedPar,
     season_map: Option<&SeasonMap>,
+    past_inflows: &[HydroPastInflows],
+    stage_lag_transitions: &[StageLagTransition],
     user_pool: Option<&HistoricalYears>,
     forward_passes: u32,
 ) -> Result<HistoricalScenarioLibrary, SddpError> {
@@ -60,6 +68,8 @@ pub(crate) fn build_historical_inflow_library(
         par,
         &window_years,
         season_map,
+        past_inflows,
+        stage_lag_transitions,
     );
     validate_historical_library(
         &library,
