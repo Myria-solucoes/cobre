@@ -29,13 +29,37 @@
 //! ```
 //!
 //! where `Q` is the LP objective and `dual[0..n_state]` are the duals of the
-//! fixing constraints (storage-fixing and lag-fixing rows).
-//!
-//! The coefficients stored in the [`crate::FutureCostFunction`] are the raw (unscaled)
-//! duals of the state-fixing rows. Negation is applied later when building the
+//! fixing constraints (storage-fixing, lag-fixing, and anticipated-state-fixing rows).
+//! For all three categories the convention is `coefficients = dual` (raw `HiGHS` dual,
+//! no sign flip at extraction). Negation is applied later when building the
 //! LP cut row in `build_cut_row_batch_into` (forward.rs):
 //! `-coeff * x + theta >= intercept`.
+//! The intercept formula covers all `n_state` indices uniformly; no special handling
+//! for the anticipated-state subrange.
 //! See the project convention: "coefficients = dual (NOT -dual)".
+//!
+//! ### Anticipated-state cut gradient flow
+//!
+//! Anticipated-state slots are deterministic state variables that connect a decision
+//! stage to its delivery stage via the fishing constraint at the delivery stage.
+//! `state_to_lp_column` applies a shift-aware mapping for these slots: slot `K_p-1`
+//! (the maturation slot for plant `p`) maps to the decision column, while slot
+//! `i < K_p-1` maps to slot `i+1` so cuts apply against the correct LP variables
+//! at the predecessor stage.
+//!
+//! The dual of the anticipated-state-fixing row at stage `t` reflects
+//! `dQ_t/dx_ant[slot, plant]`. For slots not yet matured at stage `t`
+//! (`k_i > stage_idx`), the dual flows through intermediate-stage cuts on the
+//! same slot. For matured slots (`k_i <= stage_idx`), the dual reflects the
+//! immediate fishing constraint.
+//!
+//! The backward pass does not call `shift_anticipated_state`. The trial point
+//! `x_hat` is the forward-shifted state; cut extraction uses it as-is. This
+//! mirrors the inflow-lag convention and is correct: re-shifting would offset
+//! `x_hat` relative to the anticipated-state-fixing rows, breaking cut consistency.
+//! Empirical verification:
+//! `crates/cobre-sddp/tests/anticipated_backward_cut_k1.rs` (K=1) and
+//! `crates/cobre-sddp/tests/anticipated_backward_cut_k2.rs` (K=2).
 //!
 //! ## Cut activity tracking
 //!
@@ -331,7 +355,6 @@ fn patch_opening_bounds<S: SolverInterface + Send>(
                 }
             }
         }
-        // Lower/upper buffers were both rebuilt above by `transform_ncs_noise`.
         ws.solver.set_col_bounds(
             &ws.scratch.ncs_col_indices_buf,
             &ws.scratch.ncs_col_lower_buf,
@@ -551,21 +574,13 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
         let raw_noise = tree_view.opening(s, omega);
         patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s);
 
-        // Take scratch buffers out of `ws.backward_accum` before the solve so
-        // they can be filled from `view.dual` while `view` holds a `'ws` borrow
-        // over `ws`. The `take` leaves an empty `Vec` in place; its former
-        // content (which may carry capacity from a prior opening) moves into
-        // the local binding.  After `view` is dropped the local binding is
-        // moved back into the scratch slot so capacity is reused on the next
-        // iteration.  This means allocation only occurs on the first opening of
-        // the first stage; subsequent openings reuse the pre-warmed capacity.
+        // Scratch buffers are moved out before the solve to avoid borrow conflicts
+        // with `view`'s lifetime. Pre-warmed capacity is reused across openings.
         let mut state_duals = std::mem::take(&mut ws.backward_accum.state_duals_buf);
         let mut cut_duals = std::mem::take(&mut ws.backward_accum.cut_duals_buf);
 
-        // Snapshot solver statistics before this opening's solve.
         let stats_before_omega = ws.solver.statistics();
 
-        // ω=0: resolve warm-start basis; ω>0: HiGHS hot-starts from retained factorization.
         let stored_basis = if omega == 0 {
             resolve_backward_basis(basis_slice, m, s)
         } else {
@@ -597,14 +612,8 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
             unreachable!("run_stage_solve(Phase::Backward) returns Backward variant")
         };
 
-        // Extract duals while `view` is live. `state_duals` and `cut_duals` were
-        // taken from their scratch slots above, so no `ws` borrow is needed here.
-        // `view` is dropped at the end of the call (it is `Copy`; the explicit
-        // `let _ = view` inside the helper documents that intent).
-        //
-        // SEQUENCING: `ws.solver.statistics()` (stats_after) must be called AFTER
-        // this returns, because `view` borrows `ws` for `'ws` and the borrow checker
-        // forbids `ws.solver` access while `view` is alive.
+        // Extract duals from view (which borrows ws for 'ws).
+        // Statistics must be captured after view is dropped.
         let objective = extract_duals_from_view(
             &view,
             indexer.n_state,
@@ -615,14 +624,11 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
         );
         let _ = view;
 
-        // Restore pre-warmed scratch back into workspace slots before any `ws` access.
         ws.backward_accum.state_duals_buf = state_duals;
         ws.backward_accum.cut_duals_buf = cut_duals;
 
-        // Statistics after the solve (safe now that `view` is dropped).
         let stats_after_omega = ws.solver.statistics();
 
-        // Accumulate stats delta, outcome coefficients/intercept, and cut activity.
         accumulate_opening_outcome(
             ws,
             succ,
@@ -633,17 +639,13 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
             &stats_after_omega,
         );
 
-        // Capture basis at ω=0; ω>0 writes are forbidden (retained-LU corruption risk).
         if omega == 0 {
             save_basis_at_omega_zero(ws, succ, basis_slice, m, x_hat);
         }
     }
 
-    // Copy the aggregated coefficients out of the per-worker scratch
-    // buffer into an owned Vec<f64> so they outlive the parallel
-    // closure. This is the one allocation per trial point inside the
-    // parallel region; see the module-level "Hot-path allocation
-    // discipline" section for the full inventory.
+    // One allocation per trial point: copy coefficients out of the scratch
+    // buffer so they outlive the parallel closure (see module-level docs).
     let n_openings = succ.probabilities.len();
     let mut agg_intercept = 0.0_f64;
     risk_measures[succ.t].aggregate_cut_into(

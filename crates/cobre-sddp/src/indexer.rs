@@ -1351,23 +1351,55 @@ impl StageIndexer {
     ///   → LP column `z_inflow.start + h`
     /// - `[N + l·N + h]` for `l ≥ 1`: outgoing lag `l` = incoming lag `l − 1`
     ///   → LP column `N + (l − 1)·N + h`
+    /// - `[N*(1+L), N*(1+L) + n_anticipated*K_max)`: `anticipated_state` slots
+    ///   → shift-aware mapping (mirrors the inflow-lag pattern structurally):
+    ///   - `slot == K_p − 1` for plant `p`: the decision at stage `t − 1` writes
+    ///     into slot `K_p − 1`; returns `anticipated_decision.start + p`.
+    ///   - `slot < K_p − 1`: the successor's slot `i` = predecessor's incoming
+    ///     slot `i + 1` (shift); returns
+    ///     `anticipated_state.start + (slot + 1) * n_anticipated + p`.
+    ///   - `slot > K_p − 1`: padding (unused for this plant, pinned to 0 by the
+    ///     state-fixing row); returns `j` (identity; safe default).
     ///
-    /// When `max_par_order == 0` (no lags), this is the identity for all `j`.
+    /// The `anticipated_state` branch is evaluated regardless of `max_par_order`
+    /// because the shift semantics apply even when there are no inflow lags.
+    /// The `max_par_order == 0` early-return only guards the lag-remap block
+    /// (which has zero length when `max_par_order == 0`).
     #[inline]
     #[must_use]
     pub fn state_to_lp_column(&self, j: usize) -> usize {
         let n = self.hydro_count;
-        if j < n || self.max_par_order == 0 {
+        if j < n {
             return j;
         }
+        // Anticipated-state mapping (must check before early return on max_par_order == 0).
+        if self.n_anticipated > 0 && j >= self.anticipated_state.start {
+            let ant_block_size = self.n_anticipated * self.k_max;
+            if j < self.anticipated_state.start + ant_block_size {
+                let offset = j - self.anticipated_state.start;
+                let slot = offset / self.n_anticipated;
+                let plant = offset % self.n_anticipated;
+                let k_p = self.anticipated_lead_stages[plant];
+                return match (slot + 1).cmp(&k_p) {
+                    std::cmp::Ordering::Equal => self.anticipated_decision.start + plant,
+                    std::cmp::Ordering::Less => {
+                        self.anticipated_state.start + (slot + 1) * self.n_anticipated + plant
+                    }
+                    std::cmp::Ordering::Greater => j,
+                };
+            }
+            return j;
+        }
+        if self.max_par_order == 0 {
+            return j;
+        }
+        // Lag block: slot-to-column mapping.
         let offset = j - n;
         let h = offset % n;
         let lag = offset / n;
         if lag == 0 {
-            // Outgoing lag 0 = realised inflow z_t,h.
             self.z_inflow.start + h
         } else {
-            // Outgoing lag l (l ≥ 1) = incoming lag l−1.
             n + (lag - 1) * n + h
         }
     }
@@ -1560,7 +1592,6 @@ mod tests {
 
     use super::{EquipmentCounts, EvapConfig, FphaColumnLayout, FphaRowRange, StageIndexer};
 
-    /// Test helper: construct `EquipmentCounts` with `max_deficit_segments = 1`.
     fn eq(
         hydro_count: usize,
         max_par_order: usize,
@@ -1586,7 +1617,6 @@ mod tests {
         }
     }
 
-    /// Test helper: construct `FphaColumnLayout`.
     fn fpha(hydro_indices: Vec<usize>, planes_per_hydro: Vec<usize>) -> FphaColumnLayout {
         FphaColumnLayout {
             hydro_indices,
@@ -1594,7 +1624,6 @@ mod tests {
         }
     }
 
-    /// Test helper: construct `EvapConfig`.
     fn evap(hydro_indices: Vec<usize>) -> EvapConfig {
         EvapConfig { hydro_indices }
     }
@@ -1612,31 +1641,26 @@ mod tests {
 
     #[test]
     fn inflow_lags_range_3_2() {
-        // N = 3, L = 2 → [N, N*(1+L)) = [3, 9)
         assert_eq!(indexer_3_2().inflow_lags, 3..9);
     }
 
     #[test]
     fn z_inflow_range_3_2() {
-        // [N*(1+L), N*(2+L)) = [9, 12)
         assert_eq!(indexer_3_2().z_inflow, 9..12);
     }
 
     #[test]
     fn storage_in_range_3_2() {
-        // [N*(2+L), N*(3+L)) = [12, 15)
         assert_eq!(indexer_3_2().storage_in, 12..15);
     }
 
     #[test]
     fn theta_index_3_2() {
-        // N*(3+L) = 3*(3+2) = 15
         assert_eq!(indexer_3_2().theta, 15);
     }
 
     #[test]
     fn n_state_3_2() {
-        // N*(1+L) = 3*(1+2) = 9
         assert_eq!(indexer_3_2().n_state, 9);
     }
 
@@ -1647,7 +1671,6 @@ mod tests {
 
     #[test]
     fn lag_fixing_range_3_2() {
-        // [N, N + N*L) = [3, 9)  ≡  [N, N*(1+L))
         assert_eq!(indexer_3_2().lag_fixing, 3..9);
     }
 
@@ -1666,13 +1689,11 @@ mod tests {
 
     #[test]
     fn n_state_production_scale() {
-        // N*(1+L) = 160*13 = 2080
         assert_eq!(indexer_160_12().n_state, 2080);
     }
 
     #[test]
     fn theta_production_scale() {
-        // N*(3+L) = 160*15 = 2400
         assert_eq!(indexer_160_12().theta, 2400);
     }
 
@@ -1683,30 +1704,18 @@ mod tests {
         assert_eq!(idx.lag_fixing, idx.inflow_lags);
     }
 
-    // Edge case: N = 1, L = 0 (single hydro, no lags)
-
     #[test]
     fn single_hydro_no_lags() {
         let idx = StageIndexer::new(1, 0);
 
-        // storage: 0..1
         assert_eq!(idx.storage, 0..1);
-        // inflow_lags: 1..1*(1+0) = 1..1 (empty)
         assert_eq!(idx.inflow_lags, 1..1);
-        // z_inflow: 1..1*(2+0) = 1..2
         assert_eq!(idx.z_inflow, 1..2);
-        // storage_in: 1*(2+0)..1*(3+0) = 2..3
         assert_eq!(idx.storage_in, 2..3);
-        // theta: 1*(3+0) = 3
         assert_eq!(idx.theta, 3);
-        // n_state: 1*(1+0) = 1
         assert_eq!(idx.n_state, 1);
-        // storage_fixing: 0..1
         assert_eq!(idx.storage_fixing, 0..1);
-        // lag_fixing: 1..1 (empty)
         assert_eq!(idx.lag_fixing, 1..1);
-
-        // Row-column symmetry holds for empty ranges
         assert_eq!(idx.storage_fixing, idx.storage);
         assert_eq!(idx.lag_fixing, idx.inflow_lags);
     }
@@ -3713,6 +3722,205 @@ mod tests {
         let active: Vec<_> = idx.anticipated_fishing_active_at_stage(5, 5).collect();
         // Both K_0=3<=5 and K_1=5<=5 accept.
         assert_eq!(active, vec![(0, start), (1, start + 1)]);
+    }
+
+    // ── state_to_lp_column tests ──────────────────────────────────────────────
+
+    /// R4.a: `anticipated_state` indices use the shift-aware mapping when
+    /// `max_par_order == 0 && n_anticipated > 0`. The `anticipated_state` branch
+    /// runs before the `max_par_order == 0` lag-block guard; verify the shift
+    /// semantics apply even when there are no inflow lags.
+    ///
+    /// Assertions reflect the shift-aware mapping (the anticipated-state
+    /// branch in `state_to_lp_column` runs before the `max_par_order==0`
+    /// early-return).
+    #[test]
+    fn state_to_lp_column_anticipated_identity_no_lag() {
+        // N=1, L=0, n_anticipated=1, k_max=2, anticipated_lead_stages=[2].
+        // n_state = 1*(1+0) + 1*2 = 3.
+        // anticipated_state = [1, 3); slot 0 at j=1, slot 1 at j=2.
+        // anticipated_state.start = N*(1+L) = 1.
+        // anticipated_decision.start = theta+1 = 6 (no hydro/thermal cols).
+        let idx = StageIndexer::with_equipment_and_evaporation(
+            &eq_with_anticipated(1, 0, 0, 0, 1, 1, false, 1, 2),
+            &fpha(vec![], vec![]),
+            &evap(vec![]),
+        );
+        // Storage index: identity.
+        assert_eq!(idx.state_to_lp_column(0), 0);
+        // Anticipated-state slot 0 (j=1): slot+1=1 < k_p=2 → shift to slot 1.
+        // Returns anticipated_state.start + 1*n_anticipated + 0 = 1+1 = 2.
+        assert_eq!(idx.state_to_lp_column(1), 2);
+        // Anticipated-state slot 1 (j=2): slot+1=2 == k_p=2 → decision channel.
+        // Returns anticipated_decision.start + 0.
+        assert_eq!(idx.state_to_lp_column(2), idx.anticipated_decision.start);
+    }
+
+    /// R4.b: `anticipated_state` indices use the shift-aware mapping when
+    /// `max_par_order > 0 && n_anticipated > 0`.  The fixture uses N=1, L=1,
+    /// `n_anticipated=1`, `K_max=2`, `anticipated_lead_stages=[2]`.
+    ///
+    /// Assertions reflect the shift-aware mapping (identity is wrong for
+    /// `K_max >= 2` because the decision-write slot `K_p - 1` and the shifted
+    /// slots map to different LP columns than the incoming state's own).
+    #[test]
+    fn state_to_lp_column_anticipated_identity_with_lag() {
+        // N=1, L=1, n_anticipated=1, k_max=2, anticipated_lead_stages=[2].
+        // n_state = 1*(1+1) + 1*2 = 4.
+        // Layout: j=0 storage, j=1 lag-0, j=2 ant slot-0, j=3 ant slot-1.
+        // anticipated_state.start = N*(1+L) = 2.
+        // z_inflow.start = anticipated_state_end = 2 + 2 = 4.
+        // anticipated_decision.start = theta + 1 = 7 (no hydro/thermal columns).
+        let idx = StageIndexer::with_equipment_and_evaporation(
+            &eq_with_anticipated(1, 1, 0, 0, 1, 1, false, 1, 2),
+            &fpha(vec![], vec![]),
+            &evap(vec![]),
+        );
+        // Storage: identity.
+        assert_eq!(idx.state_to_lp_column(0), 0);
+        // Lag block: remapped (existing behaviour preserved).
+        // j=1: offset=0, h=0, lag=0 → z_inflow.start + 0 = 4.
+        assert_eq!(idx.state_to_lp_column(1), idx.z_inflow.start);
+        // Anticipated-state slot 0 (j=2): slot+1=1 < k_p=2 → shift to slot 1.
+        // Returns anticipated_state.start + 1*n_anticipated + 0 = 2+1 = 3.
+        assert_eq!(idx.state_to_lp_column(2), 3);
+        // Anticipated-state slot 1 (j=3): slot+1=2 == k_p=2 → decision channel.
+        // Returns anticipated_decision.start + 0.
+        assert_eq!(idx.state_to_lp_column(3), idx.anticipated_decision.start);
+    }
+
+    /// R4.c: lag-remap branch is preserved when `n_anticipated == 0` and
+    /// `max_par_order > 0`.  The new anticipated-state guard must not fire
+    /// when there are no anticipated thermals.
+    #[test]
+    fn state_to_lp_column_lag_remap_preserved_no_anticipated() {
+        // N=1, L=1, n_anticipated=0 — classic PAR(p) case.
+        // n_state = 1*(1+1) = 2. Layout: j=0 storage, j=1 lag-0.
+        let idx = StageIndexer::new(1, 1);
+        assert_eq!(idx.n_anticipated, 0);
+        // Storage: identity.
+        assert_eq!(idx.state_to_lp_column(0), 0);
+        // Lag block j=1: offset=0, h=0, lag=0 → z_inflow.start + 0.
+        // For StageIndexer::new(1,1): z_inflow = N*(1+L)..N*(2+L) = 2..3.
+        assert_eq!(idx.z_inflow.start, 2);
+        assert_eq!(idx.state_to_lp_column(1), 2);
+    }
+
+    /// Decision-channel branch: slot `K_p - 1` of an anticipated plant maps to
+    /// the predecessor stage's `anticipated_decision` column for that plant.
+    /// This is the decision-channel branch — the stage `t - 1` decision
+    /// writes into slot `K_p - 1` of stage `t`'s incoming state via the
+    /// shift in `noise.rs::shift_anticipated_state`.
+    #[test]
+    fn state_to_lp_column_anticipated_decision_channel() {
+        // N=0, L=0, n_anticipated=1, k_max=2, anticipated_lead_stages=[2].
+        // n_state = 0*(1+0) + 1*2 = 2.
+        // anticipated_state = [0, 2); slot 0 at j=0, slot 1 at j=1.
+        let idx = StageIndexer::with_equipment_and_evaporation(
+            &eq_with_anticipated(0, 0, 0, 0, 1, 1, false, 1, 2),
+            &fpha(vec![], vec![]),
+            &evap(vec![]),
+        );
+        // Slot K_p - 1 = 1 (the highest slot for plant 0) → decision column.
+        let slot_k_minus_1 = idx.anticipated_state.start + (idx.k_max - 1) * idx.n_anticipated;
+        assert_eq!(
+            idx.state_to_lp_column(slot_k_minus_1),
+            idx.anticipated_decision.start,
+        );
+    }
+
+    /// Shift branch: an `anticipated_state` slot `i < K_p - 1` maps to the
+    /// predecessor stage's `anticipated_state` column at slot `i + 1` (the
+    /// shift). Successor's slot `i` comes from predecessor's incoming slot
+    /// `i + 1` after `shift_anticipated_state` runs.
+    #[test]
+    fn state_to_lp_column_anticipated_shift() {
+        // Same fixture as R5.a: single plant, K=2.
+        let idx = StageIndexer::with_equipment_and_evaporation(
+            &eq_with_anticipated(0, 0, 0, 0, 1, 1, false, 1, 2),
+            &fpha(vec![], vec![]),
+            &evap(vec![]),
+        );
+        // Slot 0 → shift to slot 1's column.
+        let slot_0 = idx.anticipated_state.start;
+        let slot_1 = idx.anticipated_state.start + idx.n_anticipated;
+        assert_eq!(idx.state_to_lp_column(slot_0), slot_1);
+    }
+
+    /// Padding branch: an `anticipated_state` slot `i > K_p - 1` (padding
+    /// for a plant with `K_p < K_max`) maps to identity `j`. Padding slots
+    /// are pinned to 0 by the state-fixing row, so the identity mapping is a
+    /// safe default that does not introduce wrong cuts.
+    #[test]
+    fn state_to_lp_column_anticipated_padding_slot_identity() {
+        // Two plants: plant 0 has K_p=1 (only slot 0 is in-use), plant 1 has
+        // K_p=3 (slots 0, 1, 2 all in-use). k_max=3 so plant 0 has padding
+        // at slots 1 and 2.
+        let idx = StageIndexer::with_equipment_and_evaporation(
+            &EquipmentCounts {
+                hydro_count: 0,
+                max_par_order: 0,
+                n_thermals: 2,
+                n_lines: 0,
+                n_buses: 1,
+                n_blks: 1,
+                has_inflow_penalty: false,
+                max_deficit_segments: 1,
+                n_anticipated: 2,
+                k_max: 3,
+                anticipated_lead_stages: vec![1, 3],
+                anticipated_thermal_indices: vec![0, 1],
+            },
+            &fpha(vec![], vec![]),
+            &evap(vec![]),
+        );
+        // Plant 0 padding: slot 1 at j = ant_start + 1*2 + 0, slot 2 at j = ant_start + 2*2 + 0.
+        let pad_slot_1_plant_0 = idx.anticipated_state.start + idx.n_anticipated;
+        let pad_slot_2_plant_0 = idx.anticipated_state.start + 2 * idx.n_anticipated;
+        assert_eq!(
+            idx.state_to_lp_column(pad_slot_1_plant_0),
+            pad_slot_1_plant_0
+        );
+        assert_eq!(
+            idx.state_to_lp_column(pad_slot_2_plant_0),
+            pad_slot_2_plant_0
+        );
+    }
+
+    /// Multi-plant layout: correct routing for all `(slot, plant)`
+    /// combinations in a two-plant K=2 fixture.
+    #[test]
+    fn state_to_lp_column_anticipated_multi_plant_layout() {
+        // Two plants, both with K_p=2; k_max=2.
+        let idx = StageIndexer::with_equipment_and_evaporation(
+            &EquipmentCounts {
+                hydro_count: 0,
+                max_par_order: 0,
+                n_thermals: 2,
+                n_lines: 0,
+                n_buses: 1,
+                n_blks: 1,
+                has_inflow_penalty: false,
+                max_deficit_segments: 1,
+                n_anticipated: 2,
+                k_max: 2,
+                anticipated_lead_stages: vec![2, 2],
+                anticipated_thermal_indices: vec![0, 1],
+            },
+            &fpha(vec![], vec![]),
+            &evap(vec![]),
+        );
+        // Layout: slot * n_anticipated + plant. n_anticipated=2.
+        //   j=ant_start+0 → slot 0, plant 0; shift → ant_start + 1*2 + 0 = ant_start + 2
+        //   j=ant_start+1 → slot 0, plant 1; shift → ant_start + 1*2 + 1 = ant_start + 3
+        //   j=ant_start+2 → slot 1, plant 0; decision → anticipated_decision.start + 0
+        //   j=ant_start+3 → slot 1, plant 1; decision → anticipated_decision.start + 1
+        let s = idx.anticipated_state.start;
+        let d = idx.anticipated_decision.start;
+        assert_eq!(idx.state_to_lp_column(s), s + 2);
+        assert_eq!(idx.state_to_lp_column(s + 1), s + 3);
+        assert_eq!(idx.state_to_lp_column(s + 2), d);
+        assert_eq!(idx.state_to_lp_column(s + 3), d + 1);
     }
 
     /// Structural-invariant sweep tests for the anticipated-thermal indexer

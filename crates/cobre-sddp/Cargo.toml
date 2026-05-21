@@ -60,5 +60,9 @@ tracing-subscriber = "0.3"
 name = "backward_stats_gather"
 harness = false
 
+[[bench]]
+name = "cut_application_anticipated_state"
+harness = false
+
 [lints]
 workspace = true
