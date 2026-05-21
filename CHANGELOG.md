@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (breaking)
+
+- The `gnl_config` field in `system/thermals.json` is renamed to
+  `anticipated_config`. Its sub-field `lag_stages` is renamed to
+  `lead_stages`. Files using the old keys will fail to parse.
+- Three columns in `simulation/thermals.parquet` are renamed for
+  consistency: `is_gnl` → `is_anticipated`, `gnl_committed_mw` →
+  `anticipated_committed_mw`, `gnl_decision_mw` → `anticipated_decision_mw`.
+  Code reading these columns by name must be updated.
+
 ## [0.6.2] - 2026-05-20
 
 ### Added

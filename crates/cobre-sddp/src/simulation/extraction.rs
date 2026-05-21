@@ -678,9 +678,11 @@ fn extract_thermals(
                 thermal_id,
                 generation_mw: 0.0,
                 generation_cost: 0.0,
-                is_gnl: false,
-                gnl_committed_mw: None,
-                gnl_decision_mw: None,
+                // Anticipated commitment fields: populated when the unit has
+                // `anticipated_config = Some(_)`.
+                is_anticipated: false,
+                anticipated_committed_mw: None,
+                anticipated_decision_mw: None,
                 operative_state_code: 1,
             })
             .collect()
@@ -702,9 +704,11 @@ fn extract_thermals(
                         generation_cost: gen_mw * view.objective_coeffs[col]
                             / spec.col_scale_factor(col)
                             * COST_SCALE_FACTOR,
-                        is_gnl: false,
-                        gnl_committed_mw: None,
-                        gnl_decision_mw: None,
+                        // Anticipated commitment fields: populated when the unit has
+                        // `anticipated_config = Some(_)`.
+                        is_anticipated: false,
+                        anticipated_committed_mw: None,
+                        anticipated_decision_mw: None,
                         operative_state_code: 1,
                     }
                 })

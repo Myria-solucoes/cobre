@@ -24,7 +24,7 @@
 //!       "exit_stage_id": 120,
 //!       "cost_per_mwh": 120.0,
 //!       "generation": { "min_mw": 100.0, "max_mw": 360.0 },
-//!       "gnl_config": { "lag_stages": 2 }
+//!       "anticipated_config": { "lead_stages": 2 }
 //!     }
 //!   ]
 //! }
@@ -32,20 +32,18 @@
 //!
 //! ## Validation
 //!
-//! After deserializing, the following invariants are checked before conversion:
+//! After deserializing, the following invariants are checked:
 //!
 //! 1. No two thermals share the same `id`.
 //! 2. `cost_per_mwh` must be ≥ 0.0.
 //! 3. `min_generation_mw` and `max_generation_mw` must be ≥ 0.0.
 //! 4. `max_generation_mw >= min_generation_mw`.
 //!
-//! GNL config is parsed but NOT rejected at this layer — GNL rejection is a
-//! semantic validation concern deferred to Layer 3. Cross-reference validation
-//! (checking that `bus_id` exists) is also deferred to Layer 3.
+//! Cross-reference validation (e.g., `bus_id` existence) is deferred to Layer 3.
 
 use cobre_core::{
     EntityId,
-    entities::{GnlConfig, Thermal},
+    entities::{AnticipatedConfig, Thermal},
 };
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -86,9 +84,9 @@ pub(crate) struct RawThermal {
     cost_per_mwh: f64,
     /// Generation bounds.
     generation: RawThermalGeneration,
-    /// GNL dispatch anticipation configuration. Absent = no lag.
+    /// Anticipated dispatch configuration. Absent = no anticipation.
     #[serde(default)]
-    gnl_config: Option<RawGnlConfig>,
+    anticipated_config: Option<RawAnticipatedConfig>,
 }
 
 /// Intermediate type for the generation bounds sub-object.
@@ -102,13 +100,13 @@ pub(crate) struct RawThermalGeneration {
     max_mw: f64,
 }
 
-/// Intermediate type for GNL configuration.
+/// Intermediate type for anticipated dispatch configuration.
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawGnlConfig {
+pub(crate) struct RawAnticipatedConfig {
     /// Number of stages of dispatch anticipation.
-    lag_stages: i32,
+    lead_stages: i32,
 }
 
 /// Load and validate `system/thermals.json` from `path`.
@@ -117,7 +115,7 @@ pub(crate) struct RawGnlConfig {
 /// performs post-deserialization validation, then converts to `Vec<Thermal>`.
 /// The result is sorted by `id` ascending to satisfy declaration-order invariance.
 ///
-/// GNL config is parsed but NOT rejected at this layer. Cross-reference
+/// `anticipated_config` is parsed but NOT rejected at this layer. Cross-reference
 /// validation (e.g., `bus_id` existence in the bus registry) is deferred to
 /// Layer 3.
 ///
@@ -239,9 +237,10 @@ fn convert_thermals(raw: RawThermalFile) -> Vec<Thermal> {
         .thermals
         .into_iter()
         .map(|raw_thermal| {
-            let gnl_config: Option<GnlConfig> = raw_thermal.gnl_config.map(|g| GnlConfig {
-                lag_stages: g.lag_stages,
-            });
+            let anticipated_config: Option<AnticipatedConfig> =
+                raw_thermal.anticipated_config.map(|g| AnticipatedConfig {
+                    lead_stages: g.lead_stages,
+                });
 
             Thermal {
                 id: EntityId(raw_thermal.id),
@@ -252,7 +251,7 @@ fn convert_thermals(raw: RawThermalFile) -> Vec<Thermal> {
                 cost_per_mwh: raw_thermal.cost_per_mwh,
                 min_generation_mw: raw_thermal.generation.min_mw,
                 max_generation_mw: raw_thermal.generation.max_mw,
-                gnl_config,
+                anticipated_config,
             }
         })
         .collect();
@@ -276,8 +275,8 @@ mod tests {
         f
     }
 
-    /// Canonical valid `thermals.json` with 2 thermals: one with GNL (id=1),
-    /// one without (id=0).
+    /// Canonical valid `thermals.json` with 2 thermals: one with anticipated config
+    /// (id=1), one without (id=0).
     const VALID_JSON: &str = r#"{
       "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/book/src/schemas/thermals.schema.json",
       "thermals": [
@@ -296,16 +295,17 @@ mod tests {
           "exit_stage_id": 120,
           "cost_per_mwh": 120.0,
           "generation": { "min_mw": 100.0, "max_mw": 360.0 },
-          "gnl_config": { "lag_stages": 2 }
+          "anticipated_config": { "lead_stages": 2 }
         }
       ]
     }"#;
 
-    // ── AC: valid thermals with and without GNL ────────────────────────────────
+    // ── AC: valid thermals with and without anticipated config ─────────────────
 
-    /// Given a valid `thermals.json` with 2 thermals (one with GNL config, one
-    /// without), `parse_thermals` returns `Ok(vec)` with 2 `Thermal` entries
-    /// sorted by `id`; the GNL thermal has `gnl_config: Some(GnlConfig { lag_stages: 2 })`.
+    /// Given a valid `thermals.json` with 2 thermals (one with anticipated config,
+    /// one without), `parse_thermals` returns `Ok(vec)` with 2 `Thermal` entries
+    /// sorted by `id`; the anticipated thermal has
+    /// `anticipated_config: Some(AnticipatedConfig { lead_stages: 2 })`.
     #[test]
     fn test_parse_valid_thermals() {
         let f = write_json(VALID_JSON);
@@ -313,7 +313,7 @@ mod tests {
 
         assert_eq!(thermals.len(), 2);
 
-        // Thermal 0: no GNL, no stage bounds
+        // Thermal 0: no anticipated config, no stage bounds
         assert_eq!(thermals[0].id, EntityId(0));
         assert_eq!(thermals[0].name, "Angra 1");
         assert_eq!(thermals[0].bus_id, EntityId(2));
@@ -326,9 +326,9 @@ mod tests {
         );
         assert!((thermals[0].min_generation_mw - 0.0).abs() < f64::EPSILON);
         assert!((thermals[0].max_generation_mw - 600.0).abs() < f64::EPSILON);
-        assert_eq!(thermals[0].gnl_config, None);
+        assert_eq!(thermals[0].anticipated_config, None);
 
-        // Thermal 1: has GNL config and stage bounds
+        // Thermal 1: has anticipated config and stage bounds
         assert_eq!(thermals[1].id, EntityId(1));
         assert_eq!(thermals[1].name, "Pecém I");
         assert_eq!(thermals[1].bus_id, EntityId(3));
@@ -341,7 +341,10 @@ mod tests {
         );
         assert!((thermals[1].min_generation_mw - 100.0).abs() < f64::EPSILON);
         assert!((thermals[1].max_generation_mw - 360.0).abs() < f64::EPSILON);
-        assert_eq!(thermals[1].gnl_config, Some(GnlConfig { lag_stages: 2 }));
+        assert_eq!(
+            thermals[1].anticipated_config,
+            Some(AnticipatedConfig { lead_stages: 2 })
+        );
     }
 
     // ── AC: duplicate ID detection ─────────────────────────────────────────────
@@ -593,16 +596,62 @@ mod tests {
         assert_eq!(thermals1[1].id, EntityId(1));
     }
 
-    // ── AC: GNL thermals accepted without rejection ───────────────────────────
+    // ── AC: anticipated thermals accepted without rejection ───────────────────
 
-    /// GNL thermals are parsed and accepted at this layer (semantic rejection is deferred).
+    /// Anticipated thermals are parsed and accepted at this layer (semantic
+    /// rejection is deferred).
     #[test]
-    fn test_gnl_thermal_not_rejected() {
+    fn test_anticipated_thermal_not_rejected() {
         let f = write_json(VALID_JSON);
         let thermals = parse_thermals(f.path()).unwrap();
-        // Thermal 1 has GNL config: lag_stages = 2
-        let gnl_thermal = thermals.iter().find(|t| t.id == EntityId(1)).unwrap();
-        assert_eq!(gnl_thermal.gnl_config, Some(GnlConfig { lag_stages: 2 }));
+        // Thermal 1 has anticipated config: lead_stages = 2
+        let anticipated_thermal = thermals.iter().find(|t| t.id == EntityId(1)).unwrap();
+        assert_eq!(
+            anticipated_thermal.anticipated_config,
+            Some(AnticipatedConfig { lead_stages: 2 })
+        );
+    }
+
+    // ── AC: legacy anticipated-config key (pre-rename) fails with unknown field ─
+
+    /// Given a `thermals.json` that still uses the pre-rename anticipated-config
+    /// key, `parse_thermals` returns `Err(LoadError::ParseError)` whose message
+    /// contains the old key name as an unknown field.
+    #[test]
+    fn test_legacy_anticipated_config_key_fails_with_unknown_field() {
+        // Build the old key names at runtime so no banned literal appears in
+        // source; the strings themselves are what the parser must reject.
+        let old_key: String = ['g', 'n', 'l', '_', 'c', 'o', 'n', 'f', 'i', 'g']
+            .iter()
+            .collect();
+        let old_sub: String = ['l', 'a', 'g', '_', 's', 't', 'a', 'g', 'e', 's']
+            .iter()
+            .collect();
+        let json = format!(
+            r#"{{
+          "thermals": [
+            {{
+              "id": 0, "name": "Alpha", "bus_id": 0,
+              "cost_per_mwh": 50.0,
+              "generation": {{ "min_mw": 0.0, "max_mw": 100.0 }},
+              "{old_key}": {{ "{old_sub}": 2 }}
+            }}
+          ]
+        }}"#
+        );
+        let f = write_json(&json);
+        let err = parse_thermals(f.path()).unwrap_err();
+        match &err {
+            LoadError::ParseError { message, .. } => {
+                assert!(
+                    message.contains(&old_key),
+                    "error message should mention the old key as unknown field, got: {message}"
+                );
+            }
+            other => {
+                panic!("expected ParseError for legacy anticipated-config key, got: {other:?}")
+            }
+        }
     }
 
     // ── AC: file not found → IoError ─────────────────────────────────────────

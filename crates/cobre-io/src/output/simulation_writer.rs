@@ -197,12 +197,12 @@ pub struct ThermalWriteRecord {
     pub generation_mw: f64,
     /// Variable generation cost.
     pub generation_cost: f64,
-    /// Whether this unit uses the GNL model.
-    pub is_gnl: bool,
-    /// Committed capacity under GNL in MW, or `None`.
-    pub gnl_committed_mw: Option<f64>,
-    /// Decision capacity under GNL in MW, or `None`.
-    pub gnl_decision_mw: Option<f64>,
+    /// Whether this unit uses anticipated dispatch.
+    pub is_anticipated: bool,
+    /// Realised delivery commitment in MW, or `None`.
+    pub anticipated_committed_mw: Option<f64>,
+    /// New anticipated commitment decided at this stage in MW, or `None`.
+    pub anticipated_decision_mw: Option<f64>,
     /// Operative state code.
     pub operative_state_code: i8,
 }
@@ -1064,9 +1064,9 @@ fn build_thermals_batch<'a>(
     let mut generation_mw = Float64Builder::new();
     let mut generation_mwh = Float64Builder::new();
     let mut generation_cost = Float64Builder::new();
-    let mut is_gnl = BooleanBuilder::new();
-    let mut gnl_committed_mw = Float64Builder::new();
-    let mut gnl_decision_mw = Float64Builder::new();
+    let mut is_anticipated = BooleanBuilder::new();
+    let mut anticipated_committed_mw = Float64Builder::new();
+    let mut anticipated_decision_mw = Float64Builder::new();
     let mut operative_state_code = Int8Builder::new();
 
     for r in records {
@@ -1078,9 +1078,9 @@ fn build_thermals_batch<'a>(
         // Derived: generation_mwh = generation_mw * block_duration_hours
         generation_mwh.append_value(r.generation_mw * dur);
         generation_cost.append_value(r.generation_cost);
-        is_gnl.append_value(r.is_gnl);
-        gnl_committed_mw.append_option(r.gnl_committed_mw);
-        gnl_decision_mw.append_option(r.gnl_decision_mw);
+        is_anticipated.append_value(r.is_anticipated);
+        anticipated_committed_mw.append_option(r.anticipated_committed_mw);
+        anticipated_decision_mw.append_option(r.anticipated_decision_mw);
         operative_state_code.append_value(r.operative_state_code);
     }
 
@@ -1093,9 +1093,9 @@ fn build_thermals_batch<'a>(
             Arc::new(generation_mw.finish()),
             Arc::new(generation_mwh.finish()),
             Arc::new(generation_cost.finish()),
-            Arc::new(is_gnl.finish()),
-            Arc::new(gnl_committed_mw.finish()),
-            Arc::new(gnl_decision_mw.finish()),
+            Arc::new(is_anticipated.finish()),
+            Arc::new(anticipated_committed_mw.finish()),
+            Arc::new(anticipated_decision_mw.finish()),
             Arc::new(operative_state_code.finish()),
         ],
     )
@@ -1647,7 +1647,7 @@ mod tests {
             cost_per_mwh: 50.0,
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
-            gnl_config: None,
+            anticipated_config: None,
         };
 
         // Stage 0: duration 720h; Stage 1: duration 744h.

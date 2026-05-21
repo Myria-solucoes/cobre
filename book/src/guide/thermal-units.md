@@ -21,7 +21,7 @@ The cost structure of a thermal unit is modeled with a **scalar marginal cost**
 For an introductory walkthrough of writing `thermals.json`, see
 [Building a System](../tutorial/building-a-system.md) and
 [Anatomy of a Case](../tutorial/anatomy-of-a-case.md). This page provides the
-complete field reference, including GNL configuration.
+complete field reference, including anticipated dispatch configuration.
 
 ---
 
@@ -30,7 +30,7 @@ complete field reference, including GNL configuration.
 Thermal units are defined in `system/thermals.json`. The top-level object has a
 single key `"thermals"` containing an array of unit objects. The following example
 shows all fields, including the optional `entry_stage_id`, `exit_stage_id`, and
-`gnl_config`:
+`anticipated_config`:
 
 ```json
 {
@@ -56,8 +56,8 @@ shows all fields, including the optional `entry_stage_id`, `exit_stage_id`, and
         "min_mw": 0.0,
         "max_mw": 657.0
       },
-      "gnl_config": {
-        "lag_stages": 2
+      "anticipated_config": {
+        "lead_stages": 2
       }
     }
   ]
@@ -65,9 +65,9 @@ shows all fields, including the optional `entry_stage_id`, `exit_stage_id`, and
 ```
 
 The first plant (`UTE1`) matches the `1dtoy` template format: a cost per MWh with
-no optional fields. The second plant (`Angra 1`) shows the complete schema with GNL
-dispatch anticipation. The fields `entry_stage_id`, `exit_stage_id`, and
-`gnl_config` are optional and can be omitted.
+no optional fields. The second plant (`Angra 1`) shows the complete schema with
+anticipated dispatch. The fields `entry_stage_id`, `exit_stage_id`, and
+`anticipated_config` are optional and can be omitted.
 
 ---
 
@@ -111,30 +111,29 @@ always dispatch at least that amount whenever the plant is active.
 
 ---
 
-## GNL Configuration
+## Anticipated Dispatch Configuration
 
-> **Not yet implemented.** The `gnl_config` field is parsed and validated but has
-> no effect on the LP formulation in the current version. GNL dispatch anticipation
+> **Not yet implemented.** The `anticipated_config` field is parsed and validated but has
+> no effect on the LP formulation in the current version. Anticipated dispatch
 > is a planned feature — see the [CHANGELOG](https://github.com/cobre-rs/cobre/blob/main/CHANGELOG.md)
 > for the implementation timeline.
 
-The optional `gnl_config` block is intended to enable GNL (Gás Natural Liquefeito,
-or liquefied natural gas) dispatch anticipation. This will model thermal units that
-require advance scheduling over multiple stages due to commitment lead times — for
-example, an LNG-fired plant that must be booked several weeks before the dispatch
+The optional `anticipated_config` block enables anticipated dispatch for thermal
+units that require advance scheduling over multiple stages due to commitment lead
+times — for example, a plant that must be booked several weeks before the dispatch
 occurs.
 
 ```json
-"gnl_config": {
-  "lag_stages": 2
+"anticipated_config": {
+  "lead_stages": 2
 }
 ```
 
-| Field        | Type    | Description                                                                                                                               |
-| ------------ | ------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `lag_stages` | integer | Number of stages of dispatch anticipation. A value of `2` means the generation commitment for stage `t` must be decided at stage `t - 2`. |
+| Field         | Type    | Description                                                                                                                               |
+| ------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `lead_stages` | integer | Number of stages of dispatch anticipation. A value of `2` means the generation commitment for stage `t` must be decided at stage `t - 2`. |
 
-When implemented, `lag_stages` greater than zero will couple the commitment
+When implemented, `lead_stages` greater than zero will couple the commitment
 decision at an earlier stage to the dispatch variable at a later stage. For now,
 the field is accepted by the parser but silently ignored during LP construction.
 
@@ -145,12 +144,12 @@ the field is accepted by the parser but silently ignored during LP construction.
 Cobre's five-layer validation pipeline checks the following conditions on thermal
 units. Violations are reported as error messages with the failing unit's `id`.
 
-| Rule                       | Error Class          | Description                                                                |
-| -------------------------- | -------------------- | -------------------------------------------------------------------------- |
-| Bus reference integrity    | Reference error      | Every `bus_id` must match an `id` in `buses.json`.                         |
-| Non-negative cost          | Schema error         | `cost_per_mwh` must be ≥ 0.0.                                              |
-| Generation bounds ordering | Physical feasibility | `min_mw` must be less than or equal to `max_mw`.                           |
-| GNL lag validity           | Physical feasibility | When `gnl_config` is present, `lag_stages` must be a non-negative integer. |
+| Rule                       | Error Class          | Description                                                                         |
+| -------------------------- | -------------------- | ----------------------------------------------------------------------------------- |
+| Bus reference integrity    | Reference error      | Every `bus_id` must match an `id` in `buses.json`.                                  |
+| Non-negative cost          | Schema error         | `cost_per_mwh` must be ≥ 0.0.                                                       |
+| Generation bounds ordering | Physical feasibility | `min_mw` must be less than or equal to `max_mw`.                                    |
+| Anticipated lead validity  | Physical feasibility | When `anticipated_config` is present, `lead_stages` must be a non-negative integer. |
 
 ---
 

@@ -95,9 +95,9 @@ impl From<SimulationThermalResult> for ThermalWriteRecord {
             thermal_id: s.thermal_id,
             generation_mw: s.generation_mw,
             generation_cost: s.generation_cost,
-            is_gnl: s.is_gnl,
-            gnl_committed_mw: s.gnl_committed_mw,
-            gnl_decision_mw: s.gnl_decision_mw,
+            is_anticipated: s.is_anticipated,
+            anticipated_committed_mw: s.anticipated_committed_mw,
+            anticipated_decision_mw: s.anticipated_decision_mw,
             operative_state_code: s.operative_state_code,
         }
     }
@@ -306,9 +306,9 @@ mod tests {
             thermal_id: 1,
             generation_mw: 150.0,
             generation_cost: 300.0,
-            is_gnl: false,
-            gnl_committed_mw: None,
-            gnl_decision_mw: None,
+            is_anticipated: false,
+            anticipated_committed_mw: None,
+            anticipated_decision_mw: None,
             operative_state_code: 1,
         }
     }

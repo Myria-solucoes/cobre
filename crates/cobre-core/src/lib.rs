@@ -53,9 +53,10 @@ pub mod training_event;
 pub mod welford;
 
 pub use entities::{
-    Bus, ContractType, DeficitSegment, DiversionChannel, EfficiencyModel, EnergyContract,
-    FillingConfig, GnlConfig, HydraulicLossesModel, Hydro, HydroGenerationModel, HydroPenalties,
-    Line, NonControllableSource, PumpingStation, TailraceModel, TailracePoint, Thermal,
+    AnticipatedConfig, Bus, ContractType, DeficitSegment, DiversionChannel, EfficiencyModel,
+    EnergyContract, FillingConfig, HydraulicLossesModel, Hydro, HydroGenerationModel,
+    HydroPenalties, Line, NonControllableSource, PumpingStation, TailraceModel, TailracePoint,
+    Thermal,
 };
 pub use entity_id::EntityId;
 pub use error::ValidationError;

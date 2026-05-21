@@ -1347,7 +1347,7 @@ mod tests {
             cost_per_mwh: 50.0,
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
-            gnl_config: None,
+            anticipated_config: None,
         }];
         // HydroGeometryRow referencing non-existent hydro (888)
         data.hydro_geometry = vec![HydroGeometryRow {

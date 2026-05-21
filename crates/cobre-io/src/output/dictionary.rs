@@ -353,8 +353,8 @@ fn unit_for(file: &str, column: &str) -> &'static str {
         | "spot_price"
         | "pumped_flow_m3s"
         | "power_consumption_mw"
-        | "gnl_committed_mw"
-        | "gnl_decision_mw"
+        | "anticipated_committed_mw"
+        | "anticipated_decision_mw"
         | "power_mw" => return "MW",
         "generation_mwh"
         | "curtailment_mwh"
@@ -541,9 +541,9 @@ fn description_for(file: &str, column: &str) -> &'static str {
         ("thermals", "generation_mw") => "Thermal generation",
         ("thermals", "generation_mwh") => "Thermal energy generated",
         ("thermals", "generation_cost") => "Thermal generation cost",
-        ("thermals", "is_gnl") => "Whether plant is GNL-modeled",
-        ("thermals", "gnl_committed_mw") => "GNL committed capacity (nullable)",
-        ("thermals", "gnl_decision_mw") => "GNL dispatch decision (nullable)",
+        ("thermals", "is_anticipated") => "Whether plant uses anticipated dispatch",
+        ("thermals", "anticipated_committed_mw") => "Anticipated committed capacity (nullable)",
+        ("thermals", "anticipated_decision_mw") => "Anticipated dispatch decision (nullable)",
         ("thermals", "operative_state_code") => "Operative state code",
         // ── exchanges ──────────────────────────────────────────────────────
         ("exchanges", "stage_id") => "Stage index",
@@ -1165,7 +1165,7 @@ mod tests {
             cost_per_mwh: 50.0,
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
-            gnl_config: None,
+            anticipated_config: None,
         }
     }
 

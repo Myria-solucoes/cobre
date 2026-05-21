@@ -134,7 +134,7 @@ pub(super) fn make_thermal(id: i32, min_mw: f64, max_mw: f64) -> Thermal {
         cost_per_mwh: 100.0,
         min_generation_mw: min_mw,
         max_generation_mw: max_mw,
-        gnl_config: None,
+        anticipated_config: None,
     }
 }
 

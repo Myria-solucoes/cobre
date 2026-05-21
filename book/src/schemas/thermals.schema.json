@@ -1,24 +1,33 @@
 {
   "$defs": {
-    "RawGnlConfig": {
+    "RawAnticipatedConfig": {
       "additionalProperties": false,
-      "description": "Intermediate type for GNL configuration.",
+      "description": "Intermediate type for anticipated dispatch configuration.",
       "properties": {
-        "lag_stages": {
+        "lead_stages": {
           "description": "Number of stages of dispatch anticipation.",
           "format": "int32",
           "type": "integer"
         }
       },
-      "required": [
-        "lag_stages"
-      ],
+      "required": ["lead_stages"],
       "type": "object"
     },
     "RawThermal": {
       "additionalProperties": false,
       "description": "Intermediate type for a single thermal plant entry.",
       "properties": {
+        "anticipated_config": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RawAnticipatedConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Anticipated dispatch configuration. Absent = no lead."
+        },
         "bus_id": {
           "description": "Bus to which this plant's generation is injected.",
           "format": "int32",
@@ -33,34 +42,17 @@
           "default": null,
           "description": "Stage index when the plant enters service. Absent or null = always exists.",
           "format": "int32",
-          "type": [
-            "integer",
-            "null"
-          ]
+          "type": ["integer", "null"]
         },
         "exit_stage_id": {
           "default": null,
           "description": "Stage index when the plant is decommissioned. Absent or null = never.",
           "format": "int32",
-          "type": [
-            "integer",
-            "null"
-          ]
+          "type": ["integer", "null"]
         },
         "generation": {
           "$ref": "#/$defs/RawThermalGeneration",
           "description": "Generation bounds."
-        },
-        "gnl_config": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/RawGnlConfig"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "GNL dispatch anticipation configuration. Absent = no lag."
         },
         "id": {
           "description": "Thermal plant identifier. Must be unique within the file.",
@@ -72,13 +64,7 @@
           "type": "string"
         }
       },
-      "required": [
-        "id",
-        "name",
-        "bus_id",
-        "cost_per_mwh",
-        "generation"
-      ],
+      "required": ["id", "name", "bus_id", "cost_per_mwh", "generation"],
       "type": "object"
     },
     "RawThermalGeneration": {
@@ -96,10 +82,7 @@
           "type": "number"
         }
       },
-      "required": [
-        "min_mw",
-        "max_mw"
-      ],
+      "required": ["min_mw", "max_mw"],
       "type": "object"
     }
   },
@@ -109,10 +92,7 @@
   "properties": {
     "$schema": {
       "description": "`$schema` field — informational, not validated.",
-      "type": [
-        "string",
-        "null"
-      ]
+      "type": ["string", "null"]
     },
     "thermals": {
       "description": "Array of thermal plant entries.",
@@ -122,9 +102,7 @@
       "type": "array"
     }
   },
-  "required": [
-    "thermals"
-  ],
+  "required": ["thermals"],
   "title": "RawThermalFile",
   "type": "object"
 }

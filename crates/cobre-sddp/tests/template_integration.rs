@@ -7440,7 +7440,7 @@ fn one_bus_one_thermal_system(
         min_generation_mw: 0.0,
         max_generation_mw: 100.0,
         cost_per_mwh: 50.0,
-        gnl_config: None,
+        anticipated_config: None,
         entry_stage_id: None,
         exit_stage_id: None,
     };

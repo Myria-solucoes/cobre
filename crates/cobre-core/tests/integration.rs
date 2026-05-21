@@ -112,7 +112,7 @@ fn make_thermal(id: i32, bus_id: i32) -> Thermal {
         cost_per_mwh: 80.0,
         min_generation_mw: 0.0,
         max_generation_mw: 300.0,
-        gnl_config: None,
+        anticipated_config: None,
     }
 }
 

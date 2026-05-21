@@ -109,10 +109,10 @@ A thermal power plant with a scalar marginal cost.
 | `cost_per_mwh`      | `f64`               | Marginal cost of generation [$/MWh]              |
 | `min_generation_mw` | `f64`               | Minimum stable load                              |
 | `max_generation_mw` | `f64`               | Installed capacity                               |
-| `gnl_config`        | `Option<GnlConfig>` | GNL dispatch anticipation; `None` = no lag       |
+| `anticipated_config` | `Option<AnticipatedConfig>` | Anticipated dispatch configuration; `None` = no lead |
 
-`GnlConfig` holds `lag_stages: i32` (number of stages of dispatch anticipation
-for liquefied natural gas units that require advance scheduling).
+`AnticipatedConfig` holds `lead_stages: i32` (number of stages of dispatch anticipation
+for thermal units that require advance scheduling).
 
 #### Hydro
 
@@ -215,7 +215,7 @@ Fields: `id`, `name`, `bus_id`, `entry_stage_id`, `exit_stage_id`,
 | ------------------ | ------------------------------------------------ | ------------------------------------------------------ |
 | `TailracePoint`    | `outflow_m3s: f64`, `height_m: f64`              | One breakpoint on a piecewise tailrace curve           |
 | `DeficitSegment`   | `depth_mw: Option<f64>`, `cost_per_mwh: f64`     | One segment of a piecewise deficit cost curve          |
-| `GnlConfig`        | `lag_stages: i32`                                | Dispatch anticipation lag for GNL thermal units        |
+| `AnticipatedConfig` | `lead_stages: i32`                               | Dispatch anticipation lead for anticipated thermal units |
 | `DiversionChannel` | `downstream_id: EntityId`, `max_flow_m3s: f64`   | Water diversion bypassing turbines and spillways       |
 | `FillingConfig`    | `start_stage_id: i32`, `filling_inflow_m3s: f64` | Reservoir filling operation from a fixed inflow source |
 | `HydroPenalties`   | 16 `f64` fields (see Penalty resolution section) | Pre-resolved penalty costs for one hydro plant         |
