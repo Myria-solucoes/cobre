@@ -6,13 +6,10 @@
       "properties": {
         "description": {
           "description": "Optional human-readable description.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         },
         "expression": {
-          "description": "Expression string to be parsed. E.g. `\"2.5 * thermal_generation(5) - hydro_generation(3)\"`.",
+          "description": "Expression string to be parsed. E.g. `\"2.5 * thermal_generation(5) - hydro_generation(3)\"`. To constrain an anticipated thermal's commitment, use `\"anticipated_decision(5)\"` (stage-level scalar, no block index).",
           "type": "string"
         },
         "id": {
@@ -33,13 +30,7 @@
           "description": "Slack variable configuration."
         }
       },
-      "required": [
-        "id",
-        "name",
-        "expression",
-        "sense",
-        "slack"
-      ],
+      "required": ["id", "name", "expression", "sense", "slack"],
       "type": "object"
     },
     "RawSlackConfig": {
@@ -53,15 +44,10 @@
         "penalty": {
           "description": "Penalty per unit of violation. Must be > 0.0 when `enabled` is `true`.",
           "format": "double",
-          "type": [
-            "number",
-            "null"
-          ]
+          "type": ["number", "null"]
         }
       },
-      "required": [
-        "enabled"
-      ],
+      "required": ["enabled"],
       "type": "object"
     }
   },
@@ -71,10 +57,7 @@
   "properties": {
     "$schema": {
       "description": "`$schema` field — informational, not validated.",
-      "type": [
-        "string",
-        "null"
-      ]
+      "type": ["string", "null"]
     },
     "constraints": {
       "description": "Array of constraint entries.",
@@ -84,9 +67,7 @@
       "type": "array"
     }
   },
-  "required": [
-    "constraints"
-  ],
+  "required": ["constraints"],
   "title": "RawGenericConstraintsFile",
   "type": "object"
 }
