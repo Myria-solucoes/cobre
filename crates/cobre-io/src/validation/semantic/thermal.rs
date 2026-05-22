@@ -220,11 +220,24 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
 }
 
 /// For an anticipated thermal whose history has the correct length, check each
-/// `values_mw[j]` against the plant's generation bounds `[min_gen, max_gen]`.
+/// `values_mw[j]` for validity.
 ///
-/// A value outside that range makes the matured-stage fishing equality
-/// `sum_blk block_hours[blk] * gen_blk == block_hours_total * v` infeasible
-/// (the per-block generation columns are bounded to `[min_gen, max_gen]`).
+/// Two rules are enforced in order:
+///
+/// 1. **Non-zero rejection** — every `values_mw[j]` must be exactly `0.0`.
+///    Pre-horizon commitments cannot be expressed in the current version: the
+///    LP's fishing-constraint activation predicate is FALSE at every stage
+///    before the first matured delivery, and the ring-buffer shift overwrites
+///    slot 0 with the LP decision before any constraint reads it. A non-zero
+///    entry would be silently dropped. See [`AnticipatedCommitmentHistory`] for
+///    the full rationale and future-work direction.
+///
+/// 2. **Generation bounds check** (subordinate) — for any `values_mw[j] != 0.0`
+///    that passes the non-zero gate (which only occurs if rule 1 is relaxed in a
+///    future release), the value must lie within
+///    `[thermal.min_generation_mw, thermal.max_generation_mw]`. A value outside
+///    that range makes the matured-stage fishing equality infeasible (the
+///    per-block generation columns are bounded to `[min_gen, max_gen]`).
 fn check_committed_value_bounds(
     thermal: &cobre_core::entities::Thermal,
     thermal_id: EntityId,
@@ -235,6 +248,27 @@ fn check_committed_value_bounds(
     let max_mw = thermal.max_generation_mw;
     let entity_str = format!("thermals[id={}].anticipated_config", thermal_id.0);
     for (j, &v) in values_mw.iter().enumerate() {
+        // Rule 1: reject any non-zero entry — pre-horizon seeding is not
+        // supported in the current version. The value would be silently dropped
+        // by the ring-buffer machinery; fail loudly instead.
+        if v != 0.0 {
+            ctx.add_error(
+                ErrorKind::BusinessRuleViolation,
+                "initial_conditions.json",
+                Some(&entity_str),
+                format!(
+                    "Thermal {}: past_anticipated_commitments.values_mw[{j}] = {v} \
+                     is non-zero; pre-horizon commitments are not supported in the \
+                     current version and would be silently dropped. \
+                     Set all values_mw entries to 0.0",
+                    thermal_id.0
+                ),
+            );
+            continue;
+        }
+        // Rule 2: check generation bounds (subordinate; only reached when v == 0.0,
+        // which is always within [min_gen, max_gen] for non-negative min_gen;
+        // retained for defence-in-depth when a future release relaxes rule 1).
         if v < min_mw || v > max_mw {
             ctx.add_error(
                 ErrorKind::BusinessRuleViolation,
@@ -347,14 +381,14 @@ mod tests {
     // ── AC-1: valid anticipated thermal — returns Ok(()) ─────────────────────
 
     /// Given a valid anticipated thermal (lead_stages=2, n_stages=5, no entry/exit,
-    /// exactly 2 values_mw in past_anticipated_commitments), validate_anticipated_thermals
-    /// returns no errors.
+    /// exactly 2 values_mw all zero in past_anticipated_commitments),
+    /// validate_anticipated_thermals returns no errors.
     #[test]
     fn test_valid_anticipated_thermal_ok() {
         let thermal = make_anticipated_thermal(1, 2, None, None);
         let history = AnticipatedCommitmentHistory {
             thermal_id: EntityId::from(1),
-            values_mw: vec![100.0, 200.0],
+            values_mw: vec![0.0, 0.0],
         };
         let data = make_data_anticipated(vec![thermal], 5, vec![history]);
         let mut ctx = ValidationContext::new();
@@ -536,7 +570,7 @@ mod tests {
         let thermal = make_anticipated_thermal(1, 5, None, None);
         let history = AnticipatedCommitmentHistory {
             thermal_id: EntityId::from(1),
-            values_mw: vec![100.0, 110.0, 120.0, 130.0, 140.0],
+            values_mw: vec![0.0, 0.0, 0.0, 0.0, 0.0],
         };
         let data = make_data_anticipated(vec![thermal], 5, vec![history]);
         let mut ctx = ValidationContext::new();
@@ -558,7 +592,7 @@ mod tests {
         let thermal = make_anticipated_thermal(1, 3, Some(4), None);
         let history = AnticipatedCommitmentHistory {
             thermal_id: EntityId::from(1),
-            values_mw: vec![100.0, 200.0, 300.0],
+            values_mw: vec![0.0, 0.0, 0.0],
         };
         let data = make_data_anticipated(vec![thermal], 5, vec![history]);
         let mut ctx = ValidationContext::new();
@@ -598,7 +632,7 @@ mod tests {
         let thermal = make_anticipated_thermal(1, 3, None, Some(2));
         let history = AnticipatedCommitmentHistory {
             thermal_id: EntityId::from(1),
-            values_mw: vec![100.0, 200.0, 300.0],
+            values_mw: vec![0.0, 0.0, 0.0],
         };
         let data = make_data_anticipated(vec![thermal], 5, vec![history]);
         let mut ctx = ValidationContext::new();
@@ -617,17 +651,18 @@ mod tests {
         );
     }
 
-    // ── AC-9: committed value above max_generation_mw ────────────────────────
+    // ── AC-9: non-zero values_mw[0] rejected before bounds check ─────────────
 
-    /// Given values_mw[0] > thermal.max_generation_mw, the validator emits a
-    /// BusinessRuleViolation naming the thermal id, the index, the value, and
-    /// the generation bounds.
+    /// Given values_mw[0] = 600.0 (non-zero), the validator emits a
+    /// BusinessRuleViolation naming the thermal id and the index with
+    /// "pre-horizon commitments are not supported". The bounds check does not
+    /// fire because rule 1 (non-zero rejection) intercepts first.
     #[test]
-    fn test_committed_value_above_max_gen_error() {
+    fn test_committed_value_nonzero_rejected() {
         let thermal = make_anticipated_thermal(3, 2, None, None); // min=0.0, max=500.0
         let history = AnticipatedCommitmentHistory {
             thermal_id: EntityId::from(3),
-            values_mw: vec![600.0, 200.0], // 600 > 500
+            values_mw: vec![600.0, 200.0], // both non-zero — both trigger rule 1
         };
         let data = make_data_anticipated(vec![thermal], 5, vec![history]);
         let mut ctx = ValidationContext::new();
@@ -638,30 +673,36 @@ mod tests {
             .iter()
             .filter(|e| {
                 e.kind == ErrorKind::BusinessRuleViolation
-                    && e.message.contains("outside the plant's generation bounds")
+                    && e.message
+                        .contains("pre-horizon commitments are not supported")
             })
             .collect();
         assert_eq!(
             relevant.len(),
-            1,
-            "expected exactly one bounds-violation error, got: {errors:?}"
+            2,
+            "expected two non-zero-rejection errors (one per slot), got: {errors:?}"
         );
-        let msg = &relevant[0].message;
+        let msg0 = &relevant[0].message;
         assert!(
-            msg.contains("Thermal 3"),
-            "message should contain 'Thermal 3', got: {msg}"
-        );
-        assert!(
-            msg.contains("values_mw[0]"),
-            "message should identify the index [0], got: {msg}"
+            msg0.contains("Thermal 3"),
+            "message should contain 'Thermal 3', got: {msg0}"
         );
         assert!(
-            msg.contains("600"),
-            "message should contain the offending value 600, got: {msg}"
+            msg0.contains("values_mw[0]"),
+            "message should identify the index [0], got: {msg0}"
         );
         assert!(
-            msg.contains("[0, 500]"),
-            "message should show the bounds [0, 500], got: {msg}"
+            msg0.contains("600"),
+            "message should contain the offending value 600, got: {msg0}"
+        );
+        // Bounds-violation message must NOT appear — rule 1 fires continue.
+        let bounds_errors: Vec<_> = errors
+            .iter()
+            .filter(|e| e.message.contains("outside the plant's generation bounds"))
+            .collect();
+        assert!(
+            bounds_errors.is_empty(),
+            "bounds-violation message must not appear when non-zero rule fires, got: {bounds_errors:?}"
         );
         let file = relevant[0].file.to_string_lossy();
         assert!(
@@ -675,21 +716,21 @@ mod tests {
         );
     }
 
-    // ── AC-10: committed value below min_generation_mw ───────────────────────
+    // ── AC-10: non-zero values_mw with min_gen > 0 still rejected by rule 1 ──
 
-    /// Given values_mw[1] < thermal.min_generation_mw, the validator emits a
-    /// BusinessRuleViolation naming the thermal id, the index, the value, and
-    /// the generation bounds.
+    /// Given values_mw[1] = 50.0 (non-zero, below min_gen=100), the non-zero
+    /// rejection fires for all non-zero entries. The bounds check does not fire
+    /// because rule 1 intercepts with `continue`.
     #[test]
-    fn test_committed_value_below_min_gen_error() {
-        // Build a thermal with min_mw=100.0 so that a value below 100 is invalid.
+    fn test_committed_value_nonzero_below_min_gen_rejected_by_rule1() {
+        // Build a thermal with min_mw=100.0.
         let thermal = cobre_core::entities::Thermal {
             anticipated_config: Some(cobre_core::entities::AnticipatedConfig { lead_stages: 2 }),
             ..make_thermal(5, 100.0, 500.0)
         };
         let history = AnticipatedCommitmentHistory {
             thermal_id: EntityId::from(5),
-            values_mw: vec![200.0, 50.0], // 50 < 100
+            values_mw: vec![200.0, 50.0], // both non-zero — rule 1 fires for both
         };
         let data = make_data_anticipated(vec![thermal], 5, vec![history]);
         let mut ctx = ValidationContext::new();
@@ -700,123 +741,294 @@ mod tests {
             .iter()
             .filter(|e| {
                 e.kind == ErrorKind::BusinessRuleViolation
-                    && e.message.contains("outside the plant's generation bounds")
+                    && e.message
+                        .contains("pre-horizon commitments are not supported")
             })
             .collect();
         assert_eq!(
             relevant.len(),
-            1,
-            "expected exactly one bounds-violation error, got: {errors:?}"
+            2,
+            "expected two non-zero-rejection errors, got: {errors:?}"
         );
-        let msg = &relevant[0].message;
+        let msg1 = &relevant[1].message;
         assert!(
-            msg.contains("Thermal 5"),
-            "message should contain 'Thermal 5', got: {msg}"
-        );
-        assert!(
-            msg.contains("values_mw[1]"),
-            "message should identify the index [1], got: {msg}"
+            msg1.contains("Thermal 5"),
+            "message should contain 'Thermal 5', got: {msg1}"
         );
         assert!(
-            msg.contains("50"),
-            "message should contain the offending value 50, got: {msg}"
+            msg1.contains("values_mw[1]"),
+            "message should identify the index [1], got: {msg1}"
         );
         assert!(
-            msg.contains("[100, 500]"),
-            "message should show the bounds [100, 500], got: {msg}"
+            msg1.contains("50"),
+            "message should contain the offending value 50, got: {msg1}"
+        );
+        // Bounds-violation message must NOT appear.
+        let bounds_errors: Vec<_> = errors
+            .iter()
+            .filter(|e| e.message.contains("outside the plant's generation bounds"))
+            .collect();
+        assert!(
+            bounds_errors.is_empty(),
+            "bounds-violation message must not appear when non-zero rule fires, got: {bounds_errors:?}"
         );
     }
 
-    // ── AC-11: all committed values in range — passes ─────────────────────────
+    // ── AC-11: all values zero — passes (no errors from rule 1 or rule 2) ─────
 
-    /// Given values_mw all within [min_gen, max_gen], no bounds-violation error
-    /// is emitted.
+    /// Given values_mw all zero and min_gen = 0.0, no rejection error is emitted
+    /// (rule 1 does not fire for zero values; rule 2 does not fire because
+    /// 0.0 is within [0.0, 400.0]).
     #[test]
-    fn test_committed_values_within_bounds_ok() {
+    fn test_committed_values_all_zero_ok() {
         let thermal = cobre_core::entities::Thermal {
             anticipated_config: Some(cobre_core::entities::AnticipatedConfig { lead_stages: 3 }),
-            ..make_thermal(7, 100.0, 400.0)
+            ..make_thermal(7, 0.0, 400.0)
         };
         let history = AnticipatedCommitmentHistory {
             thermal_id: EntityId::from(7),
-            values_mw: vec![150.0, 300.0, 100.0], // all in [100, 400]
+            values_mw: vec![0.0, 0.0, 0.0],
         };
         let data = make_data_anticipated(vec![thermal], 5, vec![history]);
         let mut ctx = ValidationContext::new();
         validate_semantic_hydro_thermal(&data, &mut ctx);
-        let all_errors = ctx.errors();
-        let bounds_errors: Vec<_> = all_errors
-            .iter()
-            .filter(|e| {
-                e.kind == ErrorKind::BusinessRuleViolation
-                    && e.message.contains("outside the plant's generation bounds")
-            })
-            .collect();
         assert!(
-            bounds_errors.is_empty(),
-            "expected no bounds-violation errors, got: {bounds_errors:?}"
+            !ctx.has_errors(),
+            "expected no errors for all-zero values_mw, got: {:?}",
+            ctx.errors()
         );
     }
 
-    // ── AC-12: boundary — value == min_gen is accepted ────────────────────────
+    // ── AC-12: boundary — value == 0.0 is accepted (was: min_gen boundary) ────
 
-    /// Given values_mw[0] == thermal.min_generation_mw (exact boundary), no
-    /// bounds-violation error is emitted.
+    /// Given values_mw[0] == 0.0, no error is emitted. Zero is the only
+    /// accepted value in the current version.
     #[test]
-    fn test_committed_value_equal_min_gen_accepted() {
+    fn test_committed_value_zero_accepted() {
         let thermal = cobre_core::entities::Thermal {
             anticipated_config: Some(cobre_core::entities::AnticipatedConfig { lead_stages: 1 }),
-            ..make_thermal(9, 100.0, 400.0)
+            ..make_thermal(9, 0.0, 400.0)
         };
         let history = AnticipatedCommitmentHistory {
             thermal_id: EntityId::from(9),
-            values_mw: vec![100.0], // exactly min_mw
+            values_mw: vec![0.0],
         };
         let data = make_data_anticipated(vec![thermal], 5, vec![history]);
         let mut ctx = ValidationContext::new();
         validate_semantic_hydro_thermal(&data, &mut ctx);
-        let all_errors = ctx.errors();
-        let bounds_errors: Vec<_> = all_errors
-            .iter()
-            .filter(|e| {
-                e.kind == ErrorKind::BusinessRuleViolation
-                    && e.message.contains("outside the plant's generation bounds")
-            })
-            .collect();
         assert!(
-            bounds_errors.is_empty(),
-            "value == min_gen must be accepted, got: {bounds_errors:?}"
+            !ctx.has_errors(),
+            "zero value must be accepted, got: {:?}",
+            ctx.errors()
         );
     }
 
-    // ── AC-13: boundary — value == max_gen is accepted ────────────────────────
+    // ── AC-13: single non-zero value — rejected ───────────────────────────────
 
-    /// Given values_mw[0] == thermal.max_generation_mw (exact boundary), no
-    /// bounds-violation error is emitted.
+    /// Given values_mw[0] = 400.0 (non-zero, within [100, 400]), the non-zero
+    /// rejection fires. Even an in-bounds non-zero value is rejected because
+    /// pre-horizon seeding is not supported.
     #[test]
-    fn test_committed_value_equal_max_gen_accepted() {
+    fn test_committed_value_nonzero_single_rejected() {
         let thermal = cobre_core::entities::Thermal {
             anticipated_config: Some(cobre_core::entities::AnticipatedConfig { lead_stages: 1 }),
             ..make_thermal(11, 100.0, 400.0)
         };
         let history = AnticipatedCommitmentHistory {
             thermal_id: EntityId::from(11),
-            values_mw: vec![400.0], // exactly max_mw
+            values_mw: vec![400.0], // non-zero — rejected even though within [100, 400]
         };
         let data = make_data_anticipated(vec![thermal], 5, vec![history]);
         let mut ctx = ValidationContext::new();
         validate_semantic_hydro_thermal(&data, &mut ctx);
-        let all_errors = ctx.errors();
-        let bounds_errors: Vec<_> = all_errors
+        assert!(ctx.has_errors());
+        let errors = ctx.errors();
+        let relevant: Vec<_> = errors
             .iter()
             .filter(|e| {
                 e.kind == ErrorKind::BusinessRuleViolation
-                    && e.message.contains("outside the plant's generation bounds")
+                    && e.message
+                        .contains("pre-horizon commitments are not supported")
             })
             .collect();
+        assert_eq!(
+            relevant.len(),
+            1,
+            "expected exactly one non-zero-rejection error, got: {errors:?}"
+        );
+        let msg = &relevant[0].message;
         assert!(
-            bounds_errors.is_empty(),
-            "value == max_gen must be accepted, got: {bounds_errors:?}"
+            msg.contains("Thermal 11"),
+            "message should contain 'Thermal 11', got: {msg}"
+        );
+        assert!(
+            msg.contains("values_mw[0]"),
+            "message should identify the index [0], got: {msg}"
+        );
+        assert!(
+            msg.contains("400"),
+            "message should contain the offending value 400, got: {msg}"
+        );
+        assert!(
+            msg.contains("Set all values_mw entries to 0.0"),
+            "message should instruct the user to set entries to 0.0, got: {msg}"
+        );
+    }
+
+    // ── AC-14 (F3-002): semantic validator rejects non-zero values_mw ─────────
+
+    /// F3-002 acceptance criterion: the semantic validator rejects a non-zero
+    /// `values_mw` entry with a `BusinessRuleViolation` that names the thermal
+    /// id, the offending slot index, the value, and explains that pre-horizon
+    /// commitments are not supported in the current version.
+    ///
+    /// K=1 case: `values_mw = [7.0]` — a single non-zero slot should produce
+    /// exactly one error referencing `values_mw[0]` and thermal id 2.
+    #[test]
+    fn test_f3_002_nonzero_values_mw_rejected_k1() {
+        let thermal = make_anticipated_thermal(2, 1, None, None); // min=0.0, max=500.0
+        let history = AnticipatedCommitmentHistory {
+            thermal_id: EntityId::from(2),
+            values_mw: vec![7.0], // non-zero — must be rejected
+        };
+        let data = make_data_anticipated(vec![thermal], 5, vec![history]);
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        assert!(
+            ctx.has_errors(),
+            "expected validation error for non-zero values_mw"
+        );
+        let errors = ctx.errors();
+        let relevant: Vec<_> = errors
+            .iter()
+            .filter(|e| {
+                e.kind == ErrorKind::BusinessRuleViolation
+                    && e.message
+                        .contains("pre-horizon commitments are not supported")
+            })
+            .collect();
+        assert_eq!(
+            relevant.len(),
+            1,
+            "expected exactly one non-zero-rejection error for K=1, got: {errors:?}"
+        );
+        let err = &relevant[0];
+        let msg = &err.message;
+        assert!(
+            msg.contains("Thermal 2"),
+            "error must name the thermal id (Thermal 2), got: {msg}"
+        );
+        assert!(
+            msg.contains("values_mw[0]"),
+            "error must identify the offending slot index [0], got: {msg}"
+        );
+        assert!(
+            msg.contains('7'),
+            "error must include the offending value 7, got: {msg}"
+        );
+        assert!(
+            msg.contains("Set all values_mw entries to 0.0"),
+            "error must instruct user to zero out all entries, got: {msg}"
+        );
+        let file = err.file.to_string_lossy();
+        assert!(
+            file.contains("initial_conditions"),
+            "file must reference initial_conditions.json, got: {file}"
+        );
+        let entity = err.entity.as_deref().unwrap_or("");
+        assert!(
+            entity.contains("thermals[id=2].anticipated_config"),
+            "entity must reference the thermal anticipated_config, got: {entity}"
+        );
+    }
+
+    /// F3-002 acceptance criterion: K=2 case with two non-zero slots produces
+    /// exactly two non-zero-rejection errors, one per slot, in slot-index order.
+    #[test]
+    fn test_f3_002_nonzero_values_mw_rejected_k2_both_slots() {
+        let thermal = make_anticipated_thermal(5, 2, None, None); // min=0.0, max=500.0
+        let history = AnticipatedCommitmentHistory {
+            thermal_id: EntityId::from(5),
+            values_mw: vec![50.0, 30.0], // both non-zero
+        };
+        let data = make_data_anticipated(vec![thermal], 5, vec![history]);
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        assert!(ctx.has_errors());
+        let errors = ctx.errors();
+        let relevant: Vec<_> = errors
+            .iter()
+            .filter(|e| {
+                e.kind == ErrorKind::BusinessRuleViolation
+                    && e.message
+                        .contains("pre-horizon commitments are not supported")
+            })
+            .collect();
+        assert_eq!(
+            relevant.len(),
+            2,
+            "expected two non-zero-rejection errors for K=2, got: {errors:?}"
+        );
+        // First error: slot 0.
+        assert!(
+            relevant[0].message.contains("values_mw[0]"),
+            "first error must identify slot [0], got: {}",
+            relevant[0].message
+        );
+        assert!(
+            relevant[0].message.contains("50"),
+            "first error must contain value 50, got: {}",
+            relevant[0].message
+        );
+        // Second error: slot 1.
+        assert!(
+            relevant[1].message.contains("values_mw[1]"),
+            "second error must identify slot [1], got: {}",
+            relevant[1].message
+        );
+        assert!(
+            relevant[1].message.contains("30"),
+            "second error must contain value 30, got: {}",
+            relevant[1].message
+        );
+    }
+
+    /// F3-002 acceptance criterion: mixed zero/non-zero K=2 — only the
+    /// non-zero slot produces a rejection, the zero slot passes silently.
+    #[test]
+    fn test_f3_002_mixed_zero_nonzero_only_nonzero_rejected() {
+        let thermal = make_anticipated_thermal(7, 2, None, None); // min=0.0, max=500.0
+        let history = AnticipatedCommitmentHistory {
+            thermal_id: EntityId::from(7),
+            values_mw: vec![0.0, 25.0], // slot 0 zero, slot 1 non-zero
+        };
+        let data = make_data_anticipated(vec![thermal], 5, vec![history]);
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        assert!(ctx.has_errors());
+        let errors = ctx.errors();
+        let relevant: Vec<_> = errors
+            .iter()
+            .filter(|e| {
+                e.kind == ErrorKind::BusinessRuleViolation
+                    && e.message
+                        .contains("pre-horizon commitments are not supported")
+            })
+            .collect();
+        assert_eq!(
+            relevant.len(),
+            1,
+            "expected exactly one rejection (slot 1 only), got: {errors:?}"
+        );
+        assert!(
+            relevant[0].message.contains("values_mw[1]"),
+            "error must identify slot [1], got: {}",
+            relevant[0].message
+        );
+        assert!(
+            relevant[0].message.contains("25"),
+            "error must contain value 25, got: {}",
+            relevant[0].message
         );
     }
 

@@ -36,7 +36,7 @@
 //!     { "hydro_id": 0, "start_date": "2026-04-04", "end_date": "2026-04-11", "value_m3s": 480.0 }
 //!   ],
 //!   "past_anticipated_commitments": [
-//!     { "thermal_id": 1, "values_mw": [120.0, 180.0] }
+//!     { "thermal_id": 1, "values_mw": [0.0, 0.0] }
 //!   ]
 //! }
 //! ```
@@ -60,7 +60,12 @@
 //! 9. No `thermal_id` appears more than once in `past_anticipated_commitments`.
 //! 10. Every `past_anticipated_commitments[i].values_mw` is non-empty.
 //! 11. Every value in `past_anticipated_commitments[i].values_mw` is finite and
-//!     non-negative (`>= 0.0`).
+//!     non-negative (`>= 0.0`). (Parse-time check; see also rule 12.)
+//! 12. Every value in `past_anticipated_commitments[i].values_mw` must be `0.0`.
+//!     Non-zero entries are rejected by the semantic validator (Layer 5a) with an
+//!     error naming the thermal id and slot index. Pre-horizon commitments are not
+//!     supported in the current version; see [`AnticipatedCommitmentHistory`] in
+//!     `cobre-core` for the limitation rationale.
 //!
 //! Cross-reference validation (checking that hydro IDs exist in the hydro
 //! registry) is deferred to Layer 3 (deferred). Storage bounds validation

@@ -159,10 +159,9 @@ reverse.
 
 ### Pairing with initial_conditions.json
 
-Because anticipated dispatch carries state across stages, a study that begins with
-pending commitments made outside the study horizon must declare those commitments in
-`initial_conditions.json`. For each anticipated thermal unit add one entry to
-`past_anticipated_commitments`:
+Because anticipated dispatch carries state across stages, every anticipated thermal
+unit must have a corresponding entry in `past_anticipated_commitments` in
+`initial_conditions.json`:
 
 ```json
 {
@@ -178,14 +177,22 @@ pending commitments made outside the study horizon must declare those commitment
 ```
 
 The `values_mw` array must have exactly `lead_stages` entries. The values are
-ordered chronologically from oldest to most recent: `values_mw[0]` is the
-commitment delivering at study stage 1, `values_mw[1]` is the commitment delivering
-at study stage 2, and so on. For the example above with `lead_stages = 2`, the
-array has length 2. Supplying an array of a different length is a validation error.
+ordered chronologically from oldest to most recent: `values_mw[0]` corresponds to
+the oldest pending slot and `values_mw[lead_stages - 1]` to the most recent.
+For the example above with `lead_stages = 2`, the array has length 2. Supplying an
+array of a different length is a validation error.
 
-If no commitments were made before the study start (or if the unit was idle), supply
-zero values. The `past_anticipated_commitments` key is optional in the JSON file and
-defaults to an empty list for studies that have no anticipated thermal units.
+**Current limitation: every entry in `values_mw` must be `0.0`.** Pre-horizon
+commitments (generation dispatched outside the study horizon that delivers during
+the study) cannot be expressed in the current version. The semantic validator rejects
+any non-zero `values_mw` entry with an explicit error message naming the thermal id
+and the offending slot index. Set all entries to `0.0` when constructing
+`initial_conditions.json` for studies with anticipated thermal units.
+
+Support for non-zero pre-horizon commitments is planned for a future release.
+
+The `past_anticipated_commitments` key is optional in the JSON file and defaults to
+an empty list for studies that have no anticipated thermal units.
 
 ### Reading the outputs
 

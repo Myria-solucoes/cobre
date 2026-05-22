@@ -87,12 +87,27 @@ pub struct HydroPastInflows {
 
 /// Past externally-decided anticipated commitments for a single thermal plant.
 ///
-/// For an anticipated thermal plant with `lead_stages = K`, this records the
-/// commitments made externally (before the study horizon) for delivery during
-/// study stages 1..=K. Index 0 holds the commitment delivering at stage 1
-/// (oldest still-pending commitment), index K-1 holds the commitment delivering
-/// at stage K. `values_mw.len()` MUST equal the plant's `lead_stages`
-/// (validated by the `cobre-io` semantic validator).
+/// For an anticipated thermal plant with `lead_stages = K`, this struct would
+/// normally express commitments made externally (before the study horizon) for
+/// delivery during study stages 1..=K.
+///
+/// **Current limitation: `values_mw` must contain all zeros.**
+/// Pre-horizon commitments cannot be expressed in the current version: the
+/// LP's fishing-constraint activation predicate (`k_i <= stage_idx`) is FALSE
+/// at every stage before the first matured delivery, and the ring-buffer shift
+/// overwrites slot 0 with the LP decision before any constraint can read a
+/// seeded value. Supplying non-zero `values_mw` entries is therefore rejected
+/// by the `cobre-io` semantic validator with an error message naming the
+/// offending thermal and slot index.
+///
+/// The field is kept in the data model to preserve forward compatibility: a
+/// future release may re-introduce seeding by re-indexing slots or adjusting
+/// the predicate. Users supplying past commitments today must set every entry
+/// to `0.0`.
+///
+/// `values_mw` must have exactly `lead_stages` entries; the length check is
+/// enforced by the structural validator
+/// (`cobre-io::validation::semantic::thermal::check_anticipated_thermals`).
 ///
 /// # Sorting invariant
 ///
@@ -105,6 +120,7 @@ pub struct HydroPastInflows {
 /// Construction-time invariants (enforced by `cobre-io`, **not** by
 /// `cobre-core`):
 /// - `values_mw.len() == thermal.anticipated_config.lead_stages as usize`.
+/// - Every `values_mw[k] == 0.0` (non-zero entries are rejected as unusable).
 /// - `thermal_id` references a thermal whose `anticipated_config` is `Some`.
 /// - Exactly one entry per anticipated thermal in the system.
 ///
@@ -115,9 +131,10 @@ pub struct HydroPastInflows {
 pub struct AnticipatedCommitmentHistory {
     /// Thermal plant identifier. Must reference an anticipated thermal entity.
     pub thermal_id: EntityId,
-    /// Pending committed MW values ordered by delivery stage ascending.
-    /// `values_mw[k]` delivers at study stage `k + 1` (1-indexed).
-    /// Length must equal the plant's `lead_stages`.
+    /// Pending committed MW values ordered by delivery-stage index ascending.
+    /// Length must equal the plant's `lead_stages`. Every entry must be `0.0`
+    /// in the current version — non-zero values are rejected by the semantic
+    /// validator. See the struct-level documentation for the limitation rationale.
     pub values_mw: Vec<f64>,
 }
 
@@ -192,10 +209,11 @@ pub struct InitialConditions {
     /// plant. Empty for studies without anticipated thermal plants. Sorted by
     /// `thermal_id` ascending to satisfy declaration-order invariance.
     ///
-    /// Each entry covers one anticipated thermal plant; `values_mw[k]` is the
-    /// committed MW delivery at study stage `k + 1` (1-indexed). The length of
+    /// Each entry covers one anticipated thermal plant. The length of
     /// `values_mw` must equal the plant's `lead_stages` (validated in
-    /// `cobre-io`).
+    /// `cobre-io`). Every `values_mw[k]` must be `0.0` in the current version
+    /// — non-zero entries are rejected by the semantic validator. See
+    /// [`AnticipatedCommitmentHistory`] for the limitation rationale.
     ///
     /// In JSON: the field is optional (`serde(default)` fills an empty `Vec`
     /// when the key is absent). Backward-compatible with existing JSON files

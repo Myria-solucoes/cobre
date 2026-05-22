@@ -135,19 +135,28 @@ impl Communicator for StubComm {
 // System builder
 // ---------------------------------------------------------------------------
 
-/// Build a deterministic K=1, 5-stage system with:
+/// Build a deterministic K-stage system with:
 /// - 1 bus (deficit cost 5000 $/MWh)
 /// - 1 hydro (small capacity, mostly inactive)
-/// - 1 anticipated thermal (K=1, cost 10 $/MWh, max 200 MW) — id=2
+/// - 1 anticipated thermal (K lead stages, cost 10 $/MWh, max 200 MW) — id=2
 /// - 1 backup thermal (cost 5000 $/MWh, max 500 MW) — id=4
 /// - Load 150 MW constant across all stages
-/// - `past_anticipated_commitments = [(id=2, [50.0])]` (non-zero seed!)
+/// - `past_anticipated_commitments` seeded with the given `past_commitments_mw`
+///
+/// **Note on non-zero seeds**: this function constructs the resolved
+/// `cobre_core::System` directly via `SystemBuilder::new()`, bypassing the
+/// `cobre-io` parse-and-validate pipeline. The semantic validator that rejects
+/// non-zero `values_mw` entries (F3-002) therefore does NOT fire here. That is
+/// intentional: the non-zero seed is a deliberate test fixture for the
+/// ring-buffer shift mechanic (see the test doc below), not a user-supplied
+/// pre-horizon commitment. The validator's rejection rule applies to JSON input
+/// through `load_case`; unit tests that construct `System` directly are exempt.
 ///
 /// With K=1 and cheap anticipated cost, the optimal policy commits the full
 /// load (150 MW) one stage in advance from stage 0 onward, so:
 /// - `anticipated_decision_mw(t)` should converge to 150 for t in 0..n-1
-/// - `anticipated_committed_mw(t)` at stage t==1 must equal the decision
-///   made at stage 0 (a fresh in-study commitment), NOT the seed 50.0.
+/// - `anticipated_committed_mw(t)` at stage t==K must equal the decision
+///   made at stage 0 (a fresh in-study commitment), NOT any seeded value.
 fn build_system(k: usize, past_commitments_mw: Vec<f64>, n_stages: usize) -> cobre_core::System {
     use chrono::NaiveDate;
 
