@@ -36,7 +36,7 @@ use cobre_core::EntityId;
 
 use crate::energy_conversion::EnergyConversionSet;
 use crate::indexer::StageIndexer;
-use crate::lp_builder::{COST_SCALE_FACTOR, GenericConstraintRowEntry};
+use crate::lp_builder::{GenericConstraintRowEntry, COST_SCALE_FACTOR};
 use crate::simulation::types::{
     ScenarioCategoryCosts, SimulationBusResult, SimulationContractResult, SimulationCostResult,
     SimulationExchangeResult, SimulationGenericViolationResult, SimulationHydroResult,
@@ -124,7 +124,8 @@ impl ThermalReverseLookup {
 ///
 /// Returns `None` silently under any of:
 /// - the thermal is not anticipated,
-/// - `spec.stage_index + K_i > spec.n_stages` (decision absent from LP at this stage),
+/// - `spec.stage_index + K_i >= spec.n_stages` (decision absent from LP — the
+///   strict-predicate boundary set by F2-002),
 /// - the plant is outside its entry/exit window (the LP builder sets `[0,0]` bounds for
 ///   those columns; the activation predicate is the canonical test — do not read-then-check).
 #[inline]
@@ -136,7 +137,9 @@ fn compute_anticipated_decision_mw(
 ) -> Option<f64> {
     let local_idx = lookup.thermal_is_anticipated[thermal_local]?;
     let k_i = spec.indexer.anticipated_lead_stages[local_idx];
-    if spec.stage_index.saturating_add(k_i) > spec.n_stages {
+    // Canonical predicate: matches `StageIndexer::anticipated_decision_active_at_stage`
+    // in indexer.rs and the LP-builder gates at matrix.rs:245, :291, :1047.
+    if spec.stage_index.saturating_add(k_i) >= spec.n_stages {
         return None;
     }
     let col = spec.indexer.anticipated_decision.start + local_idx;
@@ -425,7 +428,11 @@ impl StageExtractionSpec<'_> {
     fn col_scale_factor(&self, col: usize) -> f64 {
         if col < self.col_scale.len() {
             let d = self.col_scale[col];
-            if d == 0.0 { 1.0 } else { d }
+            if d == 0.0 {
+                1.0
+            } else {
+                d
+            }
         } else {
             1.0
         }
@@ -1185,7 +1192,11 @@ fn compute_cost_result(
     let scale_factor = |col: usize| -> f64 {
         if col < col_scale.len() {
             let d = col_scale[col];
-            if d == 0.0 { 1.0 } else { d }
+            if d == 0.0 {
+                1.0
+            } else {
+                d
+            }
         } else {
             1.0
         }
@@ -1583,8 +1594,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        EntityCounts, SolutionView, StageExtractionSpec, accumulate_category_costs,
-        assign_scenarios, extract_stage_result,
+        accumulate_category_costs, assign_scenarios, extract_stage_result, EntityCounts,
+        SolutionView, StageExtractionSpec,
     };
     use crate::indexer::StageIndexer;
     use crate::simulation::types::{ScenarioCategoryCosts, SimulationCostResult};
@@ -1906,7 +1917,7 @@ mod tests {
         );
 
         assert_eq!(result.inflow_lags.len(), 2); // 2 hydros × 1 lag each
-        // Hydro 10, lag 0 → primal[2] = 50.0
+                                                 // Hydro 10, lag 0 → primal[2] = 50.0
         assert_eq!(result.inflow_lags[0].hydro_id, 10);
         assert_eq!(result.inflow_lags[0].lag_index, 0);
         assert_eq!(result.inflow_lags[0].inflow_m3s, 50.0);
@@ -2139,7 +2150,7 @@ mod tests {
         primal[1] = 200.0; // storage h1
         primal[2] = 50.0; // lag h0
         primal[3] = 60.0; // lag h1
-        // primal[4..6] = z_inflow (zeros)
+                          // primal[4..6] = z_inflow (zeros)
         primal[6] = 90.0; // storage_in h0
         primal[7] = 180.0; // storage_in h1
         primal[8] = 500.0; // theta
@@ -2147,7 +2158,7 @@ mod tests {
         primal[10] = 40.0; // turbine h1 b0
         primal[11] = 5.0; // spillage h0 b0
         primal[12] = 0.0; // spillage h1 b0
-        // primal[13..15] = diversion (zeros)
+                          // primal[13..15] = diversion (zeros)
         primal[15] = 80.0; // thermal t0 b0
         primal[16] = 15.0; // line_fwd l0 b0
         primal[17] = 0.0; // line_rev l0 b0
@@ -2580,12 +2591,13 @@ mod tests {
         );
     }
 
-    /// Same fixture, `stage_index=1`.  `t+K_i = 1+2 = 3 == n_stages` (boundary is
-    /// active — predicate uses `<=`).
+    /// Same fixture, `stage_index=1`.  `t+K_i = 1+2 = 3 == n_stages` (boundary
+    /// is INACTIVE under F2-002 strict predicate `<`).
     ///
-    /// Expects `anticipated_decision_mw == Some(123.5)`.
+    /// Expects `anticipated_decision_mw == None` — the LP has [0,0] bounds at
+    /// this boundary column and the extraction predicate must match.
     #[test]
-    fn extract_thermals_reads_anticipated_decision_at_horizon_boundary() {
+    fn extract_thermals_emits_none_at_horizon_boundary() {
         let indexer = make_anticipated_decision_indexer_k2();
         let primal = make_primal_with_decision_sentinel(&indexer, 123.5);
         let obj = vec![0.0_f64; primal.len()];
@@ -2636,9 +2648,9 @@ mod tests {
         assert_eq!(result.thermals.len(), 2);
         assert_eq!(result.thermals[1].thermal_id, 20);
         assert_eq!(
-            result.thermals[1].anticipated_decision_mw,
-            Some(123.5),
-            "expected Some(123.5) for thermal 20 at stage 1 with K_i=2, n_stages=3 (boundary)"
+            result.thermals[1].anticipated_decision_mw, None,
+            "expected None for thermal 20 at boundary stage 1 (K_i=2, n_stages=3): \
+             t+K_i = 3 >= n_stages = 3 under F2-002 strict predicate"
         );
     }
 
@@ -3508,7 +3520,7 @@ mod tests {
     /// If the two paths ever diverge, this test catches it immediately.
     #[test]
     fn extract_stage_result_prebuilt_lookup_matches_standard_path() {
-        use super::{HydroReverseLookup, ThermalReverseLookup, extract_stage_result_with_lookups};
+        use super::{extract_stage_result_with_lookups, HydroReverseLookup, ThermalReverseLookup};
 
         let indexer = crate::indexer::StageIndexer::with_equipment(
             &crate::indexer::EquipmentCounts {
@@ -4214,7 +4226,7 @@ mod tests {
         let mut primal = vec![0.0_f64; n_cols];
         primal[0] = 50.0; // storage h0
         primal[1] = 80.0; // storage h1
-        // primal[2..4] = z_inflow (zeros)
+                          // primal[2..4] = z_inflow (zeros)
         primal[4] = 45.0; // storage_in h0
         primal[5] = 75.0; // storage_in h1
         primal[6] = 0.0; // theta
@@ -4222,7 +4234,7 @@ mod tests {
         primal[8] = 30.0; // turbine h1 b0
         primal[9] = 0.0; // spillage h0 b0
         primal[10] = 0.0; // spillage h1 b0
-        // primal[11..13] = diversion (zeros)
+                          // primal[11..13] = diversion (zeros)
         primal[13] = 75.0; // FPHA generation h0 b0 — acceptance criterion value
 
         let obj = vec![0.0_f64; n_cols];
@@ -4408,12 +4420,12 @@ mod tests {
         let n_cols = indexer.generation_below_slack.end;
         let mut primal = vec![0.0_f64; n_cols];
         primal[0] = 200.0; // storage h0
-        // primal[1] = z_inflow h0 (zero)
+                           // primal[1] = z_inflow h0 (zero)
         primal[2] = 190.0; // storage_in h0
         primal[3] = 0.0; // theta
         primal[4] = 10.0; // turbine h0 b0
         primal[5] = 0.0; // spillage h0 b0
-        // primal[6] = diversion h0 b0 (zero)
+                         // primal[6] = diversion h0 b0 (zero)
         primal[7] = 3.5; // Q_ev — acceptance criterion value
 
         let obj = vec![0.0_f64; n_cols];
@@ -4486,8 +4498,8 @@ mod tests {
         primal[0] = 200.0;
         // primal[1] = z_inflow h0 (zero)
         primal[2] = 190.0; // storage_in h0
-        // primal[3] = theta = 0
-        // primal[6] = diversion h0 b0 (zero)
+                           // primal[3] = theta = 0
+                           // primal[6] = diversion h0 b0 (zero)
         primal[7] = 2.0; // Q_ev
         primal[8] = 0.5; // f_evap_plus (under-evaporation -> neg)
         primal[9] = 0.0; // f_evap_minus (over-evaporation -> pos)
@@ -4572,7 +4584,7 @@ mod tests {
 
         let mut obj = vec![0.0_f64; n_cols];
         obj[6] = 1.0; // theta coefficient (undiscounted)
-        // h0 turbine column 7: objective_coeff=0.01
+                      // h0 turbine column 7: objective_coeff=0.01
         obj[7] = 0.01;
 
         let dual = vec![0.0_f64; 2];
@@ -4647,8 +4659,8 @@ mod tests {
         let mut obj = vec![0.0_f64; n_cols];
         obj[6] = 1.0; // theta coefficient (undiscounted)
         obj[7] = 0.01; // turbined cost (scaled)
-        // objective in scaled space = theta_coeff * theta + turbine_coeff * turbine
-        //                           = 1.0 * 500 + 0.01 * 30 = 500.3
+                       // objective in scaled space = theta_coeff * theta + turbine_coeff * turbine
+                       //                           = 1.0 * 500 + 0.01 * 30 = 500.3
         let objective_val = 500.3_f64;
 
         let dual = vec![0.0_f64; 2];
@@ -4738,7 +4750,7 @@ mod tests {
 
         let mut obj = vec![0.0_f64; n_cols];
         obj[6] = 1.0; // theta coefficient (undiscounted)
-        // c_orig / K = 0.005.  With col_scale = 2.0: obj_coeff = 0.005 * 2.0 = 0.01.
+                      // c_orig / K = 0.005.  With col_scale = 2.0: obj_coeff = 0.005 * 2.0 = 0.01.
         obj[7] = 0.01;
 
         // Build col_scale: all 1.0 except column 7 = 2.0.

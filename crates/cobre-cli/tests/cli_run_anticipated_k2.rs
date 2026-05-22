@@ -381,9 +381,11 @@ fn cli_run_k2_populates_anticipated_columns_and_state_dictionary() {
         );
     }
 
-    // Anticipated thermal at stage 1 — anticipated_decision_mw non-null and >= 0.0 (horizon-
-    // boundary active: t + K_i = 1 + 2 = 3 = n_stages), anticipated_committed_mw null
-    // (delivery requires K_i <= stage_index = 2 <= 1 is false).
+    // Anticipated thermal at stage 1 — anticipated_decision_mw null (horizon-boundary
+    // INACTIVE under F2-002 strict predicate: t + K_i = 1 + 2 = 3 = n_stages, so
+    // the decision column has [0, 0] bounds and the extraction returns None).
+    // anticipated_committed_mw also null (delivery requires K_i <= stage_index = 2 <= 1
+    // which is false).
     let stage_1_ant_rows: Vec<usize> = rows
         .thermal_ids
         .iter()
@@ -398,17 +400,11 @@ fn cli_run_k2_populates_anticipated_columns_and_state_dictionary() {
     );
 
     for &row_idx in &stage_1_ant_rows {
-        let decision = rows.anticipated_decision_mw[row_idx];
         assert!(
-            decision.is_some(),
-            "row {row_idx}: anticipated thermal at stage 1 must have non-null \
-             anticipated_decision_mw (horizon-boundary active: t + K_i = 3 = n_stages)"
-        );
-        let v = decision.unwrap();
-        assert!(
-            v >= 0.0 && v.is_finite(),
-            "row {row_idx}: anticipated_decision_mw at stage 1 must be >= 0.0 and finite, \
-             got {v}"
+            rows.anticipated_decision_mw[row_idx].is_none(),
+            "row {row_idx}: anticipated thermal at stage 1 must have \
+             anticipated_decision_mw=null (horizon-boundary inactive: \
+             t + K_i = 3 >= n_stages = 3 under F2-002 strict predicate)"
         );
         assert!(
             rows.anticipated_committed_mw[row_idx].is_none(),

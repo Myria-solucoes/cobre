@@ -6,12 +6,12 @@
 //! class of bugs where one call site receives a fix and others are forgotten.
 
 use cobre_core::temporal::StageLagTransition;
-use cobre_stochastic::{StochasticContext, evaluate_par_batch, solve_par_noise_batch};
+use cobre_stochastic::{evaluate_par_batch, solve_par_noise_batch, StochasticContext};
 
 use crate::{
-    InflowNonNegativityMethod,
     context::{StageContext, TrainingContext},
     workspace::ScratchBuffers,
+    InflowNonNegativityMethod,
 };
 
 /// Compute effective (possibly clamped) eta for each hydro.
@@ -225,6 +225,21 @@ fn shift_lag_state_from_inflows(
 ///   whose lead time is shorter than `k_max`).
 ///
 /// No-op when `n_anticipated == 0` or `k_max == 0`.  Zero heap allocations.
+///
+/// ## Inactive plants (horizon boundary)
+///
+/// This function does not gate per-plant on the decision-active predicate
+/// (`stage_idx + K_i < n_stages`, see [`StageIndexer::anticipated_decision_active_at_stage`]).
+/// Inactive plants — those at stages where the LP did not emit a real
+/// decision column — rely on the LP builder pinning their decision column
+/// bounds to `[0.0, 0.0]` (matrix.rs:`fill_anticipated_decision_columns`).
+/// The unscaled primal at that column is therefore `0.0`, and writing `0.0`
+/// into slot `K_i - 1` is the correct ring-buffer transition: no new
+/// commitment was placed, so slot `K_i - 1` should hold zero. If a future
+/// change relaxes the `[0, 0]` invariant for inactive columns, this
+/// function must be updated to gate on the activation predicate.
+///
+/// [`StageIndexer::anticipated_decision_active_at_stage`]: crate::indexer::StageIndexer::anticipated_decision_active_at_stage
 ///
 /// # Panics (debug only)
 ///
@@ -624,8 +639,8 @@ mod tests {
     };
     use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
     use cobre_solver::StageTemplate;
+    use cobre_stochastic::context::{build_stochastic_context, ClassSchemes, OpeningTreeInputs};
     use cobre_stochastic::StochasticContext;
-    use cobre_stochastic::context::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
     use std::collections::BTreeMap;
 
     use crate::{
@@ -1286,7 +1301,7 @@ mod tests {
         let indexer = StageIndexer::new(1, 1);
         let mut state = vec![500.0, 99.0]; // v_out, stale lag
         let incoming_lags = vec![42.0]; // lag0 (lag-major: lag * n_h + h = 0*1+0 = 0)
-        // z_inflow starts at N*(1+L) = 1*(1+1) = 2
+                                        // z_inflow starts at N*(1+L) = 1*(1+1) = 2
         let mut primal = vec![0.0; 10];
         primal[indexer.z_inflow.start] = 77.0; // Z_t for hydro 0
         shift_lag_state(&mut state, &incoming_lags, &primal, &indexer);
@@ -1683,7 +1698,7 @@ mod tests {
 
     use cobre_core::temporal::StageLagTransition;
 
-    use crate::noise::{DownstreamAccumState, LagAccumState, accumulate_and_shift_lag_state};
+    use crate::noise::{accumulate_and_shift_lag_state, DownstreamAccumState, LagAccumState};
     // Convenience helper: build a no-op DownstreamAccumState for tests that
     // exercise only primary accumulation (uniform-resolution path).
     fn noop_ds<'a>(
