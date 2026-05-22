@@ -516,4 +516,17 @@ fn cli_run_k2_populates_anticipated_columns_and_state_dictionary() {
             .collect::<std::collections::HashSet<u64>>(),
         "anticipated_state entries must cover slot_index values {{0, 1}}, found {slot_indices:?}"
     );
+
+    // F1-007: each entry must carry `lead_stages` so consumers can
+    // distinguish active slots (slot_index < lead_stages) from padding
+    // slots (slot_index >= lead_stages). For this fixture lead_stages=2
+    // and k_max=2, so every slot is active.
+    for entry in &anticipated_entries {
+        assert_eq!(
+            entry["lead_stages"].as_u64(),
+            Some(2),
+            "each anticipated_state entry must carry lead_stages=2, got {:?}",
+            entry["lead_stages"]
+        );
+    }
 }

@@ -14,13 +14,12 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Float64Builder, Int8Builder, Int32Builder, RecordBatch};
+use arrow::array::{Float64Builder, Int32Builder, Int8Builder, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use cobre_core::System;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 
-use crate::Config;
 use crate::output::error::OutputError;
 use crate::output::parquet_config::ParquetWriterConfig;
 use crate::output::schemas::{
@@ -29,6 +28,7 @@ use crate::output::schemas::{
     iteration_timing_schema, non_controllables_schema, pumping_stations_schema, rank_timing_schema,
     retry_histogram_schema, row_selection_schema, solver_iterations_schema, thermals_schema,
 };
+use crate::Config;
 
 // ─── Entity type codes (SS3) ─────────────────────────────────────────────────
 
@@ -1016,6 +1016,13 @@ fn write_state_dictionary_json(path: &Path, system: &System) -> Result<(), Outpu
     // Anticipated-state slot variables: one per (slot, plant) pair.
     // Ordering matches the LP layout
     // `anticipated_state.start + slot * n_anticipated + plant`.
+    //
+    // For a plant with `lead_stages = K_i`, slots `0..K_i` carry real
+    // pending commitments and slots `K_i..k_max` are structural padding
+    // (deterministically zero, kept to align the ring buffer to a
+    // uniform stride). The `lead_stages` field below lets consumers
+    // distinguish "active" slots (`slot_index < lead_stages`) from
+    // padding slots (`slot_index >= lead_stages`).
     let anticipated_thermals: Vec<&cobre_core::Thermal> = system
         .thermals()
         .iter()
@@ -1028,11 +1035,13 @@ fn write_state_dictionary_json(path: &Path, system: &System) -> Result<(), Outpu
         .unwrap_or(0);
     for slot in 0..k_max {
         for plant in &anticipated_thermals {
+            let lead_stages = plant.anticipated_config.map_or(0_u32, |c| c.lead_stages);
             state_variables.push(serde_json::json!({
                 "type": "anticipated_state",
                 "entity_type": "thermal",
                 "entity_id": plant.id.0,
                 "slot_index": slot,
+                "lead_stages": lead_stages,
                 "unit": "MW"
             }));
         }
@@ -1112,13 +1121,13 @@ mod tests {
     use super::*;
     use chrono::NaiveDate;
     use cobre_core::{
-        AnticipatedConfig, Block, BlockMode, Bus, DeficitSegment, EntityId, Hydro,
-        HydroGenerationModel, HydroPenalties, InflowModel, NoiseMethod, ScenarioSourceConfig,
-        Stage, StageRiskConfig, StageStateConfig, SystemBuilder, Thermal,
         resolved::{
             BoundsCountsSpec, BoundsDefaults, ContractStageBounds, HydroStageBounds,
             LineStageBounds, PumpingStageBounds, ResolvedBounds, ThermalStageBounds,
         },
+        AnticipatedConfig, Block, BlockMode, Bus, DeficitSegment, EntityId, Hydro,
+        HydroGenerationModel, HydroPenalties, InflowModel, NoiseMethod, ScenarioSourceConfig,
+        Stage, StageRiskConfig, StageStateConfig, SystemBuilder, Thermal,
     };
 
     // ── Fixtures ─────────────────────────────────────────────────────────────

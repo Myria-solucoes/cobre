@@ -214,8 +214,9 @@ stage's position relative to the decision and delivery windows described above.
 
 Training output also records anticipated-dispatch state in
 `training/dictionaries/state_dictionary.json`. For each anticipated thermal unit,
-the dictionary contains one entry per slot index from `0` to `lead_stages - 1`,
-in slot-major order. Each entry has the following shape:
+the dictionary contains one entry per slot index from `0` to `K_max - 1` where
+`K_max` is the maximum `lead_stages` across all anticipated thermals in the study.
+Entries are emitted in slot-major order. Each entry has the following shape:
 
 ```json
 {
@@ -223,15 +224,23 @@ in slot-major order. Each entry has the following shape:
   "entity_type": "thermal",
   "entity_id": 2,
   "slot_index": 0,
+  "lead_stages": 2,
   "unit": "MW"
 }
 ```
 
+The `lead_stages` field reflects the plant's own `K_i`, not the study-wide
+`K_max`. For a plant where `K_i < K_max` (mixed-`K` studies), entries with
+`slot_index >= lead_stages` are structural padding — those slots are
+deterministically zero and exist only to align the ring buffer to a uniform
+stride. Filter `slot_index < lead_stages` to keep only the active slots.
+
 For a study with a single anticipated thermal unit (`id = 2`) configured as
-`lead_stages = 2`, the state dictionary will contain exactly two such entries:
-one with `slot_index = 0` and one with `slot_index = 1`. The slot index identifies
-which pending commitment the state variable tracks: slot 0 holds the oldest
-still-pending commitment and slot `lead_stages - 1` holds the most recent.
+`lead_stages = 2`, the state dictionary contains exactly two such entries: one
+with `slot_index = 0` and one with `slot_index = 1` — both active, since
+`K_max = lead_stages = 2`. The slot index identifies which pending commitment
+the state variable tracks: slot 0 holds the oldest still-pending commitment and
+slot `lead_stages - 1` holds the most recent.
 
 ---
 
