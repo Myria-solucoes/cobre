@@ -285,31 +285,10 @@ impl PatchBuffer {
             }
         }
 
-        // Category 6: anticipated-state-fixing rows [N*(1+L), N*(1+L) + A*K).
-        // Placed between Category 2 (lag-fixing) and Category 3 (AR dynamics),
-        // matching the LP row ordering.  When n_anticipated == 0 or k_max == 0
-        // this loop executes zero iterations and the layout is unchanged.
-        let n_ant = self.n_anticipated;
-        let k = self.k_max;
+        // Category 6: anticipated-state-fixing rows. Placed between Category 2
+        // (lag-fixing) and Category 3 (AR dynamics), matching the LP row ordering.
         let cat6_start = n * (1 + l);
-        let ant_state_col_start = indexer.anticipated_state.start;
-        let ant_state_row_start = indexer.anticipated_state_fixing.start;
-        for slot in 0..k {
-            for plant in 0..n_ant {
-                let off = slot * n_ant + plant;
-                let buf_slot = cat6_start + off;
-                let row = ant_state_row_start + off;
-                let sv = state[ant_state_col_start + off];
-                let scaled = if row_scale.is_empty() {
-                    sv
-                } else {
-                    sv * row_scale[row]
-                };
-                self.indices[buf_slot] = row;
-                self.lower[buf_slot] = scaled;
-                self.upper[buf_slot] = scaled;
-            }
-        }
+        self.fill_anticipated_state_patches(indexer, state, row_scale, cat6_start);
 
         // Category 3: AR dynamics rows in the static non-dual region.
         // The noise value is computed by the caller as:
@@ -319,7 +298,7 @@ impl PatchBuffer {
         // during LP setup (see `setup.rs`: noise_scale[h] *= row_scale[base_row + h]),
         // so `noise[h]` is already in the correct scaled units and must be
         // written as-is without additional prescaling here.
-        let cat3_start = n * (1 + l) + n_ant * k;
+        let cat3_start = n * (1 + l) + self.n_anticipated * self.k_max;
         for (h, &nv) in noise.iter().enumerate() {
             let slot = cat3_start + h;
             self.indices[slot] = ar_dynamics_row_offset(base_row, h);
@@ -403,12 +382,37 @@ impl PatchBuffer {
             }
         }
 
-        // Category 6: anticipated-state-fixing rows [N*(1+L), N*(1+L) + A*K).
-        // These rows are dual-relevant and therefore included in the state-patch
-        // slice used by both forward and backward solves.
+        // Category 6: anticipated-state-fixing rows. These rows are dual-relevant
+        // and therefore included in the state-patch slice used by both forward
+        // and backward solves.
+        let cat6_start = n * (1 + l);
+        self.fill_anticipated_state_patches(indexer, state, row_scale, cat6_start);
+
+        // Category 3 is intentionally not written; the caller slices
+        // [0..state_patch_count()] before passing to set_row_bounds.
+    }
+
+    /// Write the `A*K` Category 6 anticipated-state-fixing patches into the
+    /// buffer starting at `cat6_start`.
+    ///
+    /// Each patch fixes the row at `anticipated_state_fixing.start + slot * A + plant`
+    /// to the corresponding column value at
+    /// `state[anticipated_state.start + slot * A + plant]`, prescaled by
+    /// `row_scale` when non-empty. Iteration order is slot-major, plant-minor —
+    /// the canonical LP ring-buffer layout.
+    ///
+    /// When `n_anticipated == 0` or `k_max == 0` this is a no-op and the
+    /// buffer is left unchanged at the Category 6 offsets (the layout reverts
+    /// to the zero-anticipated-thermal slot pattern).
+    fn fill_anticipated_state_patches(
+        &mut self,
+        indexer: &StageIndexer,
+        state: &[f64],
+        row_scale: &[f64],
+        cat6_start: usize,
+    ) {
         let n_ant = self.n_anticipated;
         let k = self.k_max;
-        let cat6_start = n * (1 + l);
         let ant_state_col_start = indexer.anticipated_state.start;
         let ant_state_row_start = indexer.anticipated_state_fixing.start;
         for slot in 0..k {
@@ -427,9 +431,6 @@ impl PatchBuffer {
                 self.upper[buf_slot] = scaled;
             }
         }
-
-        // Category 3 is intentionally not written; the caller slices
-        // [0..state_patch_count()] before passing to set_row_bounds.
     }
 
     /// Fill Category 4 load balance row patches for a forward-pass solve.
@@ -649,7 +650,7 @@ pub fn ar_dynamics_row_offset(base_row: usize, hydro_index: usize) -> usize {
     clippy::cast_possible_truncation
 )]
 mod tests {
-    use super::{PatchBuffer, ar_dynamics_row_offset};
+    use super::{ar_dynamics_row_offset, PatchBuffer};
     use crate::indexer::StageIndexer;
 
     /// Convenience: make an indexer without repeating N/L everywhere.
