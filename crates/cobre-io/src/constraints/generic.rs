@@ -97,6 +97,7 @@ struct RawConstraint {
     description: Option<String>,
 
     /// Expression string to be parsed. E.g. `"2.5 * thermal_generation(5) - hydro_generation(3)"`.
+    /// To constrain an anticipated thermal's commitment, use `"anticipated_decision(5)"` (stage-level scalar, no block index).
     expression: String,
 
     /// Comparison sense: `">="`, `"<="`, or `"=="`.
