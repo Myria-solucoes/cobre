@@ -364,9 +364,9 @@ pub struct StageIndexer {
     /// commitment is delivered `K_i` stages later (fishing constraint, added by
     /// a subsequent ticket).
     ///
-    /// Per ticket-010 validation, every anticipated plant has `K_i <= T`, so at
-    /// stage 0 every anticipated plant is active and the range length equals
-    /// [`Self::n_anticipated`].
+    /// The `cobre-io` semantic validator enforces `K_i <= T` for every
+    /// anticipated plant, so at stage 0 every anticipated plant is active and
+    /// the range length equals [`Self::n_anticipated`].
     ///
     /// Per-stage gating is computed by
     /// [`anticipated_decision_active_at_stage`](Self::anticipated_decision_active_at_stage):
@@ -625,7 +625,7 @@ pub struct StageIndexer {
     /// has matured at stage 0. Per-stage active row indices are computed
     /// by [`anticipated_fishing_active_at_stage`](Self::anticipated_fishing_active_at_stage).
     ///
-    /// The fishing constraint reads (epic 05):
+    /// The fishing constraint reads:
     /// `gt_i^(t) - anticipated_state[slot=0, plant=i] = 0`
     /// where the dual on this row carries the cut subgradient w.r.t.
     /// the matured state slot.
@@ -637,7 +637,7 @@ pub struct StageIndexer {
     /// active, or to `evap_rows_end` (= `fpha_row_cursor + n_evap_hydros`)
     /// when they are not. Zero when built via [`StageIndexer::new`].
     ///
-    /// Used by epic 05 to compute per-stage fishing row indices:
+    /// Per-stage fishing row indices are computed as
     /// `lp_row = anticipated_fishing_start + local_idx_at_stage`.
     pub anticipated_fishing_start: usize,
 
@@ -1177,8 +1177,9 @@ impl StageIndexer {
 
         // Anticipated-fishing rows are placed after the operational-violation
         // rows when those are active, otherwise directly after the evaporation
-        // rows. The stage-0 canonical layout stores a zero-length range; epic 05
-        // populates `anticipated_fishing_start + local_idx_at_stage` per stage.
+        // rows. The stage-0 canonical layout stores a zero-length range; the
+        // per-stage template populates
+        // `anticipated_fishing_start + local_idx_at_stage`.
         let fishing_start = if op.has_operational_violations {
             op.min_generation_rows.end
         } else {
@@ -1442,8 +1443,8 @@ impl StageIndexer {
     /// `anticipated_fishing_start + k` (where k is its position in the active
     /// subset, NOT its anticipated-local index).
     ///
-    /// The dual on this row (epic 07) carries the cut subgradient w.r.t. the
-    /// matured anticipated-state slot.
+    /// The dual on this row carries the cut subgradient w.r.t. the matured
+    /// anticipated-state slot during backward-pass cut extraction.
     ///
     /// # Panics (debug builds only)
     ///

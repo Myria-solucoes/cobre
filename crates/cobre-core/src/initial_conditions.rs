@@ -92,7 +92,7 @@ pub struct HydroPastInflows {
 /// study stages 1..=K. Index 0 holds the commitment delivering at stage 1
 /// (oldest still-pending commitment), index K-1 holds the commitment delivering
 /// at stage K. `values_mw.len()` MUST equal the plant's `lead_stages`
-/// (validated in `cobre-io`, ticket-010).
+/// (validated by the `cobre-io` semantic validator).
 ///
 /// # Sorting invariant
 ///
@@ -109,7 +109,7 @@ pub struct HydroPastInflows {
 /// - Exactly one entry per anticipated thermal in the system.
 ///
 /// `cobre-core` does not enforce these because it has no view of the system
-/// entity registry. Validation lives in `cobre-io` (ticket-010).
+/// entity registry. Validation lives in the `cobre-io` semantic validator.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AnticipatedCommitmentHistory {
@@ -200,6 +200,10 @@ pub struct InitialConditions {
     /// In JSON: the field is optional (`serde(default)` fills an empty `Vec`
     /// when the key is absent). Backward-compatible with existing JSON files
     /// that predate anticipated thermal support.
+    ///
+    /// Field declaration order is part of the postcard wire format used by
+    /// MPI broadcast: reordering or inserting a field above this one would
+    /// silently break broadcast round-trips. Append new fields at the end.
     #[cfg_attr(feature = "serde", serde(default))]
     pub past_anticipated_commitments: Vec<AnticipatedCommitmentHistory>,
     /// Observed inflow data for partial periods before the study start.

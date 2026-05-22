@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Anticipated thermal dispatch is now fully implemented. Plants declared
+  with `anticipated_config = { lead_stages: K }` in `system/thermals.json`
+  participate in the LP via a decision variable at stage `t` that becomes
+  generation at stage `t + K` (fishing constraint), with the ring-buffer
+  state propagated across stages by the forward pass and the backward
+  pass extracting cut subgradients w.r.t. the matured slot.
+- `initial_conditions.json` accepts a new `past_anticipated_commitments`
+  array seeding pre-horizon commitments. Each entry maps a `thermal_id` to
+  a `values_mw` array whose length must equal that plant's `lead_stages`.
+  The semantic validator rejects mismatched lengths and references to
+  non-anticipated thermals.
+- `simulation/thermals.parquet` populates three columns for anticipated
+  plants: `is_anticipated` (bool), `anticipated_committed_mw` (Float64,
+  null outside delivery stages), and `anticipated_decision_mw` (Float64,
+  null outside the decision horizon).
+- `training/dictionaries/state_dictionary.json` includes
+  `anticipated_state` entries in slot-major plant-minor order
+  (`K_max * n_anticipated` entries with `entity_type: "thermal"`,
+  `slot_index`, and `entity_id`).
+
 ### Changed (breaking)
 
 - The `gnl_config` field in `system/thermals.json` is renamed to

@@ -197,8 +197,8 @@ The anticipated-dispatch columns are:
 | Column                     | Type    | Nullable | Meaning                                                                                                                                                                                   |
 | -------------------------- | ------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `is_anticipated`           | Boolean | No       | `true` for units configured with `anticipated_config`; `false` for all others.                                                                                                            |
-| `anticipated_decision_mw`  | Float64 | Yes      | The commitment placed at this stage for delivery `K` stages later. `null` when no forward decision is available (e.g., at the final stages of the horizon, or for non-anticipated units). |
 | `anticipated_committed_mw` | Float64 | Yes      | The committed MW value that matures and is delivered at this stage. `null` at early stages before any commitment has matured, and always `null` for non-anticipated units.                |
+| `anticipated_decision_mw`  | Float64 | Yes      | The commitment placed at this stage for delivery `K` stages later. `null` when no forward decision is available (e.g., at the final stages of the horizon, or for non-anticipated units). |
 
 Regular (non-anticipated) thermal units always have `is_anticipated = false` and
 both optional columns set to `null`. Rows for anticipated units have
