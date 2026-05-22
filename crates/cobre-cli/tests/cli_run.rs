@@ -14,6 +14,9 @@
 //!   contains a validation error message.
 //! - AC-5: Nonexistent case directory path → exit 2, stderr contains an I/O
 //!   error message.
+//!
+//! Anticipated thermal column assertions (`is_anticipated`, `anticipated_decision_mw`,
+//! `anticipated_committed_mw`) are in `cli_run_anticipated.rs`.
 
 #![allow(clippy::unwrap_used)]
 

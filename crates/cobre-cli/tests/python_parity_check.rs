@@ -1,7 +1,13 @@
-//! Integration test: Python parity script must exit 0.
+//! Integration tests: Python parity checks.
 //!
-//! Invokes `python3 scripts/check_python_parity.py --max 0`
-//! against the repo root. Skipped if `python3` is unavailable.
+//! - `python_parity_script_passes`: invokes `python3
+//!   scripts/check_python_parity.py --max 0` against the repo root.
+//!   Skipped if `python3` is unavailable.
+//! - `populated_anticipated_columns_present_in_python_run_rs`: structural
+//!   check that `crates/cobre-python/src/run.rs` constructs a
+//!   `SimulationParquetWriter`, ensuring the `is_anticipated`,
+//!   `anticipated_decision_mw`, and `anticipated_committed_mw` columns
+//!   are written by the Python binding path.
 
 #![allow(clippy::expect_used, clippy::panic, clippy::manual_assert)]
 
@@ -55,4 +61,23 @@ fn python_parity_script_passes() {
             String::from_utf8_lossy(&output.stderr),
         );
     }
+}
+
+/// Structural check: `crates/cobre-python/src/run.rs` must construct a
+/// `SimulationParquetWriter`, which is the single writer that emits the
+/// `is_anticipated`, `anticipated_decision_mw`, and `anticipated_committed_mw`
+/// columns. If a future refactor removes this call from the Python path, the
+/// populated columns will silently disappear from Python outputs.
+#[test]
+fn populated_anticipated_columns_present_in_python_run_rs() {
+    let root = repo_root();
+    let python_run = root.join("crates/cobre-python/src/run.rs");
+    let contents = std::fs::read_to_string(&python_run)
+        .unwrap_or_else(|e| panic!("cobre-python/src/run.rs must be readable: {e}"));
+    assert!(
+        contents.contains("SimulationParquetWriter::new"),
+        "crates/cobre-python/src/run.rs must construct a SimulationParquetWriter — \
+         the anticipated thermal columns (is_anticipated, anticipated_decision_mw, \
+         anticipated_committed_mw) will not be written by the Python path otherwise"
+    );
 }

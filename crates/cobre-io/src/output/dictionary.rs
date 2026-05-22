@@ -973,7 +973,8 @@ fn bounds_schema() -> Schema {
 /// Write `state_dictionary.json` describing the state space of the model.
 ///
 /// Contains one `"storage"` entry per hydro, plus `"inflow_lag"` entries for
-/// each hydro that has an AR model with order > 0.
+/// each hydro that has an AR model with order > 0, plus `"anticipated_state"`
+/// entries for each `(slot, plant)` pair when anticipated thermals are present.
 fn write_state_dictionary_json(path: &Path, system: &System) -> Result<(), OutputError> {
     let mut state_variables = Vec::new();
 
@@ -988,12 +989,7 @@ fn write_state_dictionary_json(path: &Path, system: &System) -> Result<(), Outpu
     }
 
     // Inflow lag variables: one per (hydro, lag) pair where AR order > 0.
-    // The inflow_models vec is indexed (hydro_idx, stage_idx) in canonical order.
-    // We need to find the maximum AR order for each hydro across all stages.
-    let n_hydros = system.hydros().len();
-    let n_stages = system.n_stages();
-
-    for hydro_idx in 0..n_hydros {
+    for hydro_idx in 0..system.hydros().len() {
         let hydro_id = system.hydros()[hydro_idx].id.0;
 
         // Find the maximum AR order for this hydro across all stages.
@@ -1017,8 +1013,30 @@ fn write_state_dictionary_json(path: &Path, system: &System) -> Result<(), Outpu
         }
     }
 
-    // Suppress unused variable warning when n_stages is not otherwise needed.
-    let _ = n_stages;
+    // Anticipated-state slot variables: one per (slot, plant) pair.
+    // Ordering matches the LP layout
+    // `anticipated_state.start + slot * n_anticipated + plant`.
+    let anticipated_thermals: Vec<&cobre_core::Thermal> = system
+        .thermals()
+        .iter()
+        .filter(|t| t.anticipated_config.is_some())
+        .collect();
+    let k_max = anticipated_thermals
+        .iter()
+        .filter_map(|t| t.anticipated_config.map(|c| c.lead_stages as usize))
+        .max()
+        .unwrap_or(0);
+    for slot in 0..k_max {
+        for plant in &anticipated_thermals {
+            state_variables.push(serde_json::json!({
+                "type": "anticipated_state",
+                "entity_type": "thermal",
+                "entity_id": plant.id.0,
+                "slot_index": slot,
+                "unit": "MW"
+            }));
+        }
+    }
 
     let content = serde_json::json!({
         "version": "1.0",
@@ -1094,9 +1112,9 @@ mod tests {
     use super::*;
     use chrono::NaiveDate;
     use cobre_core::{
-        Block, BlockMode, Bus, DeficitSegment, EntityId, Hydro, HydroGenerationModel,
-        HydroPenalties, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
-        StageStateConfig, SystemBuilder, Thermal,
+        AnticipatedConfig, Block, BlockMode, Bus, DeficitSegment, EntityId, Hydro,
+        HydroGenerationModel, HydroPenalties, InflowModel, NoiseMethod, ScenarioSourceConfig,
+        Stage, StageRiskConfig, StageStateConfig, SystemBuilder, Thermal,
         resolved::{
             BoundsCountsSpec, BoundsDefaults, ContractStageBounds, HydroStageBounds,
             LineStageBounds, PumpingStageBounds, ResolvedBounds, ThermalStageBounds,
@@ -1755,5 +1773,297 @@ mod tests {
                 field.name()
             );
         }
+    }
+
+    // ── state_dictionary anticipated_state tests ──────────────────────────────
+
+    /// Build a `System` with no hydros and a list of thermals (each with optional
+    /// `AnticipatedConfig`). Used by the anticipated-state dictionary tests.
+    fn make_system_thermals_only(thermals: Vec<Thermal>) -> System {
+        let bus = make_bus(1);
+        let stage = make_stage(0);
+        let n_thermals = thermals.len();
+
+        let thermal_bounds_default = ThermalStageBounds {
+            min_generation_mw: 0.0,
+            max_generation_mw: 100.0,
+            cost_per_mwh: 0.0,
+        };
+        let line_default = LineStageBounds {
+            direct_mw: 500.0,
+            reverse_mw: 500.0,
+        };
+        let pumping_default = PumpingStageBounds {
+            min_flow_m3s: 0.0,
+            max_flow_m3s: 0.0,
+        };
+        let contract_default = ContractStageBounds {
+            min_mw: 0.0,
+            max_mw: 0.0,
+            price_per_mwh: 0.0,
+        };
+        // k_max is the maximum lead_stages across anticipated thermals (or 0).
+        let k_max = thermals
+            .iter()
+            .filter_map(|t| t.anticipated_config.map(|c| c.lead_stages as usize))
+            .max()
+            .unwrap_or(0);
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 0,
+                n_thermals,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: 1,
+                k_max,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 0.0,
+                    min_turbined_m3s: 0.0,
+                    max_turbined_m3s: 0.0,
+                    min_outflow_m3s: 0.0,
+                    max_outflow_m3s: None,
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    max_diversion_m3s: None,
+                    filling_inflow_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                thermal: thermal_bounds_default,
+                line: line_default,
+                pumping: pumping_default,
+                contract: contract_default,
+            },
+        );
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .thermals(thermals)
+            .stages(vec![stage])
+            .bounds(bounds)
+            .build()
+            .expect("valid system")
+    }
+
+    /// Helper: parse `state_dictionary.json` written to a temp dir and return the
+    /// `state_variables` array.
+    fn parse_state_variables(system: &System) -> Vec<serde_json::Value> {
+        let tmp = tempfile::tempdir().unwrap();
+        write_state_dictionary_json(tmp.path(), system)
+            .expect("write_state_dictionary_json must succeed");
+        let raw = std::fs::read_to_string(tmp.path().join("state_dictionary.json")).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        val["state_variables"]
+            .as_array()
+            .expect("state_variables must be an array")
+            .clone()
+    }
+
+    #[test]
+    fn state_dictionary_zero_anticipated_emits_no_anticipated_entries() {
+        // AC-1: system with no anticipated thermals produces zero
+        // "anticipated_state" entries.
+        let system = make_system_2h_1t();
+        let state_vars = parse_state_variables(&system);
+
+        let anticipated: Vec<&serde_json::Value> = state_vars
+            .iter()
+            .filter(|v| v["type"] == serde_json::json!("anticipated_state"))
+            .collect();
+
+        assert_eq!(
+            anticipated.len(),
+            0,
+            "expected zero anticipated_state entries when no anticipated thermals"
+        );
+    }
+
+    #[test]
+    fn state_dictionary_single_anticipated_k1_emits_one_entry() {
+        // AC-2: one anticipated thermal (id=7, lead_stages=1), zero hydros.
+        // Expect exactly one "anticipated_state" entry with the correct fields.
+        let t = Thermal {
+            anticipated_config: Some(AnticipatedConfig { lead_stages: 1 }),
+            ..make_thermal(7, "Thermal7", 1)
+        };
+        let system = make_system_thermals_only(vec![t]);
+        let state_vars = parse_state_variables(&system);
+
+        let anticipated: Vec<&serde_json::Value> = state_vars
+            .iter()
+            .filter(|v| v["type"] == serde_json::json!("anticipated_state"))
+            .collect();
+
+        assert_eq!(
+            anticipated.len(),
+            1,
+            "expected exactly one anticipated_state entry"
+        );
+        assert_eq!(
+            anticipated[0]["entity_id"],
+            serde_json::json!(7),
+            "entity_id must be 7"
+        );
+        assert_eq!(
+            anticipated[0]["slot_index"],
+            serde_json::json!(0),
+            "slot_index must be 0"
+        );
+        assert_eq!(
+            anticipated[0]["unit"],
+            serde_json::json!("MW"),
+            "unit must be MW"
+        );
+        assert_eq!(
+            anticipated[0]["entity_type"],
+            serde_json::json!("thermal"),
+            "entity_type must be thermal"
+        );
+    }
+
+    #[test]
+    fn state_dictionary_two_anticipated_k3_slot_major_ordering() {
+        // AC-3: two anticipated thermals (id=5, lead=2; id=8, lead=3).
+        // Expect 6 entries (A*K_max = 2*3) in slot-major order:
+        // slot 0: [5, 8], slot 1: [5, 8], slot 2: [5, 8].
+        let t5 = Thermal {
+            anticipated_config: Some(AnticipatedConfig { lead_stages: 2 }),
+            ..make_thermal(5, "Thermal5", 1)
+        };
+        let t8 = Thermal {
+            anticipated_config: Some(AnticipatedConfig { lead_stages: 3 }),
+            ..make_thermal(8, "Thermal8", 1)
+        };
+        // Build with t5 before t8; SystemBuilder sorts by id so order is [5, 8].
+        let system = make_system_thermals_only(vec![t5, t8]);
+        let state_vars = parse_state_variables(&system);
+
+        let anticipated: Vec<&serde_json::Value> = state_vars
+            .iter()
+            .filter(|v| v["type"] == serde_json::json!("anticipated_state"))
+            .collect();
+
+        assert_eq!(anticipated.len(), 6, "expected 6 anticipated_state entries");
+
+        let expected: Vec<(i64, i64)> = vec![(5, 0), (8, 0), (5, 1), (8, 1), (5, 2), (8, 2)];
+        for (i, (exp_id, exp_slot)) in expected.iter().enumerate() {
+            assert_eq!(
+                anticipated[i]["entity_id"],
+                serde_json::json!(exp_id),
+                "entry {i}: entity_id must be {exp_id}"
+            );
+            assert_eq!(
+                anticipated[i]["slot_index"],
+                serde_json::json!(exp_slot),
+                "entry {i}: slot_index must be {exp_slot}"
+            );
+        }
+    }
+
+    #[test]
+    fn state_dictionary_total_length_equals_n_state() {
+        // AC-4: 2 hydros (one with ar_order=1, one with ar_order=0),
+        // 1 anticipated thermal (K=2).
+        // Expected total = 2 (storage) + 1 (inflow_lag) + 1*2 (anticipated) = 5.
+        let bus = make_bus(1);
+        let h1 = make_hydro(1, "Hydro1", 1);
+        let h2 = make_hydro(2, "Hydro2", 1);
+        let t = Thermal {
+            anticipated_config: Some(AnticipatedConfig { lead_stages: 2 }),
+            ..make_thermal(1, "Thermal1", 1)
+        };
+        let stage = make_stage(0);
+
+        // Inflow model for h1 with ar_order=1.
+        let inflow_h1 = InflowModel {
+            hydro_id: EntityId(1),
+            stage_id: 0,
+            mean_m3s: 100.0,
+            std_m3s: 20.0,
+            ar_coefficients: vec![0.5],
+            residual_std_ratio: 0.87,
+            annual: None,
+        };
+        // Inflow model for h2 with ar_order=0 (white noise — empty coefficients).
+        let inflow_h2 = InflowModel {
+            hydro_id: EntityId(2),
+            stage_id: 0,
+            mean_m3s: 80.0,
+            std_m3s: 15.0,
+            ar_coefficients: vec![],
+            residual_std_ratio: 1.0,
+            annual: None,
+        };
+
+        let hydro_bounds_default = HydroStageBounds {
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 100.0,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 50.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 45.0,
+            max_diversion_m3s: None,
+            filling_inflow_m3s: 0.0,
+            water_withdrawal_m3s: 0.0,
+        };
+        let thermal_bounds_default = ThermalStageBounds {
+            min_generation_mw: 0.0,
+            max_generation_mw: 100.0,
+            cost_per_mwh: 0.0,
+        };
+        let line_default = LineStageBounds {
+            direct_mw: 500.0,
+            reverse_mw: 500.0,
+        };
+        let pumping_default = PumpingStageBounds {
+            min_flow_m3s: 0.0,
+            max_flow_m3s: 0.0,
+        };
+        let contract_default = ContractStageBounds {
+            min_mw: 0.0,
+            max_mw: 0.0,
+            price_per_mwh: 0.0,
+        };
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 2,
+                n_thermals: 1,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: 1,
+                k_max: 2,
+            },
+            &BoundsDefaults {
+                hydro: hydro_bounds_default,
+                thermal: thermal_bounds_default,
+                line: line_default,
+                pumping: pumping_default,
+                contract: contract_default,
+            },
+        );
+
+        let system = SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(vec![h1, h2])
+            .thermals(vec![t])
+            .stages(vec![stage])
+            .bounds(bounds)
+            .inflow_models(vec![inflow_h1, inflow_h2])
+            .build()
+            .expect("valid system");
+
+        let state_vars = parse_state_variables(&system);
+
+        assert_eq!(
+            state_vars.len(),
+            5,
+            "total state_variables length must be 5 (2 storage + 1 inflow_lag + 2 anticipated)"
+        );
     }
 }

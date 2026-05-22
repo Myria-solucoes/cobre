@@ -688,6 +688,7 @@ fn extract_sim_stage_result(
             energy_conversion: output.energy_conversion,
             hydro_min_storage_hm3: output.hydro_min_storage_hm3,
             stage_index: t,
+            n_stages: ctx.templates.len(),
         },
         ids.stage_id_u32,
     );
