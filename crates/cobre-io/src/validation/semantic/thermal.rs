@@ -46,6 +46,14 @@ pub(super) fn check_thermal_generation_bounds(data: &ParsedData, ctx: &mut Valid
 ///      is `Some`.
 ///    - Each matched `(thermal, history)` pair must satisfy
 ///      `history.values_mw.len() == lead_stages as usize` exactly.
+///
+/// 3. **Committed-value generation bounds** — for each matched
+///    `(thermal, history)` pair whose length is correct, every
+///    `history.values_mw[j]` must lie within
+///    `[thermal.min_generation_mw, thermal.max_generation_mw]`.
+///    A value outside this range seeds the ring buffer with a commitment that
+///    cannot be satisfied by the per-block generation bounds in the LP,
+///    causing an infeasible problem at the delivery stage.
 pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut ValidationContext) {
     // Study stages only: pre-study stages have negative IDs and are never
     // delivery targets for anticipated commitments.
@@ -167,10 +175,11 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
                 );
             }
             Some(history) => {
-                // Check length exactly
                 let expected = k as usize;
                 let actual = history.values_mw.len();
-                if actual != expected {
+                if actual == expected {
+                    check_committed_value_bounds(thermal, thermal_id, &history.values_mw, ctx);
+                } else {
                     let entity_str = format!(
                         "thermals[id={}].anticipated_config.lead_stages",
                         thermal_id.0
@@ -204,6 +213,39 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
                     "Thermal {}: referenced in past_anticipated_commitments \
                      but is not an anticipated thermal (anticipated_config is None or thermal does not exist)",
                     history.thermal_id.0
+                ),
+            );
+        }
+    }
+}
+
+/// For an anticipated thermal whose history has the correct length, check each
+/// `values_mw[j]` against the plant's generation bounds `[min_gen, max_gen]`.
+///
+/// A value outside that range makes the matured-stage fishing equality
+/// `sum_blk block_hours[blk] * gen_blk == block_hours_total * v` infeasible
+/// (the per-block generation columns are bounded to `[min_gen, max_gen]`).
+fn check_committed_value_bounds(
+    thermal: &cobre_core::entities::Thermal,
+    thermal_id: EntityId,
+    values_mw: &[f64],
+    ctx: &mut ValidationContext,
+) {
+    let min_mw = thermal.min_generation_mw;
+    let max_mw = thermal.max_generation_mw;
+    let entity_str = format!("thermals[id={}].anticipated_config", thermal_id.0);
+    for (j, &v) in values_mw.iter().enumerate() {
+        if v < min_mw || v > max_mw {
+            ctx.add_error(
+                ErrorKind::BusinessRuleViolation,
+                "initial_conditions.json",
+                Some(&entity_str),
+                format!(
+                    "Thermal {}: past_anticipated_commitments.values_mw[{j}] = {v} \
+                     is outside the plant's generation bounds [{min_mw}, {max_mw}]; \
+                     the fishing equality at the delivery stage cannot be satisfied \
+                     and the LP will be infeasible",
+                    thermal_id.0
                 ),
             );
         }
@@ -572,6 +614,209 @@ mod tests {
         assert!(
             !relevant.is_empty(),
             "expected a BusinessRuleViolation mentioning 'exit_stage_id', got: {errors:?}"
+        );
+    }
+
+    // ── AC-9: committed value above max_generation_mw ────────────────────────
+
+    /// Given values_mw[0] > thermal.max_generation_mw, the validator emits a
+    /// BusinessRuleViolation naming the thermal id, the index, the value, and
+    /// the generation bounds.
+    #[test]
+    fn test_committed_value_above_max_gen_error() {
+        let thermal = make_anticipated_thermal(3, 2, None, None); // min=0.0, max=500.0
+        let history = AnticipatedCommitmentHistory {
+            thermal_id: EntityId::from(3),
+            values_mw: vec![600.0, 200.0], // 600 > 500
+        };
+        let data = make_data_anticipated(vec![thermal], 5, vec![history]);
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        assert!(ctx.has_errors());
+        let errors = ctx.errors();
+        let relevant: Vec<_> = errors
+            .iter()
+            .filter(|e| {
+                e.kind == ErrorKind::BusinessRuleViolation
+                    && e.message.contains("outside the plant's generation bounds")
+            })
+            .collect();
+        assert_eq!(
+            relevant.len(),
+            1,
+            "expected exactly one bounds-violation error, got: {errors:?}"
+        );
+        let msg = &relevant[0].message;
+        assert!(
+            msg.contains("Thermal 3"),
+            "message should contain 'Thermal 3', got: {msg}"
+        );
+        assert!(
+            msg.contains("values_mw[0]"),
+            "message should identify the index [0], got: {msg}"
+        );
+        assert!(
+            msg.contains("600"),
+            "message should contain the offending value 600, got: {msg}"
+        );
+        assert!(
+            msg.contains("[0, 500]"),
+            "message should show the bounds [0, 500], got: {msg}"
+        );
+        let file = relevant[0].file.to_string_lossy();
+        assert!(
+            file.contains("initial_conditions"),
+            "file path should reference initial_conditions, got: {file}"
+        );
+        let entity = relevant[0].entity.as_deref().unwrap_or("");
+        assert!(
+            entity.contains("thermals[id=3].anticipated_config"),
+            "entity should reference the thermal anticipated_config, got: {entity}"
+        );
+    }
+
+    // ── AC-10: committed value below min_generation_mw ───────────────────────
+
+    /// Given values_mw[1] < thermal.min_generation_mw, the validator emits a
+    /// BusinessRuleViolation naming the thermal id, the index, the value, and
+    /// the generation bounds.
+    #[test]
+    fn test_committed_value_below_min_gen_error() {
+        // Build a thermal with min_mw=100.0 so that a value below 100 is invalid.
+        let thermal = cobre_core::entities::Thermal {
+            anticipated_config: Some(cobre_core::entities::AnticipatedConfig { lead_stages: 2 }),
+            ..make_thermal(5, 100.0, 500.0)
+        };
+        let history = AnticipatedCommitmentHistory {
+            thermal_id: EntityId::from(5),
+            values_mw: vec![200.0, 50.0], // 50 < 100
+        };
+        let data = make_data_anticipated(vec![thermal], 5, vec![history]);
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        assert!(ctx.has_errors());
+        let errors = ctx.errors();
+        let relevant: Vec<_> = errors
+            .iter()
+            .filter(|e| {
+                e.kind == ErrorKind::BusinessRuleViolation
+                    && e.message.contains("outside the plant's generation bounds")
+            })
+            .collect();
+        assert_eq!(
+            relevant.len(),
+            1,
+            "expected exactly one bounds-violation error, got: {errors:?}"
+        );
+        let msg = &relevant[0].message;
+        assert!(
+            msg.contains("Thermal 5"),
+            "message should contain 'Thermal 5', got: {msg}"
+        );
+        assert!(
+            msg.contains("values_mw[1]"),
+            "message should identify the index [1], got: {msg}"
+        );
+        assert!(
+            msg.contains("50"),
+            "message should contain the offending value 50, got: {msg}"
+        );
+        assert!(
+            msg.contains("[100, 500]"),
+            "message should show the bounds [100, 500], got: {msg}"
+        );
+    }
+
+    // ── AC-11: all committed values in range — passes ─────────────────────────
+
+    /// Given values_mw all within [min_gen, max_gen], no bounds-violation error
+    /// is emitted.
+    #[test]
+    fn test_committed_values_within_bounds_ok() {
+        let thermal = cobre_core::entities::Thermal {
+            anticipated_config: Some(cobre_core::entities::AnticipatedConfig { lead_stages: 3 }),
+            ..make_thermal(7, 100.0, 400.0)
+        };
+        let history = AnticipatedCommitmentHistory {
+            thermal_id: EntityId::from(7),
+            values_mw: vec![150.0, 300.0, 100.0], // all in [100, 400]
+        };
+        let data = make_data_anticipated(vec![thermal], 5, vec![history]);
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let all_errors = ctx.errors();
+        let bounds_errors: Vec<_> = all_errors
+            .iter()
+            .filter(|e| {
+                e.kind == ErrorKind::BusinessRuleViolation
+                    && e.message.contains("outside the plant's generation bounds")
+            })
+            .collect();
+        assert!(
+            bounds_errors.is_empty(),
+            "expected no bounds-violation errors, got: {bounds_errors:?}"
+        );
+    }
+
+    // ── AC-12: boundary — value == min_gen is accepted ────────────────────────
+
+    /// Given values_mw[0] == thermal.min_generation_mw (exact boundary), no
+    /// bounds-violation error is emitted.
+    #[test]
+    fn test_committed_value_equal_min_gen_accepted() {
+        let thermal = cobre_core::entities::Thermal {
+            anticipated_config: Some(cobre_core::entities::AnticipatedConfig { lead_stages: 1 }),
+            ..make_thermal(9, 100.0, 400.0)
+        };
+        let history = AnticipatedCommitmentHistory {
+            thermal_id: EntityId::from(9),
+            values_mw: vec![100.0], // exactly min_mw
+        };
+        let data = make_data_anticipated(vec![thermal], 5, vec![history]);
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let all_errors = ctx.errors();
+        let bounds_errors: Vec<_> = all_errors
+            .iter()
+            .filter(|e| {
+                e.kind == ErrorKind::BusinessRuleViolation
+                    && e.message.contains("outside the plant's generation bounds")
+            })
+            .collect();
+        assert!(
+            bounds_errors.is_empty(),
+            "value == min_gen must be accepted, got: {bounds_errors:?}"
+        );
+    }
+
+    // ── AC-13: boundary — value == max_gen is accepted ────────────────────────
+
+    /// Given values_mw[0] == thermal.max_generation_mw (exact boundary), no
+    /// bounds-violation error is emitted.
+    #[test]
+    fn test_committed_value_equal_max_gen_accepted() {
+        let thermal = cobre_core::entities::Thermal {
+            anticipated_config: Some(cobre_core::entities::AnticipatedConfig { lead_stages: 1 }),
+            ..make_thermal(11, 100.0, 400.0)
+        };
+        let history = AnticipatedCommitmentHistory {
+            thermal_id: EntityId::from(11),
+            values_mw: vec![400.0], // exactly max_mw
+        };
+        let data = make_data_anticipated(vec![thermal], 5, vec![history]);
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let all_errors = ctx.errors();
+        let bounds_errors: Vec<_> = all_errors
+            .iter()
+            .filter(|e| {
+                e.kind == ErrorKind::BusinessRuleViolation
+                    && e.message.contains("outside the plant's generation bounds")
+            })
+            .collect();
+        assert!(
+            bounds_errors.is_empty(),
+            "value == max_gen must be accepted, got: {bounds_errors:?}"
         );
     }
 
