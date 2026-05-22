@@ -400,12 +400,10 @@ fn run_inner(
     // detection can compare against a fresh digest on later runs. The training-side
     // library is the canonical one; simulation-side is None when it borrows from
     // training (identical past_inflows by construction).
-    provenance_report.historical_library_past_inflows_digest = setup
-        .scenario_libraries
-        .training
-        .historical
-        .as_ref()
-        .map(|lib| lib.past_inflows_digest());
+    provenance_report.historical_library_past_inflows_digest =
+        setup.scenario_libraries.training.historical.as_ref().map(
+            cobre_stochastic::sampling::historical::HistoricalScenarioLibrary::past_inflows_digest,
+        );
 
     if config.exports.stochastic {
         let mut on_warning = |msg: &str| {
