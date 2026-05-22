@@ -23,9 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The semantic validator rejects mismatched lengths and references to
   non-anticipated thermals.
 - `simulation/thermals.parquet` populates three columns for anticipated
-  plants: `is_anticipated` (bool), `anticipated_committed_mw` (Float64,
-  null outside delivery stages), and `anticipated_decision_mw` (Float64,
-  null outside the decision horizon).
+  plants: `is_anticipated` (bool); `anticipated_committed_mw` (Float64,
+  null outside delivery stages) — the scalar committed MW that matures at
+  this stage, read from slot 0 of the `anticipated_state` ring buffer; and
+  `anticipated_decision_mw` (Float64, null outside the decision horizon) —
+  the commitment placed at this stage for delivery `K` stages later.
 - `training/dictionaries/state_dictionary.json` includes
   `anticipated_state` entries in slot-major plant-minor order
   (`K_max * n_anticipated` entries with `entity_type: "thermal"`,
