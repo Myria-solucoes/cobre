@@ -1,7 +1,8 @@
 //! `cobre validate <CASE_DIR>` subcommand.
 //!
-//! Runs the 5-layer validation pipeline and prints a structured diagnostic
-//! report to stdout. No banner or progress bar — the output is the deliverable.
+//! Runs the six-layer validation pipeline followed by the three pre-solver
+//! preparation phases and prints a structured diagnostic report to stdout.
+//! No banner or progress bar — the output is the deliverable.
 
 use std::path::{Path, PathBuf};
 

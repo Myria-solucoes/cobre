@@ -189,13 +189,16 @@ pub struct LoadedCase {
 /// `path` must point to the root case directory containing `config.json` and the
 /// standard subdirectories (`system/`, `scenarios/`, `constraints/`, `policy/`).
 ///
-/// The function executes a five-layer validation pipeline:
+/// The function executes a six-layer validation pipeline:
 ///
 /// 1. **Structural** — all required files exist on disk.
 /// 2. **Schema** — required fields, types, and value ranges are valid.
 /// 3. **Referential integrity** — all cross-entity ID references resolve.
 /// 4. **Dimensional consistency** — entity coverage across optional files.
 /// 5. **Semantic** — domain business rules (acyclic cascade, penalty ordering, etc.).
+/// 6. **Cross-file resolution and cross-validation** — multi-file consistency checks
+///    (productivity source conflict detection, scalar-parameter hydro-ID existence,
+///    per-stage length checks).
 ///
 /// After all layers pass, three-tier penalty/bound resolution and scenario assembly
 /// are performed before constructing the [`System`].
@@ -229,6 +232,8 @@ pub fn load_case(path: &Path) -> Result<System, LoadError> {
 /// rows: returning them here avoids the disk re-reads (and the parallel
 /// validation paths) that previously lived in downstream crates.
 ///
+/// The function runs the six-layer validation pipeline described in [`load_case`].
+///
 /// # Errors
 ///
 /// Same error conditions as [`load_case`].
@@ -239,7 +244,7 @@ pub fn load_case_with_artifacts(path: &Path) -> Result<LoadedCase, LoadError> {
 /// Load a case directory and return both the fully-validated [`System`] and a
 /// [`ValidationReport`] containing all warnings collected during the pipeline.
 ///
-/// This function runs the same five-layer validation pipeline as [`load_case`] but
+/// This function runs the same six-layer validation pipeline as [`load_case`] but
 /// preserves warnings so that callers can display them to the user. Errors still
 /// cause the function to return `Err`; warnings never block loading.
 ///
@@ -248,4 +253,23 @@ pub fn load_case_with_artifacts(path: &Path) -> Result<LoadedCase, LoadError> {
 /// Same error conditions as [`load_case`].
 pub fn validate_case(path: &Path) -> Result<(System, ValidationReport), LoadError> {
     pipeline::run_pipeline_with_report(path)
+}
+
+/// Load a case directory and return the validated [`LoadedCase`] together with a
+/// [`ValidationReport`] containing all warnings collected during the pipeline.
+///
+/// This is the preferred entry point for callers that need both the auxiliary
+/// [`CaseArtifacts`] bundle (for downstream prep phases such as
+/// `prepare_hydro_models_from_artifacts`) **and** the warning report.
+///
+/// The function runs the same six-layer validation pipeline as [`load_case`]. Errors
+/// still cause the function to return `Err`; warnings never block loading.
+///
+/// # Errors
+///
+/// Same error conditions as [`load_case`].
+pub fn validate_case_with_artifacts(
+    path: &Path,
+) -> Result<(LoadedCase, ValidationReport), LoadError> {
+    pipeline::run_pipeline_with_artifacts(path)
 }
