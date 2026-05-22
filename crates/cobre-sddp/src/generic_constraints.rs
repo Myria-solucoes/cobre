@@ -201,6 +201,11 @@ pub(crate) fn resolve_variable_ref<S: BuildHasher>(
             1.0,
         ),
 
+        // ── Anticipated thermal decision column ────────────────────────────
+        VariableRef::AnticipatedDecision { thermal_id } => {
+            resolve_anticipated_decision(*thermal_id, indexer, thermal_pos)
+        }
+
         // ── Stub entities with no LP columns ──────────────────────────────
         // The following entity types are registered in the data model but do not
         // contribute LP decision variables in this implementation:
@@ -376,6 +381,37 @@ fn resolve_bus_deficit<S: BuildHasher>(
         let base = indexer.deficit.start + b_pos * s * n_blks + effective_blk;
         // Return one entry per segment (each with coefficient 1.0).
         (0..s).map(|seg| (base + seg * n_blks, 1.0)).collect()
+    } else {
+        vec![]
+    }
+}
+
+/// Resolve `AnticipatedDecision` to the per-plant stage-level decision column.
+///
+/// Column layout: `anticipated_decision.start + local_idx` where `local_idx`
+/// is the position of the thermal's system index in
+/// `indexer.anticipated_thermal_indices`.
+///
+/// Returns an empty vec when:
+/// - `thermal_id` is not in `thermal_pos` (defense-in-depth; referential
+///   validation should have caught this).
+/// - The thermal's system position is not in `anticipated_thermal_indices`
+///   (the thermal is not anticipated; semantic validation should have caught
+///   this via rule 17 in `check_anticipated_decision_target_is_anticipated`).
+fn resolve_anticipated_decision<S: BuildHasher>(
+    thermal_id: EntityId,
+    indexer: &StageIndexer,
+    thermal_pos: &HashMap<EntityId, usize, S>,
+) -> Vec<(usize, f64)> {
+    let Some(&sys_pos) = thermal_pos.get(&thermal_id) else {
+        return vec![];
+    };
+    if let Some(local_idx) = indexer
+        .anticipated_thermal_indices
+        .iter()
+        .position(|&p| p == sys_pos)
+    {
+        vec![(indexer.anticipated_decision.start + local_idx, 1.0)]
     } else {
         vec![]
     }
@@ -1403,6 +1439,194 @@ mod tests {
         );
 
         assert!(result.is_empty());
+    }
+
+    // ── AnticipatedDecision tests ─────────────────────────────────────────────
+
+    /// Build a `StageIndexer` with 2 thermals where thermal at system position 1
+    /// is anticipated (local anticipated index 0).
+    ///
+    /// N=0 hydros, T=2 thermals (pos 0 = regular, pos 1 = anticipated), Ln=0,
+    /// B=1 bus, K=2 blocks, n_anticipated=1, k_max=2.
+    ///
+    /// Column layout (no hydros, no FPHA, no evap):
+    ///   storage:            [0, 0)    empty
+    ///   lags:               [0, 0)    empty
+    ///   z_inflow:           [0, 0)    empty
+    ///   storage_in:         [0, 0)    empty
+    ///   theta:              0
+    ///   decision_start:     1
+    ///   anticipated_state:  [1, 1 + 2*1) = [1, 3)  (k_max=2, n_anticipated=1)
+    ///   thermal:            [3, 3 + 2*2) = [3, 7)  (T=2, K=2)
+    ///   anticipated_decision: [7, 7+1) = [7, 8)   (n_anticipated=1)
+    ///   line_fwd: [8, 8) empty
+    ///   line_rev: [8, 8) empty
+    ///   deficit: [8, 8+1*1*2) = [8, 10)  (B=1, S=1, K=2)
+    ///   excess:  [10, 10+1*2) = [10, 12)
+    fn make_indexer_with_anticipated() -> StageIndexer {
+        StageIndexer::with_equipment_and_evaporation(
+            &crate::indexer::EquipmentCounts {
+                hydro_count: 0,
+                max_par_order: 0,
+                n_thermals: 2,
+                n_lines: 0,
+                n_buses: 1,
+                n_blks: 2,
+                has_inflow_penalty: false,
+                max_deficit_segments: 1,
+                n_anticipated: 1,
+                k_max: 2,
+                anticipated_lead_stages: vec![2],
+                anticipated_thermal_indices: vec![1], // sys pos 1 is anticipated
+            },
+            &crate::indexer::FphaColumnLayout {
+                hydro_indices: vec![],
+                planes_per_hydro: vec![],
+            },
+            &crate::indexer::EvapConfig {
+                hydro_indices: vec![],
+            },
+        )
+    }
+
+    /// AC-12: `AnticipatedDecision` for an anticipated thermal maps to the
+    /// correct stage-level column: `anticipated_decision.start + local_idx`.
+    ///
+    /// Using `make_indexer_with_anticipated`:
+    /// - Thermal EntityId(6) at sys_pos=1, which is anticipated_thermal_indices[0].
+    /// - anticipated_decision.start = 7, local_idx = 0.
+    /// - Expected column = 7 + 0 = 7.
+    #[test]
+    fn anticipated_decision_maps_to_correct_column() {
+        let indexer = make_indexer_with_anticipated();
+        let prod = ProductionModelSet::new(vec![], 0, 1);
+        let hpos: HashMap<EntityId, usize> = HashMap::new();
+        let tpos: HashMap<EntityId, usize> =
+            [(EntityId(5), 0), (EntityId(6), 1)].into_iter().collect();
+        let bpos: HashMap<EntityId, usize> = [(EntityId(100), 0)].into_iter().collect();
+        let lpos: HashMap<EntityId, usize> = HashMap::new();
+
+        // Verify anticipated_decision.start is as expected.
+        assert_eq!(
+            indexer.anticipated_decision.start, 7,
+            "anticipated_decision.start should be 7, got {}",
+            indexer.anticipated_decision.start
+        );
+
+        let result = call(
+            VariableRef::AnticipatedDecision {
+                thermal_id: EntityId(6), // sys_pos=1, local anticipated idx=0
+            },
+            0, // block_idx is ignored for stage-level variable
+            &indexer,
+            &prod,
+            &hpos,
+            &tpos,
+            &bpos,
+            &lpos,
+        );
+
+        assert_eq!(
+            result,
+            vec![(7, 1.0)],
+            "AnticipatedDecision(6) should resolve to column 7 (anticipated_decision.start + 0)"
+        );
+    }
+
+    /// AC-12 (block-independence): `AnticipatedDecision` is stage-level — the
+    /// returned column is the same regardless of `block_idx`.
+    #[test]
+    fn anticipated_decision_ignores_block_idx() {
+        let indexer = make_indexer_with_anticipated();
+        let prod = ProductionModelSet::new(vec![], 0, 1);
+        let hpos: HashMap<EntityId, usize> = HashMap::new();
+        let tpos: HashMap<EntityId, usize> =
+            [(EntityId(5), 0), (EntityId(6), 1)].into_iter().collect();
+        let bpos: HashMap<EntityId, usize> = [(EntityId(100), 0)].into_iter().collect();
+        let lpos: HashMap<EntityId, usize> = HashMap::new();
+
+        for block_idx in [0, 1] {
+            let result = call(
+                VariableRef::AnticipatedDecision {
+                    thermal_id: EntityId(6),
+                },
+                block_idx,
+                &indexer,
+                &prod,
+                &hpos,
+                &tpos,
+                &bpos,
+                &lpos,
+            );
+            assert_eq!(
+                result,
+                vec![(7, 1.0)],
+                "AnticipatedDecision must be stage-level (block_idx={block_idx} should not change column)"
+            );
+        }
+    }
+
+    /// AC-13: `AnticipatedDecision` for a regular (non-anticipated) thermal
+    /// returns an empty vec (defense-in-depth).
+    ///
+    /// Thermal EntityId(5) at sys_pos=0 is NOT in anticipated_thermal_indices.
+    #[test]
+    fn anticipated_decision_non_anticipated_thermal_returns_empty() {
+        let indexer = make_indexer_with_anticipated();
+        let prod = ProductionModelSet::new(vec![], 0, 1);
+        let hpos: HashMap<EntityId, usize> = HashMap::new();
+        let tpos: HashMap<EntityId, usize> =
+            [(EntityId(5), 0), (EntityId(6), 1)].into_iter().collect();
+        let bpos: HashMap<EntityId, usize> = [(EntityId(100), 0)].into_iter().collect();
+        let lpos: HashMap<EntityId, usize> = HashMap::new();
+
+        let result = call(
+            VariableRef::AnticipatedDecision {
+                thermal_id: EntityId(5), // sys_pos=0, NOT anticipated
+            },
+            0,
+            &indexer,
+            &prod,
+            &hpos,
+            &tpos,
+            &bpos,
+            &lpos,
+        );
+
+        assert!(
+            result.is_empty(),
+            "AnticipatedDecision for non-anticipated thermal must return empty vec, got: {result:?}"
+        );
+    }
+
+    /// AC-14: `AnticipatedDecision` for an unknown entity ID returns empty vec.
+    #[test]
+    fn anticipated_decision_unknown_entity_returns_empty() {
+        let indexer = make_indexer_with_anticipated();
+        let prod = ProductionModelSet::new(vec![], 0, 1);
+        let hpos: HashMap<EntityId, usize> = HashMap::new();
+        let tpos: HashMap<EntityId, usize> =
+            [(EntityId(5), 0), (EntityId(6), 1)].into_iter().collect();
+        let bpos: HashMap<EntityId, usize> = [(EntityId(100), 0)].into_iter().collect();
+        let lpos: HashMap<EntityId, usize> = HashMap::new();
+
+        let result = call(
+            VariableRef::AnticipatedDecision {
+                thermal_id: EntityId(999), // unknown
+            },
+            0,
+            &indexer,
+            &prod,
+            &hpos,
+            &tpos,
+            &bpos,
+            &lpos,
+        );
+
+        assert!(
+            result.is_empty(),
+            "AnticipatedDecision for unknown entity must return empty vec, got: {result:?}"
+        );
     }
 
     // ── HydroTurbined / HydroSpillage tests ───────────────────────────────────
