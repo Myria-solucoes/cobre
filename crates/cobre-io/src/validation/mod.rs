@@ -53,8 +53,9 @@ pub enum Severity {
 
 /// Categorises the kind of validation problem found.
 ///
-/// The 14 variants correspond to the error type catalog in SS4 of the
-/// validation-architecture spec.
+/// The 15 variants correspond to the error type catalog in SS4 of the
+/// validation-architecture spec, plus the `SemanticAmbiguity` extension
+/// added for anticipated-thermal DSL warnings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
     /// Required file is missing from the case directory.
@@ -86,17 +87,21 @@ pub enum ErrorKind {
     UnusedEntity,
     /// A statistical quality concern in the input model (warning only).
     ModelQuality,
+    /// A valid construct whose semantics are ambiguous or stage-dependent in a
+    /// way that is likely to surprise the user (warning only). Used to surface
+    /// the `thermal_generation` / `anticipated_decision` stage-drift footgun.
+    SemanticAmbiguity,
 }
 
 impl ErrorKind {
     /// Returns the default severity associated with this error kind.
     ///
-    /// Most kinds default to [`Severity::Error`]; `UnusedEntity` and `ModelQuality`
-    /// default to [`Severity::Warning`].
+    /// Most kinds default to [`Severity::Error`]; `UnusedEntity`, `ModelQuality`,
+    /// and `SemanticAmbiguity` default to [`Severity::Warning`].
     #[must_use]
     pub fn default_severity(self) -> Severity {
         match self {
-            Self::UnusedEntity | Self::ModelQuality => Severity::Warning,
+            Self::UnusedEntity | Self::ModelQuality | Self::SemanticAmbiguity => Severity::Warning,
             _ => Severity::Error,
         }
     }

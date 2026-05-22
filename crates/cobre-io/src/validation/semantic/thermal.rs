@@ -3,9 +3,9 @@
 //! Thermal generation bounds (`min_generation_mw <= max_generation_mw`) and
 //! anticipated-thermal cross-field invariants.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use cobre_core::{AnticipatedCommitmentHistory, EntityId};
+use cobre_core::{AnticipatedCommitmentHistory, EntityId, VariableRef};
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 
@@ -282,6 +282,102 @@ fn check_committed_value_bounds(
                     thermal_id.0
                 ),
             );
+        }
+    }
+}
+
+/// Layer 5a — rejects use of `anticipated_decision(N)` in a generic constraint
+/// when thermal `N` does not have `anticipated_config: Some(_)`.
+///
+/// `anticipated_decision` is an LP column that only exists for plants committed
+/// in advance. Referencing a non-anticipated thermal via this variant is always
+/// a model error: the column does not appear in the LP and the constraint would
+/// silently become an equality 0 = bound, which is either trivially satisfied
+/// or immediately infeasible.
+pub(super) fn check_anticipated_decision_target_is_anticipated(
+    data: &ParsedData,
+    ctx: &mut ValidationContext,
+) {
+    // Build the set of thermal IDs that are anticipated.
+    let anticipated_ids: HashSet<EntityId> = data
+        .thermals
+        .iter()
+        .filter(|t| t.anticipated_config.is_some())
+        .map(|t| t.id)
+        .collect();
+
+    for constraint in &data.generic_constraints {
+        for term in &constraint.expression.terms {
+            if let VariableRef::AnticipatedDecision { thermal_id } = term.variable {
+                if !anticipated_ids.contains(&thermal_id) {
+                    let entity_str = format!("constraint[id={}]", constraint.id.0);
+                    ctx.add_error(
+                        ErrorKind::BusinessRuleViolation,
+                        "constraints/generic_constraints.json",
+                        Some(&entity_str),
+                        format!(
+                            "Constraint \"{}\": anticipated_decision({}) references Thermal {} \
+                             which is not an anticipated thermal (anticipated_config is None). \
+                             The anticipated_decision column only exists for plants with \
+                             anticipated_config set.",
+                            constraint.name, thermal_id.0, thermal_id.0,
+                        ),
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Layer 5a — warns when `thermal_generation(N)` is used in a generic
+/// constraint and thermal `N` is anticipated.
+///
+/// `thermal_generation` for an anticipated thermal references the per-block
+/// generation at the *delivery* stage (the stage when the commitment matures),
+/// not the commitment made at the current stage. This is valid but frequently
+/// surprising: users who want to constrain the *commitment* should use
+/// `anticipated_decision(N)` instead. The stage at which the commitment is
+/// expressed differs from the stage at which generation is observed.
+///
+/// This validator emits a `SemanticAmbiguity` warning so the model author
+/// can confirm the intent.
+pub(super) fn warn_thermal_generation_on_anticipated_thermal(
+    data: &ParsedData,
+    ctx: &mut ValidationContext,
+) {
+    // Build the set of thermal IDs that are anticipated.
+    let anticipated_ids: HashSet<EntityId> = data
+        .thermals
+        .iter()
+        .filter(|t| t.anticipated_config.is_some())
+        .map(|t| t.id)
+        .collect();
+
+    if anticipated_ids.is_empty() {
+        return;
+    }
+
+    for constraint in &data.generic_constraints {
+        for term in &constraint.expression.terms {
+            if let VariableRef::ThermalGeneration { thermal_id, .. } = term.variable {
+                if anticipated_ids.contains(&thermal_id) {
+                    let entity_str = format!("constraint[id={}]", constraint.id.0);
+                    ctx.add_warning(
+                        ErrorKind::SemanticAmbiguity,
+                        "constraints/generic_constraints.json",
+                        Some(&entity_str),
+                        format!(
+                            "Constraint \"{}\": thermal_generation({id}) references an \
+                             anticipated thermal. thermal_generation refers to the \
+                             per-block generation at the delivery stage, not the \
+                             forward commitment. If you intend to constrain the \
+                             commitment itself, use anticipated_decision({id}) instead.",
+                            constraint.name,
+                            id = thermal_id.0,
+                        ),
+                    );
+                }
+            }
         }
     }
 }
@@ -1362,5 +1458,306 @@ mod tests {
                 "expected exactly one BusinessRuleViolation at stage_id=-1, got: {relevant:?}"
             );
         }
+    }
+
+    // ── AC-8: anticipated_decision on non-anticipated thermal → hard error ─────
+
+    /// AC-8: A generic constraint that references `anticipated_decision(N)` where
+    /// thermal `N` is NOT anticipated produces a `BusinessRuleViolation` naming
+    /// the constraint and the thermal ID.
+    #[test]
+    fn test_anticipated_decision_on_non_anticipated_thermal_error() {
+        use cobre_core::{
+            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
+            VariableRef,
+        };
+
+        let thermal = make_thermal(7, 0.0, 500.0); // NOT anticipated
+        let constraint = GenericConstraint {
+            id: EntityId::from(1),
+            name: "bad_constraint".to_string(),
+            description: None,
+            expression: ConstraintExpression {
+                terms: vec![LinearTerm::literal(
+                    1.0,
+                    VariableRef::AnticipatedDecision {
+                        thermal_id: EntityId::from(7),
+                    },
+                )],
+            },
+            sense: ConstraintSense::LessEqual,
+            slack: SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+        };
+        let stage_ids: Vec<i32> = (0..5).collect();
+        let mut data = make_data(
+            vec![],
+            vec![thermal],
+            vec![],
+            make_stages(stage_ids),
+            vec![],
+            vec![],
+        );
+        data.generic_constraints = vec![constraint];
+
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        assert!(
+            ctx.has_errors(),
+            "expected error for non-anticipated thermal"
+        );
+        let errors = ctx.errors();
+        let relevant: Vec<_> = errors
+            .iter()
+            .filter(|e| e.kind == ErrorKind::BusinessRuleViolation)
+            .collect();
+        assert!(
+            !relevant.is_empty(),
+            "expected BusinessRuleViolation, got: {errors:?}"
+        );
+        let msg = &relevant[0].message;
+        assert!(
+            msg.contains("bad_constraint"),
+            "message should contain constraint name, got: {msg}"
+        );
+        assert!(
+            msg.contains('7'),
+            "message should contain thermal id 7, got: {msg}"
+        );
+        assert!(
+            msg.contains("not an anticipated thermal"),
+            "message should explain the rule, got: {msg}"
+        );
+        let file = relevant[0].file.to_string_lossy();
+        assert!(
+            file.contains("generic_constraints.json"),
+            "file should reference generic_constraints.json, got: {file}"
+        );
+    }
+
+    // ── AC-9: anticipated_decision on anticipated thermal → no error ───────────
+
+    /// AC-9: A generic constraint that references `anticipated_decision(N)` where
+    /// thermal `N` IS anticipated produces no `BusinessRuleViolation` from the
+    /// new validator.
+    #[test]
+    fn test_anticipated_decision_on_anticipated_thermal_ok() {
+        use cobre_core::{
+            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
+            VariableRef, entities::AnticipatedConfig,
+        };
+
+        let thermal = cobre_core::entities::Thermal {
+            anticipated_config: Some(AnticipatedConfig { lead_stages: 2 }),
+            ..make_thermal(3, 0.0, 500.0)
+        };
+        let history = cobre_core::AnticipatedCommitmentHistory {
+            thermal_id: EntityId::from(3),
+            values_mw: vec![0.0, 0.0],
+        };
+        let constraint = GenericConstraint {
+            id: EntityId::from(10),
+            name: "valid_anticipated_constraint".to_string(),
+            description: None,
+            expression: ConstraintExpression {
+                terms: vec![LinearTerm::literal(
+                    1.0,
+                    VariableRef::AnticipatedDecision {
+                        thermal_id: EntityId::from(3),
+                    },
+                )],
+            },
+            sense: ConstraintSense::LessEqual,
+            slack: SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+        };
+        let stage_ids: Vec<i32> = (0..5).collect();
+        let mut data = make_data(
+            vec![],
+            vec![thermal],
+            vec![],
+            make_stages(stage_ids),
+            vec![],
+            vec![],
+        );
+        data.initial_conditions.past_anticipated_commitments = vec![history];
+        data.generic_constraints = vec![constraint];
+
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let errors = ctx.errors();
+        let relevant: Vec<_> = errors
+            .iter()
+            .filter(|e| {
+                e.kind == ErrorKind::BusinessRuleViolation
+                    && e.file
+                        .to_string_lossy()
+                        .contains("generic_constraints.json")
+            })
+            .collect();
+        assert!(
+            relevant.is_empty(),
+            "anticipated_decision on an anticipated thermal must not produce a BusinessRuleViolation, got: {relevant:?}"
+        );
+    }
+
+    // ── AC-10: thermal_generation on anticipated thermal → SemanticAmbiguity ───
+
+    /// AC-10: A generic constraint that references `thermal_generation(N)` where
+    /// thermal `N` IS anticipated produces a `SemanticAmbiguity` warning naming
+    /// the constraint and the thermal ID with a hint to use `anticipated_decision`.
+    #[test]
+    fn test_thermal_generation_on_anticipated_thermal_warns() {
+        use cobre_core::{
+            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
+            VariableRef, entities::AnticipatedConfig,
+        };
+
+        let thermal = cobre_core::entities::Thermal {
+            anticipated_config: Some(AnticipatedConfig { lead_stages: 1 }),
+            ..make_thermal(5, 0.0, 300.0)
+        };
+        let history = cobre_core::AnticipatedCommitmentHistory {
+            thermal_id: EntityId::from(5),
+            values_mw: vec![0.0],
+        };
+        let constraint = GenericConstraint {
+            id: EntityId::from(20),
+            name: "ambiguous_constraint".to_string(),
+            description: None,
+            expression: ConstraintExpression {
+                terms: vec![LinearTerm::literal(
+                    1.0,
+                    VariableRef::ThermalGeneration {
+                        thermal_id: EntityId::from(5),
+                        block_id: None,
+                    },
+                )],
+            },
+            sense: ConstraintSense::GreaterEqual,
+            slack: SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+        };
+        let stage_ids: Vec<i32> = (0..5).collect();
+        let mut data = make_data(
+            vec![],
+            vec![thermal],
+            vec![],
+            make_stages(stage_ids),
+            vec![],
+            vec![],
+        );
+        data.initial_conditions.past_anticipated_commitments = vec![history];
+        data.generic_constraints = vec![constraint];
+
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+
+        // No hard errors from the new validator.
+        let errors = ctx.errors();
+        let hard: Vec<_> = errors
+            .iter()
+            .filter(|e| {
+                e.file
+                    .to_string_lossy()
+                    .contains("generic_constraints.json")
+            })
+            .collect();
+        assert!(
+            hard.is_empty(),
+            "thermal_generation on anticipated thermal must not produce a hard error, got: {hard:?}"
+        );
+
+        // Exactly one SemanticAmbiguity warning.
+        let warnings = ctx.warnings();
+        let relevant: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.kind == ErrorKind::SemanticAmbiguity)
+            .collect();
+        assert_eq!(
+            relevant.len(),
+            1,
+            "expected exactly one SemanticAmbiguity warning, got: {warnings:?}"
+        );
+        let msg = &relevant[0].message;
+        assert!(
+            msg.contains("ambiguous_constraint"),
+            "warning should name the constraint, got: {msg}"
+        );
+        assert!(
+            msg.contains('5'),
+            "warning should mention thermal id 5, got: {msg}"
+        );
+        assert!(
+            msg.contains("anticipated_decision"),
+            "warning should suggest anticipated_decision, got: {msg}"
+        );
+        let file = relevant[0].file.to_string_lossy();
+        assert!(
+            file.contains("generic_constraints.json"),
+            "file should reference generic_constraints.json, got: {file}"
+        );
+    }
+
+    // ── AC-11: thermal_generation on non-anticipated thermal → no warning ──────
+
+    /// AC-11: A generic constraint that references `thermal_generation(N)` where
+    /// thermal `N` is NOT anticipated produces no `SemanticAmbiguity` warning.
+    #[test]
+    fn test_thermal_generation_on_non_anticipated_thermal_no_warn() {
+        use cobre_core::{
+            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
+            VariableRef,
+        };
+
+        let thermal = make_thermal(9, 0.0, 200.0); // NOT anticipated
+        let constraint = GenericConstraint {
+            id: EntityId::from(30),
+            name: "plain_thermal_constraint".to_string(),
+            description: None,
+            expression: ConstraintExpression {
+                terms: vec![LinearTerm::literal(
+                    1.0,
+                    VariableRef::ThermalGeneration {
+                        thermal_id: EntityId::from(9),
+                        block_id: None,
+                    },
+                )],
+            },
+            sense: ConstraintSense::GreaterEqual,
+            slack: SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+        };
+        let stage_ids: Vec<i32> = (0..5).collect();
+        let mut data = make_data(
+            vec![],
+            vec![thermal],
+            vec![],
+            make_stages(stage_ids),
+            vec![],
+            vec![],
+        );
+        data.generic_constraints = vec![constraint];
+
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+
+        let warnings = ctx.warnings();
+        let relevant: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.kind == ErrorKind::SemanticAmbiguity)
+            .collect();
+        assert!(
+            relevant.is_empty(),
+            "thermal_generation on a non-anticipated thermal must not emit SemanticAmbiguity, got: {relevant:?}"
+        );
     }
 }
