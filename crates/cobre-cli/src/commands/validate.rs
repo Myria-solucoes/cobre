@@ -21,8 +21,9 @@ use std::path::{Path, PathBuf};
 
 use clap::Args;
 use cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts;
-use cobre_sddp::{SddpError, StudyParams, prepare_stochastic};
-use console::{Term, style};
+use cobre_sddp::validate_phases::{prep_phase_metadata, PrepPhase};
+use cobre_sddp::{prepare_stochastic, StudyParams};
+use console::{style, Term};
 
 use crate::error::CliError;
 
@@ -54,24 +55,17 @@ fn format_constraint_description(
 
 /// Format and print a pre-solver preparation error to `stdout`.
 ///
-/// Maps the error to a human-readable diagnostic with a best-effort file label
-/// derived from the error variant:
-///
-/// - Config/validation errors from `StudyParams::from_config` → `config.json`
-/// - Stochastic/I/O errors from `prepare_stochastic` → `scenarios/inflow_history.parquet`
-///   (most PAR estimation failures stem from this file).
-/// - Hydro model errors from `prepare_hydro_models_from_artifacts` → the production
-///   models file that is most likely to trigger the error.
-///
-/// Returns the error message string so the caller can embed it in a `CliError`.
-fn format_prep_error(term: &Term, phase: PrepPhase, err: &SddpError, case_dir: &Path) -> String {
-    let file_label = match (phase, err) {
-        (PrepPhase::Config, _) => "config.json",
-        (PrepPhase::Stochastic, SddpError::Stochastic(_)) => "scenarios/inflow_history.parquet",
-        (PrepPhase::Stochastic, _) => "scenarios/",
-        (PrepPhase::HydroModels, _) => "system/hydro_production_models.json",
-    };
-
+/// Delegates the phase→file-label and phase→kind mapping to
+/// [`prep_phase_metadata`], then writes one summary line and one error line to
+/// `term`. Returns the `"file_label: message"` string so the caller can embed
+/// it in a [`CliError`].
+fn format_prep_error(
+    term: &Term,
+    phase: PrepPhase,
+    err: &cobre_sddp::SddpError,
+    case_dir: &Path,
+) -> String {
+    let (_kind, file_label) = prep_phase_metadata(phase, err);
     let message = err.to_string();
     let _ = term.write_line(&format!(
         "Validation: 1 errors, 0 warnings in {}",
@@ -82,17 +76,6 @@ fn format_prep_error(term: &Term, phase: PrepPhase, err: &SddpError, case_dir: &
         style("error:").red().bold()
     ));
     format!("{file_label}: {message}")
-}
-
-/// Which pre-solver preparation phase produced an error.
-#[derive(Debug, Clone, Copy)]
-enum PrepPhase {
-    /// `StudyParams::from_config` (config.json parsing).
-    Config,
-    /// `prepare_stochastic` (PAR estimation, opening trees, stochastic context).
-    Stochastic,
-    /// `prepare_hydro_models_from_artifacts` (production/evaporation models).
-    HydroModels,
 }
 
 /// Execute the `validate` subcommand.
