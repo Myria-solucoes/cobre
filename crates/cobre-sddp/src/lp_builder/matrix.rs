@@ -219,9 +219,14 @@ fn fill_thermal_columns(
 /// Anticipated-decision columns: one per anticipated thermal, stage-level.
 ///
 /// For each anticipated plant `i` at decision stage `t`:
-/// - If `t + K_i <= n_stages` (active): bounds come from `thermal_bounds(thermal_idx, t + K_i)`,
+/// - If `t + K_i < n_stages` (active): bounds come from `thermal_bounds(thermal_idx, t + K_i)`,
 ///   the delivery-stage bounds.
-/// - Else (inactive, `t + K_i > n_stages`): bounds are `[0, 0]`; the presolver eliminates.
+/// - Else (inactive, `t + K_i >= n_stages`): bounds are `[0, 0]`; the presolver eliminates.
+///
+/// The boundary case `t + K_i == n_stages` is excluded: the delivery stage
+/// would fall outside the study horizon `[0, n_stages)`, so no delivery LP is
+/// built for it. Pricing such a commitment with no enforcement would create a
+/// cost-only column with no physical delivery.
 ///
 /// Objective coefficients are NOT set here; they are filled by a separate pass.
 fn fill_anticipated_decision_columns(
@@ -235,9 +240,9 @@ fn fill_anticipated_decision_columns(
         let k_i = ctx.anticipated_lead_stages[local_idx];
         let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
         let col = layout.col_anticipated_decision_start + local_idx;
-        // Horizon gate: active iff t + K_i <= n_stages.
+        // Horizon gate: active iff t + K_i < n_stages (strict).
         // saturating_add is safe; n_stages and k_i fit in usize without overflow.
-        if stage_idx.saturating_add(k_i) <= n_stages {
+        if stage_idx.saturating_add(k_i) < n_stages {
             let delivery_stage = stage_idx + k_i;
             let tb = ctx.bounds.thermal_bounds(thermal_idx, delivery_stage);
             bufs.col_lower[col] = tb.min_generation_mw;
@@ -255,7 +260,7 @@ fn fill_anticipated_decision_columns(
 /// Set NPV-discounted objective coefficients for anticipated-decision columns.
 ///
 /// For each anticipated plant `i` active at decision stage `t`
-/// (i.e. `t + K_i <= n_stages`), writes:
+/// (i.e. `t + K_i < n_stages`), writes:
 ///
 /// ```text
 /// objective[col_anticipated_decision_start + i] =
@@ -282,8 +287,8 @@ fn fill_anticipated_decision_objective(
     for local_idx in 0..ctx.n_anticipated {
         let k_i = ctx.anticipated_lead_stages[local_idx];
         let col = layout.col_anticipated_decision_start + local_idx;
-        // Horizon gate matches fill_anticipated_decision_columns.
-        if stage_idx.saturating_add(k_i) <= n_stages {
+        // Horizon gate matches fill_anticipated_decision_columns (strict).
+        if stage_idx.saturating_add(k_i) < n_stages {
             let delivery_stage = stage_idx + k_i;
             let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
             let tb = ctx.bounds.thermal_bounds(thermal_idx, delivery_stage);
@@ -1036,8 +1041,10 @@ fn fill_anticipated_decision_state_write_entries(
     let n_stages = ctx.bounds.n_stages();
     for local_idx in 0..ctx.n_anticipated {
         let k_i = ctx.anticipated_lead_stages[local_idx];
-        // Active iff t + K_i <= n_stages (same gate as fill_anticipated_decision_columns).
-        if stage_idx.saturating_add(k_i) > n_stages {
+        // Active iff t + K_i < n_stages (same gate as fill_anticipated_decision_columns,
+        // strict under F2-002: the boundary case t + K_i == n_stages is excluded
+        // because the delivery stage falls outside the study horizon [0, n_stages)).
+        if stage_idx.saturating_add(k_i) >= n_stages {
             continue;
         }
         // K_i >= 1 enforced by epic-02 IO validators; K_i - 1 >= 0 is always safe.

@@ -1409,10 +1409,12 @@ impl StageIndexer {
     /// at `stage_idx`.
     ///
     /// A plant is active iff
-    /// `stage_idx + anticipated_lead_stages[local_idx] <= n_stages`. The boundary
-    /// case `stage_idx + K_i == n_stages` accepts (the commitment matures
-    /// exactly at the horizon end). Inactive plants are skipped; the LP build
-    /// applies `[0, 0]` bounds to their columns so the presolver eliminates them.
+    /// `stage_idx + anticipated_lead_stages[local_idx] < n_stages`. The boundary
+    /// case `stage_idx + K_i == n_stages` is **excluded**: the commitment would
+    /// mature at a delivery stage outside the study horizon `[0, n_stages)`, so
+    /// no delivery LP is ever built for it. Inactive plants are skipped; the LP
+    /// build applies `[0, 0]` bounds to their columns so the presolver
+    /// eliminates them.
     ///
     /// All arithmetic uses `usize`; the upstream conversion from `u32 lead_stages`
     /// to `usize` happens when [`EquipmentCounts::anticipated_lead_stages`] is
@@ -1426,7 +1428,7 @@ impl StageIndexer {
             .iter()
             .enumerate()
             .filter_map(move |(i, &k_i)| {
-                if stage_idx.saturating_add(k_i) <= n_stages {
+                if stage_idx.saturating_add(k_i) < n_stages {
                     Some((i, self.anticipated_decision.start + i))
                 } else {
                     None
@@ -3161,10 +3163,39 @@ mod tests {
         assert_eq!(idx.excess, 43..51);
     }
 
-    /// Boundary acceptance: `stage_idx + K_i == n_stages` accepts.
-    /// `K_i = 3`, `stage_idx = 3`, `n_stages = 6` → plant is active.
+    /// Strict-predicate acceptance: `stage_idx + K_i < n_stages` accepts.
+    /// `K_i = 3`, `stage_idx = 2`, `n_stages = 6` → `delivery_stage` = 5 < 6 → active.
     #[test]
-    fn anticipated_decision_active_acceptance_boundary() {
+    fn anticipated_decision_active_acceptance_strict_interior() {
+        let idx = StageIndexer::with_equipment_and_evaporation(
+            &EquipmentCounts {
+                hydro_count: 1,
+                max_par_order: 0,
+                n_thermals: 1,
+                n_lines: 0,
+                n_buses: 1,
+                n_blks: 1,
+                has_inflow_penalty: false,
+                max_deficit_segments: 1,
+                n_anticipated: 1,
+                k_max: 3,
+                anticipated_lead_stages: vec![3],
+                anticipated_thermal_indices: vec![0],
+            },
+            &fpha(vec![], vec![]),
+            &evap(vec![]),
+        );
+        let active: Vec<_> = idx.anticipated_decision_active_at_stage(2, 6).collect();
+        assert_eq!(active, vec![(0, idx.anticipated_decision.start)]);
+    }
+
+    /// F2-002 strict-predicate boundary rejection: `stage_idx + K_i == n_stages`
+    /// is REJECTED. `K_i = 3`, `stage_idx = 3`, `n_stages = 6` → `delivery_stage` = 6
+    /// would fall outside the study horizon `[0, 6)`. The strict predicate
+    /// `stage_idx + K_i < n_stages` excludes this case so the LP never builds
+    /// a priced-but-not-delivered commitment.
+    #[test]
+    fn anticipated_decision_active_rejection_at_n_stages_boundary() {
         let idx = StageIndexer::with_equipment_and_evaporation(
             &EquipmentCounts {
                 hydro_count: 1,
@@ -3184,13 +3215,17 @@ mod tests {
             &evap(vec![]),
         );
         let active: Vec<_> = idx.anticipated_decision_active_at_stage(3, 6).collect();
-        assert_eq!(active, vec![(0, idx.anticipated_decision.start)]);
+        assert!(
+            active.is_empty(),
+            "stage_idx + K_i == n_stages must be excluded under the strict predicate"
+        );
     }
 
-    /// Boundary rejection: `stage_idx + K_i == n_stages + 1` rejects.
+    /// Strict-predicate one-past-boundary rejection: `stage_idx + K_i == n_stages + 1`
+    /// also rejects (the inclusive-predicate "one-past-boundary" case).
     /// `K_i = 3`, `stage_idx = 4`, `n_stages = 6` → plant is NOT active.
     #[test]
-    fn anticipated_decision_active_rejection_boundary() {
+    fn anticipated_decision_active_rejection_one_past_boundary() {
         let idx = StageIndexer::with_equipment_and_evaporation(
             &EquipmentCounts {
                 hydro_count: 1,
@@ -3213,9 +3248,13 @@ mod tests {
         assert!(active.is_empty());
     }
 
-    /// At `stage_idx == 0`, every plant with `K_i <= n_stages` is active.
+    /// At `stage_idx == 0`, every plant with `K_i < n_stages` is active under
+    /// the strict predicate. Plants with `K_i == n_stages` are excluded
+    /// (delivery would land at `n_stages`, outside the study horizon).
     #[test]
     fn anticipated_decision_active_all_at_stage_zero() {
+        // K = [1, 3, 6], n_stages = 6 → plants 0 (K=1) and 1 (K=3) accept
+        // (0+1=1 < 6, 0+3=3 < 6). Plant 2 (K=6) rejects (0+6=6 NOT < 6).
         let idx = StageIndexer::with_equipment_and_evaporation(
             &EquipmentCounts {
                 hydro_count: 1,
@@ -3236,7 +3275,7 @@ mod tests {
         );
         let start = idx.anticipated_decision.start;
         let active: Vec<_> = idx.anticipated_decision_active_at_stage(0, 6).collect();
-        assert_eq!(active, vec![(0, start), (1, start + 1), (2, start + 2)]);
+        assert_eq!(active, vec![(0, start), (1, start + 1)]);
     }
 
     /// When `anticipated_lead_stages` is empty, the iterator yields nothing
@@ -3258,7 +3297,8 @@ mod tests {
     }
 
     /// AC example `K_i = [3, 2, 5]` with `n_stages = 6`: verify each
-    /// `stage_idx` selects the expected subset.
+    /// `stage_idx` selects the expected subset under the strict predicate
+    /// `stage_idx + K_i < n_stages`.
     #[test]
     fn anticipated_decision_active_mixed_k_values() {
         let idx = StageIndexer::with_equipment_and_evaporation(
@@ -3281,25 +3321,36 @@ mod tests {
         );
         let start = idx.anticipated_decision.start;
 
-        // stage_idx = 3: plants 0 and 1 active (3+3=6<=6, 3+2=5<=6); plant 2
-        // rejected (3+5=8>6).
+        // stage_idx = 3: plant 0 rejects (3+3=6 NOT < 6), plant 1 accepts
+        // (3+2=5 < 6), plant 2 rejects (3+5=8 NOT < 6).
         let active3: Vec<_> = idx.anticipated_decision_active_at_stage(3, 6).collect();
-        assert_eq!(active3, vec![(0, start), (1, start + 1)]);
+        assert_eq!(active3, vec![(1, start + 1)]);
 
-        // stage_idx = 2: all three plants active (2+3=5, 2+2=4, 2+5=7…
-        // wait 2+5=7 > 6 — corrected: at stage_idx=2 plants 0 and 1 only,
-        // plant 2 rejects). Per the ticket text, stage_idx=1 has all three.
+        // stage_idx = 1: plant 0 accepts (1+3=4 < 6), plant 1 accepts
+        // (1+2=3 < 6), plant 2 rejects (1+5=6 NOT < 6).
         let active1: Vec<_> = idx.anticipated_decision_active_at_stage(1, 6).collect();
         assert_eq!(
             active1,
-            vec![(0, start), (1, start + 1), (2, start + 2)],
-            "at stage_idx=1, all plants active (1+3=4, 1+2=3, 1+5=6 all <= 6)"
+            vec![(0, start), (1, start + 1)],
+            "at stage_idx=1 under strict predicate: plants 0,1 active (1+3=4 < 6, 1+2=3 < 6); plant 2 excluded (1+5=6 NOT < 6)"
         );
 
-        // stage_idx = 4: only plant 1 active (4+3=7>6 rejects, 4+2=6<=6
-        // accepts, 4+5=9>6 rejects).
+        // stage_idx = 0: all three plants accept (0+3=3 < 6, 0+2=2 < 6,
+        // 0+5=5 < 6).
+        let active0: Vec<_> = idx.anticipated_decision_active_at_stage(0, 6).collect();
+        assert_eq!(
+            active0,
+            vec![(0, start), (1, start + 1), (2, start + 2)],
+            "at stage_idx=0 under strict predicate: all plants active (0+K < 6 for K in {{3,2,5}})"
+        );
+
+        // stage_idx = 4: all plants reject under strict predicate
+        // (4+3=7, 4+2=6, 4+5=9; none < 6).
         let active4: Vec<_> = idx.anticipated_decision_active_at_stage(4, 6).collect();
-        assert_eq!(active4, vec![(1, start + 1)]);
+        assert!(
+            active4.is_empty(),
+            "at stage_idx=4 under strict predicate, no plant satisfies stage_idx + K < 6"
+        );
     }
 
     /// At horizon tail `stage_idx == n_stages` and every plant has `K_i > 0`,

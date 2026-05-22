@@ -46,17 +46,15 @@ pub(crate) fn compute_per_stage_discount_factors(
 ///
 /// `cumulative[0] = 1.0`, `cumulative[t] = cumulative[t-1] * per_stage[t-1]` for `t >= 1`.
 ///
-/// The returned vec has length `per_stage.len() + 1`. The extra entry at index
-/// `n_stages` equals `cumulative[n_stages-1] * per_stage[n_stages-1]`, which
-/// allows callers to look up the cumulative factor at the horizon boundary stage
-/// `delivery_stage == n_stages` without an out-of-bounds access. This is required
-/// when an anticipated thermal decision made at stage `t` has delivery at
-/// `t + K_i == n_stages`.
+/// The returned vec has length `per_stage.len()` (one entry per study stage).
+/// The anticipated-decision predicate is strict (`stage_idx + K_i < n_stages`),
+/// so every delivery lookup index falls within `[0, n_stages)` and no
+/// boundary-stage entry is needed.
 pub(crate) fn compute_cumulative_discount_factors(per_stage: &[f64]) -> Vec<f64> {
     let n = per_stage.len();
-    // Length is n + 1: indices [0, n] inclusive.
-    let mut cumulative = vec![1.0; n + 1];
-    for t in 1..=n {
+    // Length is n: indices [0, n).
+    let mut cumulative = vec![1.0; n];
+    for t in 1..n {
         cumulative[t] = cumulative[t - 1] * per_stage[t - 1];
     }
     cumulative
@@ -80,8 +78,9 @@ pub(crate) fn postprocess_templates(
     }
 
     // D_0 = 1.0, D_t = D_{t-1} * d_{t-1} for t >= 1.
-    // Extended to length n_stages + 1 so that anticipated-delivery lookups at
-    // delivery_stage == n_stages are valid (see compute_cumulative_discount_factors).
+    // Length is n_stages exactly: the strict anticipated-decision predicate
+    // (`stage_idx + K_i < n_stages`) guarantees every delivery lookup falls
+    // within `[0, n_stages)`.
     {
         stage_templates.cumulative_discount_factors =
             compute_cumulative_discount_factors(&stage_templates.discount_factors);
@@ -89,8 +88,8 @@ pub(crate) fn postprocess_templates(
 
     debug_assert_eq!(
         stage_templates.cumulative_discount_factors.len(),
-        stage_templates.templates.len() + 1,
-        "cumulative_discount_factors must have length n_stages + 1 after postprocess"
+        stage_templates.templates.len(),
+        "cumulative_discount_factors must have length n_stages after postprocess"
     );
 
     // Apply discount factors to theta objective coefficients before
@@ -189,22 +188,22 @@ pub(crate) fn postprocess_templates(
 mod tests {
     use super::compute_cumulative_discount_factors;
 
-    /// AC-6: `compute_cumulative_discount_factors` returns a vec of length
-    /// `n_stages + 1` — one entry beyond `n_stages` to allow anticipated-delivery
-    /// lookups when `delivery_stage == n_stages`.
+    /// `compute_cumulative_discount_factors` returns a vec of length `n_stages`
+    /// (one entry per study stage). The strict anticipated-decision predicate
+    /// (`stage_idx + K_i < n_stages`) guarantees every delivery lookup falls
+    /// within `[0, n_stages)`, so no phantom boundary entry is needed.
     #[test]
-    fn cumulative_discount_factors_extended_by_one_for_delivery_lookup() {
+    fn cumulative_discount_factors_length_matches_n_stages() {
         let n_stages = 4_usize;
         // Uniform 5% annual discount folded into per-stage factors.
         let per_stage = vec![0.95_f64; n_stages];
         let cumulative = compute_cumulative_discount_factors(&per_stage);
 
-        // Length must be n_stages + 1 = 5.
+        // Length must equal n_stages = 4.
         assert_eq!(
             cumulative.len(),
-            n_stages + 1,
-            "cumulative_discount_factors length must be n_stages + 1 = {}",
-            n_stages + 1
+            n_stages,
+            "cumulative_discount_factors length must equal n_stages = {n_stages}"
         );
 
         // Spot-check values.
@@ -214,18 +213,12 @@ mod tests {
             "cumulative[1] == 0.95 = 1.0 * per_stage[0]"
         );
         // Use approximate comparison: repeated multiplication may differ from
-        // powi(4) by a ULP due to floating-point associativity.
+        // powi(3) by a ULP due to floating-point associativity.
+        // The last in-horizon entry is cumulative[n_stages - 1] = 0.95^(n_stages - 1).
         assert!(
-            (cumulative[4] - 0.95_f64.powi(4)).abs() < 1e-15,
-            "cumulative[4] must be within 1e-15 of 0.95^4 (got {})",
-            cumulative[4]
-        );
-
-        // The extra entry at [n_stages] = cumulative[n_stages-1] * per_stage[n_stages-1].
-        let expected_extra = cumulative[n_stages - 1] * per_stage[n_stages - 1];
-        assert_eq!(
-            cumulative[n_stages], expected_extra,
-            "cumulative[n_stages] must be the product of the last two entries"
+            (cumulative[n_stages - 1] - 0.95_f64.powi(3)).abs() < 1e-15,
+            "cumulative[n_stages-1] must be within 1e-15 of 0.95^(n_stages-1) (got {})",
+            cumulative[n_stages - 1]
         );
     }
 
@@ -234,7 +227,7 @@ mod tests {
     fn cumulative_discount_factors_all_ones_when_rate_zero() {
         let per_stage = vec![1.0_f64; 3];
         let cumulative = compute_cumulative_discount_factors(&per_stage);
-        assert_eq!(cumulative.len(), 4);
+        assert_eq!(cumulative.len(), 3);
         for (i, &v) in cumulative.iter().enumerate() {
             assert_eq!(
                 v, 1.0,

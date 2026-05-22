@@ -126,11 +126,10 @@ pub struct StageTemplates {
     /// `cumulative_discount_factors[t] = cumulative_discount_factors[t-1] * discount_factors[t-1]`
     /// for `t >= 1`.
     ///
-    /// Length equals `templates.len() + 1`. The extra entry at index `n_stages`
-    /// supports anticipated-thermal delivery lookups when `delivery_stage ==
-    /// n_stages` (an anticipated decision made at the last decision stage
-    /// `t = n_stages - K_i` delivers at the terminal boundary). The present
-    /// value of stage `t`'s immediate cost is
+    /// Length equals `templates.len()` (one entry per study stage). The
+    /// anticipated-decision predicate is strict (`stage_idx + K_i < n_stages`),
+    /// so every active delivery stage satisfies `delivery_stage in [0, n_stages)`.
+    /// The present value of stage `t`'s immediate cost is
     /// `cumulative_discount_factors[t] * immediate_cost_t`.
     pub cumulative_discount_factors: Vec<f64>,
 }
@@ -574,32 +573,29 @@ fn build_template_build_ctx<'a>(
     // Pre-compute discount factors and total stage hours before the per-stage
     // template loop so that `fill_anticipated_decision_objective` can read them
     // from the ctx at LP build time (before postprocess_templates runs).
+    //
+    // Both arrays have length `n_study_stages` exactly. The anticipated-decision
+    // predicate is strict (`stage_idx + K_i < n_stages`), so every active
+    // delivery stage satisfies `delivery_stage in [0, n_stages)` — no phantom
+    // boundary entry is needed.
     let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
     let per_stage_discount =
         compute_per_stage_discount_factors(&study_stages, system.policy_graph());
-    // cumulative_discount_factors has length n_study_stages + 1 so that
-    // delivery_stage == n_stages is a valid index (see AC-2/AC-6).
     let cumulative_discount_factors = compute_cumulative_discount_factors(&per_stage_discount);
-    // total_hours_per_stage also has length n_study_stages + 1 so that
-    // fill_anticipated_decision_objective can read total_hours[delivery_stage]
-    // when delivery_stage == n_stages (the horizon boundary; AC-2).
-    // The extra entry mirrors the last stage's hours (same block structure).
-    let mut total_hours_per_stage: Vec<f64> = study_stages
+    let total_hours_per_stage: Vec<f64> = study_stages
         .iter()
         .map(|s| s.blocks.iter().map(|b| b.duration_hours).sum())
         .collect();
-    let last_stage_hours = total_hours_per_stage.last().copied().unwrap_or(0.0);
-    total_hours_per_stage.push(last_stage_hours);
 
     debug_assert_eq!(
         cumulative_discount_factors.len(),
-        study_stages.len() + 1,
-        "cumulative_discount_factors length must be n_study_stages + 1"
+        study_stages.len(),
+        "cumulative_discount_factors length must equal n_study_stages"
     );
     debug_assert_eq!(
         total_hours_per_stage.len(),
-        study_stages.len() + 1,
-        "total_hours_per_stage length must be n_study_stages + 1"
+        study_stages.len(),
+        "total_hours_per_stage length must equal n_study_stages"
     );
 
     let ctx = TemplateBuildCtx {
@@ -711,9 +707,10 @@ fn assemble_stage_templates_output(
         hydro_productivities_per_stage,
         discount_factors,
         // Cumulative factors default to 1.0; overwritten by setup.rs.
-        // Length is `n_study + 1`: the extra trailing entry supports
-        // anticipated-thermal delivery lookups when `delivery_stage == n_stages`.
-        cumulative_discount_factors: vec![1.0; n_study + 1],
+        // Length is `n_study`: the strict anticipated-decision predicate
+        // (`stage_idx + K_i < n_stages`) guarantees every delivery lookup
+        // falls within `[0, n_stages)`.
+        cumulative_discount_factors: vec![1.0; n_study],
     }
 }
 

@@ -87,16 +87,17 @@ pub(crate) struct TemplateBuildCtx<'a> {
     /// Cumulative discount factor at each stage for NPV cost computation.
     ///
     /// `cumulative_discount_factors[t]` is the present-value multiplier at stage `t`.
-    /// Length is `n_study_stages + 1`: the extra entry at index `n_stages` allows
-    /// anticipated-delivery lookups when `delivery_stage == n_stages`.
+    /// Length is `n_study_stages`: the strict anticipated-decision predicate
+    /// (`stage_idx + K_i < n_stages`) guarantees every delivery lookup falls
+    /// within `[0, n_stages)`.
     /// Populated by `build_template_build_ctx` before the per-stage template loop.
     pub(crate) cumulative_discount_factors: Vec<f64>,
     /// Total stage hours for each study stage.
     ///
     /// `total_hours_per_stage[stage_idx]` is the sum of `block.duration_hours` for all
-    /// blocks in that stage. Length is `n_study_stages + 1`: the extra entry at index
-    /// `n_stages` mirrors the last stage's hours, allowing anticipated-delivery lookups
-    /// when `delivery_stage == n_stages` (horizon boundary; see AC-2).
+    /// blocks in that stage. Length is `n_study_stages`: the strict anticipated-decision
+    /// predicate (`stage_idx + K_i < n_stages`) guarantees every delivery lookup falls
+    /// within `[0, n_stages)`.
     /// Populated by `build_template_build_ctx` before the per-stage template loop.
     pub(crate) total_hours_per_stage: Vec<f64>,
 }
@@ -947,9 +948,9 @@ mod tests {
                 anticipated_thermal_indices,
                 has_penalty: false,
                 // Tests that use ZeroEntityFixtures don't exercise discount
-                // factors; provide n_stages+1 = 2 element vecs that won't panic.
-                cumulative_discount_factors: vec![1.0, 1.0],
-                total_hours_per_stage: vec![744.0, 744.0],
+                // factors; provide n_stages = 1 element vecs that won't panic.
+                cumulative_discount_factors: vec![1.0],
+                total_hours_per_stage: vec![744.0],
             }
         }
     }

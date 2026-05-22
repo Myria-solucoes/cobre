@@ -9352,15 +9352,18 @@ fn test_anticipated_decision_bounds_inactive_when_beyond_horizon() {
     );
 }
 
-/// AC-4: the horizon boundary `t + K_i == n_stages` is accepted (active).
+/// F2-002: the horizon boundary `t + K_i == n_stages` is REJECTED (inactive)
+/// under the strict predicate `t + K_i < n_stages`.
 ///
 /// Setup: `n_stages = 4`, `K_i = 2`, `min_generation_mw = 10.0`,
 /// `max_generation_mw = 100.0`.
-/// At stage `t = 2`: delivery stage = `2 + 2 = 4 == n_stages` → active
-/// (equality satisfies `t + K_i <= n_stages`).
-/// Expected: `col_lower = 10.0`, `col_upper = 100.0`.
+/// At stage `t = 2`: delivery stage = `2 + 2 = 4 == n_stages` → inactive
+/// (the strict predicate excludes equality; no delivery LP exists at
+/// `delivery_stage == n_stages` because the per-stage loop iterates
+/// `[0, n_stages)`).
+/// Expected: `col_lower = 0.0`, `col_upper = 0.0`.
 #[test]
-fn test_anticipated_decision_active_at_horizon_boundary() {
+fn test_anticipated_decision_inactive_at_horizon_boundary() {
     let system = one_anticipated_thermal_system(4, 2, 10.0, 100.0);
     let result = build_stage_templates(
         &system,
@@ -9376,14 +9379,14 @@ fn test_anticipated_decision_active_at_horizon_boundary() {
     let col = anticipated_decision_col(2);
     let t = &result.templates[2];
     assert_eq!(
-        t.col_lower[col], 10.0,
-        "stage 2: anticipated-decision col_lower must equal 10.0 \
-         (delivery stage = 2+2=4 == n_stages=4, boundary active)"
+        t.col_lower[col], 0.0,
+        "stage 2: anticipated-decision col_lower must be 0.0 \
+         (delivery stage = 2+2=4 == n_stages=4, strict predicate excludes boundary)"
     );
     assert_eq!(
-        t.col_upper[col], 100.0,
-        "stage 2: anticipated-decision col_upper must equal 100.0 \
-         (delivery stage = 2+2=4 == n_stages=4, boundary active)"
+        t.col_upper[col], 0.0,
+        "stage 2: anticipated-decision col_upper must be 0.0 \
+         (delivery stage = 2+2=4 == n_stages=4, strict predicate excludes boundary)"
     );
 }
 
@@ -9465,12 +9468,15 @@ fn test_anticipated_decision_objective_uses_delivery_stage_factors() {
     );
 }
 
-/// AC-2: objective at boundary stage t + K_i == n_stages is accepted and non-zero.
+/// F2-002: objective at boundary stage t + K_i == n_stages is REJECTED (zero)
+/// under the strict predicate `t + K_i < n_stages`.
 ///
-/// System: n_stages=4, K_i=2. At stage t=2: delivery_stage=4==n_stages.
-/// objective = 50.0 * 744.0 * 1.0 / 1000.0 = 37.2.
+/// System: n_stages=4, K_i=2. At stage t=2: delivery_stage=4==n_stages → inactive
+/// (the strict predicate excludes equality; no delivery LP exists at
+/// `delivery_stage == n_stages`).
+/// Expected: `objective[col] == 0.0`.
 #[test]
-fn test_anticipated_decision_objective_at_horizon_boundary() {
+fn test_anticipated_decision_objective_zero_at_horizon_boundary() {
     let system = one_anticipated_thermal_system(4, 2, 0.0, 100.0);
     let result = build_stage_templates(
         &system,
@@ -9484,12 +9490,12 @@ fn test_anticipated_decision_objective_at_horizon_boundary() {
     .expect("build ok");
 
     let col = anticipated_decision_col(2);
-    let tmpl = &result.templates[2]; // t=2, delivery=4==n_stages
+    let tmpl = &result.templates[2]; // t=2, delivery=4==n_stages, strict-predicate-inactive
 
-    let expected = 50.0 * 744.0 * 1.0 / COST_SCALE_FACTOR;
     assert_eq!(
-        tmpl.objective[col], expected,
-        "stage 2 (t+K=n_stages): anticipated-decision objective must be {expected}"
+        tmpl.objective[col], 0.0,
+        "stage 2 (t+K==n_stages): anticipated-decision objective must be 0.0 \
+         (strict predicate excludes boundary; no delivery LP exists at n_stages)"
     );
 }
 
@@ -9545,6 +9551,63 @@ fn test_anticipated_decision_objective_zero_one_past_boundary() {
         tmpl.objective[col], 0.0,
         "stage 2 (t+K=n_stages+1): anticipated-decision objective must be 0.0"
     );
+}
+
+/// F2-002 regression: at `stage_idx = n_stages - K_i`, no anticipated-decision
+/// column is emitted (bounds `[0,0]` and objective `0.0`) for any K and any
+/// n_stages such that K < n_stages.
+///
+/// Under the strict predicate `stage_idx + K_i < n_stages`, the boundary stage
+/// `stage_idx = n_stages - K_i` would produce `delivery_stage = n_stages` —
+/// outside the study horizon `[0, n_stages)`. The decision column at that
+/// stage must be gated out so the LP never pays for an undelivered commitment.
+///
+/// This is the multi-K sweep guarding the strict-predicate semantics across
+/// realistic horizons (n_stages in {3, 4, 5, 6}) and lead times (K in {1, 2, 3}).
+#[test]
+fn test_anticipated_decision_no_column_at_boundary_stage_strict_predicate() {
+    for n_stages in 3_usize..=6 {
+        for k in 1_usize..=3 {
+            if k >= n_stages {
+                // K must be strictly less than n_stages for the boundary stage
+                // `n_stages - K` to be a valid non-negative index.
+                continue;
+            }
+            let boundary_stage = n_stages - k;
+            #[allow(clippy::cast_possible_truncation)]
+            let k_u32 = k as u32;
+            let system = one_anticipated_thermal_system(n_stages, k_u32, 10.0, 100.0);
+            let result = build_stage_templates(
+                &system,
+                no_penalty_config(),
+                &PrecomputedPar::default(),
+                &PrecomputedNormal::default(),
+                &default_production(&system),
+                &default_evaporation(&system),
+                &ResolvedParameters::default(),
+            )
+            .expect("build ok");
+
+            let col = anticipated_decision_col(k);
+            let tmpl = &result.templates[boundary_stage];
+
+            assert_eq!(
+                tmpl.col_lower[col], 0.0,
+                "n_stages={n_stages}, K={k}, boundary_stage={boundary_stage}: \
+                 col_lower must be 0.0 (delivery_stage = n_stages excluded by strict predicate)"
+            );
+            assert_eq!(
+                tmpl.col_upper[col], 0.0,
+                "n_stages={n_stages}, K={k}, boundary_stage={boundary_stage}: \
+                 col_upper must be 0.0 (delivery_stage = n_stages excluded by strict predicate)"
+            );
+            assert_eq!(
+                tmpl.objective[col], 0.0,
+                "n_stages={n_stages}, K={k}, boundary_stage={boundary_stage}: \
+                 objective must be 0.0 (delivery_stage = n_stages excluded by strict predicate)"
+            );
+        }
+    }
 }
 
 // ── Helper: two-thermal system (one anticipated, one not) ────────────────────
@@ -11692,8 +11755,9 @@ fn rt_expected_num_rows(k: usize, stage_idx: usize) -> usize {
 /// Verifies simultaneously:
 /// - `n_state == 2` for all stages.
 /// - `num_cols == 28` and `num_rows` per stage match the K=1 formula.
-/// - anticipated_decision bounds: `[0,100]` when active (`t+1 <= 4`), which
-///   is all stages 0..3 for K=1 (boundary at stage 3: `3+1=4==n_stages`).
+/// - anticipated_decision bounds: `[0,100]` when active (`t+1 < 4`), which
+///   is stages 0..2 for K=1; INACTIVE at boundary stage 3 (`3+1=4==n_stages`,
+///   excluded by the strict predicate).
 /// - NPV objective coefficient at stage 0 (no discount): `50*720/1000 = 36.0`.
 /// - State-fixing CSC diagonal +1.0 for slot 0, plant 0.
 /// - Decision-write CSC +1.0 at row `1 + (K-1)*1 = 1` (slot K-1=0).
@@ -11754,9 +11818,9 @@ fn test_anticipated_thermals_lp_roundtrip_k1() {
         );
     }
 
-    // ── anticipated_decision bounds — all stages active for K=1 (AC-1.d) ────
-    // t + K = t+1 <= 4 for t in 0..3 (all active; boundary at t=3: 3+1=4=n_stages).
-    for t in 0..n_stages {
+    // ── anticipated_decision bounds (AC-1.d) ────────────────────────────────
+    // Active: t in 0..3 (t+1 < 4: 1, 2, 3 all < 4 under strict predicate).
+    for t in 0..(n_stages - k) {
         let tmpl = &result.templates[t];
         assert_eq!(
             tmpl.col_lower[col_ant_dec], 0.0,
@@ -11765,6 +11829,22 @@ fn test_anticipated_thermals_lp_roundtrip_k1() {
         assert_eq!(
             tmpl.col_upper[col_ant_dec], 100.0,
             "K=1, stage {t}: anticipated_decision col_upper must be 100.0 (active)"
+        );
+    }
+    // Inactive: boundary stage t=3 (3+1=4 NOT < 4 under strict predicate).
+    {
+        let tmpl = &result.templates[n_stages - k];
+        assert_eq!(
+            tmpl.col_lower[col_ant_dec],
+            0.0,
+            "K=1, boundary stage {}: anticipated_decision col_lower must be 0.0 (strict predicate excludes)",
+            n_stages - k
+        );
+        assert_eq!(
+            tmpl.col_upper[col_ant_dec],
+            0.0,
+            "K=1, boundary stage {}: anticipated_decision col_upper must be 0.0 (strict predicate excludes; t+K=n_stages)",
+            n_stages - k
         );
     }
 
@@ -11868,8 +11948,8 @@ fn test_anticipated_thermals_lp_roundtrip_k1() {
 /// Verifies:
 /// - `n_state == 3` for all stages.
 /// - `num_cols == 29` and `num_rows` per stage match K=2 formula.
-/// - Bounds: active at t=0 (`0+2=2<=4`), active at t=2 (`2+2=4==n_stages`),
-///   INACTIVE at t=3 (`3+2=5>4`).
+/// - Bounds: active at t=0 (`0+2=2<4`), active at t=1 (`1+2=3<4`),
+///   INACTIVE at boundary t=2 (`2+2=4 NOT < 4`) and t=3 (`3+2=5>4`).
 /// - Decision-write: slot K-1=1; at stage 0 active, col has +1.0 at
 ///   `row_fix_start + 1 = 2`.
 /// - Fishing row active at stage 2 (K=2 <= 2), absent at stage 1 (K=2 > 1).
@@ -11926,8 +12006,8 @@ fn test_anticipated_thermals_lp_roundtrip_k2() {
     }
 
     // ── anticipated_decision bounds (AC-2.d) ─────────────────────────────────
-    // Active: t=0 (0+2=2<=4), t=1 (1+2=3<=4), t=2 (2+2=4==n_stages, boundary).
-    for t in 0..=2 {
+    // Active under strict predicate: t=0 (0+2=2 < 4), t=1 (1+2=3 < 4).
+    for t in 0..=1 {
         let tmpl = &result.templates[t];
         assert_eq!(
             tmpl.col_lower[col_ant_dec], 0.0,
@@ -11938,16 +12018,16 @@ fn test_anticipated_thermals_lp_roundtrip_k2() {
             "K=2, stage {t}: anticipated_decision col_upper must be 100.0 (active)"
         );
     }
-    // Inactive: t=3 (3+2=5>4).
-    {
-        let tmpl = &result.templates[3];
+    // Inactive under strict predicate: boundary t=2 (2+2=4 NOT < 4) and t=3.
+    for t in 2..n_stages {
+        let tmpl = &result.templates[t];
         assert_eq!(
             tmpl.col_lower[col_ant_dec], 0.0,
-            "K=2, stage 3: anticipated_decision col_lower must be 0.0 (inactive)"
+            "K=2, stage {t}: anticipated_decision col_lower must be 0.0 (inactive)"
         );
         assert_eq!(
             tmpl.col_upper[col_ant_dec], 0.0,
-            "K=2, stage 3: anticipated_decision col_upper must be 0.0 (inactive, 3+2=5>4)"
+            "K=2, stage {t}: anticipated_decision col_upper must be 0.0 (inactive under strict predicate; t+K >= n_stages)"
         );
     }
 
@@ -11993,15 +12073,15 @@ fn test_anticipated_thermals_lp_roundtrip_k2() {
         );
     }
 
-    // ── Decision write absent at stage 3 (inactive) (AC-2.g) ─────────────────
-    {
-        let t = &result.templates[3]; // inactive (3+2=5>4)
+    // ── Decision write absent at stages 2 and 3 (inactive under strict predicate) (AC-2.g) ─────
+    for inactive_stage in 2..n_stages {
+        let t = &result.templates[inactive_stage]; // inactive (2+2=4 NOT < 4, 3+2=5>4)
         for slot in 0..k {
             let row = row_fix_start + slot;
             let entries = csc_entries_at(t, col_ant_dec, row);
             assert!(
                 entries.is_empty(),
-                "K=2, stage 3 (inactive): decision-write CSC at row {row} must be empty, \
+                "K=2, stage {inactive_stage} (inactive): decision-write CSC at row {row} must be empty, \
                  got {entries:?}"
             );
         }
@@ -12068,8 +12148,8 @@ fn test_anticipated_thermals_lp_roundtrip_k2() {
 /// Verifies:
 /// - `n_state == 4` for all stages.
 /// - `num_cols == 30` and `num_rows` per stage match K=3 formula.
-/// - Bounds: active at t=0 (`0+3=3<=4`), active at t=1 (`1+3=4==n_stages`),
-///   INACTIVE at t=2 (`2+3=5>4`) and t=3.
+/// - Bounds: active at t=0 (`0+3=3 < 4`), INACTIVE at boundary t=1
+///   (`1+3=4 NOT < 4`), t=2 (`2+3=5>4`), and t=3.
 /// - Decision-write: slot K-1=2; at stage 0, col has +1.0 at row_fix_start+2=3.
 /// - Fishing rows: absent at t=0,1,2; present at t=3 (K=3 <= 3).
 /// - Fishing row CSC pattern at stage 3.
@@ -12125,20 +12205,20 @@ fn test_anticipated_thermals_lp_roundtrip_k3() {
     }
 
     // ── anticipated_decision bounds (AC-3.d) ─────────────────────────────────
-    // Active: t=0 (0+3=3<=4), t=1 (1+3=4==n_stages, boundary acceptance).
-    for t in 0..=1 {
-        let tmpl = &result.templates[t];
+    // Active under strict predicate: t=0 only (0+3=3 < 4).
+    {
+        let tmpl = &result.templates[0];
         assert_eq!(
             tmpl.col_lower[col_ant_dec], 0.0,
-            "K=3, stage {t}: anticipated_decision col_lower must be 0.0 (active)"
+            "K=3, stage 0: anticipated_decision col_lower must be 0.0 (active)"
         );
         assert_eq!(
             tmpl.col_upper[col_ant_dec], 100.0,
-            "K=3, stage {t}: anticipated_decision col_upper must be 100.0 (active)"
+            "K=3, stage 0: anticipated_decision col_upper must be 100.0 (active)"
         );
     }
-    // Inactive: t=2 (2+3=5>4) and t=3 (3+3=6>4).
-    for t in 2..n_stages {
+    // Inactive under strict predicate: boundary t=1 (1+3=4 NOT < 4), t=2, t=3.
+    for t in 1..n_stages {
         let tmpl = &result.templates[t];
         assert_eq!(
             tmpl.col_lower[col_ant_dec], 0.0,
@@ -12146,7 +12226,7 @@ fn test_anticipated_thermals_lp_roundtrip_k3() {
         );
         assert_eq!(
             tmpl.col_upper[col_ant_dec], 0.0,
-            "K=3, stage {t}: anticipated_decision col_upper must be 0.0 (inactive, t+3>4)"
+            "K=3, stage {t}: anticipated_decision col_upper must be 0.0 (inactive under strict predicate; t+3 >= n_stages)"
         );
     }
 
@@ -12190,8 +12270,8 @@ fn test_anticipated_thermals_lp_roundtrip_k3() {
         );
     }
 
-    // ── Decision write absent at stages 2 and 3 (inactive) ───────────────────
-    for t_idx in [2_usize, 3] {
+    // ── Decision write absent at stages 1, 2, 3 (inactive under strict predicate) ──
+    for t_idx in [1_usize, 2, 3] {
         let t = &result.templates[t_idx];
         for slot in 0..k {
             let row = row_fix_start + slot;

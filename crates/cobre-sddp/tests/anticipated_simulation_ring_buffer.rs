@@ -606,7 +606,8 @@ fn simulation_ring_buffer_shifts_anticipated_state_k1() {
 
     // ── Sanity: stage 0 has a decision; committed is None (no commitment ──
     // has matured yet — fishing rows only become active when k_i <= t).
-    let d0 = decision_at(0).expect("anticipated_decision_mw must exist at stage 0 (t + K <= T)");
+    let d0 =
+        decision_at(0).expect("anticipated_decision_mw must exist at stage 0 (t + K < n_stages)");
     assert!(
         committed_at(0).is_none(),
         "anticipated_committed_mw must be None at stage 0 with K=1 (fishing inactive)",
@@ -736,7 +737,7 @@ fn simulation_ring_buffer_shifts_anticipated_state_k2() {
         "committed at stage 1 must be None with K=2 (fishing inactive)",
     );
 
-    let d0 = decision_at(0).expect("decision at stage 0 must exist (0 + K <= n_stages)");
+    let d0 = decision_at(0).expect("decision at stage 0 must exist (0 + K < n_stages)");
 
     // The non-zero seed and the cheap anticipated thermal should produce
     // a non-trivial stage-0 commitment under any reasonable policy.

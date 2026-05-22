@@ -328,9 +328,9 @@ pub fn deserialize_parameters(bytes: &[u8]) -> Result<Vec<ScalarParameter>, Load
 mod tests {
     use super::*;
     use cobre_core::{
-        entities::AnticipatedConfig, AnticipatedCommitmentHistory, Bus, ComputedParameter,
-        DeficitSegment, EntityId, Hydro, HydroGenerationModel, HydroPenalties, InitialConditions,
-        ParameterKind, ScalarParameter, SystemBuilder, Thermal,
+        AnticipatedCommitmentHistory, Bus, ComputedParameter, DeficitSegment, EntityId, Hydro,
+        HydroGenerationModel, HydroPenalties, InitialConditions, ParameterKind, ScalarParameter,
+        SystemBuilder, Thermal, entities::AnticipatedConfig,
     };
 
     fn minimal_bus(id: i32) -> Bus {
