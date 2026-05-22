@@ -32,6 +32,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `anticipated_state` entries in slot-major plant-minor order
   (`K_max * n_anticipated` entries with `entity_type: "thermal"`,
   `slot_index`, and `entity_id`).
+- Generic constraints now support `anticipated_decision(N)` as an
+  expression term, where `N` is the anticipated thermal's `id`. The term
+  references the stage-level commitment variable — the MW quantity placed
+  at the current stage for delivery `K` stages later. Referencing a
+  non-anticipated thermal is a hard semantic error. Using
+  `thermal_generation(N)` on an anticipated thermal emits a
+  `SemanticAmbiguity` warning to flag likely intent mismatch.
 
 ### Changed (breaking)
 

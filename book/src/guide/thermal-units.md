@@ -244,6 +244,46 @@ slot `lead_stages - 1` holds the most recent.
 
 ---
 
+## Constraining commitments via generic constraints
+
+The anticipated-commitment decision variable can be referenced directly in a
+generic constraint using the `anticipated_decision(N)` expression syntax, where
+`N` is the thermal unit's `id`. This lets you cap, floor, or couple the MW level
+committed at each decision stage across multiple anticipated thermals.
+
+```json
+{
+  "constraints": [
+    {
+      "id": 1,
+      "name": "cap_ant_t1",
+      "expression": "anticipated_decision(2)",
+      "sense": "<=",
+      "slack": { "enabled": false }
+    }
+  ]
+}
+```
+
+With a matching bound row in `constraints/generic_constraint_bounds.parquet`
+that sets `bound = 20.0` at stage 0, the constraint limits the commitment placed
+at stage 0 for delivery 2 stages later to at most 20 MW.
+
+Two semantic rules apply:
+
+- `anticipated_decision(N)` must reference a thermal that carries an
+  `anticipated_config` block. Referencing a non-anticipated thermal is a hard
+  error (`BusinessRuleViolation`).
+- `thermal_generation(N)` referencing an anticipated thermal emits a
+  `SemanticAmbiguity` warning, because the variable is the per-block generation
+  at the current stage and does not represent the forward commitment. Use
+  `anticipated_decision(N)` when the intent is to constrain the commitment level.
+
+For context on the constraint file format see
+[Generic Constraints](../reference/case-format.md).
+
+---
+
 ## Validation Rules
 
 Cobre's five-layer validation pipeline checks the following conditions on thermal
