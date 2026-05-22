@@ -1,9 +1,26 @@
-//! Declaration-order invariance test for anticipated thermal plants.
+//! Canonical-sort determinism check for anticipated thermal plants.
 //!
-//! Verifies that training results are bit-for-bit identical regardless of the
-//! order in which thermal plants are declared in the input. Two orderings of
-//! the same 6-stage, 2-anticipated-plant, 1-backup-thermal fixture are trained
-//! to 8 iterations and their `final_lb` values are compared bitwise.
+//! ## Scope and limitations
+//!
+//! This integration test verifies that `SystemBuilder::build()` produces a
+//! deterministic canonical thermal ordering (by `EntityId`) regardless of the
+//! declaration order in the input, and that training results are bit-for-bit
+//! identical across two declaration orderings.
+//!
+//! **It is NOT a declaration-order invariance probe.** Because
+//! `SystemBuilder::build()` sorts thermals by `EntityId`, both configurations
+//! present **identical canonical input** to every downstream layer — so this
+//! test is structurally a tautology: same input -> same output. It catches a
+//! regression in `SystemBuilder`'s canonical sort but does NOT exercise the
+//! LP-builder code paths that consume `anticipated_thermal_indices` directly.
+//!
+//! The genuine LP-level order-invariance probe lives at
+//! `crates/cobre-sddp/src/lp_builder/template.rs` (the test
+//! `lp_template_invariant_under_anticipated_index_permutation` in the
+//! internal `mod tests` block). That probe constructs two `TemplateBuildCtx`s
+//! with permuted `anticipated_thermal_indices`/`anticipated_lead_stages` arrays
+//! and asserts LP equivalence under the canonical column/row swap permutation.
+//! See assessment finding F3-004 for the historical context.
 //!
 //! ## Fixture description
 //!
@@ -16,7 +33,7 @@
 //! - Anticipated thermal plant 1: K=4, cost 40 $/MWh, max 80 MW — id=5.
 //! - Load 150 MW constant across all stages.
 //!
-//! ## Declaration-order invariance
+//! ## Canonical-sort behavior
 //!
 //! Config A declares thermals as `[id=4 (backup), id=2 (ant K=2), id=5 (ant K=4)]`.
 //! Config B declares thermals as `[id=5 (ant K=4), id=2 (ant K=2), id=4 (backup)]`.
@@ -25,9 +42,10 @@
 //! — `[id=2, id=4, id=5]` — is identical in both runs. The LP column layout
 //! is therefore deterministic: the anticipated-state block uses slot-major,
 //! plant-minor indexing relative to the anticipated-local sort order
-//! (id=2 → local 0, id=5 → local 1). Any bug that iterates thermals in
-//! declaration order rather than the post-sort canonical order would produce
-//! different `final_lb` values across the two configurations.
+//! (id=2 -> local 0, id=5 -> local 1). A regression in `SystemBuilder`'s
+//! canonical sort would surface here as different `final_lb` values; deeper
+//! LP-builder regressions that depend on `anticipated_thermal_indices`
+//! ordering are caught by the F3-004 unit test referenced above.
 
 #![allow(
     clippy::unwrap_used,
@@ -471,16 +489,28 @@ fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
 // Integration test
 // ---------------------------------------------------------------------------
 
-/// Verify that training results are bit-for-bit identical when the three
-/// thermal plants (one backup, two anticipated) are declared in different
-/// orders.
+/// Verify that `SystemBuilder::build()` produces deterministic canonical
+/// thermal ordering and that training results are bit-for-bit identical
+/// across two declaration orderings of the same 3 thermals.
 ///
-/// Declaration-order invariance is a hard project rule: results must be
-/// bit-for-bit identical regardless of the order in which entities appear in
-/// input files. This test exercises the anticipated-thermal LP layout — the
-/// slot-major, plant-minor ring-buffer block — to prove that `SystemBuilder`'s
-/// `EntityId`-sorted canonical order is used throughout, not the raw
-/// declaration order.
+/// **This is a determinism check, not an invariance probe.** See the
+/// module-level docstring for the scope-and-limitations discussion and
+/// the pointer to the genuine LP-level invariance probe (F3-004) that
+/// exercises the `anticipated_thermal_indices` consumer paths directly.
+///
+/// What this test catches:
+/// - A regression in `SystemBuilder::build()` that broke the canonical
+///   sort would produce different `final_lb` values here.
+/// - A change to the LP construction that is sensitive to which canonical
+///   sort `SystemBuilder` uses (e.g., a switch from EntityId to name)
+///   would produce different cached state bitwise.
+///
+/// What this test does NOT catch:
+/// - Order-dependence within the LP builder itself when given different
+///   permutations of `anticipated_thermal_indices`. Both configurations
+///   feed identical canonical input to the LP builder, so any order-
+///   dependent code path downstream of `SystemBuilder` is exercised
+///   identically in both runs.
 #[test]
 fn declaration_order_invariance_anticipated_thermals() {
     // Config A: regular-first, then anticipated ascending.

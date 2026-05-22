@@ -721,7 +721,11 @@ fn assemble_stage_templates_output(
     clippy::panic,
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::needless_range_loop,
+    clippy::doc_markdown,
+    clippy::doc_overindented_list_items
 )]
 mod tests {
     use chrono::NaiveDate;
@@ -1028,5 +1032,529 @@ mod tests {
             ctx.anticipated_thermal_indices.is_empty(),
             "anticipated_thermal_indices"
         );
+    }
+
+    // ── Real declaration-order-invariance probe (assessment finding F3-004) ──
+
+    /// Build a 5-stage 3-thermal system used by the order-invariance probe.
+    ///
+    /// Three thermals (canonical EntityId order, since `SystemBuilder::build`
+    /// sorts by `EntityId`):
+    /// - `id=1`: anticipated K=2, max=120 MW, cost=50 $/MWh
+    /// - `id=2`: anticipated K=3, max=80 MW, cost=40 $/MWh
+    /// - `id=3`: standard thermal (no anticipation), max=200 MW, cost=500 $/MWh
+    ///
+    /// `ResolvedBounds` is populated with per-thermal stage costs/limits matching
+    /// the per-thermal declarations (the default `BoundsDefaults::thermal` is uniform,
+    /// so a probe that relied on defaults would be trivial — distinct per-thermal
+    /// stage data is required to expose any latent order-dependence in the LP fill).
+    ///
+    /// `n_stages = 5` ensures both anticipated decisions are active at `stage_idx=0`
+    /// (strict gate `t + K_i < n_stages` -> `2 < 5` and `3 < 5`).
+    fn anticipated_invariance_system() -> cobre_core::System {
+        let thermals = vec![
+            Thermal {
+                id: EntityId(1),
+                name: "T_ant_k2".to_string(),
+                bus_id: EntityId(1),
+                entry_stage_id: None,
+                exit_stage_id: None,
+                cost_per_mwh: 50.0,
+                min_generation_mw: 0.0,
+                max_generation_mw: 120.0,
+                anticipated_config: Some(AnticipatedConfig { lead_stages: 2 }),
+            },
+            Thermal {
+                id: EntityId(2),
+                name: "T_ant_k3".to_string(),
+                bus_id: EntityId(1),
+                entry_stage_id: None,
+                exit_stage_id: None,
+                cost_per_mwh: 40.0,
+                min_generation_mw: 0.0,
+                max_generation_mw: 80.0,
+                anticipated_config: Some(AnticipatedConfig { lead_stages: 3 }),
+            },
+            Thermal {
+                id: EntityId(3),
+                name: "T_backup".to_string(),
+                bus_id: EntityId(1),
+                entry_stage_id: None,
+                exit_stage_id: None,
+                cost_per_mwh: 500.0,
+                min_generation_mw: 0.0,
+                max_generation_mw: 200.0,
+                anticipated_config: None,
+            },
+        ];
+
+        let n_thermals = thermals.len();
+        let n_stages = 5_usize;
+        let k_max = 3_usize;
+
+        let bus = Bus {
+            id: EntityId(1),
+            name: "B1".to_string(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 1000.0,
+            }],
+            excess_cost: 0.0,
+        };
+
+        let stages: Vec<Stage> = (0..n_stages)
+            .map(|i| Stage {
+                index: i,
+                id: i as i32,
+                start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                season_id: Some(0),
+                blocks: vec![Block {
+                    index: 0,
+                    name: "BLK0".to_string(),
+                    duration_hours: 744.0,
+                }],
+                block_mode: BlockMode::Parallel,
+                state_config: StageStateConfig {
+                    storage: false,
+                    inflow_lags: false,
+                },
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::Saa,
+                },
+            })
+            .collect();
+
+        let load_models: Vec<LoadModel> = (0..n_stages)
+            .map(|s| LoadModel {
+                bus_id: EntityId(1),
+                stage_id: s as i32,
+                mean_mw: 150.0,
+                std_mw: 0.0,
+            })
+            .collect();
+
+        let mut resolved_bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 0,
+                n_thermals,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages,
+                k_max,
+            },
+            &BoundsDefaults {
+                hydro: default_hydro_bounds(),
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 100.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+
+        // Per-thermal stage bounds (distinct so a permutation actually changes
+        // the LP coefficients). The bounds table is indexed [thermal_idx][stage_idx]
+        // with a stage axis of length `n_stages + k_max` (delivery-stage padding).
+        let stage_axis_len = resolved_bounds.thermal_stage_axis_len();
+        for t_idx in 0..n_thermals {
+            for s_idx in 0..stage_axis_len {
+                let tb = resolved_bounds.thermal_bounds_mut(t_idx, s_idx);
+                match t_idx {
+                    0 => {
+                        tb.max_generation_mw = 120.0;
+                        tb.cost_per_mwh = 50.0;
+                    }
+                    1 => {
+                        tb.max_generation_mw = 80.0;
+                        tb.cost_per_mwh = 40.0;
+                    }
+                    2 => {
+                        tb.max_generation_mw = 200.0;
+                        tb.cost_per_mwh = 500.0;
+                    }
+                    _ => unreachable!("only 3 thermals"),
+                }
+            }
+        }
+
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 0,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages,
+            },
+            &PenaltiesDefaults {
+                hydro: default_hydro_penalties(),
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .thermals(thermals)
+            .stages(stages)
+            .load_models(load_models)
+            .bounds(resolved_bounds)
+            .penalties(penalties)
+            .build()
+            .expect("anticipated_invariance_system: valid system")
+    }
+
+    /// Compare two `StageTemplate`s for bit-for-bit equivalence after applying
+    /// the swap-(0,1) permutation on anticipated-decision columns,
+    /// anticipated-state ring-buffer columns/rows (slot-major), and
+    /// anticipated-fishing rows.
+    ///
+    /// `dec_start_a` / `dec_start_b`: column index of `col_anticipated_decision_start`
+    /// in each template.
+    /// `state_start_a` / `state_start_b`: column AND row index of
+    /// `col_anticipated_state_start` / `row_anticipated_state_fixing_start` (these
+    /// coincide numerically per the indexer convention).
+    /// `n_ant`: number of anticipated plants (must be 2 for this swap).
+    /// `k_max`: ring-buffer slots per plant.
+    /// `fish_start_a` / `fish_start_b`: row index of `row_anticipated_fishing_start`.
+    /// `n_fish_rows`: number of active fishing rows at this stage (0..=n_ant).
+    ///
+    /// Strategy: build the column-permutation `col_perm` such that
+    /// `tpl_a.column[col_perm[j]]` corresponds to `tpl_b.column[j]`, and the row
+    /// permutation `row_perm` analogously. Then assert that the permuted dense
+    /// LP (bounds, objective, full coefficient matrix) matches `tpl_b` bitwise.
+    ///
+    /// Uses dense matrix expansion for clarity; the templates are tiny
+    /// (`num_cols ~ 20-50`, `num_rows ~ 10-20`) so the O(n^2) memory cost is fine.
+    #[allow(clippy::too_many_arguments)]
+    fn assert_lp_equivalence_after_anticipated_swap(
+        tpl_a: &cobre_solver::StageTemplate,
+        tpl_b: &cobre_solver::StageTemplate,
+        dec_start_a: usize,
+        dec_start_b: usize,
+        state_start_a: usize,
+        state_start_b: usize,
+        n_ant: usize,
+        k_max: usize,
+        fish_start_a: usize,
+        fish_start_b: usize,
+        n_fish_rows: usize,
+        stage_idx: usize,
+    ) {
+        assert_eq!(
+            tpl_a.num_cols, tpl_b.num_cols,
+            "stage {stage_idx}: num_cols"
+        );
+        assert_eq!(
+            tpl_a.num_rows, tpl_b.num_rows,
+            "stage {stage_idx}: num_rows"
+        );
+        assert_eq!(tpl_a.num_nz, tpl_b.num_nz, "stage {stage_idx}: num_nz");
+        assert_eq!(n_ant, 2, "this helper requires n_ant == 2");
+
+        // Build column permutation: `col_perm[j] = i` means tpl_a column `i`
+        // corresponds to tpl_b column `j`. Identity outside the anticipated regions.
+        let mut col_perm: Vec<usize> = (0..tpl_a.num_cols).collect();
+        // Swap the two anticipated_decision columns.
+        col_perm[dec_start_b] = dec_start_a + 1;
+        col_perm[dec_start_b + 1] = dec_start_a;
+        // Swap anticipated_state columns at each ring-buffer slot. Slot-major
+        // layout: column for slot `s`, plant `p` = state_start + s * n_ant + p.
+        for s in 0..k_max {
+            col_perm[state_start_b + s * n_ant] = state_start_a + s * n_ant + 1;
+            col_perm[state_start_b + s * n_ant + 1] = state_start_a + s * n_ant;
+        }
+
+        // Build row permutation: identity outside anticipated_state_fixing and
+        // anticipated_fishing rows. The state-fixing rows live at the same
+        // numeric range as the state columns (per indexer convention).
+        let mut row_perm: Vec<usize> = (0..tpl_a.num_rows).collect();
+        for s in 0..k_max {
+            row_perm[state_start_b + s * n_ant] = state_start_a + s * n_ant + 1;
+            row_perm[state_start_b + s * n_ant + 1] = state_start_a + s * n_ant;
+        }
+        if n_fish_rows == 2 {
+            row_perm[fish_start_b] = fish_start_a + 1;
+            row_perm[fish_start_b + 1] = fish_start_a;
+        }
+        // If only 1 fishing row is active (one plant matured but not the other),
+        // the SAME plant is active in both LPs — but at LOCAL index 0 in one and
+        // LOCAL index 1 in the other. The fishing-row index differs but corresponds
+        // to the same plant's constraint. The mapping is still a single-row swap
+        // when applicable.
+        if n_fish_rows == 1 {
+            // The single active fishing row in tpl_a corresponds to the single
+            // active fishing row in tpl_b (same plant, different local index).
+            row_perm[fish_start_b] = fish_start_a;
+        }
+
+        // Dense bound/objective comparison: tpl_a[col_perm[j]] == tpl_b[j].
+        for j in 0..tpl_a.num_cols {
+            let a = col_perm[j];
+            assert_eq!(
+                tpl_a.col_lower[a].to_bits(),
+                tpl_b.col_lower[j].to_bits(),
+                "stage {stage_idx}: col_lower mismatch at permuted col {j} <- {a}"
+            );
+            assert_eq!(
+                tpl_a.col_upper[a].to_bits(),
+                tpl_b.col_upper[j].to_bits(),
+                "stage {stage_idx}: col_upper mismatch at permuted col {j} <- {a}"
+            );
+            assert_eq!(
+                tpl_a.objective[a].to_bits(),
+                tpl_b.objective[j].to_bits(),
+                "stage {stage_idx}: objective mismatch at permuted col {j} <- {a}"
+            );
+        }
+        for i in 0..tpl_a.num_rows {
+            let ra = row_perm[i];
+            assert_eq!(
+                tpl_a.row_lower[ra].to_bits(),
+                tpl_b.row_lower[i].to_bits(),
+                "stage {stage_idx}: row_lower mismatch at permuted row {i} <- {ra}"
+            );
+            assert_eq!(
+                tpl_a.row_upper[ra].to_bits(),
+                tpl_b.row_upper[i].to_bits(),
+                "stage {stage_idx}: row_upper mismatch at permuted row {i} <- {ra}"
+            );
+        }
+
+        // Dense matrix comparison: expand CSC to dense, apply permutation,
+        // assert bit-equality. Tiny LPs (~50x20) so the O(n^2) cost is fine.
+        let dense_a = csc_to_dense(tpl_a);
+        let dense_b = csc_to_dense(tpl_b);
+        for i in 0..tpl_a.num_rows {
+            for j in 0..tpl_a.num_cols {
+                let va = dense_a[row_perm[i]][col_perm[j]];
+                let vb = dense_b[i][j];
+                assert_eq!(
+                    va.to_bits(),
+                    vb.to_bits(),
+                    "stage {stage_idx}: coefficient mismatch at row {i} col {j} \
+                     (permuted from row {} col {} in tpl_a)",
+                    row_perm[i],
+                    col_perm[j],
+                );
+            }
+        }
+    }
+
+    /// Expand a CSC `StageTemplate` to a dense `Vec<Vec<f64>>`.
+    fn csc_to_dense(tpl: &cobre_solver::StageTemplate) -> Vec<Vec<f64>> {
+        let mut dense = vec![vec![0.0_f64; tpl.num_cols]; tpl.num_rows];
+        for j in 0..tpl.num_cols {
+            let start = tpl.col_starts[j] as usize;
+            let end = tpl.col_starts[j + 1] as usize;
+            for k in start..end {
+                let row = tpl.row_indices[k] as usize;
+                dense[row][j] = tpl.values[k];
+            }
+        }
+        dense
+    }
+
+    /// **F3-004 invariance probe** — direct LP-construction layer test.
+    ///
+    /// Verifies that the LP templates produced by [`build_single_stage_template`]
+    /// are equivalent under a permutation of the `anticipated_thermal_indices` /
+    /// `anticipated_lead_stages` arrays.
+    ///
+    /// ## Why this test exists
+    ///
+    /// The integration test at
+    /// `crates/cobre-sddp/tests/declaration_order_invariance_anticipated.rs`
+    /// is a tautology: it builds two `System`s with thermals declared in
+    /// different orders, but `SystemBuilder::build()` sorts by `EntityId` so
+    /// both systems present identical canonical input downstream. That test
+    /// proves **determinism** (same canonical input -> same output), not
+    /// **invariance** (different declaration orders -> same canonical result).
+    ///
+    /// The Cobre hard rule on declaration-order invariance requires bit-for-bit
+    /// identical results regardless of input entity ordering. This unit test
+    /// targets the **actual** code path that the canonical sort masks: it
+    /// directly constructs a `TemplateBuildCtx` with a permuted (yet internally
+    /// consistent) pair of `(anticipated_thermal_indices, anticipated_lead_stages)`
+    /// arrays and confirms that the resulting LP coefficients are equivalent
+    /// (modulo the expected swap of the anticipated-decision columns,
+    /// anticipated-state ring-buffer columns/rows, and anticipated-fishing rows).
+    ///
+    /// ## Method
+    ///
+    /// 1. Build a system with two anticipated thermals (K=2 and K=3) plus one
+    ///    standard backup thermal, with **distinct** per-thermal stage costs
+    ///    and bounds (uniform defaults would trivially pass).
+    /// 2. Call `build_template_build_ctx` to obtain `ctx_a` with the canonical
+    ///    ordering `anticipated_thermal_indices = [0, 1]`,
+    ///    `anticipated_lead_stages = [2, 3]`.
+    /// 3. Manually construct `ctx_b` by swapping both arrays in lockstep:
+    ///    `anticipated_thermal_indices = [1, 0]`,
+    ///    `anticipated_lead_stages = [3, 2]`.
+    /// 4. Build single-stage templates for both contexts at stages 0, 2, and 4.
+    ///    Stage 0: both decisions active, no fishing rows.
+    ///    Stage 2: both decisions active, one fishing row (plant K=2 matured).
+    ///    Stage 4: only the K=2 decision active (K=3 inactive since `4 + 3 >= 5`),
+    ///             both fishing rows active.
+    /// 5. Assert LP equivalence under the canonical swap permutation
+    ///    (column swap on anticipated_decision and slot-major state, row swap
+    ///    on state-fixing and fishing rows when both plants are present).
+    #[test]
+    fn lp_template_invariant_under_anticipated_index_permutation() {
+        let system = anticipated_invariance_system();
+        // Canonical sort places thermals as [id=1, id=2, id=3].
+        assert_eq!(system.thermals().len(), 3);
+        assert_eq!(system.thermals()[0].id.0, 1);
+        assert_eq!(system.thermals()[1].id.0, 2);
+        assert_eq!(system.thermals()[2].id.0, 3);
+
+        let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
+        let par_lp = PrecomputedPar::default();
+        let resolved_params = ResolvedParameters {
+            per_param: vec![],
+            id_to_slot: vec![],
+        };
+
+        let (ctx_a, _, _) = super::build_template_build_ctx(
+            &system,
+            InflowNonNegativityMethod::None,
+            &par_lp,
+            &hydro_result.production,
+            &hydro_result.evaporation,
+            &resolved_params,
+        );
+
+        // Sanity: ctx_a uses canonical ordering.
+        assert_eq!(ctx_a.n_anticipated, 2);
+        assert_eq!(ctx_a.k_max, 3);
+        assert_eq!(ctx_a.anticipated_thermal_indices, vec![0, 1]);
+        assert_eq!(ctx_a.anticipated_lead_stages, vec![2, 3]);
+
+        // Construct ctx_b: a clone of ctx_a with the two anticipated arrays
+        // swapped in lockstep. Both arrays must be permuted by the same
+        // permutation to preserve the (thermal_idx, K_i) pairing.
+        let ctx_b = super::super::layout::TemplateBuildCtx {
+            hydros: ctx_a.hydros,
+            thermals: ctx_a.thermals,
+            lines: ctx_a.lines,
+            buses: ctx_a.buses,
+            load_models: ctx_a.load_models,
+            cascade: ctx_a.cascade,
+            bounds: ctx_a.bounds,
+            penalties: ctx_a.penalties,
+            hydro_pos: ctx_a.hydro_pos.clone(),
+            thermal_pos: ctx_a.thermal_pos.clone(),
+            line_pos: ctx_a.line_pos.clone(),
+            bus_pos: ctx_a.bus_pos.clone(),
+            par_lp: ctx_a.par_lp,
+            production_models: ctx_a.production_models,
+            evaporation_models: ctx_a.evaporation_models,
+            generic_constraints: ctx_a.generic_constraints,
+            resolved_generic_bounds: ctx_a.resolved_generic_bounds,
+            resolved_load_factors: ctx_a.resolved_load_factors,
+            resolved_exchange_factors: ctx_a.resolved_exchange_factors,
+            non_controllable_sources: ctx_a.non_controllable_sources,
+            resolved_ncs_bounds: ctx_a.resolved_ncs_bounds,
+            resolved_ncs_factors: ctx_a.resolved_ncs_factors,
+            resolved_parameters: ctx_a.resolved_parameters,
+            diversion_upstream: ctx_a.diversion_upstream.clone(),
+            n_hydros: ctx_a.n_hydros,
+            n_thermals: ctx_a.n_thermals,
+            n_lines: ctx_a.n_lines,
+            n_buses: ctx_a.n_buses,
+            max_par_order: ctx_a.max_par_order,
+            n_anticipated: ctx_a.n_anticipated,
+            k_max: ctx_a.k_max,
+            // The swap: lockstep permutation [0,1] -> [1,0] on both arrays.
+            anticipated_lead_stages: vec![
+                ctx_a.anticipated_lead_stages[1],
+                ctx_a.anticipated_lead_stages[0],
+            ],
+            anticipated_thermal_indices: vec![
+                ctx_a.anticipated_thermal_indices[1],
+                ctx_a.anticipated_thermal_indices[0],
+            ],
+            has_penalty: ctx_a.has_penalty,
+            cumulative_discount_factors: ctx_a.cumulative_discount_factors.clone(),
+            total_hours_per_stage: ctx_a.total_hours_per_stage.clone(),
+        };
+
+        // Sanity: ctx_b really has the swapped ordering.
+        assert_eq!(ctx_b.anticipated_thermal_indices, vec![1, 0]);
+        assert_eq!(ctx_b.anticipated_lead_stages, vec![3, 2]);
+
+        let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
+
+        // Test multiple stages to cover: no fishing rows (stage 0),
+        // partial fishing rows (stage 2: K=2 matured, K=3 not yet),
+        // full fishing rows (stage 3+: both matured).
+        for stage_idx in [0_usize, 2, 3] {
+            let stage = study_stages[stage_idx];
+
+            let (tpl_a, _, _, _, _, _, _) =
+                super::build_single_stage_template(&ctx_a, stage, stage_idx);
+            let (tpl_b, _, _, _, _, _, _) =
+                super::build_single_stage_template(&ctx_b, stage, stage_idx);
+
+            // Reconstruct the indexer for tpl_a / tpl_b to find the
+            // anticipated_decision / anticipated_state / fishing row offsets.
+            // Both templates use the same num_cols/num_rows (the layout depends
+            // only on n_anticipated and k_max, both unchanged by the swap).
+            let layout_a = super::super::layout::StageLayout::new(&ctx_a, stage, stage_idx);
+            let layout_b = super::super::layout::StageLayout::new(&ctx_b, stage, stage_idx);
+
+            // Layout offsets must be identical (they depend only on counts,
+            // not on the contents of the anticipated arrays).
+            assert_eq!(
+                layout_a.col_anticipated_decision_start, layout_b.col_anticipated_decision_start,
+                "stage {stage_idx}: dec_start"
+            );
+            assert_eq!(
+                layout_a.col_anticipated_state_start, layout_b.col_anticipated_state_start,
+                "stage {stage_idx}: state_start"
+            );
+            assert_eq!(
+                layout_a.row_anticipated_fishing_start, layout_b.row_anticipated_fishing_start,
+                "stage {stage_idx}: fish_start"
+            );
+            assert_eq!(
+                layout_a.n_anticipated_fishing_rows, layout_b.n_anticipated_fishing_rows,
+                "stage {stage_idx}: n_fish_rows"
+            );
+
+            assert_lp_equivalence_after_anticipated_swap(
+                &tpl_a,
+                &tpl_b,
+                layout_a.col_anticipated_decision_start,
+                layout_b.col_anticipated_decision_start,
+                layout_a.col_anticipated_state_start,
+                layout_b.col_anticipated_state_start,
+                ctx_a.n_anticipated,
+                ctx_a.k_max,
+                layout_a.row_anticipated_fishing_start,
+                layout_b.row_anticipated_fishing_start,
+                layout_a.n_anticipated_fishing_rows,
+                stage_idx,
+            );
+        }
     }
 }
