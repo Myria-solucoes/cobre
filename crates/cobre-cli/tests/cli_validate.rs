@@ -203,3 +203,194 @@ fn valid_case_piped_stdout_has_no_ansi_escapes() {
         "stdout should contain no ANSI escape sequences when piped, got: {stdout:?}"
     );
 }
+
+// ── acceptance criterion 5: pre-solver preparation phases are exercised ────────
+//
+// These tests cover failures that pass the six-layer IO pipeline but are caught
+// only by the three additional phases (StudyParams::from_config, prepare_stochastic,
+// prepare_hydro_models_from_artifacts) that `validate` now exercises.
+
+/// A `config.json` with `basis_activity_window = 100` must cause `validate` to
+/// exit 1.  The IO pipeline accepts any integer in the config schema — only
+/// `StudyParams::from_config` (Phase 8) enforces the `1..=31` range constraint.
+///
+/// Failure mode: `StudyParams::from_config` returns `SddpError::Validation`
+/// because `basis_activity_window` is outside the valid range.
+#[test]
+fn basis_activity_window_out_of_range_fails_validate() {
+    let dir = TempDir::new().unwrap();
+    make_valid_case(&dir);
+
+    // Overwrite config.json with an out-of-range basis_activity_window.
+    // The IO pipeline accepts this without error; only Phase 8 rejects it.
+    let bad_config = r#"{
+        "training": {
+            "forward_passes": 10,
+            "stopping_rules": [
+                { "type": "iteration_limit", "limit": 100 }
+            ],
+            "scenario_source": { "inflow": { "scheme": "in_sample" }, "seed": 42 },
+            "cut_selection": { "basis_activity_window": 100 }
+        }
+    }"#;
+    write_file(dir.path(), "config.json", bad_config);
+
+    cobre()
+        .args(["validate", dir.path().to_str().unwrap()])
+        .assert()
+        .failure()
+        .code(1);
+}
+
+/// Same case as above — the stdout must mention both `basis_activity_window`
+/// and the valid range `1..=31` so the user can fix the problem without
+/// reading the source code.
+#[test]
+fn basis_activity_window_out_of_range_stdout_mentions_field_and_range() {
+    let dir = TempDir::new().unwrap();
+    make_valid_case(&dir);
+
+    let bad_config = r#"{
+        "training": {
+            "forward_passes": 10,
+            "stopping_rules": [
+                { "type": "iteration_limit", "limit": 100 }
+            ],
+            "scenario_source": { "inflow": { "scheme": "in_sample" }, "seed": 42 },
+            "cut_selection": { "basis_activity_window": 100 }
+        }
+    }"#;
+    write_file(dir.path(), "config.json", bad_config);
+
+    cobre()
+        .args(["validate", dir.path().to_str().unwrap()])
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(
+            predicate::str::contains("basis_activity_window")
+                .and(predicate::str::contains("1..=31")),
+        );
+}
+
+/// A hydro plant configured with `"model": "fpha"` in `hydros.json` but with
+/// no entry in `system/hydro_production_models.json` (the file is absent entirely)
+/// must cause `validate` to exit 1.
+///
+/// Failure mode: `prepare_hydro_models_from_artifacts` (Phase 10) calls
+/// `determine_source`, which rejects an FPHA hydro that has no config entry.
+/// The dimensional-consistency check (Layer 4 of the IO pipeline) skips FPHA
+/// hydros when `fpha_hyperplanes.parquet` is absent — so the case passes Phases
+/// 1-9 and is only caught at Phase 10.
+#[test]
+fn fpha_hydro_without_production_models_json_fails_validate() {
+    let dir = TempDir::new().unwrap();
+
+    // Build a case identical to `make_valid_case` except:
+    // 1. `hydros.json` declares one hydro with `model: "fpha"`.
+    // 2. `system/hydro_production_models.json` is absent.
+    // 3. `system/fpha_hyperplanes.parquet` is absent.
+    // The IO pipeline passes because the dimensional check is guarded by
+    // `if !data.fpha_hyperplanes.is_empty()`. Phase 10 catches it.
+    write_file(dir.path(), "config.json", CONFIG_JSON);
+    write_file(dir.path(), "penalties.json", PENALTIES_JSON);
+    write_file(dir.path(), "stages.json", STAGES_JSON);
+    write_file(
+        dir.path(),
+        "initial_conditions.json",
+        INITIAL_CONDITIONS_JSON,
+    );
+    write_file(dir.path(), "system/buses.json", BUSES_JSON);
+    write_file(dir.path(), "system/lines.json", LINES_JSON);
+    write_file(dir.path(), "system/thermals.json", THERMALS_JSON);
+
+    // Hydro with FPHA generation model and no hydro_production_models.json entry.
+    let fpha_hydros_json = r#"{
+        "hydros": [
+            {
+                "id": 1,
+                "name": "UHE_FPHA",
+                "bus_id": 1,
+                "downstream_id": null,
+                "reservoir": {
+                    "min_storage_hm3": 0.0,
+                    "max_storage_hm3": 500.0
+                },
+                "outflow": {
+                    "min_outflow_m3s": 0.0,
+                    "max_outflow_m3s": null
+                },
+                "generation": {
+                    "model": "fpha",
+                    "min_turbined_m3s": 0.0,
+                    "max_turbined_m3s": 100.0,
+                    "min_generation_mw": 0.0,
+                    "max_generation_mw": 300.0
+                }
+            }
+        ]
+    }"#;
+    write_file(dir.path(), "system/hydros.json", fpha_hydros_json);
+    // Deliberately omit system/hydro_production_models.json and
+    // system/fpha_hyperplanes.parquet — the IO pipeline should pass,
+    // and Phase 10 should reject.
+
+    cobre()
+        .args(["validate", dir.path().to_str().unwrap()])
+        .assert()
+        .failure()
+        .code(1);
+}
+
+/// Same case — stdout must mention `hydro_production_models.json` so the user
+/// knows which file to create.
+#[test]
+fn fpha_hydro_without_production_models_json_stdout_mentions_file() {
+    let dir = TempDir::new().unwrap();
+
+    write_file(dir.path(), "config.json", CONFIG_JSON);
+    write_file(dir.path(), "penalties.json", PENALTIES_JSON);
+    write_file(dir.path(), "stages.json", STAGES_JSON);
+    write_file(
+        dir.path(),
+        "initial_conditions.json",
+        INITIAL_CONDITIONS_JSON,
+    );
+    write_file(dir.path(), "system/buses.json", BUSES_JSON);
+    write_file(dir.path(), "system/lines.json", LINES_JSON);
+    write_file(dir.path(), "system/thermals.json", THERMALS_JSON);
+
+    let fpha_hydros_json = r#"{
+        "hydros": [
+            {
+                "id": 1,
+                "name": "UHE_FPHA",
+                "bus_id": 1,
+                "downstream_id": null,
+                "reservoir": {
+                    "min_storage_hm3": 0.0,
+                    "max_storage_hm3": 500.0
+                },
+                "outflow": {
+                    "min_outflow_m3s": 0.0,
+                    "max_outflow_m3s": null
+                },
+                "generation": {
+                    "model": "fpha",
+                    "min_turbined_m3s": 0.0,
+                    "max_turbined_m3s": 100.0,
+                    "min_generation_mw": 0.0,
+                    "max_generation_mw": 300.0
+                }
+            }
+        ]
+    }"#;
+    write_file(dir.path(), "system/hydros.json", fpha_hydros_json);
+
+    cobre()
+        .args(["validate", dir.path().to_str().unwrap()])
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::contains("hydro_production_models.json"));
+}
