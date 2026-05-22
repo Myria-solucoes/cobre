@@ -14,12 +14,13 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Float64Builder, Int32Builder, Int8Builder, RecordBatch};
+use arrow::array::{Float64Builder, Int8Builder, Int32Builder, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use cobre_core::System;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 
+use crate::Config;
 use crate::output::error::OutputError;
 use crate::output::parquet_config::ParquetWriterConfig;
 use crate::output::schemas::{
@@ -28,7 +29,6 @@ use crate::output::schemas::{
     iteration_timing_schema, non_controllables_schema, pumping_stations_schema, rank_timing_schema,
     retry_histogram_schema, row_selection_schema, solver_iterations_schema, thermals_schema,
 };
-use crate::Config;
 
 // ─── Entity type codes (SS3) ─────────────────────────────────────────────────
 
@@ -1121,13 +1121,13 @@ mod tests {
     use super::*;
     use chrono::NaiveDate;
     use cobre_core::{
+        AnticipatedConfig, Block, BlockMode, Bus, DeficitSegment, EntityId, Hydro,
+        HydroGenerationModel, HydroPenalties, InflowModel, NoiseMethod, ScenarioSourceConfig,
+        Stage, StageRiskConfig, StageStateConfig, SystemBuilder, Thermal,
         resolved::{
             BoundsCountsSpec, BoundsDefaults, ContractStageBounds, HydroStageBounds,
             LineStageBounds, PumpingStageBounds, ResolvedBounds, ThermalStageBounds,
         },
-        AnticipatedConfig, Block, BlockMode, Bus, DeficitSegment, EntityId, Hydro,
-        HydroGenerationModel, HydroPenalties, InflowModel, NoiseMethod, ScenarioSourceConfig,
-        Stage, StageRiskConfig, StageStateConfig, SystemBuilder, Thermal,
     };
 
     // ── Fixtures ─────────────────────────────────────────────────────────────

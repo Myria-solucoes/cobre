@@ -558,6 +558,7 @@ name = "cobre-core"
 version = "0.6.2"
 dependencies = [
  "chrono",
+ "postcard",
  "schemars",
  "serde",
  "serde_json",
