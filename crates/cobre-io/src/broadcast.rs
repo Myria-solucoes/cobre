@@ -328,9 +328,9 @@ pub fn deserialize_parameters(bytes: &[u8]) -> Result<Vec<ScalarParameter>, Load
 mod tests {
     use super::*;
     use cobre_core::{
-        AnticipatedCommitmentHistory, Bus, ComputedParameter, DeficitSegment, EntityId, Hydro,
-        HydroGenerationModel, HydroPenalties, InitialConditions, ParameterKind, ScalarParameter,
-        SystemBuilder, Thermal,
+        entities::AnticipatedConfig, AnticipatedCommitmentHistory, Bus, ComputedParameter,
+        DeficitSegment, EntityId, Hydro, HydroGenerationModel, HydroPenalties, InitialConditions,
+        ParameterKind, ScalarParameter, SystemBuilder, Thermal,
     };
 
     fn minimal_bus(id: i32) -> Bus {
@@ -452,6 +452,49 @@ mod tests {
         assert!(restored.hydro(EntityId(1)).is_some());
 
         // Verify structural equality
+        assert_eq!(restored, system);
+    }
+
+    #[test]
+    fn test_round_trip_anticipated_thermal_system() {
+        // Regression guard: ensure a Thermal carrying `anticipated_config: Some(_)`
+        // survives postcard serialize/deserialize byte-for-byte through the
+        // broadcast wire format. Without this, a future Thermal field reorder
+        // or AnticipatedConfig schema change could silently break MPI worker
+        // deserialization with no test failure.
+        let buses = vec![minimal_bus(1), minimal_bus(2)];
+        let mut anticipated = minimal_thermal(10, 1);
+        anticipated.anticipated_config = Some(AnticipatedConfig { lead_stages: 2 });
+        let regular = minimal_thermal(20, 2);
+        let thermals = vec![anticipated, regular];
+
+        let system = SystemBuilder::new()
+            .buses(buses)
+            .thermals(thermals)
+            .build()
+            .unwrap();
+
+        let bytes = serialize_system(&system).unwrap();
+        let restored = deserialize_system(&bytes).unwrap();
+
+        assert_eq!(restored.n_thermals(), system.n_thermals());
+        let Some(restored_anticipated) = restored.thermal(EntityId(10)) else {
+            panic!("thermal 10 must round-trip");
+        };
+        assert_eq!(
+            restored_anticipated.anticipated_config,
+            Some(AnticipatedConfig { lead_stages: 2 }),
+            "anticipated_config must survive broadcast round-trip"
+        );
+        let Some(restored_regular) = restored.thermal(EntityId(20)) else {
+            panic!("thermal 20 must round-trip");
+        };
+        assert_eq!(
+            restored_regular.anticipated_config, None,
+            "non-anticipated thermal must remain None after round-trip"
+        );
+
+        // Structural equality covers all other fields including future additions.
         assert_eq!(restored, system);
     }
 
