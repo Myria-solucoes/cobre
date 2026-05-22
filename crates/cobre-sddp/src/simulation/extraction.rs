@@ -120,7 +120,7 @@ impl ThermalReverseLookup {
 /// Returns `Some(v)` where `v = primal[anticipated_decision.start + local_idx]` when:
 /// - thermal `thermal_local` is anticipated (i.e., `lookup.thermal_is_anticipated[thermal_local]`
 ///   is `Some(local_idx)`), AND
-/// - the decision is active at the current stage: `spec.stage_index + K_i <= spec.n_stages`.
+/// - the decision is active at the current stage: `spec.stage_index + K_i < spec.n_stages`.
 ///
 /// Returns `None` silently under any of:
 /// - the thermal is not anticipated,

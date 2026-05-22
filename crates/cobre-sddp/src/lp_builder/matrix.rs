@@ -89,11 +89,14 @@ fn fill_ar_lag_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
     }
 }
 
-/// Anticipated-state columns: unconstrained (free variables fixed by state-fixing rows).
+/// Anticipated-state columns: intentionally unconstrained bounds `(-INF, +INF)`.
 ///
 /// Writes `(-INF, +INF)` on every `n_ant_state` anticipated-state columns.
-/// These columns are fixed at solve time by the `n_ant_state` state-fixing equality
-/// rows (row RHS is patched in epic-06). Mirror of `fill_ar_lag_columns`.
+/// The columns are stored in slot-major, plant-minor order:
+/// `col = col_anticipated_state_start + slot * n_anticipated + plant`.
+/// Bounds are left open because the binding constraint comes from the
+/// `n_ant_state` state-fixing equality rows whose RHS values are patched
+/// at solve time by `fill_state_patches`. Mirror of `fill_ar_lag_columns`.
 ///
 /// No-op when `n_anticipated == 0` (`n_ant_state == 0`).
 fn fill_anticipated_state_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
