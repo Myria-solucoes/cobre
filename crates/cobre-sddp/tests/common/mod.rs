@@ -11,6 +11,8 @@ use std::path::Path;
 
 use cobre_sddp::{StudySetup, setup::StudyParams};
 
+pub mod anticipated_structural_assertions;
+
 /// Build a [`StudySetup`] for a case directory.
 ///
 /// Reads scenario sources from `config`, derives `StudyParams`, and constructs

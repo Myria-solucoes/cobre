@@ -1,5 +1,21 @@
-//! Integration test verifying the training lower bound for a 5-stage K=2
-//! system with 1 anticipated thermal, 1 backup thermal, and 1 hydro.
+//! Smoke test for K=2 anticipated thermal dispatch with 5 stages.
+//!
+//! ## Scope
+//!
+//! Uses structural assertions (training completes without error, iteration
+//! count matches the configured limit, lower bound is finite and
+//! non-decreasing across iterations, basis cache is populated at every
+//! stage, and anticipated-state slots at delivery stages hold finite,
+//! non-negative values). It deliberately does NOT pin an `EXPECTED_LB`
+//! constant: there is no closed-form derivation for this fixture, so a
+//! pinned value would only certify the converged value is _stable_, not
+//! that it is _correct_.
+//!
+//! The closed-form value-correctness canary lives in
+//! `anticipated_closed_form_lb_k1_single_thermal.rs`, which uses a stripped
+//! 2-stage K=1 fixture whose lower bound is hand-derivable in five minutes.
+//! That canary defends the LP/cut math; this smoke test defends multi-stage
+//! state propagation, the K=2 ring-buffer shift, and basis-cache capture.
 //!
 //! ## Fixture description
 //!
@@ -11,15 +27,6 @@
 //! - 1 backup thermal (cost 500 $/MWh, max 200 MW, id=4).
 //! - Load 150 MW constant across all stages.
 //! - `past_anticipated_commitments = [(id=2, [100.0, 50.0])]`.
-//!
-//! ## Lower bound (golden value)
-//!
-//! `EXPECTED_LB` is pinned as a golden value: it was captured from the first
-//! passing run and asserted bit-for-bit on subsequent runs (relative tolerance
-//! 1e-6). This test validates state propagation, the ring-buffer shift, and
-//! basis-cache capture under converged training — it does NOT certify a
-//! closed-form cost derivation. Re-pin the constant only after deliberate
-//! fixture changes.
 
 #![allow(
     clippy::unwrap_used,
@@ -63,9 +70,11 @@ use cobre_sddp::{StudySetup, hydro_models::PrepareHydroModelsResult};
 use cobre_solver::highs::HighsSolver;
 use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
-// Golden value pinned from a converged run; re-pin only after deliberate
-// fixture changes.
-const EXPECTED_LB: f64 = 18_600_000.0;
+mod common;
+use common::anticipated_structural_assertions::{
+    assert_anticipated_delivery_slots_populated, assert_basis_cache_fully_populated,
+    assert_training_converged_structurally,
+};
 
 // ---------------------------------------------------------------------------
 // StubComm — single-rank communicator for testing
@@ -468,24 +477,21 @@ fn test_anticipated_5stage_k2_analytical_lb() {
     );
 
     let result = &outcome.result;
+    let indexer = setup.stage_indexer();
+    let anticipated_state_start = indexer.anticipated_state.start;
+    let n_anticipated = indexer.n_anticipated;
 
-    assert_eq!(result.iterations, 8, "iterations mismatch");
-
-    assert_eq!(
-        result.basis_cache.len(),
-        5,
-        "basis_cache must have one entry per study stage"
-    );
-    for (stage_idx, entry) in result.basis_cache.iter().enumerate() {
-        assert!(entry.is_some(), "basis_cache[{stage_idx}] must be Some");
-    }
-
-    let actual = result.final_lb;
-    let expected = EXPECTED_LB;
-    let rel_diff = (actual - expected).abs() / expected.abs();
-    assert!(
-        rel_diff < 1e-6,
-        "final_lb golden value mismatch: actual={actual}, expected={expected}, \
-         rel_diff={rel_diff}. If intentional, update EXPECTED_LB."
+    // Structural assertions — no EXPECTED_LB. Value-correctness coverage
+    // lives in anticipated_closed_form_lb_k1_single_thermal.rs (closed-form
+    // canary). See F3-003 in assessment-report.md.
+    assert_training_converged_structurally(result, &[], 8);
+    assert_basis_cache_fully_populated(result, 5);
+    // Delivery stages for K=2 with strict predicate (F2-002): t + K < n_stages
+    // means decisions at t in {0,1,2}, deliveries at t+K in {2,3,4}.
+    assert_anticipated_delivery_slots_populated(
+        result,
+        anticipated_state_start,
+        n_anticipated,
+        &[2, 3, 4],
     );
 }
