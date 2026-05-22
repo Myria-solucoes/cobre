@@ -1386,6 +1386,26 @@ impl StageIndexer {
                     std::cmp::Ordering::Less => {
                         self.anticipated_state.start + (slot + 1) * self.n_anticipated + plant
                     }
+                    // INVARIANT: Padding slot — `slot >= k_p` means this ring-buffer
+                    // entry belongs to plant `plant` but exceeds its lead time `K_i`.
+                    // Padding slots exist because the ring buffer is sized to `k_max`
+                    // slots (the system-wide maximum), but plant `plant` only uses
+                    // `k_p = K_i` of them. These slots are safe to pass through as
+                    // their own state-column index (not a decision-variable column)
+                    // because the following 5-step chain guarantees their LP dual is 0:
+                    //   1. `shift_anticipated_state` initialises padding slots to 0.0.
+                    //   2. The corresponding state-fixing row has RHS 0 (from step 1).
+                    //   3. The LP solver pins the slot value to 0 via the equality row.
+                    //   4. A zero-valued variable at a zero-RHS equality has dual 0.
+                    //   5. Zero duals produce zero cut coefficients, which are no-ops
+                    //      in the cut row (neither pruned nor corrupted).
+                    //
+                    // WARNING: if pre-horizon seeding is implemented (the data model
+                    // already has `AnticipatedCommitmentHistory` fields for it), step 1
+                    // would inject a non-zero into a padding slot, breaking this chain.
+                    // At that point the `j` identity return here must be replaced with
+                    // a proper column remap, and the `debug_assert!` in
+                    // `build_cut_row_batch_into` will fire to surface the breakage.
                     std::cmp::Ordering::Greater => j,
                 };
             }

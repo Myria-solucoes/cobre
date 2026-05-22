@@ -345,6 +345,21 @@ pub fn build_cut_row_batch_into(
         } else {
             for (j, &c) in coefficients.iter().enumerate() {
                 let lp_col = indexer.state_to_lp_column(j);
+                // Padding-slot invariant: when state_to_lp_column returns j unchanged
+                // and j falls inside the anticipated-state block, the slot is a padding
+                // slot (slot >= k_p for its plant). The INVARIANT comment in
+                // state_to_lp_column explains the 5-step chain that guarantees the
+                // corresponding cut coefficient is 0.0. Assert this in debug builds.
+                debug_assert!(
+                    !(lp_col == j
+                        && indexer.n_anticipated > 0
+                        && j >= indexer.anticipated_state.start
+                        && j < indexer.anticipated_state.start
+                            + indexer.n_anticipated * indexer.k_max)
+                        || c == 0.0,
+                    "padding-slot j={j} has non-zero cut coefficient {c}; \
+                     shift_anticipated_state must have seeded a non-zero into a padding slot"
+                );
                 push_scaled_coefficient(batch, lp_col, c, col_scale);
             }
         }
@@ -485,6 +500,21 @@ pub fn build_delta_cut_row_batch_into(
         } else {
             for (j, &c) in coefficients.iter().enumerate() {
                 let lp_col = indexer.state_to_lp_column(j);
+                // Padding-slot invariant: when state_to_lp_column returns j unchanged
+                // and j falls inside the anticipated-state block, the slot is a padding
+                // slot (slot >= k_p for its plant). The INVARIANT comment in
+                // state_to_lp_column explains the 5-step chain that guarantees the
+                // corresponding cut coefficient is 0.0. Assert this in debug builds.
+                debug_assert!(
+                    !(lp_col == j
+                        && indexer.n_anticipated > 0
+                        && j >= indexer.anticipated_state.start
+                        && j < indexer.anticipated_state.start
+                            + indexer.n_anticipated * indexer.k_max)
+                        || c == 0.0,
+                    "padding-slot j={j} has non-zero cut coefficient {c}; \
+                     shift_anticipated_state must have seeded a non-zero into a padding slot"
+                );
                 push_scaled_coefficient(batch, lp_col, c, col_scale);
             }
         }
