@@ -406,11 +406,9 @@ fn resolve_anticipated_decision<S: BuildHasher>(
     let Some(&sys_pos) = thermal_pos.get(&thermal_id) else {
         return vec![];
     };
-    if let Some(local_idx) = indexer
-        .anticipated_thermal_indices
-        .iter()
-        .position(|&p| p == sys_pos)
-    {
+    // O(1) reverse lookup via the pre-built map in the indexer rather than
+    // a linear scan over anticipated_thermal_indices.
+    if let Some(&local_idx) = indexer.anticipated_local_by_sys_pos.get(&sys_pos) {
         vec![(indexer.anticipated_decision.start + local_idx, 1.0)]
     } else {
         vec![]

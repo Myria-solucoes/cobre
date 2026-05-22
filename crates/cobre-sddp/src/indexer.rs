@@ -104,6 +104,7 @@
 //! With 2 anticipated thermals (`K_max = 3`): `anticipated_state = 9..15` inserts
 //! before `z_inflow`, shifting it to `15..18` and `theta` to `21`.
 
+use std::collections::HashMap;
 use std::ops::Range;
 
 use cobre_solver::StageTemplate;
@@ -393,6 +394,15 @@ pub struct StageIndexer {
     /// `fpha_hydro_indices` pattern. Empty when built via
     /// [`StageIndexer::new`].
     pub anticipated_thermal_indices: Vec<usize>,
+
+    /// Reverse map: global thermal position → anticipated-local index.
+    ///
+    /// Inverse of [`Self::anticipated_thermal_indices`]: given a system-level
+    /// thermal position `sys_pos`, `anticipated_local_by_sys_pos[&sys_pos]`
+    /// yields the anticipated-local index (0-indexed within the anticipated
+    /// subset). Built once at construction for O(1) resolution in
+    /// `resolve_anticipated_decision`. Empty when `n_anticipated == 0`.
+    pub(crate) anticipated_local_by_sys_pos: HashMap<usize, usize>,
 
     /// Column range for forward line flow variables, one per (line, block) pair.
     ///
@@ -862,6 +872,7 @@ impl StageIndexer {
             anticipated_decision: 0..0,
             anticipated_lead_stages: Vec::new(),
             anticipated_thermal_indices: Vec::new(),
+            anticipated_local_by_sys_pos: HashMap::new(),
             line_fwd: 0..0,
             line_rev: 0..0,
             deficit: 0..0,
@@ -1198,6 +1209,12 @@ impl StageIndexer {
             thermal: thermal_start..thermal_end,
             anticipated_decision,
             anticipated_lead_stages: counts.anticipated_lead_stages.clone(),
+            anticipated_local_by_sys_pos: counts
+                .anticipated_thermal_indices
+                .iter()
+                .enumerate()
+                .map(|(local, &sys_pos)| (sys_pos, local))
+                .collect(),
             anticipated_thermal_indices: counts.anticipated_thermal_indices.clone(),
             line_fwd: line_fwd_start..line_rev_start,
             line_rev: line_rev_start..deficit_start,

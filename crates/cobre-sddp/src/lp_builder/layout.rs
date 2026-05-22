@@ -315,6 +315,12 @@ pub(crate) struct StageLayout {
     /// order within each constraint's bound entries. Used for CSC matrix construction,
     /// row bound filling, and objective coefficient filling.
     pub(crate) generic_constraint_rows: Vec<GenericConstraintRowEntry>,
+    /// Full augmented indexer for this stage.
+    ///
+    /// Cached here so that `fill_generic_constraint_entries` can call
+    /// `resolve_variable_ref` without rebuilding the indexer (and cloning the
+    /// anticipated metadata vecs) on every template build call.
+    pub(crate) indexer: StageIndexer,
 }
 
 // ── Private helper return structs ─────────────────────────────────────────────
@@ -829,6 +835,7 @@ impl StageLayout {
             fpha_planes_per_hydro,
             evap_hydro_indices,
             generic_constraint_rows: generic.generic_constraint_rows,
+            indexer: idx,
         }
     }
 }

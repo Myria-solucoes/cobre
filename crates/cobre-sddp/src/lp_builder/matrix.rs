@@ -1499,32 +1499,8 @@ pub(super) fn fill_generic_constraint_entries(
         return;
     }
 
-    // Build a full StageIndexer so that resolve_variable_ref can map any
-    // VariableRef to the correct column index for this stage.
-    let indexer = crate::indexer::StageIndexer::with_equipment_and_evaporation(
-        &crate::indexer::EquipmentCounts {
-            hydro_count: ctx.n_hydros,
-            max_par_order: ctx.max_par_order,
-            n_thermals: ctx.n_thermals,
-            n_lines: ctx.n_lines,
-            n_buses: ctx.n_buses,
-            n_blks: layout.n_blks,
-            has_inflow_penalty: ctx.has_penalty,
-            max_deficit_segments: layout.max_deficit_segments,
-            n_anticipated: ctx.n_anticipated,
-            k_max: ctx.k_max,
-            anticipated_lead_stages: ctx.anticipated_lead_stages.clone(),
-            anticipated_thermal_indices: ctx.anticipated_thermal_indices.clone(),
-        },
-        &crate::indexer::FphaColumnLayout {
-            hydro_indices: layout.fpha_hydro_indices.clone(),
-            planes_per_hydro: layout.fpha_planes_per_hydro.clone(),
-        },
-        &crate::indexer::EvapConfig {
-            hydro_indices: layout.evap_hydro_indices.clone(),
-        },
-    );
-
+    // Use the indexer already built and cached on the layout; avoids rebuilding
+    // and cloning the anticipated metadata vecs on every template build call.
     let positions = crate::generic_constraints::EntityPositionMaps {
         hydro: &ctx.hydro_pos,
         thermal: &ctx.thermal_pos,
@@ -1560,7 +1536,7 @@ pub(super) fn fill_generic_constraint_entries(
                 entry.block_idx,
                 layout.n_blks,
                 stage_idx,
-                &indexer,
+                &layout.indexer,
                 ctx.production_models,
                 &positions,
             );

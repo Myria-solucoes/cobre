@@ -549,7 +549,8 @@ fn build_template_build_ctx<'a>(
     for (t_idx, thermal) in system.thermals().iter().enumerate() {
         if let Some(cfg) = thermal.anticipated_config.as_ref() {
             anticipated_thermal_indices.push(t_idx);
-            anticipated_lead_stages.push(usize::try_from(cfg.lead_stages).unwrap_or(usize::MAX));
+            // u32 always fits in usize on supported 32-bit and 64-bit targets.
+            anticipated_lead_stages.push(cfg.lead_stages as usize);
         }
     }
     let n_anticipated = anticipated_thermal_indices.len();
