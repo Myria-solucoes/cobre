@@ -12,8 +12,16 @@ use crate::EntityId;
 /// The field is `u32` so that negative JSON literals are rejected at serde
 /// deserialise time with a `ParseError`; zero is rejected by the semantic
 /// validator with a `SchemaError`.
+///
+/// `deny_unknown_fields` matches the IO-layer `RawAnticipatedConfig` (see
+/// `crates/cobre-io/src/system/thermals.rs`) so that any deserialisation path
+/// that bypasses the IO raw parser (programmatic JSON loads, future internal
+/// state-snapshot tooling) still rejects unknown keys consistently. Postcard
+/// is positional and ignores this attribute on the wire — broadcast
+/// compatibility is unaffected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct AnticipatedConfig {
     /// Number of stages of dispatch anticipation. Must be ≥ 1.
     pub lead_stages: u32,
