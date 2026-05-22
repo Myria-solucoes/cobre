@@ -130,11 +130,11 @@ fn default_options() -> [DefaultOption; 13] {
         },
         DefaultOption {
             name: c"primal_feasibility_tolerance",
-            value: OptionValue::Double(1e-7),
+            value: OptionValue::Double(1e-9),
         },
         DefaultOption {
             name: c"dual_feasibility_tolerance",
-            value: OptionValue::Double(1e-7),
+            value: OptionValue::Double(1e-9),
         },
         DefaultOption {
             name: c"simplex_dual_edge_weight_strategy",

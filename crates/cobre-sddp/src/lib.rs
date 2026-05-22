@@ -83,7 +83,7 @@ pub use config::TrainingConfig;
 // ── convergence ───────────────────────────────────────────────────────────────
 pub use convergence::ConvergenceMonitor;
 // ── cut ───────────────────────────────────────────────────────────────────────
-pub use cut::wire::{cut_wire_size, deserialize_cut, serialize_cut, CutWireHeader};
+pub use cut::wire::{CutWireHeader, cut_wire_size, deserialize_cut, serialize_cut};
 pub use cut::{CutPool, FutureCostFunction};
 // ── cut_selection ─────────────────────────────────────────────────────────────
 pub use cut_selection::CutSelectionStrategy;
@@ -94,64 +94,64 @@ pub use energy_conversion::{EnergyConversionSet, HydroEnergyProductivityOverride
 // ── error ─────────────────────────────────────────────────────────────────────
 pub use error::SddpError;
 // ── estimation ────────────────────────────────────────────────────────────────
-pub use estimation::{estimate_from_history, EstimationPath, EstimationReport};
+pub use estimation::{EstimationPath, EstimationReport, estimate_from_history};
 // ── forward ───────────────────────────────────────────────────────────────────
-pub use forward::{build_cut_row_batch_into, SyncResult};
+pub use forward::{SyncResult, build_cut_row_batch_into};
 // ── hydro_models ──────────────────────────────────────────────────────────────
 pub use hydro_models::{
-    build_hydro_model_summary, prepare_hydro_models, FphaHydroDetail, HydroModelSummary,
-    PrepareHydroModelsResult, ProductionModelSource,
+    FphaHydroDetail, HydroModelSummary, PrepareHydroModelsResult, ProductionModelSource,
+    build_hydro_model_summary, prepare_hydro_models,
 };
 // ── indexer ───────────────────────────────────────────────────────────────────
 pub use indexer::{EquipmentCounts, FphaColumnLayout, StageIndexer};
 // ── inflow_method ─────────────────────────────────────────────────────────────
 pub use inflow_method::InflowNonNegativityMethod;
 // ── lp_builder ────────────────────────────────────────────────────────────────
-pub use lp_builder::{build_stage_templates, StageTemplates};
+pub use lp_builder::{StageTemplates, build_stage_templates};
 // ── policy_load ───────────────────────────────────────────────────────────────
 pub use policy_load::{
     build_basis_cache_from_checkpoint, inject_boundary_cuts, load_boundary_cuts,
     validate_policy_compatibility,
 };
 // ── provenance ────────────────────────────────────────────────────────────────
-pub use provenance::{build_provenance_report, ModelProvenanceReport, ProvenanceSource};
+pub use provenance::{ModelProvenanceReport, ProvenanceSource, build_provenance_report};
 // ── risk_measure ──────────────────────────────────────────────────────────────
 pub use risk_measure::{BackwardOutcome, RiskMeasure};
 // ── setup ─────────────────────────────────────────────────────────────────────
 pub use setup::{
-    prepare_stochastic, PrepareStochasticResult, StudyParams, StudySetup, DEFAULT_MAX_ITERATIONS,
-    DEFAULT_SEED,
+    DEFAULT_MAX_ITERATIONS, DEFAULT_SEED, PrepareStochasticResult, StudyParams, StudySetup,
+    prepare_stochastic,
 };
 // ── simulation ────────────────────────────────────────────────────────────────
 pub use simulation::{
-    aggregate_simulation, simulate, ScenarioCategoryCosts, SimulationError, SimulationHydroResult,
-    SimulationScenarioResult, SimulationStageResult, SimulationSummary,
+    ScenarioCategoryCosts, SimulationError, SimulationHydroResult, SimulationScenarioResult,
+    SimulationStageResult, SimulationSummary, aggregate_simulation, simulate,
 };
 // ── solver_stats ──────────────────────────────────────────────────────────────
 pub use solver_stats::{
-    pack_delta_scalars, pack_scenario_stats, unpack_delta_scalars, unpack_scenario_stats,
-    SolverStatsDelta, SOLVER_STATS_DELTA_SCALAR_FIELDS,
+    SOLVER_STATS_DELTA_SCALAR_FIELDS, SolverStatsDelta, pack_delta_scalars, pack_scenario_stats,
+    unpack_delta_scalars, unpack_scenario_stats,
 };
 // ── stochastic_summary ────────────────────────────────────────────────────────
 pub use stochastic_summary::{
-    build_stochastic_summary, estimation_report_to_fitting_report,
-    inflow_models_to_annual_component_rows, inflow_models_to_ar_rows, inflow_models_to_stats_rows,
-    ArOrderSummary, StochasticSource, StochasticSummary,
+    ArOrderSummary, StochasticSource, StochasticSummary, build_stochastic_summary,
+    estimation_report_to_fitting_report, inflow_models_to_annual_component_rows,
+    inflow_models_to_ar_rows, inflow_models_to_stats_rows,
 };
 // ── stopping_rule ─────────────────────────────────────────────────────────────
 pub use stopping_rule::{MonitorState, StoppingMode, StoppingRule, StoppingRuleSet};
 // ── training ──────────────────────────────────────────────────────────────────
-pub use training::{train, TrainingOutcome, TrainingResult};
+pub use training::{TrainingOutcome, TrainingResult, train};
 // ── training_output ───────────────────────────────────────────────────────────
 pub use training_output::build_training_output;
 // ── resolved_parameters ───────────────────────────────────────────────────────
 pub use resolved_parameters::{
-    build_resolved_parameters, deserialize_resolved_parameters, serialize_resolved_parameters,
-    ResolvedParameters, ResolvedParametersError,
+    ResolvedParameters, ResolvedParametersError, build_resolved_parameters,
+    deserialize_resolved_parameters, serialize_resolved_parameters,
 };
 // ── state_exchange ────────────────────────────────────────────────────────────
 pub use state_exchange::ExchangeBuffers;
 // ── trajectory ────────────────────────────────────────────────────────────────
 pub use trajectory::TrajectoryRecord;
 // ── workspace ─────────────────────────────────────────────────────────────────
-pub use workspace::{CapturedBasis, BASIS_BROADCAST_WIRE_VERSION};
+pub use workspace::{BASIS_BROADCAST_WIRE_VERSION, CapturedBasis};

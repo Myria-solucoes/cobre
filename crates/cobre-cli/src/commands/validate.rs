@@ -21,9 +21,9 @@ use std::path::{Path, PathBuf};
 
 use clap::Args;
 use cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts;
-use cobre_sddp::validate_phases::{prep_phase_metadata, PrepPhase};
-use cobre_sddp::{prepare_stochastic, StudyParams};
-use console::{style, Term};
+use cobre_sddp::validate_phases::{PrepPhase, prep_phase_metadata};
+use cobre_sddp::{StudyParams, prepare_stochastic};
+use console::{Term, style};
 
 use crate::error::CliError;
 
