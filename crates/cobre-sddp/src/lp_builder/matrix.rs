@@ -255,7 +255,7 @@ fn fill_anticipated_decision_columns(
             bufs.col_lower[col] = 0.0;
             bufs.col_upper[col] = 0.0;
         }
-        // Objective coefficient is set by ticket-022; leave at 0.0
+        // Objective coefficient left at default 0.0; set by fill_anticipated_decision_objective.
         // (already the vec initialization default).
     }
 }
@@ -1006,7 +1006,7 @@ pub(super) fn fill_anticipated_fishing_entries(
 /// This pins each anticipated-state ring-buffer slot to its corresponding state-fixing
 /// equality row (mirror of the storage-fixing and lag-fixing diagonals in
 /// `fill_state_and_water_entries`). Row bounds default to `0 == 0` (initialised
-/// in `fill_stage_rows`); the RHS is patched at solve time in epic-06.
+/// in `fill_stage_rows`); the RHS is patched at solve time by `fill_state_patches`.
 ///
 /// No-op when `n_anticipated == 0` (`n_ant_state == 0`, loops execute zero times).
 fn fill_anticipated_state_fixing_entries(
@@ -1050,7 +1050,7 @@ fn fill_anticipated_decision_state_write_entries(
         if stage_idx.saturating_add(k_i) >= n_stages {
             continue;
         }
-        // K_i >= 1 enforced by epic-02 IO validators; K_i - 1 >= 0 is always safe.
+        // K_i >= 1 enforced by IO validators; K_i - 1 >= 0 is always safe.
         let slot = k_i - 1;
         let col = layout.col_anticipated_decision_start + local_idx;
         let row =

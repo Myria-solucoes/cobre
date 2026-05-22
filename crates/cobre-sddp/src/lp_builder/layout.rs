@@ -660,7 +660,7 @@ impl StageLayout {
 
         // Build the augmented indexer with the real anticipated metadata.
         // When `n_anticipated == 0` the anticipated_state block is empty and the
-        // layout is bit-identical to the pre-ticket-020 base indexer.
+        // layout is bit-identical to the base indexer without anticipated columns.
         let idx = StageIndexer::with_equipment_and_evaporation(
             &crate::indexer::EquipmentCounts {
                 hydro_count: ctx.n_hydros,

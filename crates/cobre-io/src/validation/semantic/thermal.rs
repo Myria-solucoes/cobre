@@ -385,11 +385,11 @@ pub(super) fn warn_thermal_generation_on_anticipated_thermal(
 /// Layer 5a — rejects per-stage thermal bound overrides whose `stage_id` is
 /// outside the study horizon `[0, n_stages)`.
 ///
-/// Per epic-04 Decision 7, the thermal-bounds resolution table is padded
-/// with each plant's base entity values for stages `[n_stages, n_stages + K_max)`
-/// to support anticipated-delivery lookups. Overrides in that padded region
-/// would be silently dropped by `resolve_bounds` (the `stage_index` only
-/// covers study stages); this validator surfaces them as a user-visible error.
+/// The thermal-bounds resolution table is padded with each plant's base entity
+/// values for stages `[n_stages, n_stages + K_max)` to support
+/// anticipated-delivery lookups. Overrides in that padded region would be
+/// silently dropped by `resolve_bounds` (the `stage_index` only covers study
+/// stages); this validator surfaces them as a user-visible error.
 pub(super) fn check_thermal_bounds_override_stage_range(
     data: &ParsedData,
     ctx: &mut ValidationContext,
