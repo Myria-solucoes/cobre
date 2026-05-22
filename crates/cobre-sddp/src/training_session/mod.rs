@@ -278,6 +278,8 @@ impl<'a, S: SolverInterface + Send, C: Communicator> TrainingSession<'a, S, C> {
             stage_ctx.templates[0].num_rows,
             indexer.hydro_count,
             indexer.max_par_order,
+            indexer.n_anticipated,
+            indexer.k_max,
             stage_ctx,
         );
 
