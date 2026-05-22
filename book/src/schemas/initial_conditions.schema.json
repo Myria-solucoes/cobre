@@ -1,5 +1,29 @@
 {
   "$defs": {
+    "RawAnticipatedCommitmentHistory": {
+      "additionalProperties": false,
+      "description": "Past committed MW values for one anticipated thermal plant.\n\n`values_mw[0]` is the commitment for the earliest pending delivery stage;\n`values_mw[k-1]` is the most recent. Length must equal the plant's\n`lead_stages` (validated semantically in a later validation layer).",
+      "properties": {
+        "thermal_id": {
+          "description": "Thermal plant identifier. Must reference an anticipated thermal.",
+          "format": "int32",
+          "type": "integer"
+        },
+        "values_mw": {
+          "description": "Past committed MW values, ordered by delivery stage ascending.\nLength must equal the plant's `lead_stages` (validated semantically).",
+          "items": {
+            "format": "double",
+            "type": "number"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "thermal_id",
+        "values_mw"
+      ],
+      "type": "object"
+    },
     "RawHydroPastInflows": {
       "additionalProperties": false,
       "description": "Past inflow values for PAR(p) lag initialization for one hydro plant.",
@@ -105,6 +129,13 @@
       "description": "Initial reservoir volumes for filling hydros [hm³].\nA filling hydro may not also appear in `storage`.",
       "items": {
         "$ref": "#/$defs/RawHydroStorage"
+      },
+      "type": "array"
+    },
+    "past_anticipated_commitments": {
+      "description": "Past committed MW values for each anticipated thermal plant, ordered by\ndelivery stage ascending. Present only when the study includes at least\none anticipated thermal. Optional; defaults to empty.",
+      "items": {
+        "$ref": "#/$defs/RawAnticipatedCommitmentHistory"
       },
       "type": "array"
     },

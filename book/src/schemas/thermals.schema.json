@@ -5,12 +5,15 @@
       "description": "Intermediate type for anticipated dispatch configuration.",
       "properties": {
         "lead_stages": {
-          "description": "Number of stages of dispatch anticipation.",
-          "format": "int32",
+          "description": "Number of stages of dispatch anticipation. Must be ≥ 1.\n\nUsing `u32` here causes serde to reject negative JSON literals with a\n`ParseError` before validation runs.",
+          "format": "uint32",
+          "minimum": 0,
           "type": "integer"
         }
       },
-      "required": ["lead_stages"],
+      "required": [
+        "lead_stages"
+      ],
       "type": "object"
     },
     "RawThermal": {
@@ -26,7 +29,7 @@
               "type": "null"
             }
           ],
-          "description": "Anticipated dispatch configuration. Absent = no lead."
+          "description": "Anticipated dispatch configuration. Absent = no anticipation."
         },
         "bus_id": {
           "description": "Bus to which this plant's generation is injected.",
@@ -42,13 +45,19 @@
           "default": null,
           "description": "Stage index when the plant enters service. Absent or null = always exists.",
           "format": "int32",
-          "type": ["integer", "null"]
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "exit_stage_id": {
           "default": null,
           "description": "Stage index when the plant is decommissioned. Absent or null = never.",
           "format": "int32",
-          "type": ["integer", "null"]
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "generation": {
           "$ref": "#/$defs/RawThermalGeneration",
@@ -64,7 +73,13 @@
           "type": "string"
         }
       },
-      "required": ["id", "name", "bus_id", "cost_per_mwh", "generation"],
+      "required": [
+        "id",
+        "name",
+        "bus_id",
+        "cost_per_mwh",
+        "generation"
+      ],
       "type": "object"
     },
     "RawThermalGeneration": {
@@ -82,7 +97,10 @@
           "type": "number"
         }
       },
-      "required": ["min_mw", "max_mw"],
+      "required": [
+        "min_mw",
+        "max_mw"
+      ],
       "type": "object"
     }
   },
@@ -92,7 +110,10 @@
   "properties": {
     "$schema": {
       "description": "`$schema` field — informational, not validated.",
-      "type": ["string", "null"]
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "thermals": {
       "description": "Array of thermal plant entries.",
@@ -102,7 +123,9 @@
       "type": "array"
     }
   },
-  "required": ["thermals"],
+  "required": [
+    "thermals"
+  ],
   "title": "RawThermalFile",
   "type": "object"
 }
