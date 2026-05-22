@@ -6,7 +6,12 @@
 //! full training + simulation run on a fixture with one regular and one
 //! anticipated thermal plant.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::too_many_lines
+)]
 
 use std::fs;
 use std::path::Path;
@@ -403,10 +408,36 @@ fn cli_run_populates_anticipated_thermal_columns() {
              anticipated_committed_mw (matured delivery for K=1)"
         );
         let v = committed.unwrap();
+        // F3-006: bounded magnitude — must lie in the thermal's [min, max]
+        // generation envelope. ANTICIPATED has max_mw=100.0 in the fixture.
         assert!(
-            v >= 0.0 && v.is_finite(),
-            "row {row_idx}: anticipated_committed_mw at stage 1 must be >= 0.0 and finite, \
-             got {v}"
+            v.is_finite() && (0.0..=100.0).contains(&v),
+            "row {row_idx}: anticipated_committed_mw at stage 1 must be finite and in \
+             [0.0, 100.0] (the plant's generation envelope), got {v}"
+        );
+    }
+
+    // F3-006: ring-buffer transport invariant. The decision placed at stage 0
+    // must equal the committed value matured at stage 1, bit-for-bit (single
+    // anticipated plant, single scenario, single block — no aggregation).
+    // Catches future regressions of the F1-001 class (simulation pipeline
+    // failing to shift the anticipated ring buffer).
+    assert_eq!(
+        stage_0_ant_rows.len(),
+        stage_1_ant_rows.len(),
+        "stage-0 anticipated rows must pair 1:1 with stage-1 rows in a single-scenario, \
+         single-block fixture"
+    );
+    for (&stage_0_idx, &stage_1_idx) in stage_0_ant_rows.iter().zip(&stage_1_ant_rows) {
+        let decision = rows.anticipated_decision_mw[stage_0_idx]
+            .expect("stage-0 decision must be Some (asserted above)");
+        let committed = rows.anticipated_committed_mw[stage_1_idx]
+            .expect("stage-1 committed must be Some (asserted above)");
+        assert_eq!(
+            decision.to_bits(),
+            committed.to_bits(),
+            "ring-buffer transport: stage-0 decision {decision} must equal stage-1 \
+             committed {committed} bit-for-bit (the F1-001 simulation shift contract)"
         );
     }
 }
