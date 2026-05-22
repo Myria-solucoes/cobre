@@ -113,11 +113,6 @@ always dispatch at least that amount whenever the plant is active.
 
 ## Anticipated Dispatch Configuration
 
-> **Not yet implemented.** The `anticipated_config` field is parsed and validated but has
-> no effect on the LP formulation in the current version. Anticipated dispatch
-> is a planned feature — see the [CHANGELOG](https://github.com/cobre-rs/cobre/blob/main/CHANGELOG.md)
-> for the implementation timeline.
-
 The optional `anticipated_config` block enables anticipated dispatch for thermal
 units that require advance scheduling over multiple stages due to commitment lead
 times — for example, a plant that must be booked several weeks before the dispatch
@@ -133,9 +128,103 @@ occurs.
 | ------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | `lead_stages` | integer | Number of stages of dispatch anticipation. A value of `2` means the generation commitment for stage `t` must be decided at stage `t - 2`. |
 
-When implemented, `lead_stages` greater than zero will couple the commitment
-decision at an earlier stage to the dispatch variable at a later stage. For now,
-the field is accepted by the parser but silently ignored during LP construction.
+### How anticipated dispatch works
+
+When a thermal unit has `lead_stages = K`, its dispatch commitment is split across
+two roles that appear at different stages:
+
+- **Decision stage** (`t`): the LP at stage `t` sets the generation level that will
+  be delivered `K` stages later. This decision variable is carried forward as state.
+- **Delivery stage** (`t + K`): the LP at stage `t + K` receives the committed MW
+  value as a fixed bound, reflecting that the generation level was locked in earlier.
+
+Consider a 3-stage finite-horizon study with one anticipated thermal unit configured
+as `"lead_stages": 2`:
+
+| Stage | Role for this unit                                          | `anticipated_decision_mw`                            | `anticipated_committed_mw`                                 |
+| ----- | ----------------------------------------------------------- | ---------------------------------------------------- | ---------------------------------------------------------- |
+| 0     | Decision                                                    | non-null (commitment placed for delivery at stage 2) | `null` (no matured delivery yet)                           |
+| 1     | Decision (horizon boundary: stage 1 + 2 = 3 = total stages) | non-null                                             | `null` (delivery requires K ≤ stage index; 2 ≤ 1 is false) |
+| 2     | Delivery                                                    | `null` (stage 2 + 2 = 4 exceeds the horizon)         | non-null (matured commitment from stage 0)                 |
+
+The `null` values in this table are not errors — they reflect the position of a
+stage within the horizon. At the first stages the commitment is being placed but
+has not yet matured; at the last stage the commitment has matured but there are no
+more future stages to place new decisions into.
+
+For a `lead_stages = 1` configuration on a 2-stage study, the coupling is simpler:
+the decision placed at stage 0 matures at stage 1. Stage 0 shows a non-null
+`anticipated_decision_mw` and null `anticipated_committed_mw`; stage 1 shows the
+reverse.
+
+### Pairing with initial_conditions.json
+
+Because anticipated dispatch carries state across stages, a study that begins with
+pending commitments made outside the study horizon must declare those commitments in
+`initial_conditions.json`. For each anticipated thermal unit add one entry to
+`past_anticipated_commitments`:
+
+```json
+{
+  "storage": [],
+  "filling_storage": [],
+  "past_anticipated_commitments": [
+    {
+      "thermal_id": 2,
+      "values_mw": [0.0, 0.0]
+    }
+  ]
+}
+```
+
+The `values_mw` array must have exactly `lead_stages` entries. The values are
+ordered chronologically from oldest to most recent: `values_mw[0]` is the
+commitment delivering at study stage 1, `values_mw[1]` is the commitment delivering
+at study stage 2, and so on. For the example above with `lead_stages = 2`, the
+array has length 2. Supplying an array of a different length is a validation error.
+
+If no commitments were made before the study start (or if the unit was idle), supply
+zero values. The `past_anticipated_commitments` key is optional in the JSON file and
+defaults to an empty list for studies that have no anticipated thermal units.
+
+### Reading the outputs
+
+After a simulation run, three additional columns appear in
+`simulation/thermals/scenario_id=NNNN/data.parquet` for every thermal unit. See
+[Output Format Reference](../reference/output-format.md) for the full column schema.
+The anticipated-dispatch columns are:
+
+| Column                     | Type    | Nullable | Meaning                                                                                                                                                                                   |
+| -------------------------- | ------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `is_anticipated`           | Boolean | No       | `true` for units configured with `anticipated_config`; `false` for all others.                                                                                                            |
+| `anticipated_decision_mw`  | Float64 | Yes      | The commitment placed at this stage for delivery `K` stages later. `null` when no forward decision is available (e.g., at the final stages of the horizon, or for non-anticipated units). |
+| `anticipated_committed_mw` | Float64 | Yes      | The committed MW value that matures and is delivered at this stage. `null` at early stages before any commitment has matured, and always `null` for non-anticipated units.                |
+
+Regular (non-anticipated) thermal units always have `is_anticipated = false` and
+both optional columns set to `null`. Rows for anticipated units have
+`is_anticipated = true`; the two nullable columns are populated according to each
+stage's position relative to the decision and delivery windows described above.
+
+Training output also records anticipated-dispatch state in
+`training/dictionaries/state_dictionary.json`. For each anticipated thermal unit,
+the dictionary contains one entry per slot index from `0` to `lead_stages - 1`,
+in slot-major order. Each entry has the following shape:
+
+```json
+{
+  "type": "anticipated_state",
+  "entity_type": "thermal",
+  "entity_id": 2,
+  "slot_index": 0,
+  "unit": "MW"
+}
+```
+
+For a study with a single anticipated thermal unit (`id = 2`) configured as
+`lead_stages = 2`, the state dictionary will contain exactly two such entries:
+one with `slot_index = 0` and one with `slot_index = 1`. The slot index identifies
+which pending commitment the state variable tracks: slot 0 holds the oldest
+still-pending commitment and slot `lead_stages - 1` holds the most recent.
 
 ---
 
