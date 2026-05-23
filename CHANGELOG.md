@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Add per-phase solver profile mechanism for training and simulation passes.
 
 - Anticipated thermal dispatch is now fully implemented. Plants declared
   with `anticipated_config = { lead_stages: K }` in `system/thermals.json`

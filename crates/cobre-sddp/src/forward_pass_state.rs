@@ -10,8 +10,8 @@ use cobre_core::{TrainingEvent, WorkerTimingPhase};
 use cobre_solver::{SolverInterface, SolverStatistics, StageTemplate};
 use cobre_stochastic::context::ClassSchemes;
 use cobre_stochastic::{
-    build_forward_sampler, ClassDimensions, ClassSampleRequest, ForwardSampler,
-    ForwardSamplerConfig, SampleRequest,
+    ClassDimensions, ClassSampleRequest, ForwardSampler, ForwardSamplerConfig, SampleRequest,
+    build_forward_sampler,
 };
 use rayon::iter::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator,
@@ -21,9 +21,9 @@ use crate::{
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
     error::SddpError,
-    forward::{partition, run_forward_stage, ForwardResult, StageKey},
+    forward::{ForwardResult, StageKey, partition, run_forward_stage},
     indexer::StageIndexer,
-    solver_phase::{Phase, FORWARD_PROFILE},
+    solver_phase::{FORWARD_PROFILE, Phase},
     solver_stats::SolverStatsDelta,
     trajectory::TrajectoryRecord,
     workspace::{BasisStore, BasisStoreSliceMut, SolverWorkspace},
@@ -839,8 +839,8 @@ mod tests {
         Basis, LpSolution, ProfiledSolver, RowBatch, SolverError, SolverInterface,
         SolverStatistics, StageTemplate,
     };
-    use cobre_stochastic::context::{build_stochastic_context, ClassSchemes, OpeningTreeInputs};
     use cobre_stochastic::StochasticContext;
+    use cobre_stochastic::context::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
     use super::*;
     use crate::{

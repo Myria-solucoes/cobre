@@ -328,6 +328,18 @@ After the parallel region, staged rows are sorted by `trial_point_idx`
 and inserted into the FCF in deterministic order, guaranteeing bit-for-bit
 identical results regardless of thread count or completion order.
 
+### Per-Phase Solver Profiles
+
+Each algorithmic phase — forward sweep, backward sweep, and simulation — can
+be configured with a distinct `SolveProfile` that sets the LP solver's
+feasibility tolerances and per-attempt iteration caps. Tuning `BACKWARD_PROFILE`
+to tighter tolerances or stricter iteration caps can reduce backward-pass
+solve time variance, which in turn improves load balance across worker threads
+and shortens wall-clock training time. The current release ships all three
+profiles equal to `SolveProfile::default()`, preserving the historical
+behavior; a future tuning effort will set measured values for
+`BACKWARD_PROFILE`.
+
 ### Forward Pass and Simulation
 
 Scenarios are statically partitioned across solver workspace instances
