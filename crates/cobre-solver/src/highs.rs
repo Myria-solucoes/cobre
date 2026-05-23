@@ -24,6 +24,7 @@ use std::os::raw::c_void;
 use std::time::Instant;
 
 use crate::{
+    DEFAULT_PROFILE_HEURISTIC_SENTINEL, DEFAULT_PROFILE_IPM_UNBOUNDED_SENTINEL, SolveProfile,
     SolverInterface, ffi,
     types::{RowBatch, SolutionView, SolverError, SolverStatistics, StageTemplate},
 };
@@ -220,6 +221,13 @@ pub struct HighsSolver {
     /// Accumulated solver statistics. Counters grow monotonically from zero;
     /// not reset by `reset()`.
     stats: SolverStatistics,
+    /// Cached solver profile applied by the last `set_*_profile` call.
+    ///
+    /// Initialised to `SolveProfile::default()` at construction, which
+    /// preserves the historical hardcoded behaviour bit-for-bit. Updated by
+    /// the four `SolverInterface` profile setter methods; read by
+    /// `set_iteration_limits` on every solve attempt.
+    current_profile: SolveProfile,
 }
 
 // SAFETY: `HighsSolver` holds a raw pointer to a `HiGHS` C++ object. The `HiGHS`
@@ -316,6 +324,7 @@ impl HighsSolver {
                 retry_level_histogram: vec![0u64; 12],
                 ..SolverStatistics::default()
             },
+            current_profile: SolveProfile::default(),
         })
     }
 
@@ -385,6 +394,34 @@ impl HighsSolver {
         }
     }
 
+    /// Re-applies the current profile's feasibility tolerances to the `HiGHS` instance.
+    ///
+    /// Called immediately after `restore_default_settings()` in the retry-escalation
+    /// finalization path so that `HiGHS` state and `current_profile` remain in sync.
+    /// `restore_default_settings` resets the tolerances to the hardcoded table values
+    /// (1e-9); this helper layers the caller's profile values on top.
+    ///
+    /// The iteration limits are not re-applied here because `restore_iteration_limits`
+    /// always follows immediately and sets them to `i32::MAX` (unconstrained for the
+    /// post-retry default-attempt path).
+    fn apply_profile_tolerances(&mut self) {
+        // SAFETY: `self.handle` is a valid, non-null HiGHS pointer obtained from
+        // `cobre_highs_create()`. Option names are static C string literals with no
+        // retained pointer after the call returns.
+        unsafe {
+            ffi::cobre_highs_set_double_option(
+                self.handle,
+                c"primal_feasibility_tolerance".as_ptr(),
+                self.current_profile.primal_feasibility_tolerance,
+            );
+            ffi::cobre_highs_set_double_option(
+                self.handle,
+                c"dual_feasibility_tolerance".as_ptr(),
+                self.current_profile.dual_feasibility_tolerance,
+            );
+        }
+    }
+
     /// Restores default options after retry escalation.
     ///
     /// Status codes are checked via `debug_assert!` to catch programming
@@ -417,8 +454,16 @@ impl HighsSolver {
 
     /// Sets per-solve iteration limits before a `run_once()` call.
     ///
-    /// Simplex gets `max(100_000, 50 × num_cols)` and IPM gets 10,000.
-    /// These prevent degenerate cycling without affecting normal convergence.
+    /// Simplex cap: if `current_profile.simplex_iteration_limit` equals
+    /// [`DEFAULT_PROFILE_HEURISTIC_SENTINEL`] (`0`), the historical heuristic
+    /// `max(100_000, 50 × num_cols)` is used. Any non-zero profile value is
+    /// applied verbatim (clamped to `i32::MAX` for the FFI call).
+    ///
+    /// IPM cap: if `current_profile.ipm_iteration_limit` equals
+    /// [`DEFAULT_PROFILE_IPM_UNBOUNDED_SENTINEL`] (`0`), `i32::MAX` is sent to
+    /// `HiGHS` (no cap). Any positive value is applied verbatim (clamped to
+    /// `i32::MAX` for the FFI call). The `Default` value is `10_000`, so
+    /// existing callers see no behavioural change.
     ///
     /// **Note on `time_limit`**: `HiGHS` tracks elapsed time cumulatively from
     /// instance creation, not per-`run()` call — neither `clear_solver()` nor
@@ -427,17 +472,53 @@ impl HighsSolver {
     /// instance). Wall-clock measurement via `Instant` is used instead for
     /// time-based budget management.
     fn set_iteration_limits(&mut self) {
-        let simplex_iter_limit = self.num_cols.saturating_mul(50).max(100_000);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let simplex_iter_limit: i32 =
+            if self.current_profile.simplex_iteration_limit == DEFAULT_PROFILE_HEURISTIC_SENTINEL {
+                // Heuristic fallback: scale with LP size to avoid runaway cycling.
+                let heuristic = self.num_cols.saturating_mul(50).max(100_000);
+                // `heuristic` is bounded by `usize::MAX`, but realistic LP sizes
+                // are well below `i32::MAX` (≈2.1 × 10^9 cols). Clamp defensively.
+                (heuristic.min(i32::MAX as usize)) as i32
+            } else {
+                // Profile literal value: apply verbatim, clamped for FFI cast.
+                // `.min(i32::MAX as u32)` ensures the value fits; the cast cannot wrap.
+                #[allow(clippy::cast_possible_wrap)]
+                {
+                    (self
+                        .current_profile
+                        .simplex_iteration_limit
+                        .min(i32::MAX as u32)) as i32
+                }
+            };
+
+        // IPM cap: 0 is the "unbounded" sentinel per trait contract; map it to
+        // i32::MAX so HiGHS does not interpret 0 as "no iterations allowed".
+        // Any positive value is applied verbatim (clamped for the FFI cast).
+        #[allow(clippy::cast_possible_wrap)]
+        let ipm_iter_limit: i32 =
+            if self.current_profile.ipm_iteration_limit == DEFAULT_PROFILE_IPM_UNBOUNDED_SENTINEL {
+                i32::MAX // "unbounded" per trait contract
+            } else {
+                (self
+                    .current_profile
+                    .ipm_iteration_limit
+                    .min(i32::MAX as u32)) as i32
+            };
+
         // SAFETY: handle is valid non-null HiGHS pointer; option names are
         // static C strings with no retained pointers.
         unsafe {
-            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
             ffi::cobre_highs_set_int_option(
                 self.handle,
                 c"simplex_iteration_limit".as_ptr(),
-                simplex_iter_limit as i32,
+                simplex_iter_limit,
             );
-            ffi::cobre_highs_set_int_option(self.handle, c"ipm_iteration_limit".as_ptr(), 10_000);
+            ffi::cobre_highs_set_int_option(
+                self.handle,
+                c"ipm_iteration_limit".as_ptr(),
+                ipm_iter_limit,
+            );
         }
     }
 
@@ -657,9 +738,13 @@ impl HighsSolver {
         }
 
         // Restore default settings and safeguard limits unconditionally.
-        // `restore_default_settings()` covers the 8 defaults. Retry-only
-        // options and safeguard limits need explicit reset.
+        // `restore_default_settings()` covers the 13 defaults (including the
+        // hardcoded 1e-9 tolerance values). `apply_profile_tolerances()` then
+        // re-applies the caller's profile tolerances on top, keeping HiGHS
+        // state and `current_profile` in sync (design §5.5). Retry-only options
+        // and safeguard limits need explicit reset.
         self.restore_default_settings();
+        self.apply_profile_tolerances();
         self.restore_iteration_limits();
         unsafe {
             ffi::cobre_highs_set_int_option(self.handle, c"user_objective_scale".as_ptr(), 0);
@@ -741,18 +826,29 @@ impl HighsSolver {
             },
             // Level 3: + relaxed tolerances 1e-8.
             // Cumulative: presolve + dual simplex + relaxed tolerances.
-            3 => unsafe {
-                ffi::cobre_highs_set_double_option(
-                    self.handle,
-                    c"primal_feasibility_tolerance".as_ptr(),
-                    1e-8,
-                );
-                ffi::cobre_highs_set_double_option(
-                    self.handle,
-                    c"dual_feasibility_tolerance".as_ptr(),
-                    1e-8,
-                );
-            },
+            // Apply max(level_default, profile_value) so a loose profile is
+            // not inadvertently tightened by the retry ladder (design §5.5).
+            3 => {
+                let level_default = 1e-8_f64;
+                let applied_primal =
+                    level_default.max(self.current_profile.primal_feasibility_tolerance);
+                let applied_dual =
+                    level_default.max(self.current_profile.dual_feasibility_tolerance);
+                // SAFETY: handle is valid non-null HiGHS pointer; option names
+                // are static C strings with no retained pointers after the call.
+                unsafe {
+                    ffi::cobre_highs_set_double_option(
+                        self.handle,
+                        c"primal_feasibility_tolerance".as_ptr(),
+                        applied_primal,
+                    );
+                    ffi::cobre_highs_set_double_option(
+                        self.handle,
+                        c"dual_feasibility_tolerance".as_ptr(),
+                        applied_dual,
+                    );
+                }
+            }
             // Level 4: + IPM.
             // Cumulative: presolve + relaxed tolerances + IPM.
             4 => unsafe {
@@ -791,19 +887,33 @@ impl HighsSolver {
                 ffi::cobre_highs_set_int_option(self.handle, c"simplex_strategy".as_ptr(), 1);
                 ffi::cobre_highs_set_int_option(self.handle, c"simplex_scale_strategy".as_ptr(), 4);
             },
-            7 => unsafe {
-                ffi::cobre_highs_set_int_option(self.handle, c"simplex_scale_strategy".as_ptr(), 3);
-                ffi::cobre_highs_set_double_option(
-                    self.handle,
-                    c"primal_feasibility_tolerance".as_ptr(),
-                    1e-8,
-                );
-                ffi::cobre_highs_set_double_option(
-                    self.handle,
-                    c"dual_feasibility_tolerance".as_ptr(),
-                    1e-8,
-                );
-            },
+            7 => {
+                // Apply max(level_default, profile_value) — design §5.5.
+                let level_default = 1e-8_f64;
+                let applied_primal =
+                    level_default.max(self.current_profile.primal_feasibility_tolerance);
+                let applied_dual =
+                    level_default.max(self.current_profile.dual_feasibility_tolerance);
+                // SAFETY: handle is valid non-null HiGHS pointer; option names
+                // are static C strings with no retained pointers after the call.
+                unsafe {
+                    ffi::cobre_highs_set_int_option(
+                        self.handle,
+                        c"simplex_scale_strategy".as_ptr(),
+                        3,
+                    );
+                    ffi::cobre_highs_set_double_option(
+                        self.handle,
+                        c"primal_feasibility_tolerance".as_ptr(),
+                        applied_primal,
+                    );
+                    ffi::cobre_highs_set_double_option(
+                        self.handle,
+                        c"dual_feasibility_tolerance".as_ptr(),
+                        applied_dual,
+                    );
+                }
+            }
             8 => unsafe {
                 ffi::cobre_highs_set_int_option(self.handle, c"user_objective_scale".as_ptr(), -10);
             },
@@ -812,39 +922,67 @@ impl HighsSolver {
                 ffi::cobre_highs_set_int_option(self.handle, c"user_objective_scale".as_ptr(), -10);
                 ffi::cobre_highs_set_int_option(self.handle, c"user_bound_scale".as_ptr(), -5);
             },
-            10 => unsafe {
-                ffi::cobre_highs_set_int_option(self.handle, c"user_objective_scale".as_ptr(), -13);
-                ffi::cobre_highs_set_int_option(self.handle, c"user_bound_scale".as_ptr(), -8);
-                ffi::cobre_highs_set_double_option(
-                    self.handle,
-                    c"primal_feasibility_tolerance".as_ptr(),
-                    1e-7,
-                );
-                ffi::cobre_highs_set_double_option(
-                    self.handle,
-                    c"dual_feasibility_tolerance".as_ptr(),
-                    1e-7,
-                );
-            },
-            11 => unsafe {
-                ffi::cobre_highs_set_string_option(
-                    self.handle,
-                    c"solver".as_ptr(),
-                    c"ipm".as_ptr(),
-                );
-                ffi::cobre_highs_set_int_option(self.handle, c"user_objective_scale".as_ptr(), -10);
-                ffi::cobre_highs_set_int_option(self.handle, c"user_bound_scale".as_ptr(), -5);
-                ffi::cobre_highs_set_double_option(
-                    self.handle,
-                    c"primal_feasibility_tolerance".as_ptr(),
-                    1e-7,
-                );
-                ffi::cobre_highs_set_double_option(
-                    self.handle,
-                    c"dual_feasibility_tolerance".as_ptr(),
-                    1e-7,
-                );
-            },
+            10 => {
+                // Apply max(level_default, profile_value) — design §5.5.
+                let level_default = 1e-7_f64;
+                let applied_primal =
+                    level_default.max(self.current_profile.primal_feasibility_tolerance);
+                let applied_dual =
+                    level_default.max(self.current_profile.dual_feasibility_tolerance);
+                // SAFETY: handle is valid non-null HiGHS pointer; option names
+                // are static C strings with no retained pointers after the call.
+                unsafe {
+                    ffi::cobre_highs_set_int_option(
+                        self.handle,
+                        c"user_objective_scale".as_ptr(),
+                        -13,
+                    );
+                    ffi::cobre_highs_set_int_option(self.handle, c"user_bound_scale".as_ptr(), -8);
+                    ffi::cobre_highs_set_double_option(
+                        self.handle,
+                        c"primal_feasibility_tolerance".as_ptr(),
+                        applied_primal,
+                    );
+                    ffi::cobre_highs_set_double_option(
+                        self.handle,
+                        c"dual_feasibility_tolerance".as_ptr(),
+                        applied_dual,
+                    );
+                }
+            }
+            11 => {
+                // Apply max(level_default, profile_value) — design §5.5.
+                let level_default = 1e-7_f64;
+                let applied_primal =
+                    level_default.max(self.current_profile.primal_feasibility_tolerance);
+                let applied_dual =
+                    level_default.max(self.current_profile.dual_feasibility_tolerance);
+                // SAFETY: handle is valid non-null HiGHS pointer; option names
+                // are static C strings with no retained pointers after the call.
+                unsafe {
+                    ffi::cobre_highs_set_string_option(
+                        self.handle,
+                        c"solver".as_ptr(),
+                        c"ipm".as_ptr(),
+                    );
+                    ffi::cobre_highs_set_int_option(
+                        self.handle,
+                        c"user_objective_scale".as_ptr(),
+                        -10,
+                    );
+                    ffi::cobre_highs_set_int_option(self.handle, c"user_bound_scale".as_ptr(), -5);
+                    ffi::cobre_highs_set_double_option(
+                        self.handle,
+                        c"primal_feasibility_tolerance".as_ptr(),
+                        applied_primal,
+                    );
+                    ffi::cobre_highs_set_double_option(
+                        self.handle,
+                        c"dual_feasibility_tolerance".as_ptr(),
+                        applied_dual,
+                    );
+                }
+            }
             _ => unreachable!(),
         }
     }
@@ -1342,6 +1480,76 @@ impl SolverInterface for HighsSolver {
     fn record_reconstruction_stats(&mut self) {
         self.stats.basis_reconstructions += 1;
     }
+
+    /// Configures the primal feasibility tolerance on the underlying `HiGHS`
+    /// instance and caches the value in `current_profile`.
+    ///
+    /// Subsequent solves (default attempt and any retry level that does not
+    /// override this tolerance) use `value` as the primal tolerance until
+    /// another setter call changes it. After retry escalation completes, the
+    /// solver automatically re-applies the profile tolerances via
+    /// `apply_profile_tolerances` — callers do not need to re-call this method.
+    ///
+    /// This is not a hot-path method; it is called by `ProfiledSolver::set_profile`
+    /// only when the corresponding field changes.
+    fn set_primal_feasibility_tolerance(&mut self, value: f64) {
+        // SAFETY: `self.handle` is a valid, non-null HiGHS pointer obtained
+        // from `cobre_highs_create()`. The option name is a static C string
+        // literal with no retained pointer after the call returns.
+        unsafe {
+            ffi::cobre_highs_set_double_option(
+                self.handle,
+                c"primal_feasibility_tolerance".as_ptr(),
+                value,
+            );
+        }
+        self.current_profile.primal_feasibility_tolerance = value;
+    }
+
+    /// Configures the dual feasibility tolerance on the underlying `HiGHS`
+    /// instance and caches the value in `current_profile`.
+    ///
+    /// Symmetric to [`Self::set_primal_feasibility_tolerance`]; see that
+    /// method for the full contract.
+    fn set_dual_feasibility_tolerance(&mut self, value: f64) {
+        // SAFETY: `self.handle` is a valid, non-null HiGHS pointer obtained
+        // from `cobre_highs_create()`. The option name is a static C string
+        // literal with no retained pointer after the call returns.
+        unsafe {
+            ffi::cobre_highs_set_double_option(
+                self.handle,
+                c"dual_feasibility_tolerance".as_ptr(),
+                value,
+            );
+        }
+        self.current_profile.dual_feasibility_tolerance = value;
+    }
+
+    /// Caches the per-attempt simplex iteration cap in `current_profile`.
+    ///
+    /// No FFI call is issued here. The actual cap is applied by
+    /// `set_iteration_limits` before each solve attempt: a value of
+    /// [`DEFAULT_PROFILE_HEURISTIC_SENTINEL`] (`0`) causes the heuristic
+    /// `num_cols × 50 max 100_000` to be used; any non-zero value is applied
+    /// verbatim.
+    ///
+    /// This is not a hot-path method; it is called by `ProfiledSolver::set_profile`
+    /// only when the corresponding field changes.
+    fn set_simplex_iteration_limit_profile(&mut self, value: u32) {
+        self.current_profile.simplex_iteration_limit = value;
+    }
+
+    /// Caches the per-attempt IPM iteration cap in `current_profile`.
+    ///
+    /// No FFI call is issued here. The actual cap is applied by
+    /// `set_iteration_limits` before each solve attempt. Any positive value is
+    /// applied verbatim; zero is treated as "unbounded" (no cap).
+    ///
+    /// This is not a hot-path method; it is called by `ProfiledSolver::set_profile`
+    /// only when the corresponding field changes.
+    fn set_ipm_iteration_limit_profile(&mut self, value: u32) {
+        self.current_profile.ipm_iteration_limit = value;
+    }
 }
 
 /// Test-support accessors for integration tests that need to set raw `HiGHS` options.
@@ -1361,6 +1569,77 @@ impl HighsSolver {
     #[must_use]
     pub fn raw_handle(&self) -> *mut std::os::raw::c_void {
         self.handle
+    }
+
+    /// Invoke `apply_retry_level_options` for a given level.
+    ///
+    /// Thin test-support wrapper that exposes the private retry-level applier
+    /// so integration tests can verify option composition without driving a
+    /// full solve through the retry ladder.
+    ///
+    /// Only levels 0-4 are routed through this method; levels 5-11 delegate to
+    /// `apply_extended_retry_options_for_test`. Call the appropriate method
+    /// based on the level you want to test.
+    pub fn apply_retry_level_options_for_test(&mut self, level: u32) {
+        self.apply_retry_level_options(level);
+    }
+
+    /// Invoke `apply_extended_retry_options` for a given level (5-11).
+    ///
+    /// Thin test-support wrapper that exposes the private extended retry-level
+    /// applier so integration tests can verify option composition without
+    /// driving a full solve.
+    pub fn apply_extended_retry_options_for_test(&mut self, level: u32) {
+        self.apply_extended_retry_options(level);
+    }
+
+    /// Invoke `restore_default_settings` then `apply_profile_tolerances` in sequence.
+    ///
+    /// Mirrors the finalization path in `retry_escalation` so integration tests
+    /// can verify that profile tolerances survive a defaults-restore without
+    /// driving a full retry through a failing LP.
+    pub fn restore_defaults_then_apply_profile_for_test(&mut self) {
+        self.restore_default_settings();
+        self.apply_profile_tolerances();
+    }
+
+    /// Read a double-valued `HiGHS` option by name.
+    ///
+    /// Returns `None` if the option name is unknown to `HiGHS`; `Some(value)`
+    /// on success.
+    #[must_use]
+    pub fn get_double_option(&self, option: &std::ffi::CStr) -> Option<f64> {
+        let mut out = 0.0_f64;
+        // SAFETY: handle is valid non-null HiGHS pointer; option is a valid
+        // null-terminated C string borrowed for the duration of the call;
+        // `out` is stack-allocated and written by HiGHS on success.
+        let status = unsafe {
+            ffi::cobre_highs_get_double_option(self.handle, option.as_ptr(), &raw mut out)
+        };
+        if status == ffi::HIGHS_STATUS_ERROR {
+            None
+        } else {
+            Some(out)
+        }
+    }
+
+    /// Read an integer-valued `HiGHS` option by name.
+    ///
+    /// Returns `None` if the option name is unknown to `HiGHS`; `Some(value)`
+    /// on success.
+    #[must_use]
+    pub fn get_int_option(&self, option: &std::ffi::CStr) -> Option<i32> {
+        let mut out = 0_i32;
+        // SAFETY: handle is valid non-null HiGHS pointer; option is a valid
+        // null-terminated C string borrowed for the duration of the call;
+        // `out` is stack-allocated and written by HiGHS on success.
+        let status =
+            unsafe { ffi::cobre_highs_get_int_option(self.handle, option.as_ptr(), &raw mut out) };
+        if status == ffi::HIGHS_STATUS_ERROR {
+            None
+        } else {
+            Some(out)
+        }
     }
 }
 
@@ -2054,6 +2333,23 @@ mod tests {
         assert!(
             cap_primal_after_second >= cap_primal_after_first,
             "primal scratch capacity must not decrease: {cap_primal_after_second} < {cap_primal_after_first}",
+        );
+    }
+
+    /// Verify that a freshly constructed `HighsSolver` exposes a `current_profile`
+    /// equal to `SolveProfile::default()`.
+    ///
+    /// This ensures that callers that never call any profile setter observe the
+    /// historical hardcoded behaviour bit-for-bit (§5.3 design parity guarantee).
+    #[test]
+    fn new_highs_solver_starts_with_default_profile() {
+        use crate::SolveProfile;
+
+        let solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
+        assert_eq!(
+            solver.current_profile,
+            SolveProfile::default(),
+            "current_profile must equal SolveProfile::default() immediately after construction"
         );
     }
 }
