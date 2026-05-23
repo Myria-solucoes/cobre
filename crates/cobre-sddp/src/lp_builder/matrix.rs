@@ -45,6 +45,7 @@ pub(super) fn fill_stage_columns(
     fill_diversion_columns(ctx, stage, stage_idx, layout, b);
     fill_thermal_columns(ctx, stage, stage_idx, layout, b);
     fill_anticipated_decision_columns(ctx, stage_idx, layout, b);
+    fill_anticipated_state_out_columns(ctx, stage_idx, layout, b);
     fill_anticipated_decision_objective(ctx, stage_idx, layout, b);
     zero_anticipated_delivery_thermal_cost(ctx, stage_idx, layout, b);
     fill_line_columns(ctx, stage, stage_idx, layout, b);
@@ -107,6 +108,48 @@ fn fill_anticipated_state_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_
             bufs.col_upper[col] = f64::INFINITY;
         }
     }
+}
+
+/// Fill column bounds for the `anticipated_state_out` columns.
+///
+/// For each anticipated plant `i`:
+/// - Active (`stage_idx + K_i < n_stages`): bounds `[-INF, +INF]`.
+///   The `state_out` value is pinned to `decision_col[i]` by the
+///   `anticipated_state_out_def` equality row (filled by
+///   `fill_anticipated_state_out_def_entries`).
+/// - Inactive (`stage_idx + K_i >= n_stages`): bounds `[0, 0]`. The
+///   presolver eliminates the column. The definition row is NOT emitted
+///   for inactive plants (lockstep invariant: zero-bound iff no def row).
+///
+/// Objective coefficient stays at 0.0 (vec default) — the `state_out` column
+/// carries no direct cost; the cost flows through the cut machinery.
+///
+/// No-op when `n_anticipated == 0` (loop iterates zero times).
+fn fill_anticipated_state_out_columns(
+    ctx: &TemplateBuildCtx<'_>,
+    stage_idx: usize,
+    layout: &StageLayout,
+    bufs: &mut ColumnBufs<'_>,
+) {
+    let n_stages = ctx.bounds.n_stages();
+    for local_idx in 0..ctx.n_anticipated {
+        let k_i = ctx.anticipated_lead_stages[local_idx];
+        let col = layout.col_anticipated_state_out_start + local_idx;
+        if stage_idx.saturating_add(k_i) < n_stages {
+            bufs.col_lower[col] = f64::NEG_INFINITY;
+            bufs.col_upper[col] = f64::INFINITY;
+        } else {
+            bufs.col_lower[col] = 0.0;
+            bufs.col_upper[col] = 0.0;
+        }
+    }
+    let active_count = (0..ctx.n_anticipated)
+        .filter(|&i| stage_idx.saturating_add(ctx.anticipated_lead_stages[i]) < n_stages)
+        .count();
+    debug_assert_eq!(
+        active_count, layout.n_anticipated_state_out_def_rows,
+        "active state_out column count must match def-row count at stage {stage_idx}"
+    );
 }
 
 /// Theta column: bounded below by zero so iteration-1 LPs with empty cut pools
@@ -838,6 +881,10 @@ pub(super) fn fill_stage_rows(
         &mut row_upper,
     );
 
+    // Anticipated-state-out definition rows: one per active anticipated plant.
+    // Equality 0 == 0; entries filled in build_stage_matrix_entries.
+    fill_anticipated_state_out_def_rows(ctx, stage_idx, layout, &mut row_lower, &mut row_upper);
+
     // Z-inflow definition rows: equality constraints with RHS = base_h (m3/s).
     // The base is the deterministic PAR base inflow (before noise), NOT multiplied
     // by zeta and NOT reduced by withdrawal. The noise component (sigma * eta) is
@@ -949,6 +996,38 @@ pub(super) fn fill_anticipated_fishing_rows(
     );
 }
 
+/// Fill row bounds for the `anticipated_state_out` definition equality rows.
+///
+/// For each active anticipated plant (`stage_idx + K_i < n_stages`),
+/// sets one row to equality `0 == 0`. Inactive plants emit no row,
+/// mirroring `fill_anticipated_fishing_rows` (matrix.rs:927).
+///
+/// No-op when `n_anticipated == 0` or when no plant is active at
+/// `stage_idx`.
+pub(super) fn fill_anticipated_state_out_def_rows(
+    ctx: &TemplateBuildCtx<'_>,
+    stage_idx: usize,
+    layout: &StageLayout,
+    row_lower: &mut [f64],
+    row_upper: &mut [f64],
+) {
+    let n_stages = ctx.bounds.n_stages();
+    let mut active_pos: usize = 0;
+    for &k_i in &ctx.anticipated_lead_stages {
+        if stage_idx.saturating_add(k_i) >= n_stages {
+            continue;
+        }
+        let row = layout.row_anticipated_state_out_def_start + active_pos;
+        row_lower[row] = 0.0;
+        row_upper[row] = 0.0;
+        active_pos += 1;
+    }
+    debug_assert_eq!(
+        active_pos, layout.n_anticipated_state_out_def_rows,
+        "fill_anticipated_state_out_def_rows: active_pos mismatch at stage {stage_idx}"
+    );
+}
+
 /// Fill CSC matrix entries for anticipated-fishing equality constraints.
 ///
 /// For each active anticipated plant `i` at delivery stage `t` (i.e. `K_i <= stage_idx`),
@@ -1025,40 +1104,47 @@ fn fill_anticipated_state_fixing_entries(
     }
 }
 
-/// Fill the anticipated-decision → state-slot WRITE CSC entries.
+/// Fill CSC entries for the `anticipated_state_out` definition equality rows.
 ///
-/// At the decision stage `t`, the anticipated-decision column for plant `i`
-/// contributes `+1.0` to the state-fixing row for slot `K_i - 1` (the newest slot
-/// in the ring buffer). This encodes the "decision is written to the top of the
-/// ring buffer" semantics.
+/// For each active anticipated plant `i` (`stage_idx + K_i < n_stages`),
+/// emits TWO CSC entries at the definition row:
+/// - `(row, +1.0)` on `col_anticipated_state_out_start + i`
+/// - `(row, -1.0)` on `col_anticipated_decision_start + i`
 ///
-/// Only active plants are wired: a plant is active iff `stage_idx + K_i <= n_stages`.
-/// Inactive plants have column bounds `[0, 0]`, so no entry is needed — and omitting
-/// the entry avoids noise in CSC inspection.
+/// Encodes the equality `anticipated_state_out[i] − decision_col[i] = 0`.
+/// Row bounds are filled by `fill_anticipated_state_out_def_rows`. The
+/// final CSC ordering is enforced by the per-column
+/// `sort_unstable_by_key(|&(row, _)| row)` pass in
+/// `template.rs:206–209`, so the relative order of the two pushes here
+/// does not matter for correctness.
 ///
-/// No-op when `n_anticipated == 0` or when every plant is inactive at `stage_idx`.
-fn fill_anticipated_decision_state_write_entries(
+/// Inactive plants emit no entries.
+///
+/// No-op when `n_anticipated == 0` or when no plant is active.
+pub(super) fn fill_anticipated_state_out_def_entries(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
     layout: &StageLayout,
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
     let n_stages = ctx.bounds.n_stages();
+    let mut active_pos: usize = 0;
     for local_idx in 0..ctx.n_anticipated {
         let k_i = ctx.anticipated_lead_stages[local_idx];
-        // Active iff t + K_i < n_stages (same gate as fill_anticipated_decision_columns,
-        // strict under F2-002: the boundary case t + K_i == n_stages is excluded
-        // because the delivery stage falls outside the study horizon [0, n_stages)).
         if stage_idx.saturating_add(k_i) >= n_stages {
             continue;
         }
-        // K_i >= 1 enforced by IO validators; K_i - 1 >= 0 is always safe.
-        let slot = k_i - 1;
-        let col = layout.col_anticipated_decision_start + local_idx;
-        let row =
-            layout.row_anticipated_state_fixing_start + slot * layout.n_anticipated + local_idx;
-        col_entries[col].push((row, 1.0));
+        let row = layout.row_anticipated_state_out_def_start + active_pos;
+        let col_state_out = layout.col_anticipated_state_out_start + local_idx;
+        let col_decision = layout.col_anticipated_decision_start + local_idx;
+        col_entries[col_state_out].push((row, 1.0));
+        col_entries[col_decision].push((row, -1.0));
+        active_pos += 1;
     }
+    debug_assert_eq!(
+        active_pos, layout.n_anticipated_state_out_def_rows,
+        "fill_anticipated_state_out_def_entries: active_pos mismatch at stage {stage_idx}"
+    );
 }
 
 /// Build the CSC matrix entries for one stage.
@@ -1768,7 +1854,7 @@ pub(super) fn build_stage_matrix_entries(
 
     fill_state_and_water_entries(ctx, stage, stage_idx, layout, &mut col_entries);
     fill_anticipated_state_fixing_entries(layout, &mut col_entries);
-    fill_anticipated_decision_state_write_entries(ctx, stage_idx, layout, &mut col_entries);
+    fill_anticipated_state_out_def_entries(ctx, stage_idx, layout, &mut col_entries);
     fill_load_balance_entries(ctx, stage_idx, layout, &mut col_entries);
     fill_ncs_load_balance_entries(ctx, layout, &mut col_entries);
     fill_fpha_entries(ctx, stage_idx, layout, &mut col_entries);
@@ -2314,10 +2400,11 @@ mod zero_cost_tests {
 
     use chrono::NaiveDate;
     use cobre_core::{
-        Block, BlockMode, CascadeTopology, NoiseMethod, ResolvedBounds, ResolvedExchangeFactors,
-        ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds,
-        ResolvedNcsFactors, ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig,
-        StageStateConfig,
+        Block, BlockMode, BoundsCountsSpec, BoundsDefaults, CascadeTopology, ContractStageBounds,
+        HydroStageBounds, LineStageBounds, NoiseMethod, PumpingStageBounds, ResolvedBounds,
+        ResolvedExchangeFactors, ResolvedGenericConstraintBounds, ResolvedLoadFactors,
+        ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, ScenarioSourceConfig, Stage,
+        StageRiskConfig, StageStateConfig, ThermalStageBounds,
     };
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -2326,7 +2413,8 @@ mod zero_cost_tests {
 
     use super::{
         ColumnBufs, StageLayout, TemplateBuildCtx, fill_anticipated_fishing_rows,
-        zero_anticipated_delivery_thermal_cost,
+        fill_anticipated_state_out_columns, fill_anticipated_state_out_def_entries,
+        fill_anticipated_state_out_def_rows, zero_anticipated_delivery_thermal_cost,
     };
 
     /// Build a minimal two-block `Stage` at the given index.
@@ -2530,6 +2618,228 @@ mod zero_cost_tests {
                 row_upper[row], 0.0,
                 "row_upper[{row}] (local_idx={local_idx}) expected 0.0, got {}",
                 row_upper[row]
+            );
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Fixture helper for anticipated state-out tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Build a minimal fixture for anticipated state-out tests:
+    /// `n_anticipated = 2`, `K = [2, 3]`, `n_stages = 6`.
+    ///
+    /// `ResolvedBounds` is constructed with the correct `n_stages` so that
+    /// `ctx.bounds.n_stages()` returns 6, which is required by
+    /// `fill_anticipated_state_out_columns`, `fill_anticipated_state_out_def_rows`,
+    /// and `fill_anticipated_state_out_def_entries`.
+    fn build_anticipated_ctx_n_stages_6() -> (AntFixtures, Stage) {
+        let mut fixtures = AntFixtures::new();
+        // Override bounds with a 6-stage table (zero entities, k_max = 3).
+        fixtures.bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 0,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: 6,
+                k_max: 3,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 0.0,
+                    min_turbined_m3s: 0.0,
+                    max_turbined_m3s: 0.0,
+                    min_outflow_m3s: 0.0,
+                    max_outflow_m3s: None,
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    max_diversion_m3s: None,
+                    filling_inflow_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        let stage = two_block_stage(0);
+        (fixtures, stage)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Tests for fill_anticipated_state_out_columns
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Active plants (`stage_idx + K_i < n_stages`) get `[-INF, +INF]` bounds;
+    /// inactive plants (`stage_idx + K_i >= n_stages`) get `[0, 0]` bounds.
+    ///
+    /// Fixture: `n_anticipated=2`, `K=[2, 3]`, `n_stages=6`.
+    /// Stage 0: both plants active  (0+2=2 < 6, 0+3=3 < 6) → `[-INF, +INF]`.
+    /// Stage 5: both plants inactive (5+2=7 >= 6, 5+3=8 >= 6) → `[0, 0]`.
+    #[test]
+    fn test_fill_anticipated_state_out_columns_active_and_inactive() {
+        let (fixtures, _) = build_anticipated_ctx_n_stages_6();
+        let ctx = fixtures.make_ctx(
+            2,          // n_anticipated
+            3,          // k_max
+            vec![2, 3], // anticipated_lead_stages: K=[2,3]
+            vec![0, 1], // anticipated_thermal_indices
+            0,          // n_thermals
+        );
+
+        // Stage 0: both plants active.
+        let stage0 = two_block_stage(0);
+        let layout0 = StageLayout::new(&ctx, &stage0, 0);
+        let mut col_lower = vec![0.0_f64; layout0.num_cols];
+        let mut col_upper = vec![f64::INFINITY; layout0.num_cols];
+        let mut objective = vec![0.0_f64; layout0.num_cols];
+        let mut bufs = ColumnBufs {
+            col_lower: &mut col_lower,
+            col_upper: &mut col_upper,
+            objective: &mut objective,
+        };
+        fill_anticipated_state_out_columns(&ctx, 0, &layout0, &mut bufs);
+        for i in 0..2 {
+            let col = layout0.col_anticipated_state_out_start + i;
+            assert_eq!(
+                col_lower[col],
+                f64::NEG_INFINITY,
+                "stage 0, plant {i}: col_lower expected -INF, got {}",
+                col_lower[col]
+            );
+            assert_eq!(
+                col_upper[col],
+                f64::INFINITY,
+                "stage 0, plant {i}: col_upper expected +INF, got {}",
+                col_upper[col]
+            );
+        }
+
+        // Stage 5: both plants inactive.
+        let stage5 = two_block_stage(5);
+        let layout5 = StageLayout::new(&ctx, &stage5, 5);
+        let mut col_lower5 = vec![0.0_f64; layout5.num_cols];
+        let mut col_upper5 = vec![f64::INFINITY; layout5.num_cols];
+        let mut objective5 = vec![0.0_f64; layout5.num_cols];
+        let mut bufs5 = ColumnBufs {
+            col_lower: &mut col_lower5,
+            col_upper: &mut col_upper5,
+            objective: &mut objective5,
+        };
+        fill_anticipated_state_out_columns(&ctx, 5, &layout5, &mut bufs5);
+        assert_eq!(
+            layout5.n_anticipated_state_out_def_rows, 0,
+            "stage 5 inactive: expected no def rows, got {}",
+            layout5.n_anticipated_state_out_def_rows,
+        );
+        for i in 0..2 {
+            let col = layout5.col_anticipated_state_out_start + i;
+            assert_eq!(
+                col_lower5[col], 0.0,
+                "stage 5, plant {i}: col_lower expected 0.0, got {}",
+                col_lower5[col]
+            );
+            assert_eq!(
+                col_upper5[col], 0.0,
+                "stage 5, plant {i}: col_upper expected 0.0, got {}",
+                col_upper5[col]
+            );
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Tests for fill_anticipated_state_out_def_rows
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// At stage 0 with `K=[2,3]` and `n_stages=6`, both plants are active
+    /// (0+2 < 6, 0+3 < 6), so `n_anticipated_state_out_def_rows == 2` and
+    /// both definition rows must have equality bounds `[0.0, 0.0]`.
+    #[test]
+    fn test_fill_anticipated_state_out_def_rows_two_active_plants() {
+        let (fixtures, stage) = build_anticipated_ctx_n_stages_6();
+        let ctx = fixtures.make_ctx(2, 3, vec![2, 3], vec![0, 1], 0);
+        let layout = StageLayout::new(&ctx, &stage, 0);
+
+        assert_eq!(
+            layout.n_anticipated_state_out_def_rows, 2,
+            "expected n_anticipated_state_out_def_rows == 2, got {}",
+            layout.n_anticipated_state_out_def_rows
+        );
+
+        let mut row_lower = vec![f64::NEG_INFINITY; layout.num_rows];
+        let mut row_upper = vec![f64::INFINITY; layout.num_rows];
+        fill_anticipated_state_out_def_rows(&ctx, 0, &layout, &mut row_lower, &mut row_upper);
+
+        for k in 0..2 {
+            let row = layout.row_anticipated_state_out_def_start + k;
+            assert_eq!(
+                row_lower[row], 0.0,
+                "def row {k}: row_lower expected 0.0, got {}",
+                row_lower[row]
+            );
+            assert_eq!(
+                row_upper[row], 0.0,
+                "def row {k}: row_upper expected 0.0, got {}",
+                row_upper[row]
+            );
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Tests for fill_anticipated_state_out_def_entries
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// At stage 0 with `K=[2,3]` and `n_stages=6`, both plants are active.
+    /// For each active plant `i`, the CSC entry list must contain:
+    /// - `(def_row_i, +1.0)` on `col_anticipated_state_out_start + i`
+    /// - `(def_row_i, -1.0)` on `col_anticipated_decision_start + i`
+    #[test]
+    fn test_fill_anticipated_state_out_def_entries_two_active_plants() {
+        let (fixtures, stage) = build_anticipated_ctx_n_stages_6();
+        let ctx = fixtures.make_ctx(2, 3, vec![2, 3], vec![0, 1], 0);
+        let layout = StageLayout::new(&ctx, &stage, 0);
+
+        let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
+        fill_anticipated_state_out_def_entries(&ctx, 0, &layout, &mut col_entries);
+
+        for k in 0..2 {
+            let row = layout.row_anticipated_state_out_def_start + k;
+            let col_state_out = layout.col_anticipated_state_out_start + k;
+            let col_decision = layout.col_anticipated_decision_start + k;
+
+            assert!(
+                col_entries[col_state_out]
+                    .iter()
+                    .any(|&(r, v)| r == row && (v - 1.0).abs() < 1e-15),
+                "plant {k}: expected (+1.0) entry at (col_state_out={col_state_out}, row={row}), \
+                 got {:?}",
+                col_entries[col_state_out]
+            );
+            assert!(
+                col_entries[col_decision]
+                    .iter()
+                    .any(|&(r, v)| r == row && (v + 1.0).abs() < 1e-15),
+                "plant {k}: expected (-1.0) entry at (col_decision={col_decision}, row={row}), \
+                 got {:?}",
+                col_entries[col_decision]
             );
         }
     }

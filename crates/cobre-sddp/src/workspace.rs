@@ -590,6 +590,14 @@ pub(crate) struct ScratchBuffers {
     /// Capacity is `n_anticipated * k_max`; when either dimension is zero the
     /// vec starts empty and the anticipated-state path is skipped entirely.
     pub(crate) anticipated_state_buf: Vec<f64>,
+
+    /// Per-stage scratch buffer for `[0, 0]` bound-patch operations on the new
+    /// `anticipated_state_out` columns (one column per anticipated plant per
+    /// stage). Capacity is `n_anticipated`. Mirrors
+    /// [`ScratchBuffers::ncs_col_indices_buf`].
+    // Pre-allocated here; read sites are wired in the next epic.
+    #[allow(dead_code)]
+    pub(crate) anticipated_state_out_col_indices_buf: Vec<usize>,
 }
 
 /// All per-thread mutable resources required for one LP solve sequence.
@@ -762,6 +770,7 @@ impl ScratchBuffers {
             raw_noise_buf: Vec::with_capacity(noise_dim),
             perm_scratch: Vec::with_capacity(total_forward_passes.max(1)),
             anticipated_state_buf: Vec::with_capacity(n_anticipated * k_max),
+            anticipated_state_out_col_indices_buf: Vec::with_capacity(n_anticipated),
         }
     }
 }
@@ -2180,5 +2189,131 @@ mod tests {
             &SolveProfile::default(),
             "SolverWorkspace::new must initialise solver with default profile"
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Layout-invariance tests (indexer-layout-impact.md Q4, Q5)
+    // ---------------------------------------------------------------------------
+
+    /// Locks `state_at_capture.len() == n_state` across the layout change.
+    /// Per `indexer-layout-impact.md` Q4, the new `anticipated_state_out`
+    /// column does not contribute to `state_at_capture`.
+    #[test]
+    fn test_state_at_capture_length_equals_n_state_after_layout_change() {
+        // Layout: N=2 hydros, L=1 PAR lag, n_anticipated=1, k_max=2.
+        // n_state = 2*(1+1) + 1*2 = 6.
+        //
+        // col_status length includes the new anticipated_state_out column slot;
+        // that slot lives outside the n_state prefix and must not affect
+        // state_at_capture recovery.
+        let state_at_capture = vec![1.0_f64, 2.0, 100.0, 200.0, 1000.0, 2000.0];
+        let original = CapturedBasis {
+            basis: Basis {
+                // col_status length includes the anticipated_state_out column.
+                // 12 is a representative LP num_cols.
+                col_status: vec![1_i32; 12],
+                row_status: vec![5_i32; 8],
+            },
+            base_row_count: 6,
+            cut_row_slots: vec![10_u32, 20],
+            state_at_capture: state_at_capture.clone(),
+        };
+
+        let mut i32_buf: Vec<i32> = Vec::new();
+        let mut f64_buf: Vec<f64> = Vec::new();
+        original.to_broadcast_payload(&mut i32_buf, &mut f64_buf);
+
+        let mut i32_cursor = 0_usize;
+        let mut f64_cursor = 0_usize;
+        let recovered = CapturedBasis::try_from_broadcast_payload(
+            0,
+            &i32_buf,
+            &mut i32_cursor,
+            &f64_buf,
+            &mut f64_cursor,
+        )
+        .expect("round-trip must not fail")
+        .expect("sentinel is 1; must return Some");
+
+        assert_eq!(
+            recovered.state_at_capture.len(),
+            6,
+            "state_at_capture.len() must equal n_state regardless of new LP columns"
+        );
+        assert_eq!(
+            recovered.state_at_capture, state_at_capture,
+            "state_at_capture round-trips bit-identically"
+        );
+        assert_eq!(
+            recovered.basis.col_status.len(),
+            12,
+            "col_status length round-trips bit-identically (including the new column slot)"
+        );
+        assert_eq!(
+            recovered.cut_row_slots, original.cut_row_slots,
+            "cut_row_slots round-trips bit-identically"
+        );
+    }
+
+    /// Locks `BASIS_BROADCAST_WIRE_VERSION` at 1 across the layout change.
+    /// Per `indexer-layout-impact.md` Q5, adding the new `anticipated_state_out`
+    /// column does not bump the wire version.
+    #[test]
+    fn test_basis_broadcast_wire_version_stays_one_with_state_out_column() {
+        use super::BASIS_BROADCAST_WIRE_VERSION;
+
+        // Representative basis with enough col_status entries to include the
+        // new anticipated_state_out columns.
+        let original = CapturedBasis {
+            basis: Basis {
+                col_status: vec![1_i32; 16], // includes new anticipated_state_out block
+                row_status: vec![1_i32; 10],
+            },
+            base_row_count: 8,
+            cut_row_slots: vec![],
+            state_at_capture: vec![0.0_f64; 6],
+        };
+
+        let mut i32_buf: Vec<i32> = Vec::new();
+        let mut f64_buf: Vec<f64> = Vec::new();
+        original.to_broadcast_payload(&mut i32_buf, &mut f64_buf);
+
+        // i32_buf layout per workspace.rs to_broadcast_payload:
+        //   [0]: sentinel (1)
+        //   [1]: BASIS_BROADCAST_WIRE_VERSION
+        //   [2]: col_status.len()
+        //   [3]: row_status.len()
+        //   [4]: base_row_count
+        //   [5]: cut_row_slots.len()
+        //   [6]: state_at_capture.len()
+        //   [7..]: col_status elements, then row_status, then cut_row_slots
+        assert_eq!(i32_buf[0], 1, "sentinel must be 1");
+        assert_eq!(
+            i32_buf[1], BASIS_BROADCAST_WIRE_VERSION,
+            "wire version field must equal BASIS_BROADCAST_WIRE_VERSION (= 1)"
+        );
+        assert_eq!(
+            BASIS_BROADCAST_WIRE_VERSION, 1,
+            "wire version constant must stay at 1 after Epic 03"
+        );
+
+        // Full round-trip confirms no data drift.
+        let mut i32_cursor = 0_usize;
+        let mut f64_cursor = 0_usize;
+        let recovered = CapturedBasis::try_from_broadcast_payload(
+            0,
+            &i32_buf,
+            &mut i32_cursor,
+            &f64_buf,
+            &mut f64_cursor,
+        )
+        .expect("round-trip must not fail")
+        .expect("sentinel is 1; must return Some");
+
+        assert_eq!(recovered.basis.col_status, original.basis.col_status);
+        assert_eq!(recovered.basis.row_status, original.basis.row_status);
+        assert_eq!(recovered.base_row_count, original.base_row_count);
+        assert_eq!(recovered.cut_row_slots, original.cut_row_slots);
+        assert_eq!(recovered.state_at_capture, original.state_at_capture);
     }
 }

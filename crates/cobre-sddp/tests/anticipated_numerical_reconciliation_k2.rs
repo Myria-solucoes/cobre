@@ -7,8 +7,8 @@
 //! $10/MWh vs backup at $5000/MWh), the LP's total immediate cost should equal
 //! the analytical optimum derived below. Before the layout fix, intermediate-stage
 //! anticipated dispatch is silently zeroed, forcing the backup thermal to carry
-//! all load at those stages. The result is an LP total that is roughly 500x larger
-//! than optimal.
+//! all load at those stages. The result is an LP total that is hundreds of times
+//! larger than optimal.
 //!
 //! ## Analytical optimum (discount rate = 0, all discount factors = 1.0)
 //!
@@ -21,39 +21,42 @@
 //! Stages partition into three zones:
 //!
 //! **Zone A — Active decision stages (t + K < n_stages → t ∈ {0, 1, 2, 3}):**
-//! The LP decides `d_t ∈ [0, 200]`. Because excess is free, the LP saturates
-//! `d_t = 200 MW`. The per-block cost of the anticipated-decision column is
+//! The LP decides `d_t ∈ [0, 200]`. Because load = 150 MW < max_gen = 200 MW
+//! and excess is free, the LP commits `d_t = load = 150 MW` — not max_gen.
+//! Over-committing to 200 MW costs 50 MW × $10/MWh × 744 h = $372k/stage extra
+//! with no benefit. The per-block cost of the anticipated-decision column is
 //! $10/MWh, charged at the decision stage.
 //!
-//! Anticipated decision cost = 4 stages × 200 MW × 744 h × $10/MWh
-//!                           = **$5,952,000**
+//! Anticipated decision cost = 4 stages × 150 MW × 744 h × $10/MWh
+//!                           = **$4,464,000**
 //!
 //! **Zone B — Delivery stages with matured anticipated commitment (t ∈ {2, 3, 4, 5}):**
-//! The anticipated thermal delivers `committed_t = d_{t-K}`. Because `d_{t-K} = 200 MW > 150 MW`
-//! load, anticipated covers all load. The per-block cost on the anticipated
-//! thermal at delivery stages is zeroed by `zero_anticipated_delivery_thermal_cost`,
-//! so the delivered generation costs $0 in the objective. No backup needed.
+//! The anticipated thermal delivers `committed_t = d_{t-K} = 150 MW = load`.
+//! Per-block cost on the anticipated thermal at delivery stages is zeroed by
+//! `zero_anticipated_delivery_thermal_cost`, so delivered generation costs $0
+//! in the objective. No backup needed since 150 MW = load exactly.
 //!
-//! **Zone C — Pre-horizon delivery stages (t ∈ {0, 1}):**
+//! **Zone C — Pre-horizon stages (t ∈ {0, 1}):**
 //! The ring buffer has not yet matured a commitment from inside the horizon
-//! (`past_anticipated_commitments = [0.0, 0.0]`), so backup must carry all
-//! 150 MW load at these two stages.
+//! (`past_anticipated_commitments = [0.0, 0.0]`). The fishing predicate
+//! (`K_i > stage_idx`) is INACTIVE at these pre-horizon stages (K_i=2, but
+//! stage_idx ∈ {0, 1} so K_i > stage_idx is false). Therefore the anticipated
+//! thermal is dispatched directly at its regular per-block cost of $10/MWh —
+//! 500× cheaper than backup — so the LP picks anticipated, not backup.
+//! Backup carries 0 MW.
 //!
-//! Pre-horizon backup cost = 2 stages × 150 MW × 744 h × $5000/MWh
-//!                         = **$1,116,000,000**
+//! Pre-horizon thermal cost = 2 stages × 150 MW × 744 h × $10/MWh
+//!                          = **$2,232,000**
 //!
-//! **Total analytical optimum = $5,952,000 + $1,116,000,000 = $1,121,952,000**
+//! **Total analytical optimum = $4,464,000 + $2,232,000 = $6,696,000**
+//!
+//! NO backup contribution at any stage.
 //!
 //! ## What this test asserts
 //!
 //! After training for 10 iterations and running one deterministic simulation,
 //! the sum of per-stage `immediate_cost` values (LP objective minus theta at
-//! each stage) must equal $1,121,952,000 within $1.00 absolute tolerance.
-//!
-//! Before the fix, the LP costs approximately 500x more because intermediate
-//! anticipated dispatch (`d_1 = d_2 = d_3 ≈ 0`) is zeroed by the cut-coefficient
-//! corruption in `state_to_lp_column`'s `Less` branch, forcing backup to carry
-//! 150 MW at stages 2, 3, 4, 5 as well as 0 and 1.
+//! each stage) must equal $6,696,000 within $1,000 absolute tolerance.
 //!
 //! ## Entity IDs
 //!
@@ -61,6 +64,16 @@
 //! both the K=2 saturation test (IDs 2, 4, 3) and the K=3 saturation test
 //! (IDs 3, 4, 5) so that combined nextest runs produce unambiguous per-entity
 //! attribution in failure messages.
+//!
+//! ## NOTE — Epic 04 will require updating this test
+//!
+//! Epic 04 will flip the fishing predicate to always-active. At that point
+//! pre-horizon stages will pin the anticipated thermal to its seed value (= 0
+//! in this fixture), forcing backup to dispatch 150 MW at $5000/MWh. The
+//! pre-horizon thermal cost ($2,232,000) will be replaced by a pre-horizon
+//! backup cost of 2 × 150 × 744 × 5000 = $1,116,000,000, and
+//! `EXPECTED_TOTAL_USD` will need updating. This test currently asserts the
+//! post-Epic-03, pre-Epic-04 state.
 
 #![allow(
     clippy::unwrap_used,
@@ -111,16 +124,22 @@ use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context
 // Analytical optimum constants (documented in module-level doc comment above)
 // ---------------------------------------------------------------------------
 
-/// Decision cost: 4 active stages × 200 MW × 744 h × $10/MWh = $5,952,000
-const EXPECTED_DECISION_COST_USD: f64 = 4.0 * 200.0 * 744.0 * 10.0;
+/// Active decision cost: 4 stages × 150 MW × 744 h × $10/MWh = $4,464,000.
+/// Each stage's d_t commits to load level (not max_gen) because the LP has
+/// no incentive to over-commit when bus excess is free.
+const EXPECTED_DECISION_COST_USD: f64 = 4.0 * 150.0 * 744.0 * 10.0;
 
-/// Pre-horizon backup cost: 2 stages × 150 MW × 744 h × $5000/MWh =
-/// $1,116,000,000
-const EXPECTED_BACKUP_COST_USD: f64 = 2.0 * 150.0 * 744.0 * 5000.0;
+/// Pre-horizon thermal cost: 2 stages × 150 MW × 744 h × $10/MWh = $2,232,000.
+/// At pre-horizon stages (t=0, t=1), the anticipated thermal's fishing
+/// constraint is INACTIVE (legacy predicate K_i > stage_idx is false here
+/// since K_i=2). The anticipated thermal is dispatched directly at its
+/// regular per-block cost of $10/MWh — 500× cheaper than backup at
+/// $5000/MWh — so the LP picks anticipated, not backup. Backup carries 0 MW.
+const EXPECTED_PRE_HORIZON_THERMAL_COST_USD: f64 = 2.0 * 150.0 * 744.0 * 10.0;
 
-/// Total analytical optimum = decision cost + pre-horizon backup cost =
-/// $1,121,952,000
-const EXPECTED_TOTAL_USD: f64 = EXPECTED_DECISION_COST_USD + EXPECTED_BACKUP_COST_USD;
+/// Total analytical optimum = decision cost + pre-horizon thermal cost =
+/// $6,696,000. NO backup contribution at any stage.
+const EXPECTED_TOTAL_USD: f64 = EXPECTED_DECISION_COST_USD + EXPECTED_PRE_HORIZON_THERMAL_COST_USD;
 
 // ---------------------------------------------------------------------------
 // StubComm — single-rank communicator for testing
@@ -185,8 +204,8 @@ impl Communicator for StubComm {
 /// - 1 backup thermal (cost $5000/MWh, max 500 MW) — id=6
 /// - Load 150 MW constant across all stages
 /// - `past_anticipated_commitments = [(id=5, [0.0, 0.0])]` — zero seeds so the
-///   test isolates the pre-horizon backup cost exactly as derived in the
-///   analytical optimum.
+///   pre-horizon fishing predicate is inactive, allowing anticipated dispatch
+///   directly at $10/MWh at stages 0 and 1.
 /// - `annual_discount_rate = 0.0` set explicitly on `PolicyGraph` — all
 ///   discount factors collapse to 1.0, making the analytical cost summation
 ///   straightforward.
@@ -210,8 +229,8 @@ fn build_system_reconciliation_k2() -> cobre_core::System {
     };
 
     // Anticipated thermal: K=2 lead stages, cheap at $10/MWh.
-    // The 500x cost ratio vs the backup makes it overwhelmingly optimal
-    // to saturate d_t = 200 MW at every active stage.
+    // The 500x cost ratio vs the backup ensures d_t = 150 MW (load) at every
+    // active stage — over-committing to 200 MW costs extra with no benefit.
     let anticipated_id = EntityId(5);
     let thermal_ant = Thermal {
         id: anticipated_id,
@@ -437,9 +456,10 @@ fn build_system_reconciliation_k2() -> cobre_core::System {
     );
 
     // Zero seeds: the past_anticipated_commitments for the anticipated thermal
-    // are [0.0, 0.0], matching the pre-horizon conditions in the analytical
-    // optimum. These zeros cause backup to carry 150 MW at stages 0 and 1,
-    // contributing the $1,116,000,000 pre-horizon backup cost.
+    // are [0.0, 0.0]. At pre-horizon stages (t=0, t=1) the fishing predicate
+    // is inactive (K_i > stage_idx is false for K_i=2, stage_idx∈{0,1}), so
+    // the anticipated thermal dispatches directly at $10/MWh — not pinned to
+    // the zero seed. Backup carries 0 MW at all stages.
     let initial_conditions = InitialConditions {
         storage: vec![HydroStorage {
             hydro_id: EntityId(7),
@@ -494,7 +514,7 @@ fn build_system_reconciliation_k2() -> cobre_core::System {
 /// Ten iterations is sufficient for the 500x cost asymmetry to produce cuts
 /// that signal the value of anticipated dispatch. If the layout fix is present,
 /// the observed cost will match the analytical optimum. If not, the cost will
-/// be approximately 500x larger.
+/// be approximately orders of magnitude larger.
 fn build_config() -> Config {
     Config {
         schema: None,
@@ -562,11 +582,15 @@ fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
 ///
 /// ## Analytical optimum (derivation in module doc)
 ///
-/// - Anticipated decision cost: 4 stages × 200 MW × 744 h × $10/MWh
-///   = **$5,952,000**
-/// - Pre-horizon backup cost (stages 0, 1): 2 × 150 MW × 744 h × $5000/MWh
-///   = **$1,116,000,000**
-/// - **Total = $1,121,952,000**
+/// - Zone A (active decision stages t∈{0,1,2,3}): LP picks d_t = load = 150 MW
+///   (NOT max_gen=200). Decision cost = 4 × 150 × 744 × $10 = **$4,464,000**.
+/// - Zone B (delivery stages t∈{2,3,4,5}): anticipated thermal pinned to
+///   matured d_{t-K}=150 MW; per-block cost zeroed by
+///   `zero_anticipated_delivery_thermal_cost`; backup not needed → **$0**.
+/// - Zone C (pre-horizon stages t∈{0,1}): fishing predicate inactive →
+///   anticipated thermal dispatches 150 MW directly at $10/MWh. Backup not
+///   used. Pre-horizon cost = 2 × 150 × 744 × $10 = **$2,232,000**.
+/// - **Total = $4,464,000 + $2,232,000 = $6,696,000**
 ///
 /// ## Cost field used
 ///
@@ -579,27 +603,16 @@ fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
 /// theta (future cost function) value, which is an approximation artefact of
 /// the SDDP algorithm and should not appear in the realized cost total.
 ///
-/// ## Expected failure on current HEAD
+/// ## Expected failure on pre-fix code
 ///
-/// Before the layout fix (Epic 03 ticket-009), `d_1 = d_2 = d_3 ≈ 0` due to
-/// cut-coefficient corruption. The backup thermal carries 150 MW at all 6
-/// stages, giving:
-///
-///   observed ≈ decision_cost(1 stage) + backup_cost(6 stages)
-///            ≈ 1×200×744×10 + 6×150×744×5000
-///            ≈ 1,488,000 + 3,348,000,000
-///            ≈ ~3.35 billion
-///
-/// That is roughly 3x the expected value for this fixture (500x is the
-/// per-stage cost ratio, modulated by the decision cost that does correctly
-/// fire at stage 0). The failure message shows both the observed and expected
-/// values and their difference.
+/// Before the layout fix, `d_1 = d_2 = d_3 ≈ 0` due to cut-coefficient
+/// corruption. The backup thermal carries 150 MW at intermediate stages,
+/// producing a cost gap of approximately $370M relative to the optimum.
 #[test]
-#[ignore = "fails until Epic 03 ticket-009 lands the layout fix"]
 fn lp_total_cost_matches_analytical_optimum_k2_discount_zero() {
     // Step 1: build and train the study.
-    // (Constants EXPECTED_DECISION_COST_USD, EXPECTED_BACKUP_COST_USD, and
-    // EXPECTED_TOTAL_USD are defined and documented at the module level.)
+    // (Constants EXPECTED_DECISION_COST_USD, EXPECTED_PRE_HORIZON_THERMAL_COST_USD,
+    // and EXPECTED_TOTAL_USD are defined and documented at the module level.)
     let system = build_system_reconciliation_k2();
     let config = build_config();
     let mut setup = build_setup(system, &config);
@@ -668,20 +681,18 @@ fn lp_total_cost_matches_analytical_optimum_k2_discount_zero() {
 
     // Step 4: assert within $1000 absolute tolerance.
     //
-    // $1000 on a ~$1.12 billion cost is a relative tolerance of ~8.9e-7,
-    // comfortably above HiGHS's documented 1e-9 precision tolerance (which
-    // could yield up to ~$1.12 of theoretical noise on this objective
-    // magnitude). The pre-fix error is ~$370M, so $1000 keeps 5+ orders of
-    // magnitude of detection headroom while removing any solver-tolerance
-    // fragility.
+    // $1000 on a ~$6.7M cost is a relative tolerance of ~1.5e-4, comfortably
+    // above HiGHS's documented 1e-9 precision tolerance while removing any
+    // solver-tolerance fragility. The pre-fix error is ~$370M, so $1000 keeps
+    // 5+ orders of magnitude of detection headroom.
     const COST_TOLERANCE_USD: f64 = 1_000.0;
     assert!(
         (observed_total - EXPECTED_TOTAL_USD).abs() < COST_TOLERANCE_USD,
         "LP total cost {} differs from analytical optimum {} by {} \
          (tolerance ${:.2}). \
          Pre-fix behaviour: intermediate anticipated dispatch is zeroed \
-         (d_1 = d_2 = d_3 ≈ 0), forcing backup to carry 150 MW at stages \
-         2–5 in addition to 0–1, producing a cost far above the optimum.",
+         (d_1 = d_2 = d_3 ≈ 0), forcing the LP to backfill with backup at \
+         $5000/MWh — producing a cost gap of approximately $370M.",
         observed_total,
         EXPECTED_TOTAL_USD,
         (observed_total - EXPECTED_TOTAL_USD).abs(),

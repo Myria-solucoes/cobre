@@ -161,6 +161,27 @@ pub(crate) struct StageLayout {
     /// Zero anticipated thermals: equals `col_thermal_start` (degenerate but valid;
     /// the column range is empty and `col_line_fwd_start` is unshifted).
     pub(crate) col_anticipated_decision_start: usize,
+    /// Start of the `anticipated_state_out` column block (one column per
+    /// anticipated plant; stage-level, NOT per-block). Located immediately
+    /// after `col_anticipated_decision_start` in the control region.
+    /// Pinned to `decision_col[plant]` by the `anticipated_state_out_def` row.
+    /// When `n_anticipated == 0`, equals `col_anticipated_decision_start`
+    /// (the block is empty).
+    pub(crate) col_anticipated_state_out_start: usize,
+    /// Start of the `anticipated_state_out_def` equality row block.
+    /// One row per ACTIVE plant (`stage_idx + K_p < n_stages`); inactive
+    /// plants emit no row, matching the strict gate of
+    /// `anticipated_decision_active_at_stage`. Located adjacent to and
+    /// immediately after `row_anticipated_fishing_start`.
+    pub(crate) row_anticipated_state_out_def_start: usize,
+    /// Number of `anticipated_state_out_def` rows at this stage.
+    ///
+    /// Equals the count of plants with `stage_idx + K_p < n_stages`
+    /// (strict gate). Zero when `n_anticipated == 0` or when no plant is
+    /// active at this stage. Used by the matrix-fill helpers in ticket-008
+    /// to drive the active-row iteration.
+    #[allow(dead_code)]
+    pub(crate) n_anticipated_state_out_def_rows: usize,
     /// Start of anticipated-state columns (ring-buffer slots for committed MW).
     ///
     /// Slot-major layout: column for slot `s`, plant `i` is at
@@ -331,6 +352,9 @@ struct DecisionColumnOffsets {
     /// Start of anticipated-decision columns: one per anticipated thermal per stage
     /// (stage-level, NOT per block). Equals `col_thermal_end`.
     col_anticipated_decision_start: usize,
+    /// Start of anticipated-state-out columns: one per anticipated thermal per stage
+    /// (stage-level, NOT per block). Placed immediately after `col_anticipated_decision_start`.
+    col_anticipated_state_out_start: usize,
     col_line_fwd_start: usize,
     col_line_rev_start: usize,
     col_deficit_start: usize,
@@ -385,10 +409,12 @@ fn compute_decision_column_offsets(
     let col_spillage_start = col_turbine_start + ctx.n_hydros * n_blks;
     let col_diversion_start = col_spillage_start + ctx.n_hydros * n_blks;
     let col_thermal_start = col_diversion_start + ctx.n_hydros * n_blks;
-    // Anticipated-decision columns: stage-level (NOT per-block), one per anticipated thermal.
-    // Inserted between thermal (per-block) and line_fwd.
+    // Anticipated-decision and anticipated-state-out columns: stage-level (NOT per-block),
+    // one per anticipated thermal each. Inserted between thermal (per-block) and line_fwd.
+    // Layout: thermal | anticipated_decision (A cols) | anticipated_state_out (A cols) | line_fwd
     let col_anticipated_decision_start = col_thermal_start + ctx.n_thermals * n_blks;
-    let col_line_fwd_start = col_anticipated_decision_start + ctx.n_anticipated;
+    let col_anticipated_state_out_start = col_anticipated_decision_start + ctx.n_anticipated;
+    let col_line_fwd_start = col_anticipated_state_out_start + ctx.n_anticipated;
     let col_line_rev_start = col_line_fwd_start + ctx.n_lines * n_blks;
     let max_deficit_segments = ctx
         .buses
@@ -407,6 +433,7 @@ fn compute_decision_column_offsets(
         col_diversion_start,
         col_thermal_start,
         col_anticipated_decision_start,
+        col_anticipated_state_out_start,
         col_line_fwd_start,
         col_line_rev_start,
         col_deficit_start,
@@ -539,7 +566,6 @@ fn enumerate_generic_constraint_rows(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
     n_blks: usize,
-    row_generic_start: usize,
     col_generic_slack_start: usize,
 ) -> GenericConstraintLayout {
     let mut n_generic_rows: usize = 0;
@@ -563,7 +589,6 @@ fn enumerate_generic_constraint_rows(
                 None => {
                     // One row per block.
                     for block_idx in 0..n_blks {
-                        let row_offset = row_generic_start + n_generic_rows;
                         let (slack_plus_col, slack_minus_col) = if constraint.slack.enabled {
                             let plus_col = col_generic_slack_start + n_generic_slack_cols;
                             n_generic_slack_cols += 1;
@@ -578,7 +603,6 @@ fn enumerate_generic_constraint_rows(
                         } else {
                             (None, None)
                         };
-                        let _ = row_offset; // used indirectly via n_generic_rows
                         n_generic_rows += 1;
                         generic_constraint_rows.push(GenericConstraintRowEntry {
                             constraint_idx,
@@ -740,7 +764,21 @@ impl StageLayout {
             .filter(|&&k_i| k_i <= stage_idx)
             .count();
         let row_anticipated_fishing_start = row_min_generation_start + n_op_rows;
-        let row_generic_start = row_anticipated_fishing_start + n_anticipated_fishing_rows;
+
+        // Anticipated-state-out definition rows: one per ACTIVE plant (strict gate).
+        // Active means stage_idx + K_p < n_stages (same predicate as
+        // `anticipated_decision_active_at_stage`). Inactive plants emit no row.
+        // Placed immediately after fishing rows, before generic rows.
+        let n_stages = ctx.bounds.n_stages();
+        let n_anticipated_state_out_def_rows = ctx
+            .anticipated_lead_stages
+            .iter()
+            .filter(|&&k_i| stage_idx.saturating_add(k_i) < n_stages)
+            .count();
+        let row_anticipated_state_out_def_start =
+            row_anticipated_fishing_start + n_anticipated_fishing_rows;
+        let row_generic_start =
+            row_anticipated_state_out_def_start + n_anticipated_state_out_def_rows;
 
         // Anticipated-state column start from the augmented indexer.
         // Slot-major layout: col for slot s, plant i = anticipated_state.start + s * n_anticipated + i.
@@ -748,13 +786,8 @@ impl StageLayout {
 
         // Generic constraints: active rows and slack columns.
         let col_generic_slack_start = col_ncs_end;
-        let generic = enumerate_generic_constraint_rows(
-            ctx,
-            stage,
-            n_blks,
-            row_generic_start,
-            col_generic_slack_start,
-        );
+        let generic =
+            enumerate_generic_constraint_rows(ctx, stage, n_blks, col_generic_slack_start);
 
         // z-inflow columns and rows: positions from the augmented indexer.
         let col_z_inflow_start = idx.z_inflow.start;
@@ -789,6 +822,7 @@ impl StageLayout {
             col_diversion_start: dec.col_diversion_start,
             col_thermal_start: dec.col_thermal_start,
             col_anticipated_decision_start: dec.col_anticipated_decision_start,
+            col_anticipated_state_out_start: dec.col_anticipated_state_out_start,
             col_anticipated_state_start,
             col_line_fwd_start: dec.col_line_fwd_start,
             col_line_rev_start: dec.col_line_rev_start,
@@ -819,6 +853,8 @@ impl StageLayout {
             row_anticipated_state_fixing_start: idx.anticipated_state_fixing.start,
             row_anticipated_fishing_start,
             n_anticipated_fishing_rows,
+            row_anticipated_state_out_def_start,
+            n_anticipated_state_out_def_rows,
             row_generic_start,
             num_rows,
             n_generic_rows: generic.n_generic_rows,
@@ -848,10 +884,11 @@ mod tests {
 
     use chrono::NaiveDate;
     use cobre_core::{
-        Block, BlockMode, CascadeTopology, NoiseMethod, ResolvedBounds, ResolvedExchangeFactors,
-        ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds,
-        ResolvedNcsFactors, ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig,
-        StageStateConfig,
+        Block, BlockMode, BoundsCountsSpec, BoundsDefaults, CascadeTopology, ContractStageBounds,
+        HydroStageBounds, LineStageBounds, NoiseMethod, PumpingStageBounds, ResolvedBounds,
+        ResolvedExchangeFactors, ResolvedGenericConstraintBounds, ResolvedLoadFactors,
+        ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, ScenarioSourceConfig, Stage,
+        StageRiskConfig, StageStateConfig, ThermalStageBounds,
     };
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -1019,9 +1056,9 @@ mod tests {
     /// AC-1: `col_anticipated_decision_start` falls between thermal end and
     /// `col_line_fwd_start` when `n_anticipated=2, n_thermals=3, n_blks=4`.
     ///
-    /// Expected:
-    /// `col_anticipated_decision_start == col_thermal_start + 3 * 4 == col_thermal_start + 12`
-    /// `col_line_fwd_start == col_anticipated_decision_start + 2`
+    /// After ticket-007, the layout in the control region is:
+    /// `thermal | anticipated_decision (2 cols) | anticipated_state_out (2 cols) | line_fwd`
+    /// So `col_line_fwd_start == col_anticipated_decision_start + 2 * n_anticipated`.
     #[test]
     fn anticipated_decision_columns_placed_between_thermal_and_line_fwd() {
         use chrono::NaiveDate;
@@ -1091,23 +1128,30 @@ mod tests {
         // n_thermals = 0, n_blks = 4:
         // col_thermal_start = col_diversion_start + 0 * 4 = col_diversion_start
         // col_anticipated_decision_start = col_thermal_start + 0 * 4 = col_thermal_start
-        // col_line_fwd_start = col_anticipated_decision_start + n_anticipated = col_thermal_start + 2
+        // col_anticipated_state_out_start = col_anticipated_decision_start + n_anticipated
+        // col_line_fwd_start = col_anticipated_state_out_start + n_anticipated
+        //                    = col_anticipated_decision_start + 2 * n_anticipated
         assert_eq!(
             layout.col_anticipated_decision_start, layout.col_thermal_start,
             "col_anticipated_decision_start must equal col_thermal_start \
              when n_thermals=0 (no thermal per-block cols)"
         );
         assert_eq!(
-            layout.col_line_fwd_start,
+            layout.col_anticipated_state_out_start,
             layout.col_anticipated_decision_start + n_anticipated,
-            "col_line_fwd_start == col_anticipated_decision_start + n_anticipated"
+            "col_anticipated_state_out_start == col_anticipated_decision_start + n_anticipated"
         );
-        // Verify the separation between thermal_start and line_fwd_start is exactly n_anticipated
-        // (not n_anticipated * n_blks).
+        assert_eq!(
+            layout.col_line_fwd_start,
+            layout.col_anticipated_state_out_start + n_anticipated,
+            "col_line_fwd_start == col_anticipated_state_out_start + n_anticipated"
+        );
+        // Verify the separation between thermal_start and line_fwd_start is exactly 2*n_anticipated
+        // (n_anticipated cols for anticipated_decision + n_anticipated cols for anticipated_state_out).
         assert_eq!(
             layout.col_line_fwd_start - layout.col_thermal_start,
-            n_anticipated,
-            "gap from thermal_start to line_fwd_start must be exactly n_anticipated (stage-level)"
+            2 * n_anticipated,
+            "gap from thermal_start to line_fwd_start must be exactly 2*n_anticipated (two stage-level blocks)"
         );
     }
 
@@ -1254,5 +1298,223 @@ mod tests {
             layout.row_anticipated_state_fixing_start, 0,
             "row_anticipated_state_fixing_start must be 0 for N=0"
         );
+    }
+
+    // ── ticket-007 tests ──────────────────────────────────────────────────────
+
+    /// Build a `ResolvedBounds` with zero entities but the given `n_stages`.
+    ///
+    /// Used to exercise the `stage_idx.saturating_add(k_i) < n_stages` predicate
+    /// in `n_anticipated_state_out_def_rows` without needing real entity data.
+    fn bounds_with_n_stages(n_stages: usize) -> ResolvedBounds {
+        ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 0,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 0.0,
+                    min_turbined_m3s: 0.0,
+                    max_turbined_m3s: 0.0,
+                    min_outflow_m3s: 0.0,
+                    max_outflow_m3s: None,
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    max_diversion_m3s: None,
+                    filling_inflow_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        )
+    }
+
+    /// Builds a fixture struct owning all data for a context with anticipated
+    /// thermals and a known `n_stages` for the `state_out_def` predicate.
+    struct AntFixturesWithNStages {
+        par_lp: PrecomputedPar,
+        cascade: CascadeTopology,
+        bounds: ResolvedBounds,
+        penalties: ResolvedPenalties,
+        resolved_generic_bounds: ResolvedGenericConstraintBounds,
+        resolved_load_factors: ResolvedLoadFactors,
+        resolved_exchange_factors: ResolvedExchangeFactors,
+        resolved_ncs_bounds: ResolvedNcsBounds,
+        resolved_ncs_factors: ResolvedNcsFactors,
+        resolved_parameters: ResolvedParameters,
+        production_models: ProductionModelSet,
+        evaporation_models: EvaporationModelSet,
+    }
+
+    impl AntFixturesWithNStages {
+        fn new(n_stages: usize) -> Self {
+            Self {
+                par_lp: PrecomputedPar::default(),
+                cascade: CascadeTopology::build(&[]),
+                bounds: bounds_with_n_stages(n_stages),
+                penalties: ResolvedPenalties::empty(),
+                resolved_generic_bounds: ResolvedGenericConstraintBounds::empty(),
+                resolved_load_factors: ResolvedLoadFactors::empty(),
+                resolved_exchange_factors: ResolvedExchangeFactors::empty(),
+                resolved_ncs_bounds: ResolvedNcsBounds::empty(),
+                resolved_ncs_factors: ResolvedNcsFactors::empty(),
+                resolved_parameters: ResolvedParameters {
+                    per_param: vec![],
+                    id_to_slot: vec![],
+                },
+                production_models: ProductionModelSet::new(vec![], 0, 1),
+                evaporation_models: EvaporationModelSet::new(vec![]),
+            }
+        }
+
+        fn make_ctx(
+            &self,
+            n_anticipated: usize,
+            k_max: usize,
+            anticipated_lead_stages: Vec<usize>,
+            anticipated_thermal_indices: Vec<usize>,
+        ) -> TemplateBuildCtx<'_> {
+            let n_stages = self.bounds.n_stages();
+            TemplateBuildCtx {
+                hydros: &[],
+                thermals: &[],
+                lines: &[],
+                buses: &[],
+                load_models: &[],
+                cascade: &self.cascade,
+                bounds: &self.bounds,
+                penalties: &self.penalties,
+                hydro_pos: HashMap::new(),
+                thermal_pos: HashMap::new(),
+                line_pos: HashMap::new(),
+                bus_pos: HashMap::new(),
+                par_lp: &self.par_lp,
+                production_models: &self.production_models,
+                evaporation_models: &self.evaporation_models,
+                generic_constraints: &[],
+                resolved_generic_bounds: &self.resolved_generic_bounds,
+                resolved_load_factors: &self.resolved_load_factors,
+                resolved_exchange_factors: &self.resolved_exchange_factors,
+                non_controllable_sources: &[],
+                resolved_ncs_bounds: &self.resolved_ncs_bounds,
+                resolved_ncs_factors: &self.resolved_ncs_factors,
+                resolved_parameters: &self.resolved_parameters,
+                diversion_upstream: HashMap::new(),
+                n_hydros: 0,
+                n_thermals: 0,
+                n_lines: 0,
+                n_buses: 0,
+                max_par_order: 0,
+                n_anticipated,
+                k_max,
+                anticipated_lead_stages,
+                anticipated_thermal_indices,
+                has_penalty: false,
+                cumulative_discount_factors: vec![1.0; n_stages],
+                total_hours_per_stage: vec![744.0; n_stages],
+            }
+        }
+    }
+
+    /// `col_anticipated_state_out_start` is adjacent to `col_anticipated_decision_start`,
+    /// `col_line_fwd_start` follows `col_anticipated_state_out_start`, and
+    /// `n_anticipated_state_out_def_rows` counts both active plants at stage 0.
+    ///
+    /// Fixture: `n_anticipated=2`, `K=[2,3]`, `n_stages=6`, `stage_idx=0`.
+    /// Both plants are active: `0+2=2 < 6` and `0+3=3 < 6`.
+    #[test]
+    fn test_layout_state_out_block_adjacent_to_decision() {
+        let fixtures = AntFixturesWithNStages::new(6);
+        let ctx = fixtures.make_ctx(
+            2,          // n_anticipated
+            3,          // k_max
+            vec![2, 3], // K_0=2, K_1=3
+            vec![0, 1],
+        );
+        let stage = minimal_stage();
+        let layout = StageLayout::new(&ctx, &stage, 0);
+
+        assert_eq!(
+            layout.col_anticipated_state_out_start,
+            layout.col_anticipated_decision_start + 2,
+            "state_out columns must be immediately after anticipated_decision"
+        );
+        assert_eq!(
+            layout.col_line_fwd_start,
+            layout.col_anticipated_state_out_start + 2,
+            "line_fwd must be immediately after state_out columns"
+        );
+        assert_eq!(layout.n_anticipated_state_out_def_rows, 2);
+        assert_eq!(
+            layout.row_anticipated_state_out_def_start,
+            layout.row_anticipated_fishing_start + layout.n_anticipated_fishing_rows
+        );
+    }
+
+    /// `n_anticipated_state_out_def_rows == 0` when all plants are inactive at
+    /// the given stage, but the column block stays allocated.
+    ///
+    /// Fixture: `n_anticipated=2`, `K=[2,3]`, `n_stages=6`, `stage_idx=5`.
+    /// Both inactive: `5+2=7 >= 6` and `5+3=8 >= 6`.
+    #[test]
+    fn test_layout_state_out_def_rows_zero_when_all_inactive() {
+        let fixtures = AntFixturesWithNStages::new(6);
+        let ctx = fixtures.make_ctx(
+            2,          // n_anticipated
+            3,          // k_max
+            vec![2, 3], // K_0=2, K_1=3
+            vec![0, 1],
+        );
+        let stage = minimal_stage();
+        let layout = StageLayout::new(&ctx, &stage, 5);
+
+        assert_eq!(layout.n_anticipated_state_out_def_rows, 0);
+        // Column block stays allocated regardless of activity.
+        assert_eq!(
+            layout.col_anticipated_state_out_start,
+            layout.col_anticipated_decision_start + 2
+        );
+    }
+
+    /// Zero-anticipated layouts must not grow `num_cols` or emit def rows.
+    ///
+    /// `col_anticipated_state_out_start` must equal `col_anticipated_decision_start`
+    /// when `n_anticipated == 0` (empty block; both starts coincide).
+    #[test]
+    fn test_layout_no_anticipated_unchanged_num_cols() {
+        let fixtures = ZeroEntityFixtures::new();
+        let ctx = fixtures.make_ctx(0, 0, vec![], vec![]);
+        let stage = minimal_stage();
+        let layout = StageLayout::new(&ctx, &stage, 0);
+
+        assert_eq!(
+            layout.col_anticipated_state_out_start, layout.col_anticipated_decision_start,
+            "col_anticipated_state_out_start must equal col_anticipated_decision_start when n_anticipated=0"
+        );
+        assert_eq!(layout.n_anticipated_state_out_def_rows, 0);
     }
 }

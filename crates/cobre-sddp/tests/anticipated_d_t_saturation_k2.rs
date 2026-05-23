@@ -1,17 +1,19 @@
-//! Regression test: `d_t` must saturate at `max_generation_mw` for every
-//! active anticipated-decision stage in a K=2 fixture.
+//! Regression test: `d_t` must commit to load level for every active
+//! anticipated-decision stage in a K=2 fixture.
 //!
 //! ## Bug being guarded against
 //!
 //! In a 6-stage K=2 study with a 500x cost asymmetry (anticipated thermal at
 //! $10/MWh vs backup at $5000/MWh), the LP should commit the anticipated
-//! thermal to its maximum (`200 MW`) at every stage `t` where `t + K < n_stages`
-//! (i.e. `t in {0, 1, 2, 3}`), because over-commitment is free (excess
-//! generation cost = $0) while any backup dispatch is ruinously expensive.
+//! thermal to exactly `load = 150 MW` at every stage `t` where `t + K < n_stages`
+//! (i.e. `t in {0, 1, 2, 3}`). Over-committing to `max_gen = 200 MW` costs an
+//! extra 50 MW × $10/MWh × 744 h = $372k/stage with zero offsetting benefit
+//! (excess generation is free), so the LP optimum is `d_t = load = 150 MW`,
+//! not `max_gen = 200 MW`.
 //!
-//! Empirical inspection on HEAD shows that `d_0 = 200` (correct) but
-//! `d_1 = d_2 = d_3 = 0` (wrong). The LP is discarding the benefit at all
-//! intermediate active stages. This is the symptom of the cut-coefficient
+//! Empirical inspection on pre-fix HEAD shows that `d_0 = 150` (approximately
+//! correct) but `d_1 = d_2 = d_3 = 0` (wrong). The LP is discarding the benefit
+//! at all intermediate active stages. This is the symptom of the cut-coefficient
 //! corruption in `state_to_lp_column`'s `Less` branch: the Benders cut
 //! gradients for anticipated-state columns are mapped to the wrong LP column
 //! index for `k >= 2`, so the policy at those stages receives no incentive
@@ -22,13 +24,18 @@
 //! After training a deterministic single-scenario simulation for 10 iterations:
 //!
 //! - For `t in {0, 1, 2, 3}`: `anticipated_decision_mw` exists (is `Some`) and
-//!   saturates at `200.0 ± 1e-3 MW`.
+//!   commits to load level `150.0 ± 1e-3 MW`.
 //! - For `t in {4, 5}`: `anticipated_decision_mw` is `None` (the
 //!   strict-boundary predicate `t + K < n_stages` excludes these).
 //!
-//! This test is gated behind `#[ignore]` until the layout fix in Epic 03
-//! ticket-009 lands. It will transition from ignored to passing once that
-//! fix corrects the column-index corruption.
+//! ## Economic reasoning
+//!
+//! Load = 150 MW < max_gen = 200 MW. Excess generation cost = $0.
+//! LP optimum: `d_t = load = 150 MW` at every active stage.
+//! Committing 200 MW instead would cost an extra 50 MW × $10/MWh × 744 h
+//! = $372k/stage with no benefit — the excess is simply discarded for free.
+//! The 500x cost asymmetry matters only to ensure the anticipated thermal
+//! dispatches at all (reaching load level), not to saturate at max_gen.
 
 #![allow(
     clippy::unwrap_used,
@@ -139,10 +146,10 @@ impl Communicator for StubComm {
 /// - `past_anticipated_commitments = [(id=2, [0.0, 0.0])]` — zero seeds so
 ///   the test isolates the in-horizon bug, not any seeding artefact.
 ///
-/// The 500x cost ratio (10 vs 5000) makes it overwhelmingly optimal to
-/// saturate anticipated dispatch at every active stage (`t + K < n_stages`).
-/// Over-generation is free (excess_cost = $0), so the LP has no incentive
-/// to cap anticipated commits below `max_generation_mw = 200`.
+/// The LP optimum is `d_t = load = 150 MW` at every active stage. Committing
+/// more (200 MW) costs extra at $10/MWh with no benefit — excess is free.
+/// The 500x cost ratio (10 vs 5000) ensures the anticipated thermal reaches
+/// load level, not that it saturates at max_gen.
 fn build_system_k2() -> cobre_core::System {
     use chrono::NaiveDate;
 
@@ -160,7 +167,8 @@ fn build_system_k2() -> cobre_core::System {
     };
 
     // Anticipated thermal: K=2 lead stages, very cheap so the policy
-    // saturates anticipated dispatch to max_generation_mw.
+    // dispatches to load level. Max 200 MW > load 150 MW, but d_t = 150
+    // is the optimum since over-commitment costs $10/MWh with zero benefit.
     let anticipated_id = EntityId(2);
     let thermal_ant = Thermal {
         id: anticipated_id,
@@ -493,23 +501,24 @@ fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
 // Test
 // ---------------------------------------------------------------------------
 
-/// Assert that `anticipated_decision_mw` saturates at `max_generation_mw`
-/// for every active decision stage in a K=2, 6-stage fixture.
+/// Assert that `anticipated_decision_mw` commits to load level (150 MW) for
+/// every active decision stage in a K=2, 6-stage fixture.
 ///
-/// With the anticipated thermal at $10/MWh and the backup at $5000/MWh,
-/// the value of pre-committing 200 MW (max) at every stage `t` where
-/// `t + K < n_stages` is enormous compared to relying on the backup. The
-/// excess generation cost is $0, so the LP has no reason to cap below 200 MW.
+/// With load = 150 MW < max_gen = 200 MW and excess generation cost = $0,
+/// the LP optimum is `d_t = load = 150 MW` at every active stage `t` where
+/// `t + K < n_stages`. Committing 200 MW instead costs an extra
+/// 50 MW × $10/MWh × 744 h = $372k/stage with no benefit.
 ///
-/// **Expected behaviour (post-fix)**: `d_t ≈ 200.0` for `t in {0, 1, 2, 3}`.
+/// **Expected behaviour (post-fix)**: `d_t ≈ 150.0` for `t in {0, 1, 2, 3}`.
 ///
-/// **Observed behaviour (current HEAD)**: `d_0 ≈ 200.0` but
-/// `d_1 = d_2 = d_3 ≈ 0`. The cut coefficients for the anticipated-state
-/// columns are corrupted for `k >= 2` in `state_to_lp_column`'s `Less`
-/// branch, so the policy at those stages receives no incentive to commit.
+/// **Pre-fix behaviour (historical context)**: `d_0 ≈ 150.0` (approximately
+/// correct at stage 0) but `d_1 = d_2 = d_3 ≈ 0`. The cut coefficients for
+/// the anticipated-state columns are corrupted for `k >= 2` in
+/// `state_to_lp_column`'s `Less` branch, so the policy at those stages
+/// receives no incentive to commit anticipated capacity, forcing backup to
+/// dispatch at $5000/MWh.
 #[test]
-#[ignore = "fails until Epic 03 ticket-009 lands the layout fix"]
-fn d_t_saturates_at_max_gen_for_every_active_stage_k2() {
+fn d_t_commits_to_load_for_every_active_stage_k2() {
     let k: usize = 2;
     let n_stages: usize = 6;
     // Active decision stages: t + K < n_stages  =>  t in {0, 1, 2, 3}.
@@ -576,25 +585,27 @@ fn d_t_saturates_at_max_gen_for_every_active_stage_k2() {
             .and_then(|th| th.anticipated_decision_mw)
     };
 
-    // ── Active stages: decision must exist and saturate at max_generation_mw ──
+    // ── Active stages: decision must exist and commit to load = 150 MW ──
     //
     // With the strict-boundary predicate `t + K < n_stages`, stages 0..3
-    // are active. The 500x cost asymmetry and zero excess cost make
-    // d_t = 200 overwhelmingly optimal at every active stage. On the current
-    // HEAD the cut-coefficient bug causes d_t = 0 for t in {1, 2, 3}.
-    let max_gen_mw = 200.0_f64;
+    // are active. Load = 150 MW < max_gen = 200 MW; excess is free, so
+    // d_t = load = 150 MW is the optimum — over-committing costs extra with
+    // no benefit. On pre-fix code, the cut-coefficient bug causes d_t = 0
+    // for t in {1, 2, 3}, which this test guards against post-fix.
+    let load_mw = 150.0_f64;
     let tol = 1e-3_f64;
     for t in &active_stages {
         let d_t = decision_at(*t).unwrap_or_else(|| {
             panic!("anticipated_decision_mw must be Some at active stage t={t} (t + K < n_stages)")
         });
         assert!(
-            (d_t - max_gen_mw).abs() < tol,
-            "d_t at stage {t} must saturate at max_generation_mw={max_gen_mw}: \
+            (d_t - load_mw).abs() < tol,
+            "d_t at stage {t} must saturate at load=150 MW: \
              got {d_t} (delta = {delta:.6} MW, tol = {tol} MW). \
-             Current HEAD produces d_t ≈ 0 for t >= 1 due to \
-             cut-coefficient corruption in state_to_lp_column (Less branch).",
-            delta = (d_t - max_gen_mw).abs(),
+             Pre-fix behaviour: d_t ≈ 0 for t >= 1 due to cut-coefficient \
+             corruption in state_to_lp_column (Less branch), forcing backup \
+             at $5000/MWh.",
+            delta = (d_t - load_mw).abs(),
         );
     }
 

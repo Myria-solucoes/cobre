@@ -1,13 +1,15 @@
-//! Regression test: `d_t` must saturate at `max_generation_mw` for every
-//! active anticipated-decision stage in a K=3 fixture.
+//! Regression test: `d_t` must commit to load level for every active
+//! anticipated-decision stage in a K=3 fixture.
 //!
 //! ## Bug being guarded against
 //!
 //! In an 8-stage K=3 study with a 500x cost asymmetry (anticipated thermal at
 //! $10/MWh vs backup at $5000/MWh), the LP should commit the anticipated
-//! thermal to its maximum (`200 MW`) at every stage `t` where `t + K < n_stages`
-//! (i.e. `t in {0, 1, 2, 3, 4}`), because over-commitment is free (excess
-//! generation cost = $0) while any backup dispatch is ruinously expensive.
+//! thermal to exactly `load = 150 MW` at every stage `t` where `t + K < n_stages`
+//! (i.e. `t in {0, 1, 2, 3, 4}`). Over-committing to `max_gen = 200 MW` costs
+//! an extra 50 MW × $10/MWh × 744 h = $372k/stage with zero offsetting benefit
+//! (excess generation is free), so the LP optimum is `d_t = load = 150 MW`,
+//! not `max_gen = 200 MW`.
 //!
 //! The K=3 propagation chain is longer than K=2: cuts at stage `t` propagate
 //! to predecessor's slot 1, which is `state_col[slot 2]`, whose value at K=3
@@ -20,16 +22,20 @@
 //! After training a deterministic single-scenario simulation for 15 iterations:
 //!
 //! - For `t in {0, 1, 2, 3, 4}`: `anticipated_decision_mw` exists (is `Some`) and
-//!   saturates at `200.0 ± 1e-3 MW`.
+//!   commits to load level `150.0 ± 1e-3 MW`.
 //! - For `t in {5, 6, 7}`: `anticipated_decision_mw` is `None` (the
 //!   strict-boundary predicate `t + K < n_stages` excludes these).
 //! - For `t in {3, 4, 5, 6, 7}` (stages where `t >= K`): the matured
 //!   `anticipated_committed_mw` at stage `t` equals the decision made K=3
 //!   stages earlier, i.e. `committed_at(t) ≈ decision_at(t - 3)`.
 //!
-//! This test is gated behind `#[ignore]` until the layout fix in Epic 03
-//! ticket-009 lands. It will transition from ignored to passing once that
-//! fix corrects the column-index corruption.
+//! ## Economic reasoning
+//!
+//! Load = 150 MW < max_gen = 200 MW. Excess generation cost = $0.
+//! LP optimum: `d_t = load = 150 MW` at every active stage.
+//! Committing 200 MW instead costs 50 MW × $10/MWh × 744 h = $372k/stage
+//! extra with no benefit. The 500x cost asymmetry ensures anticipated reaches
+//! load level, not that it saturates at max_gen.
 
 #![allow(
     clippy::unwrap_used,
@@ -140,10 +146,9 @@ impl Communicator for StubComm {
 /// - `past_anticipated_commitments = [(id=3, [0.0, 0.0, 0.0])]` — zero seeds
 ///   so the test isolates the in-horizon bug, not any seeding artefact.
 ///
-/// The 500x cost ratio (10 vs 5000) makes it overwhelmingly optimal to
-/// saturate anticipated dispatch at every active stage (`t + K < n_stages`).
-/// Over-generation is free (excess_cost = $0), so the LP has no incentive
-/// to cap anticipated commits below `max_generation_mw = 200`.
+/// The LP optimum is `d_t = load = 150 MW` at every active stage. Committing
+/// more (200 MW) costs extra at $10/MWh with no benefit — excess is free.
+/// The 500x cost ratio (10 vs 5000) ensures anticipated reaches load level.
 ///
 /// IDs 3 and 4 are chosen deliberately to differ from the K=2 sibling test
 /// (which uses IDs 2 and 4) so that combined nextest runs produce
@@ -165,7 +170,8 @@ fn build_system_k3() -> cobre_core::System {
     };
 
     // Anticipated thermal: K=3 lead stages, very cheap so the policy
-    // saturates anticipated dispatch to max_generation_mw.
+    // dispatches to load level. Max 200 MW > load 150 MW, but d_t = 150
+    // is the optimum since over-commitment costs $10/MWh with zero benefit.
     let anticipated_id = EntityId(3);
     let thermal_ant = Thermal {
         id: anticipated_id,
@@ -432,11 +438,9 @@ fn build_system_k3() -> cobre_core::System {
 /// Build a [`Config`] for 15-iteration training and 1-scenario deterministic
 /// simulation.
 ///
-/// Fifteen iterations is sufficient to expose the bug at K=3: with a 500x
-/// cost ratio and a three-slot propagation chain, any policy that even
-/// partially explores the anticipated commitment creates cuts whose gradients
-/// at the anticipated-state columns reveal the corruption for `t >= 1`.
-/// K=3 needs one extra step for cut propagation through three slot positions
+/// Fifteen iterations is sufficient for the 500x cost asymmetry to produce
+/// cuts that signal the value of anticipated dispatch at load level. K=3
+/// needs one extra step for cut propagation through three slot positions
 /// versus K=2; 15 is a safe upper bound.
 fn build_config() -> Config {
     Config {
@@ -500,22 +504,22 @@ fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
 // Test
 // ---------------------------------------------------------------------------
 
-/// Assert that `anticipated_decision_mw` saturates at `max_generation_mw`
-/// for every active decision stage in a K=3, 8-stage fixture, and that the
+/// Assert that `anticipated_decision_mw` commits to load level (150 MW) for
+/// every active decision stage in a K=3, 8-stage fixture, and that the
 /// ring-buffer shift correctly propagates each decision to its delivery stage.
 ///
-/// With the anticipated thermal at $10/MWh and the backup at $5000/MWh,
-/// the value of pre-committing 200 MW (max) at every stage `t` where
-/// `t + K < n_stages` is enormous compared to relying on the backup. The
-/// excess generation cost is $0, so the LP has no reason to cap below 200 MW.
+/// With load = 150 MW < max_gen = 200 MW and excess generation cost = $0,
+/// the LP optimum is `d_t = load = 150 MW` at every active stage `t` where
+/// `t + K < n_stages`. Committing 200 MW instead costs an extra
+/// 50 MW × $10/MWh × 744 h = $372k/stage with no benefit.
 ///
 /// **Expected behaviour (post-fix)**:
-/// - `d_t ≈ 200.0` for `t in {0, 1, 2, 3, 4}`.
+/// - `d_t ≈ 150.0` for `t in {0, 1, 2, 3, 4}`.
 /// - `anticipated_decision_mw` is `None` for `t in {5, 6, 7}`.
 /// - `committed_at(t) ≈ decision_at(t - 3)` for `t in {3, 4, 5, 6, 7}`.
 ///
-/// **Observed behaviour (current HEAD)**:
-/// - `d_0 ≈ 200.0` but `d_1 = d_2 = d_3 = d_4 ≈ 0`.
+/// **Pre-fix behaviour (historical context)**:
+/// - `d_0 ≈ 150.0` (approximately correct) but `d_1 = d_2 = d_3 = d_4 ≈ 0`.
 /// - The ring-buffer shift assertion may also fail if committed values
 ///   do not track the zero-valued decisions.
 ///
@@ -524,8 +528,7 @@ fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
 /// stages receives no incentive to commit. At K=3 the corruption propagates
 /// through all three slot positions, making it a stricter test than K=2.
 #[test]
-#[ignore = "fails until Epic 03 ticket-009 lands the layout fix"]
-fn d_t_saturates_at_max_gen_for_every_active_stage_k3() {
+fn d_t_commits_to_load_for_every_active_stage_k3() {
     let k: usize = 3;
     let n_stages: usize = 8;
     // Active decision stages: t + K < n_stages  =>  t in {0, 1, 2, 3, 4}.
@@ -601,13 +604,14 @@ fn d_t_saturates_at_max_gen_for_every_active_stage_k3() {
             .and_then(|th| th.anticipated_committed_mw)
     };
 
-    // ── Active stages: decision must exist and saturate at max_generation_mw ──
+    // ── Active stages: decision must exist and commit to load = 150 MW ──
     //
     // With the strict-boundary predicate `t + K < n_stages`, stages 0..4
-    // are active. The 500x cost asymmetry and zero excess cost make
-    // d_t = 200 overwhelmingly optimal at every active stage. On the current
-    // HEAD the cut-coefficient bug causes d_t = 0 for t in {1, 2, 3, 4}.
-    let max_gen_mw = 200.0_f64;
+    // are active. Load = 150 MW < max_gen = 200 MW; excess is free, so
+    // d_t = load = 150 MW is the optimum — over-committing costs extra with
+    // no benefit. On pre-fix code, the cut-coefficient bug causes d_t = 0
+    // for t in {1, 2, 3, 4}, which this test guards against post-fix.
+    let load_mw = 150.0_f64;
     let tol = 1e-3_f64;
     for t in &active_stages {
         let d_t = decision_at(*t).unwrap_or_else(|| {
@@ -617,13 +621,13 @@ fn d_t_saturates_at_max_gen_for_every_active_stage_k3() {
             )
         });
         assert!(
-            (d_t - max_gen_mw).abs() < tol,
-            "d_t at stage {t} must saturate at max_generation_mw={max_gen_mw}: \
+            (d_t - load_mw).abs() < tol,
+            "d_t at stage {t} must saturate at load=150 MW: \
              got {d_t} (delta = {delta:.6} MW, tol = {tol} MW). \
-             Current HEAD produces d_t ≈ 0 for t >= 1 due to \
-             cut-coefficient corruption in state_to_lp_column (Less branch). \
+             Pre-fix behaviour: d_t ≈ 0 for t >= 1 due to cut-coefficient \
+             corruption in state_to_lp_column (Less branch). \
              At K=3 the corruption spans all three slot positions.",
-            delta = (d_t - max_gen_mw).abs(),
+            delta = (d_t - load_mw).abs(),
         );
     }
 
@@ -652,7 +656,7 @@ fn d_t_saturates_at_max_gen_for_every_active_stage_k3() {
     //     So committed_at(t) = d_{t-3}.
     //
     // Trace for buggy code path:
-    //   - On current HEAD the ring buffer faithfully propagates the bug's
+    //   - On pre-fix code the ring buffer faithfully propagates the bug's
     //     d_{t-3} ≈ 0 into committed_at(t), so the loop passes trivially
     //     (|0 - 0| = 0 < tol). The saturation assertions above are the
     //     sole pre-fix change-detectors. This loop's job is post-fix

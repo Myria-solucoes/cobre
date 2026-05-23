@@ -211,18 +211,11 @@ pub(super) fn build_single_stage_template(
     let (col_starts, row_indices, values) = matrix::assemble_csc(&col_entries);
 
     let n_transfer = ctx.n_hydros * ctx.max_par_order;
-    let total_nz = col_entries.iter().map(Vec::len).sum();
-
-    let gc_row_entries = layout.generic_constraint_rows;
-
-    let ncs_col_start = layout.col_ncs_start;
-    let n_ncs = layout.n_ncs;
-    let ncs_active = layout.active_ncs_indices;
 
     let template = StageTemplate {
         num_cols: layout.num_cols,
         num_rows: layout.num_rows,
-        num_nz: total_nz,
+        num_nz: col_entries.iter().map(Vec::len).sum(),
         col_starts,
         row_indices,
         values,
@@ -244,10 +237,10 @@ pub(super) fn build_single_stage_template(
         template,
         stage_base_row,
         load_balance_row_start,
-        gc_row_entries,
-        ncs_col_start,
-        n_ncs,
-        ncs_active,
+        layout.generic_constraint_rows,
+        layout.col_ncs_start,
+        layout.n_ncs,
+        layout.active_ncs_indices,
     )
 }
 
@@ -1254,11 +1247,16 @@ mod tests {
         dec_start_b: usize,
         state_start_a: usize,
         state_start_b: usize,
+        state_out_start_a: usize,
+        state_out_start_b: usize,
         n_ant: usize,
         k_max: usize,
         fish_start_a: usize,
         fish_start_b: usize,
         n_fish_rows: usize,
+        def_row_start_a: usize,
+        def_row_start_b: usize,
+        n_def_rows: usize,
         stage_idx: usize,
     ) {
         assert_eq!(
@@ -1278,6 +1276,9 @@ mod tests {
         // Swap the two anticipated_decision columns.
         col_perm[dec_start_b] = dec_start_a + 1;
         col_perm[dec_start_b + 1] = dec_start_a;
+        // Swap the two anticipated_state_out columns (one per plant, plant-indexed).
+        col_perm[state_out_start_b] = state_out_start_a + 1;
+        col_perm[state_out_start_b + 1] = state_out_start_a;
         // Swap anticipated_state columns at each ring-buffer slot. Slot-major
         // layout: column for slot `s`, plant `p` = state_start + s * n_ant + p.
         for s in 0..k_max {
@@ -1285,9 +1286,10 @@ mod tests {
             col_perm[state_start_b + s * n_ant + 1] = state_start_a + s * n_ant;
         }
 
-        // Build row permutation: identity outside anticipated_state_fixing and
-        // anticipated_fishing rows. The state-fixing rows live at the same
-        // numeric range as the state columns (per indexer convention).
+        // Build row permutation: identity outside anticipated_state_fixing,
+        // anticipated_fishing, and anticipated_state_out_def rows.
+        // The state-fixing rows live at the same numeric range as the state
+        // columns (per indexer convention).
         let mut row_perm: Vec<usize> = (0..tpl_a.num_rows).collect();
         for s in 0..k_max {
             row_perm[state_start_b + s * n_ant] = state_start_a + s * n_ant + 1;
@@ -1306,6 +1308,17 @@ mod tests {
             // The single active fishing row in tpl_a corresponds to the single
             // active fishing row in tpl_b (same plant, different local index).
             row_perm[fish_start_b] = fish_start_a;
+        }
+        // Anticipated-state-out definition rows: one per active plant (strict gate).
+        // When both plants are active, swap rows 0 and 1 (plant order changes).
+        // When only one plant is active, the single def row maps identity-wise
+        // (the active plant appears at local index 0 in both ctx_a and ctx_b).
+        if n_def_rows == 2 {
+            row_perm[def_row_start_b] = def_row_start_a + 1;
+            row_perm[def_row_start_b + 1] = def_row_start_a;
+        }
+        if n_def_rows == 1 {
+            row_perm[def_row_start_b] = def_row_start_a;
         }
 
         // Dense bound/objective comparison: tpl_a[col_perm[j]] == tpl_b[j].
@@ -1549,11 +1562,16 @@ mod tests {
                 layout_b.col_anticipated_decision_start,
                 layout_a.col_anticipated_state_start,
                 layout_b.col_anticipated_state_start,
+                layout_a.col_anticipated_state_out_start,
+                layout_b.col_anticipated_state_out_start,
                 ctx_a.n_anticipated,
                 ctx_a.k_max,
                 layout_a.row_anticipated_fishing_start,
                 layout_b.row_anticipated_fishing_start,
                 layout_a.n_anticipated_fishing_rows,
+                layout_a.row_anticipated_state_out_def_start,
+                layout_b.row_anticipated_state_out_def_start,
+                layout_a.n_anticipated_state_out_def_rows,
                 stage_idx,
             );
         }

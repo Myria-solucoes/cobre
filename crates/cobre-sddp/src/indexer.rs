@@ -24,20 +24,26 @@
 //! columns follow immediately after `theta`:
 //!
 //! ```text
-//! [theta+1,                                  theta+1+H*K)                turbine              — turbined flow (m³/s)
-//! [theta+1+H*K,                              theta+1+2*H*K)              spillage             — spilled flow (m³/s)
-//! [theta+1+2*H*K,                            theta+1+3*H*K)              diversion            — diverted flow (m³/s)
-//! [theta+1+3*H*K,                            theta+1+3*H*K+T*K)          thermal              — thermal generation (MW)
-//! [theta+1+3*H*K+T*K,                        theta+1+3*H*K+T*K+A)        anticipated_decision — A = n_anticipated columns
-//! [theta+1+3*H*K+T*K+A,                      …+A+2*L_n*K)                line_fwd/rev         — line flows
-//! [theta+1+3*H*K+T*K+A+2*L_n*K,             …+A+2*L_n*K+B*S*K)           deficit
-//! [theta+1+3*H*K+T*K+A+2*L_n*K+B*S*K,       …+A+2*L_n*K+B*S*K+B*K)       excess
+//! [theta+1,                                  theta+1+H*K)                turbine                — turbined flow (m³/s)
+//! [theta+1+H*K,                              theta+1+2*H*K)              spillage               — spilled flow (m³/s)
+//! [theta+1+2*H*K,                            theta+1+3*H*K)              diversion              — diverted flow (m³/s)
+//! [theta+1+3*H*K,                            theta+1+3*H*K+T*K)          thermal                — thermal generation (MW)
+//! [theta+1+3*H*K+T*K,                        theta+1+3*H*K+T*K+A)        anticipated_decision   — A = n_anticipated columns
+//! [theta+1+3*H*K+T*K+A,                      theta+1+3*H*K+T*K+2*A)      anticipated_state_out  — A = n_anticipated columns
+//! [theta+1+3*H*K+T*K+2*A,                    …+2*A+2*L_n*K)              line_fwd/rev           — line flows
+//! [theta+1+3*H*K+T*K+2*A+2*L_n*K,           …+2*A+2*L_n*K+B*S*K)        deficit
+//! [theta+1+3*H*K+T*K+2*A+2*L_n*K+B*S*K,     …+2*A+2*L_n*K+B*S*K+B*K)    excess
 //! ```
 //!
 //! The `anticipated_decision` block is stage-level (one column per anticipated
 //! plant, NOT per-block) and has length `A = n_anticipated`. The block collapses
 //! to length 0 when `n_anticipated == 0`, leaving the rest of the layout
 //! byte-identical to the pre-anticipated form.
+//!
+//! The `anticipated_state_out` block immediately follows `anticipated_decision`
+//! and has the same length `A`. It holds the outgoing state variable for the
+//! cut-mapping definition row (ticket-009). Both blocks collapse to length 0
+//! together when `n_anticipated == 0`.
 //!
 //! When the inflow non-negativity penalty method is active (`has_inflow_penalty == true`),
 //! `N` additional slack columns are appended after `excess`:
@@ -378,6 +384,21 @@ pub struct StageIndexer {
     /// Empty (`0..0`) when `n_anticipated == 0` or when built via
     /// [`StageIndexer::new`].
     pub anticipated_decision: Range<usize>,
+
+    /// Column range for the anticipated-thermal outgoing-state variables,
+    /// one column per anticipated plant (stage-level, NOT per-block).
+    ///
+    /// Length: `n_anticipated`. Placed immediately after
+    /// [`Self::anticipated_decision`] in the control region so that
+    /// `anticipated_state_out.start == anticipated_decision.end`. Together
+    /// with the definition row added in ticket-008, this variable is pinned to
+    /// the corresponding `anticipated_decision` column by an equality
+    /// constraint, making it the correct target for cut-coefficient mapping
+    /// (ticket-009 `state_to_lp_column` Equal branch).
+    ///
+    /// Empty (`0..0`) when `n_anticipated == 0` or when built via
+    /// [`StageIndexer::new`].
+    pub anticipated_state_out: Range<usize>,
 
     /// Per-plant `lead_stages` (`K_i`) for the anticipated thermals.
     ///
@@ -868,8 +889,9 @@ impl StageIndexer {
             spillage: 0..0,
             diversion: 0..0,
             thermal: 0..0,
-            // Anticipated decision block is empty when built via `new`.
+            // Anticipated decision and state-out blocks are empty when built via `new`.
             anticipated_decision: 0..0,
+            anticipated_state_out: 0..0,
             anticipated_lead_stages: Vec::new(),
             anticipated_thermal_indices: Vec::new(),
             anticipated_local_by_sys_pos: HashMap::new(),
@@ -1116,11 +1138,16 @@ impl StageIndexer {
         let diversion_start = spillage_start + hydro_count * n_blks;
         let thermal_start = diversion_start + hydro_count * n_blks;
         let thermal_end = thermal_start + n_thermals * n_blks;
-        // Anticipated-decision columns sit between `thermal` and `line_fwd`.
-        // Per Decision 3, every anticipated plant has K_i <= T, so at stage 0
-        // (the canonical stage) all `n_anticipated` columns are active. Per-stage
-        // gating is bound-driven downstream via
+        // Anticipated-decision and anticipated-state-out columns sit between
+        // `thermal` and `line_fwd`.  Per Decision 3, every anticipated plant
+        // has K_i <= T, so at stage 0 (the canonical stage) all `n_anticipated`
+        // columns are active.  Per-stage gating is bound-driven downstream via
         // `anticipated_decision_active_at_stage`; the column count is constant.
+        //
+        // Control-region layout (equipment side):
+        //   anticipated_decision   = [thermal_end, thermal_end + A)
+        //   anticipated_state_out  = [thermal_end + A, thermal_end + 2*A)
+        //   line_fwd               = [thermal_end + 2*A, …)
         let anticipated_decision_start = thermal_end;
         let anticipated_decision_end = thermal_end + n_anticipated;
         let anticipated_decision = if n_anticipated > 0 {
@@ -1128,7 +1155,14 @@ impl StageIndexer {
         } else {
             0..0
         };
-        let line_fwd_start = anticipated_decision_end;
+        let anticipated_state_out_start = anticipated_decision_end;
+        let anticipated_state_out_end = anticipated_state_out_start + n_anticipated;
+        let anticipated_state_out = if n_anticipated > 0 {
+            anticipated_state_out_start..anticipated_state_out_end
+        } else {
+            0..0
+        };
+        let line_fwd_start = anticipated_state_out_end;
         let line_rev_start = line_fwd_start + n_lines * n_blks;
         let deficit_start = line_rev_start + n_lines * n_blks;
         let max_deficit_segments = counts.max_deficit_segments; // also assigned to Self
@@ -1208,6 +1242,7 @@ impl StageIndexer {
             diversion: diversion_start..thermal_start,
             thermal: thermal_start..thermal_end,
             anticipated_decision,
+            anticipated_state_out,
             anticipated_lead_stages: counts.anticipated_lead_stages.clone(),
             anticipated_local_by_sys_pos: counts
                 .anticipated_thermal_indices
@@ -1371,8 +1406,13 @@ impl StageIndexer {
     ///   → LP column `N + (l − 1)·N + h`
     /// - `[N*(1+L), N*(1+L) + n_anticipated*K_max)`: `anticipated_state` slots
     ///   → shift-aware mapping (mirrors the inflow-lag pattern structurally):
-    ///   - `slot == K_p − 1` for plant `p`: the decision at stage `t − 1` writes
-    ///     into slot `K_p − 1`; returns `anticipated_decision.start + p`.
+    ///   - `slot == K_p − 1` for plant `p`: the post-shift outgoing slot carries
+    ///     the decision committed at stage `t`. The Equal branch returns
+    ///     `anticipated_state_out.start + p`, which is pinned to
+    ///     `decision_col[p]` by the `anticipated_state_out_def` equality row
+    ///     (`anticipated_state_out[p] − decision_col[p] = 0`). The state-fixing
+    ///     row at slot `K_p − 1` is PURE IDENTITY under this layout (no
+    ///     decision-write coefficient).
     ///   - `slot < K_p − 1`: the successor's slot `i` = predecessor's incoming
     ///     slot `i + 1` (shift); returns
     ///     `anticipated_state.start + (slot + 1) * n_anticipated + p`.
@@ -1399,7 +1439,7 @@ impl StageIndexer {
                 let plant = offset % self.n_anticipated;
                 let k_p = self.anticipated_lead_stages[plant];
                 return match (slot + 1).cmp(&k_p) {
-                    std::cmp::Ordering::Equal => self.anticipated_decision.start + plant,
+                    std::cmp::Ordering::Equal => self.anticipated_state_out.start + plant,
                     std::cmp::Ordering::Less => {
                         self.anticipated_state.start + (slot + 1) * self.n_anticipated + plant
                     }
@@ -3162,10 +3202,17 @@ mod tests {
             &evap(vec![]),
         );
 
-        // anticipated_decision sits between thermal and line_fwd, length 2.
+        // anticipated_decision sits between thermal and anticipated_state_out, length 2.
         assert_eq!(idx.anticipated_decision.start, idx.thermal.end);
         assert_eq!(idx.anticipated_decision.len(), 2);
-        assert_eq!(idx.line_fwd.start, idx.anticipated_decision.end);
+        // anticipated_state_out sits immediately after anticipated_decision, length 2.
+        assert_eq!(
+            idx.anticipated_state_out.start,
+            idx.anticipated_decision.end
+        );
+        assert_eq!(idx.anticipated_state_out.len(), 2);
+        // line_fwd starts after anticipated_state_out.
+        assert_eq!(idx.line_fwd.start, idx.anticipated_state_out.end);
         // Per-plant metadata round-trips intact.
         assert_eq!(idx.anticipated_lead_stages, vec![3, 2]);
         assert_eq!(idx.anticipated_thermal_indices, vec![0, 2]);
@@ -3416,8 +3463,13 @@ mod tests {
         assert!(active.is_empty());
     }
 
-    /// `line_fwd.start == anticipated_decision.end` for various
+    /// `line_fwd.start == anticipated_state_out.end` for various
     /// `n_anticipated`. Sweep includes 0 (no shift), 1, 2, 5.
+    ///
+    /// Since ticket-006 inserted `anticipated_state_out` between
+    /// `anticipated_decision` and `line_fwd`, the new layout invariant is:
+    ///   `anticipated_decision.end` == `anticipated_state_out.start`
+    ///   `anticipated_state_out.end` == `line_fwd.start`
     #[test]
     fn anticipated_decision_shifts_line_fwd() {
         for n_ant in [0_usize, 1, 2, 5] {
@@ -3443,15 +3495,30 @@ mod tests {
                 &evap(vec![]),
             );
             if n_ant > 0 {
-                // When the block is non-empty, `anticipated_decision.end`
-                // directly precedes `line_fwd.start`.
+                // When the block is non-empty:
+                //   anticipated_decision.end == anticipated_state_out.start
+                //   anticipated_state_out.end == line_fwd.start
                 assert_eq!(
-                    idx.line_fwd.start, idx.anticipated_decision.end,
-                    "line_fwd.start must equal anticipated_decision.end for n_ant={n_ant}"
+                    idx.anticipated_state_out.start, idx.anticipated_decision.end,
+                    "anticipated_state_out.start must equal anticipated_decision.end for n_ant={n_ant}"
+                );
+                assert_eq!(
+                    idx.line_fwd.start, idx.anticipated_state_out.end,
+                    "line_fwd.start must equal anticipated_state_out.end for n_ant={n_ant}"
+                );
+                assert_eq!(
+                    idx.anticipated_state_out.len(),
+                    n_ant,
+                    "anticipated_state_out.len() must equal n_anticipated for n_ant={n_ant}"
                 );
             } else {
-                // When the block collapses to `0..0`, `line_fwd.start`
+                // When both blocks collapse to `0..0`, `line_fwd.start`
                 // falls directly on `thermal.end` (no shift).
+                assert_eq!(
+                    idx.anticipated_state_out,
+                    0..0,
+                    "anticipated_state_out must be 0..0 when n_ant=0"
+                );
                 assert_eq!(
                     idx.line_fwd.start, idx.thermal.end,
                     "line_fwd.start must equal thermal.end when n_ant=0"
@@ -3840,9 +3907,9 @@ mod tests {
         // Anticipated-state slot 0 (j=1): slot+1=1 < k_p=2 → shift to slot 1.
         // Returns anticipated_state.start + 1*n_anticipated + 0 = 1+1 = 2.
         assert_eq!(idx.state_to_lp_column(1), 2);
-        // Anticipated-state slot 1 (j=2): slot+1=2 == k_p=2 → decision channel.
-        // Returns anticipated_decision.start + 0.
-        assert_eq!(idx.state_to_lp_column(2), idx.anticipated_decision.start);
+        // Anticipated-state slot 1 (j=2): slot+1=2 == k_p=2 → state-out channel.
+        // Returns anticipated_state_out.start + 0.
+        assert_eq!(idx.state_to_lp_column(2), idx.anticipated_state_out.start);
     }
 
     /// R4.b: `anticipated_state` indices use the shift-aware mapping when
@@ -3873,9 +3940,9 @@ mod tests {
         // Anticipated-state slot 0 (j=2): slot+1=1 < k_p=2 → shift to slot 1.
         // Returns anticipated_state.start + 1*n_anticipated + 0 = 2+1 = 3.
         assert_eq!(idx.state_to_lp_column(2), 3);
-        // Anticipated-state slot 1 (j=3): slot+1=2 == k_p=2 → decision channel.
-        // Returns anticipated_decision.start + 0.
-        assert_eq!(idx.state_to_lp_column(3), idx.anticipated_decision.start);
+        // Anticipated-state slot 1 (j=3): slot+1=2 == k_p=2 → state-out channel.
+        // Returns anticipated_state_out.start + 0.
+        assert_eq!(idx.state_to_lp_column(3), idx.anticipated_state_out.start);
     }
 
     /// R4.c: lag-remap branch is preserved when `n_anticipated == 0` and
@@ -3895,11 +3962,11 @@ mod tests {
         assert_eq!(idx.state_to_lp_column(1), 2);
     }
 
-    /// Decision-channel branch: slot `K_p - 1` of an anticipated plant maps to
-    /// the predecessor stage's `anticipated_decision` column for that plant.
-    /// This is the decision-channel branch — the stage `t - 1` decision
-    /// writes into slot `K_p - 1` of stage `t`'s incoming state via the
-    /// shift in `noise.rs::shift_anticipated_state`.
+    /// State-out channel branch: slot `K_p - 1` of an anticipated plant maps to
+    /// the `anticipated_state_out` column for that plant (not `anticipated_decision`
+    /// directly). The `anticipated_state_out` variable is pinned to the decision
+    /// column by the `anticipated_state_out_def` equality row, so cut coefficients
+    /// on the state-out column correctly express the Benders subgradient.
     #[test]
     fn state_to_lp_column_anticipated_decision_channel() {
         // N=0, L=0, n_anticipated=1, k_max=2, anticipated_lead_stages=[2].
@@ -3910,11 +3977,11 @@ mod tests {
             &fpha(vec![], vec![]),
             &evap(vec![]),
         );
-        // Slot K_p - 1 = 1 (the highest slot for plant 0) → decision column.
+        // Slot K_p - 1 = 1 (the highest slot for plant 0) → anticipated_state_out column.
         let slot_k_minus_1 = idx.anticipated_state.start + (idx.k_max - 1) * idx.n_anticipated;
         assert_eq!(
             idx.state_to_lp_column(slot_k_minus_1),
-            idx.anticipated_decision.start,
+            idx.anticipated_state_out.start,
         );
     }
 
@@ -4002,14 +4069,170 @@ mod tests {
         // Layout: slot * n_anticipated + plant. n_anticipated=2.
         //   j=ant_start+0 → slot 0, plant 0; shift → ant_start + 1*2 + 0 = ant_start + 2
         //   j=ant_start+1 → slot 0, plant 1; shift → ant_start + 1*2 + 1 = ant_start + 3
-        //   j=ant_start+2 → slot 1, plant 0; decision → anticipated_decision.start + 0
-        //   j=ant_start+3 → slot 1, plant 1; decision → anticipated_decision.start + 1
+        //   j=ant_start+2 → slot 1, plant 0; state-out → anticipated_state_out.start + 0
+        //   j=ant_start+3 → slot 1, plant 1; state-out → anticipated_state_out.start + 1
         let s = idx.anticipated_state.start;
-        let d = idx.anticipated_decision.start;
+        let so = idx.anticipated_state_out.start;
         assert_eq!(idx.state_to_lp_column(s), s + 2);
         assert_eq!(idx.state_to_lp_column(s + 1), s + 3);
-        assert_eq!(idx.state_to_lp_column(s + 2), d);
-        assert_eq!(idx.state_to_lp_column(s + 3), d + 1);
+        assert_eq!(idx.state_to_lp_column(s + 2), so);
+        assert_eq!(idx.state_to_lp_column(s + 3), so + 1);
+    }
+
+    /// `anticipated_state_out` range is placed immediately after
+    /// `anticipated_decision` and `line_fwd` follows `anticipated_state_out`.
+    #[test]
+    fn test_anticipated_state_out_range_is_after_anticipated_decision() {
+        let counts = EquipmentCounts {
+            hydro_count: 2,
+            max_par_order: 1,
+            n_thermals: 3,
+            n_lines: 1,
+            n_buses: 2,
+            n_blks: 1,
+            has_inflow_penalty: false,
+            max_deficit_segments: 1,
+            n_anticipated: 2,
+            k_max: 3,
+            anticipated_lead_stages: vec![2, 3],
+            anticipated_thermal_indices: vec![0, 1],
+        };
+        let idx = StageIndexer::with_equipment(&counts, &fpha(vec![], vec![]));
+
+        // Range adjacency.
+        assert_eq!(
+            idx.anticipated_state_out.start,
+            idx.anticipated_decision.end
+        );
+        assert_eq!(
+            idx.anticipated_state_out.end - idx.anticipated_state_out.start,
+            2
+        );
+
+        // line_fwd starts immediately after the new column block.
+        assert_eq!(idx.line_fwd.start, idx.anticipated_state_out.end);
+
+        // n_state is unchanged: N*(1+L) + A*K_max = 2*2 + 2*3 = 10.
+        assert_eq!(idx.n_state, 10);
+    }
+
+    /// `anticipated_state_out` is empty (`0..0`) when built via `StageIndexer::new`.
+    #[test]
+    fn test_anticipated_state_out_is_empty_when_no_anticipated() {
+        let idx = StageIndexer::new(3, 2);
+        assert_eq!(idx.anticipated_state_out, 0..0);
+        assert_eq!(idx.n_state, 9);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // state_to_lp_column branch tests (ticket-009)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// K=1, single plant: slot 0 hits the Equal branch and must route to
+    /// `anticipated_state_out`, NOT to `anticipated_decision`.
+    #[test]
+    fn test_state_to_lp_column_equal_branch_routes_to_state_out() {
+        let counts = EquipmentCounts {
+            hydro_count: 1,
+            max_par_order: 0,
+            n_thermals: 1,
+            n_lines: 0,
+            n_buses: 1,
+            n_blks: 1,
+            has_inflow_penalty: false,
+            max_deficit_segments: 1,
+            n_anticipated: 1,
+            k_max: 1,
+            anticipated_lead_stages: vec![1],
+            anticipated_thermal_indices: vec![0],
+        };
+        let fpha_layout = FphaColumnLayout {
+            hydro_indices: vec![],
+            planes_per_hydro: vec![],
+        };
+        let idx = StageIndexer::with_equipment(&counts, &fpha_layout);
+
+        let j_slot0 = idx.anticipated_state.start; // slot 0, plant 0
+        assert_eq!(
+            idx.state_to_lp_column(j_slot0),
+            idx.anticipated_state_out.start,
+            "Equal branch must route to anticipated_state_out, not anticipated_decision"
+        );
+        assert_ne!(
+            idx.state_to_lp_column(j_slot0),
+            idx.anticipated_decision.start,
+            "Equal branch must NOT route to anticipated_decision (the buggy mapping)"
+        );
+    }
+
+    /// K=2, single plant: slot 0 hits the Less branch.
+    /// Less branch must return `anticipated_state.start + (slot+1)*A + plant`.
+    #[test]
+    fn test_state_to_lp_column_less_branch_unchanged() {
+        let counts = EquipmentCounts {
+            hydro_count: 1,
+            max_par_order: 0,
+            n_thermals: 1,
+            n_lines: 0,
+            n_buses: 1,
+            n_blks: 1,
+            has_inflow_penalty: false,
+            max_deficit_segments: 1,
+            n_anticipated: 1,
+            k_max: 2,
+            anticipated_lead_stages: vec![2],
+            anticipated_thermal_indices: vec![0],
+        };
+        let fpha_layout = FphaColumnLayout {
+            hydro_indices: vec![],
+            planes_per_hydro: vec![],
+        };
+        let idx = StageIndexer::with_equipment(&counts, &fpha_layout);
+
+        let j_slot0 = idx.anticipated_state.start; // slot 0, plant 0
+        assert_eq!(
+            idx.state_to_lp_column(j_slot0),
+            idx.anticipated_state.start + 1,
+            "Less branch must return anticipated_state.start + (slot+1)*A + plant"
+        );
+    }
+
+    /// K=2 plant in a `k_max=3` layout: slot 2 hits the Greater branch (padding).
+    /// Greater branch must return identity (`j` unchanged).
+    ///
+    /// Uses two anticipated plants with `k_p`=[2,3] so that `k_max=max(k_p)=3`
+    /// satisfies the indexer invariant, while plant 0 (`k_p=2`) has a genuine
+    /// padding slot at slot index 2.
+    #[test]
+    fn test_state_to_lp_column_greater_branch_unchanged() {
+        let counts = EquipmentCounts {
+            hydro_count: 1,
+            max_par_order: 0,
+            n_thermals: 2,
+            n_lines: 0,
+            n_buses: 1,
+            n_blks: 1,
+            has_inflow_penalty: false,
+            max_deficit_segments: 1,
+            n_anticipated: 2,
+            k_max: 3,
+            anticipated_lead_stages: vec![2, 3],
+            anticipated_thermal_indices: vec![0, 1],
+        };
+        let fpha_layout = FphaColumnLayout {
+            hydro_indices: vec![],
+            planes_per_hydro: vec![],
+        };
+        let idx = StageIndexer::with_equipment(&counts, &fpha_layout);
+
+        // Slot 2, plant 0: slot+1=3 > k_p=2 → Greater branch (padding).
+        // n_anticipated=2, so j = ant_start + 2*2 + 0.
+        let j_slot2_plant0 = idx.anticipated_state.start + 2 * idx.n_anticipated;
+        assert_eq!(
+            idx.state_to_lp_column(j_slot2_plant0),
+            j_slot2_plant0,
+            "Greater branch must return identity (padding-slot invariant)"
+        );
     }
 
     /// Structural-invariant sweep tests for the anticipated-thermal indexer
@@ -4292,12 +4515,14 @@ mod tests {
             }
         }
 
-        /// I6: `anticipated_decision` is contiguous between `thermal` and `line_fwd`.
+        /// I6: `anticipated_decision` and `anticipated_state_out` are contiguous
+        /// between `thermal` and `line_fwd`.
         ///
-        /// When `anticipated_decision` collapses to `0..0` (no anticipated
-        /// plants), the contiguity property reduces to `line_fwd.start ==
-        /// thermal.end`. Check that branch explicitly so the public `0..0`
-        /// normalisation does not silently break the layout.
+        /// The layout is: `thermal → anticipated_decision → anticipated_state_out → line_fwd`.
+        /// When both blocks collapse to `0..0` (no anticipated plants), the
+        /// contiguity property reduces to `line_fwd.start == thermal.end`.
+        /// Check that branch explicitly so the public `0..0` normalisation does
+        /// not silently break the layout.
         #[test]
         fn i6_decision_contiguity() {
             for p in parameter_grid() {
@@ -4308,10 +4533,19 @@ mod tests {
                         "I6 decision.start != thermal.end at {p:?}"
                     );
                     assert_eq!(
-                        idx.line_fwd.start, idx.anticipated_decision.end,
-                        "I6 line_fwd.start != decision.end at {p:?}"
+                        idx.anticipated_state_out.start, idx.anticipated_decision.end,
+                        "I6 state_out.start != decision.end at {p:?}"
+                    );
+                    assert_eq!(
+                        idx.line_fwd.start, idx.anticipated_state_out.end,
+                        "I6 line_fwd.start != state_out.end at {p:?}"
                     );
                 } else {
+                    assert_eq!(
+                        idx.anticipated_state_out,
+                        0..0,
+                        "I6 state_out must be 0..0 when n_ant=0 at {p:?}"
+                    );
                     assert_eq!(
                         idx.line_fwd.start, idx.thermal.end,
                         "I6 zero-anticipated line_fwd.start != thermal.end at {p:?}"
@@ -4466,5 +4700,69 @@ mod tests {
                 "sweep coverage {count} is below the 500-config minimum"
             );
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Layout-invariance tests (indexer-layout-impact.md Q1)
+    // ---------------------------------------------------------------------------
+
+    /// Locks the `n_state` formula against the addition of the
+    /// `anticipated_state_out` control-region column. Per
+    /// `indexer-layout-impact.md` Q1, `anticipated_state_out` is not a state
+    /// index and must not contribute to `n_state`.
+    #[test]
+    fn test_n_state_unchanged_with_anticipated_state_out_addition() {
+        let fpha_empty = fpha(vec![], vec![]);
+
+        // Case A: no anticipated thermals.
+        // n_state = hydro_count * (1 + max_par_order) = 3 * (1 + 2) = 9.
+        let counts_a = EquipmentCounts {
+            hydro_count: 3,
+            max_par_order: 2,
+            n_thermals: 1,
+            n_lines: 1,
+            n_buses: 1,
+            n_blks: 1,
+            has_inflow_penalty: false,
+            max_deficit_segments: 1,
+            n_anticipated: 0,
+            k_max: 0,
+            anticipated_lead_stages: vec![],
+            anticipated_thermal_indices: vec![],
+        };
+        let idx_a = StageIndexer::with_equipment(&counts_a, &fpha_empty);
+        assert_eq!(idx_a.n_state, 3 * (1 + 2), "n_state without anticipated");
+        assert_eq!(idx_a.anticipated_state_out, 0..0);
+
+        // Case B: with anticipated thermals.
+        // n_state = hydro_count * (1 + max_par_order) + n_anticipated * k_max
+        //         = 3 * (1 + 2) + 2 * 3 = 15.
+        // anticipated_state_out has length n_anticipated = 2, but is a
+        // control-region column and must NOT be counted in n_state.
+        let counts_b = EquipmentCounts {
+            hydro_count: 3,
+            max_par_order: 2,
+            n_thermals: 2,
+            n_lines: 1,
+            n_buses: 1,
+            n_blks: 1,
+            has_inflow_penalty: false,
+            max_deficit_segments: 1,
+            n_anticipated: 2,
+            k_max: 3,
+            anticipated_lead_stages: vec![2, 3],
+            anticipated_thermal_indices: vec![0, 1],
+        };
+        let idx_b = StageIndexer::with_equipment(&counts_b, &fpha_empty);
+        assert_eq!(
+            idx_b.n_state,
+            3 * (1 + 2) + 2 * 3,
+            "n_state formula must be N*(1+L) + A*K_max"
+        );
+        assert_eq!(
+            idx_b.anticipated_state_out.end - idx_b.anticipated_state_out.start,
+            2,
+            "anticipated_state_out range length must equal n_anticipated"
+        );
     }
 }

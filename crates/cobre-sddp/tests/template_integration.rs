@@ -10646,19 +10646,22 @@ fn test_anticipated_fishing_rows_zero_at_stage_zero() {
     let rows_stage_1 = result.templates[1].num_rows;
 
     // Stage 1 has 1 fishing row (K_0=1 <= 1), stage 0 has 0 → difference must be 1.
+    // Both stages have the same n_anticipated_state_out_def_rows (2 each), so
+    // the delta remains exactly 1.
     assert_eq!(
         rows_stage_1,
         rows_stage_0 + 1,
         "stage 1 must have exactly 1 more row than stage 0 (one fishing row for K_0=1)"
     );
     // Directly verify: fishing row start == n_state + n_buses*n_blks = 5.
-    // At stage 0 there are no fishing rows, so num_rows == fishing_start (generic
-    // constraints are also absent in this simple system).
+    // At stage 0 there are no fishing rows but there are 2 state_out_def rows
+    // (both plants active: 0+1<4 and 0+2<4), so num_rows == fishing_start + 2.
     let fishing_row_start = two_ant_fishing_row_start();
     assert_eq!(
-        rows_stage_0, fishing_row_start,
-        "at stage 0, num_rows must equal row_anticipated_fishing_start \
-         (no fishing rows active, no generic constraints)"
+        rows_stage_0,
+        fishing_row_start + 2,
+        "at stage 0, num_rows must equal row_anticipated_fishing_start + 2 \
+         (no fishing rows but 2 state_out_def rows; no generic constraints)"
     );
 }
 
@@ -10667,10 +10670,19 @@ fn test_anticipated_fishing_rows_zero_at_stage_zero() {
 /// AC-2: with two anticipated thermals (K_0=1, K_1=2) and n_stages=4,
 /// stages 1, 2, 3 have 1, 2, 2 fishing rows respectively.
 ///
-/// Verified via `num_rows` differences:
-/// - `num_rows[1] == num_rows[0] + 1`   (K_0=1 matured at stage 1)
-/// - `num_rows[2] == num_rows[0] + 2`   (K_0=1, K_1=2 both matured at stage 2)
-/// - `num_rows[3] == num_rows[0] + 2`   (same two plants active, count saturates)
+/// After ticket-007, `num_rows` includes both fishing rows and
+/// `anticipated_state_out_def` rows. Active-def predicate: `stage + K_i < 4`.
+///
+/// State_out_def rows per stage:
+///   stage 0: K_0=1: 0+1=1 < 4 ✓, K_1=2: 0+2=2 < 4 ✓ → 2 rows
+///   stage 1: K_0=1: 1+1=2 < 4 ✓, K_1=2: 1+2=3 < 4 ✓ → 2 rows
+///   stage 2: K_0=1: 2+1=3 < 4 ✓, K_1=2: 2+2=4 < 4 ✗ → 1 row
+///   stage 3: K_0=1: 3+1=4 < 4 ✗, K_1=2: 3+2=5 < 4 ✗ → 0 rows
+///
+/// Combined fishing + state_out_def deltas relative to stage 0 (0+2 rows):
+///   stage 1: 1 fishing + 2 state_out_def = base + 1
+///   stage 2: 2 fishing + 1 state_out_def = base + 1
+///   stage 3: 2 fishing + 0 state_out_def = base + 0
 #[test]
 fn test_anticipated_fishing_rows_count_by_stage() {
     let system = two_anticipated_thermal_system(4);
@@ -10685,21 +10697,21 @@ fn test_anticipated_fishing_rows_count_by_stage() {
     )
     .expect("build ok");
 
-    let base = result.templates[0].num_rows; // 0 fishing rows at stage 0
+    // base = stage 0: 0 fishing rows + 2 state_out_def rows.
+    let base = result.templates[0].num_rows;
     assert_eq!(
         result.templates[1].num_rows,
         base + 1,
-        "stage 1: exactly 1 fishing row (K_0=1 <= 1)"
+        "stage 1: 1 fishing + 2 state_out_def = base + 1"
     );
     assert_eq!(
         result.templates[2].num_rows,
-        base + 2,
-        "stage 2: exactly 2 fishing rows (K_0=1 <= 2, K_1=2 <= 2)"
+        base + 1,
+        "stage 2: 2 fishing + 1 state_out_def = base + 1 (net unchanged from stage 1)"
     );
     assert_eq!(
-        result.templates[3].num_rows,
-        base + 2,
-        "stage 3: still 2 fishing rows (both plants remain active)"
+        result.templates[3].num_rows, base,
+        "stage 3: 2 fishing + 0 state_out_def = base (net decreases from stage 2)"
     );
 }
 
@@ -10837,7 +10849,18 @@ fn test_anticipated_fishing_csc_state_slot_negative_block_hours_total() {
 ///
 /// System: one anticipated thermal K=2, n_stages=4.
 /// At stage 2: K_i=2 <= stage_idx=2 → n_anticipated_fishing_rows == 1.
-/// Verified via `num_rows` being 1 more than at stage 1 (where K_i=2 > 1).
+///
+/// After ticket-007, `num_rows` includes both fishing rows and
+/// `anticipated_state_out_def` rows. Active-def predicate: `stage + K_i < 4`.
+///
+///   stage 1: 0 fishing + 1 state_out_def (1+2=3 < 4) = fishing_start + 1
+///   stage 2: 1 fishing + 0 state_out_def (2+2=4 < 4 fails) = fishing_start + 1
+///
+/// The fishing row is correctly added at stage 2, but one state_out_def row is
+/// simultaneously removed (the plant is no longer eligible for future delivery).
+/// The net `num_rows` delta between stage 1 and stage 2 is therefore 0.
+/// Verified via `num_rows` equality between stage 1 and stage 2 plus a direct
+/// bound check confirming the fishing row at stage 2.
 #[test]
 fn test_anticipated_fishing_active_at_maturity_boundary() {
     let system = one_anticipated_thermal_system(4, 2, 0.0, 100.0);
@@ -10852,14 +10875,27 @@ fn test_anticipated_fishing_active_at_maturity_boundary() {
     )
     .expect("build ok");
 
-    // At stage 1: K_i=2 > 1 → 0 fishing rows.
-    // At stage 2: K_i=2 <= 2 → 1 fishing row.
+    // At stage 1: K_i=2 > 1 → 0 fishing rows, 1 state_out_def row.
+    // At stage 2: K_i=2 <= 2 → 1 fishing row, 0 state_out_def rows.
+    // The fishing row gained and state_out_def row lost cancel: num_rows is equal.
     let rows_stage_1 = result.templates[1].num_rows;
     let rows_stage_2 = result.templates[2].num_rows;
     assert_eq!(
-        rows_stage_2,
-        rows_stage_1 + 1,
-        "stage 2: exactly 1 fishing row (K_i=2 <= stage_idx=2, equality accepted)"
+        rows_stage_2, rows_stage_1,
+        "stage 2: fishing row gained but state_out_def row lost — num_rows unchanged vs stage 1"
+    );
+
+    // Directly verify that stage 2 has a fishing row at the expected offset.
+    // one_ant_fishing_row_start(k_max=2, n_blks=1) = 2 + 1 = 3.
+    let fishing_row_start = one_ant_fishing_row_start(2, 1);
+    let t2 = &result.templates[2];
+    assert_eq!(
+        t2.row_lower[fishing_row_start], 0.0,
+        "stage 2 fishing row must have row_lower == 0.0 (equality row)"
+    );
+    assert_eq!(
+        t2.row_upper[fishing_row_start], 0.0,
+        "stage 2 fishing row must have row_upper == 0.0 (equality row)"
     );
 }
 
@@ -11041,15 +11077,23 @@ fn test_anticipated_state_fixing_csc_diagonal_plus_one() {
     }
 }
 
-// ── AC-4: decision column writes to slot K_i - 1 ─────────────────────────
+// ── AC-4: decision column no longer writes to Cat 6 state-fixing slot ────
 
 /// AC-4: one anticipated thermal with K=2, n_stages=4.
 ///
-/// At stage 0, the plant is active (0 + 2 <= 4). The anticipated-decision column
-/// must have a +1.0 CSC entry at row `row_anticipated_state_fixing_start + (K_i-1)*n_anticipated + 0`
-/// = `0 + 1*1 + 0 = 1` (slot 1 = newest slot, plant 0).
+/// Under Alternative A, the Cat 6 state-fixing slot at K_i-1 is a PURE IDENTITY
+/// row — the decision-write coefficient is removed. The full wiring of the
+/// decision-write into the new `anticipated_state_out_def` equality row is done
+/// in ticket-010. This test verifies the removal half: the old slot entry is gone.
+///
+/// Layout for this system (no hydros, 1 bus, 1 block):
+///   n_state = n_ant_state = K = 2
+///   row_anticipated_state_fixing rows: 0, 1  (K=2)
+///   col_anticipated_decision_start: 4  (= anticipated_decision_col(2))
+///   col_anticipated_state_out_start: 5  (= col_anticipated_decision_start + n_anticipated)
+///   old Cat 6 slot row: row_fix_start + (K_i-1)*n_anticipated + 0 = 0 + 1 + 0 = 1
 #[test]
-fn test_anticipated_decision_write_to_slot_k_minus_one() {
+fn test_anticipated_decision_write_to_state_out_def_row() {
     let system = one_anticipated_thermal_system(4, 2, 0.0, 100.0);
     let result = build_stage_templates(
         &system,
@@ -11062,18 +11106,21 @@ fn test_anticipated_decision_write_to_slot_k_minus_one() {
     )
     .expect("build ok");
 
-    let t = &result.templates[0]; // stage 0: plant active (0+2<=4)
-    // n_anticipated=1, k_max=2, K_i=2.
-    // col_anticipated_decision_start = anticipated_decision_col(2) = 4.
+    let t = &result.templates[0]; // stage 0: plant active (0+2<4)
     let col_dec = anticipated_decision_col(2);
-    // row = row_anticipated_state_fixing_start + (K_i-1)*n_anticipated + 0
-    //     = 0 + (2-1)*1 + 0 = 1.
-    let row = 1_usize;
-    let entries = csc_entries_at(t, col_dec, row);
-    assert_eq!(
-        entries,
-        vec![1.0],
-        "stage 0, active plant K=2: CSC at (col={col_dec}, row={row}) must be [+1.0], got {entries:?}"
+
+    // The old Cat 6 slot: row = row_anticipated_state_fixing_start + (K_i-1)*n_anticipated + 0
+    //                         = 0 + (2-1)*1 + 0 = 1.
+    // Under Alternative A the decision column must have NO entry at this row.
+    // The new def-row entries (-1.0 on decision, +1.0 on state_out) are added by ticket-010
+    // when `fill_anticipated_state_out_def_entries` is wired into `build_stage_matrix_entries`.
+    let old_state_fixing_row = 1_usize;
+    let entries_at_old_row = csc_entries_at(t, col_dec, old_state_fixing_row);
+    assert!(
+        entries_at_old_row.is_empty(),
+        "stage 0, active plant K=2: decision column must have NO entry at old state_fixing \
+         slot row={old_state_fixing_row} (Cat 6 write removed in ticket-008), \
+         got {entries_at_old_row:?}"
     );
 }
 
@@ -11235,12 +11282,13 @@ fn test_n_transfer_unchanged_by_anticipated() {
 //   decision_start = 4+K
 //   col_thermal_start = 4+K + 3*N*n_blks = 4+K+6 = 10+K
 //   col_anticipated_decision_start = 10+K + 1*2 = 12+K
+//   col_anticipated_state_out_start = 12+K + n_anticipated = 13+K  (1 per plant)
 //   line_fwd/rev: 0 (no lines)
-//   deficit: B*1*n_blks = 2 columns → cols 13+K..14+K
-//   excess:  B*n_blks = 2 columns  → cols 15+K..16+K
-//   withdrawal_neg/pos: N each = 2 → cols 17+K..18+K
-//   op_slacks (4*N*n_blks): 8 → cols 19+K..26+K
-//   num_cols = 27+K  (valid for K >= 1)
+//   deficit: B*1*n_blks = 2 columns → cols 14+K..15+K
+//   excess:  B*n_blks = 2 columns  → cols 16+K..17+K
+//   withdrawal_neg/pos: N each = 2 → cols 18+K..19+K
+//   op_slacks (4*N*n_blks): 8 → cols 20+K..27+K
+//   num_cols = 28+K  (valid for K >= 1)
 //
 // Row layout derivation (K arbitrary, stage t):
 //   rows 0..1     = hydro storage-fixing (N=1)
@@ -11253,7 +11301,8 @@ fn test_n_transfer_unchanged_by_anticipated() {
 //   rows 9+K..10+K = min_turbine
 //   rows 11+K..12+K = min_generation
 //   row 13+K      = anticipated_fishing (0 or 1 row; active iff K <= stage_idx)
-//   num_rows = 13+K + (1 if K <= stage_idx else 0)
+//   row/rows after fishing = anticipated_state_out_def (active iff stage_idx+K < n_stages)
+//   num_rows = 13+K + (1 if K <= stage_idx else 0) + (1 if stage_idx+K < n_stages else 0)
 //
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -11733,16 +11782,23 @@ fn rt_row_ant_fishing_start(k: usize) -> usize {
 
 /// Expected `num_cols` for the roundtrip geometry with anticipation K=k.
 ///
-/// = 27+k (as derived in the section header comment).
+/// = 28+k (as derived in the section header comment).
+/// The extra column versus the pre-ticket-007 formula is the
+/// `anticipated_state_out` block (one column per anticipated plant, here 1).
 fn rt_expected_num_cols(k: usize) -> usize {
-    27 + k
+    28 + k
 }
 
 /// Expected `num_rows` for the roundtrip geometry with anticipation K=k and
-/// stage index `stage_idx` (fishing active iff `k <= stage_idx`).
+/// stage index `stage_idx`.
+///
+/// Fishing row active iff `k <= stage_idx`.
+/// `anticipated_state_out_def` row active iff `stage_idx + k < 4` (strict gate;
+/// n_stages=4 in the roundtrip geometry).
 fn rt_expected_num_rows(k: usize, stage_idx: usize) -> usize {
     let fishing = usize::from(k <= stage_idx);
-    13 + k + fishing
+    let state_out_def = usize::from(stage_idx + k < 4);
+    13 + k + fishing + state_out_def
 }
 
 // ─── AC-1: K=1 roundtrip integration ────────────────────────────────────────
@@ -11754,7 +11810,7 @@ fn rt_expected_num_rows(k: usize, stage_idx: usize) -> usize {
 ///
 /// Verifies simultaneously:
 /// - `n_state == 2` for all stages.
-/// - `num_cols == 28` and `num_rows` per stage match the K=1 formula.
+/// - `num_cols == 29` and `num_rows` per stage match the K=1 formula.
 /// - anticipated_decision bounds: `[0,100]` when active (`t+1 < 4`), which
 ///   is stages 0..2 for K=1; INACTIVE at boundary stage 3 (`3+1=4==n_stages`,
 ///   excluded by the strict predicate).
@@ -11872,18 +11928,18 @@ fn test_anticipated_thermals_lp_roundtrip_k1() {
         );
     }
 
-    // ── Decision-write CSC at row K-1=0 (slot K_i-1=0) (AC-1.g) ─────────────
-    // At stage 0 (active), col_ant_dec has +1.0 at row_fix_start + (K-1)*1 = 1+0 = 1.
-    // Wait: slot K_i-1 = 0; row = row_fix_start + 0*n_anticipated + 0 = row_fix_start = 1.
+    // ── Decision-write no longer at Cat 6 state-fixing slot (AC-1.g) ─────────
+    // Under Alternative A, the decision column no longer writes to the state-fixing slot K-1.
+    // The positive wiring (decision -1.0 / state_out +1.0 at the def row) is added by ticket-010.
+    // This section verifies the removal: old Cat 6 entry must be absent at stage 0 (active).
     {
         let t = &result.templates[0];
-        let row_dec_write = row_fix_start + (k - 1); // k=1, n_anticipated=1 → row = 1 + 0 = 1
-        let entries = csc_entries_at(t, col_ant_dec, row_dec_write);
-        assert_eq!(
-            entries,
-            vec![1.0],
-            "K=1, stage 0: decision-write CSC at (col={col_ant_dec}, row={row_dec_write}) must be [+1.0], \
-             got {entries:?}"
+        let old_row = row_fix_start + (k - 1); // 1+0 = 1
+        let old_entries = csc_entries_at(t, col_ant_dec, old_row);
+        assert!(
+            old_entries.is_empty(),
+            "K=1, stage 0: decision column must have NO entry at old state_fixing row={old_row} \
+             (Cat 6 write removed in ticket-008), got {old_entries:?}"
         );
     }
 
@@ -11947,7 +12003,7 @@ fn test_anticipated_thermals_lp_roundtrip_k1() {
 ///
 /// Verifies:
 /// - `n_state == 3` for all stages.
-/// - `num_cols == 29` and `num_rows` per stage match K=2 formula.
+/// - `num_cols == 30` and `num_rows` per stage match K=2 formula.
 /// - Bounds: active at t=0 (`0+2=2<4`), active at t=1 (`1+2=3<4`),
 ///   INACTIVE at boundary t=2 (`2+2=4 NOT < 4`) and t=3 (`3+2=5>4`).
 /// - Decision-write: slot K-1=1; at stage 0 active, col has +1.0 at
@@ -12059,17 +12115,18 @@ fn test_anticipated_thermals_lp_roundtrip_k2() {
         }
     }
 
-    // ── Decision-write CSC at slot K-1=1 (AC-2.g) ────────────────────────────
-    // At stage 0 (active), row = row_fix_start + (K-1)*1 = 1+1 = 2.
+    // ── Decision-write no longer at Cat 6 state-fixing slot (AC-2.g) ─────────
+    // Under Alternative A, the decision column no longer writes to the state-fixing slot K-1.
+    // The positive wiring (decision -1.0 / state_out +1.0 at the def row) is added by ticket-010.
+    // This section verifies the removal: old Cat 6 entry must be absent at stage 0 (active).
     {
         let t = &result.templates[0];
-        let row_dec_write = row_fix_start + (k - 1); // 1 + 1 = 2
-        let entries = csc_entries_at(t, col_ant_dec, row_dec_write);
-        assert_eq!(
-            entries,
-            vec![1.0],
-            "K=2, stage 0: decision-write CSC at (col={col_ant_dec}, row={row_dec_write}) \
-             must be [+1.0], got {entries:?}"
+        let old_row = row_fix_start + (k - 1); // 1+1 = 2
+        let old_entries = csc_entries_at(t, col_ant_dec, old_row);
+        assert!(
+            old_entries.is_empty(),
+            "K=2, stage 0: decision column must have NO entry at old state_fixing row={old_row} \
+             (Cat 6 write removed in ticket-008), got {old_entries:?}"
         );
     }
 
@@ -12125,17 +12182,20 @@ fn test_anticipated_thermals_lp_roundtrip_k2() {
         );
     }
 
-    // ── Fishing absent at stage 1 (K=2 > 1) (AC-2 implicit) ─────────────────
+    // ── Row-count invariants across stages (K=2 implicit) ───────────────────
+    // For K=2, n_stages=4:
+    //   Fishing (K<=stage):  absent at 0,1; active at 2,3 (+1 each).
+    //   State_out_def (s+K<4): active at 0,1 (+1 each); absent at 2,3.
+    // Net effect: fishing gain at stage 2 is exactly offset by def loss →
+    // all four stages have identical row counts.
     {
-        assert_eq!(
-            result.templates[1].num_rows, result.templates[0].num_rows,
-            "K=2: stage 0 and stage 1 must have equal row count (fishing absent for both)"
-        );
-        assert_eq!(
-            result.templates[2].num_rows,
-            result.templates[1].num_rows + 1,
-            "K=2: stage 2 must have exactly 1 more row than stage 1 (fishing activates at stage 2)"
-        );
+        for t in 1..n_stages {
+            assert_eq!(
+                result.templates[t].num_rows, result.templates[0].num_rows,
+                "K=2: stage {t} must have same row count as stage 0 \
+                 (fishing gain at stage 2 cancels state_out_def loss)"
+            );
+        }
     }
 }
 
@@ -12147,7 +12207,7 @@ fn test_anticipated_thermals_lp_roundtrip_k2() {
 ///
 /// Verifies:
 /// - `n_state == 4` for all stages.
-/// - `num_cols == 30` and `num_rows` per stage match K=3 formula.
+/// - `num_cols == 31` and `num_rows` per stage match K=3 formula.
 /// - Bounds: active at t=0 (`0+3=3 < 4`), INACTIVE at boundary t=1
 ///   (`1+3=4 NOT < 4`), t=2 (`2+3=5>4`), and t=3.
 /// - Decision-write: slot K-1=2; at stage 0, col has +1.0 at row_fix_start+2=3.
@@ -12256,17 +12316,18 @@ fn test_anticipated_thermals_lp_roundtrip_k3() {
         }
     }
 
-    // ── Decision-write CSC at slot K-1=2 (AC-3.g) ────────────────────────────
-    // At stage 0 (active), row = row_fix_start + (K-1) = 1+2 = 3.
+    // ── Decision-write no longer at Cat 6 state-fixing slot (AC-3.g) ─────────
+    // Under Alternative A, the decision column no longer writes to the state-fixing slot K-1.
+    // The positive wiring (decision -1.0 / state_out +1.0 at the def row) is added by ticket-010.
+    // This section verifies the removal: old Cat 6 entry must be absent at stage 0 (active).
     {
         let t = &result.templates[0];
-        let row_dec_write = row_fix_start + (k - 1); // 1+2 = 3
-        let entries = csc_entries_at(t, col_ant_dec, row_dec_write);
-        assert_eq!(
-            entries,
-            vec![1.0],
-            "K=3, stage 0: decision-write CSC at (col={col_ant_dec}, row={row_dec_write}) \
-             must be [+1.0], got {entries:?}"
+        let old_row = row_fix_start + (k - 1); // 1+2 = 3
+        let old_entries = csc_entries_at(t, col_ant_dec, old_row);
+        assert!(
+            old_entries.is_empty(),
+            "K=3, stage 0: decision column must have NO entry at old state_fixing row={old_row} \
+             (Cat 6 write removed in ticket-008), got {old_entries:?}"
         );
     }
 
@@ -12284,16 +12345,23 @@ fn test_anticipated_thermals_lp_roundtrip_k3() {
         }
     }
 
-    // ── Fishing rows absent at stages 0, 1, 2 (K=3 > stage_idx) ─────────────
+    // ── Row-count invariants across stages (K=3 implicit) ───────────────────
+    // For K=3, n_stages=4:
+    //   Fishing (K<=stage):      absent at 0,1,2; active at 3 (+1).
+    //   State_out_def (s+K<4):  active at 0 only (+1); absent at 1,2,3.
+    // Stage 0: base +0 fishing +1 def  (1 more than stages 1,2)
+    // Stage 1: base +0 fishing +0 def
+    // Stage 2: base +0 fishing +0 def
+    // Stage 3: base +1 fishing +0 def  (1 more than stages 1,2)
     {
-        // Stages 0,1,2 all have the same row count (no fishing active).
-        assert_eq!(
-            result.templates[0].num_rows, result.templates[1].num_rows,
-            "K=3: stages 0 and 1 must have equal row count (no fishing)"
-        );
         assert_eq!(
             result.templates[1].num_rows, result.templates[2].num_rows,
-            "K=3: stages 1 and 2 must have equal row count (no fishing)"
+            "K=3: stages 1 and 2 must have equal row count (no fishing, no def)"
+        );
+        assert_eq!(
+            result.templates[0].num_rows,
+            result.templates[1].num_rows + 1,
+            "K=3: stage 0 must have 1 more row than stage 1 (state_out_def active at stage 0)"
         );
     }
 
