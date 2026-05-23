@@ -3,8 +3,8 @@
 use cobre_core::{PolicyGraph, Stage, System};
 
 use crate::scaling_report::{
-    LpDimensions, StageScalingReport, build_scaling_report, compute_coefficient_range,
-    summarize_scale_factors,
+    build_scaling_report, compute_coefficient_range, summarize_scale_factors, LpDimensions,
+    StageScalingReport,
 };
 use crate::{lp_builder, lp_builder::StageTemplates};
 

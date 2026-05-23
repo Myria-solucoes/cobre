@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use cobre_core::{AnticipatedCommitmentHistory, EntityId, VariableRef};
 
-use super::super::{schema::ParsedData, ErrorKind, ValidationContext};
+use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 
 pub(super) fn check_thermal_generation_bounds(data: &ParsedData, ctx: &mut ValidationContext) {
     for thermal in &data.thermals {
@@ -404,7 +404,7 @@ pub(super) fn check_thermal_bounds_override_stage_range(
     clippy::cast_sign_loss
 )]
 mod tests {
-    use cobre_core::{entities::AnticipatedConfig, AnticipatedCommitmentHistory, EntityId};
+    use cobre_core::{AnticipatedCommitmentHistory, EntityId, entities::AnticipatedConfig};
 
     use super::super::test_support::*;
     use super::super::validate_semantic_hydro_thermal;
@@ -1437,8 +1437,8 @@ mod tests {
     #[test]
     fn test_anticipated_decision_on_anticipated_thermal_ok() {
         use cobre_core::{
-            entities::AnticipatedConfig, ConstraintExpression, ConstraintSense, GenericConstraint,
-            LinearTerm, SlackConfig, VariableRef,
+            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
+            VariableRef, entities::AnticipatedConfig,
         };
 
         let thermal = cobre_core::entities::Thermal {
@@ -1505,8 +1505,8 @@ mod tests {
     #[test]
     fn test_thermal_generation_on_anticipated_thermal_warns() {
         use cobre_core::{
-            entities::AnticipatedConfig, ConstraintExpression, ConstraintSense, GenericConstraint,
-            LinearTerm, SlackConfig, VariableRef,
+            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
+            VariableRef, entities::AnticipatedConfig,
         };
 
         let thermal = cobre_core::entities::Thermal {

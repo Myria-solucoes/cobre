@@ -309,11 +309,17 @@ fn fill_anticipated_decision_objective(
 /// at their delivery stages.
 ///
 /// At every stage `t` that is a delivery stage for anticipated plant `i`
-/// (predicate: `K_i <= stage_idx`, identical to
-/// `anticipated_fishing_active_at_stage`), the thermal's per-block generation
-/// cost is zeroed. This prevents double-counting: the generation is already
-/// priced at the decision stage via `fill_anticipated_decision_objective`; the
+/// (predicate: `K_i <= stage_idx`), the thermal's per-block generation cost is
+/// zeroed. This prevents double-counting: the generation is already priced at
+/// the decision stage via `fill_anticipated_decision_objective`; the
 /// delivery-stage LP must consume it at zero marginal cost.
+///
+/// NOTE: this predicate is intentionally distinct from
+/// `StageIndexer::anticipated_fishing_active_at_stage`, which became
+/// always-active in Epic 02 of the pre-horizon-seeding plan to accommodate
+/// pre-horizon seeded deliveries at stages `[0, K_i)`. Reconciling the two —
+/// so the same active set drives both the fishing rows and the cost-zeroing —
+/// is the scope of Epic 03 in that plan.
 ///
 /// Must be called AFTER `fill_thermal_columns`, which writes the standard
 /// non-zero cost for all thermals at all stages. This function overwrites that
@@ -331,9 +337,11 @@ fn zero_anticipated_delivery_thermal_cost(
     let n_blks = layout.n_blks;
     for local_idx in 0..ctx.n_anticipated {
         let k_i = ctx.anticipated_lead_stages[local_idx];
-        // Delivery stages: those where a past decision has matured.
-        // Predicate k_i <= stage_idx identifies active plants, matching the
-        // fishing-row constraint construction so both use the same active set.
+        // Delivery stages: those where a past decision has matured. The
+        // k_i <= stage_idx predicate matches the fishing-row construction in
+        // fill_anticipated_fishing_entries; the indexer's
+        // anticipated_fishing_active_at_stage is always-active and tracked
+        // separately (see Epic 03 reconciliation note on this function's doc).
         if k_i > stage_idx {
             continue;
         }
@@ -1836,7 +1844,7 @@ mod parameter_resolution_tests {
     use cobre_stochastic::par::precompute::PrecomputedPar;
     use std::collections::HashMap;
 
-    use crate::energy_conversion::{EnergyConversionSet, build_hydro_energy_productivity_override};
+    use crate::energy_conversion::{build_hydro_energy_productivity_override, EnergyConversionSet};
     use crate::hydro_models::PrepareHydroModelsResult;
     use crate::inflow_method::InflowNonNegativityMethod;
     use crate::resolved_parameters::build_resolved_parameters;

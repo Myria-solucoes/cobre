@@ -38,20 +38,20 @@ pub mod stochastic_pipeline;
 pub(crate) mod template_postprocess;
 
 pub use params::{
-    ConstructionConfig, DEFAULT_FORWARD_PASSES, DEFAULT_MAX_ITERATIONS, DEFAULT_SEED, StudyParams,
+    ConstructionConfig, StudyParams, DEFAULT_FORWARD_PASSES, DEFAULT_MAX_ITERATIONS, DEFAULT_SEED,
 };
 pub use scenario_library_set::{PhaseLibraries, ScenarioLibraries};
 pub use stage_data::StageData;
 pub use stochastic_pipeline::{
-    PrepareStochasticResult, build_ncs_factor_entries, load_load_factors_for_stochastic,
-    prepare_stochastic,
+    build_ncs_factor_entries, load_load_factors_for_stochastic, prepare_stochastic,
+    PrepareStochasticResult,
 };
 
 use std::path::Path;
 
 use cobre_core::{
-    EntityId, Stage, System,
     scenario::{SamplingScheme, ScenarioSource},
+    EntityId, Stage, System,
 };
 use cobre_io::build_hydro_reference_volume_fractions;
 use cobre_stochastic::{ExternalScenarioLibrary, HistoricalScenarioLibrary, StochasticContext};
@@ -59,7 +59,7 @@ use cobre_stochastic::{ExternalScenarioLibrary, HistoricalScenarioLibrary, Stoch
 use crate::{
     config::{CutManagementConfig, EventParams},
     cut::FutureCostFunction,
-    energy_conversion::{EnergyConversionSet, build_energy_conversion_set},
+    energy_conversion::{build_energy_conversion_set, EnergyConversionSet},
     error::SddpError,
     horizon_mode::HorizonMode,
     hydro_models::{EvaporationModel, PrepareHydroModelsResult, ResolvedProductionModel},
@@ -869,12 +869,14 @@ fn build_initial_state(system: &System, indexer: &StageIndexer) -> Vec<f64> {
         }
     }
 
-    // Seed the anticipated_state ring-buffer slots from
-    // `past_anticipated_commitments`.  Each `AnticipatedCommitmentHistory`
-    // carries the K_i committed MW values that were decided before the study
-    // start and deliver at stages 1..=K_i.  Slot-major layout:
-    //   state[anticipated_state.start + slot * n_anticipated + local_idx]
-    // mirrors the LP column layout established by the stage indexer.
+    // Seed anticipated-state ring buffer from `past_anticipated_commitments`.
+    // Each entry carries K_i values decided before study start, delivered at
+    // stages 1..=K_i. Layout: state[anticipated_state.start + slot * n_anticipated + local_idx].
+    //
+    // Pre-horizon seeding is enabled: slot 0 may hold a non-zero seed at stage 0.
+    // Padding slots [K_i, k_max) must stay zero (enforced by clamping to K_i
+    // and debug_assert). The ring-buffer logic in noise.rs and indexer.rs
+    // assumes padding slots are zero.
     if indexer.n_anticipated > 0 && indexer.k_max > 0 {
         debug_assert_eq!(
             indexer.anticipated_thermal_indices.len(),
@@ -906,13 +908,26 @@ fn build_initial_state(system: &System, indexer: &StageIndexer) -> Vec<f64> {
                 // Silently skip — not an anticipated plant.
                 continue;
             };
-            // Tolerate values_mw shorter than k_max: write only the available
-            // slots and leave the rest at 0.0.  The cobre-io validator forbids
-            // this mismatch in production.
-            let n_slots = history.values_mw.len().min(indexer.k_max);
+            // K_i is the per-plant lead time; clamp to K_i (not k_max) to
+            // prevent over-long input from corrupting padding slots.
+            // cobre-io validator enforces values_mw.len() == K_i in production.
+            let k_i = indexer.anticipated_lead_stages[local_idx];
+            let n_slots = history.values_mw.len().min(k_i);
             for slot in 0..n_slots {
                 let off = ant_start + slot * n_ant + local_idx;
                 state[off] = history.values_mw[slot];
+            }
+            // Padding-slot invariant: [K_i, k_max) must remain 0.0 to prevent
+            // ring-buffer corruption and LP infeasibility.
+            #[allow(clippy::float_cmp)]
+            for slot in k_i..indexer.k_max {
+                let off = ant_start + slot * n_ant + local_idx;
+                debug_assert_eq!(
+                    state[off],
+                    0.0,
+                    "padding slot must be zero: plant local_idx={local_idx}, slot={slot}, K_i={k_i}, k_max={}",
+                    indexer.k_max
+                );
             }
         }
     }
@@ -933,13 +948,6 @@ mod tests {
     use crate::indexer::StageIndexer;
 
     use cobre_core::{
-        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, HydroStageBounds,
-        HydroStagePenalties, LineStageBounds, LineStagePenalties, NcsStagePenalties,
-        PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
-        ResolvedPenalties, ThermalStageBounds,
-    };
-    use cobre_core::{
-        EntityId, SystemBuilder,
         entities::{
             bus::{Bus, DeficitSegment},
             hydro::{Hydro, HydroGenerationModel, HydroPenalties},
@@ -950,6 +958,13 @@ mod tests {
             Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
             StageStateConfig,
         },
+        EntityId, SystemBuilder,
+    };
+    use cobre_core::{
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, HydroStageBounds,
+        HydroStagePenalties, LineStageBounds, LineStagePenalties, NcsStagePenalties,
+        PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
+        ResolvedPenalties, ThermalStageBounds,
     };
     use cobre_io::config::{
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
@@ -958,7 +973,7 @@ mod tests {
         SimulationConfig as IoSimulationConfig, StoppingRuleConfig, TrainingConfig,
         TrainingSolverConfig, UpperBoundEvaluationConfig,
     };
-    use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
+    use cobre_stochastic::{build_stochastic_context, ClassSchemes, OpeningTreeInputs};
 
     /// Build a minimal system with 1 bus, 1 thermal, 1 hydro, and `n_stages`
     /// study stages (each with 1 block). All bounds and penalties are set to
@@ -2134,7 +2149,7 @@ mod tests {
     /// default values for all fields.
     #[test]
     fn study_params_from_config_defaults() {
-        use super::{DEFAULT_FORWARD_PASSES, DEFAULT_SEED, StudyParams};
+        use super::{StudyParams, DEFAULT_FORWARD_PASSES, DEFAULT_SEED};
         use crate::stopping_rule::StoppingMode;
         use cobre_io::config::{
             Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
@@ -3840,6 +3855,80 @@ mod tests {
         }
     }
 
+    /// AC-6 (happy path with padding slot): two anticipated plants with
+    /// `K_0 = 1` and `K_1 = 2`, so `k_max = 2`. The plant-0 ring-buffer column
+    /// has one valid slot (slot 0) and one padding slot (slot 1).
+    ///
+    /// `past_anticipated_commitments` carries `[100.0]` for plant 0 and
+    /// `[50.0, 75.0]` for plant 1, each of length `K_i` exactly (the contract
+    /// the cobre-io validator enforces in production).
+    ///
+    /// Expected layout (`n_ant = 2`, slot-major):
+    ///   - `ant_start + 0*2 + 0` (slot 0, plant 0) -> 100.0  (seed)
+    ///   - `ant_start + 0*2 + 1` (slot 0, plant 1) ->  50.0  (seed)
+    ///   - `ant_start + 1*2 + 0` (slot 1, plant 0) ->   0.0  (padding; `K_0=1` < `k_max=2`)
+    ///   - `ant_start + 1*2 + 1` (slot 1, plant 1) ->  75.0  (seed)
+    ///
+    /// The padding-slot `debug_assert!` must not fire because the `.min(k_i)`
+    /// clamp prevents writing past slot `K_0=1` on plant 0.
+    #[test]
+    fn build_initial_state_anticipated_seed_padding_slot_stays_zero() {
+        use super::build_initial_state;
+        use cobre_core::AnticipatedCommitmentHistory;
+
+        let past_commits = vec![
+            AnticipatedCommitmentHistory {
+                thermal_id: EntityId(10),
+                values_mw: vec![100.0],
+            },
+            AnticipatedCommitmentHistory {
+                thermal_id: EntityId(11),
+                values_mw: vec![50.0, 75.0],
+            },
+        ];
+        let system = system_with_anticipated_thermals(&[1, 2], past_commits);
+        // n_anticipated=2, k_values=[1, 2] -> k_max=2.
+        let indexer = indexer_with_anticipated(2, &[1, 2], &[0, 1]);
+
+        let state = build_initial_state(&system, &indexer);
+
+        assert_eq!(
+            state.len(),
+            indexer.n_state,
+            "state length must equal n_state"
+        );
+        let s = indexer.anticipated_state.start;
+        let n_ant = indexer.n_anticipated;
+        assert_eq!(n_ant, 2);
+        assert_eq!(indexer.k_max, 2);
+
+        // slot 0, plant 0 -> 100.0
+        assert!(
+            (state[s] - 100.0).abs() < 1e-10,
+            "slot 0 plant 0 expected 100.0, got {}",
+            state[s]
+        );
+        // slot 0, plant 1 -> 50.0
+        assert!(
+            (state[s + 1] - 50.0).abs() < 1e-10,
+            "slot 0 plant 1 expected 50.0, got {}",
+            state[s + 1]
+        );
+        // slot 1, plant 0 -> 0.0 (padding for K_0=1 < k_max=2). This is the
+        // invariant the new debug_assert! protects.
+        assert!(
+            state[s + 2].abs() < 1e-10,
+            "padding slot 1 plant 0 expected 0.0, got {}",
+            state[s + 2]
+        );
+        // slot 1, plant 1 -> 75.0
+        assert!(
+            (state[s + 3] - 75.0).abs() < 1e-10,
+            "slot 1 plant 1 expected 75.0, got {}",
+            state[s + 3]
+        );
+    }
+
     /// Given a `System` with `inflow_scheme = InSample`, when `StudySetup::new()`
     /// is called, then `historical_library()` returns `None`.
     #[test]
@@ -4743,9 +4832,9 @@ mod tests {
         use chrono::NaiveDate;
         use cobre_core::scenario::InflowModel as CoreInflowModel;
         use cobre_core::{
-            NonControllableSource,
             scenario::{ExternalNcsRow, NcsModel},
             system::SystemBuilder,
+            NonControllableSource,
         };
 
         let bus = Bus {
