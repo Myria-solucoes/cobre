@@ -2610,11 +2610,7 @@ mod tests {
         );
     }
 
-    /// Multi-step ring-buffer evolution with non-zero pre-horizon seeds.
-    ///
-    /// Plant config: n_anticipated=1, k_max=2. Initial state: slot 0=10.0, slot 1=20.0.
-    /// Stage decisions: [30.0, 40.0, 50.0].
-    /// Expected trace: each shift promotes slot 1→slot 0 and loads decision→slot 1.
+    /// Three-stage evolution with pre-horizon seed: slot 1→0, decision→1 per stage.
     #[test]
     fn shift_anticipated_state_pre_horizon_seed_three_stage_evolution() {
         let indexer = make_anticipated_indexer(1, 2, vec![2]);

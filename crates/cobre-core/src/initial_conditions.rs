@@ -88,21 +88,29 @@ pub struct HydroPastInflows {
 /// Past externally-decided anticipated commitments for a single thermal plant.
 ///
 /// For an anticipated thermal plant with `lead_stages = K`, each `values_mw[k]`
-/// is the externally-decided MW the plant must deliver at study stage `k`
-/// (0-indexed, `0 <= k < lead_stages`). The commitment was priced externally
-/// (sunk cost) and does NOT contribute to the study objective.
+/// nominally represents the externally-decided MW the plant should deliver at
+/// study stage `k` (0-indexed, `0 <= k < lead_stages`). The intent is that
+/// these commitments were priced externally (sunk cost) and do not contribute
+/// to the study objective.
 ///
-/// The LP enforces, at every stage `k in [0, lead_stages)`:
+/// # Current LP-enforcement gap
 ///
-/// ```text
-/// sum_b gen[i][b] * block_hours_b == values_mw[k] * stage_total_hours
-/// ```
+/// **Non-zero entries are accepted by the validator but the LP does not yet
+/// pin generation to them.** The fishing equality that would enforce
+/// `sum_b gen[i][b] * block_hours_b == values_mw[k] * stage_total_hours`
+/// is only active at stages `[K_i, n_stages)` (the matured-delivery range),
+/// not at the pre-horizon stages `[0, K_i)` where the seeded values live.
+/// Between study start and stage `K_i - 1` the ring-buffer shift overwrites
+/// the seed slots before any constraint reads them, so non-zero seeds flow
+/// through the data model unobserved by the dispatch. A future release that
+/// decouples the fishing-read column from the decision-write column will
+/// honor seeded values; until then, supplying `[0.0; K]` produces the same
+/// dispatch as supplying any other in-bounds vector.
 ///
-/// where the sum runs over all generation blocks `b` of plant `i` at stage `k`.
-///
-/// Every `values_mw[k]` must lie in
+/// Every `values_mw[k]` must still lie in
 /// `[thermal.min_generation_mw, thermal.max_generation_mw]`; out-of-bounds
-/// values are rejected by `cobre-io`.
+/// values are rejected by `cobre-io` as a defence-in-depth guard against
+/// inputs that will become infeasible once LP enforcement lands.
 ///
 /// `values_mw` must have exactly `lead_stages` entries; the length check is
 /// enforced by the structural validator
@@ -213,7 +221,9 @@ pub struct InitialConditions {
     /// `cobre-io`). Every `values_mw[k]` must lie in
     /// `[thermal.min_generation_mw, thermal.max_generation_mw]` — out-of-bounds
     /// entries are rejected by the semantic validator. See
-    /// [`AnticipatedCommitmentHistory`] for the sunk-cost semantics.
+    /// [`AnticipatedCommitmentHistory`] for the sunk-cost semantics AND the
+    /// current LP-enforcement gap (non-zero seeds load but the dispatch does
+    /// not yet pin generation to them).
     ///
     /// In JSON: the field is optional (`serde(default)` fills an empty `Vec`
     /// when the key is absent). Backward-compatible with existing JSON files

@@ -5665,8 +5665,7 @@ mod tests {
         }
     }
 
-    /// Build a minimal anticipated `StageIndexer` for sign-convention tests.
-    /// Mirrors `noise.rs::make_anticipated_indexer` to avoid cross-module pub dependency.
+    /// Minimal anticipated `StageIndexer` for sign-convention tests.
     fn make_anticipated_indexer_local(
         n_anticipated: usize,
         k_max: usize,
@@ -5698,13 +5697,7 @@ mod tests {
         )
     }
 
-    /// Verify sign convention end-to-end for anticipated slot-0 under K=2.
-    ///
-    /// A cut coefficient of 7.5 at a non-terminal stage (state-fixing-row dual)
-    /// must map to batch value -7.5 at the correct LP column, locking the
-    /// single-negation invariant in the anticipated-state cut path. The cut
-    /// is placed at stage 1 of a 3-stage FCF — the canonical backward-generated
-    /// stage (a non-terminal slot that the real backward pass populates).
+    /// Verify cut sign convention: dual 7.5 → batch -7.5 at correct column.
     #[test]
     fn cut_coefficient_sign_convention_slot_zero_k2() {
         let indexer = make_anticipated_indexer_local(1, 2, vec![2]);

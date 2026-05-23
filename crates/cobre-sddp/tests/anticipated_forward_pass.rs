@@ -1,11 +1,13 @@
 //! End-to-end integration test verifying the anticipated-state ring-buffer
 //! evolution across the full forward pass for a 5-stage K=2 system.
 //!
-//! The ring-buffer shift semantics are documented in
-//! `plans/anticipated-thermals-pre-horizon-seeding/epic-04-hot-path-verification/audit-forward-shift.md`
-//! (stage-by-stage table at lines 28-37). The basis-cache capture sequence
-//! across forward + backward passes is described in the AC-2 / AC-3 / AC-4
-//! comments inline below.
+//! The ring-buffer shift semantics: at the end of stage `t`,
+//! `shift_anticipated_state` (`crates/cobre-sddp/src/noise.rs`) shifts each
+//! plant's slots down (`slot[s] <- incoming[s+1]`) and writes the new
+//! decision into the highest slot (`slot[K-1] <- decision_primal`). Slot 0
+//! at stage `t+1` therefore equals slot 1 at stage `t`. The basis-cache
+//! capture sequence across forward + backward passes is described inline
+//! in the per-stage assertions below.
 
 #![allow(
     clippy::unwrap_used,

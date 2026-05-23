@@ -225,14 +225,15 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
 /// **Generation bounds check** — every `values_mw[j]` must lie within
 /// `[thermal.min_generation_mw, thermal.max_generation_mw]`.
 ///
-/// Rationale: the LP's anticipated-delivery equality at stage `j` pins
-/// `sum_b gen[i][b] * block_hours_b = values_mw[j] * stage_hours`, and the
-/// per-block generation columns are bounded to `[min_gen, max_gen]`. A seed
-/// outside that range yields per-block bounds that cannot satisfy the equality,
-/// making the LP infeasible.
+/// Rationale: defence-in-depth guard. The downstream LP equality that would
+/// pin per-block generation to `values_mw[j] * stage_hours` is currently
+/// inactive at pre-horizon stages (see
+/// [`cobre_core::initial_conditions::AnticipatedCommitmentHistory`]), so the
+/// bounds check today catches inputs that would become infeasible once a
+/// future release adds LP enforcement.
 ///
 /// See [`cobre_core::initial_conditions::AnticipatedCommitmentHistory`] for the
-/// overall sunk-cost semantics of pre-horizon commitments.
+/// overall sunk-cost semantics and the current LP-enforcement gap.
 fn check_committed_value_bounds(
     thermal: &cobre_core::entities::Thermal,
     thermal_id: EntityId,
@@ -242,6 +243,7 @@ fn check_committed_value_bounds(
     let min_mw = thermal.min_generation_mw;
     let max_mw = thermal.max_generation_mw;
     let entity_str = format!("thermals[id={}].anticipated_config", thermal_id.0);
+    let mut nonzero_count: usize = 0;
     for (j, &v) in values_mw.iter().enumerate() {
         if v < min_mw || v > max_mw {
             ctx.add_error(
@@ -256,7 +258,27 @@ fn check_committed_value_bounds(
                     thermal_id.0
                 ),
             );
+            continue;
         }
+        if v != 0.0 {
+            nonzero_count += 1;
+        }
+    }
+    if nonzero_count > 0 {
+        ctx.add_warning(
+            ErrorKind::SemanticAmbiguity,
+            "initial_conditions.json",
+            Some(&entity_str),
+            format!(
+                "Thermal {}: {nonzero_count} non-zero past_anticipated_commitments.values_mw \
+                 entry(ies) accepted by the bounds check, but the LP does not currently pin \
+                 generation to these pre-horizon seeds (the fishing equality is active only \
+                 at stages [K_i, n_stages)). Non-zero seeds will load but produce the same \
+                 dispatch as all-zero seeds until a future release decouples the \
+                 fishing-read column from the decision-write column",
+                thermal_id.0
+            ),
+        );
     }
 }
 

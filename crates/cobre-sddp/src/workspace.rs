@@ -2108,10 +2108,7 @@ mod tests {
         );
     }
 
-    /// Roundtrip test for the pre-horizon seeding case: slot 0 of the
-    /// anticipated region carries a sentinel value (`12345.5`) that can only
-    /// appear when a pre-horizon seed is present. AC: `state_at_capture[4]`
-    /// bit-equals 12345.5 after roundtrip; `row_status.len()` is 4.
+    /// Pre-horizon seeding roundtrip: slot 0 carries sentinel 12345.5.
     #[test]
     fn test_captured_basis_round_trip_with_pre_horizon_seed_in_slot_zero() {
         let state_at_capture = vec![1.0_f64, 2.0, 100.0, 200.0, 12345.5, 0.0];

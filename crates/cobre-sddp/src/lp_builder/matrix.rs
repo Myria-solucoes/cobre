@@ -1838,7 +1838,7 @@ mod parameter_resolution_tests {
     use cobre_stochastic::par::precompute::PrecomputedPar;
     use std::collections::HashMap;
 
-    use crate::energy_conversion::{build_hydro_energy_productivity_override, EnergyConversionSet};
+    use crate::energy_conversion::{EnergyConversionSet, build_hydro_energy_productivity_override};
     use crate::hydro_models::PrepareHydroModelsResult;
     use crate::inflow_method::InflowNonNegativityMethod;
     use crate::resolved_parameters::build_resolved_parameters;
@@ -2325,8 +2325,8 @@ mod zero_cost_tests {
     use crate::resolved_parameters::ResolvedParameters;
 
     use super::{
-        fill_anticipated_fishing_rows, zero_anticipated_delivery_thermal_cost, ColumnBufs,
-        StageLayout, TemplateBuildCtx,
+        ColumnBufs, StageLayout, TemplateBuildCtx, fill_anticipated_fishing_rows,
+        zero_anticipated_delivery_thermal_cost,
     };
 
     /// Build a minimal two-block `Stage` at the given index.
@@ -2448,13 +2448,8 @@ mod zero_cost_tests {
         }
     }
 
-    /// `zero_anticipated_delivery_thermal_cost` zeroes costs ONLY for matured
-    /// anticipated thermals at delivery stages (`K_i <= stage_idx`).
-    ///
-    /// Setup: `n_anticipated=2`, `anticipated_lead_stages=[1, 5]`, `n_blks=2`,
-    /// `stage_idx=2`. Plant 0 (`K_0=1`) is matured; plant 1 (`K_1=5`) is not.
-    /// Plant 0's per-block thermal cost must be zeroed; plant 1's must remain
-    /// at the sentinel value `42.0`.
+    /// Zeroes cost only for matured anticipated plants (`K_i <= stage_idx`).
+    /// At stage 2 with `K_i=[1, 5]`: plant 0 zeroed, plant 1 preserved.
     #[test]
     fn zero_anticipated_delivery_thermal_cost_zeroes_matured_only() {
         let fixtures = AntFixtures::new();
@@ -2502,12 +2497,8 @@ mod zero_cost_tests {
         }
     }
 
-    /// `fill_anticipated_fishing_rows` writes equality bounds `(0.0, 0.0)` ONLY
-    /// for matured anticipated plants (`K_i <= stage_idx`).
-    ///
-    /// Setup: `n_anticipated=2`, `anticipated_lead_stages=[1, 5]`,
-    /// `stage_idx=2`. Plant 0 (`K_0=1`) is matured; plant 1 (`K_1=5`) is not.
-    /// Exactly one fishing row is filled (at offset 0 within the active subset).
+    /// Fills rows only for matured plants (`K_i <= stage_idx`).
+    /// At stage 2 with `K_i=[1, 5]`: exactly one fishing row (plant 0 only).
     #[test]
     fn fishing_rows_fill_matured_plants_only() {
         let fixtures = AntFixtures::new();

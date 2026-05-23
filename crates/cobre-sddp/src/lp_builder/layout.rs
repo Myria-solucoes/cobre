@@ -266,16 +266,14 @@ pub(crate) struct StageLayout {
     pub(crate) row_anticipated_state_fixing_start: usize,
     /// Start of anticipated-fishing constraint rows (after operational violation rows).
     ///
-    /// One equality row per anticipated plant at every stage (always-active).
-    /// The count of rows is `n_anticipated_fishing_rows`.
-    /// When `n_anticipated == 0`, this equals `row_generic_start`.
-    /// Layout: `row_anticipated_fishing_start + local_idx` for plant `local_idx`.
+    /// One equality row per matured anticipated plant (`K_i <= stage_idx`).
+    /// Layout: `row_anticipated_fishing_start + active_pos`.
     pub(crate) row_anticipated_fishing_start: usize,
     /// Number of anticipated-fishing rows at this stage.
     ///
-    /// Equals `n_anticipated` — one row per anticipated plant at every stage.
-    /// Stage-invariant: the count does not depend on `stage_idx` or lead times `K_i`.
-    /// Zero when `n_anticipated == 0`.
+    /// Equals the count of anticipated plants with `K_i <= stage_idx`.
+    /// Stage-dependent; grows from 0 to `n_anticipated` as stages pass lead times.
+    /// Zero when `n_anticipated == 0` or no plant has matured.
     pub(crate) n_anticipated_fishing_rows: usize,
     /// Start of generic constraint rows (after operational violation rows).
     ///
@@ -735,8 +733,7 @@ impl StageLayout {
         let row_min_turbine_start = row_max_outflow_start + n_op_rows;
         let row_min_generation_start = row_min_turbine_start + n_op_rows;
 
-        // Anticipated-fishing rows: one row per matured anticipated plant at this stage.
-        // Active iff K_i <= stage_idx; count is stage-dependent.
+        // Anticipated-fishing rows: one per plant with K_i <= stage_idx.
         let n_anticipated_fishing_rows = ctx
             .anticipated_lead_stages
             .iter()
@@ -1199,16 +1196,8 @@ mod tests {
         );
     }
 
-    /// `n_anticipated_fishing_rows` is stage-dependent under the
-    /// `K_i <= stage_idx` predicate: the count grows from 0 to `n_anticipated`
-    /// as stages progress past each plant's lead time.
-    ///
-    /// With `n_anticipated=2` and `anticipated_lead_stages=[1,2]`, the count
-    /// must follow the table:
-    ///   stage 0 → 0 active (`K_0=1 > 0`, `K_1=2 > 0`)
-    ///   stage 1 → 1 active (`K_0=1 <= 1`)
-    ///   stage 2 → 2 active (`K_0=1 <= 2`, `K_1=2 <= 2`)
-    ///   stage 3 → 2 active
+    /// `n_anticipated_fishing_rows` grows as stages pass each plant's lead time.
+    /// With `K_i=[1,2]`, the count is 0 at stage 0, then 1, 2, 2 at stages 1-3.
     #[test]
     fn anticipated_fishing_row_count_grows_with_stage() {
         let n_anticipated = 2_usize;
@@ -1232,10 +1221,8 @@ mod tests {
         }
     }
 
-    /// `row_anticipated_state_fixing_start` and `col_anticipated_state_start` have
-    /// the same numeric value `N*(1+L)` (indexed independently in row/column spaces).
-    ///
-    /// With `n_anticipated=2`, `k_max=3`, zero hydros, one block: both equal 0.
+    /// `row_anticipated_state_fixing_start` and `col_anticipated_state_start`
+    /// have the same numeric value `N*(1+L)` (independent row/column spaces).
     #[test]
     fn row_anticipated_state_fixing_start_equals_anticipated_state_column_start_numerically() {
         let n_anticipated = 2_usize;
