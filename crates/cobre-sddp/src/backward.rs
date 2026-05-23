@@ -104,15 +104,15 @@ use cobre_comm::Communicator;
 use cobre_solver::{RowBatch, SolutionView, SolverInterface, SolverStatistics};
 
 use crate::{
+    SddpError,
     context::{StageContext, TrainingContext},
     cut::pool::CutPool,
     forward::write_capture_metadata,
-    noise::{transform_inflow_noise, transform_load_noise, transform_ncs_noise, NcsNoiseOffsets},
+    noise::{NcsNoiseOffsets, transform_inflow_noise, transform_load_noise, transform_ncs_noise},
     risk_measure::RiskMeasure,
     solver_stats::SolverStatsDelta,
     state_exchange::ExchangeBuffers,
     workspace::{BasisStoreSliceMut, CapturedBasis, SolverWorkspace},
-    SddpError,
 };
 
 /// Per-`(rank, worker_id, opening)` solver delta collected during a single
@@ -724,7 +724,7 @@ mod tests {
 
     use cobre_core::scenario::SamplingScheme;
 
-    use super::{run_backward_pass, BackwardResult};
+    use super::{BackwardResult, run_backward_pass};
     use crate::{
         context::{StageContext, TrainingContext},
         cut::FutureCostFunction,
@@ -1063,6 +1063,7 @@ mod tests {
         use chrono::NaiveDate;
         use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
         use cobre_core::{
+            Bus, DeficitSegment, EntityId, SystemBuilder,
             scenario::{
                 CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile,
                 InflowModel,
@@ -1071,10 +1072,9 @@ mod tests {
                 Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
                 StageStateConfig,
             },
-            Bus, DeficitSegment, EntityId, SystemBuilder,
         };
         use cobre_stochastic::context::{
-            build_stochastic_context, ClassSchemes, OpeningTreeInputs,
+            ClassSchemes, OpeningTreeInputs, build_stochastic_context,
         };
         use std::collections::BTreeMap;
 
@@ -3025,7 +3025,7 @@ mod tests {
         };
         use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
         use cobre_stochastic::context::{
-            build_stochastic_context, ClassSchemes, OpeningTreeInputs,
+            ClassSchemes, OpeningTreeInputs, build_stochastic_context,
         };
 
         let bus0 = Bus {

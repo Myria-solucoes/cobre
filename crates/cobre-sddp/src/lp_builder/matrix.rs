@@ -305,29 +305,39 @@ fn fill_anticipated_decision_objective(
     }
 }
 
-/// Zero per-block thermal objective coefficients for every anticipated thermal
-/// at every stage in `[0, n_stages)`.
+/// Zero out per-block thermal objective coefficients for anticipated thermals
+/// at their delivery stages.
 ///
-/// This implements the sunk-cost treatment: anticipated decisions are priced
-/// once at the decision stage via `fill_anticipated_decision_objective`, and
-/// the delivery-stage LP must consume the resulting generation at zero marginal
-/// cost.
+/// At every stage `t` that is a delivery stage for anticipated plant `i`
+/// (predicate: `K_i <= stage_idx`, matching the fishing-row activation in
+/// `fill_anticipated_fishing_entries`), the thermal's per-block generation
+/// cost is zeroed. This prevents double-counting: the generation is already
+/// priced at the decision stage via `fill_anticipated_decision_objective`;
+/// the delivery-stage LP must consume it at zero marginal cost.
 ///
 /// Must be called AFTER `fill_thermal_columns`, which writes the standard
 /// non-zero cost for all thermals at all stages. This function overwrites that
-/// cost for every anticipated thermal regardless of stage.
+/// cost for anticipated thermals at their delivery stages only.
 ///
 /// The assignment `= 0.0` (not `*= 0.0`) is deliberate: a clean write that
 /// survives floating-point anomalies. Dividing zero by `COST_SCALE_FACTOR`
 /// (the post-loop in `build_single_stage_template`) still gives zero.
 fn zero_anticipated_delivery_thermal_cost(
     ctx: &TemplateBuildCtx<'_>,
-    _stage_idx: usize,
+    stage_idx: usize,
     layout: &StageLayout,
     bufs: &mut ColumnBufs<'_>,
 ) {
     let n_blks = layout.n_blks;
     for local_idx in 0..ctx.n_anticipated {
+        let k_i = ctx.anticipated_lead_stages[local_idx];
+        // Delivery stages: those where a past decision has matured. Predicate
+        // k_i <= stage_idx matches the fishing-row construction in
+        // fill_anticipated_fishing_entries; both gates use the legacy
+        // stage-dependent predicate.
+        if k_i > stage_idx {
+            continue;
+        }
         let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
         for blk in 0..n_blks {
             let col = layout.col_thermal_start + thermal_idx * n_blks + blk;
@@ -907,35 +917,42 @@ fn fill_operational_violation_rows(
 
 /// Fill row bounds for anticipated-fishing equality constraints.
 ///
-/// Sets one equality row `0 == 0` per anticipated plant at every stage in
-/// `[0, n_stages)` (always-active). The fishing constraint balances per-block
-/// thermal generation (`MWh`) against the committed power level in the
+/// For each anticipated plant `i` with `K_i <= stage_idx`, sets one row to
+/// equality `0 == 0`. The fishing constraint balances per-block thermal
+/// generation (`MWh`) against the committed power level in the
 /// `anticipated_state` slot (`MW` × `block_hours_total` = `MWh`).
 ///
-/// No-op when `n_anticipated == 0`.
+/// When `n_anticipated == 0` or no plant has matured (`K_i > stage_idx` for
+/// all plants), this function is a no-op: `n_anticipated_fishing_rows == 0`.
 pub(super) fn fill_anticipated_fishing_rows(
     ctx: &TemplateBuildCtx<'_>,
     _stage: &Stage,
-    _stage_idx: usize,
+    stage_idx: usize,
     layout: &StageLayout,
     row_lower: &mut [f64],
     row_upper: &mut [f64],
 ) {
-    debug_assert_eq!(
-        ctx.n_anticipated, layout.n_anticipated_fishing_rows,
-        "fill_anticipated_fishing_rows: count mismatch"
-    );
-    for local_idx in 0..ctx.n_anticipated {
-        let row = layout.row_anticipated_fishing_start + local_idx;
+    let mut active_pos: usize = 0;
+    for &k_i in &ctx.anticipated_lead_stages {
+        if k_i > stage_idx {
+            continue;
+        }
+        let row = layout.row_anticipated_fishing_start + active_pos;
         // Equality constraint: LHS == 0 (both bounds set to 0.0).
         row_lower[row] = 0.0;
         row_upper[row] = 0.0;
+        active_pos += 1;
     }
+    debug_assert_eq!(
+        active_pos, layout.n_anticipated_fishing_rows,
+        "fill_anticipated_fishing_rows: active_pos mismatch at stage {stage_idx}"
+    );
 }
 
 /// Fill CSC matrix entries for anticipated-fishing equality constraints.
 ///
-/// For each anticipated plant `i`, writes at row `row_anticipated_fishing_start + i`:
+/// For each active anticipated plant `i` at delivery stage `t` (i.e. `K_i <= stage_idx`),
+/// writes:
 /// - `(row, +block_hours[blk])` on each per-block thermal column
 ///   `col_thermal_start + thermal_idx * n_blks + blk` (`LHS`, `MWh`).
 /// - `(row, -block_hours_total)` on the anticipated-state slot-0 column
@@ -944,21 +961,21 @@ pub(super) fn fill_anticipated_fishing_rows(
 /// The constraint enforces that the total generated energy (sum over blocks) equals
 /// the committed power level (slot 0 content) scaled to `MWh`.
 ///
-/// Always-active: one row per anticipated plant at every stage. No-op when `n_anticipated == 0`.
+/// When `n_anticipated == 0` or no plant has matured, this function is a no-op.
 pub(super) fn fill_anticipated_fishing_entries(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
-    _stage_idx: usize,
+    stage_idx: usize,
     layout: &StageLayout,
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
-    debug_assert_eq!(
-        ctx.n_anticipated, layout.n_anticipated_fishing_rows,
-        "fill_anticipated_fishing_entries: count mismatch"
-    );
     let n_blks = layout.n_blks;
-    for local_idx in 0..ctx.n_anticipated {
-        let row = layout.row_anticipated_fishing_start + local_idx;
+    let mut active_pos: usize = 0;
+    for (local_idx, &k_i) in ctx.anticipated_lead_stages.iter().enumerate() {
+        if k_i > stage_idx {
+            continue;
+        }
+        let row = layout.row_anticipated_fishing_start + active_pos;
         let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
         // LHS: sum_{blk} block_hours[blk] * gt_i^(t, blk)   (converts MW → MWh per block).
         let mut block_hours_total: f64 = 0.0;
@@ -974,7 +991,12 @@ pub(super) fn fill_anticipated_fishing_entries(
         //                             = col_anticipated_state_start + local_idx.
         let col_state = layout.col_anticipated_state_start + local_idx;
         col_entries[col_state].push((row, -block_hours_total));
+        active_pos += 1;
     }
+    debug_assert_eq!(
+        active_pos, layout.n_anticipated_fishing_rows,
+        "fill_anticipated_fishing_entries: active_pos mismatch at stage {stage_idx}"
+    );
 }
 
 /// Fill the anticipated-state-fixing CSC diagonal entries.
@@ -1816,7 +1838,7 @@ mod parameter_resolution_tests {
     use cobre_stochastic::par::precompute::PrecomputedPar;
     use std::collections::HashMap;
 
-    use crate::energy_conversion::{EnergyConversionSet, build_hydro_energy_productivity_override};
+    use crate::energy_conversion::{build_hydro_energy_productivity_override, EnergyConversionSet};
     use crate::hydro_models::PrepareHydroModelsResult;
     use crate::inflow_method::InflowNonNegativityMethod;
     use crate::resolved_parameters::build_resolved_parameters;
@@ -2303,8 +2325,8 @@ mod zero_cost_tests {
     use crate::resolved_parameters::ResolvedParameters;
 
     use super::{
-        ColumnBufs, StageLayout, TemplateBuildCtx, fill_anticipated_fishing_rows,
-        zero_anticipated_delivery_thermal_cost,
+        fill_anticipated_fishing_rows, zero_anticipated_delivery_thermal_cost, ColumnBufs,
+        StageLayout, TemplateBuildCtx,
     };
 
     /// Build a minimal two-block `Stage` at the given index.
@@ -2426,23 +2448,25 @@ mod zero_cost_tests {
         }
     }
 
-    /// `zero_anticipated_delivery_thermal_cost` zeroes costs for all anticipated
-    /// thermals at every stage, regardless of lead times.
+    /// `zero_anticipated_delivery_thermal_cost` zeroes costs ONLY for matured
+    /// anticipated thermals at delivery stages (`K_i <= stage_idx`).
     ///
-    /// With `n_anticipated == 2`, `anticipated_lead_stages == [3, 5]`, `n_blks == 2`,
-    /// both plants have future delivery times but costs are zeroed at stage 0.
+    /// Setup: `n_anticipated=2`, `anticipated_lead_stages=[1, 5]`, `n_blks=2`,
+    /// `stage_idx=2`. Plant 0 (`K_0=1`) is matured; plant 1 (`K_1=5`) is not.
+    /// Plant 0's per-block thermal cost must be zeroed; plant 1's must remain
+    /// at the sentinel value `42.0`.
     #[test]
-    fn zero_anticipated_delivery_thermal_cost_zeroes_at_all_stages() {
+    fn zero_anticipated_delivery_thermal_cost_zeroes_matured_only() {
         let fixtures = AntFixtures::new();
         let ctx = fixtures.make_ctx(
             2,          // n_anticipated
-            5,          // k_max (max of [3, 5])
-            vec![3, 5], // anticipated_lead_stages: K_0 = 3, K_1 = 5
+            5,          // k_max (max of [1, 5])
+            vec![1, 5], // anticipated_lead_stages: K_0 = 1 (matured at stage 2), K_1 = 5
             vec![0, 1], // anticipated_thermal_indices: positions in ctx.thermals
             2,          // n_thermals
         );
-        let stage = two_block_stage(0);
-        let layout = StageLayout::new(&ctx, &stage, 0);
+        let stage = two_block_stage(2);
+        let layout = StageLayout::new(&ctx, &stage, 2);
 
         // Allocate objective buffer at full column width, pre-filled with a
         // sentinel so any un-zeroed entry is visible in the assertions.
@@ -2455,49 +2479,56 @@ mod zero_cost_tests {
             objective: &mut objective,
         };
 
-        zero_anticipated_delivery_thermal_cost(&ctx, 0, &layout, &mut bufs);
+        zero_anticipated_delivery_thermal_cost(&ctx, 2, &layout, &mut bufs);
 
-        // Both anticipated thermals (thermal_idx 0 and 1), 2 blocks each, must
-        // have objective == 0.0 regardless of their K_i values.
         let n_blks = layout.n_blks;
-        for local_idx in 0..ctx.n_anticipated {
-            let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
-            for blk in 0..n_blks {
-                let col = layout.col_thermal_start + thermal_idx * n_blks + blk;
-                assert_eq!(
-                    bufs.objective[col], 0.0,
-                    "expected 0.0 at col {col} (thermal_idx={thermal_idx}, blk={blk}), got {}",
-                    bufs.objective[col]
-                );
-            }
+        // Plant 0 (K_0=1 <= stage_idx=2): zeroed.
+        let thermal_idx_0 = ctx.anticipated_thermal_indices[0];
+        for blk in 0..n_blks {
+            let col = layout.col_thermal_start + thermal_idx_0 * n_blks + blk;
+            assert_eq!(
+                bufs.objective[col], 0.0,
+                "plant 0 (matured) must be zeroed at col {col}",
+            );
+        }
+        // Plant 1 (K_1=5 > stage_idx=2): sentinel preserved.
+        let thermal_idx_1 = ctx.anticipated_thermal_indices[1];
+        for blk in 0..n_blks {
+            let col = layout.col_thermal_start + thermal_idx_1 * n_blks + blk;
+            assert_eq!(
+                bufs.objective[col], 42.0,
+                "plant 1 (not matured) must keep sentinel at col {col}",
+            );
         }
     }
 
-    /// `fill_anticipated_fishing_rows` writes equality bounds `(0.0, 0.0)` for
-    /// every anticipated plant at every stage, regardless of lead times.
+    /// `fill_anticipated_fishing_rows` writes equality bounds `(0.0, 0.0)` ONLY
+    /// for matured anticipated plants (`K_i <= stage_idx`).
     ///
-    /// With `n_anticipated == 2`, `anticipated_lead_stages == [3, 5]`, `n_blks == 1`,
-    /// both plants have future delivery times but fishing rows exist at stage 0.
+    /// Setup: `n_anticipated=2`, `anticipated_lead_stages=[1, 5]`,
+    /// `stage_idx=2`. Plant 0 (`K_0=1`) is matured; plant 1 (`K_1=5`) is not.
+    /// Exactly one fishing row is filled (at offset 0 within the active subset).
     #[test]
-    fn fishing_rows_fill_every_plant_at_stage_zero() {
+    fn fishing_rows_fill_matured_plants_only() {
         let fixtures = AntFixtures::new();
-        let ctx = fixtures.make_ctx(2, 5, vec![3, 5], vec![0, 1], 2);
-        let stage = two_block_stage(0);
-        let layout = StageLayout::new(&ctx, &stage, 0);
+        let ctx = fixtures.make_ctx(2, 5, vec![1, 5], vec![0, 1], 2);
+        let stage = two_block_stage(2);
+        let layout = StageLayout::new(&ctx, &stage, 2);
 
-        // Both fishing rows must exist post-flip.
+        // Exactly one matured plant at stage 2 → one fishing row.
         assert_eq!(
-            layout.n_anticipated_fishing_rows, 2,
-            "expected n_anticipated_fishing_rows == 2, got {}",
+            layout.n_anticipated_fishing_rows, 1,
+            "expected n_anticipated_fishing_rows == 1, got {}",
             layout.n_anticipated_fishing_rows
         );
 
         let mut row_lower = vec![f64::NAN; layout.num_rows];
         let mut row_upper = vec![f64::NAN; layout.num_rows];
 
-        fill_anticipated_fishing_rows(&ctx, &stage, 0, &layout, &mut row_lower, &mut row_upper);
+        fill_anticipated_fishing_rows(&ctx, &stage, 2, &layout, &mut row_lower, &mut row_upper);
 
-        for local_idx in 0..ctx.n_anticipated {
+        // Only the first active position (plant 0) writes a row.
+        for local_idx in 0..layout.n_anticipated_fishing_rows {
             let row = layout.row_anticipated_fishing_start + local_idx;
             assert_eq!(
                 row_lower[row], 0.0,

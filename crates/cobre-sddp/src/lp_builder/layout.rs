@@ -735,9 +735,13 @@ impl StageLayout {
         let row_min_turbine_start = row_max_outflow_start + n_op_rows;
         let row_min_generation_start = row_min_turbine_start + n_op_rows;
 
-        // Anticipated-fishing rows: one per anticipated plant at every stage (always-active).
-        // Stage-invariant count; does not depend on stage_idx or lead times K_i.
-        let n_anticipated_fishing_rows = ctx.n_anticipated;
+        // Anticipated-fishing rows: one row per matured anticipated plant at this stage.
+        // Active iff K_i <= stage_idx; count is stage-dependent.
+        let n_anticipated_fishing_rows = ctx
+            .anticipated_lead_stages
+            .iter()
+            .filter(|&&k_i| k_i <= stage_idx)
+            .count();
         let row_anticipated_fishing_start = row_min_generation_start + n_op_rows;
         let row_generic_start = row_anticipated_fishing_start + n_anticipated_fishing_rows;
 
@@ -1163,6 +1167,7 @@ mod tests {
     /// Setup: `n_anticipated=2`, `k_max=2`, `anticipated_lead_stages=[1,2]`,
     /// zero hydros, one block. At `stage_idx=1`:
     /// - `n_op_rows = 0 * 1 = 0` (no hydros)
+    /// - `n_anticipated_fishing_rows = 1` (`K_0=1<=1` active, `K_1=2>1` inactive)
     /// - `row_anticipated_fishing_start` must equal `row_min_generation_start + 0`
     #[test]
     fn anticipated_fishing_row_offset_after_operational_violations() {
@@ -1177,7 +1182,7 @@ mod tests {
             vec![0, 1], // arbitrary thermal indices
         );
         let stage = minimal_stage(); // 1 block
-        // stage_idx = 1; every anticipated plant is active at every stage.
+        // stage_idx=1: K_0=1 active, K_1=2 inactive → 1 fishing row.
         let layout = StageLayout::new(&ctx, &stage, 1);
 
         // n_op_rows = n_hydros * n_blks = 0 * 1 = 0
@@ -1187,21 +1192,25 @@ mod tests {
             layout.row_min_generation_start + n_op_rows,
             "row_anticipated_fishing_start must equal row_min_generation_start + n_op_rows"
         );
-        // Sanity: n_anticipated_fishing_rows == n_anticipated (always-active: every
-        // plant has a fishing row at every stage regardless of K_i).
+        // Sanity: exactly one matured plant at stage 1 → exactly one fishing row.
         assert_eq!(
-            layout.n_anticipated_fishing_rows, n_anticipated,
-            "n_anticipated_fishing_rows must equal n_anticipated (always-active)"
+            layout.n_anticipated_fishing_rows, 1,
+            "n_anticipated_fishing_rows must equal 1 at stage 1 (K_0=1 matured, K_1=2 not)"
         );
     }
 
-    /// `n_anticipated_fishing_rows` is stage-invariant: equals `n_anticipated`
-    /// at every stage regardless of lead times.
+    /// `n_anticipated_fishing_rows` is stage-dependent under the
+    /// `K_i <= stage_idx` predicate: the count grows from 0 to `n_anticipated`
+    /// as stages progress past each plant's lead time.
     ///
-    /// With `n_anticipated=2` and `anticipated_lead_stages=[1,2]`, the count must
-    /// equal 2 at every stage in `[0, 3]`.
+    /// With `n_anticipated=2` and `anticipated_lead_stages=[1,2]`, the count
+    /// must follow the table:
+    ///   stage 0 → 0 active (`K_0=1 > 0`, `K_1=2 > 0`)
+    ///   stage 1 → 1 active (`K_0=1 <= 1`)
+    ///   stage 2 → 2 active (`K_0=1 <= 2`, `K_1=2 <= 2`)
+    ///   stage 3 → 2 active
     #[test]
-    fn anticipated_fishing_row_count_is_stage_invariant() {
+    fn anticipated_fishing_row_count_grows_with_stage() {
         let n_anticipated = 2_usize;
         let k_max = 2_usize;
 
@@ -1214,11 +1223,11 @@ mod tests {
         );
         let stage = minimal_stage(); // 1 block
 
-        for stage_idx in [0, 1, 2, 3] {
+        for (stage_idx, expected) in [(0_usize, 0), (1, 1), (2, 2), (3, 2)] {
             let layout = StageLayout::new(&ctx, &stage, stage_idx);
             assert_eq!(
-                layout.n_anticipated_fishing_rows, n_anticipated,
-                "n_anticipated_fishing_rows must equal n_anticipated={n_anticipated} at stage_idx={stage_idx}"
+                layout.n_anticipated_fishing_rows, expected,
+                "n_anticipated_fishing_rows must equal {expected} at stage_idx={stage_idx}"
             );
         }
     }

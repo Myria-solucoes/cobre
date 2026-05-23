@@ -1,14 +1,11 @@
 //! End-to-end integration test verifying the anticipated-state ring-buffer
 //! evolution across the full forward pass for a 5-stage K=2 system.
 //!
-//! The test exercises the composition of four upstream tickets:
-//! - ticket-026: `shift_anticipated_state` ring-buffer shift in `noise.rs`.
-//! - ticket-027: call-site discipline across multi-resolution / lower-bound paths.
-//! - ticket-028: `build_initial_state` seed from `past_anticipated_commitments`.
-//! - ticket-029: MPI basis-cache wire-format round-trip with anticipated_state.
-//!
-//! All assertions correspond to the acceptance criteria in the ticket spec and
-//! are labelled accordingly (AC-1 through AC-5).
+//! The ring-buffer shift semantics are documented in
+//! `plans/anticipated-thermals-pre-horizon-seeding/epic-04-hot-path-verification/audit-forward-shift.md`
+//! (stage-by-stage table at lines 28-37). The basis-cache capture sequence
+//! across forward + backward passes is described in the AC-2 / AC-3 / AC-4
+//! comments inline below.
 
 #![allow(
     clippy::unwrap_used,

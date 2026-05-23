@@ -1237,8 +1237,7 @@ mod tests {
     /// `n_ant`: number of anticipated plants (must be 2 for this swap).
     /// `k_max`: ring-buffer slots per plant.
     /// `fish_start_a` / `fish_start_b`: row index of `row_anticipated_fishing_start`.
-    /// `n_fish_rows`: number of active fishing rows at this stage; equals
-    /// `n_ant` (always-active predicate) or `0` when `n_ant == 0`.
+    /// `n_fish_rows`: number of active fishing rows at this stage (0..=n_ant).
     ///
     /// Strategy: build the column-permutation `col_perm` such that
     /// `tpl_a.column[col_perm[j]]` corresponds to `tpl_b.column[j]`, and the row
@@ -1294,15 +1293,20 @@ mod tests {
             row_perm[state_start_b + s * n_ant] = state_start_a + s * n_ant + 1;
             row_perm[state_start_b + s * n_ant + 1] = state_start_a + s * n_ant;
         }
-        // Always-active fishing predicate: with n_ant == 2 we always have
-        // exactly 2 fishing rows to swap. The legacy `n_fish_rows == 1`
-        // partial-maturity case no longer occurs.
-        debug_assert_eq!(
-            n_fish_rows, n_ant,
-            "n_fish_rows must equal n_ant (always-active predicate)"
-        );
-        row_perm[fish_start_b] = fish_start_a + 1;
-        row_perm[fish_start_b + 1] = fish_start_a;
+        if n_fish_rows == 2 {
+            row_perm[fish_start_b] = fish_start_a + 1;
+            row_perm[fish_start_b + 1] = fish_start_a;
+        }
+        // If only 1 fishing row is active (one plant matured but not the other),
+        // the SAME plant is active in both LPs — but at LOCAL index 0 in one and
+        // LOCAL index 1 in the other. The fishing-row index differs but corresponds
+        // to the same plant's constraint. The mapping is still a single-row swap
+        // when applicable.
+        if n_fish_rows == 1 {
+            // The single active fishing row in tpl_a corresponds to the single
+            // active fishing row in tpl_b (same plant, different local index).
+            row_perm[fish_start_b] = fish_start_a;
+        }
 
         // Dense bound/objective comparison: tpl_a[col_perm[j]] == tpl_b[j].
         for j in 0..tpl_a.num_cols {

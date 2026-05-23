@@ -85,13 +85,12 @@
 //! ```
 //!
 //! After the operational violation rows, the anticipated-thermal fishing rows
-//! are placed. The fishing predicate is always-active: every anticipated plant
-//! has a row at every stage in `[0, n_stages)`. The stage-0 canonical layout
-//! still stores a zero-length range on `StageIndexer` (the per-stage row count
-//! is produced downstream from the `anticipated_fishing_start` offset):
+//! are placed. The stage-0 canonical layout stores a zero-length range; per-stage
+//! row counts (`0..n_anticipated`) are produced downstream from the
+//! `anticipated_fishing_start` offset:
 //!
 //! ```text
-//! [min_generation_rows.end, +n_anticipated)   anticipated_fishing — one row per plant, every stage
+//! [min_generation_rows.end, +0)   anticipated_fishing — zero rows at stage 0
 //! ```
 //!
 //! ## Worked example (SS5.5.3): N = 3, L = 2
@@ -632,8 +631,8 @@ pub struct StageIndexer {
 
     /// Row range for anticipated-thermal fishing constraints.
     ///
-    /// All anticipated plants are active at every stage in `[0, n_stages)`.
-    /// Per-stage active row indices are computed
+    /// Empty (`0..0`) in the canonical stage-0 layout — no commitment
+    /// has matured at stage 0. Per-stage active row indices are computed
     /// by [`anticipated_fishing_active_at_stage`](Self::anticipated_fishing_active_at_stage).
     ///
     /// The fishing constraint reads:
@@ -1418,11 +1417,12 @@ impl StageIndexer {
                     //   5. Zero duals produce zero cut coefficients, which are no-ops
                     //      in the cut row (neither pruned nor corrupted).
                     //
-                    // INVARIANT: Pre-horizon seeding populates slots [0, K_i) only.
-                    // Padding slots [K_i, k_max) stay zero via: (1) `debug_assert!`
-                    // in `setup/mod.rs` prevents seeding them, (2)
-                    // `shift_anticipated_state` re-zeros them at each stage transition.
-                    // Thus the 5-step chain above remains intact.
+                    // WARNING: if pre-horizon seeding is implemented (the data model
+                    // already has `AnticipatedCommitmentHistory` fields for it), step 1
+                    // would inject a non-zero into a padding slot, breaking this chain.
+                    // At that point the `j` identity return here must be replaced with
+                    // a proper column remap, and the `debug_assert!` in
+                    // `build_cut_row_batch_into` will fire to surface the breakage.
                     std::cmp::Ordering::Greater => j,
                 };
             }
@@ -1474,17 +1474,16 @@ impl StageIndexer {
     }
 
     /// Iterator over `(local_idx, lp_row)` for anticipated fishing
-    /// constraints active at `stage_idx`.
+    /// constraints active at `stage_idx`. Active iff
+    /// `anticipated_lead_stages[local_idx] <= stage_idx <= n_stages`.
     ///
-    /// Every anticipated plant is active at every stage in `[0, n_stages)`.
-    /// Row assignment: plant `local_idx` → `anticipated_fishing_start + local_idx`.
+    /// Rows are assigned in ascending `local_idx` order within the active
+    /// subset: the k-th active plant gets row
+    /// `anticipated_fishing_start + k` (where k is its position in the active
+    /// subset, NOT its anticipated-local index).
     ///
-    /// At stage 0, slot 0 holds a pre-horizon seed from the initial state.
-    /// From stage `K_i` onwards it holds the most recent in-study decision.
-    /// See [`cobre_core::initial_conditions::AnticipatedCommitmentHistory`].
-    ///
-    /// Iteration order is ascending `local_idx`, preserving
-    /// declaration-order invariance.
+    /// The dual on this row carries the cut subgradient w.r.t. the matured
+    /// anticipated-state slot during backward-pass cut extraction.
     ///
     /// # Panics (debug builds only)
     ///
@@ -1498,10 +1497,18 @@ impl StageIndexer {
             stage_idx <= n_stages,
             "stage_idx {stage_idx} exceeds n_stages {n_stages}"
         );
+        // `n_stages` participates only in the debug guard; fishing activation
+        // depends solely on `k_i <= stage_idx` (the commitment placed at stage
+        // `stage_idx - k_i` matures here). Symmetric with
+        // `anticipated_decision_active_at_stage` in signature, not in predicate.
         self.anticipated_lead_stages
             .iter()
             .enumerate()
-            .map(move |(local_idx, _)| (local_idx, self.anticipated_fishing_start + local_idx))
+            .filter(move |&(_, &k_i)| k_i <= stage_idx)
+            .enumerate()
+            .map(|(active_pos, (local_idx, _))| {
+                (local_idx, self.anticipated_fishing_start + active_pos)
+            })
     }
 
     /// Compute and store the nonzero state index mask from per-hydro
@@ -3591,9 +3598,10 @@ mod tests {
         );
     }
 
-    /// Fishing predicate is always-active: all plants present at stage 0.
+    /// At `stage_idx == 0` no commitment has matured yet: the iterator is empty
+    /// for any non-zero `K_i` set.
     #[test]
-    fn anticipated_fishing_active_yields_full_set_at_stage_zero() {
+    fn anticipated_fishing_active_empty_at_stage_zero() {
         let idx = StageIndexer::with_equipment_and_evaporation(
             &EquipmentCounts {
                 hydro_count: 1,
@@ -3612,15 +3620,14 @@ mod tests {
             &fpha(vec![], vec![]),
             &evap(vec![]),
         );
-        let start = idx.anticipated_fishing_start;
         let active: Vec<_> = idx.anticipated_fishing_active_at_stage(0, 5).collect();
-        // All three plants are active at every stage: row = start + local_idx.
-        assert_eq!(active, vec![(0, start), (1, start + 1), (2, start + 2)]);
+        assert!(active.is_empty());
     }
 
-    /// Fishing predicate is stage-independent: all plants at stage 1.
+    /// Boundary acceptance: `K_i == stage_idx` accepts (commitment placed at
+    /// stage `0` matures at stage `K_i`).
     #[test]
-    fn anticipated_fishing_active_yields_full_set_at_early_stage() {
+    fn anticipated_fishing_active_acceptance_boundary() {
         let idx = StageIndexer::with_equipment_and_evaporation(
             &EquipmentCounts {
                 hydro_count: 1,
@@ -3641,13 +3648,14 @@ mod tests {
         );
         let start = idx.anticipated_fishing_start;
         let active: Vec<_> = idx.anticipated_fishing_active_at_stage(1, 5).collect();
-        // All plants active regardless of lead stage — row = start + local_idx.
-        assert_eq!(active, vec![(0, start), (1, start + 1), (2, start + 2)]);
+        // Only plant 0 (K_0=1) matures at stage 1.
+        assert_eq!(active, vec![(0, start)]);
     }
 
-    /// Fishing predicate is lead-independent: plant active even if K > stage.
+    /// Boundary rejection: `K_i == stage_idx + 1` rejects (`K_0 = 5`,
+    /// `stage_idx = 4` → not yet matured).
     #[test]
-    fn anticipated_fishing_active_yields_plant_regardless_of_lead() {
+    fn anticipated_fishing_active_rejection_boundary() {
         let idx = StageIndexer::with_equipment_and_evaporation(
             &EquipmentCounts {
                 hydro_count: 1,
@@ -3666,13 +3674,12 @@ mod tests {
             &fpha(vec![], vec![]),
             &evap(vec![]),
         );
-        let start = idx.anticipated_fishing_start;
         let active: Vec<_> = idx.anticipated_fishing_active_at_stage(4, 6).collect();
-        // Plant is active even though K_0=5 > stage_idx=4.
-        assert_eq!(active, vec![(0, start)]);
+        assert!(active.is_empty());
     }
 
-    /// All plants always active; rows assigned ascending by `local_idx`.
+    /// All plants active at `stage_idx == 3` when `K_i = [1, 2, 3]`. Rows are
+    /// assigned ascending: `(0, start+0), (1, start+1), (2, start+2)`.
     #[test]
     fn anticipated_fishing_active_all_plants() {
         let idx = StageIndexer::with_equipment_and_evaporation(
@@ -3716,7 +3723,9 @@ mod tests {
         }
     }
 
-    /// `local_idx` order is preserved with equal lead stages.
+    /// Ascending `local_idx` order is preserved even when ties cause the
+    /// active subset to be the full set: `K_i = [2, 2, 2]`, `stage_idx = 2`
+    /// yields `(0, start+0), (1, start+1), (2, start+2)`.
     #[test]
     fn anticipated_fishing_active_preserves_local_idx_order() {
         let idx = StageIndexer::with_equipment_and_evaporation(
@@ -3742,10 +3751,14 @@ mod tests {
         assert_eq!(active, vec![(0, start), (1, start + 1), (2, start + 2)]);
     }
 
-    /// Row indices are strictly monotonic across all plants.
+    /// Successive yields have strictly increasing `lp_row` values. The
+    /// `local_idx` values are not necessarily contiguous (the row index is
+    /// `start + active_pos`, not `start + local_idx`).
     #[test]
     fn anticipated_fishing_active_row_indices_monotonic() {
-        // K_i = [1, 4, 2, 3]: all four plants active, rows contiguous.
+        // K_i = [1, 4, 2, 3] with stage_idx = 3 → plants 0, 2, 3 active
+        // (K_1 = 4 > 3 rejects). Local indices preserved: (0, 2, 3),
+        // row indices contiguous: start+0, start+1, start+2.
         let idx = StageIndexer::with_equipment_and_evaporation(
             &EquipmentCounts {
                 hydro_count: 1,
@@ -3766,16 +3779,14 @@ mod tests {
         );
         let start = idx.anticipated_fishing_start;
         let active: Vec<_> = idx.anticipated_fishing_active_at_stage(3, 5).collect();
-        assert_eq!(
-            active,
-            vec![(0, start), (1, start + 1), (2, start + 2), (3, start + 3)]
-        );
+        assert_eq!(active, vec![(0, start), (2, start + 1), (3, start + 2)]);
         // Row indices are strictly monotonic.
         let rows: Vec<_> = active.iter().map(|(_, row)| *row).collect();
         assert!(rows.windows(2).all(|w| w[0] < w[1]));
     }
 
-    /// All plants present at the horizon boundary `stage_idx == n_stages`.
+    /// `stage_idx == n_stages` is an acceptance boundary (delivery happens at
+    /// the horizon end and the LP at stage `T` still solves).
     #[test]
     fn anticipated_fishing_active_at_n_stages_boundary() {
         let idx = StageIndexer::with_equipment_and_evaporation(
@@ -3798,46 +3809,8 @@ mod tests {
         );
         let start = idx.anticipated_fishing_start;
         let active: Vec<_> = idx.anticipated_fishing_active_at_stage(5, 5).collect();
-        // Both plants active regardless of lead stages.
+        // Both K_0=3<=5 and K_1=5<=5 accept.
         assert_eq!(active, vec![(0, start), (1, start + 1)]);
-    }
-
-    /// Fishing predicate is independent: plant active even if ineligible for
-    /// decision commits (when `K_i >= n_stages`). This protects against
-    /// "synchronize predicates" refactors.
-    #[test]
-    fn anticipated_fishing_active_independent_of_decision_predicate() {
-        // K = 5, n_stages = 3: plant ineligible for commits but fishing active.
-        let idx = StageIndexer::with_equipment_and_evaporation(
-            &EquipmentCounts {
-                hydro_count: 1,
-                max_par_order: 0,
-                n_thermals: 1,
-                n_lines: 0,
-                n_buses: 1,
-                n_blks: 1,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
-                n_anticipated: 1,
-                k_max: 5,
-                anticipated_lead_stages: vec![5],
-                anticipated_thermal_indices: vec![0],
-            },
-            &fpha(vec![], vec![]),
-            &evap(vec![]),
-        );
-        let start = idx.anticipated_fishing_start;
-        // Plant is yielded at every stage in [0, 3) despite K=5 > n_stages=3.
-        for stage_idx in 0..3_usize {
-            let active: Vec<_> = idx
-                .anticipated_fishing_active_at_stage(stage_idx, 3)
-                .collect();
-            assert_eq!(
-                active,
-                vec![(0, start)],
-                "fishing predicate must yield plant at stage_idx={stage_idx}"
-            );
-        }
     }
 
     // ── state_to_lp_column tests ──────────────────────────────────────────────
@@ -4435,17 +4408,15 @@ mod tests {
             }
         }
 
-        /// I11: at stage 0, every anticipated plant is active in the fishing
-        /// predicate — the count equals `n_anticipated`.
+        /// I11: at stage 0, no fishing constraint is active (all `K_i >= 1`).
         #[test]
-        fn i11_fishing_active_at_stage_zero_yields_full_count() {
+        fn i11_fishing_active_at_stage_zero_is_empty() {
             for p in parameter_grid() {
                 let (idx, _) = build_indexer(&p);
                 let count = idx.anticipated_fishing_active_at_stage(0, N_STAGES).count();
                 assert_eq!(
-                    count, p.n_ant,
-                    "I11 failed at {p:?}: fishing active count {count} != n_ant {}",
-                    p.n_ant
+                    count, 0,
+                    "I11 failed at {p:?}: fishing active count {count} != 0"
                 );
             }
         }
