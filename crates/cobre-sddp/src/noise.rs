@@ -6,12 +6,12 @@
 //! class of bugs where one call site receives a fix and others are forgotten.
 
 use cobre_core::temporal::StageLagTransition;
-use cobre_stochastic::{StochasticContext, evaluate_par_batch, solve_par_noise_batch};
+use cobre_stochastic::{evaluate_par_batch, solve_par_noise_batch, StochasticContext};
 
 use crate::{
-    InflowNonNegativityMethod,
     context::{StageContext, TrainingContext},
     workspace::ScratchBuffers,
+    InflowNonNegativityMethod,
 };
 
 /// Compute effective (possibly clamped) eta for each hydro.
@@ -643,8 +643,8 @@ mod tests {
     };
     use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
     use cobre_solver::StageTemplate;
+    use cobre_stochastic::context::{build_stochastic_context, ClassSchemes, OpeningTreeInputs};
     use cobre_stochastic::StochasticContext;
-    use cobre_stochastic::context::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
     use std::collections::BTreeMap;
 
     use crate::{
@@ -1305,7 +1305,7 @@ mod tests {
         let indexer = StageIndexer::new(1, 1);
         let mut state = vec![500.0, 99.0]; // v_out, stale lag
         let incoming_lags = vec![42.0]; // lag0 (lag-major: lag * n_h + h = 0*1+0 = 0)
-        // z_inflow starts at N*(1+L) = 1*(1+1) = 2
+                                        // z_inflow.start = N*(1+L) = 1*(1+1) = 2
         let mut primal = vec![0.0; 10];
         primal[indexer.z_inflow.start] = 77.0; // Z_t for hydro 0
         shift_lag_state(&mut state, &incoming_lags, &primal, &indexer);
@@ -1702,7 +1702,7 @@ mod tests {
 
     use cobre_core::temporal::StageLagTransition;
 
-    use crate::noise::{DownstreamAccumState, LagAccumState, accumulate_and_shift_lag_state};
+    use crate::noise::{accumulate_and_shift_lag_state, DownstreamAccumState, LagAccumState};
     // Convenience helper: build a no-op DownstreamAccumState for tests that
     // exercise only primary accumulation (uniform-resolution path).
     fn noop_ds<'a>(
@@ -2608,5 +2608,45 @@ mod tests {
             "rebuilt lag[0] hydro 1 should be {expected_h1}, got {}",
             state[lag_start + 1]
         );
+    }
+
+    /// Multi-step ring-buffer evolution with non-zero pre-horizon seeds.
+    ///
+    /// Plant config: n_anticipated=1, k_max=2. Initial state: slot 0=10.0, slot 1=20.0.
+    /// Stage decisions: [30.0, 40.0, 50.0].
+    /// Expected trace: each shift promotes slot 1→slot 0 and loads decision→slot 1.
+    #[test]
+    fn shift_anticipated_state_pre_horizon_seed_three_stage_evolution() {
+        let indexer = make_anticipated_indexer(1, 2, vec![2]);
+        let ant_start = indexer.anticipated_state.start;
+        let dec_start = indexer.anticipated_decision.start;
+
+        let mut state = vec![0.0_f64; indexer.n_state];
+        state[ant_start] = 10.0;
+        state[ant_start + 1] = 20.0;
+
+        let mut incoming = vec![0.0_f64; 2];
+        let mut primal = vec![0.0_f64; dec_start + 2];
+
+        // Stage 0: incoming=[10.0, 20.0], decision=30.0 → slot 0=20.0, slot 1=30.0
+        incoming.copy_from_slice(&state[ant_start..ant_start + 2]);
+        primal[dec_start] = 30.0;
+        shift_anticipated_state(&mut state, &incoming, &primal, &indexer);
+        assert_eq!(state[ant_start], 20.0);
+        assert_eq!(state[ant_start + 1], 30.0);
+
+        // Stage 1: incoming=[20.0, 30.0], decision=40.0 → slot 0=30.0, slot 1=40.0
+        incoming.copy_from_slice(&state[ant_start..ant_start + 2]);
+        primal[dec_start] = 40.0;
+        shift_anticipated_state(&mut state, &incoming, &primal, &indexer);
+        assert_eq!(state[ant_start], 30.0);
+        assert_eq!(state[ant_start + 1], 40.0);
+
+        // Stage 2: incoming=[30.0, 40.0], decision=50.0 → slot 0=40.0, slot 1=50.0
+        incoming.copy_from_slice(&state[ant_start..ant_start + 2]);
+        primal[dec_start] = 50.0;
+        shift_anticipated_state(&mut state, &incoming, &primal, &indexer);
+        assert_eq!(state[ant_start], 40.0);
+        assert_eq!(state[ant_start + 1], 50.0);
     }
 }

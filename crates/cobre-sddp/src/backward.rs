@@ -104,15 +104,15 @@ use cobre_comm::Communicator;
 use cobre_solver::{RowBatch, SolutionView, SolverInterface, SolverStatistics};
 
 use crate::{
-    SddpError,
     context::{StageContext, TrainingContext},
     cut::pool::CutPool,
     forward::write_capture_metadata,
-    noise::{NcsNoiseOffsets, transform_inflow_noise, transform_load_noise, transform_ncs_noise},
+    noise::{transform_inflow_noise, transform_load_noise, transform_ncs_noise, NcsNoiseOffsets},
     risk_measure::RiskMeasure,
     solver_stats::SolverStatsDelta,
     state_exchange::ExchangeBuffers,
     workspace::{BasisStoreSliceMut, CapturedBasis, SolverWorkspace},
+    SddpError,
 };
 
 /// Per-`(rank, worker_id, opening)` solver delta collected during a single
@@ -724,7 +724,7 @@ mod tests {
 
     use cobre_core::scenario::SamplingScheme;
 
-    use super::{BackwardResult, run_backward_pass};
+    use super::{run_backward_pass, BackwardResult};
     use crate::{
         context::{StageContext, TrainingContext},
         cut::FutureCostFunction,
@@ -1063,7 +1063,6 @@ mod tests {
         use chrono::NaiveDate;
         use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
         use cobre_core::{
-            Bus, DeficitSegment, EntityId, SystemBuilder,
             scenario::{
                 CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile,
                 InflowModel,
@@ -1072,9 +1071,10 @@ mod tests {
                 Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
                 StageStateConfig,
             },
+            Bus, DeficitSegment, EntityId, SystemBuilder,
         };
         use cobre_stochastic::context::{
-            ClassSchemes, OpeningTreeInputs, build_stochastic_context,
+            build_stochastic_context, ClassSchemes, OpeningTreeInputs,
         };
         use std::collections::BTreeMap;
 
@@ -3025,7 +3025,7 @@ mod tests {
         };
         use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
         use cobre_stochastic::context::{
-            ClassSchemes, OpeningTreeInputs, build_stochastic_context,
+            build_stochastic_context, ClassSchemes, OpeningTreeInputs,
         };
 
         let bus0 = Bus {
@@ -5663,5 +5663,82 @@ mod tests {
                 "expected Err(SddpError::Validation(_)) from non-uniform handshake, got: {other:?}"
             ),
         }
+    }
+
+    /// Build a minimal anticipated `StageIndexer` for sign-convention tests.
+    /// Mirrors `noise.rs::make_anticipated_indexer` to avoid cross-module pub dependency.
+    fn make_anticipated_indexer_local(
+        n_anticipated: usize,
+        k_max: usize,
+        anticipated_lead_stages: Vec<usize>,
+    ) -> StageIndexer {
+        use crate::indexer::{EquipmentCounts, EvapConfig, FphaColumnLayout};
+        StageIndexer::with_equipment_and_evaporation(
+            &EquipmentCounts {
+                hydro_count: 0,
+                max_par_order: 0,
+                n_thermals: 0,
+                n_lines: 0,
+                n_buses: 1,
+                n_blks: 1,
+                has_inflow_penalty: false,
+                max_deficit_segments: 1,
+                n_anticipated,
+                k_max,
+                anticipated_lead_stages,
+                anticipated_thermal_indices: (0..n_anticipated).collect(),
+            },
+            &FphaColumnLayout {
+                hydro_indices: vec![],
+                planes_per_hydro: vec![],
+            },
+            &EvapConfig {
+                hydro_indices: vec![],
+            },
+        )
+    }
+
+    /// Verify sign convention end-to-end for anticipated slot-0 under K=2.
+    ///
+    /// A cut coefficient of 7.5 at a non-terminal stage (state-fixing-row dual)
+    /// must map to batch value -7.5 at the correct LP column, locking the
+    /// single-negation invariant in the anticipated-state cut path. The cut
+    /// is placed at stage 1 of a 3-stage FCF — the canonical backward-generated
+    /// stage (a non-terminal slot that the real backward pass populates).
+    #[test]
+    fn cut_coefficient_sign_convention_slot_zero_k2() {
+        let indexer = make_anticipated_indexer_local(1, 2, vec![2]);
+        assert_eq!(indexer.anticipated_state.start, 0);
+        assert_eq!(indexer.n_state, 2);
+
+        let mut fcf = FutureCostFunction::new(3, indexer.n_state, 1, 10, &[0; 3]);
+        let mut coefficients = vec![0.0_f64; indexer.n_state];
+        coefficients[indexer.anticipated_state.start] = 7.5;
+        fcf.add_cut(1, 0, 0, 0.0, &coefficients);
+
+        let mut batch = RowBatch {
+            num_rows: 0,
+            row_starts: Vec::new(),
+            col_indices: Vec::new(),
+            values: Vec::new(),
+            row_lower: Vec::new(),
+            row_upper: Vec::new(),
+        };
+        crate::forward::build_cut_row_batch_into(&mut batch, &fcf, 1, &indexer, &[]);
+
+        let lp_col = indexer.state_to_lp_column(indexer.anticipated_state.start);
+        assert_eq!(lp_col, 1);
+
+        let pos = batch
+            .col_indices
+            .iter()
+            .position(|&c| c == lp_col as i32)
+            .expect("lp_col must appear in batch.col_indices");
+
+        assert!(
+            (batch.values[pos] - (-7.5_f64)).abs() < f64::EPSILON,
+            "expected batch.values[pos]=-7.5 for lp_col={lp_col}, got {}",
+            batch.values[pos]
+        );
     }
 }

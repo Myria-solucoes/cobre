@@ -1083,8 +1083,8 @@ mod tests {
         BasisStore, CapturedBasis, ScratchBuffers, SolverWorkspace, WorkspacePool, WorkspaceSizing,
     };
     use cobre_solver::{
-        Basis, SolutionView, SolveProfile, SolverError, SolverInterface, SolverStatistics,
         types::{RowBatch, StageTemplate},
+        Basis, SolutionView, SolveProfile, SolverError, SolverInterface, SolverStatistics,
     };
 
     /// Minimal no-op solver for workspace tests.
@@ -2106,6 +2106,46 @@ mod tests {
             &large_state[9..15],
             "anticipated slice (last 6 entries) must roundtrip bit-exactly"
         );
+    }
+
+    /// Roundtrip test for the pre-horizon seeding case: slot 0 of the
+    /// anticipated region carries a sentinel value (`12345.5`) that can only
+    /// appear when a pre-horizon seed is present. AC: `state_at_capture[4]`
+    /// bit-equals 12345.5 after roundtrip; `row_status.len()` is 4.
+    #[test]
+    fn test_captured_basis_round_trip_with_pre_horizon_seed_in_slot_zero() {
+        let state_at_capture = vec![1.0_f64, 2.0, 100.0, 200.0, 12345.5, 0.0];
+        let original = CapturedBasis {
+            basis: Basis {
+                col_status: vec![1_i32, 2, 3, 4],
+                row_status: vec![5_i32, 6, 7, 8],
+            },
+            base_row_count: 3,
+            cut_row_slots: vec![10_u32, 20],
+            state_at_capture: state_at_capture.clone(),
+        };
+
+        let mut i32_buf = Vec::new();
+        let mut f64_buf = Vec::new();
+        original.to_broadcast_payload(&mut i32_buf, &mut f64_buf);
+
+        let mut i32_cursor = 0;
+        let mut f64_cursor = 0;
+        let recovered = CapturedBasis::try_from_broadcast_payload(
+            0,
+            &i32_buf,
+            &mut i32_cursor,
+            &f64_buf,
+            &mut f64_cursor,
+        )
+        .expect("round-trip must not fail")
+        .expect("sentinel is 1; must return Some");
+
+        assert_eq!(recovered.state_at_capture[4], 12345.5);
+        assert_eq!(recovered.basis.row_status.len(), 4);
+        assert_eq!(recovered.state_at_capture, state_at_capture);
+        assert_eq!(i32_cursor, i32_buf.len());
+        assert_eq!(f64_cursor, f64_buf.len());
     }
 
     // ---------------------------------------------------------------------------
