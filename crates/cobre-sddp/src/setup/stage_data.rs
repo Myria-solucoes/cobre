@@ -1,6 +1,6 @@
 //! Stage-indexed data sub-struct extracted from [`super::StudySetup`].
 
-use cobre_core::{temporal::StageLagTransition, Stage};
+use cobre_core::{Stage, temporal::StageLagTransition};
 
 use crate::{
     indexer::StageIndexer, lp_builder::StageTemplates, scaling_report::ScalingReport,

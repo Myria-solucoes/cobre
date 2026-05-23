@@ -85,12 +85,13 @@
 //! ```
 //!
 //! After the operational violation rows, the anticipated-thermal fishing rows
-//! are placed. The stage-0 canonical layout stores a zero-length range; per-stage
-//! row counts (`0..n_anticipated`) are produced downstream from the
-//! `anticipated_fishing_start` offset:
+//! are placed. The fishing predicate is always-active: every anticipated plant
+//! has a row at every stage in `[0, n_stages)`. The stage-0 canonical layout
+//! still stores a zero-length range on `StageIndexer` (the per-stage row count
+//! is produced downstream from the `anticipated_fishing_start` offset):
 //!
 //! ```text
-//! [min_generation_rows.end, +0)   anticipated_fishing — zero rows at stage 0
+//! [min_generation_rows.end, +n_anticipated)   anticipated_fishing — one row per plant, every stage
 //! ```
 //!
 //! ## Worked example (SS5.5.3): N = 3, L = 2
@@ -1484,14 +1485,6 @@ impl StageIndexer {
     ///
     /// Iteration order is ascending `local_idx`, preserving
     /// declaration-order invariance.
-    ///
-    /// RECONCILE(Epic 03): the LP matrix-fill site
-    /// (`lp_builder/matrix.rs::fill_anticipated_fishing_entries`) still uses
-    /// the legacy `K_i <= stage_idx` predicate and assigns rows by position
-    /// within the filtered active subset, while this method's row map is
-    /// `local_idx -> fishing_start + local_idx`. Production callers of this
-    /// method are tests only; Epic 03 will reconcile both sites onto a single
-    /// predicate.
     ///
     /// # Panics (debug builds only)
     ///

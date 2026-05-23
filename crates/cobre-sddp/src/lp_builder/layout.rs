@@ -266,17 +266,16 @@ pub(crate) struct StageLayout {
     pub(crate) row_anticipated_state_fixing_start: usize,
     /// Start of anticipated-fishing constraint rows (after operational violation rows).
     ///
-    /// One equality row per active anticipated plant at this stage (i.e. those with
-    /// `K_i <= stage_idx`).  The count of active rows is `n_anticipated_fishing_rows`.
-    /// When `n_anticipated == 0` or no plant has matured, this equals `row_generic_start`.
-    /// Layout: `row_anticipated_fishing_start + active_pos` where `active_pos` is
-    /// the position within the set of plants with `K_i <= stage_idx`.
+    /// One equality row per anticipated plant at every stage (always-active).
+    /// The count of rows is `n_anticipated_fishing_rows`.
+    /// When `n_anticipated == 0`, this equals `row_generic_start`.
+    /// Layout: `row_anticipated_fishing_start + local_idx` for plant `local_idx`.
     pub(crate) row_anticipated_fishing_start: usize,
     /// Number of anticipated-fishing rows at this stage.
     ///
-    /// Equals the number of anticipated plants with `K_i <= stage_idx`.
-    /// Stage-dependent (unlike most other layout counts, which are stage-invariant).
-    /// Zero when `n_anticipated == 0` or no plant has matured at `stage_idx`.
+    /// Equals `n_anticipated` — one row per anticipated plant at every stage.
+    /// Stage-invariant: the count does not depend on `stage_idx` or lead times `K_i`.
+    /// Zero when `n_anticipated == 0`.
     pub(crate) n_anticipated_fishing_rows: usize,
     /// Start of generic constraint rows (after operational violation rows).
     ///
@@ -736,13 +735,9 @@ impl StageLayout {
         let row_min_turbine_start = row_max_outflow_start + n_op_rows;
         let row_min_generation_start = row_min_turbine_start + n_op_rows;
 
-        // Anticipated-fishing rows: one per active plant (K_i <= stage_idx).
-        // Stage-dependent: grows from 0 at stage 0 to n_anticipated at stage >= K_max.
-        let n_anticipated_fishing_rows = ctx
-            .anticipated_lead_stages
-            .iter()
-            .filter(|&&k_i| k_i <= stage_idx)
-            .count();
+        // Anticipated-fishing rows: one per anticipated plant at every stage (always-active).
+        // Stage-invariant count; does not depend on stage_idx or lead times K_i.
+        let n_anticipated_fishing_rows = ctx.n_anticipated;
         let row_anticipated_fishing_start = row_min_generation_start + n_op_rows;
         let row_generic_start = row_anticipated_fishing_start + n_anticipated_fishing_rows;
 
@@ -1166,7 +1161,7 @@ mod tests {
     /// the production code path (`n_hydros * n_blks` counts operational violation rows).
     ///
     /// Setup: `n_anticipated=2`, `k_max=2`, `anticipated_lead_stages=[1,2]`,
-    /// zero hydros, one block. At `stage_idx=0`:
+    /// zero hydros, one block. At `stage_idx=1`:
     /// - `n_op_rows = 0 * 1 = 0` (no hydros)
     /// - `row_anticipated_fishing_start` must equal `row_min_generation_start + 0`
     #[test]
@@ -1182,8 +1177,7 @@ mod tests {
             vec![0, 1], // arbitrary thermal indices
         );
         let stage = minimal_stage(); // 1 block
-        // stage_idx = 1 so that at least one plant (K_0=1) has matured,
-        // giving n_anticipated_fishing_rows = 1 (non-trivial but layout still holds).
+        // stage_idx = 1; every anticipated plant is active at every stage.
         let layout = StageLayout::new(&ctx, &stage, 1);
 
         // n_op_rows = n_hydros * n_blks = 0 * 1 = 0
@@ -1193,29 +1187,46 @@ mod tests {
             layout.row_min_generation_start + n_op_rows,
             "row_anticipated_fishing_start must equal row_min_generation_start + n_op_rows"
         );
-        // Sanity: n_anticipated_fishing_rows == 1 (only K_0=1 <= stage_idx=1 is active;
-        // K_1=2 > 1 so not yet matured).
+        // Sanity: n_anticipated_fishing_rows == n_anticipated (always-active: every
+        // plant has a fishing row at every stage regardless of K_i).
         assert_eq!(
-            layout.n_anticipated_fishing_rows, 1,
-            "n_anticipated_fishing_rows must be 1 at stage_idx=1 (K_0=1<=1, K_1=2>1)"
+            layout.n_anticipated_fishing_rows, n_anticipated,
+            "n_anticipated_fishing_rows must equal n_anticipated (always-active)"
         );
     }
 
-    // ── ticket-024 unit test ──────────────────────────────────────────────────
+    /// `n_anticipated_fishing_rows` is stage-invariant: equals `n_anticipated`
+    /// at every stage regardless of lead times.
+    ///
+    /// With `n_anticipated=2` and `anticipated_lead_stages=[1,2]`, the count must
+    /// equal 2 at every stage in `[0, 3]`.
+    #[test]
+    fn anticipated_fishing_row_count_is_stage_invariant() {
+        let n_anticipated = 2_usize;
+        let k_max = 2_usize;
 
-    /// ticket-024: `row_anticipated_state_fixing_start` and `col_anticipated_state_start`
-    /// share the same numeric value `N*(1+L)` for the canonical layout.
+        let fixtures = ZeroEntityFixtures::new();
+        let ctx = fixtures.make_ctx(
+            n_anticipated,
+            k_max,
+            vec![1, 2], // K_0=1, K_1=2
+            vec![0, 1], // arbitrary thermal indices
+        );
+        let stage = minimal_stage(); // 1 block
+
+        for stage_idx in [0, 1, 2, 3] {
+            let layout = StageLayout::new(&ctx, &stage, stage_idx);
+            assert_eq!(
+                layout.n_anticipated_fishing_rows, n_anticipated,
+                "n_anticipated_fishing_rows must equal n_anticipated={n_anticipated} at stage_idx={stage_idx}"
+            );
+        }
+    }
+
+    /// `row_anticipated_state_fixing_start` and `col_anticipated_state_start` have
+    /// the same numeric value `N*(1+L)` (indexed independently in row/column spaces).
     ///
-    /// Both are derived from the augmented indexer:
-    /// - `col_anticipated_state_start = idx.anticipated_state.start`
-    /// - `row_anticipated_state_fixing_start = idx.anticipated_state_fixing.start`
-    ///
-    /// The indexer assigns `anticipated_state_fixing` the same range as
-    /// `anticipated_state` (both at offset `N*(1+L)` within their respective spaces).
-    /// They are independent (column vs row spaces) but numerically equal.
-    ///
-    /// Setup: `n_anticipated=2`, `k_max=3`, zero hydros, one block.
-    /// `N*(1+L) = 0` → both must equal 0.
+    /// With `n_anticipated=2`, `k_max=3`, zero hydros, one block: both equal 0.
     #[test]
     fn row_anticipated_state_fixing_start_equals_anticipated_state_column_start_numerically() {
         let n_anticipated = 2_usize;

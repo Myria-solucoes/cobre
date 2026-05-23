@@ -4,9 +4,9 @@ use cobre_core::ScalarParameter;
 use cobre_io::config::StoppingRuleConfig;
 
 use crate::{
-    cut_selection::{parse_cut_selection_config, CutSelectionStrategy},
-    stopping_rule::{StoppingMode, StoppingRule, StoppingRuleSet},
     InflowNonNegativityMethod, SddpError,
+    cut_selection::{CutSelectionStrategy, parse_cut_selection_config},
+    stopping_rule::{StoppingMode, StoppingRule, StoppingRuleSet},
 };
 
 /// Default number of forward-pass trajectories when not specified in config.
@@ -270,7 +270,7 @@ mod tests {
         RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
         TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
     };
-    use tracing::{span, Event, Level, Metadata, Subscriber};
+    use tracing::{Event, Level, Metadata, Subscriber, span};
 
     use super::StudyParams;
 
