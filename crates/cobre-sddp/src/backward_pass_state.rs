@@ -15,8 +15,8 @@ use rayon::iter::{
 
 use crate::{
     backward::{
-        BackwardResult, StageWorkerOpeningDelta, StagedCut, SuccessorSpec, load_backward_lp,
-        process_trial_point_backward,
+        load_backward_lp, process_trial_point_backward, BackwardResult, StageWorkerOpeningDelta,
+        StagedCut, SuccessorSpec,
     },
     config::CutManagementConfig,
     context::{StageContext, TrainingContext},
@@ -25,9 +25,10 @@ use crate::{
     error::SddpError,
     forward::{build_delta_cut_row_batch_into, partition},
     risk_measure::RiskMeasure,
+    solver_phase::{Phase, BACKWARD_PROFILE},
     solver_stats::{
-        SolverStatsDelta, StageWorkerStatsBuffer, WORKER_STATS_ENTRY_STRIDE,
-        pack_worker_opening_stats, unpack_worker_opening_stats,
+        pack_worker_opening_stats, unpack_worker_opening_stats, SolverStatsDelta,
+        StageWorkerStatsBuffer, WORKER_STATS_ENTRY_STRIDE,
     },
     state_exchange::ExchangeBuffers,
     training_session::{
@@ -340,6 +341,18 @@ impl BackwardPassState {
             .iter()
             .map(|ws| ws.solver.statistics().solve_count)
             .sum();
+
+        // Apply the backward-phase solver profile to every worker workspace before
+        // the per-stage loop begins.  In v1 all named profiles equal
+        // `SolveProfile::default()`, so this is a no-op (delta tracking skips all
+        // FFI calls), preserving bit-identical parity with the pre-profile branch.
+        for ws in inputs.workspaces.iter_mut() {
+            ws.solver.set_profile(&Phase::Backward.profile());
+            debug_assert!(
+                ws.solver.current_profile() == &BACKWARD_PROFILE,
+                "solver profile must equal BACKWARD_PROFILE after set_profile"
+            );
+        }
 
         // Reset per-worker timing and iteration-scoped window buffers.
         for ws in inputs.workspaces.iter_mut() {
@@ -1024,7 +1037,8 @@ mod tests {
     use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
     use cobre_core::scenario::SamplingScheme;
     use cobre_solver::{
-        Basis, LpSolution, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
+        Basis, LpSolution, ProfiledSolver, RowBatch, SolverError, SolverInterface,
+        SolverStatistics, StageTemplate,
     };
 
     use crate::{
@@ -1148,6 +1162,10 @@ mod tests {
         fn statistics(&self) -> SolverStatistics {
             SolverStatistics::default()
         }
+        fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
+        fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
+        fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
+        fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
     }
 
     fn minimal_template_1_0() -> StageTemplate {
@@ -1189,7 +1207,7 @@ mod tests {
         vec![SolverWorkspace {
             rank: 0,
             worker_id: 0,
-            solver,
+            solver: ProfiledSolver::new(solver),
             patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
             scratch: crate::workspace::ScratchBuffers {
@@ -1270,15 +1288,15 @@ mod tests {
         use chrono::NaiveDate;
         use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
         use cobre_core::{
-            Bus, DeficitSegment, EntityId, SystemBuilder,
             scenario::{CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile},
             temporal::{
                 Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
                 StageStateConfig,
             },
+            Bus, DeficitSegment, EntityId, SystemBuilder,
         };
         use cobre_stochastic::context::{
-            ClassSchemes, OpeningTreeInputs, build_stochastic_context,
+            build_stochastic_context, ClassSchemes, OpeningTreeInputs,
         };
         use std::collections::BTreeMap;
 

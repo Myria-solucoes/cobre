@@ -10,8 +10,8 @@ use cobre_core::{TrainingEvent, WorkerTimingPhase};
 use cobre_solver::{SolverInterface, SolverStatistics, StageTemplate};
 use cobre_stochastic::context::ClassSchemes;
 use cobre_stochastic::{
-    ClassDimensions, ClassSampleRequest, ForwardSampler, ForwardSamplerConfig, SampleRequest,
-    build_forward_sampler,
+    build_forward_sampler, ClassDimensions, ClassSampleRequest, ForwardSampler,
+    ForwardSamplerConfig, SampleRequest,
 };
 use rayon::iter::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator,
@@ -21,8 +21,9 @@ use crate::{
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
     error::SddpError,
-    forward::{ForwardResult, StageKey, partition, run_forward_stage},
+    forward::{partition, run_forward_stage, ForwardResult, StageKey},
     indexer::StageIndexer,
+    solver_phase::{Phase, FORWARD_PROFILE},
     solver_stats::SolverStatsDelta,
     trajectory::TrajectoryRecord,
     workspace::{BasisStore, BasisStoreSliceMut, SolverWorkspace},
@@ -408,6 +409,18 @@ impl ForwardPassState {
         self.worker_stats_before.clear();
         self.worker_stats_before
             .extend(inputs.workspaces.iter().map(|ws| ws.solver.statistics()));
+
+        // Apply the forward-phase solver profile to every worker workspace before
+        // the parallel region begins.  In v1 all named profiles equal
+        // `SolveProfile::default()`, so this is a no-op (delta tracking skips all
+        // FFI calls), preserving bit-identical parity with the pre-profile branch.
+        for ws in inputs.workspaces.iter_mut() {
+            ws.solver.set_profile(&Phase::Forward.profile());
+            debug_assert!(
+                ws.solver.current_profile() == &FORWARD_PROFILE,
+                "solver profile must equal FORWARD_PROFILE after set_profile"
+            );
+        }
 
         // Reset per-worker timing accumulators at the iteration boundary.
         for ws in inputs.workspaces.iter_mut() {
@@ -823,10 +836,11 @@ mod tests {
     };
     use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
     use cobre_solver::{
-        Basis, LpSolution, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
+        Basis, LpSolution, ProfiledSolver, RowBatch, SolverError, SolverInterface,
+        SolverStatistics, StageTemplate,
     };
+    use cobre_stochastic::context::{build_stochastic_context, ClassSchemes, OpeningTreeInputs};
     use cobre_stochastic::StochasticContext;
-    use cobre_stochastic::context::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
     use super::*;
     use crate::{
@@ -897,6 +911,10 @@ mod tests {
         fn solver_name_version(&self) -> String {
             "MockSolver 0.0.0".to_string()
         }
+        fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
+        fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
+        fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
+        fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
     }
 
     // ── Fixture helpers ────────────────────────────────────────────────────
@@ -939,7 +957,7 @@ mod tests {
         SolverWorkspace {
             rank: 0,
             worker_id: 0,
-            solver,
+            solver: ProfiledSolver::new(solver),
             patch_buf: crate::lp_builder::PatchBuffer::new(
                 indexer.hydro_count,
                 indexer.max_par_order,

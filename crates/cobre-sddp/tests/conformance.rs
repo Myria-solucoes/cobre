@@ -129,6 +129,10 @@ impl SolverInterface for MockSolver {
     fn name(&self) -> &'static str {
         "MockConformance"
     }
+    fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
+    fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
+    fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
+    fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
 }
 
 /// Minimal stage template for a single hydro, zero PAR lags.
