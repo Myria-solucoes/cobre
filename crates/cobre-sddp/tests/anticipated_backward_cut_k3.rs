@@ -69,9 +69,9 @@ use cobre_io::config::{
     SimulationConfig as IoSimulationConfig, StoppingRuleConfig, TrainingConfig,
     TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
-use cobre_sddp::{hydro_models::PrepareHydroModelsResult, StudySetup};
+use cobre_sddp::{StudySetup, hydro_models::PrepareHydroModelsResult};
 use cobre_solver::highs::HighsSolver;
-use cobre_stochastic::{build_stochastic_context, ClassSchemes, OpeningTreeInputs};
+use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
 // ---------------------------------------------------------------------------
 // Numeric fixture (single source of truth).

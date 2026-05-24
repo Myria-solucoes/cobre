@@ -1928,7 +1928,7 @@ mod parameter_resolution_tests {
     use cobre_stochastic::par::precompute::PrecomputedPar;
     use std::collections::HashMap;
 
-    use crate::energy_conversion::{build_hydro_energy_productivity_override, EnergyConversionSet};
+    use crate::energy_conversion::{EnergyConversionSet, build_hydro_energy_productivity_override};
     use crate::hydro_models::PrepareHydroModelsResult;
     use crate::inflow_method::InflowNonNegativityMethod;
     use crate::resolved_parameters::build_resolved_parameters;
@@ -2416,10 +2416,10 @@ mod zero_cost_tests {
     use crate::resolved_parameters::ResolvedParameters;
 
     use super::{
-        fill_anticipated_fishing_entries, fill_anticipated_fishing_rows,
-        fill_anticipated_state_out_columns, fill_anticipated_state_out_def_entries,
-        fill_anticipated_state_out_def_rows, zero_anticipated_delivery_thermal_cost, ColumnBufs,
-        StageLayout, TemplateBuildCtx,
+        ColumnBufs, StageLayout, TemplateBuildCtx, fill_anticipated_fishing_entries,
+        fill_anticipated_fishing_rows, fill_anticipated_state_out_columns,
+        fill_anticipated_state_out_def_entries, fill_anticipated_state_out_def_rows,
+        zero_anticipated_delivery_thermal_cost,
     };
 
     /// Build a minimal two-block `Stage` at the given index.

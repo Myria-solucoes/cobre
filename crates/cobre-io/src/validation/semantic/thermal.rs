@@ -225,15 +225,8 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
 /// **Generation bounds check** — every `values_mw[j]` must lie within
 /// `[thermal.min_generation_mw, thermal.max_generation_mw]`.
 ///
-/// Rationale: defence-in-depth guard. The downstream LP equality that would
-/// pin per-block generation to `values_mw[j] * stage_hours` is currently
-/// inactive at pre-horizon stages (see
-/// [`cobre_core::initial_conditions::AnticipatedCommitmentHistory`]), so the
-/// bounds check today catches inputs that would become infeasible once a
-/// future release adds LP enforcement.
-///
-/// See [`cobre_core::initial_conditions::AnticipatedCommitmentHistory`] for the
-/// overall sunk-cost semantics and the current LP-enforcement gap.
+/// Out-of-bounds entries would make the LP infeasible at the corresponding
+/// stage's fishing equality.
 fn check_committed_value_bounds(
     thermal: &cobre_core::entities::Thermal,
     thermal_id: EntityId,
@@ -243,7 +236,6 @@ fn check_committed_value_bounds(
     let min_mw = thermal.min_generation_mw;
     let max_mw = thermal.max_generation_mw;
     let entity_str = format!("thermals[id={}].anticipated_config", thermal_id.0);
-    let mut nonzero_count: usize = 0;
     for (j, &v) in values_mw.iter().enumerate() {
         if v < min_mw || v > max_mw {
             ctx.add_error(
@@ -258,27 +250,7 @@ fn check_committed_value_bounds(
                     thermal_id.0
                 ),
             );
-            continue;
         }
-        if v != 0.0 {
-            nonzero_count += 1;
-        }
-    }
-    if nonzero_count > 0 {
-        ctx.add_warning(
-            ErrorKind::SemanticAmbiguity,
-            "initial_conditions.json",
-            Some(&entity_str),
-            format!(
-                "Thermal {}: {nonzero_count} non-zero past_anticipated_commitments.values_mw \
-                 entry(ies) accepted by the bounds check, but the LP does not currently pin \
-                 generation to these pre-horizon seeds (the fishing equality is active only \
-                 at stages [K_i, n_stages)). Non-zero seeds will load but produce the same \
-                 dispatch as all-zero seeds until a future release decouples the \
-                 fishing-read column from the decision-write column",
-                thermal_id.0
-            ),
-        );
     }
 }
 
@@ -1000,6 +972,40 @@ mod tests {
             ctx.errors().is_empty(),
             "expected no errors for in-bounds K=2 values_mw, got: {:?}",
             ctx.errors()
+        );
+    }
+
+    /// Regression lock: `check_committed_value_bounds` must not emit any
+    /// `SemanticAmbiguity` warning for an in-bounds non-zero seed.
+    ///
+    /// Verifies that the obsolete "non-zero seeds will load but produce the same
+    /// dispatch as all-zero seeds" warning has been permanently removed and cannot
+    /// be reintroduced silently.
+    #[test]
+    fn test_nonzero_in_bounds_seed_emits_no_semantic_ambiguity_warning() {
+        let thermal = cobre_core::entities::Thermal {
+            anticipated_config: Some(cobre_core::entities::AnticipatedConfig { lead_stages: 2 }),
+            ..make_thermal(3, 0.0, 350.0)
+        };
+        let history = AnticipatedCommitmentHistory {
+            thermal_id: EntityId::from(3),
+            values_mw: vec![100.0, 200.0], // both within [0.0, 350.0]
+        };
+        let data = make_data_anticipated(vec![thermal], 5, vec![history]);
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let all_warnings = ctx.warnings();
+        let ambiguity_warnings: Vec<_> = all_warnings
+            .iter()
+            .filter(|w| {
+                w.kind == ErrorKind::SemanticAmbiguity
+                    && w.file.to_string_lossy().contains("initial_conditions.json")
+            })
+            .collect();
+        assert!(
+            ambiguity_warnings.is_empty(),
+            "expected no SemanticAmbiguity warning from initial_conditions.json \
+             for an in-bounds non-zero seed, got: {ambiguity_warnings:?}"
         );
     }
 

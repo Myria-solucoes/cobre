@@ -7122,13 +7122,13 @@ fn generic_constraint_thermal_equal_two_slacks() {
 #[allow(clippy::cast_possible_wrap)]
 fn generic_constraint_two_hydros_sum_csc_entries() {
     use chrono::NaiveDate;
+    use cobre_core::ResolvedGenericConstraintBounds;
     use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
     use cobre_core::scenario::{InflowModel, LoadModel};
     use cobre_core::temporal::{
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
         StageStateConfig,
     };
-    use cobre_core::ResolvedGenericConstraintBounds;
     use cobre_core::{
         ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
         VariableRef,
@@ -11070,7 +11070,7 @@ fn test_anticipated_state_fixing_csc_diagonal_plus_one() {
     let t = &result.templates[0];
     let n_anticipated = 2_usize;
     let k_max = 3_usize; // K_0=2, K_1=3 → k_max=3 (6 diagonal entries total)
-                         // col_anticipated_state_start = row_anticipated_state_fixing_start = 0 (no hydros).
+    // col_anticipated_state_start = row_anticipated_state_fixing_start = 0 (no hydros).
     let col_state_start = col_ant_state_start_zero_hydros();
     let row_fix_start = 0_usize;
 
@@ -11156,7 +11156,7 @@ fn test_anticipated_decision_inactive_no_state_write() {
     .expect("build ok");
 
     let t = &result.templates[3]; // stage 3: 3+2=5 > 4 → inactive
-                                  // n_anticipated=1, k_max=2, n_ant_state=2.
+    // n_anticipated=1, k_max=2, n_ant_state=2.
     let col_dec = anticipated_decision_col(2);
     // Check all n_ant_state state-fixing rows: none should have the decision entry.
     let row_fix_start = 0_usize;
