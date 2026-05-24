@@ -9,6 +9,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-05-24
+
+### Added
+
+- Add per-phase solver profile mechanism for training and simulation passes.
+
+- Anticipated thermal dispatch is now fully implemented. Plants declared
+  with `anticipated_config = { lead_stages: K }` in `system/thermals.json`
+  participate in the LP via a decision variable at stage `t` that becomes
+  generation at stage `t + K` (fishing constraint), with the ring-buffer
+  state propagated across stages by the forward pass and the backward
+  pass extracting cut subgradients w.r.t. the matured slot.
+- `initial_conditions.json` accepts a new `past_anticipated_commitments`
+  array seeding pre-horizon commitments. Each entry maps a `thermal_id` to
+  a `values_mw` array whose length must equal that plant's `lead_stages`.
+  The semantic validator rejects mismatched lengths and references to
+  non-anticipated thermals.
+- `simulation/thermals.parquet` populates three columns for anticipated
+  plants: `is_anticipated` (bool); `anticipated_committed_mw` (Float64,
+  null outside delivery stages) — the scalar committed MW that matures at
+  this stage, read from slot 0 of the `anticipated_state` ring buffer; and
+  `anticipated_decision_mw` (Float64, null outside the decision horizon) —
+  the commitment placed at this stage for delivery `K` stages later.
+- `training/dictionaries/state_dictionary.json` includes
+  `anticipated_state` entries in slot-major plant-minor order
+  (`K_max * n_anticipated` entries with `entity_type: "thermal"`,
+  `slot_index`, and `entity_id`).
+- Generic constraints now support `anticipated_decision(N)` as an
+  expression term, where `N` is the anticipated thermal's `id`. The term
+  references the stage-level commitment variable — the MW quantity placed
+  at the current stage for delivery `K` stages later. Referencing a
+  non-anticipated thermal is a hard semantic error. Using
+  `thermal_generation(N)` on an anticipated thermal emits a
+  `SemanticAmbiguity` warning to flag likely intent mismatch.
+
+### Changed (breaking)
+
+- The `gnl_config` field in `system/thermals.json` is renamed to
+  `anticipated_config`. Its sub-field `lag_stages` is renamed to
+  `lead_stages`. Files using the old keys will fail to parse.
+- Three columns in `simulation/thermals.parquet` are renamed for
+  consistency: `is_gnl` → `is_anticipated`, `gnl_committed_mw` →
+  `anticipated_committed_mw`, `gnl_decision_mw` → `anticipated_decision_mw`.
+  Code reading these columns by name must be updated.
+
+### Fixed
+
+- Anticipated-thermal cut machinery: the post-shift `anticipated_state`
+  ring-buffer value is now decoupled from the state-fixing column via a
+  new `anticipated_state_out` LP column block, eliminating a
+  decision-write coefficient that corrupted `state_to_lp_column`'s
+  Less-branch routing and previously drove `d_t = 0` for in-horizon
+  stages `t >= 1` when `K >= 2`. The fishing predicate is now active at
+  every stage in `[0, T-1]`, so pre-horizon seeded `values_mw[k]` is
+  delivered end-to-end (committed_at(0) == values_mw[0], etc.). Verified
+  by K=1, K=2, and K=3 pre-horizon delivery integration tests plus a
+  NEWAVE-parity bridge fixture (ST.CRUZ NOVA, K=1,
+  values_mw=[204.5647]).
+- Anticipated semantic validator no longer rejects in-bounds non-zero
+  `past_anticipated_commitments.values_mw` entries. The previous
+  `SemanticAmbiguity` warning ("non-zero seeds will load but produce the
+  same dispatch as all-zero seeds") is removed; the bounds-check rule
+  (`v_k ∈ [min_mw, max_mw]`) remains. The `SemanticAmbiguity` warning
+  for `thermal_generation(N)` on an anticipated thermal in generic
+  constraints is preserved.
+
 ## [0.6.2] - 2026-05-20
 
 ### Added

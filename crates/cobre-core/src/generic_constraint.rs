@@ -207,6 +207,29 @@ pub enum VariableRef {
         /// Block index. `None` = sum over all blocks; `Some(i)` = block `i`.
         block_id: Option<usize>,
     },
+    /// Forward-commitment decision MW for an anticipated thermal unit (MW).
+    ///
+    /// References the commitment placed at the current stage `t` for delivery
+    /// at stage `t + lead_stages`. This is a per-plant per-stage scalar — it has
+    /// **no `block_id`** because the commitment is uniform across blocks.
+    ///
+    /// The column exists in the LP only for plants whose `anticipated_config`
+    /// is `Some(_)`. Referencing this variant for a non-anticipated thermal is
+    /// a referential-validation error (see
+    /// `cobre-io::validation::referential::validate_variable_ref_entity`).
+    ///
+    /// The column also has `[0.0, 0.0]` bounds at boundary stages where
+    /// `t + K_i >= n_stages` (the F2-002 strict predicate); a constraint
+    /// referencing the column at the boundary is structurally a no-op.
+    ///
+    /// **Postcard wire-format note**: this variant is appended at the END of
+    /// the enum to preserve the discriminant indices of all existing variants.
+    /// Postcard encodes enum variants by declaration order; inserting in the
+    /// middle would break existing serialized policies.
+    AnticipatedDecision {
+        /// Thermal unit identifier. Must satisfy `anticipated_config: Some(_)`.
+        thermal_id: EntityId,
+    },
 }
 
 /// One term in a linear constraint expression: `coefficient * scale * variable`.
@@ -474,12 +497,18 @@ mod tests {
                     block_id: None,
                 },
             ),
+            (
+                "AnticipatedDecision",
+                VariableRef::AnticipatedDecision {
+                    thermal_id: EntityId(0),
+                },
+            ),
         ];
 
         assert_eq!(
             variants.len(),
-            20,
-            "VariableRef must have exactly 20 variants"
+            21,
+            "VariableRef must have exactly 21 variants"
         );
 
         for (name, variant) in variants {
@@ -614,6 +643,90 @@ mod tests {
             block_id: Some(0),
         };
         assert_ne!(all_blocks, specific_block);
+    }
+
+    // ── AC-1: AnticipatedDecision construction ────────────────────────────────
+
+    /// AC-1: `VariableRef::AnticipatedDecision` constructs successfully.
+    #[test]
+    fn anticipated_decision_constructs() {
+        let v = VariableRef::AnticipatedDecision {
+            thermal_id: EntityId(5),
+        };
+        let debug_str = format!("{v:?}");
+        assert!(
+            debug_str.contains("AnticipatedDecision"),
+            "Debug output should contain variant name: {debug_str}"
+        );
+        assert!(
+            debug_str.contains("thermal_id"),
+            "Debug output should contain field name: {debug_str}"
+        );
+    }
+
+    /// AC-1 (structural): `AnticipatedDecision` is `Copy` and `PartialEq`.
+    #[test]
+    fn anticipated_decision_copy_and_eq() {
+        let v1 = VariableRef::AnticipatedDecision {
+            thermal_id: EntityId(5),
+        };
+        let v2 = v1; // copy
+        assert_eq!(v1, v2);
+
+        let v3 = VariableRef::AnticipatedDecision {
+            thermal_id: EntityId(9),
+        };
+        assert_ne!(v1, v3);
+    }
+
+    // ── AC-2: Postcard round-trip ─────────────────────────────────────────────
+
+    /// AC-2: Postcard round-trip preserves `AnticipatedDecision` and its `thermal_id`.
+    ///
+    /// Also pins the discriminant byte so that future variants cannot be
+    /// inserted before `AnticipatedDecision` without breaking this assertion
+    /// (postcard encodes enum variants by declaration order).
+    #[cfg(feature = "serde")]
+    #[test]
+    fn anticipated_decision_postcard_roundtrip() {
+        let original = VariableRef::AnticipatedDecision {
+            thermal_id: EntityId(5),
+        };
+        let bytes = postcard::to_allocvec(&original).expect("serialize");
+        let recovered: VariableRef = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(
+            original, recovered,
+            "postcard round-trip must preserve the variant"
+        );
+
+        // Pin the discriminant: AnticipatedDecision is variant 20 (0-indexed).
+        // Postcard encodes enum variants as a varint; for index 20 that is 0x14.
+        assert_eq!(
+            bytes[0], 20,
+            "AnticipatedDecision must be discriminant 20 (end-of-enum); \
+             got {}. Did you insert a variant before it?",
+            bytes[0]
+        );
+    }
+
+    /// AC-2 (regression): existing variants retain their expected discriminants.
+    ///
+    /// Smoke-tests that no insertion before `NonControllableCurtailment` shifted
+    /// the discriminant of the 20th variant (index 19).
+    #[cfg(feature = "serde")]
+    #[test]
+    fn non_controllable_curtailment_discriminant_is_19() {
+        let v = VariableRef::NonControllableCurtailment {
+            source_id: EntityId(0),
+            block_id: None,
+        };
+        let bytes = postcard::to_allocvec(&v).expect("serialize");
+        assert_eq!(
+            bytes[0], 19,
+            "NonControllableCurtailment must remain discriminant 19; \
+             got {}. A variant was inserted before it.",
+            bytes[0]
+        );
     }
 
     #[cfg(feature = "serde")]

@@ -99,20 +99,20 @@ not a violation penalty.
 
 A thermal power plant with a scalar marginal cost.
 
-| Field               | Type                | Description                                      |
-| ------------------- | ------------------- | ------------------------------------------------ |
-| `id`                | `EntityId`          | Unique thermal plant identifier                  |
-| `name`              | `String`            | Human-readable name                              |
-| `bus_id`            | `EntityId`          | Bus receiving this plant's generation            |
-| `entry_stage_id`    | `Option<i32>`       | Stage when plant enters service; `None` = always |
-| `exit_stage_id`     | `Option<i32>`       | Stage when plant is retired; `None` = never      |
-| `cost_per_mwh`      | `f64`               | Marginal cost of generation [$/MWh]              |
-| `min_generation_mw` | `f64`               | Minimum stable load                              |
-| `max_generation_mw` | `f64`               | Installed capacity                               |
-| `gnl_config`        | `Option<GnlConfig>` | GNL dispatch anticipation; `None` = no lag       |
+| Field                | Type                        | Description                                          |
+| -------------------- | --------------------------- | ---------------------------------------------------- |
+| `id`                 | `EntityId`                  | Unique thermal plant identifier                      |
+| `name`               | `String`                    | Human-readable name                                  |
+| `bus_id`             | `EntityId`                  | Bus receiving this plant's generation                |
+| `entry_stage_id`     | `Option<i32>`               | Stage when plant enters service; `None` = always     |
+| `exit_stage_id`      | `Option<i32>`               | Stage when plant is retired; `None` = never          |
+| `cost_per_mwh`       | `f64`                       | Marginal cost of generation [$/MWh]                  |
+| `min_generation_mw`  | `f64`                       | Minimum stable load                                  |
+| `max_generation_mw`  | `f64`                       | Installed capacity                                   |
+| `anticipated_config` | `Option<AnticipatedConfig>` | Anticipated dispatch configuration; `None` = no lead |
 
-`GnlConfig` holds `lag_stages: i32` (number of stages of dispatch anticipation
-for liquefied natural gas units that require advance scheduling).
+`AnticipatedConfig` holds `lead_stages: i32` (number of stages of dispatch anticipation
+for thermal units that require advance scheduling).
 
 #### Hydro
 
@@ -211,14 +211,14 @@ Fields: `id`, `name`, `bus_id`, `entry_stage_id`, `exit_stage_id`,
 
 ### Structs
 
-| Struct             | Fields                                           | Purpose                                                |
-| ------------------ | ------------------------------------------------ | ------------------------------------------------------ |
-| `TailracePoint`    | `outflow_m3s: f64`, `height_m: f64`              | One breakpoint on a piecewise tailrace curve           |
-| `DeficitSegment`   | `depth_mw: Option<f64>`, `cost_per_mwh: f64`     | One segment of a piecewise deficit cost curve          |
-| `GnlConfig`        | `lag_stages: i32`                                | Dispatch anticipation lag for GNL thermal units        |
-| `DiversionChannel` | `downstream_id: EntityId`, `max_flow_m3s: f64`   | Water diversion bypassing turbines and spillways       |
-| `FillingConfig`    | `start_stage_id: i32`, `filling_inflow_m3s: f64` | Reservoir filling operation from a fixed inflow source |
-| `HydroPenalties`   | 16 `f64` fields (see Penalty resolution section) | Pre-resolved penalty costs for one hydro plant         |
+| Struct              | Fields                                           | Purpose                                                  |
+| ------------------- | ------------------------------------------------ | -------------------------------------------------------- |
+| `TailracePoint`     | `outflow_m3s: f64`, `height_m: f64`              | One breakpoint on a piecewise tailrace curve             |
+| `DeficitSegment`    | `depth_mw: Option<f64>`, `cost_per_mwh: f64`     | One segment of a piecewise deficit cost curve            |
+| `AnticipatedConfig` | `lead_stages: i32`                               | Dispatch anticipation lead for anticipated thermal units |
+| `DiversionChannel`  | `downstream_id: EntityId`, `max_flow_m3s: f64`   | Water diversion bypassing turbines and spillways         |
+| `FillingConfig`     | `start_stage_id: i32`, `filling_inflow_m3s: f64` | Reservoir filling operation from a fixed inflow source   |
+| `HydroPenalties`    | 16 `f64` fields (see Penalty resolution section) | Pre-resolved penalty costs for one hydro plant           |
 
 ## EntityId
 
@@ -847,7 +847,7 @@ blocks or `Some(i)` to reference block `i` specifically.
 | Category | Variants                                                                                                                                     |
 | -------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | Hydro    | `HydroStorage`, `HydroTurbined`, `HydroSpillage`, `HydroDiversion`, `HydroOutflow`, `HydroGeneration`, `HydroEvaporation`, `HydroWithdrawal` |
-| Thermal  | `ThermalGeneration`                                                                                                                          |
+| Thermal  | `ThermalGeneration`, `AnticipatedDecision`                                                                                                   |
 | Line     | `LineDirect`, `LineReverse`, `LineExchange`                                                                                                  |
 | Bus      | `BusDeficit`, `BusExcess`                                                                                                                    |
 | Pumping  | `PumpingFlow`, `PumpingPower`                                                                                                                |
@@ -857,6 +857,15 @@ blocks or `Some(i)` to reference block `i` specifically.
 `HydroStorage`, `HydroEvaporation`, and `HydroWithdrawal` are stage-level
 variables (no `block_id`). All other hydro variables and all thermal, line, bus,
 pumping, contract, and NCS variables are block-specific (`block_id` field present).
+
+`AnticipatedDecision` is a stage-level variable (no `block_id`). It references
+the commitment placed at the current stage for delivery `K` stages later, where
+`K` is the thermal's `lead_stages`. The variable is only active at decision
+stages (stages where `stage_idx + K < n_stages`); at delivery stages and beyond
+the column bound is `[0, 0]` so the constraint row has no LP effect.
+`AnticipatedDecision` may only reference thermals that carry an
+`anticipated_config`; a constraint referencing a non-anticipated thermal is
+rejected during semantic validation with a `BusinessRuleViolation`.
 
 `LineExchange` represents the net flow on a line (direct - reverse). Its resolver
 returns two LP column entries: `(fwd_col, +1.0)` and `(rev_col, -1.0)`. This

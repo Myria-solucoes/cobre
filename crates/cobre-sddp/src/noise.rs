@@ -210,6 +210,92 @@ fn shift_lag_state_from_inflows(
     }
 }
 
+/// Shift the anticipated-state ring buffer and write the new decision.
+///
+/// For each anticipated thermal `i` with lead time `K_i`, performs:
+///
+/// - **Slots `0..K_i-1`**: write `incoming_anticipated[(slot+1) * n_ant + i]`
+///   into `state[anticipated_state.start + slot * n_ant + i]` (shift down by
+///   one).  Slot 0 of the outgoing state holds what was slot 1 of the incoming
+///   state (the second-oldest commitment horizon).  The incoming slot 0
+///   (the oldest) falls out, consumed by the next-stage fishing constraint.
+///   At stage 0, slot 0 of the incoming state may carry a non-zero pre-horizon
+///   seed from `past_anticipated_commitments.values_mw[0]`; this is the normal
+///   case when the study has pre-horizon commitments and the seeding block in
+///   `setup/mod.rs` has populated the initial state.
+/// - **Slot `K_i - 1`**: write `unscaled_primal[anticipated_decision.start + i]`
+///   — the freshly-made commitment from this stage's solve, in MW.
+/// - **Slots `K_i..k_max`**: write `0.0` (deterministic padding for plants
+///   whose lead time is shorter than `k_max`).
+///
+/// No-op when `n_anticipated == 0` or `k_max == 0`.  Zero heap allocations.
+///
+/// ## Inactive plants (horizon boundary)
+///
+/// This function does not gate per-plant on the decision-active predicate
+/// (`stage_idx + K_i < n_stages`, see [`StageIndexer::anticipated_decision_active_at_stage`]).
+/// Inactive plants — those at stages where the LP did not emit a real
+/// decision column — rely on the LP builder pinning their decision column
+/// bounds to `[0.0, 0.0]` (matrix.rs:`fill_anticipated_decision_columns`).
+/// The unscaled primal at that column is therefore `0.0`, and writing `0.0`
+/// into slot `K_i - 1` is the correct ring-buffer transition: no new
+/// commitment was placed, so slot `K_i - 1` should hold zero. If a future
+/// change relaxes the `[0, 0]` invariant for inactive columns, this
+/// function must be updated to gate on the activation predicate.
+///
+/// [`StageIndexer::anticipated_decision_active_at_stage`]: crate::indexer::StageIndexer::anticipated_decision_active_at_stage
+///
+/// # Panics (debug only)
+///
+/// Panics in debug builds if `incoming_anticipated.len() != n_ant * k_max`,
+/// or if `unscaled_primal` is shorter than `anticipated_decision.end`, or if
+/// any `K_i == 0`.
+pub(crate) fn shift_anticipated_state(
+    state: &mut [f64],
+    incoming_anticipated: &[f64],
+    unscaled_primal: &[f64],
+    indexer: &crate::indexer::StageIndexer,
+) {
+    let n_ant = indexer.n_anticipated;
+    let k_max = indexer.k_max;
+    if n_ant == 0 || k_max == 0 {
+        return;
+    }
+    debug_assert_eq!(
+        incoming_anticipated.len(),
+        n_ant * k_max,
+        "incoming_anticipated length mismatch: expected {}, got {}",
+        n_ant * k_max,
+        incoming_anticipated.len(),
+    );
+    debug_assert!(
+        unscaled_primal.len() >= indexer.anticipated_decision.end,
+        "unscaled_primal too short for anticipated_decision range",
+    );
+    let state_start = indexer.anticipated_state.start;
+    let decision_start = indexer.anticipated_decision.start;
+    for (plant, &k_i) in indexer.anticipated_lead_stages.iter().enumerate() {
+        debug_assert!(
+            k_i >= 1,
+            "K_i must be >= 1 (enforced by anticipation validation)"
+        );
+        // Shift: slot s ← incoming slot s+1, for s in 0..K_i - 1.
+        for slot in 0..(k_i - 1) {
+            let dst = state_start + slot * n_ant + plant;
+            let src = (slot + 1) * n_ant + plant;
+            state[dst] = incoming_anticipated[src];
+        }
+        // Write new decision at slot K_i - 1.
+        let newest = state_start + (k_i - 1) * n_ant + plant;
+        state[newest] = unscaled_primal[decision_start + plant];
+        // Zero padding for slots k_i..k_max (plants with K_i < k_max).
+        for slot in k_i..k_max {
+            let dst = state_start + slot * n_ant + plant;
+            state[dst] = 0.0;
+        }
+    }
+}
+
 /// Mutable primary lag-accumulation buffers threaded through the hot path.
 ///
 /// Groups `lag_accumulator` and `lag_weight_accum` so that
@@ -282,6 +368,16 @@ pub(crate) struct DownstreamAccumState<'a> {
 /// For uniform-resolution studies pass `ds.accumulator = &mut []` (empty slice).
 /// All downstream code paths are skipped via a single `is_empty()` guard,
 /// producing zero overhead.
+///
+/// # Anticipated-thermal state
+///
+/// This function does NOT shift the `anticipated_state` ring buffer.
+/// Anticipated commitments advance once per LP stage regardless of
+/// `StageLagTransition.finalize_period` or `accumulate_downstream`,
+/// because the decision cadence equals the LP-stage cadence. The
+/// companion function `shift_anticipated_state` performs the shift; the
+/// stage driver (currently `forward.rs::run_forward_stage`) calls both
+/// functions in sequence, once per stage.
 pub(crate) fn accumulate_and_shift_lag_state(
     state: &mut [f64],
     incoming_lags: &[f64],
@@ -527,6 +623,13 @@ pub(crate) fn transform_ncs_noise(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(
+    clippy::erasing_op,
+    clippy::identity_op,
+    clippy::doc_markdown,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap
+)]
 mod tests {
     use chrono::NaiveDate;
     use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
@@ -550,7 +653,8 @@ mod tests {
         indexer::StageIndexer,
         inflow_method::InflowNonNegativityMethod,
         noise::{
-            compute_effective_eta, shift_lag_state, transform_inflow_noise, transform_load_noise,
+            compute_effective_eta, shift_anticipated_state, shift_lag_state,
+            transform_inflow_noise, transform_load_noise,
         },
         workspace::ScratchBuffers,
     };
@@ -615,6 +719,8 @@ mod tests {
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
+            anticipated_state_buf: Vec::new(),
+            anticipated_state_out_col_indices_buf: Vec::new(),
         }
     }
 
@@ -1200,7 +1306,7 @@ mod tests {
         let indexer = StageIndexer::new(1, 1);
         let mut state = vec![500.0, 99.0]; // v_out, stale lag
         let incoming_lags = vec![42.0]; // lag0 (lag-major: lag * n_h + h = 0*1+0 = 0)
-        // z_inflow starts at N*(1+L) = 1*(1+1) = 2
+        // z_inflow.start = N*(1+L) = 1*(1+1) = 2
         let mut primal = vec![0.0; 10];
         primal[indexer.z_inflow.start] = 77.0; // Z_t for hydro 0
         shift_lag_state(&mut state, &incoming_lags, &primal, &indexer);
@@ -1250,6 +1356,259 @@ mod tests {
         shift_lag_state(&mut state, &incoming_lags, &primal, &indexer);
         assert_eq!(state[0], 100.0, "storage[0] must be preserved");
         assert_eq!(state[1], 200.0, "storage[1] must be preserved");
+    }
+
+    // ── shift_anticipated_state tests ────────────────────────────────────────
+
+    /// Build a StageIndexer with anticipated thermals using with_equipment_and_evaporation.
+    fn make_anticipated_indexer(
+        n_anticipated: usize,
+        k_max: usize,
+        anticipated_lead_stages: Vec<usize>,
+    ) -> StageIndexer {
+        use crate::indexer::{EquipmentCounts, EvapConfig, FphaColumnLayout};
+        StageIndexer::with_equipment_and_evaporation(
+            &EquipmentCounts {
+                hydro_count: 0,
+                max_par_order: 0,
+                n_thermals: 0,
+                n_lines: 0,
+                n_buses: 1,
+                n_blks: 1,
+                has_inflow_penalty: false,
+                max_deficit_segments: 1,
+                n_anticipated,
+                k_max,
+                anticipated_lead_stages,
+                anticipated_thermal_indices: (0..n_anticipated).collect(),
+            },
+            &FphaColumnLayout {
+                hydro_indices: vec![],
+                planes_per_hydro: vec![],
+            },
+            &EvapConfig {
+                hydro_indices: vec![],
+            },
+        )
+    }
+
+    /// AC-1: given n_anticipated == 0, shift_anticipated_state is a no-op.
+    #[test]
+    fn shift_anticipated_state_no_anticipated_is_noop() {
+        let indexer = StageIndexer::new(1, 0);
+        // state: [storage_0]
+        let mut state = vec![42.0_f64; indexer.n_state.max(1)];
+        let incoming = vec![];
+        let primal = vec![0.0_f64; 10];
+        let before = state.clone();
+        shift_anticipated_state(&mut state, &incoming, &primal, &indexer);
+        assert_eq!(
+            state, before,
+            "state must be unchanged when n_anticipated == 0"
+        );
+    }
+
+    /// AC-2: n_anticipated=1, k_max=2, K_0=2.
+    /// incoming = [10.0, 20.0] (slot 0 = 10.0, slot 1 = 20.0).
+    /// primal[decision_start] = 99.0.
+    /// Expected outgoing: slot 0 = 20.0 (shifted from incoming slot 1),
+    ///                    slot 1 = 99.0 (new decision).
+    #[test]
+    fn shift_anticipated_state_single_plant_k2() {
+        let indexer = make_anticipated_indexer(1, 2, vec![2]);
+        let ant_start = indexer.anticipated_state.start;
+        let dec_start = indexer.anticipated_decision.start;
+
+        // n_state = 0*(1+0) + 1*2 = 2
+        let mut state = vec![0.0_f64; indexer.n_state];
+        let incoming = vec![10.0_f64, 20.0_f64]; // slot 0 = 10.0, slot 1 = 20.0
+        let mut primal = vec![0.0_f64; indexer.anticipated_decision.end + 1];
+        primal[dec_start] = 99.0;
+
+        shift_anticipated_state(&mut state, &incoming, &primal, &indexer);
+
+        assert_eq!(
+            state[ant_start], 20.0,
+            "slot 0 must be shifted from incoming slot 1"
+        );
+        assert_eq!(
+            state[ant_start + 1],
+            99.0,
+            "slot K_i-1 must receive the new decision primal"
+        );
+    }
+
+    /// K_i = 1 edge case: single-slot ring buffer.
+    /// The shift loop `for slot in 0..(k_i - 1)` becomes `0..0` (empty), so
+    /// only the "new decision at slot K_i - 1 = 0" write fires. Slot 0 is
+    /// consumed by the fishing row of the current stage and immediately
+    /// replaced by the new decision for next-stage delivery.
+    #[test]
+    fn shift_anticipated_state_single_plant_k1() {
+        let indexer = make_anticipated_indexer(1, 1, vec![1]);
+        let ant_start = indexer.anticipated_state.start;
+        let dec_start = indexer.anticipated_decision.start;
+
+        // n_state = 0*(1+0) + 1*1 = 1 single anticipated slot.
+        let mut state = vec![0.0_f64; indexer.n_state];
+        let incoming = vec![100.0_f64]; // slot 0 = 100.0 (will be overwritten)
+        let mut primal = vec![0.0_f64; indexer.anticipated_decision.end + 1];
+        primal[dec_start] = 42.0;
+
+        shift_anticipated_state(&mut state, &incoming, &primal, &indexer);
+
+        // Shift loop is empty (0..0); the new decision write at slot K_i - 1 = 0
+        // is the only operation.
+        assert_eq!(
+            state[ant_start], 42.0,
+            "K_i=1 single slot must receive the new decision",
+        );
+    }
+
+    /// AC-3: n_anticipated=2, k_max=3, K_0=2, K_1=3.
+    /// For plant 0 (K=2): slot 0 = incoming_slot_1_plant_0, slot 1 = decision[0], slot 2 = 0.0.
+    /// For plant 1 (K=3): slot 0 = incoming_slot_1_plant_1, slot 1 = incoming_slot_2_plant_1,
+    ///                    slot 2 = decision[1].
+    #[test]
+    fn shift_anticipated_state_two_plants_mixed_k() {
+        // n_ant=2, k_max=3. Slot-major layout: slot * 2 + plant.
+        // n_state = 0 + 2*3 = 6.
+        let indexer = make_anticipated_indexer(2, 3, vec![2, 3]);
+        let ant_start = indexer.anticipated_state.start;
+        let dec_start = indexer.anticipated_decision.start;
+
+        let mut state = vec![0.0_f64; indexer.n_state];
+        // incoming[slot * 2 + plant]:
+        // slot0_p0=1.0, slot0_p1=2.0, slot1_p0=3.0, slot1_p1=4.0, slot2_p0=5.0, slot2_p1=6.0
+        let incoming = vec![1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let mut primal = vec![0.0_f64; indexer.anticipated_decision.end + 1];
+        primal[dec_start] = 10.0; // decision for plant 0
+        primal[dec_start + 1] = 20.0; // decision for plant 1
+
+        shift_anticipated_state(&mut state, &incoming, &primal, &indexer);
+
+        // Plant 0 (K=2): slot 0 = incoming[1*2+0]=3.0, slot 1 = decision[0]=10.0, slot 2 = 0.0
+        assert_eq!(state[ant_start + 0 * 2 + 0], 3.0, "plant0 slot0");
+        assert_eq!(
+            state[ant_start + 1 * 2 + 0],
+            10.0,
+            "plant0 slot1 (decision)"
+        );
+        assert_eq!(state[ant_start + 2 * 2 + 0], 0.0, "plant0 slot2 (padding)");
+
+        // Plant 1 (K=3): slot 0 = incoming[1*2+1]=4.0, slot 1 = incoming[2*2+1]=6.0,
+        //                slot 2 = decision[1]=20.0
+        assert_eq!(state[ant_start + 0 * 2 + 1], 4.0, "plant1 slot0");
+        assert_eq!(state[ant_start + 1 * 2 + 1], 6.0, "plant1 slot1");
+        assert_eq!(
+            state[ant_start + 2 * 2 + 1],
+            20.0,
+            "plant1 slot2 (decision)"
+        );
+    }
+
+    /// shift_anticipated_state only modifies the anticipated_state slice; storage
+    /// and lag regions are preserved unchanged.
+    #[test]
+    fn shift_anticipated_state_preserves_storage_and_lag() {
+        // Use StageIndexer::new for N=2, L=1 to get storage + lag slots,
+        // then build a combined state vector by padding with anticipated slots.
+        // We must use an indexer that has both hydro state AND anticipated state.
+        use crate::indexer::{EquipmentCounts, EvapConfig, FphaColumnLayout};
+        let indexer = StageIndexer::with_equipment_and_evaporation(
+            &EquipmentCounts {
+                hydro_count: 2,
+                max_par_order: 1,
+                n_thermals: 0,
+                n_lines: 0,
+                n_buses: 1,
+                n_blks: 1,
+                has_inflow_penalty: false,
+                max_deficit_segments: 1,
+                n_anticipated: 1,
+                k_max: 2,
+                anticipated_lead_stages: vec![2],
+                anticipated_thermal_indices: vec![0],
+            },
+            &FphaColumnLayout {
+                hydro_indices: vec![],
+                planes_per_hydro: vec![],
+            },
+            &EvapConfig {
+                hydro_indices: vec![],
+            },
+        );
+        // n_state = N*(1+L) + A*K = 2*(1+1) + 1*2 = 6
+        // storage [0..2), lags [2..4), anticipated [4..6)
+        let ant_start = indexer.anticipated_state.start;
+        let dec_start = indexer.anticipated_decision.start;
+
+        let mut state = vec![100.0, 200.0, 10.0, 20.0, 0.0, 0.0];
+        let incoming = vec![7.0_f64, 11.0]; // A*K = 2 values
+        let mut primal = vec![0.0_f64; dec_start + 2];
+        primal[dec_start] = 55.0;
+
+        shift_anticipated_state(&mut state, &incoming, &primal, &indexer);
+
+        // Storage and lag must be untouched.
+        assert_eq!(state[0], 100.0, "storage[0] must be preserved");
+        assert_eq!(state[1], 200.0, "storage[1] must be preserved");
+        assert_eq!(state[2], 10.0, "lag[0] must be preserved");
+        assert_eq!(state[3], 20.0, "lag[1] must be preserved");
+
+        // Anticipated state must be shifted.
+        assert_eq!(state[ant_start], 11.0, "slot 0 = incoming slot 1");
+        assert_eq!(state[ant_start + 1], 55.0, "slot 1 = decision");
+    }
+
+    /// Early-return guard: k_max == 0 means no anticipated state slots, no-op.
+    #[test]
+    fn shift_anticipated_state_zero_k_max_is_noop() {
+        // Build a trivial indexer with n_anticipated=0 (which also makes k_max=0).
+        let indexer = StageIndexer::new(1, 0);
+        let mut state = vec![5.0_f64; 3];
+        let incoming = vec![];
+        let primal = vec![0.0_f64; 5];
+        let before = state.clone();
+        shift_anticipated_state(&mut state, &incoming, &primal, &indexer);
+        assert_eq!(state, before, "state must be unchanged when k_max == 0");
+    }
+
+    /// AC-1: shift_anticipated_state produces bit-identical output regardless
+    /// of StageLagTransition flags (finalize_period, accumulate_weight).
+    ///
+    /// Because shift_anticipated_state does not take a StageLagTransition
+    /// parameter, calling it on a "finalizing" stage versus a "non-finalizing"
+    /// stage with identical inputs produces identical outgoing anticipated state.
+    /// This test documents that invariant explicitly.
+    #[test]
+    fn shift_anticipated_state_invariant_under_stage_lag_transition() {
+        // One anticipated thermal, k_max=2, K=2.
+        let indexer = make_anticipated_indexer(1, 2, vec![2]);
+
+        let incoming_anticipated = vec![5.0_f64, 15.0];
+        let dec_start = indexer.anticipated_decision.start;
+        let mut primal = vec![0.0_f64; dec_start + 2];
+        primal[dec_start] = 42.0;
+
+        // state_a represents a finalizing stage (finalize_period = true,
+        // accumulate_weight = 1.0 in the lag accumulator — irrelevant here).
+        // state_b represents a non-finalizing stage (accumulate_weight = 0.25).
+        // Neither flag is passed to shift_anticipated_state; both calls are
+        // therefore identical and must yield bit-for-bit equal results.
+        let mut state_a = vec![0.0_f64; indexer.n_state];
+        let mut state_b = state_a.clone();
+
+        shift_anticipated_state(&mut state_a, &incoming_anticipated, &primal, &indexer);
+        shift_anticipated_state(&mut state_b, &incoming_anticipated, &primal, &indexer);
+
+        let s = indexer.anticipated_state.start;
+        let n_ant_state = indexer.n_anticipated * indexer.k_max;
+        assert_eq!(
+            &state_a[s..s + n_ant_state],
+            &state_b[s..s + n_ant_state],
+            "anticipated_state shift must be invariant under StageLagTransition"
+        );
     }
 
     // ── compute_effective_eta tests ─────────────────────────────────────────
@@ -2254,5 +2613,41 @@ mod tests {
             "rebuilt lag[0] hydro 1 should be {expected_h1}, got {}",
             state[lag_start + 1]
         );
+    }
+
+    /// Three-stage evolution with pre-horizon seed: slot 1→0, decision→1 per stage.
+    #[test]
+    fn shift_anticipated_state_pre_horizon_seed_three_stage_evolution() {
+        let indexer = make_anticipated_indexer(1, 2, vec![2]);
+        let ant_start = indexer.anticipated_state.start;
+        let dec_start = indexer.anticipated_decision.start;
+
+        let mut state = vec![0.0_f64; indexer.n_state];
+        state[ant_start] = 10.0;
+        state[ant_start + 1] = 20.0;
+
+        let mut incoming = vec![0.0_f64; 2];
+        let mut primal = vec![0.0_f64; dec_start + 2];
+
+        // Stage 0: incoming=[10.0, 20.0], decision=30.0 → slot 0=20.0, slot 1=30.0
+        incoming.copy_from_slice(&state[ant_start..ant_start + 2]);
+        primal[dec_start] = 30.0;
+        shift_anticipated_state(&mut state, &incoming, &primal, &indexer);
+        assert_eq!(state[ant_start], 20.0);
+        assert_eq!(state[ant_start + 1], 30.0);
+
+        // Stage 1: incoming=[20.0, 30.0], decision=40.0 → slot 0=30.0, slot 1=40.0
+        incoming.copy_from_slice(&state[ant_start..ant_start + 2]);
+        primal[dec_start] = 40.0;
+        shift_anticipated_state(&mut state, &incoming, &primal, &indexer);
+        assert_eq!(state[ant_start], 30.0);
+        assert_eq!(state[ant_start + 1], 40.0);
+
+        // Stage 2: incoming=[30.0, 40.0], decision=50.0 → slot 0=40.0, slot 1=50.0
+        incoming.copy_from_slice(&state[ant_start..ant_start + 2]);
+        primal[dec_start] = 50.0;
+        shift_anticipated_state(&mut state, &incoming, &primal, &indexer);
+        assert_eq!(state[ant_start], 40.0);
+        assert_eq!(state[ant_start + 1], 50.0);
     }
 }

@@ -4,7 +4,7 @@
 //! [`WorkspacePool`] allocates one workspace per worker thread.
 //! [`BasisStore`] provides per-scenario, per-stage basis storage for warm-starting LP solves.
 
-use cobre_solver::{Basis, SolverInterface};
+use cobre_solver::{Basis, ProfiledSolver, SolverInterface};
 
 use crate::backward::StagedCut;
 use crate::basis_reconstruct::PromotionScratch;
@@ -351,6 +351,18 @@ pub struct WorkspaceSizing {
     /// Used to pre-size `ScratchBuffers::raw_noise_buf`. Pass `0` for
     /// backward-only or simulation-only workspaces.
     pub noise_dim: usize,
+    /// Number of anticipated thermals (A).
+    ///
+    /// Used to pre-size `ScratchBuffers::anticipated_state_buf` and the
+    /// `PatchBuffer` Category 6 region. Pass `0` when there are no
+    /// anticipated thermals.
+    pub n_anticipated: usize,
+    /// Maximum lead-time horizon across anticipated thermals (K).
+    ///
+    /// Used together with `n_anticipated` to determine the size of the
+    /// anticipated-state ring buffer. Pass `0` when there are no anticipated
+    /// thermals.
+    pub k_max: usize,
 }
 
 /// Pre-allocated accumulators for the backward pass trial-point loop.
@@ -569,6 +581,23 @@ pub(crate) struct ScratchBuffers {
     /// `resize(n_scenarios.max(1), 0)`d before the scenario loop; neither
     /// use overlaps the other within a single `SolverWorkspace`.
     pub(crate) perm_scratch: Vec<usize>,
+
+    /// Snapshot of the incoming anticipated-state slice saved before
+    /// `ws.current_state.clear()` clears the forward-stage state vector.
+    ///
+    /// Written in `run_forward_stage` (one `extend_from_slice` per stage) and
+    /// read by `shift_anticipated_state` to produce the new ring-buffer state.
+    /// Capacity is `n_anticipated * k_max`; when either dimension is zero the
+    /// vec starts empty and the anticipated-state path is skipped entirely.
+    pub(crate) anticipated_state_buf: Vec<f64>,
+
+    /// Per-stage scratch buffer for `[0, 0]` bound-patch operations on the new
+    /// `anticipated_state_out` columns (one column per anticipated plant per
+    /// stage). Capacity is `n_anticipated`. Mirrors
+    /// [`ScratchBuffers::ncs_col_indices_buf`].
+    // Pre-allocated here; read sites are wired in the next epic.
+    #[allow(dead_code)]
+    pub(crate) anticipated_state_out_col_indices_buf: Vec<usize>,
 }
 
 /// All per-thread mutable resources required for one LP solve sequence.
@@ -595,7 +624,12 @@ pub struct SolverWorkspace<S: SolverInterface> {
     /// `0..n_workers_local`.
     pub worker_id: i32,
     /// LP solver instance owned exclusively by this workspace.
-    pub solver: S,
+    ///
+    /// Wrapped in [`ProfiledSolver`] so that per-phase solver configuration
+    /// (tolerances, iteration limits) can be applied at phase boundaries via
+    /// [`ProfiledSolver::set_profile`] without modifying call sites that use
+    /// the solver through the [`SolverInterface`] trait.
+    pub solver: ProfiledSolver<S>,
     /// Pre-allocated row-bound patch buffer.
     pub patch_buf: PatchBuffer,
     /// Scratch buffer for the current state vector.
@@ -661,7 +695,7 @@ impl<S: SolverInterface> SolverWorkspace<S> {
         Self {
             rank,
             worker_id,
-            solver,
+            solver: ProfiledSolver::new(solver),
             patch_buf,
             current_state: Vec::with_capacity(n_state),
             scratch: ScratchBuffers::new(sizing),
@@ -694,6 +728,8 @@ impl ScratchBuffers {
             max_local_fwd,
             total_forward_passes,
             noise_dim,
+            n_anticipated,
+            k_max,
             // max_openings used by BackwardAccumulators only
             ..
         } = s;
@@ -733,6 +769,8 @@ impl ScratchBuffers {
             trajectory_costs_buf: Vec::with_capacity(max_local_fwd),
             raw_noise_buf: Vec::with_capacity(noise_dim),
             perm_scratch: Vec::with_capacity(total_forward_passes.max(1)),
+            anticipated_state_buf: Vec::with_capacity(n_anticipated * k_max),
+            anticipated_state_out_col_indices_buf: Vec::with_capacity(n_anticipated),
         }
     }
 }
@@ -782,12 +820,14 @@ impl<S: SolverInterface> WorkspacePool<S> {
                 SolverWorkspace {
                     rank,
                     worker_id,
-                    solver: solver_factory(),
+                    solver: ProfiledSolver::new(solver_factory()),
                     patch_buf: PatchBuffer::new(
                         sizing.hydro_count,
                         sizing.max_par_order,
                         sizing.n_load_buses,
                         sizing.max_blocks,
+                        sizing.n_anticipated,
+                        sizing.k_max,
                     ),
                     current_state: Vec::with_capacity(n_state),
                     scratch: ScratchBuffers::new(sizing),
@@ -837,12 +877,14 @@ impl<S: SolverInterface> WorkspacePool<S> {
             workspaces.push(SolverWorkspace {
                 rank,
                 worker_id,
-                solver: solver_factory()?,
+                solver: ProfiledSolver::new(solver_factory()?),
                 patch_buf: PatchBuffer::new(
                     sizing.hydro_count,
                     sizing.max_par_order,
                     sizing.n_load_buses,
                     sizing.max_blocks,
+                    sizing.n_anticipated,
+                    sizing.k_max,
                 ),
                 current_state: Vec::with_capacity(n_state),
                 scratch: ScratchBuffers::new(sizing),
@@ -1050,7 +1092,7 @@ mod tests {
         BasisStore, CapturedBasis, ScratchBuffers, SolverWorkspace, WorkspacePool, WorkspaceSizing,
     };
     use cobre_solver::{
-        Basis, SolutionView, SolverError, SolverInterface, SolverStatistics,
+        Basis, SolutionView, SolveProfile, SolverError, SolverInterface, SolverStatistics,
         types::{RowBatch, StageTemplate},
     };
 
@@ -1078,6 +1120,10 @@ mod tests {
         fn name(&self) -> &'static str {
             "Mock"
         }
+        fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
+        fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
+        fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
+        fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
     }
 
     /// Compile-time assertion that `SolverWorkspace<MockSolver>` is `Send`.
@@ -1907,5 +1953,367 @@ mod tests {
         assert_eq!(stage1.basis.row_status, populated.basis.row_status);
         assert_eq!(i32_cursor, i32_buf.len(), "i32_cursor must be at end");
         assert_eq!(f64_cursor, f64_buf.len(), "f64_cursor must be at end");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Anticipated-state roundtrip tests
+    // ---------------------------------------------------------------------------
+
+    /// Roundtrip a basis whose `state_at_capture` has the
+    /// `N*(1+L) + n_anticipated*k_max` layout introduced by the
+    /// anticipated-thermals feature, with numerically distinct regions.
+    ///
+    /// AC-1, AC-2: pack then unpack; assert bit-equality of the full
+    /// state slice and of the anticipated sub-slice.
+    #[test]
+    fn test_captured_basis_round_trip_includes_anticipated_state() {
+        // Layout: N=2 hydros, L=1 PAR lag, n_anticipated=1, k_max=2.
+        // n_state = 2 * (1 + 1) + 1 * 2 = 6.
+        //
+        // Region populations (numerically distinct so truncation shows up):
+        //   storage      [0..2)  = [1.0, 2.0]
+        //   lags         [2..4)  = [100.0, 200.0]
+        //   anticipated  [4..6)  = [1000.0, 2000.0]
+        let state_at_capture = vec![1.0_f64, 2.0, 100.0, 200.0, 1000.0, 2000.0];
+
+        let original = CapturedBasis {
+            basis: Basis {
+                col_status: vec![1_i32, 2, 3, 4],
+                row_status: vec![5_i32, 6, 7],
+            },
+            base_row_count: 2,
+            cut_row_slots: vec![10_u32, 20],
+            state_at_capture: state_at_capture.clone(),
+        };
+
+        let mut i32_buf: Vec<i32> = Vec::new();
+        let mut f64_buf: Vec<f64> = Vec::new();
+        original.to_broadcast_payload(&mut i32_buf, &mut f64_buf);
+
+        let mut i32_cursor = 0_usize;
+        let mut f64_cursor = 0_usize;
+        let recovered = CapturedBasis::try_from_broadcast_payload(
+            0,
+            &i32_buf,
+            &mut i32_cursor,
+            &f64_buf,
+            &mut f64_cursor,
+        )
+        .expect("round-trip must not fail")
+        .expect("sentinel is 1; must return Some");
+
+        assert_eq!(
+            recovered.state_at_capture, state_at_capture,
+            "full state must roundtrip bit-exactly"
+        );
+        assert_eq!(
+            &recovered.state_at_capture[4..6],
+            &[1000.0, 2000.0],
+            "anticipated slice must roundtrip bit-exactly"
+        );
+        assert_eq!(
+            &recovered.state_at_capture[2..4],
+            &[100.0, 200.0],
+            "lag slice must roundtrip bit-exactly"
+        );
+        assert_eq!(
+            &recovered.state_at_capture[0..2],
+            &[1.0, 2.0],
+            "storage slice must roundtrip bit-exactly"
+        );
+
+        assert_eq!(i32_cursor, i32_buf.len(), "i32_cursor at end");
+        assert_eq!(f64_cursor, f64_buf.len(), "f64_cursor at end");
+    }
+
+    /// Explicit length-field inspection: verify that the recorded
+    /// `state_at_capture` length field in the wire payload equals `n_state`
+    /// for three layouts (`n_anticipated=0` baseline, `n_anticipated` > 0 small,
+    /// and a larger realistic layout).
+    ///
+    /// AC-3, AC-4, AC-5: introspect `i32_buf` positions.
+    #[test]
+    fn test_captured_basis_state_at_capture_length_is_recorded_correctly() {
+        // Layout 1: small with anticipated.
+        // n_state = 2 * (1+1) + 1 * 2 = 6.
+        let small = CapturedBasis {
+            basis: Basis {
+                col_status: vec![1_i32; 4],
+                row_status: vec![1_i32; 3],
+            },
+            base_row_count: 2,
+            cut_row_slots: vec![],
+            state_at_capture: vec![0.0_f64; 6],
+        };
+        let mut i32_buf: Vec<i32> = Vec::new();
+        let mut f64_buf: Vec<f64> = Vec::new();
+        small.to_broadcast_payload(&mut i32_buf, &mut f64_buf);
+        // i32_buf layout (Some path):
+        //   [0] = 1 (sentinel)
+        //   [1] = BASIS_BROADCAST_WIRE_VERSION = 1
+        //   [2] = col_len = 4
+        //   [3] = row_len = 3
+        //   [4] = base_row_count = 2
+        //   [5] = cut_slot_count = 0
+        //   [6] = state_len = 6   <-- AC-3
+        assert_eq!(
+            i32_buf[6], 6_i32,
+            "state_at_capture length field must be 6 for N=2 L=1 A=1 K=2"
+        );
+
+        // Layout 2: n_state == 0 boundary case (AC-4).
+        let empty_state = CapturedBasis {
+            basis: Basis {
+                col_status: vec![1_i32],
+                row_status: vec![1_i32],
+            },
+            base_row_count: 1,
+            cut_row_slots: vec![],
+            state_at_capture: vec![],
+        };
+        let mut i32_buf2: Vec<i32> = Vec::new();
+        let mut f64_buf2: Vec<f64> = Vec::new();
+        empty_state.to_broadcast_payload(&mut i32_buf2, &mut f64_buf2);
+        assert_eq!(
+            i32_buf2[6], 0_i32,
+            "state_at_capture length field must be 0 for empty state"
+        );
+
+        // Layout 3: larger realistic layout N=3 L=2 A=2 K_max=3 (AC-5).
+        // n_state = 3 * (1+2) + 2 * 3 = 9 + 6 = 15.
+        let large_state: Vec<f64> = (0..15).map(|i| f64::from(i) * 10.0).collect();
+        let large = CapturedBasis {
+            basis: Basis {
+                col_status: vec![1_i32; 5],
+                row_status: vec![1_i32; 5],
+            },
+            base_row_count: 3,
+            cut_row_slots: vec![1_u32, 2],
+            state_at_capture: large_state.clone(),
+        };
+        let mut i32_buf3: Vec<i32> = Vec::new();
+        let mut f64_buf3: Vec<f64> = Vec::new();
+        large.to_broadcast_payload(&mut i32_buf3, &mut f64_buf3);
+        assert_eq!(
+            i32_buf3[6], 15_i32,
+            "state_at_capture length field must be 15 for N=3 L=2 A=2 K=3"
+        );
+
+        let mut i32_cursor = 0_usize;
+        let mut f64_cursor = 0_usize;
+        let recovered = CapturedBasis::try_from_broadcast_payload(
+            0,
+            &i32_buf3,
+            &mut i32_cursor,
+            &f64_buf3,
+            &mut f64_cursor,
+        )
+        .expect("round-trip must not fail")
+        .expect("sentinel is 1; must return Some");
+        assert_eq!(
+            &recovered.state_at_capture[9..15],
+            &large_state[9..15],
+            "anticipated slice (last 6 entries) must roundtrip bit-exactly"
+        );
+    }
+
+    /// Pre-horizon seeding roundtrip: slot 0 carries sentinel 12345.5.
+    #[test]
+    fn test_captured_basis_round_trip_with_pre_horizon_seed_in_slot_zero() {
+        let state_at_capture = vec![1.0_f64, 2.0, 100.0, 200.0, 12345.5, 0.0];
+        let original = CapturedBasis {
+            basis: Basis {
+                col_status: vec![1_i32, 2, 3, 4],
+                row_status: vec![5_i32, 6, 7, 8],
+            },
+            base_row_count: 3,
+            cut_row_slots: vec![10_u32, 20],
+            state_at_capture: state_at_capture.clone(),
+        };
+
+        let mut i32_buf = Vec::new();
+        let mut f64_buf = Vec::new();
+        original.to_broadcast_payload(&mut i32_buf, &mut f64_buf);
+
+        let mut i32_cursor = 0;
+        let mut f64_cursor = 0;
+        let recovered = CapturedBasis::try_from_broadcast_payload(
+            0,
+            &i32_buf,
+            &mut i32_cursor,
+            &f64_buf,
+            &mut f64_cursor,
+        )
+        .expect("round-trip must not fail")
+        .expect("sentinel is 1; must return Some");
+
+        assert_eq!(recovered.state_at_capture[4], 12345.5);
+        assert_eq!(recovered.basis.row_status.len(), 4);
+        assert_eq!(recovered.state_at_capture, state_at_capture);
+        assert_eq!(i32_cursor, i32_buf.len());
+        assert_eq!(f64_cursor, f64_buf.len());
+    }
+
+    // ---------------------------------------------------------------------------
+    // ProfiledSolver integration
+    // ---------------------------------------------------------------------------
+
+    /// A freshly constructed workspace must expose a solver whose
+    /// `current_profile()` equals `SolveProfile::default()`.
+    ///
+    /// This confirms that `ProfiledSolver::new` wraps the inner solver without
+    /// issuing any FFI calls and that `WorkspacePool::new` correctly initialises
+    /// every workspace.
+    #[test]
+    fn workspace_solver_initialised_with_default_profile() {
+        let pool = WorkspacePool::new(0, 2, 0, WorkspaceSizing::default(), || MockSolver);
+        for ws in &pool.workspaces {
+            assert_eq!(
+                ws.solver.current_profile(),
+                &SolveProfile::default(),
+                "solver.current_profile() must equal SolveProfile::default() after construction"
+            );
+        }
+
+        // Also verify SolverWorkspace::new directly.
+        let ws = SolverWorkspace::new(
+            0,
+            0,
+            MockSolver,
+            crate::lp_builder::PatchBuffer::new(0, 0, 0, 0, 0, 0),
+            0,
+            WorkspaceSizing::default(),
+        );
+        assert_eq!(
+            ws.solver.current_profile(),
+            &SolveProfile::default(),
+            "SolverWorkspace::new must initialise solver with default profile"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Layout-invariance tests (indexer-layout-impact.md Q4, Q5)
+    // ---------------------------------------------------------------------------
+
+    /// Locks `state_at_capture.len() == n_state` across the layout change.
+    /// Per `indexer-layout-impact.md` Q4, the new `anticipated_state_out`
+    /// column does not contribute to `state_at_capture`.
+    #[test]
+    fn test_state_at_capture_length_equals_n_state_after_layout_change() {
+        // Layout: N=2 hydros, L=1 PAR lag, n_anticipated=1, k_max=2.
+        // n_state = 2*(1+1) + 1*2 = 6.
+        //
+        // col_status length includes the new anticipated_state_out column slot;
+        // that slot lives outside the n_state prefix and must not affect
+        // state_at_capture recovery.
+        let state_at_capture = vec![1.0_f64, 2.0, 100.0, 200.0, 1000.0, 2000.0];
+        let original = CapturedBasis {
+            basis: Basis {
+                // col_status length includes the anticipated_state_out column.
+                // 12 is a representative LP num_cols.
+                col_status: vec![1_i32; 12],
+                row_status: vec![5_i32; 8],
+            },
+            base_row_count: 6,
+            cut_row_slots: vec![10_u32, 20],
+            state_at_capture: state_at_capture.clone(),
+        };
+
+        let mut i32_buf: Vec<i32> = Vec::new();
+        let mut f64_buf: Vec<f64> = Vec::new();
+        original.to_broadcast_payload(&mut i32_buf, &mut f64_buf);
+
+        let mut i32_cursor = 0_usize;
+        let mut f64_cursor = 0_usize;
+        let recovered = CapturedBasis::try_from_broadcast_payload(
+            0,
+            &i32_buf,
+            &mut i32_cursor,
+            &f64_buf,
+            &mut f64_cursor,
+        )
+        .expect("round-trip must not fail")
+        .expect("sentinel is 1; must return Some");
+
+        assert_eq!(
+            recovered.state_at_capture.len(),
+            6,
+            "state_at_capture.len() must equal n_state regardless of new LP columns"
+        );
+        assert_eq!(
+            recovered.state_at_capture, state_at_capture,
+            "state_at_capture round-trips bit-identically"
+        );
+        assert_eq!(
+            recovered.basis.col_status.len(),
+            12,
+            "col_status length round-trips bit-identically (including the new column slot)"
+        );
+        assert_eq!(
+            recovered.cut_row_slots, original.cut_row_slots,
+            "cut_row_slots round-trips bit-identically"
+        );
+    }
+
+    /// Locks `BASIS_BROADCAST_WIRE_VERSION` at 1 across the layout change.
+    /// Per `indexer-layout-impact.md` Q5, adding the new `anticipated_state_out`
+    /// column does not bump the wire version.
+    #[test]
+    fn test_basis_broadcast_wire_version_stays_one_with_state_out_column() {
+        use super::BASIS_BROADCAST_WIRE_VERSION;
+
+        // Representative basis with enough col_status entries to include the
+        // new anticipated_state_out columns.
+        let original = CapturedBasis {
+            basis: Basis {
+                col_status: vec![1_i32; 16], // includes new anticipated_state_out block
+                row_status: vec![1_i32; 10],
+            },
+            base_row_count: 8,
+            cut_row_slots: vec![],
+            state_at_capture: vec![0.0_f64; 6],
+        };
+
+        let mut i32_buf: Vec<i32> = Vec::new();
+        let mut f64_buf: Vec<f64> = Vec::new();
+        original.to_broadcast_payload(&mut i32_buf, &mut f64_buf);
+
+        // i32_buf layout per workspace.rs to_broadcast_payload:
+        //   [0]: sentinel (1)
+        //   [1]: BASIS_BROADCAST_WIRE_VERSION
+        //   [2]: col_status.len()
+        //   [3]: row_status.len()
+        //   [4]: base_row_count
+        //   [5]: cut_row_slots.len()
+        //   [6]: state_at_capture.len()
+        //   [7..]: col_status elements, then row_status, then cut_row_slots
+        assert_eq!(i32_buf[0], 1, "sentinel must be 1");
+        assert_eq!(
+            i32_buf[1], BASIS_BROADCAST_WIRE_VERSION,
+            "wire version field must equal BASIS_BROADCAST_WIRE_VERSION (= 1)"
+        );
+        assert_eq!(
+            BASIS_BROADCAST_WIRE_VERSION, 1,
+            "broadcast wire-format version constant must remain stable across releases"
+        );
+
+        // Full round-trip confirms no data drift.
+        let mut i32_cursor = 0_usize;
+        let mut f64_cursor = 0_usize;
+        let recovered = CapturedBasis::try_from_broadcast_payload(
+            0,
+            &i32_buf,
+            &mut i32_cursor,
+            &f64_buf,
+            &mut f64_cursor,
+        )
+        .expect("round-trip must not fail")
+        .expect("sentinel is 1; must return Some");
+
+        assert_eq!(recovered.basis.col_status, original.basis.col_status);
+        assert_eq!(recovered.basis.row_status, original.basis.row_status);
+        assert_eq!(recovered.base_row_count, original.base_row_count);
+        assert_eq!(recovered.cut_row_slots, original.cut_row_slots);
+        assert_eq!(recovered.state_at_capture, original.state_at_capture);
     }
 }

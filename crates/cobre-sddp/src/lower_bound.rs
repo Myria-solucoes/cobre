@@ -400,6 +400,10 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
             }
         }
 
+        // No shift_anticipated_state call here: the lower-bound evaluator
+        // solves each stage at a fixed trial point, never advancing the ring
+        // buffer. The trial point itself carries the anticipated-state slots,
+        // patched by fill_forward_patches as Category 6.
         patch_buf.fill_forward_patches(
             indexer,
             initial_state,
@@ -910,6 +914,10 @@ mod tests {
         fn name(&self) -> &'static str {
             "Mock"
         }
+        fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
+        fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
+        fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
+        fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
     }
 
     // ── Shared test setup ────────────────────────────────────────────────────
@@ -928,7 +936,8 @@ mod tests {
         let template = minimal_template();
         let fcf = make_fcf(2, indexer.n_state);
         let initial_state = vec![0.0_f64; indexer.n_state];
-        let mut patch_buf = PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0);
+        let mut patch_buf =
+            PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(1);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -981,7 +990,8 @@ mod tests {
         let template = minimal_template();
         let fcf = make_fcf(2, indexer.n_state);
         let initial_state = vec![0.0_f64; indexer.n_state];
-        let mut patch_buf = PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0);
+        let mut patch_buf =
+            PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(3);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -1036,7 +1046,8 @@ mod tests {
         let template = minimal_template();
         let fcf = make_fcf(2, indexer.n_state);
         let initial_state = vec![0.0_f64; indexer.n_state];
-        let mut patch_buf = PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0);
+        let mut patch_buf =
+            PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(2);
         // CVaR(alpha=0.5, lambda=1.0): pure CVaR; upper bound per scenario =
         // p / alpha = 0.5 / 0.5 = 1.0. With 2 equal-probability scenarios the
@@ -1098,7 +1109,8 @@ mod tests {
         let template = minimal_template();
         let fcf = make_fcf(2, indexer.n_state);
         let initial_state = vec![0.0_f64; indexer.n_state];
-        let mut patch_buf = PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0);
+        let mut patch_buf =
+            PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(2);
         let rm = RiskMeasure::CVaR {
             alpha: 1.0,
@@ -1155,7 +1167,8 @@ mod tests {
         let template = minimal_template();
         let fcf = make_fcf(2, indexer.n_state);
         let initial_state = vec![0.0_f64; indexer.n_state];
-        let mut patch_buf = PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0);
+        let mut patch_buf =
+            PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(1);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -1207,7 +1220,8 @@ mod tests {
         let template = minimal_template();
         let fcf = make_fcf(2, indexer.n_state);
         let initial_state = vec![0.0_f64; indexer.n_state];
-        let mut patch_buf = PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0);
+        let mut patch_buf =
+            PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(1);
         let rm = RiskMeasure::Expectation;
         let comm = FailingBcastComm;
@@ -1266,7 +1280,8 @@ mod tests {
         // Start with 0 cuts (empty FCF).
         let fcf = make_fcf(2, indexer.n_state);
         let initial_state = vec![50.0_f64]; // non-zero initial state
-        let mut patch_buf = PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0);
+        let mut patch_buf =
+            PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(2);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -1324,7 +1339,8 @@ mod tests {
         let template = minimal_template();
         let fcf = make_fcf(2, indexer.n_state);
         let initial_state = vec![0.0_f64];
-        let mut patch_buf = PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0);
+        let mut patch_buf =
+            PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(2);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -1404,7 +1420,8 @@ mod tests {
         let template = minimal_template();
         let fcf = make_fcf(2, indexer.n_state);
         let initial_state = vec![0.0_f64; indexer.n_state];
-        let mut patch_buf = PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0);
+        let mut patch_buf =
+            PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(2);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -1462,7 +1479,8 @@ mod tests {
         let template = minimal_template();
         let fcf = make_fcf(2, indexer.n_state);
         let initial_state = vec![0.0_f64; indexer.n_state];
-        let mut patch_buf = PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0);
+        let mut patch_buf =
+            PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(1);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -1514,7 +1532,8 @@ mod tests {
         let template = minimal_template();
         let fcf = make_fcf(2, indexer.n_state);
         let initial_state = vec![0.0_f64; indexer.n_state];
-        let mut patch_buf = PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0);
+        let mut patch_buf =
+            PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(1);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -1759,7 +1778,7 @@ mod tests {
             }
         }
 
-        let mut patch_buf = PatchBuffer::new(0, 0, 0, 0);
+        let mut patch_buf = PatchBuffer::new(0, 0, 0, 0, 0, 0);
         let initial_state: Vec<f64> = Vec::new();
         let actual_n_openings = opening_tree.n_openings(0);
         let mut solver =
@@ -1806,7 +1825,8 @@ mod tests {
         let template = minimal_template();
         let fcf = make_fcf(2, indexer.n_state);
         let initial_state = vec![0.0_f64; indexer.n_state];
-        let mut patch_buf = PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0);
+        let mut patch_buf =
+            PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(1);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;

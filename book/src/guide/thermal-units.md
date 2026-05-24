@@ -21,7 +21,7 @@ The cost structure of a thermal unit is modeled with a **scalar marginal cost**
 For an introductory walkthrough of writing `thermals.json`, see
 [Building a System](../tutorial/building-a-system.md) and
 [Anatomy of a Case](../tutorial/anatomy-of-a-case.md). This page provides the
-complete field reference, including GNL configuration.
+complete field reference, including anticipated dispatch configuration.
 
 ---
 
@@ -30,7 +30,7 @@ complete field reference, including GNL configuration.
 Thermal units are defined in `system/thermals.json`. The top-level object has a
 single key `"thermals"` containing an array of unit objects. The following example
 shows all fields, including the optional `entry_stage_id`, `exit_stage_id`, and
-`gnl_config`:
+`anticipated_config`:
 
 ```json
 {
@@ -56,8 +56,8 @@ shows all fields, including the optional `entry_stage_id`, `exit_stage_id`, and
         "min_mw": 0.0,
         "max_mw": 657.0
       },
-      "gnl_config": {
-        "lag_stages": 2
+      "anticipated_config": {
+        "lead_stages": 2
       }
     }
   ]
@@ -65,9 +65,9 @@ shows all fields, including the optional `entry_stage_id`, `exit_stage_id`, and
 ```
 
 The first plant (`UTE1`) matches the `1dtoy` template format: a cost per MWh with
-no optional fields. The second plant (`Angra 1`) shows the complete schema with GNL
-dispatch anticipation. The fields `entry_stage_id`, `exit_stage_id`, and
-`gnl_config` are optional and can be omitted.
+no optional fields. The second plant (`Angra 1`) shows the complete schema with
+anticipated dispatch. The fields `entry_stage_id`, `exit_stage_id`, and
+`anticipated_config` are optional and can be omitted.
 
 ---
 
@@ -111,32 +111,176 @@ always dispatch at least that amount whenever the plant is active.
 
 ---
 
-## GNL Configuration
+## Anticipated Dispatch Configuration
 
-> **Not yet implemented.** The `gnl_config` field is parsed and validated but has
-> no effect on the LP formulation in the current version. GNL dispatch anticipation
-> is a planned feature — see the [CHANGELOG](https://github.com/cobre-rs/cobre/blob/main/CHANGELOG.md)
-> for the implementation timeline.
-
-The optional `gnl_config` block is intended to enable GNL (Gás Natural Liquefeito,
-or liquefied natural gas) dispatch anticipation. This will model thermal units that
-require advance scheduling over multiple stages due to commitment lead times — for
-example, an LNG-fired plant that must be booked several weeks before the dispatch
+The optional `anticipated_config` block enables anticipated dispatch for thermal
+units that require advance scheduling over multiple stages due to commitment lead
+times — for example, a plant that must be booked several weeks before the dispatch
 occurs.
 
 ```json
-"gnl_config": {
-  "lag_stages": 2
+"anticipated_config": {
+  "lead_stages": 2
 }
 ```
 
-| Field        | Type    | Description                                                                                                                               |
-| ------------ | ------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `lag_stages` | integer | Number of stages of dispatch anticipation. A value of `2` means the generation commitment for stage `t` must be decided at stage `t - 2`. |
+| Field         | Type    | Description                                                                                                                               |
+| ------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `lead_stages` | integer | Number of stages of dispatch anticipation. A value of `2` means the generation commitment for stage `t` must be decided at stage `t - 2`. |
 
-When implemented, `lag_stages` greater than zero will couple the commitment
-decision at an earlier stage to the dispatch variable at a later stage. For now,
-the field is accepted by the parser but silently ignored during LP construction.
+### How anticipated dispatch works
+
+When a thermal unit has `lead_stages = K`, its dispatch commitment is split across
+two roles that appear at different stages:
+
+- **Decision stage** (`t`): the LP at stage `t` sets the generation level that will
+  be delivered `K` stages later. This decision variable is carried forward as state.
+- **Delivery stage** (`t + K`): the LP at stage `t + K` receives the committed MW
+  value as a fixed bound, reflecting that the generation level was locked in earlier.
+
+Consider a 3-stage finite-horizon study with one anticipated thermal unit configured
+as `"lead_stages": 2`:
+
+| Stage | Role for this unit                                          | `anticipated_decision_mw`                            | `anticipated_committed_mw`                                 |
+| ----- | ----------------------------------------------------------- | ---------------------------------------------------- | ---------------------------------------------------------- |
+| 0     | Decision                                                    | non-null (commitment placed for delivery at stage 2) | `null` (no matured delivery yet)                           |
+| 1     | Decision (horizon boundary: stage 1 + 2 = 3 = total stages) | non-null                                             | `null` (delivery requires K ≤ stage index; 2 ≤ 1 is false) |
+| 2     | Delivery                                                    | `null` (stage 2 + 2 = 4 exceeds the horizon)         | non-null (matured commitment from stage 0)                 |
+
+The `null` values in this table are not errors — they reflect the position of a
+stage within the horizon. At the first stages the commitment is being placed but
+has not yet matured; at the last stage the commitment has matured but there are no
+more future stages to place new decisions into.
+
+For a `lead_stages = 1` configuration on a 2-stage study, the coupling is simpler:
+the decision placed at stage 0 matures at stage 1. Stage 0 shows a non-null
+`anticipated_decision_mw` and null `anticipated_committed_mw`; stage 1 shows the
+reverse.
+
+### Pairing with initial_conditions.json
+
+Because anticipated dispatch carries state across stages, every anticipated thermal
+unit must have a corresponding entry in `past_anticipated_commitments` in
+`initial_conditions.json`:
+
+```json
+{
+  "storage": [],
+  "filling_storage": [],
+  "past_anticipated_commitments": [
+    {
+      "thermal_id": 2,
+      "values_mw": [0.0, 0.0]
+    }
+  ]
+}
+```
+
+The `values_mw` array must have exactly `lead_stages` entries. The values are
+ordered chronologically from oldest to most recent: `values_mw[0]` corresponds to
+the oldest pending slot and `values_mw[lead_stages - 1]` to the most recent.
+For the example above with `lead_stages = 2`, the array has length 2. Supplying an
+array of a different length is a validation error.
+
+**Current limitation: every entry in `values_mw` must be `0.0`.** Pre-horizon
+commitments (generation dispatched outside the study horizon that delivers during
+the study) cannot be expressed in the current version. The semantic validator rejects
+any non-zero `values_mw` entry with an explicit error message naming the thermal id
+and the offending slot index. Set all entries to `0.0` when constructing
+`initial_conditions.json` for studies with anticipated thermal units.
+
+Support for non-zero pre-horizon commitments is planned for a future release.
+
+The `past_anticipated_commitments` key is optional in the JSON file and defaults to
+an empty list for studies that have no anticipated thermal units.
+
+### Reading the outputs
+
+After a simulation run, three additional columns appear in
+`simulation/thermals/scenario_id=NNNN/data.parquet` for every thermal unit. See
+[Output Format Reference](../reference/output-format.md) for the full column schema.
+The anticipated-dispatch columns are:
+
+| Column                     | Type    | Nullable | Meaning                                                                                                                                                                                   |
+| -------------------------- | ------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `is_anticipated`           | Boolean | No       | `true` for units configured with `anticipated_config`; `false` for all others.                                                                                                            |
+| `anticipated_committed_mw` | Float64 | Yes      | The committed MW value that matures and is delivered at this stage. `null` at early stages before any commitment has matured, and always `null` for non-anticipated units.                |
+| `anticipated_decision_mw`  | Float64 | Yes      | The commitment placed at this stage for delivery `K` stages later. `null` when no forward decision is available (e.g., at the final stages of the horizon, or for non-anticipated units). |
+
+Regular (non-anticipated) thermal units always have `is_anticipated = false` and
+both optional columns set to `null`. Rows for anticipated units have
+`is_anticipated = true`; the two nullable columns are populated according to each
+stage's position relative to the decision and delivery windows described above.
+
+Training output also records anticipated-dispatch state in
+`training/dictionaries/state_dictionary.json`. For each anticipated thermal unit,
+the dictionary contains one entry per slot index from `0` to `K_max - 1` where
+`K_max` is the maximum `lead_stages` across all anticipated thermals in the study.
+Entries are emitted in slot-major order. Each entry has the following shape:
+
+```json
+{
+  "type": "anticipated_state",
+  "entity_type": "thermal",
+  "entity_id": 2,
+  "slot_index": 0,
+  "lead_stages": 2,
+  "unit": "MW"
+}
+```
+
+The `lead_stages` field reflects the plant's own `K_i`, not the study-wide
+`K_max`. For a plant where `K_i < K_max` (mixed-`K` studies), entries with
+`slot_index >= lead_stages` are structural padding — those slots are
+deterministically zero and exist only to align the ring buffer to a uniform
+stride. Filter `slot_index < lead_stages` to keep only the active slots.
+
+For a study with a single anticipated thermal unit (`id = 2`) configured as
+`lead_stages = 2`, the state dictionary contains exactly two such entries: one
+with `slot_index = 0` and one with `slot_index = 1` — both active, since
+`K_max = lead_stages = 2`. The slot index identifies which pending commitment
+the state variable tracks: slot 0 holds the oldest still-pending commitment and
+slot `lead_stages - 1` holds the most recent.
+
+---
+
+## Constraining commitments via generic constraints
+
+The anticipated-commitment decision variable can be referenced directly in a
+generic constraint using the `anticipated_decision(N)` expression syntax, where
+`N` is the thermal unit's `id`. This lets you cap, floor, or couple the MW level
+committed at each decision stage across multiple anticipated thermals.
+
+```json
+{
+  "constraints": [
+    {
+      "id": 1,
+      "name": "cap_ant_t1",
+      "expression": "anticipated_decision(2)",
+      "sense": "<=",
+      "slack": { "enabled": false }
+    }
+  ]
+}
+```
+
+With a matching bound row in `constraints/generic_constraint_bounds.parquet`
+that sets `bound = 20.0` at stage 0, the constraint limits the commitment placed
+at stage 0 for delivery 2 stages later to at most 20 MW.
+
+Two semantic rules apply:
+
+- `anticipated_decision(N)` must reference a thermal that carries an
+  `anticipated_config` block. Referencing a non-anticipated thermal is a hard
+  error (`BusinessRuleViolation`).
+- `thermal_generation(N)` referencing an anticipated thermal emits a
+  `SemanticAmbiguity` warning, because the variable is the per-block generation
+  at the current stage and does not represent the forward commitment. Use
+  `anticipated_decision(N)` when the intent is to constrain the commitment level.
+
+For context on the constraint file format see
+[Generic Constraints](../reference/case-format.md).
 
 ---
 
@@ -145,12 +289,12 @@ the field is accepted by the parser but silently ignored during LP construction.
 Cobre's five-layer validation pipeline checks the following conditions on thermal
 units. Violations are reported as error messages with the failing unit's `id`.
 
-| Rule                       | Error Class          | Description                                                                |
-| -------------------------- | -------------------- | -------------------------------------------------------------------------- |
-| Bus reference integrity    | Reference error      | Every `bus_id` must match an `id` in `buses.json`.                         |
-| Non-negative cost          | Schema error         | `cost_per_mwh` must be ≥ 0.0.                                              |
-| Generation bounds ordering | Physical feasibility | `min_mw` must be less than or equal to `max_mw`.                           |
-| GNL lag validity           | Physical feasibility | When `gnl_config` is present, `lag_stages` must be a non-negative integer. |
+| Rule                       | Error Class          | Description                                                                         |
+| -------------------------- | -------------------- | ----------------------------------------------------------------------------------- |
+| Bus reference integrity    | Reference error      | Every `bus_id` must match an `id` in `buses.json`.                                  |
+| Non-negative cost          | Schema error         | `cost_per_mwh` must be ≥ 0.0.                                                       |
+| Generation bounds ordering | Physical feasibility | `min_mw` must be less than or equal to `max_mw`.                                    |
+| Anticipated lead validity  | Physical feasibility | When `anticipated_config` is present, `lead_stages` must be a non-negative integer. |
 
 ---
 

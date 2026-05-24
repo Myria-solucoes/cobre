@@ -445,6 +445,69 @@ println!(
 );
 ```
 
+## Per-phase configuration
+
+`cobre-sddp` defines three algorithmic phases and associates a `SolveProfile`
+with each one. This lets the LP solver be tuned differently for training and
+simulation without modifying call sites.
+
+### `Phase` enum
+
+```rust,ignore
+pub enum Phase {
+    Forward,
+    Backward,
+    Simulation,
+}
+```
+
+| Variant      | When it runs                                                                      |
+|--------------|-----------------------------------------------------------------------------------|
+| `Forward`    | Forward sweep: solving LPs from stage 1 to T to sample trajectories.             |
+| `Backward`   | Backward sweep: solving LPs from stage T to 1 to generate Benders cuts.          |
+| `Simulation` | Policy simulation: evaluating the trained policy on out-of-sample scenarios.      |
+
+`Phase` is `Copy + Eq`, so it can be used in `match` patterns and stored
+cheaply by value. `Phase::profile()` returns the `SolveProfile` that should be
+applied when entering that phase.
+
+### Named profile constants
+
+Three `pub const` values define the per-phase solver configurations:
+
+| Constant            | Applied during            |
+|---------------------|---------------------------|
+| `FORWARD_PROFILE`   | `Phase::Forward` entry    |
+| `BACKWARD_PROFILE`  | `Phase::Backward` entry   |
+| `SIMULATION_PROFILE`| `Phase::Simulation` entry |
+
+In the current release all three constants equal `SolveProfile::default()`
+field-for-field, preserving bit-for-bit behavioral parity with the historical
+hard-coded solver tolerances. Compile-time assertions in `solver_phase.rs`
+catch any future drift between the constants and their documented values.
+
+Future tuning — particularly of `BACKWARD_PROFILE` to reduce backward-pass
+load imbalance — will update these constants without changing the call sites
+or the `Phase` API.
+
+### Orchestrator call sites
+
+Profiles are applied once per phase at the point where a solver workspace is
+first acquired for that phase:
+
+- **Forward sweep** — applied in `forward_pass_state.rs` when a worker
+  enters the forward pass.
+- **Backward sweep** — applied in `backward_pass_state.rs` when a worker
+  enters the backward pass.
+- **Simulation** — applied in `simulation/state.rs` when the simulation
+  pool worker is initialized.
+
+Each call site invokes `ProfiledSolver::set_profile` with the result of
+`Phase::Forward.profile()`, `Phase::Backward.profile()`, or
+`Phase::Simulation.profile()`. Because `ProfiledSolver` skips FFI calls when
+the requested profile matches the current one, re-entering the same phase
+within a run incurs no overhead.
+
 ## Error handling
 
 All fallible operations return `Result<T, SddpError>`. The error type is

@@ -154,6 +154,44 @@ jobs:
       - name: Check book version references
         run: python3 scripts/check_book_version.py
 
+  schemas:
+    name: Schema Freshness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - name: Cache MPICH
+        id: mpich-cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/mpich
+          key: mpich-${{ env.MPICH_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+      - name: Build MPICH from source
+        if: steps.mpich-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          wget -q "https://www.mpich.org/static/downloads/${MPICH_VERSION}/mpich-${MPICH_VERSION}.tar.gz"
+          tar xzf "mpich-${MPICH_VERSION}.tar.gz"
+          cd "mpich-${MPICH_VERSION}"
+          ./configure --prefix=/opt/mpich \
+              --disable-fortran \
+              --disable-cxx \
+              --disable-romio \
+              --disable-doc \
+              --with-device=ch3:nemesis
+          make -j"$(nproc)"
+          make install
+      - name: Set MPICH environment
+        run: |
+          echo "/opt/mpich/bin" >> "$GITHUB_PATH"
+          echo "PKG_CONFIG_PATH=/opt/mpich/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=/opt/mpich/lib" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify schema freshness
+        run: ./scripts/check_schemas.sh --build
+
   docs:
     name: Documentation
     runs-on: ubuntu-latest

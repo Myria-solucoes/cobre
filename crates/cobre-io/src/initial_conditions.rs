@@ -5,7 +5,7 @@
 //!
 //! ## JSON structure
 //!
-//! The file contains two required top-level arrays and two optional arrays:
+//! The file contains two required top-level arrays and three optional arrays:
 //!
 //! - `storage` — initial reservoir volumes for operating hydros (hm³).
 //! - `filling_storage` — initial reservoir volumes for filling hydros (hm³).
@@ -15,6 +15,9 @@
 //! - `recent_observations` — observed inflow data for partial periods before
 //!   the study start (m³/s per date range per hydro). Optional; defaults to an
 //!   empty array when absent.
+//! - `past_anticipated_commitments` — committed MW values for each anticipated
+//!   thermal plant, ordered by delivery stage ascending. Optional; defaults to
+//!   an empty array when no anticipated thermals are present.
 //!
 //! ```json
 //! {
@@ -31,6 +34,9 @@
 //!   "recent_observations": [
 //!     { "hydro_id": 0, "start_date": "2026-04-01", "end_date": "2026-04-04", "value_m3s": 500.0 },
 //!     { "hydro_id": 0, "start_date": "2026-04-04", "end_date": "2026-04-11", "value_m3s": 480.0 }
+//!   ],
+//!   "past_anticipated_commitments": [
+//!     { "thermal_id": 1, "values_mw": [0.0, 0.0] }
 //!   ]
 //! }
 //! ```
@@ -51,6 +57,15 @@
 //! 7. Every `value_m3s` in `recent_observations` is finite and non-negative.
 //! 8. For observations with the same `hydro_id`, date ranges do not overlap
 //!    (adjacent ranges where `start == prev_end` are accepted).
+//! 9. No `thermal_id` appears more than once in `past_anticipated_commitments`.
+//! 10. Every `past_anticipated_commitments[i].values_mw` is non-empty.
+//! 11. Every value in `past_anticipated_commitments[i].values_mw` is finite and
+//!     non-negative (`>= 0.0`). (Parse-time check; see also rule 12.)
+//! 12. Every value in `past_anticipated_commitments[i].values_mw` must be `0.0`.
+//!     Non-zero entries are rejected by the semantic validator (Layer 5a) with an
+//!     error naming the thermal id and slot index. Pre-horizon commitments are not
+//!     supported in the current version; see [`AnticipatedCommitmentHistory`] in
+//!     `cobre-core` for the limitation rationale.
 //!
 //! Cross-reference validation (checking that hydro IDs exist in the hydro
 //! registry) is deferred to Layer 3 (deferred). Storage bounds validation
@@ -58,7 +73,10 @@
 //! hydro registry and is likewise deferred.
 
 use chrono::NaiveDate;
-use cobre_core::{EntityId, HydroPastInflows, HydroStorage, InitialConditions, RecentObservation};
+use cobre_core::{
+    AnticipatedCommitmentHistory, EntityId, HydroPastInflows, HydroStorage, InitialConditions,
+    RecentObservation,
+};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::Path;
@@ -114,6 +132,12 @@ pub(crate) struct RawInitialConditions {
     /// Optional; defaults to empty.
     #[serde(default)]
     recent_observations: Vec<RawRecentObservation>,
+
+    /// Past committed MW values for each anticipated thermal plant, ordered by
+    /// delivery stage ascending. Present only when the study includes at least
+    /// one anticipated thermal. Optional; defaults to empty.
+    #[serde(default)]
+    past_anticipated_commitments: Vec<RawAnticipatedCommitmentHistory>,
 }
 
 /// Initial reservoir volume for one hydro plant, in hm³.
@@ -166,6 +190,22 @@ struct RawRecentObservation {
     /// Average inflow observed during the period [m³/s]. Must be finite and
     /// non-negative.
     value_m3s: f64,
+}
+
+/// Past committed MW values for one anticipated thermal plant.
+///
+/// `values_mw[0]` is the commitment for the earliest pending delivery stage;
+/// `values_mw[k-1]` is the most recent. Length must equal the plant's
+/// `lead_stages` (validated semantically in a later validation layer).
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawAnticipatedCommitmentHistory {
+    /// Thermal plant identifier. Must reference an anticipated thermal.
+    thermal_id: i32,
+    /// Past committed MW values, ordered by delivery stage ascending.
+    /// Length must equal the plant's `lead_stages` (validated semantically).
+    values_mw: Vec<f64>,
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -227,6 +267,7 @@ fn validate_raw(raw: &RawInitialConditions, path: &Path) -> Result<(), LoadError
     validate_recent_observations_dates(&raw.recent_observations, path)?;
     validate_recent_observations_values(&raw.recent_observations, path)?;
     validate_recent_observations_no_overlap(&raw.recent_observations, path)?;
+    validate_anticipated_commitment_histories(&raw.past_anticipated_commitments, path)?;
     Ok(())
 }
 
@@ -467,6 +508,64 @@ fn validate_recent_observations_no_overlap(
     Ok(())
 }
 
+/// Validate IO-layer invariants on `past_anticipated_commitments`.
+///
+/// Checks:
+/// - No duplicate `thermal_id` within the array.
+/// - No entry with an empty `values_mw` (anticipated plants always need ≥ 1 value).
+/// - No negative or non-finite value in `values_mw`.
+fn validate_anticipated_commitment_histories(
+    histories: &[RawAnticipatedCommitmentHistory],
+    path: &Path,
+) -> Result<(), LoadError> {
+    let mut seen: HashSet<i32> = HashSet::new();
+    for (i, entry) in histories.iter().enumerate() {
+        if !seen.insert(entry.thermal_id) {
+            return Err(LoadError::SchemaError {
+                path: path.to_path_buf(),
+                field: format!("past_anticipated_commitments[{i}].thermal_id"),
+                message: format!(
+                    "duplicate thermal_id {} in past_anticipated_commitments",
+                    entry.thermal_id
+                ),
+            });
+        }
+        if entry.values_mw.is_empty() {
+            return Err(LoadError::SchemaError {
+                path: path.to_path_buf(),
+                field: format!("past_anticipated_commitments[{i}].values_mw"),
+                message: format!(
+                    "past_anticipated_commitments[{i}].values_mw must not be empty; \
+                     anticipated plants always require at least one committed value"
+                ),
+            });
+        }
+        for (j, &v) in entry.values_mw.iter().enumerate() {
+            if !v.is_finite() {
+                return Err(LoadError::SchemaError {
+                    path: path.to_path_buf(),
+                    field: format!("past_anticipated_commitments[{i}].values_mw[{j}]"),
+                    message: format!(
+                        "past_anticipated_commitments[{i}].values_mw[{j}] is not finite \
+                         (got {v}); all committed MW values must be finite numbers"
+                    ),
+                });
+            }
+            if v < 0.0 {
+                return Err(LoadError::SchemaError {
+                    path: path.to_path_buf(),
+                    field: format!("past_anticipated_commitments[{i}].values_mw[{j}]"),
+                    message: format!(
+                        "past_anticipated_commitments[{i}].values_mw[{j}] must be >= 0 \
+                         (got {v}); anticipated commitments are physical generation amounts"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 // ── Conversion ────────────────────────────────────────────────────────────────
 
 /// Convert validated raw data into [`InitialConditions`].
@@ -521,10 +620,21 @@ fn convert(raw: RawInitialConditions) -> InitialConditions {
         .collect();
     recent_observations.sort_by_key(|e| (e.hydro_id.0, e.start_date));
 
+    let mut past_anticipated_commitments: Vec<AnticipatedCommitmentHistory> = raw
+        .past_anticipated_commitments
+        .into_iter()
+        .map(|e| AnticipatedCommitmentHistory {
+            thermal_id: EntityId(e.thermal_id),
+            values_mw: e.values_mw,
+        })
+        .collect();
+    past_anticipated_commitments.sort_by_key(|e| e.thermal_id.0);
+
     InitialConditions {
         storage,
         filling_storage,
         past_inflows,
+        past_anticipated_commitments,
         recent_observations,
     }
 }
@@ -1356,5 +1466,162 @@ mod tests {
             ic.past_inflows[0].season_ids, None,
             "absent season_ids must deserialize as None"
         );
+    }
+
+    // ── AC: past_anticipated_commitments ─────────────────────────────────────
+
+    /// Given an `initial_conditions.json` with one `past_anticipated_commitments`
+    /// entry, `parse_initial_conditions` returns the correct parsed value.
+    #[test]
+    fn test_parse_past_anticipated_commitments_present() {
+        let json = r#"{
+          "storage": [],
+          "filling_storage": [],
+          "past_anticipated_commitments": [
+            { "thermal_id": 1, "values_mw": [120.0, 180.0] }
+          ]
+        }"#;
+        let f = write_json(json);
+        let ic = parse_initial_conditions(f.path()).unwrap();
+
+        assert_eq!(ic.past_anticipated_commitments.len(), 1);
+        assert_eq!(ic.past_anticipated_commitments[0].thermal_id, EntityId(1));
+        assert_eq!(
+            ic.past_anticipated_commitments[0].values_mw,
+            vec![120.0, 180.0]
+        );
+    }
+
+    /// Given an `initial_conditions.json` with no `past_anticipated_commitments`
+    /// key, `parse_initial_conditions` returns an empty vec.
+    #[test]
+    fn test_parse_past_anticipated_commitments_absent_defaults_empty() {
+        let f = write_json(VALID_JSON);
+        let ic = parse_initial_conditions(f.path()).unwrap();
+        assert!(
+            ic.past_anticipated_commitments.is_empty(),
+            "absent past_anticipated_commitments must default to empty vec"
+        );
+    }
+
+    /// Given two JSON inputs identical except for entry order in
+    /// `past_anticipated_commitments`, the resulting vecs are identical
+    /// (sorted by `thermal_id` ascending — declaration-order invariance).
+    #[test]
+    fn test_past_anticipated_commitments_declaration_order_invariance() {
+        let json_forward = r#"{
+          "storage": [],
+          "filling_storage": [],
+          "past_anticipated_commitments": [
+            { "thermal_id": 1, "values_mw": [120.0, 180.0] },
+            { "thermal_id": 2, "values_mw": [50.0] }
+          ]
+        }"#;
+        let json_reversed = r#"{
+          "storage": [],
+          "filling_storage": [],
+          "past_anticipated_commitments": [
+            { "thermal_id": 2, "values_mw": [50.0] },
+            { "thermal_id": 1, "values_mw": [120.0, 180.0] }
+          ]
+        }"#;
+        let f1 = write_json(json_forward);
+        let f2 = write_json(json_reversed);
+        let ic1 = parse_initial_conditions(f1.path()).unwrap();
+        let ic2 = parse_initial_conditions(f2.path()).unwrap();
+
+        assert_eq!(
+            ic1.past_anticipated_commitments, ic2.past_anticipated_commitments,
+            "results must be identical regardless of input ordering"
+        );
+        // Sorted by thermal_id ascending
+        assert_eq!(ic1.past_anticipated_commitments[0].thermal_id, EntityId(1));
+        assert_eq!(ic1.past_anticipated_commitments[1].thermal_id, EntityId(2));
+    }
+
+    /// Given two entries with the same `thermal_id: 5` in
+    /// `past_anticipated_commitments`, `parse_initial_conditions` returns
+    /// `Err(LoadError::SchemaError)` with field containing
+    /// `"past_anticipated_commitments["` and message containing `"duplicate"`.
+    #[test]
+    fn test_duplicate_thermal_id_in_past_anticipated_commitments_rejected() {
+        let json = r#"{
+          "storage": [],
+          "filling_storage": [],
+          "past_anticipated_commitments": [
+            { "thermal_id": 5, "values_mw": [100.0] },
+            { "thermal_id": 5, "values_mw": [200.0] }
+          ]
+        }"#;
+        let f = write_json(json);
+        let err = parse_initial_conditions(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert!(
+                    field.contains("past_anticipated_commitments["),
+                    "field should contain 'past_anticipated_commitments[', got: {field}"
+                );
+                assert!(
+                    message.contains("duplicate"),
+                    "message should contain 'duplicate', got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// Given a `past_anticipated_commitments` entry with `values_mw: []`,
+    /// `parse_initial_conditions` returns `Err(LoadError::SchemaError)` with
+    /// `message` containing `"values_mw must not be empty"`.
+    #[test]
+    fn test_empty_values_mw_rejected() {
+        let json = r#"{
+          "storage": [],
+          "filling_storage": [],
+          "past_anticipated_commitments": [
+            { "thermal_id": 3, "values_mw": [] }
+          ]
+        }"#;
+        let f = write_json(json);
+        let err = parse_initial_conditions(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { message, .. } => {
+                assert!(
+                    message.contains("values_mw must not be empty"),
+                    "message should contain 'values_mw must not be empty', got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// Given a `past_anticipated_commitments` entry with a negative MW value
+    /// (e.g. `values_mw: [120.0, -50.0]`), `parse_initial_conditions` returns
+    /// `Err(LoadError::SchemaError)` with `message` containing `"must be >= 0"`
+    /// and `field` containing `"values_mw[1]"`.
+    #[test]
+    fn test_negative_values_mw_rejected() {
+        let json = r#"{
+          "storage": [],
+          "filling_storage": [],
+          "past_anticipated_commitments": [
+            { "thermal_id": 7, "values_mw": [120.0, -50.0] }
+          ]
+        }"#;
+        let f = write_json(json);
+        let err = parse_initial_conditions(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert!(
+                    message.contains("must be >= 0"),
+                    "message should contain 'must be >= 0', got: {message}"
+                );
+                assert!(
+                    field.contains("values_mw[1]"),
+                    "field should contain 'values_mw[1]', got: {field}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
     }
 }

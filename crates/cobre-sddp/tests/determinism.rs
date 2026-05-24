@@ -180,6 +180,10 @@ impl SolverInterface for MockSolver3H {
     fn name(&self) -> &'static str {
         "MockDeterminism3H"
     }
+    fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
+    fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
+    fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
+    fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
 }
 
 // ===========================================================================
@@ -625,7 +629,7 @@ fn run_simulation(
                 0,
                 i32::try_from(idx).expect("worker_id fits in i32"),
                 MockSolver3H::new(100.0),
-                PatchBuffer::new(fx.indexer.hydro_count, fx.indexer.max_par_order, 0, 0),
+                PatchBuffer::new(fx.indexer.hydro_count, fx.indexer.max_par_order, 0, 0, 0, 0),
                 fx.indexer.n_state,
                 WorkspaceSizing {
                     hydro_count: fx.indexer.hydro_count,

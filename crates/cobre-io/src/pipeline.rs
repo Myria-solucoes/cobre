@@ -154,6 +154,13 @@ pub(crate) fn run_pipeline_with_artifacts(
         },
     );
 
+    let k_max: usize = data
+        .thermals
+        .iter()
+        .filter_map(|t| t.anticipated_config.as_ref())
+        .map(|c| usize::try_from(c.lead_stages).unwrap_or(usize::MAX))
+        .max()
+        .unwrap_or(0);
     let bounds = resolve_bounds(
         &BoundsEntitySlices {
             hydros: &data.hydros,
@@ -163,6 +170,7 @@ pub(crate) fn run_pipeline_with_artifacts(
             contracts: &data.energy_contracts,
         },
         n_stages,
+        k_max,
         &stage_index,
         &BoundsOverrides {
             hydro: &data.hydro_bounds,

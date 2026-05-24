@@ -129,6 +129,10 @@ impl SolverInterface for MockSolver {
     fn name(&self) -> &'static str {
         "MockConformance"
     }
+    fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
+    fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
+    fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
+    fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
 }
 
 /// Minimal stage template for a single hydro, zero PAR lags.
@@ -825,7 +829,8 @@ mod lb_conformance {
         let template = minimal_template();
         let fcf = make_fcf(2, indexer.n_state);
         let initial_state = vec![0.0_f64; indexer.n_state];
-        let mut patch_buf = PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0);
+        let mut patch_buf =
+            PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0, 0, 0);
         let opening_tree = simple_opening_tree(2);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -942,6 +947,10 @@ fn indexer_constraint_inventory() {
             n_blks: 2,
             has_inflow_penalty: true,
             max_deficit_segments: 2,
+            n_anticipated: 0,
+            k_max: 0,
+            anticipated_lead_stages: vec![],
+            anticipated_thermal_indices: vec![],
         },
         &FphaColumnLayout {
             hydro_indices: vec![0],
@@ -1068,6 +1077,10 @@ fn constraint_extraction_regression_guard() {
             n_blks: 1,
             has_inflow_penalty: true,
             max_deficit_segments: 1,
+            n_anticipated: 0,
+            k_max: 0,
+            anticipated_lead_stages: vec![],
+            anticipated_thermal_indices: vec![],
         },
         &FphaColumnLayout {
             hydro_indices: vec![0],

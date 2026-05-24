@@ -29,13 +29,42 @@
 //! ```
 //!
 //! where `Q` is the LP objective and `dual[0..n_state]` are the duals of the
-//! fixing constraints (storage-fixing and lag-fixing rows).
-//!
-//! The coefficients stored in the [`crate::FutureCostFunction`] are the raw (unscaled)
-//! duals of the state-fixing rows. Negation is applied later when building the
+//! fixing constraints (storage-fixing, lag-fixing, and anticipated-state-fixing rows).
+//! For all three categories the convention is `coefficients = dual` (raw `HiGHS` dual,
+//! no sign flip at extraction). Negation is applied later when building the
 //! LP cut row in `build_cut_row_batch_into` (forward.rs):
 //! `-coeff * x + theta >= intercept`.
+//! The intercept formula covers all `n_state` indices uniformly; no special handling
+//! for the anticipated-state subrange.
 //! See the project convention: "coefficients = dual (NOT -dual)".
+//!
+//! ### Anticipated-state cut gradient flow
+//!
+//! Anticipated-state slots are deterministic state variables that connect a decision
+//! stage to its delivery stage via the fishing constraint at the delivery stage.
+//! `state_to_lp_column` applies a shift-aware mapping for these slots: slot `K_p-1`
+//! (the maturation slot for plant `p`) maps to the decision column, while slot
+//! `i < K_p-1` maps to slot `i+1` so cuts apply against the correct LP variables
+//! at the predecessor stage.
+//!
+//! The dual of the anticipated-state-fixing row at stage `t` reflects
+//! `dQ_t/dx_ant[slot, plant]`. Under the always-active fishing predicate
+//! (`StageIndexer::is_anticipated_fishing_active` at `indexer.rs:1555`), every
+//! slot at every stage participates in the dual chain: the fishing constraint is
+//! emitted at every stage unconditionally. The dual on the Cat 6
+//! state-fixing row at slot `s` flows back to the predecessor's LP column via
+//! `state_to_lp_column`'s branch decision (Less / Equal / Greater), which maps
+//! slot `K_p-1` to the decision column and slot `i < K_p-1` to slot `i+1`.
+//! See `indexer.rs:1429-1454` for the `state_to_lp_column` rustdoc and
+//! `artifacts/layout-decision.md` Section 2 for sign-chain derivations.
+//!
+//! The backward pass does not call `shift_anticipated_state`. The trial point
+//! `x_hat` is the forward-shifted state; cut extraction uses it as-is. This
+//! mirrors the inflow-lag convention and is correct: re-shifting would offset
+//! `x_hat` relative to the anticipated-state-fixing rows, breaking cut consistency.
+//! Empirical verification:
+//! `crates/cobre-sddp/tests/anticipated_backward_cut_k1.rs` (K=1) and
+//! `crates/cobre-sddp/tests/anticipated_backward_cut_k2.rs` (K=2).
 //!
 //! ## Cut activity tracking
 //!
@@ -287,6 +316,10 @@ fn patch_opening_bounds<S: SolverInterface + Send>(
             &mut ws.scratch.ncs_col_upper_buf,
         );
     }
+    // No shift_anticipated_state call here: the backward pass solves each
+    // opening at a fixed trial point produced by the forward sampler. The
+    // ring-buffer advance happens once in the forward pass; the backward
+    // and simulation paths reuse those slot values without re-shifting.
     ws.patch_buf.fill_forward_patches(
         training_ctx.indexer,
         x_hat,
@@ -327,7 +360,6 @@ fn patch_opening_bounds<S: SolverInterface + Send>(
                 }
             }
         }
-        // Lower/upper buffers were both rebuilt above by `transform_ncs_noise`.
         ws.solver.set_col_bounds(
             &ws.scratch.ncs_col_indices_buf,
             &ws.scratch.ncs_col_lower_buf,
@@ -547,21 +579,13 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
         let raw_noise = tree_view.opening(s, omega);
         patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s);
 
-        // Take scratch buffers out of `ws.backward_accum` before the solve so
-        // they can be filled from `view.dual` while `view` holds a `'ws` borrow
-        // over `ws`. The `take` leaves an empty `Vec` in place; its former
-        // content (which may carry capacity from a prior opening) moves into
-        // the local binding.  After `view` is dropped the local binding is
-        // moved back into the scratch slot so capacity is reused on the next
-        // iteration.  This means allocation only occurs on the first opening of
-        // the first stage; subsequent openings reuse the pre-warmed capacity.
+        // Scratch buffers are moved out before the solve to avoid borrow conflicts
+        // with `view`'s lifetime. Pre-warmed capacity is reused across openings.
         let mut state_duals = std::mem::take(&mut ws.backward_accum.state_duals_buf);
         let mut cut_duals = std::mem::take(&mut ws.backward_accum.cut_duals_buf);
 
-        // Snapshot solver statistics before this opening's solve.
         let stats_before_omega = ws.solver.statistics();
 
-        // ω=0: resolve warm-start basis; ω>0: HiGHS hot-starts from retained factorization.
         let stored_basis = if omega == 0 {
             resolve_backward_basis(basis_slice, m, s)
         } else {
@@ -593,14 +617,8 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
             unreachable!("run_stage_solve(Phase::Backward) returns Backward variant")
         };
 
-        // Extract duals while `view` is live. `state_duals` and `cut_duals` were
-        // taken from their scratch slots above, so no `ws` borrow is needed here.
-        // `view` is dropped at the end of the call (it is `Copy`; the explicit
-        // `let _ = view` inside the helper documents that intent).
-        //
-        // SEQUENCING: `ws.solver.statistics()` (stats_after) must be called AFTER
-        // this returns, because `view` borrows `ws` for `'ws` and the borrow checker
-        // forbids `ws.solver` access while `view` is alive.
+        // Extract duals from view (which borrows ws for 'ws).
+        // Statistics must be captured after view is dropped.
         let objective = extract_duals_from_view(
             &view,
             indexer.n_state,
@@ -611,14 +629,11 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
         );
         let _ = view;
 
-        // Restore pre-warmed scratch back into workspace slots before any `ws` access.
         ws.backward_accum.state_duals_buf = state_duals;
         ws.backward_accum.cut_duals_buf = cut_duals;
 
-        // Statistics after the solve (safe now that `view` is dropped).
         let stats_after_omega = ws.solver.statistics();
 
-        // Accumulate stats delta, outcome coefficients/intercept, and cut activity.
         accumulate_opening_outcome(
             ws,
             succ,
@@ -629,17 +644,13 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
             &stats_after_omega,
         );
 
-        // Capture basis at ω=0; ω>0 writes are forbidden (retained-LU corruption risk).
         if omega == 0 {
             save_basis_at_omega_zero(ws, succ, basis_slice, m, x_hat);
         }
     }
 
-    // Copy the aggregated coefficients out of the per-worker scratch
-    // buffer into an owned Vec<f64> so they outlive the parallel
-    // closure. This is the one allocation per trial point inside the
-    // parallel region; see the module-level "Hot-path allocation
-    // discipline" section for the full inventory.
+    // One allocation per trial point: copy coefficients out of the scratch
+    // buffer so they outlive the parallel closure (see module-level docs).
     let n_openings = succ.probabilities.len();
     let mut agg_intercept = 0.0_f64;
     risk_measures[succ.t].aggregate_cut_into(
@@ -712,7 +723,8 @@ fn run_backward_pass<S: SolverInterface + Send, C: Communicator>(
 mod tests {
     use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
     use cobre_solver::{
-        Basis, LpSolution, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
+        Basis, LpSolution, ProfiledSolver, RowBatch, SolverError, SolverInterface,
+        SolverStatistics, StageTemplate,
     };
 
     use cobre_core::scenario::SamplingScheme;
@@ -913,6 +925,10 @@ mod tests {
         fn name(&self) -> &'static str {
             "Mock"
         }
+        fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
+        fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
+        fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
+        fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
     }
 
     fn minimal_template_1_0() -> StageTemplate {
@@ -959,8 +975,8 @@ mod tests {
         vec![SolverWorkspace {
             rank: 0,
             worker_id: 0,
-            solver,
-            patch_buf: PatchBuffer::new(1, 0, 0, 0),
+            solver: ProfiledSolver::new(solver),
+            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
             scratch: crate::workspace::ScratchBuffers {
                 noise_buf: Vec::new(),
@@ -990,6 +1006,8 @@ mod tests {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
+                anticipated_state_buf: Vec::new(),
+                anticipated_state_out_col_indices_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -2501,7 +2519,7 @@ mod tests {
         })
         .unwrap();
 
-        let warm_start_calls = workspaces[0].solver.warm_start_calls;
+        let warm_start_calls = workspaces[0].solver.inner().warm_start_calls;
         assert_eq!(
             warm_start_calls, 1,
             "first opening at successor stage must call solve(Some(&basis)) \
@@ -2604,7 +2622,7 @@ mod tests {
         // P3b optimization: opening 0 cold-starts (no basis in store),
         // openings 1 and 2 use solve(None) (HiGHS internal hot-start) instead of
         // solve(Some(&working_basis)). No explicit warm-start calls for subsequent openings.
-        let warm_start_calls = workspaces[0].solver.warm_start_calls;
+        let warm_start_calls = workspaces[0].solver.inner().warm_start_calls;
         assert_eq!(
             warm_start_calls, 0,
             "P3b: no warm-start calls expected when BasisStore is empty \
@@ -2766,8 +2784,8 @@ mod tests {
         let mut workspaces_1 = vec![SolverWorkspace {
             rank: 0,
             worker_id: 0,
-            solver: solver_1,
-            patch_buf: PatchBuffer::new(1, 0, 0, 0),
+            solver: ProfiledSolver::new(solver_1),
+            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
             scratch: crate::workspace::ScratchBuffers {
                 noise_buf: Vec::new(),
@@ -2797,6 +2815,8 @@ mod tests {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
+                anticipated_state_buf: Vec::new(),
+                anticipated_state_out_col_indices_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -2867,8 +2887,8 @@ mod tests {
             .map(|idx| SolverWorkspace {
                 rank: 0,
                 worker_id: idx,
-                solver: MockSolver::always_ok(solution.clone()),
-                patch_buf: PatchBuffer::new(1, 0, 0, 0),
+                solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
+                patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
                 current_state: Vec::with_capacity(n_state),
                 scratch: crate::workspace::ScratchBuffers {
                     noise_buf: Vec::new(),
@@ -2898,6 +2918,8 @@ mod tests {
                     trajectory_costs_buf: Vec::new(),
                     raw_noise_buf: Vec::new(),
                     perm_scratch: Vec::new(),
+                    anticipated_state_buf: Vec::new(),
+                    anticipated_state_out_col_indices_buf: Vec::new(),
                 },
                 scratch_basis: Basis::new(0, 0),
                 backward_accum: BackwardAccumulators::default(),
@@ -3176,7 +3198,7 @@ mod tests {
         let indexer = StageIndexer::new(1, 0); // N=1, L=0, n_state=1
 
         // PatchBuffer: n_hydros=1, max_par_order=0, n_load_buses=1, max_blocks=1.
-        let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 1, 1);
+        let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 1, 1, 0, 0);
 
         // Template: 2 rows (row 0 = state-fixing, row 1 = water-balance).
         // base_rows=[1] → inflow RHS row starts at index 1.
@@ -3222,7 +3244,7 @@ mod tests {
         let ws = SolverWorkspace {
             rank: 0,
             worker_id: 0,
-            solver: MockSolver::always_ok(solution),
+            solver: ProfiledSolver::new(MockSolver::always_ok(solution)),
             patch_buf,
             current_state: Vec::with_capacity(n_state),
             scratch: crate::workspace::ScratchBuffers {
@@ -3253,6 +3275,8 @@ mod tests {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
+                anticipated_state_buf: Vec::new(),
+                anticipated_state_out_col_indices_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -3351,7 +3375,7 @@ mod tests {
         let indexer = StageIndexer::new(1, 0); // N=1, L=0
 
         // PatchBuffer with no load buses: n_load_buses=0, max_blocks=1.
-        let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 0, 0);
+        let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 0, 0, 0, 0);
 
         let template = StageTemplate {
             num_cols: 3,
@@ -3392,7 +3416,7 @@ mod tests {
         let ws = SolverWorkspace {
             rank: 0,
             worker_id: 0,
-            solver: MockSolver::always_ok(solution),
+            solver: ProfiledSolver::new(MockSolver::always_ok(solution)),
             patch_buf,
             current_state: Vec::with_capacity(n_state),
             scratch: crate::workspace::ScratchBuffers {
@@ -3423,6 +3447,8 @@ mod tests {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
+                anticipated_state_buf: Vec::new(),
+                anticipated_state_out_col_indices_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -3516,7 +3542,7 @@ mod tests {
         let stochastic = make_stochastic_context_with_load(n_stages, n_openings, 200.0, 20.0);
         let indexer = StageIndexer::new(1, 0); // N=1, L=0, n_state=1
 
-        let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 1, 1);
+        let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 1, 1, 0, 0);
 
         let template = StageTemplate {
             num_cols: 3,
@@ -3557,7 +3583,7 @@ mod tests {
         let ws = SolverWorkspace {
             rank: 0,
             worker_id: 0,
-            solver: MockSolver::always_ok(solution),
+            solver: ProfiledSolver::new(MockSolver::always_ok(solution)),
             patch_buf,
             current_state: Vec::with_capacity(n_state),
             scratch: crate::workspace::ScratchBuffers {
@@ -3588,6 +3614,8 @@ mod tests {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
+                anticipated_state_buf: Vec::new(),
+                anticipated_state_out_col_indices_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -4348,8 +4376,8 @@ mod tests {
             .map(|idx| SolverWorkspace {
                 rank: 0,
                 worker_id: i32::try_from(idx).expect("worker_id fits in i32"),
-                solver: MockSolver::always_ok(solution.clone()),
-                patch_buf: PatchBuffer::new(1, 0, 0, 0),
+                solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
+                patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
                 current_state: Vec::with_capacity(n_state),
                 scratch: crate::workspace::ScratchBuffers {
                     noise_buf: Vec::new(),
@@ -4379,6 +4407,8 @@ mod tests {
                     trajectory_costs_buf: Vec::new(),
                     raw_noise_buf: Vec::new(),
                     perm_scratch: Vec::new(),
+                    anticipated_state_buf: Vec::new(),
+                    anticipated_state_out_col_indices_buf: Vec::new(),
                 },
                 scratch_basis: Basis::new(0, 0),
                 backward_accum: BackwardAccumulators::default(),
@@ -4710,8 +4740,8 @@ mod tests {
             .map(|idx| SolverWorkspace {
                 rank: 0,
                 worker_id: i32::try_from(idx).expect("idx fits in i32"),
-                solver: MockSolver::always_ok(solution.clone()),
-                patch_buf: PatchBuffer::new(1, 0, 0, 0),
+                solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
+                patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
                 current_state: Vec::with_capacity(n_state),
                 scratch: crate::workspace::ScratchBuffers {
                     noise_buf: Vec::new(),
@@ -4741,6 +4771,8 @@ mod tests {
                     trajectory_costs_buf: Vec::new(),
                     raw_noise_buf: Vec::new(),
                     perm_scratch: Vec::new(),
+                    anticipated_state_buf: Vec::new(),
+                    anticipated_state_out_col_indices_buf: Vec::new(),
                 },
                 scratch_basis: Basis::new(0, 0),
                 backward_accum: BackwardAccumulators::default(),
@@ -4933,8 +4965,8 @@ mod tests {
             .map(|idx| SolverWorkspace {
                 rank: 0,
                 worker_id: i32::try_from(idx).expect("idx fits in i32"),
-                solver: MockSolver::always_ok(solution.clone()),
-                patch_buf: PatchBuffer::new(1, 0, 0, 0),
+                solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
+                patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
                 current_state: Vec::with_capacity(n_state),
                 scratch: crate::workspace::ScratchBuffers {
                     noise_buf: Vec::new(),
@@ -4964,6 +4996,8 @@ mod tests {
                     trajectory_costs_buf: Vec::new(),
                     raw_noise_buf: Vec::new(),
                     perm_scratch: Vec::new(),
+                    anticipated_state_buf: Vec::new(),
+                    anticipated_state_out_col_indices_buf: Vec::new(),
                 },
                 scratch_basis: Basis::new(0, 0),
                 backward_accum: BackwardAccumulators::default(),
@@ -5267,7 +5301,8 @@ mod tests {
         );
         // Confirm the solver ran exactly once.
         assert_eq!(
-            workspaces[0].solver.call_count, 1,
+            workspaces[0].solver.inner().call_count,
+            1,
             "solver must be called exactly once for a 1-opening backward pass"
         );
     }
@@ -5364,8 +5399,8 @@ mod tests {
             .map(|idx| SolverWorkspace {
                 rank: 0,
                 worker_id: i32::try_from(idx).expect("idx fits i32"),
-                solver: MockSolver::always_ok(solution.clone()),
-                patch_buf: PatchBuffer::new(1, 0, 0, 0),
+                solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
+                patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
                 current_state: Vec::with_capacity(n_state),
                 scratch: crate::workspace::ScratchBuffers {
                     noise_buf: Vec::new(),
@@ -5395,6 +5430,8 @@ mod tests {
                     trajectory_costs_buf: Vec::new(),
                     raw_noise_buf: Vec::new(),
                     perm_scratch: Vec::new(),
+                    anticipated_state_buf: Vec::new(),
+                    anticipated_state_out_col_indices_buf: Vec::new(),
                 },
                 scratch_basis: Basis::new(0, 0),
                 backward_accum: BackwardAccumulators::default(),
@@ -5641,5 +5678,75 @@ mod tests {
                 "expected Err(SddpError::Validation(_)) from non-uniform handshake, got: {other:?}"
             ),
         }
+    }
+
+    /// Minimal anticipated `StageIndexer` for sign-convention tests.
+    fn make_anticipated_indexer_local(
+        n_anticipated: usize,
+        k_max: usize,
+        anticipated_lead_stages: Vec<usize>,
+    ) -> StageIndexer {
+        use crate::indexer::{EquipmentCounts, EvapConfig, FphaColumnLayout};
+        StageIndexer::with_equipment_and_evaporation(
+            &EquipmentCounts {
+                hydro_count: 0,
+                max_par_order: 0,
+                n_thermals: 0,
+                n_lines: 0,
+                n_buses: 1,
+                n_blks: 1,
+                has_inflow_penalty: false,
+                max_deficit_segments: 1,
+                n_anticipated,
+                k_max,
+                anticipated_lead_stages,
+                anticipated_thermal_indices: (0..n_anticipated).collect(),
+            },
+            &FphaColumnLayout {
+                hydro_indices: vec![],
+                planes_per_hydro: vec![],
+            },
+            &EvapConfig {
+                hydro_indices: vec![],
+            },
+        )
+    }
+
+    /// Verify cut sign convention: dual 7.5 → batch -7.5 at correct column.
+    #[test]
+    fn cut_coefficient_sign_convention_slot_zero_k2() {
+        let indexer = make_anticipated_indexer_local(1, 2, vec![2]);
+        assert_eq!(indexer.anticipated_state.start, 0);
+        assert_eq!(indexer.n_state, 2);
+
+        let mut fcf = FutureCostFunction::new(3, indexer.n_state, 1, 10, &[0; 3]);
+        let mut coefficients = vec![0.0_f64; indexer.n_state];
+        coefficients[indexer.anticipated_state.start] = 7.5;
+        fcf.add_cut(1, 0, 0, 0.0, &coefficients);
+
+        let mut batch = RowBatch {
+            num_rows: 0,
+            row_starts: Vec::new(),
+            col_indices: Vec::new(),
+            values: Vec::new(),
+            row_lower: Vec::new(),
+            row_upper: Vec::new(),
+        };
+        crate::forward::build_cut_row_batch_into(&mut batch, &fcf, 1, &indexer, &[]);
+
+        let lp_col = indexer.state_to_lp_column(indexer.anticipated_state.start);
+        assert_eq!(lp_col, 1);
+
+        let pos = batch
+            .col_indices
+            .iter()
+            .position(|&c| c == lp_col as i32)
+            .expect("lp_col must appear in batch.col_indices");
+
+        assert!(
+            (batch.values[pos] - (-7.5_f64)).abs() < f64::EPSILON,
+            "expected batch.values[pos]=-7.5 for lp_col={lp_col}, got {}",
+            batch.values[pos]
+        );
     }
 }

@@ -345,6 +345,21 @@ pub fn build_cut_row_batch_into(
         } else {
             for (j, &c) in coefficients.iter().enumerate() {
                 let lp_col = indexer.state_to_lp_column(j);
+                // Padding-slot invariant: when state_to_lp_column returns j unchanged
+                // and j falls inside the anticipated-state block, the slot is a padding
+                // slot (slot >= k_p for its plant). The INVARIANT comment in
+                // state_to_lp_column explains the 5-step chain that guarantees the
+                // corresponding cut coefficient is 0.0. Assert this in debug builds.
+                debug_assert!(
+                    !(lp_col == j
+                        && indexer.n_anticipated > 0
+                        && j >= indexer.anticipated_state.start
+                        && j < indexer.anticipated_state.start
+                            + indexer.n_anticipated * indexer.k_max)
+                        || c == 0.0,
+                    "padding-slot j={j} has non-zero cut coefficient {c}; \
+                     shift_anticipated_state must have seeded a non-zero into a padding slot"
+                );
                 push_scaled_coefficient(batch, lp_col, c, col_scale);
             }
         }
@@ -485,6 +500,21 @@ pub fn build_delta_cut_row_batch_into(
         } else {
             for (j, &c) in coefficients.iter().enumerate() {
                 let lp_col = indexer.state_to_lp_column(j);
+                // Padding-slot invariant: when state_to_lp_column returns j unchanged
+                // and j falls inside the anticipated-state block, the slot is a padding
+                // slot (slot >= k_p for its plant). The INVARIANT comment in
+                // state_to_lp_column explains the 5-step chain that guarantees the
+                // corresponding cut coefficient is 0.0. Assert this in debug builds.
+                debug_assert!(
+                    !(lp_col == j
+                        && indexer.n_anticipated > 0
+                        && j >= indexer.anticipated_state.start
+                        && j < indexer.anticipated_state.start
+                            + indexer.n_anticipated * indexer.k_max)
+                        || c == 0.0,
+                    "padding-slot j={j} has non-zero cut coefficient {c}; \
+                     shift_anticipated_state must have seeded a non-zero into a padding slot"
+                );
                 push_scaled_coefficient(batch, lp_col, c, col_scale);
             }
         }
@@ -1004,6 +1034,15 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         .lag_matrix_buf
         .extend_from_slice(&ws.current_state[lag_start..lag_start + lag_len]);
 
+    // Save incoming anticipated-state slice before overwriting state with primal.
+    // Uses the pre-allocated anticipated_state_buf scratch buffer (no allocation).
+    let ant_start = indexer.anticipated_state.start;
+    let ant_len = indexer.n_anticipated * indexer.k_max;
+    ws.scratch.anticipated_state_buf.clear();
+    ws.scratch
+        .anticipated_state_buf
+        .extend_from_slice(&ws.current_state[ant_start..ant_start + ant_len]);
+
     // Compute shifted lag state once into ws.current_state, then copy to rec.state.
     ws.current_state.clear();
     ws.current_state
@@ -1043,6 +1082,12 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
             n_completed: &mut ws.scratch.downstream_n_completed,
             par_order: downstream_par_order,
         },
+    );
+    crate::noise::shift_anticipated_state(
+        &mut ws.current_state,
+        &ws.scratch.anticipated_state_buf,
+        &unscaled_primal,
+        indexer,
     );
     rec.state.clear();
     rec.state.extend_from_slice(&ws.current_state);
@@ -1233,7 +1278,8 @@ mod tests {
     };
     use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
     use cobre_solver::{
-        Basis, LpSolution, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
+        Basis, LpSolution, ProfiledSolver, RowBatch, SolverError, SolverInterface,
+        SolverStatistics, StageTemplate,
     };
     use cobre_stochastic::StochasticContext;
     use cobre_stochastic::context::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
@@ -1375,6 +1421,10 @@ mod tests {
         fn name(&self) -> &'static str {
             "Mock"
         }
+        fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
+        fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
+        fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
+        fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
@@ -1862,10 +1912,12 @@ mod tests {
         SolverWorkspace {
             rank: 0,
             worker_id: 0,
-            solver,
+            solver: ProfiledSolver::new(solver),
             patch_buf: crate::lp_builder::PatchBuffer::new(
                 indexer.hydro_count,
                 indexer.max_par_order,
+                0,
+                0,
                 0,
                 0,
             ),
@@ -1898,6 +1950,8 @@ mod tests {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
+                anticipated_state_buf: Vec::new(),
+                anticipated_state_out_col_indices_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -2767,7 +2821,8 @@ mod tests {
         // First iteration: no cached bases → all cold-start.
         run_one_iteration(&mut ws, &mut basis_store).unwrap();
         assert_eq!(
-            ws.solver.warm_start_calls, 0,
+            ws.solver.inner().warm_start_calls,
+            0,
             "first iteration must use cold-start for all stages (warm_start_calls == 0)"
         );
 
@@ -2780,10 +2835,10 @@ mod tests {
         // Second iteration: cached bases present → all stages warm-start.
         run_one_iteration(&mut ws, &mut basis_store).unwrap();
         assert!(
-            ws.solver.warm_start_calls > 0,
+            ws.solver.inner().warm_start_calls > 0,
             "second iteration must use warm-start for at least one stage \
              (warm_start_calls > 0, got {})",
-            ws.solver.warm_start_calls
+            ws.solver.inner().warm_start_calls
         );
     }
 
@@ -3864,11 +3919,16 @@ mod tests {
         let n_load_buses = 1usize;
         let stochastic = make_stochastic_context_1_hydro_1_load_bus(300.0, 30.0);
         let indexer = StageIndexer::new(1, 0);
-        let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, n_load_buses, 1);
+        let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0);
         let mut ws = SolverWorkspace {
             rank: 0,
             worker_id: 0,
-            solver: MockSolver::always_ok(fixed_solution(4, 100.0, indexer.theta, 30.0)),
+            solver: ProfiledSolver::new(MockSolver::always_ok(fixed_solution(
+                4,
+                100.0,
+                indexer.theta,
+                30.0,
+            ))),
             patch_buf,
             current_state: Vec::with_capacity(indexer.n_state),
             scratch: crate::workspace::ScratchBuffers {
@@ -3899,6 +3959,8 @@ mod tests {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
+                anticipated_state_buf: Vec::new(),
+                anticipated_state_out_col_indices_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -4005,11 +4067,16 @@ mod tests {
         let n_load_buses = 1usize;
         let stochastic = make_stochastic_context_1_hydro_1_load_bus(-1000.0, 1.0);
         let indexer = StageIndexer::new(1, 0);
-        let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, n_load_buses, 1);
+        let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0);
         let mut ws = SolverWorkspace {
             rank: 0,
             worker_id: 0,
-            solver: MockSolver::always_ok(fixed_solution(4, 100.0, indexer.theta, 30.0)),
+            solver: ProfiledSolver::new(MockSolver::always_ok(fixed_solution(
+                4,
+                100.0,
+                indexer.theta,
+                30.0,
+            ))),
             patch_buf,
             current_state: Vec::with_capacity(indexer.n_state),
             scratch: crate::workspace::ScratchBuffers {
@@ -4040,6 +4107,8 @@ mod tests {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
+                anticipated_state_buf: Vec::new(),
+                anticipated_state_out_col_indices_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -4283,6 +4352,10 @@ mod tests {
         fn name(&self) -> &'static str {
             "RecordingMock"
         }
+        fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
+        fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
+        fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
+        fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
     }
 
     // ── Tests for append_new_cuts_to_lp ─────────────────────────────────

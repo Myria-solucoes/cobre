@@ -1,11 +1,28 @@
 //! `cobre validate <CASE_DIR>` subcommand.
 //!
-//! Runs the 5-layer validation pipeline and prints a structured diagnostic
-//! report to stdout. No banner or progress bar — the output is the deliverable.
+//! Runs the six-layer validation pipeline followed by the three pre-solver
+//! preparation phases and prints a structured diagnostic report to stdout.
+//! No banner or progress bar — the output is the deliverable.
+//!
+//! ## Validation contract
+//!
+//! If `cobre validate <CASE_DIR>` exits 0, then `cobre run <CASE_DIR>` will not
+//! fail in any phase before the solver begins iterating. The three pre-solver
+//! phases exercised here are:
+//!
+//! 1. [`cobre_sddp::StudyParams::from_config`] — validates `config.json` fields
+//!    that are only checked at algorithm startup (e.g. `basis_activity_window`).
+//! 2. [`cobre_sddp::prepare_stochastic`] — runs PAR estimation from inflow
+//!    history, loads user opening trees, and builds the stochastic context.
+//! 3. [`cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts`] — resolves
+//!    production and evaporation models from the pre-parsed artifact bundle.
 
 use std::path::{Path, PathBuf};
 
 use clap::Args;
+use cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts;
+use cobre_sddp::validate_phases::{PrepPhase, prep_phase_metadata};
+use cobre_sddp::{StudyParams, prepare_stochastic};
 use console::{Term, style};
 
 use crate::error::CliError;
@@ -36,11 +53,39 @@ fn format_constraint_description(
     }
 }
 
+/// Format and print a pre-solver preparation error to `stdout`.
+///
+/// Delegates the phase→file-label and phase→kind mapping to
+/// [`prep_phase_metadata`], then writes one summary line and one error line to
+/// `term`. Returns the `"file_label: message"` string so the caller can embed
+/// it in a [`CliError`].
+fn format_prep_error(
+    term: &Term,
+    phase: PrepPhase,
+    err: &cobre_sddp::SddpError,
+    case_dir: &Path,
+) -> String {
+    let (_kind, file_label) = prep_phase_metadata(phase, err);
+    let message = err.to_string();
+    let _ = term.write_line(&format!(
+        "Validation: 1 errors, 0 warnings in {}",
+        case_dir.display()
+    ));
+    let _ = term.write_line(&format!(
+        "{} {file_label}: {message}",
+        style("error:").red().bold()
+    ));
+    format!("{file_label}: {message}")
+}
+
 /// Execute the `validate` subcommand.
 ///
-/// Calls `cobre_io::validate_case` on the given case directory and prints a
-/// structured diagnostic report to stdout, including any warnings collected
-/// during the validation pipeline.
+/// Calls the six-layer IO pipeline followed by the three pre-solver preparation
+/// phases. Prints a structured diagnostic report to stdout, including any warnings
+/// collected during the pipeline.
+///
+/// The validation contract: if this command exits 0, `cobre run <CASE_DIR>` will
+/// not fail in any phase before the solver begins iterating.
 ///
 /// # Errors
 ///
@@ -61,56 +106,110 @@ pub fn execute(args: ValidateArgs) -> Result<(), CliError> {
         });
     }
 
-    match cobre_io::validate_case(&args.case_dir) {
-        Ok((system, report)) => {
-            // Print entity counts — one per line for easy grep/pipe consumption.
-            let _ = stdout.write_line(&format!(
-                "Valid case: {} buses, {} hydros, {} thermals, {} lines",
-                system.n_buses(),
-                system.n_hydros(),
-                system.n_thermals(),
-                system.n_lines(),
-            ));
-            let _ = stdout.write_line(&format!("  buses: {}", system.n_buses()));
-            let _ = stdout.write_line(&format!("  hydros: {}", system.n_hydros()));
-            let _ = stdout.write_line(&format!("  thermals: {}", system.n_thermals()));
-            let _ = stdout.write_line(&format!("  lines: {}", system.n_lines()));
-            if report.warning_count > 0 {
-                let _ = stdout.write_line(&format!(
-                    "Validation: 0 errors, {} warnings in {}",
-                    report.warning_count,
-                    args.case_dir.display()
-                ));
-                for entry in &report.warnings {
-                    let location = if let Some(entity) = &entry.entity {
-                        format!("{} ({})", entry.file, entity)
-                    } else {
-                        entry.file.clone()
-                    };
-                    let _ = stdout.write_line(&format!(
-                        "{} {location}: {}",
-                        style("warning:").yellow().bold(),
-                        entry.message
-                    ));
-                }
-            }
-            Ok(())
+    // Phase 1-6: IO pipeline (structural + schema + referential + dimensional +
+    // semantic + cross-file resolution). Use the _with_artifacts variant so we
+    // get the pre-parsed CaseArtifacts needed by phase 3 below without a second
+    // disk read.
+    let (loaded, report) = match cobre_io::validate_case_with_artifacts(&args.case_dir) {
+        Ok(result) => result,
+        Err(cobre_io::LoadError::IoError { path, source }) => {
+            return Err(CliError::Io {
+                source,
+                context: path.display().to_string(),
+            });
         }
-        Err(cobre_io::LoadError::IoError { path, source }) => Err(CliError::Io {
-            source,
-            context: path.display().to_string(),
-        }),
         Err(cobre_io::LoadError::ConstraintError { description }) => {
             // Warnings are not available when errors abort the pipeline, so report 0.
             format_constraint_description(&stdout, &description, 0, &args.case_dir);
-            Err(CliError::Validation {
+            return Err(CliError::Validation {
                 report: description,
-            })
+            });
         }
-        Err(other) => Err(CliError::Internal {
-            message: other.to_string(),
-        }),
+        Err(other) => {
+            return Err(CliError::Internal {
+                message: other.to_string(),
+            });
+        }
+    };
+
+    let system = loaded.system;
+    let artifacts = loaded.artifacts;
+
+    // Phase 7: Parse config.json and validate solver-level config fields.
+    let config_path = args.case_dir.join("config.json");
+    let config = cobre_io::parse_config(&config_path).map_err(CliError::from)?;
+
+    // Phase 8: StudyParams::from_config — catches basis_activity_window range
+    // violations, unsupported stopping rules, and cut-selection config errors.
+    let study_params = match StudyParams::from_config(&config) {
+        Ok(p) => p,
+        Err(ref err) => {
+            let report_msg = format_prep_error(&stdout, PrepPhase::Config, err, &args.case_dir);
+            return Err(CliError::Validation { report: report_msg });
+        }
+    };
+
+    let seed = study_params.seed;
+
+    // Extract the training scenario source (needed by prepare_stochastic).
+    // Use config_path as the sentinel — training_scenario_source only uses it
+    // for historical-years file look-up and error messages.
+    let training_source = config
+        .training_scenario_source(&config_path)
+        .map_err(CliError::from)?;
+
+    // Phase 9: prepare_stochastic — runs PAR estimation from history, loads user
+    // opening trees, builds the stochastic context. This is the most expensive
+    // step; the user has explicitly accepted the cost for full parity.
+    let prepared = match prepare_stochastic(system, &args.case_dir, &config, seed, &training_source)
+    {
+        Ok(p) => p,
+        Err(ref err) => {
+            let report_msg = format_prep_error(&stdout, PrepPhase::Stochastic, err, &args.case_dir);
+            return Err(CliError::Validation { report: report_msg });
+        }
+    };
+
+    // Phase 10: prepare_hydro_models_from_artifacts — resolves production and
+    // evaporation models. Uses the already-parsed artifacts bundle from phase 1-6
+    // to avoid re-reading disk.
+    if let Err(ref err) = prepare_hydro_models_from_artifacts(&prepared.system, &artifacts) {
+        let report_msg = format_prep_error(&stdout, PrepPhase::HydroModels, err, &args.case_dir);
+        return Err(CliError::Validation { report: report_msg });
     }
+
+    // All phases passed — print entity counts and any pipeline warnings.
+    let _ = stdout.write_line(&format!(
+        "Valid case: {} buses, {} hydros, {} thermals, {} lines",
+        prepared.system.n_buses(),
+        prepared.system.n_hydros(),
+        prepared.system.n_thermals(),
+        prepared.system.n_lines(),
+    ));
+    let _ = stdout.write_line(&format!("  buses: {}", prepared.system.n_buses()));
+    let _ = stdout.write_line(&format!("  hydros: {}", prepared.system.n_hydros()));
+    let _ = stdout.write_line(&format!("  thermals: {}", prepared.system.n_thermals()));
+    let _ = stdout.write_line(&format!("  lines: {}", prepared.system.n_lines()));
+    if report.warning_count > 0 {
+        let _ = stdout.write_line(&format!(
+            "Validation: 0 errors, {} warnings in {}",
+            report.warning_count,
+            args.case_dir.display()
+        ));
+        for entry in &report.warnings {
+            let location = if let Some(entity) = &entry.entity {
+                format!("{} ({})", entry.file, entity)
+            } else {
+                entry.file.clone()
+            };
+            let _ = stdout.write_line(&format!(
+                "{} {location}: {}",
+                style("warning:").yellow().bold(),
+                entry.message
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

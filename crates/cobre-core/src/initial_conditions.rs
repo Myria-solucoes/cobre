@@ -11,7 +11,10 @@
 //! # Examples
 //!
 //! ```
-//! use cobre_core::{EntityId, InitialConditions, HydroStorage, HydroPastInflows};
+//! use cobre_core::{
+//!     AnticipatedCommitmentHistory, EntityId, HydroPastInflows, HydroStorage,
+//!     InitialConditions,
+//! };
 //!
 //! let ic = InitialConditions {
 //!     storage: vec![
@@ -24,12 +27,16 @@
 //!     past_inflows: vec![
 //!         HydroPastInflows { hydro_id: EntityId(0), values_m3s: vec![600.0, 500.0], season_ids: None },
 //!     ],
+//!     past_anticipated_commitments: vec![
+//!         AnticipatedCommitmentHistory { thermal_id: EntityId(20), values_mw: vec![100.0, 200.0] },
+//!     ],
 //!     recent_observations: vec![],
 //! };
 //!
 //! assert_eq!(ic.storage.len(), 2);
 //! assert_eq!(ic.filling_storage.len(), 1);
 //! assert_eq!(ic.past_inflows.len(), 1);
+//! assert_eq!(ic.past_anticipated_commitments.len(), 1);
 //! assert_eq!(ic.recent_observations.len(), 0);
 //! ```
 
@@ -78,6 +85,53 @@ pub struct HydroPastInflows {
     pub season_ids: Option<Vec<u32>>,
 }
 
+/// Past externally-decided anticipated commitments for a single thermal plant.
+///
+/// For an anticipated thermal plant with `lead_stages = K`, each `values_mw[k]`
+/// is the MW output the LP dispatches at study stage `k` (0-indexed,
+/// `0 <= k < lead_stages`). The decisions were priced externally (sunk cost):
+/// the per-MWh cost of these deliveries does not contribute to the study
+/// objective. The LP imposes a fishing equality at every pre-horizon stage `k`:
+/// `sum_b gen[i][b] * block_hours_b == values_mw[k] * stage_total_hours`.
+///
+/// Every `values_mw[k]` must lie in
+/// `[thermal.min_generation_mw, thermal.max_generation_mw]`; out-of-bounds
+/// values are rejected by `cobre-io` because an out-of-bounds entry would
+/// make the LP's fishing equality at stage `k` infeasible.
+///
+/// `values_mw` must have exactly `lead_stages` entries; the length check is
+/// enforced by the structural validator
+/// (`cobre-io::validation::semantic::thermal::check_anticipated_thermals`).
+///
+/// # Sorting invariant
+///
+/// Callers MUST sort the containing `Vec<AnticipatedCommitmentHistory>` by
+/// `thermal_id` ascending before passing it to
+/// `SystemBuilder::initial_conditions` to satisfy declaration-order invariance.
+///
+/// # Division of responsibility
+///
+/// Construction-time invariants (enforced by `cobre-io`, **not** by
+/// `cobre-core`):
+/// - `values_mw.len() == thermal.anticipated_config.lead_stages as usize`.
+/// - Every `values_mw[k]` in `[min_generation_mw, max_generation_mw]`.
+/// - `thermal_id` references a thermal whose `anticipated_config` is `Some`.
+/// - Exactly one entry per anticipated thermal in the system.
+///
+/// `cobre-core` does not enforce these because it has no view of the system
+/// entity registry. Validation lives in the `cobre-io` semantic validator.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct AnticipatedCommitmentHistory {
+    /// Thermal plant identifier. Must reference an anticipated thermal entity.
+    pub thermal_id: EntityId,
+    /// Externally-decided MW delivered at each study stage, in MW.
+    /// `values_mw[k]` is the committed output at study stage `k` (0-indexed).
+    /// Length must equal the plant's `lead_stages`. Every entry must lie in
+    /// `[thermal.min_generation_mw, thermal.max_generation_mw]`.
+    pub values_mw: Vec<f64>,
+}
+
 /// Observed inflow for a single hydro plant over a specific date range.
 ///
 /// Used to seed the lag accumulator when a study begins mid-season. Each entry
@@ -104,13 +158,27 @@ pub struct RecentObservation {
 /// Initial system state at the start of the optimization study.
 ///
 /// Produced by parsing `initial_conditions.json` (in `cobre-io`) and stored
-/// inside [`crate::System`]. All arrays are sorted by `hydro_id` after
-/// loading to satisfy the declaration-order invariance requirement.
+/// inside [`crate::System`]. All arrays are sorted by the respective entity ID
+/// after loading to satisfy the declaration-order invariance requirement.
 ///
 /// A hydro must appear in exactly one of the two storage arrays, never both.
 /// Hydros with a `filling` configuration belong in [`filling_storage`]; all
 /// other hydros (including late-entry hydros) belong in
 /// [`storage`](InitialConditions::storage).
+///
+/// # Fields
+///
+/// - [`storage`](InitialConditions::storage): initial reservoir volumes for
+///   operating hydros, sorted by `hydro_id`.
+/// - [`filling_storage`](InitialConditions::filling_storage): initial volumes
+///   for filling hydros (below dead volume), sorted by `hydro_id`.
+/// - [`past_inflows`](InitialConditions::past_inflows): PAR(p) lag history per
+///   hydro, sorted by `hydro_id`.
+/// - [`past_anticipated_commitments`](InitialConditions::past_anticipated_commitments):
+///   externally-decided pending commitments per anticipated thermal plant, sorted
+///   by `thermal_id`.
+/// - [`recent_observations`](InitialConditions::recent_observations): observed
+///   inflows for partial periods, sorted by `(hydro_id, start_date)`.
 ///
 /// [`filling_storage`]: InitialConditions::filling_storage
 #[derive(Debug, Clone, PartialEq)]
@@ -131,6 +199,26 @@ pub struct InitialConditions {
     /// omitting it would break postcard round-trips used by MPI broadcast.
     #[cfg_attr(feature = "serde", serde(default))]
     pub past_inflows: Vec<HydroPastInflows>,
+    /// Past externally-decided anticipated commitments per anticipated thermal
+    /// plant. Empty for studies without anticipated thermal plants. Sorted by
+    /// `thermal_id` ascending to satisfy declaration-order invariance.
+    ///
+    /// Each entry covers one anticipated thermal plant. The length of
+    /// `values_mw` must equal the plant's `lead_stages` (validated in
+    /// `cobre-io`). Every `values_mw[k]` must lie in
+    /// `[thermal.min_generation_mw, thermal.max_generation_mw]` — out-of-bounds
+    /// entries are rejected by the semantic validator. See
+    /// [`AnticipatedCommitmentHistory`] for the sunk-cost semantics.
+    ///
+    /// In JSON: the field is optional (`serde(default)` fills an empty `Vec`
+    /// when the key is absent). Backward-compatible with existing JSON files
+    /// that predate anticipated thermal support.
+    ///
+    /// Field declaration order is part of the postcard wire format used by
+    /// MPI broadcast: reordering or inserting a field above this one would
+    /// silently break broadcast round-trips. Append new fields at the end.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub past_anticipated_commitments: Vec<AnticipatedCommitmentHistory>,
     /// Observed inflow data for partial periods before the study start.
     ///
     /// Used to seed the lag accumulator when a study begins mid-season (i.e.,
@@ -144,12 +232,13 @@ pub struct InitialConditions {
 }
 
 impl Default for InitialConditions {
-    /// Returns an empty `InitialConditions` (no hydros).
+    /// Returns an empty `InitialConditions` (no hydros, no anticipated thermals).
     fn default() -> Self {
         Self {
             storage: Vec::new(),
             filling_storage: Vec::new(),
             past_inflows: Vec::new(),
+            past_anticipated_commitments: Vec::new(),
             recent_observations: Vec::new(),
         }
     }
@@ -181,6 +270,7 @@ mod tests {
                 values_m3s: vec![600.0, 500.0],
                 season_ids: None,
             }],
+            past_anticipated_commitments: vec![],
             recent_observations: vec![],
         };
 
@@ -214,8 +304,6 @@ mod tests {
         };
         let cloned = hs.clone();
         assert_eq!(hs, cloned);
-        assert_eq!(cloned.hydro_id, EntityId(5));
-        assert_eq!(cloned.value_hm3, 1_234.5);
     }
 
     #[test]
@@ -227,8 +315,6 @@ mod tests {
         };
         let cloned = hpi.clone();
         assert_eq!(hpi, cloned);
-        assert_eq!(cloned.hydro_id, EntityId(3));
-        assert_eq!(cloned.values_m3s, vec![300.0, 200.0, 100.0]);
     }
 
     #[cfg(feature = "serde")]
@@ -254,6 +340,7 @@ mod tests {
                 values_m3s: vec![600.0, 500.0],
                 season_ids: None,
             }],
+            past_anticipated_commitments: vec![],
             recent_observations: vec![],
         };
 
@@ -274,6 +361,7 @@ mod tests {
             }],
             filling_storage: vec![],
             past_inflows: vec![],
+            past_anticipated_commitments: vec![],
             recent_observations: vec![],
         };
 
@@ -296,8 +384,6 @@ mod tests {
         };
         let cloned = obs.clone();
         assert_eq!(obs, cloned);
-        assert_eq!(cloned.hydro_id, EntityId(2));
-        assert_eq!(cloned.value_m3s, 500.0);
     }
 
     #[test]
@@ -309,6 +395,7 @@ mod tests {
             }],
             filling_storage: vec![],
             past_inflows: vec![],
+            past_anticipated_commitments: vec![],
             recent_observations: vec![RecentObservation {
                 hydro_id: EntityId(0),
                 start_date: NaiveDate::from_ymd_opt(2026, 4, 1)
@@ -333,6 +420,7 @@ mod tests {
             }],
             filling_storage: vec![],
             past_inflows: vec![],
+            past_anticipated_commitments: vec![],
             recent_observations: vec![
                 RecentObservation {
                     hydro_id: EntityId(0),
@@ -405,5 +493,73 @@ mod tests {
         assert_eq!(hpi.hydro_id, EntityId(0));
         assert_eq!(hpi.values_m3s, vec![600.0, 500.0]);
         assert_eq!(hpi.season_ids, None);
+    }
+
+    // --- AnticipatedCommitmentHistory tests ---
+
+    #[test]
+    fn test_past_anticipated_commitments_default_empty() {
+        let ic = InitialConditions::default();
+        assert!(ic.past_anticipated_commitments.is_empty());
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_anticipated_commitment_history_serde_roundtrip() {
+        let ach = AnticipatedCommitmentHistory {
+            thermal_id: EntityId(7),
+            values_mw: vec![100.0, 200.0],
+        };
+        let json = serde_json::to_string(&ach).unwrap();
+        let deserialized: AnticipatedCommitmentHistory = serde_json::from_str(&json).unwrap();
+        assert_eq!(ach, deserialized);
+        // The serialized JSON must NOT contain a season_ids field.
+        assert!(
+            !json.contains("season_ids"),
+            "JSON must not contain 'season_ids', got: {json}"
+        );
+    }
+
+    #[test]
+    fn test_initial_conditions_with_anticipated_commitments() {
+        let ic = InitialConditions {
+            storage: vec![],
+            filling_storage: vec![],
+            past_inflows: vec![],
+            past_anticipated_commitments: vec![
+                AnticipatedCommitmentHistory {
+                    thermal_id: EntityId(3),
+                    values_mw: vec![50.0, 75.0, 100.0],
+                },
+                AnticipatedCommitmentHistory {
+                    thermal_id: EntityId(5),
+                    values_mw: vec![200.0],
+                },
+            ],
+            recent_observations: vec![],
+        };
+        assert_eq!(ic.past_anticipated_commitments.len(), 2);
+        assert_eq!(ic.past_anticipated_commitments[0].thermal_id, EntityId(3));
+        assert_eq!(
+            ic.past_anticipated_commitments[0].values_mw,
+            vec![50.0, 75.0, 100.0]
+        );
+        assert_eq!(ic.past_anticipated_commitments[1].thermal_id, EntityId(5));
+        assert_eq!(ic.past_anticipated_commitments[1].values_mw, vec![200.0]);
+    }
+
+    /// Compile-time enforcement that `AnticipatedCommitmentHistory` has exactly
+    /// two fields (`thermal_id` and `values_mw`) and no `season_ids` field.
+    ///
+    /// Rust's exhaustive struct-literal syntax will fail to compile if any
+    /// undeclared field is present or any declared field is missing.
+    #[test]
+    fn test_anticipated_commitment_history_has_no_season_ids_field() {
+        let ach = AnticipatedCommitmentHistory {
+            thermal_id: EntityId(0),
+            values_mw: vec![],
+        };
+        assert_eq!(ach.thermal_id, EntityId(0));
+        assert!(ach.values_mw.is_empty());
     }
 }

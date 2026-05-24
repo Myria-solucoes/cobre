@@ -907,7 +907,8 @@ fn validate_variable_ref_entity(
                 );
             }
         }
-        VariableRef::ThermalGeneration { thermal_id, .. } => {
+        VariableRef::ThermalGeneration { thermal_id, .. }
+        | VariableRef::AnticipatedDecision { thermal_id, .. } => {
             if !ids.thermal.contains(&thermal_id.0) {
                 ctx.add_error(
                     ErrorKind::InvalidReference,
@@ -1347,7 +1348,7 @@ mod tests {
             cost_per_mwh: 50.0,
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
-            gnl_config: None,
+            anticipated_config: None,
         }];
         // HydroGeometryRow referencing non-existent hydro (888)
         data.hydro_geometry = vec![HydroGeometryRow {
@@ -2106,5 +2107,68 @@ mod tests {
             .collect();
         assert_eq!(inv.len(), 1);
         assert!(inv[0].message.contains("negative"));
+    }
+
+    // ── AC-7: AnticipatedDecision referential validation ─────────────────────
+
+    /// AC-7: A constraint with `anticipated_decision(99)` where Thermal 99 does
+    /// not exist produces `ErrorKind::InvalidReference` naming Thermal 99 and
+    /// including the constraint id in the context.
+    #[test]
+    fn test_anticipated_decision_unknown_thermal_ref() {
+        use cobre_core::{
+            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
+            VariableRef,
+        };
+
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+
+        // Build a generic constraint referencing Thermal 99, which does not exist.
+        let gc = GenericConstraint {
+            id: EntityId::from(1),
+            name: "test_constraint".to_string(),
+            description: None,
+            expression: ConstraintExpression {
+                terms: vec![LinearTerm::literal(
+                    1.0,
+                    VariableRef::AnticipatedDecision {
+                        thermal_id: EntityId::from(99),
+                    },
+                )],
+            },
+            sense: ConstraintSense::LessEqual,
+            slack: SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+        };
+        data.generic_constraints = vec![gc];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+        assert!(ctx.has_errors(), "expected referential errors");
+
+        let inv: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidReference)
+            .collect();
+        assert_eq!(
+            inv.len(),
+            1,
+            "expected exactly 1 InvalidReference, got: {inv:?}"
+        );
+        assert!(
+            inv[0].message.contains("99"),
+            "error message must name Thermal 99, got: {}",
+            inv[0].message
+        );
+        assert!(
+            inv[0].message.contains("Thermal"),
+            "error message must include 'Thermal', got: {}",
+            inv[0].message
+        );
     }
 }

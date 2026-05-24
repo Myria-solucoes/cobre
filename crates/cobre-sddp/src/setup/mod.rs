@@ -382,6 +382,17 @@ impl StudySetup {
             .max()
             .unwrap_or(0);
 
+        let mut anticipated_thermal_indices: Vec<usize> = Vec::new();
+        let mut anticipated_lead_stages: Vec<usize> = Vec::new();
+        for (t_idx, thermal) in system.thermals().iter().enumerate() {
+            if let Some(cfg) = thermal.anticipated_config.as_ref() {
+                anticipated_thermal_indices.push(t_idx);
+                anticipated_lead_stages
+                    .push(usize::try_from(cfg.lead_stages).unwrap_or(usize::MAX));
+            }
+        }
+        let n_anticipated = anticipated_thermal_indices.len();
+        let k_max: usize = anticipated_lead_stages.iter().copied().max().unwrap_or(0);
         let eq_counts = crate::indexer::EquipmentCounts {
             hydro_count: stage_templates_ref[0].n_hydro,
             max_par_order: stage_templates_ref[0].max_par_order,
@@ -391,6 +402,10 @@ impl StudySetup {
             n_blks: n_blks_stage0,
             has_inflow_penalty,
             max_deficit_segments,
+            n_anticipated,
+            k_max,
+            anticipated_lead_stages,
+            anticipated_thermal_indices,
         };
         let fpha_cfg = crate::indexer::FphaColumnLayout {
             hydro_indices: fpha_hydro_indices,
@@ -425,12 +440,21 @@ impl StudySetup {
         // Using `par.order(h)` here would silently truncate the cut row's state
         // coefficients on lag slots that carry the annual `ψ̂/12` term and
         // produce over-estimating cuts (analogue of d0e4a42).
-        if indexer.max_par_order > 0 && stochastic.par().n_hydros() > 0 {
+        if (indexer.max_par_order > 0 && stochastic.par().n_hydros() > 0)
+            || indexer.n_anticipated > 0
+        {
             let par = stochastic.par();
-            let effective_lag_counts: Vec<usize> = (0..par.n_hydros())
-                .map(|h| par.effective_lag_count(h))
-                .collect();
-            indexer.set_nonzero_mask(&effective_lag_counts);
+            let effective_lag_counts: Vec<usize> = if indexer.max_par_order > 0 {
+                (0..par.n_hydros())
+                    .map(|h| par.effective_lag_count(h))
+                    .collect()
+            } else {
+                vec![0; indexer.hydro_count]
+            };
+            // Clone to release the immutable borrow on `indexer` before the
+            // mutable `set_nonzero_mask` call below.
+            let anticipated_k: Vec<usize> = indexer.anticipated_lead_stages.clone();
+            indexer.set_nonzero_mask(&effective_lag_counts, &anticipated_k);
         }
 
         let initial_state = build_initial_state(system, &indexer);
@@ -845,6 +869,68 @@ fn build_initial_state(system: &System, indexer: &StageIndexer) -> Vec<f64> {
         }
     }
 
+    // Seed anticipated-state ring buffer from `past_anticipated_commitments`.
+    // Each entry carries K_i values decided before study start, delivered at
+    // stages 1..=K_i. Layout: state[anticipated_state.start + slot * n_anticipated + local_idx].
+    //
+    // Pre-horizon seeding is enabled: slot 0 may hold a non-zero seed at stage 0.
+    // Padding slots [K_i, k_max) must stay zero (enforced by clamping to K_i
+    // and debug_assert). The ring-buffer logic in noise.rs and indexer.rs
+    // assumes padding slots are zero.
+    if indexer.n_anticipated > 0 && indexer.k_max > 0 {
+        debug_assert_eq!(
+            indexer.anticipated_thermal_indices.len(),
+            indexer.n_anticipated,
+            "anticipated_thermal_indices length must equal n_anticipated",
+        );
+        let thermals = system.thermals();
+        let n_ant = indexer.n_anticipated;
+        let ant_start = indexer.anticipated_state.start;
+        for history in &ic.past_anticipated_commitments {
+            // Resolve global thermal index via binary search on EntityId.
+            // Both system.thermals() and past_anticipated_commitments are
+            // sorted by thermal_id ascending (sorted during system construction).
+            let Ok(global_idx) = thermals.binary_search_by_key(&history.thermal_id.0, |t| t.id.0)
+            else {
+                // Unknown thermal ID — silently skip.  The cobre-io validator
+                // rejects this in production, but defense-in-depth matches the
+                // existing `past_inflows` behavior.
+                continue;
+            };
+            // Find the anticipated-local index by linear search.
+            // n_anticipated is small (typical range 1–50), so O(n) is fine.
+            let Some(local_idx) = indexer
+                .anticipated_thermal_indices
+                .iter()
+                .position(|&g| g == global_idx)
+            else {
+                // Thermal exists in the system but has anticipated_config: None.
+                // Silently skip — not an anticipated plant.
+                continue;
+            };
+            // K_i is the per-plant lead time; clamp to K_i (not k_max) to
+            // prevent over-long input from corrupting padding slots.
+            // cobre-io validator enforces values_mw.len() == K_i in production.
+            let k_i = indexer.anticipated_lead_stages[local_idx];
+            let n_slots = history.values_mw.len().min(k_i);
+            for slot in 0..n_slots {
+                let off = ant_start + slot * n_ant + local_idx;
+                state[off] = history.values_mw[slot];
+            }
+            // Padding-slot invariant: [K_i, k_max) must remain 0.0 to prevent
+            // ring-buffer corruption and LP infeasibility.
+            #[allow(clippy::float_cmp)]
+            for slot in k_i..indexer.k_max {
+                let off = ant_start + slot * n_ant + local_idx;
+                debug_assert_eq!(
+                    state[off], 0.0,
+                    "padding slot must be zero: plant local_idx={local_idx}, slot={slot}, K_i={k_i}, k_max={}",
+                    indexer.k_max
+                );
+            }
+        }
+    }
+
     state
 }
 
@@ -871,7 +957,7 @@ mod tests {
         entities::{
             bus::{Bus, DeficitSegment},
             hydro::{Hydro, HydroGenerationModel, HydroPenalties},
-            thermal::Thermal,
+            thermal::{AnticipatedConfig, Thermal},
         },
         scenario::{InflowModel, LoadModel, SamplingScheme},
         temporal::{
@@ -917,7 +1003,7 @@ mod tests {
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
             cost_per_mwh: 50.0,
-            gnl_config: None,
+            anticipated_config: None,
             entry_stage_id: None,
             exit_stage_id: None,
         };
@@ -1064,6 +1150,7 @@ mod tests {
             0,
                 n_stages: // n_contracts
             n_st,
+                k_max: 0,
             },
             &BoundsDefaults {
                 hydro: default_hydro_bounds(),
@@ -1152,7 +1239,7 @@ mod tests {
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
             cost_per_mwh: 50.0,
-            gnl_config: None,
+            anticipated_config: None,
             entry_stage_id: None,
             exit_stage_id: None,
         };
@@ -1257,6 +1344,7 @@ mod tests {
                 n_pumping: 0,
                 n_contracts: 0,
                 n_stages: n_st,
+                k_max: 0,
             },
             &BoundsDefaults {
                 hydro: HydroStageBounds {
@@ -2423,7 +2511,7 @@ mod tests {
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
             cost_per_mwh: 50.0,
-            gnl_config: None,
+            anticipated_config: None,
             entry_stage_id: None,
             exit_stage_id: None,
         };
@@ -2539,6 +2627,7 @@ mod tests {
                 n_pumping: 0,
                 n_contracts: 0,
                 n_stages: n_st,
+                k_max: 0,
             },
             &BoundsDefaults {
                 hydro: HydroStageBounds {
@@ -3010,6 +3099,7 @@ mod tests {
                 n_pumping: 0,
                 n_contracts: 0,
                 n_stages: n_st,
+                k_max: 0,
             },
             &BoundsDefaults {
                 hydro: default_hydro_bounds(),
@@ -3078,6 +3168,7 @@ mod tests {
                 storage: vec![],
                 filling_storage: vec![],
                 past_inflows,
+                past_anticipated_commitments: vec![],
                 recent_observations: vec![],
             })
             .build()
@@ -3263,6 +3354,580 @@ mod tests {
         assert_eq!(state.len(), 1, "state length must equal n_state=1");
     }
 
+    // -----------------------------------------------------------------------
+    // build_initial_state — anticipated_state seed
+    // -----------------------------------------------------------------------
+
+    /// Build a `StageIndexer` that has N=1 hydro, L=0 lags, and the given
+    /// anticipated-thermal metadata, using `with_equipment_and_evaporation`.
+    ///
+    /// This gives a non-zero `anticipated_state` block in the state vector.
+    fn indexer_with_anticipated(
+        n_anticipated: usize,
+        k_values: &[usize],        // K_i per plant, length == n_anticipated
+        thermal_indices: &[usize], // global thermal index per plant
+    ) -> StageIndexer {
+        use crate::indexer::{EquipmentCounts, EvapConfig, FphaColumnLayout};
+
+        let k_max = k_values.iter().copied().max().unwrap_or(0);
+        StageIndexer::with_equipment_and_evaporation(
+            &EquipmentCounts {
+                hydro_count: 1,
+                max_par_order: 0,
+                n_thermals: n_anticipated, // at least cover the anticipated plants
+                n_lines: 0,
+                n_buses: 1,
+                n_blks: 1,
+                has_inflow_penalty: false,
+                max_deficit_segments: 1,
+                n_anticipated,
+                k_max,
+                anticipated_lead_stages: k_values.to_vec(),
+                anticipated_thermal_indices: thermal_indices.to_vec(),
+            },
+            &FphaColumnLayout {
+                hydro_indices: vec![],
+                planes_per_hydro: vec![],
+            },
+            &EvapConfig {
+                hydro_indices: vec![],
+            },
+        )
+    }
+
+    /// Build a 1-bus / 1-hydro system whose `thermals` list contains N
+    /// anticipated thermals with the given `lead_stages` values.  Thermal IDs
+    /// are assigned as `EntityId(10 + i as i32)` so they are distinct from the
+    /// bus (ID 1) and the hydro (ID 3).  `past_anticipated_commitments` is set
+    /// to `past_commits` (must be pre-sorted by `thermal_id`).
+    #[allow(
+        clippy::too_many_lines,
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::items_after_statements
+    )]
+    fn system_with_anticipated_thermals(
+        k_values: &[u32],
+        past_commits: Vec<cobre_core::AnticipatedCommitmentHistory>,
+    ) -> cobre_core::System {
+        use chrono::NaiveDate;
+
+        let bus = Bus {
+            id: EntityId(1),
+            name: "B1".to_string(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 500.0,
+            }],
+            excess_cost: 0.0,
+        };
+
+        // Build N anticipated thermals. IDs are 10, 11, 12, … so they are
+        // always above the hydro ID (3) and can be easily identified.
+        let thermals: Vec<Thermal> = k_values
+            .iter()
+            .enumerate()
+            .map(|(i, &k)| Thermal {
+                id: EntityId(10 + i as i32),
+                name: format!("AT{i}"),
+                bus_id: EntityId(1),
+                min_generation_mw: 0.0,
+                max_generation_mw: 100.0,
+                cost_per_mwh: 50.0,
+                anticipated_config: Some(AnticipatedConfig { lead_stages: k }),
+                entry_stage_id: None,
+                exit_stage_id: None,
+            })
+            .collect();
+
+        let hydro = Hydro {
+            id: EntityId(3),
+            name: "H1".to_string(),
+            bus_id: EntityId(1),
+            downstream_id: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 200.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 250.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: HydroPenalties {
+                spillage_cost: 0.01,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 0.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            },
+        };
+
+        let n_stages = 2_usize;
+        let stages: Vec<Stage> = (0..n_stages)
+            .map(|i| Stage {
+                index: i,
+                id: i as i32,
+                start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                season_id: None,
+                blocks: vec![Block {
+                    index: 0,
+                    name: "S".to_string(),
+                    duration_hours: 744.0,
+                }],
+                block_mode: BlockMode::Parallel,
+                state_config: StageStateConfig {
+                    storage: true,
+                    inflow_lags: false,
+                },
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::Saa,
+                },
+            })
+            .collect();
+
+        let inflow_models: Vec<InflowModel> = (0..n_stages)
+            .map(|i| InflowModel {
+                hydro_id: EntityId(3),
+                stage_id: i as i32,
+                mean_m3s: 80.0,
+                std_m3s: 20.0,
+                ar_coefficients: vec![],
+                residual_std_ratio: 1.0,
+                annual: None,
+            })
+            .collect();
+
+        let load_models: Vec<LoadModel> = (0..n_stages)
+            .map(|i| LoadModel {
+                bus_id: EntityId(1),
+                stage_id: i as i32,
+                mean_mw: 100.0,
+                std_mw: 0.0,
+            })
+            .collect();
+
+        let k_max_bounds = k_values.iter().copied().max().unwrap_or(0) as usize;
+        let n_thermals = k_values.len();
+
+        fn default_hydro_bounds() -> HydroStageBounds {
+            HydroStageBounds {
+                min_storage_hm3: 0.0,
+                max_storage_hm3: 200.0,
+                min_turbined_m3s: 0.0,
+                max_turbined_m3s: 100.0,
+                min_outflow_m3s: 0.0,
+                max_outflow_m3s: None,
+                min_generation_mw: 0.0,
+                max_generation_mw: 250.0,
+                max_diversion_m3s: None,
+                filling_inflow_m3s: 0.0,
+                water_withdrawal_m3s: 0.0,
+            }
+        }
+
+        fn default_hydro_penalties() -> HydroStagePenalties {
+            HydroStagePenalties {
+                spillage_cost: 0.01,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 500.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            }
+        }
+
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages,
+                k_max: k_max_bounds,
+            },
+            &BoundsDefaults {
+                hydro: default_hydro_bounds(),
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 100.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 1,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages,
+            },
+            &PenaltiesDefaults {
+                hydro: default_hydro_penalties(),
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .thermals(thermals)
+            .hydros(vec![hydro])
+            .stages(stages)
+            .inflow_models(inflow_models)
+            .load_models(load_models)
+            .bounds(bounds)
+            .penalties(penalties)
+            .initial_conditions(cobre_core::InitialConditions {
+                storage: vec![],
+                filling_storage: vec![],
+                past_inflows: vec![],
+                past_anticipated_commitments: past_commits,
+                recent_observations: vec![],
+            })
+            .build()
+            .expect("system_with_anticipated_thermals: valid")
+    }
+
+    /// AC-1: A system with `n_anticipated == 0` produces an unchanged state
+    /// vector (length `n_state`, `anticipated_state` block is empty).
+    ///
+    /// Regression guard: confirms zero-anticipated path is unaffected.
+    #[test]
+    fn build_initial_state_no_anticipated_state_unchanged() {
+        use super::build_initial_state;
+
+        let system = minimal_system(2);
+        let indexer = indexer_for_lag_test(1, 0);
+
+        // n_anticipated == 0; anticipated_state range is 0..0.
+        assert_eq!(indexer.n_anticipated, 0);
+        assert!(indexer.anticipated_state.is_empty());
+
+        let state = build_initial_state(&system, &indexer);
+
+        assert_eq!(
+            state.len(),
+            indexer.n_state,
+            "state length must equal n_state"
+        );
+        // All slots are 0.0 — storage IC is empty in minimal_system.
+        assert!(
+            state.iter().all(|&v| v == 0.0),
+            "all state slots must be 0.0 when no anticipated thermals and no ICs set"
+        );
+    }
+
+    /// AC-2: `n_anticipated == 1`, `k_max == 2`, `K_0 == 2` and
+    /// `past_anticipated_commitments` has one entry with `values_mw: [50.0, 75.0]`.
+    ///
+    /// Expected slot-major layout (`n_ant=1`):
+    ///   slot 0: `ant_start + 0*1 + 0 = ant_start`   → 50.0
+    ///   slot 1: `ant_start + 1*1 + 0 = ant_start+1`  → 75.0
+    #[test]
+    fn build_initial_state_single_anticipated_thermal_k2() {
+        use super::build_initial_state;
+        use cobre_core::AnticipatedCommitmentHistory;
+
+        // Thermal ID 10 is the first (and only) anticipated plant.
+        // The system thermals() sorts by ID, so global_idx == 0 for ID 10.
+        let past_commits = vec![AnticipatedCommitmentHistory {
+            thermal_id: EntityId(10),
+            values_mw: vec![50.0, 75.0],
+        }];
+        let system = system_with_anticipated_thermals(&[2], past_commits);
+
+        // indexer: 1 hydro, 0 lags, 1 anticipated thermal (global idx 0), k_max=2.
+        let indexer = indexer_with_anticipated(1, &[2], &[0]);
+
+        let state = build_initial_state(&system, &indexer);
+
+        assert_eq!(
+            state.len(),
+            indexer.n_state,
+            "state length must equal n_state"
+        );
+        let ant_start = indexer.anticipated_state.start;
+        assert!(
+            (state[ant_start] - 50.0).abs() < 1e-10,
+            "slot 0 expected 50.0, got {}",
+            state[ant_start]
+        );
+        assert!(
+            (state[ant_start + 1] - 75.0).abs() < 1e-10,
+            "slot 1 expected 75.0, got {}",
+            state[ant_start + 1]
+        );
+    }
+
+    /// AC-3: `n_anticipated == 2`, `k_max == 3`, `K_0 == 2`, `K_1 == 3`.
+    ///
+    /// Slot-major layout with `n_ant=2`:
+    ///
+    /// - (slot 0, plant 0): `ant_start + 0*2+0` → 10.0
+    /// - (slot 0, plant 1): `ant_start + 0*2+1` → 100.0
+    /// - (slot 1, plant 0): `ant_start + 1*2+0` → 20.0
+    /// - (slot 1, plant 1): `ant_start + 1*2+1` → 200.0
+    /// - (slot 2, plant 0): `ant_start + 2*2+0` → 0.0  (padding: `K_0=2 < k_max=3`)
+    /// - (slot 2, plant 1): `ant_start + 2*2+1` → 300.0
+    #[test]
+    fn build_initial_state_two_anticipated_thermals_mixed_k() {
+        use super::build_initial_state;
+        use cobre_core::AnticipatedCommitmentHistory;
+
+        // Thermal IDs 10 (K=2) and 11 (K=3); sorted ascending so global order
+        // in system.thermals() is idx 0 → ID 10, idx 1 → ID 11.
+        let past_commits = vec![
+            AnticipatedCommitmentHistory {
+                thermal_id: EntityId(10),
+                values_mw: vec![10.0, 20.0],
+            },
+            AnticipatedCommitmentHistory {
+                thermal_id: EntityId(11),
+                values_mw: vec![100.0, 200.0, 300.0],
+            },
+        ];
+        let system = system_with_anticipated_thermals(&[2, 3], past_commits);
+
+        // indexer: 1 hydro, 0 lags, 2 anticipated thermals
+        //   anticipated_thermal_indices = [0, 1]  (global idxs in thermals())
+        //   anticipated_lead_stages     = [2, 3]
+        //   k_max                       = 3
+        let indexer = indexer_with_anticipated(2, &[2, 3], &[0, 1]);
+
+        let state = build_initial_state(&system, &indexer);
+
+        assert_eq!(
+            state.len(),
+            indexer.n_state,
+            "state length must equal n_state"
+        );
+        // n_ant = 2, k_max = 3.  Slot-major offsets from ant_start:
+        //   (slot, plant) → offset = slot * n_ant + plant
+        //   (0,0)→0, (0,1)→1, (1,0)→2, (1,1)→3, (2,0)→4, (2,1)→5
+        let s = indexer.anticipated_state.start;
+
+        assert!(
+            (state[s] - 10.0).abs() < 1e-10,
+            "slot 0 plant 0: expected 10.0, got {}",
+            state[s]
+        );
+        assert!(
+            (state[s + 1] - 100.0).abs() < 1e-10,
+            "slot 0 plant 1: expected 100.0, got {}",
+            state[s + 1]
+        );
+        assert!(
+            (state[s + 2] - 20.0).abs() < 1e-10,
+            "slot 1 plant 0: expected 20.0, got {}",
+            state[s + 2]
+        );
+        assert!(
+            (state[s + 3] - 200.0).abs() < 1e-10,
+            "slot 1 plant 1: expected 200.0, got {}",
+            state[s + 3]
+        );
+        assert!(
+            state[s + 4].abs() < 1e-10,
+            "slot 2 plant 0 (K_0=2 padding): expected 0.0, got {}",
+            state[s + 4]
+        );
+        assert!(
+            (state[s + 5] - 300.0).abs() < 1e-10,
+            "slot 2 plant 1: expected 300.0, got {}",
+            state[s + 5]
+        );
+    }
+
+    /// AC-4: `n_anticipated == 1`, `k_max == 2`, but `past_anticipated_commitments`
+    /// is empty.  All `anticipated_state` slots must remain 0.0 (no panic).
+    #[test]
+    fn build_initial_state_empty_past_commitments_leaves_zeros() {
+        use super::build_initial_state;
+
+        let system = system_with_anticipated_thermals(&[2], vec![]);
+
+        let indexer = indexer_with_anticipated(1, &[2], &[0]);
+
+        let state = build_initial_state(&system, &indexer);
+
+        assert_eq!(
+            state.len(),
+            indexer.n_state,
+            "state length must equal n_state"
+        );
+        let ant_start = indexer.anticipated_state.start;
+        let ant_end = indexer.anticipated_state.end;
+        for (i, &v) in state[ant_start..ant_end].iter().enumerate() {
+            assert!(
+                v.abs() < 1e-10,
+                "anticipated_state slot {i} expected 0.0, got {v}"
+            );
+        }
+    }
+
+    /// AC-5: `past_anticipated_commitments` contains a `thermal_id` that does
+    /// not match any anticipated thermal.  The function silently ignores it and
+    /// all `anticipated_state` slots remain 0.0 (no panic).
+    #[test]
+    fn build_initial_state_unknown_thermal_id_silently_skipped() {
+        use super::build_initial_state;
+        use cobre_core::AnticipatedCommitmentHistory;
+
+        // System has one anticipated thermal (ID 10).
+        // past_anticipated_commitments references ID 99999 — not in the system.
+        let past_commits = vec![AnticipatedCommitmentHistory {
+            thermal_id: EntityId(99999),
+            values_mw: vec![42.0, 43.0],
+        }];
+        let system = system_with_anticipated_thermals(&[2], past_commits);
+
+        let indexer = indexer_with_anticipated(1, &[2], &[0]);
+
+        let state = build_initial_state(&system, &indexer);
+
+        assert_eq!(
+            state.len(),
+            indexer.n_state,
+            "state length must equal n_state"
+        );
+        let ant_start = indexer.anticipated_state.start;
+        let ant_end = indexer.anticipated_state.end;
+        for (i, &v) in state[ant_start..ant_end].iter().enumerate() {
+            assert!(
+                v.abs() < 1e-10,
+                "anticipated_state slot {i} expected 0.0 for unknown ID, got {v}"
+            );
+        }
+    }
+
+    /// AC-6 (happy path with padding slot): two anticipated plants with
+    /// `K_0 = 1` and `K_1 = 2`, so `k_max = 2`. The plant-0 ring-buffer column
+    /// has one valid slot (slot 0) and one padding slot (slot 1).
+    ///
+    /// `past_anticipated_commitments` carries `[100.0]` for plant 0 and
+    /// `[50.0, 75.0]` for plant 1, each of length `K_i` exactly (the contract
+    /// the cobre-io validator enforces in production).
+    ///
+    /// Expected layout (`n_ant = 2`, slot-major):
+    ///   - `ant_start + 0*2 + 0` (slot 0, plant 0) -> 100.0  (seed)
+    ///   - `ant_start + 0*2 + 1` (slot 0, plant 1) ->  50.0  (seed)
+    ///   - `ant_start + 1*2 + 0` (slot 1, plant 0) ->   0.0  (padding; `K_0=1` < `k_max=2`)
+    ///   - `ant_start + 1*2 + 1` (slot 1, plant 1) ->  75.0  (seed)
+    ///
+    /// The padding-slot `debug_assert!` must not fire because the `.min(k_i)`
+    /// clamp prevents writing past slot `K_0=1` on plant 0.
+    #[test]
+    fn build_initial_state_anticipated_seed_padding_slot_stays_zero() {
+        use super::build_initial_state;
+        use cobre_core::AnticipatedCommitmentHistory;
+
+        let past_commits = vec![
+            AnticipatedCommitmentHistory {
+                thermal_id: EntityId(10),
+                values_mw: vec![100.0],
+            },
+            AnticipatedCommitmentHistory {
+                thermal_id: EntityId(11),
+                values_mw: vec![50.0, 75.0],
+            },
+        ];
+        let system = system_with_anticipated_thermals(&[1, 2], past_commits);
+        // n_anticipated=2, k_values=[1, 2] -> k_max=2.
+        let indexer = indexer_with_anticipated(2, &[1, 2], &[0, 1]);
+
+        let state = build_initial_state(&system, &indexer);
+
+        assert_eq!(
+            state.len(),
+            indexer.n_state,
+            "state length must equal n_state"
+        );
+        let s = indexer.anticipated_state.start;
+        let n_ant = indexer.n_anticipated;
+        assert_eq!(n_ant, 2);
+        assert_eq!(indexer.k_max, 2);
+
+        // slot 0, plant 0 -> 100.0
+        assert!(
+            (state[s] - 100.0).abs() < 1e-10,
+            "slot 0 plant 0 expected 100.0, got {}",
+            state[s]
+        );
+        // slot 0, plant 1 -> 50.0
+        assert!(
+            (state[s + 1] - 50.0).abs() < 1e-10,
+            "slot 0 plant 1 expected 50.0, got {}",
+            state[s + 1]
+        );
+        // slot 1, plant 0 -> 0.0 (padding for K_0=1 < k_max=2). This is the
+        // invariant the new debug_assert! protects.
+        assert!(
+            state[s + 2].abs() < 1e-10,
+            "padding slot 1 plant 0 expected 0.0, got {}",
+            state[s + 2]
+        );
+        // slot 1, plant 1 -> 75.0
+        assert!(
+            (state[s + 3] - 75.0).abs() < 1e-10,
+            "slot 1 plant 1 expected 75.0, got {}",
+            state[s + 3]
+        );
+    }
+
     /// Given a `System` with `inflow_scheme = InSample`, when `StudySetup::new()`
     /// is called, then `historical_library()` returns `None`.
     #[test]
@@ -3382,7 +4047,7 @@ mod tests {
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
             cost_per_mwh: 50.0,
-            gnl_config: None,
+            anticipated_config: None,
             entry_stage_id: None,
             exit_stage_id: None,
         };
@@ -3501,6 +4166,7 @@ mod tests {
                 n_pumping: 0,
                 n_contracts: 0,
                 n_stages: n_st,
+                k_max: 0,
             },
             &BoundsDefaults {
                 hydro: default_hydro_bounds(),
@@ -3656,7 +4322,7 @@ mod tests {
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
             cost_per_mwh: 50.0,
-            gnl_config: None,
+            anticipated_config: None,
             entry_stage_id: None,
             exit_stage_id: None,
         };
@@ -3757,6 +4423,7 @@ mod tests {
                 n_pumping: 0,
                 n_contracts: 0,
                 n_stages: 2,
+                k_max: 0,
             },
             &BoundsDefaults {
                 hydro: HydroStageBounds {
@@ -3911,7 +4578,7 @@ mod tests {
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
             cost_per_mwh: 50.0,
-            gnl_config: None,
+            anticipated_config: None,
             entry_stage_id: None,
             exit_stage_id: None,
         };
@@ -4026,6 +4693,7 @@ mod tests {
                 n_pumping: 0,
                 n_contracts: 0,
                 n_stages: 2,
+                k_max: 0,
             },
             &BoundsDefaults {
                 hydro: HydroStageBounds {
@@ -4184,7 +4852,7 @@ mod tests {
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
             cost_per_mwh: 50.0,
-            gnl_config: None,
+            anticipated_config: None,
             entry_stage_id: None,
             exit_stage_id: None,
         };
@@ -4322,6 +4990,7 @@ mod tests {
                 n_pumping: 0,
                 n_contracts: 0,
                 n_stages: 2,
+                k_max: 0,
             },
             &BoundsDefaults {
                 hydro: HydroStageBounds {
@@ -4485,7 +5154,7 @@ mod tests {
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
             cost_per_mwh: 50.0,
-            gnl_config: None,
+            anticipated_config: None,
             entry_stage_id: None,
             exit_stage_id: None,
         };
@@ -4587,6 +5256,7 @@ mod tests {
                 n_pumping: 0,
                 n_contracts: 0,
                 n_stages: 2,
+                k_max: 0,
             },
             &BoundsDefaults {
                 hydro: HydroStageBounds {
@@ -4810,6 +5480,281 @@ mod tests {
         assert!(
             setup.simulation_ctx().historical_library.is_some(),
             "simulation context must have a historical library when sim scheme is Historical"
+        );
+    }
+
+    /// Build a minimal system identical to [`minimal_system`] except that the
+    /// single thermal carries `anticipated_config: Some(AnticipatedConfig { lead_stages })`.
+    /// The `BoundsCountsSpec::k_max` is set to `lead_stages as usize` so the
+    /// thermal stage-bounds axis is wide enough to accommodate delivery-stage
+    /// padding.
+    #[allow(
+        clippy::too_many_lines,
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::items_after_statements
+    )]
+    fn minimal_system_with_anticipated_lead_stages(
+        n_stages: usize,
+        lead_stages: u32,
+    ) -> cobre_core::System {
+        use chrono::NaiveDate;
+
+        let bus = Bus {
+            id: EntityId(1),
+            name: "B1".to_string(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 500.0,
+            }],
+            excess_cost: 0.0,
+        };
+
+        let thermal = Thermal {
+            id: EntityId(2),
+            name: "T1".to_string(),
+            bus_id: EntityId(1),
+            min_generation_mw: 0.0,
+            max_generation_mw: 100.0,
+            cost_per_mwh: 50.0,
+            anticipated_config: Some(AnticipatedConfig { lead_stages }),
+            entry_stage_id: None,
+            exit_stage_id: None,
+        };
+
+        let hydro = Hydro {
+            id: EntityId(3),
+            name: "H1".to_string(),
+            bus_id: EntityId(1),
+            downstream_id: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 200.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 250.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: HydroPenalties {
+                spillage_cost: 0.01,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 0.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            },
+        };
+
+        let stages: Vec<Stage> = (0..n_stages)
+            .map(|i| Stage {
+                index: i,
+                id: i as i32,
+                start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                season_id: None,
+                blocks: vec![Block {
+                    index: 0,
+                    name: "S".to_string(),
+                    duration_hours: 744.0,
+                }],
+                block_mode: BlockMode::Parallel,
+                state_config: StageStateConfig {
+                    storage: true,
+                    inflow_lags: false,
+                },
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::Saa,
+                },
+            })
+            .collect();
+
+        let inflow_models: Vec<InflowModel> = (0..n_stages)
+            .map(|i| InflowModel {
+                hydro_id: EntityId(3),
+                stage_id: i as i32,
+                mean_m3s: 80.0,
+                std_m3s: 20.0,
+                ar_coefficients: vec![],
+                residual_std_ratio: 1.0,
+                annual: None,
+            })
+            .collect();
+
+        let load_models: Vec<LoadModel> = (0..n_stages)
+            .map(|i| LoadModel {
+                bus_id: EntityId(1),
+                stage_id: i as i32,
+                mean_mw: 100.0,
+                std_mw: 0.0,
+            })
+            .collect();
+
+        let n_st = n_stages.max(1);
+        let k_max_bounds = lead_stages as usize;
+
+        fn default_hydro_bounds() -> HydroStageBounds {
+            HydroStageBounds {
+                min_storage_hm3: 0.0,
+                max_storage_hm3: 200.0,
+                min_turbined_m3s: 0.0,
+                max_turbined_m3s: 100.0,
+                min_outflow_m3s: 0.0,
+                max_outflow_m3s: None,
+                min_generation_mw: 0.0,
+                max_generation_mw: 250.0,
+                max_diversion_m3s: None,
+                filling_inflow_m3s: 0.0,
+                water_withdrawal_m3s: 0.0,
+            }
+        }
+
+        fn default_hydro_penalties() -> HydroStagePenalties {
+            HydroStagePenalties {
+                spillage_cost: 0.01,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 500.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            }
+        }
+
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 1,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: n_st,
+                k_max: k_max_bounds,
+            },
+            &BoundsDefaults {
+                hydro: default_hydro_bounds(),
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 100.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 1,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: n_st,
+            },
+            &PenaltiesDefaults {
+                hydro: default_hydro_penalties(),
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .thermals(vec![thermal])
+            .hydros(vec![hydro])
+            .stages(stages)
+            .inflow_models(inflow_models)
+            .load_models(load_models)
+            .bounds(bounds)
+            .penalties(penalties)
+            .build()
+            .expect("minimal_system_with_anticipated_lead_stages: valid")
+    }
+
+    /// Given a `StudySetup::new` call on a system with one anticipated thermal
+    /// (`K_i = 2`), when the test inspects the resulting indexer metadata, then
+    /// `n_anticipated == 1`, `k_max == 2`, and `anticipated_lead_stages == [2]`.
+    #[test]
+    fn setup_wires_anticipated_metadata_into_indexer() {
+        let system = minimal_system_with_anticipated_lead_stages(2, 2);
+        let config = minimal_config(1, 10);
+        let stochastic = build_stochastic_context(
+            &system,
+            42,
+            None,
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::InSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .expect("stochastic context");
+
+        let setup = StudySetup::new(
+            &system,
+            &config,
+            stochastic,
+            PrepareHydroModelsResult::default_from_system(&system),
+        )
+        .expect("setup");
+
+        assert_eq!(
+            setup.stage_data.indexer.n_anticipated, 1,
+            "expected n_anticipated == 1"
+        );
+        assert_eq!(setup.stage_data.indexer.k_max, 2, "expected k_max == 2");
+        assert_eq!(
+            setup.stage_data.indexer.anticipated_lead_stages,
+            vec![2],
+            "expected anticipated_lead_stages == [2]"
         );
     }
 }

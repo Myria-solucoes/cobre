@@ -107,9 +107,9 @@ pub(crate) fn thermals_schema() -> Schema {
         Field::new("generation_mw", DataType::Float64, false),
         Field::new("generation_mwh", DataType::Float64, false),
         Field::new("generation_cost", DataType::Float64, false),
-        Field::new("is_gnl", DataType::Boolean, false),
-        Field::new("gnl_committed_mw", DataType::Float64, true),
-        Field::new("gnl_decision_mw", DataType::Float64, true),
+        Field::new("is_anticipated", DataType::Boolean, false),
+        Field::new("anticipated_committed_mw", DataType::Float64, true),
+        Field::new("anticipated_decision_mw", DataType::Float64, true),
         Field::new("operative_state_code", DataType::Int8, false),
     ])
 }
@@ -636,13 +636,14 @@ mod tests {
     }
 
     #[test]
-    fn thermals_schema_gnl_fields_nullable() {
+    fn thermals_schema_anticipated_fields_nullable() {
         let schema = thermals_schema();
-        assert!(is_nullable(&schema, "gnl_committed_mw"));
-        assert!(is_nullable(&schema, "gnl_decision_mw"));
-        assert!(!is_nullable(&schema, "is_gnl"));
-        assert_eq!(field_type(&schema, "is_gnl"), DataType::Boolean);
+        assert!(is_nullable(&schema, "anticipated_committed_mw"));
+        assert!(is_nullable(&schema, "anticipated_decision_mw"));
+        assert!(!is_nullable(&schema, "is_anticipated"));
+        assert_eq!(field_type(&schema, "is_anticipated"), DataType::Boolean);
         assert_eq!(field_type(&schema, "operative_state_code"), DataType::Int8);
+        // The field count test above ensures no legacy column names survive.
     }
 
     #[test]

@@ -153,6 +153,10 @@ impl SolverInterface for MockSolver {
     fn name(&self) -> &'static str {
         "MockIntegration"
     }
+    fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
+    fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
+    fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
+    fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
 }
 
 #[allow(clippy::cast_possible_wrap)]
@@ -735,7 +739,7 @@ fn train_simulate_write_cycle() {
         0,
         0,
         sim_solver,
-        PatchBuffer::new(fx.indexer.hydro_count, fx.indexer.max_par_order, 0, 0),
+        PatchBuffer::new(fx.indexer.hydro_count, fx.indexer.max_par_order, 0, 0, 0, 0),
         fx.indexer.n_state,
         WorkspaceSizing {
             hydro_count: fx.indexer.hydro_count,
@@ -988,6 +992,10 @@ impl SolverInterface for SizedMockSolver {
     fn name(&self) -> &'static str {
         "SizedMockSolver"
     }
+    fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
+    fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
+    fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
+    fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
 }
 
 /// Build a 1-hydro, 1-bus system with `min_outflow_m3s` > 0 for integration testing.
@@ -1117,6 +1125,7 @@ fn make_min_outflow_system() -> cobre_core::System {
             n_pumping: 0,
             n_contracts: 0,
             n_stages,
+            k_max: 0,
         },
         &BoundsDefaults {
             hydro: HydroStageBounds {
@@ -1263,6 +1272,10 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
             n_blks: 1,
             has_inflow_penalty: false,
             max_deficit_segments: 1,
+            n_anticipated: 0,
+            k_max: 0,
+            anticipated_lead_stages: vec![],
+            anticipated_thermal_indices: vec![],
         },
         &cobre_sddp::indexer::FphaColumnLayout {
             hydro_indices: vec![],
@@ -1418,7 +1431,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
         0,
         0,
         sim_solver,
-        PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0),
+        PatchBuffer::new(indexer.hydro_count, indexer.max_par_order, 0, 0, 0, 0),
         indexer.n_state,
         WorkspaceSizing {
             hydro_count: indexer.hydro_count,

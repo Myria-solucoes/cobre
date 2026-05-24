@@ -45,11 +45,12 @@ use crate::{
         error::SimulationError,
         extraction::assign_scenarios,
         pipeline::{
-            SIMULATION_SEED_OFFSET, ScenarioIds, SimulationOutputSpec, SimulationRunResult,
-            WorkerCosts, WorkerStats, dispatch_scenario_result, emit_sim_progress,
-            process_scenario_stages,
+            SIMULATION_SEED_OFFSET, ScenarioIds, SimLookups, SimulationOutputSpec,
+            SimulationRunResult, WorkerCosts, WorkerStats, dispatch_scenario_result,
+            emit_sim_progress, process_scenario_stages,
         },
     },
+    solver_phase::{Phase, SIMULATION_PROFILE},
     solver_stats::SolverStatsDelta,
     workspace::{CapturedBasis, SolverWorkspace},
 };
@@ -247,6 +248,19 @@ impl SimulationState {
             });
         }
 
+        // Apply the simulation-phase solver profile to every worker workspace
+        // before the rayon parallel region begins.  In v1 all named profiles
+        // equal `SolveProfile::default()`, so this is a no-op (delta tracking
+        // skips all FFI calls), preserving bit-identical parity with the
+        // pre-profile branch.
+        for ws in inputs.workspaces.iter_mut() {
+            ws.solver.set_profile(&Phase::Simulation.profile());
+            debug_assert!(
+                ws.solver.current_profile() == &SIMULATION_PROFILE,
+                "solver profile must equal SIMULATION_PROFILE after set_profile"
+            );
+        }
+
         let sampler = build_sim_sampler(training_ctx)?;
 
         let worker_results: Vec<Result<(WorkerCosts, WorkerStats), SimulationError>> = inputs
@@ -391,6 +405,17 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
         .perm_scratch
         .resize(config.n_scenarios.max(1) as usize, 0_usize);
 
+    // Build the study-invariant reverse-lookup tables once per worker thread.
+    // Both lookups depend only on the indexer and entity counts, which are
+    // constant across all scenarios and all stages.  This eliminates the
+    // per-(scenario, stage) allocation that would otherwise occur inside
+    // extract_thermals / extract_hydros (600k allocs for 10k scenarios × 60 stages).
+    let lookups = SimLookups::build(
+        training_ctx.indexer,
+        output.entity_counts.thermal_ids.len(),
+        output.entity_counts.hydro_ids.len(),
+    );
+
     for local_idx in start_local..end_local {
         #[allow(clippy::cast_possible_truncation)]
         let scenario_id = (scenario_start + local_idx) as u32;
@@ -424,6 +449,7 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
                 perm_scratch: &mut perm_scratch,
                 sampler,
             },
+            &lookups,
         );
         ws.scratch.raw_noise_buf = raw_noise_buf;
         ws.scratch.perm_scratch = perm_scratch;

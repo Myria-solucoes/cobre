@@ -28,6 +28,10 @@ pub struct PolicyCutRecord<'a> {
     /// Pre-computed cut intercept: `alpha - beta' * x_hat`.
     pub intercept: f64,
     /// Gradient coefficient vector, length must equal `state_dimension`.
+    ///
+    /// Coefficient vector is positional only — index `i` refers to the
+    /// i-th state-vector dimension as defined by
+    /// `state_dictionary.json`. No labels are stored inline.
     pub coefficients: &'a [f64],
     /// Whether this cut is currently active in the LP.
     pub is_active: bool,
@@ -189,6 +193,10 @@ pub struct OwnedPolicyCutRecord {
     /// Pre-computed cut intercept.
     pub intercept: f64,
     /// Gradient coefficient vector, length equals `state_dimension` of the stage.
+    ///
+    /// Coefficient vector is positional only — index `i` refers to the
+    /// i-th state-vector dimension as defined by
+    /// `state_dictionary.json`. No labels are stored inline.
     pub coefficients: Vec<f64>,
     /// Whether this cut is currently active in the LP.
     pub is_active: bool,

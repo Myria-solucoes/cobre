@@ -44,6 +44,14 @@ pub use types::{
     Basis, LpSolution, RowBatch, SolutionView, SolverError, SolverStatistics, StageTemplate,
 };
 
+pub mod profile;
+pub use profile::{
+    DEFAULT_PROFILE_HEURISTIC_SENTINEL, DEFAULT_PROFILE_IPM_UNBOUNDED_SENTINEL, SolveProfile,
+};
+
+pub mod profiled;
+pub use profiled::ProfiledSolver;
+
 pub mod baking;
 pub use baking::bake_rows_into_template;
 
@@ -59,6 +67,7 @@ pub mod test_support {
     //! call into the `HiGHS` C API directly and bypass all safe-wrapper validation.
 
     pub use crate::ffi::{
-        cobre_highs_set_double_option, cobre_highs_set_int_option, cobre_highs_set_string_option,
+        cobre_highs_get_double_option, cobre_highs_get_int_option, cobre_highs_set_double_option,
+        cobre_highs_set_int_option, cobre_highs_set_string_option,
     };
 }

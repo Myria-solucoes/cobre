@@ -35,9 +35,11 @@
 //! Until the parameter loader is wired, callers pass `&HashMap::new()` and
 //! expressions must not contain `@name` tokens.
 //!
-//! All 20 variable names from the variable catalog are recognised. Block-specific
+//! All 21 variable names from the variable catalog are recognised. Block-specific
 //! variables accept an optional second argument; stage-only variables (`hydro_storage`,
-//! `hydro_evaporation`, `hydro_withdrawal`) must not have a block argument.
+//! `hydro_evaporation`, `hydro_withdrawal`, `anticipated_decision`) must not have a
+//! block argument. Use `anticipated_decision(thermal_id)` to reference the per-stage
+//! commitment column of an anticipated thermal unit (no block index accepted).
 //!
 //! ## Validation
 //!
@@ -95,6 +97,7 @@ struct RawConstraint {
     description: Option<String>,
 
     /// Expression string to be parsed. E.g. `"2.5 * thermal_generation(5) - hydro_generation(3)"`.
+    /// To constrain an anticipated thermal's commitment, use `"anticipated_decision(5)"` (stage-level scalar, no block index).
     expression: String,
 
     /// Comparison sense: `">="`, `"<="`, or `"=="`.
@@ -888,8 +891,22 @@ fn build_variable_ref(
             source_id: entity_id,
             block_id,
         }),
+        "anticipated_decision" => {
+            // Stage-level (no block_id). Reject explicit block_id with a clear error.
+            if block_id.is_some() {
+                return Err(format!(
+                    "variable \"anticipated_decision\" is a stage-level scalar and \
+                     does not accept a block_id — write \"anticipated_decision({})\", \
+                     not \"anticipated_decision({}, ...)\"",
+                    entity_id.0, entity_id.0,
+                ));
+            }
+            Ok(VariableRef::AnticipatedDecision {
+                thermal_id: entity_id,
+            })
+        }
         other => Err(format!(
-            "unknown variable name \"{other}\": not one of the 20 supported LP variable types"
+            "unknown variable name \"{other}\": not one of the 21 supported LP variable types"
         )),
     }
 }
@@ -1758,5 +1775,99 @@ mod tests {
         let result = parse_generic_constraints(f.path(), &HashMap::new()).unwrap();
         assert_eq!(result.len(), 1);
         assert!(result[0].description.is_none());
+    }
+
+    // ── AC-3..AC-6: anticipated_decision parser tests ─────────────────────────
+
+    /// AC-3: `anticipated_decision(5)` produces a single `AnticipatedDecision` term.
+    #[test]
+    fn anticipated_decision_simple_parse() {
+        let expr = parse_expression("anticipated_decision(5)", &HashMap::new()).unwrap();
+        assert_eq!(expr.terms.len(), 1);
+        assert!(
+            (lit(&expr.terms[0]) - 1.0).abs() < f64::EPSILON,
+            "coefficient must be 1.0"
+        );
+        assert_eq!(
+            expr.terms[0].variable,
+            VariableRef::AnticipatedDecision {
+                thermal_id: EntityId(5),
+            }
+        );
+    }
+
+    /// AC-4: `2.5 * anticipated_decision(5)` applies the literal scale.
+    #[test]
+    fn anticipated_decision_with_coefficient() {
+        let expr = parse_expression("2.5 * anticipated_decision(5)", &HashMap::new()).unwrap();
+        assert_eq!(expr.terms.len(), 1);
+        assert!(
+            (lit(&expr.terms[0]) - 2.5).abs() < f64::EPSILON,
+            "coefficient must be 2.5"
+        );
+        assert_eq!(
+            expr.terms[0].variable,
+            VariableRef::AnticipatedDecision {
+                thermal_id: EntityId(5),
+            }
+        );
+    }
+
+    /// AC-5: `anticipated_decision(5, 0)` returns an error naming the variable
+    /// and explaining it does not accept a block_id.
+    #[test]
+    fn anticipated_decision_rejects_block_id() {
+        let result = parse_expression("anticipated_decision(5, 0)", &HashMap::new());
+        assert!(
+            result.is_err(),
+            "should reject block_id for anticipated_decision"
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("anticipated_decision"),
+            "error message must name the variable: {msg}"
+        );
+        // Should mention that it doesn't accept a block_id
+        assert!(
+            msg.contains("block_id") || msg.contains("stage-level"),
+            "error message should explain no block_id accepted: {msg}"
+        );
+    }
+
+    /// AC-6: Whitespace insensitivity — `anticipated_decision( 5 )` produces the
+    /// same term as `anticipated_decision(5)`.
+    #[test]
+    fn anticipated_decision_whitespace_insensitive() {
+        let expr1 = parse_expression("anticipated_decision(5)", &HashMap::new()).unwrap();
+        let expr2 = parse_expression("anticipated_decision( 5 )", &HashMap::new()).unwrap();
+        assert_eq!(expr1.terms.len(), 1);
+        assert_eq!(expr2.terms.len(), 1);
+        assert_eq!(
+            expr1.terms[0].variable, expr2.terms[0].variable,
+            "whitespace must not affect the parsed variable"
+        );
+    }
+
+    /// AC-6 (multi-term): `anticipated_decision(5) + anticipated_decision(6)` works.
+    #[test]
+    fn anticipated_decision_multi_term_expression() {
+        let expr = parse_expression(
+            "anticipated_decision(5) + anticipated_decision(6)",
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(expr.terms.len(), 2);
+        assert_eq!(
+            expr.terms[0].variable,
+            VariableRef::AnticipatedDecision {
+                thermal_id: EntityId(5),
+            }
+        );
+        assert_eq!(
+            expr.terms[1].variable,
+            VariableRef::AnticipatedDecision {
+                thermal_id: EntityId(6),
+            }
+        );
     }
 }

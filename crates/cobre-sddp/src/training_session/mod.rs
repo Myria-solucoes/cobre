@@ -173,6 +173,8 @@ impl<'a, S: SolverInterface + Send, C: Communicator> TrainingSession<'a, S, C> {
                 max_local_fwd: ranks.max_local_fwd,
                 total_forward_passes,
                 noise_dim: training_ctx.stochastic.dim(),
+                n_anticipated: indexer.n_anticipated,
+                k_max: indexer.k_max,
             },
             solver_factory,
         )
@@ -276,6 +278,8 @@ impl<'a, S: SolverInterface + Send, C: Communicator> TrainingSession<'a, S, C> {
             stage_ctx.templates[0].num_rows,
             indexer.hydro_count,
             indexer.max_par_order,
+            indexer.n_anticipated,
+            indexer.k_max,
             stage_ctx,
         );
 
@@ -1127,6 +1131,10 @@ mod tests {
         fn name(&self) -> &'static str {
             "Mock"
         }
+        fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
+        fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
+        fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
+        fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
     }
 
     struct StubComm;

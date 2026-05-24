@@ -53,9 +53,10 @@ pub mod training_event;
 pub mod welford;
 
 pub use entities::{
-    Bus, ContractType, DeficitSegment, DiversionChannel, EfficiencyModel, EnergyContract,
-    FillingConfig, GnlConfig, HydraulicLossesModel, Hydro, HydroGenerationModel, HydroPenalties,
-    Line, NonControllableSource, PumpingStation, TailraceModel, TailracePoint, Thermal,
+    AnticipatedConfig, Bus, ContractType, DeficitSegment, DiversionChannel, EfficiencyModel,
+    EnergyContract, FillingConfig, HydraulicLossesModel, Hydro, HydroGenerationModel,
+    HydroPenalties, Line, NonControllableSource, PumpingStation, TailraceModel, TailracePoint,
+    Thermal,
 };
 pub use entity_id::EntityId;
 pub use error::ValidationError;
@@ -63,7 +64,8 @@ pub use generic_constraint::{
     ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
 };
 pub use initial_conditions::{
-    HydroPastInflows, HydroStorage, InitialConditions, RecentObservation,
+    AnticipatedCommitmentHistory, HydroPastInflows, HydroStorage, InitialConditions,
+    RecentObservation,
 };
 pub use parameters::{CoefficientRef, ComputedParameter, ParameterKind, ScalarParameter};
 pub use penalty::{

@@ -1371,7 +1371,7 @@ mod tests {
             cost_per_mwh: 50.0,
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
-            gnl_config: None,
+            anticipated_config: None,
         }
     }
 
@@ -2264,6 +2264,7 @@ mod tests {
             }],
             filling_storage: vec![],
             past_inflows: vec![],
+            past_anticipated_commitments: vec![],
             recent_observations: vec![],
         };
 

@@ -3258,6 +3258,7 @@ mod tests {
             storage: vec![],
             filling_storage: vec![],
             past_inflows,
+            past_anticipated_commitments: vec![],
             recent_observations: vec![],
         };
         let system = SystemBuilder::new()
@@ -3402,6 +3403,7 @@ mod tests {
                 values_m3s: vec![500.0],
                 season_ids: None,
             }],
+            past_anticipated_commitments: vec![],
             recent_observations: vec![],
         };
         let system = SystemBuilder::new()

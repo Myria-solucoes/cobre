@@ -1,12 +1,64 @@
 //! Template post-processing: discount factors, LP scaling, and noise pre-scaling.
 
-use cobre_core::System;
+use cobre_core::{PolicyGraph, Stage, System};
 
 use crate::scaling_report::{
     LpDimensions, StageScalingReport, build_scaling_report, compute_coefficient_range,
     summarize_scale_factors,
 };
-use crate::{indexer::StageIndexer, lp_builder, lp_builder::StageTemplates};
+use crate::{lp_builder, lp_builder::StageTemplates};
+
+/// Compute per-stage one-step discount factors from study stages and a policy graph.
+///
+/// `discount_factors[t] = 1 / (1 + r_t)^(Dt / 365.25)` where `r_t` is the annual
+/// discount rate for the transition departing stage `t` (global or per-transition
+/// override) and `Dt` is the stage duration in days. When `rate == 0.0`, the factor
+/// is `1.0` (no discounting).
+///
+/// Returns a vec of length `study_stages.len()`.
+pub(crate) fn compute_per_stage_discount_factors(
+    study_stages: &[&Stage],
+    pg: &PolicyGraph,
+) -> Vec<f64> {
+    study_stages
+        .iter()
+        .map(|stage| {
+            let rate = pg
+                .transitions
+                .iter()
+                .find(|tr| tr.source_id == stage.id)
+                .and_then(|tr| tr.annual_discount_rate_override)
+                .unwrap_or(pg.annual_discount_rate);
+            if rate == 0.0 {
+                1.0
+            } else {
+                let dt_days = f64::from(
+                    i32::try_from((stage.end_date - stage.start_date).num_days())
+                        .unwrap_or(i32::MAX),
+                );
+                1.0 / (1.0 + rate).powf(dt_days / 365.25)
+            }
+        })
+        .collect()
+}
+
+/// Compute cumulative discount factors from per-stage one-step factors.
+///
+/// `cumulative[0] = 1.0`, `cumulative[t] = cumulative[t-1] * per_stage[t-1]` for `t >= 1`.
+///
+/// The returned vec has length `per_stage.len()` (one entry per study stage).
+/// The anticipated-decision predicate is strict (`stage_idx + K_i < n_stages`),
+/// so every delivery lookup index falls within `[0, n_stages)` and no
+/// boundary-stage entry is needed.
+pub(crate) fn compute_cumulative_discount_factors(per_stage: &[f64]) -> Vec<f64> {
+    let n = per_stage.len();
+    // Length is n: indices [0, n).
+    let mut cumulative = vec![1.0; n];
+    for t in 1..n {
+        cumulative[t] = cumulative[t - 1] * per_stage[t - 1];
+    }
+    cumulative
+}
 
 /// Apply discount factors, LP scaling, and noise pre-scaling to stage templates.
 ///
@@ -22,38 +74,23 @@ pub(crate) fn postprocess_templates(
     {
         let pg = system.policy_graph();
         let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
-        stage_templates.discount_factors = study_stages
-            .iter()
-            .map(|stage| {
-                let rate = pg
-                    .transitions
-                    .iter()
-                    .find(|tr| tr.source_id == stage.id)
-                    .and_then(|tr| tr.annual_discount_rate_override)
-                    .unwrap_or(pg.annual_discount_rate);
-                if rate == 0.0 {
-                    1.0
-                } else {
-                    let dt_days = f64::from(
-                        i32::try_from((stage.end_date - stage.start_date).num_days())
-                            .unwrap_or(i32::MAX),
-                    );
-                    1.0 / (1.0 + rate).powf(dt_days / 365.25)
-                }
-            })
-            .collect();
+        stage_templates.discount_factors = compute_per_stage_discount_factors(&study_stages, pg);
     }
 
     // D_0 = 1.0, D_t = D_{t-1} * d_{t-1} for t >= 1.
-    // Used by the simulation extraction layer for reporting only.
+    // Length is n_stages exactly: the strict anticipated-decision predicate
+    // (`stage_idx + K_i < n_stages`) guarantees every delivery lookup falls
+    // within `[0, n_stages)`.
     {
-        let n = stage_templates.discount_factors.len();
-        let mut cumulative = vec![1.0; n];
-        for t in 1..n {
-            cumulative[t] = cumulative[t - 1] * stage_templates.discount_factors[t - 1];
-        }
-        stage_templates.cumulative_discount_factors = cumulative;
+        stage_templates.cumulative_discount_factors =
+            compute_cumulative_discount_factors(&stage_templates.discount_factors);
     }
+
+    debug_assert_eq!(
+        stage_templates.cumulative_discount_factors.len(),
+        stage_templates.templates.len(),
+        "cumulative_discount_factors must have length n_stages after postprocess"
+    );
 
     // Apply discount factors to theta objective coefficients before
     // column/row scaling. The discount factor d_t converts
@@ -63,7 +100,12 @@ pub(crate) fn postprocess_templates(
     // the discount factor multiplies that untouched 1.0 to d_t.
     // When annual_discount_rate == 0.0, d_t == 1.0 and this is a no-op.
     if let Some(first) = stage_templates.templates.first() {
-        let theta_col = StageIndexer::new(stage_templates.n_hydros, first.max_par_order).theta;
+        // Theta sits 2*N columns past `n_state` in the LP layout
+        // (z_inflow occupies N cols then storage_in occupies N cols
+        // between the state region and theta). This invariant holds
+        // for both the base and the augmented (anticipated-state-extended)
+        // indexer because `n_state` already absorbs `A*K_max`.
+        let theta_col = first.n_state + 2 * stage_templates.n_hydros;
         for (s_idx, tmpl) in stage_templates.templates.iter_mut().enumerate() {
             tmpl.objective[theta_col] *= stage_templates.discount_factors[s_idx];
         }
@@ -134,4 +176,63 @@ pub(crate) fn postprocess_templates(
     }
 
     scaling_report
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::float_cmp
+)]
+mod tests {
+    use super::compute_cumulative_discount_factors;
+
+    /// `compute_cumulative_discount_factors` returns a vec of length `n_stages`
+    /// (one entry per study stage). The strict anticipated-decision predicate
+    /// (`stage_idx + K_i < n_stages`) guarantees every delivery lookup falls
+    /// within `[0, n_stages)`, so no phantom boundary entry is needed.
+    #[test]
+    fn cumulative_discount_factors_length_matches_n_stages() {
+        let n_stages = 4_usize;
+        // Uniform 5% annual discount folded into per-stage factors.
+        let per_stage = vec![0.95_f64; n_stages];
+        let cumulative = compute_cumulative_discount_factors(&per_stage);
+
+        // Length must equal n_stages = 4.
+        assert_eq!(
+            cumulative.len(),
+            n_stages,
+            "cumulative_discount_factors length must equal n_stages = {n_stages}"
+        );
+
+        // Spot-check values.
+        assert_eq!(cumulative[0], 1.0, "cumulative[0] == 1.0 (present value)");
+        assert_eq!(
+            cumulative[1], 0.95,
+            "cumulative[1] == 0.95 = 1.0 * per_stage[0]"
+        );
+        // Use approximate comparison: repeated multiplication may differ from
+        // powi(3) by a ULP due to floating-point associativity.
+        // The last in-horizon entry is cumulative[n_stages - 1] = 0.95^(n_stages - 1).
+        assert!(
+            (cumulative[n_stages - 1] - 0.95_f64.powi(3)).abs() < 1e-15,
+            "cumulative[n_stages-1] must be within 1e-15 of 0.95^(n_stages-1) (got {})",
+            cumulative[n_stages - 1]
+        );
+    }
+
+    /// Verify that the zero-rate edge case gives all-ones for any length.
+    #[test]
+    fn cumulative_discount_factors_all_ones_when_rate_zero() {
+        let per_stage = vec![1.0_f64; 3];
+        let cumulative = compute_cumulative_discount_factors(&per_stage);
+        assert_eq!(cumulative.len(), 3);
+        for (i, &v) in cumulative.iter().enumerate() {
+            assert_eq!(
+                v, 1.0,
+                "cumulative[{i}] must be 1.0 when per-stage factor is 1.0"
+            );
+        }
+    }
 }

@@ -1,17 +1,18 @@
 {
   "$defs": {
-    "RawGnlConfig": {
+    "RawAnticipatedConfig": {
       "additionalProperties": false,
-      "description": "Intermediate type for GNL configuration.",
+      "description": "Intermediate type for anticipated dispatch configuration.",
       "properties": {
-        "lag_stages": {
-          "description": "Number of stages of dispatch anticipation.",
-          "format": "int32",
+        "lead_stages": {
+          "description": "Number of stages of dispatch anticipation. Must be ≥ 1.\n\nUsing `u32` here causes serde to reject negative JSON literals with a\n`ParseError` before validation runs.",
+          "format": "uint32",
+          "minimum": 0,
           "type": "integer"
         }
       },
       "required": [
-        "lag_stages"
+        "lead_stages"
       ],
       "type": "object"
     },
@@ -19,6 +20,17 @@
       "additionalProperties": false,
       "description": "Intermediate type for a single thermal plant entry.",
       "properties": {
+        "anticipated_config": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RawAnticipatedConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Anticipated dispatch configuration. Absent = no anticipation."
+        },
         "bus_id": {
           "description": "Bus to which this plant's generation is injected.",
           "format": "int32",
@@ -50,17 +62,6 @@
         "generation": {
           "$ref": "#/$defs/RawThermalGeneration",
           "description": "Generation bounds."
-        },
-        "gnl_config": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/RawGnlConfig"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "GNL dispatch anticipation configuration. Absent = no lag."
         },
         "id": {
           "description": "Thermal plant identifier. Must be unique within the file.",

@@ -22,7 +22,8 @@ use crate::{
         error::SimulationError,
         extraction::EntityCounts,
         extraction::{
-            SolutionView, StageExtractionSpec, accumulate_category_costs, extract_stage_result,
+            HydroReverseLookup, SolutionView, StageExtractionSpec, ThermalReverseLookup,
+            accumulate_category_costs, extract_stage_result_with_lookups,
         },
         types::{ScenarioCategoryCosts, SimulationScenarioResult, SimulationStageResult},
     },
@@ -262,6 +263,37 @@ impl<'a> SimScenarioLoadSpec<'a> {
     }
 }
 
+/// Pre-built study-invariant reverse-lookup tables for simulation extraction.
+///
+/// Both lookups depend only on the study's [`crate::indexer::StageIndexer`] and
+/// entity counts, which are constant across all scenarios and all stages.
+/// Build once per simulation run (or per worker thread) via
+/// [`SimLookups::build`] and pass by reference into every per-stage extraction
+/// call to eliminate per-`(scenario, stage)` allocations on the hot path.
+pub(crate) struct SimLookups {
+    /// Reverse-lookup table for anticipated thermal indices.
+    pub(crate) thermal: ThermalReverseLookup,
+    /// Reverse-lookup table for hydro FPHA and evaporation indices.
+    pub(crate) hydro: HydroReverseLookup,
+}
+
+impl SimLookups {
+    /// Build both reverse-lookup tables from the study's indexer and entity counts.
+    ///
+    /// Allocates once; the returned value is then used read-only for the entire
+    /// simulation run.
+    pub(crate) fn build(
+        indexer: &crate::indexer::StageIndexer,
+        n_thermals: usize,
+        n_hydros: usize,
+    ) -> Self {
+        Self {
+            thermal: ThermalReverseLookup::build(indexer, n_thermals),
+            hydro: HydroReverseLookup::build(indexer, n_hydros),
+        }
+    }
+}
+
 /// Patch NCS column bounds in the LP solver with per-scenario availability.
 ///
 /// Called after `set_row_bounds` and before `solve`. The `ncs_col_lower_buf`
@@ -307,6 +339,10 @@ fn apply_ncs_col_bounds<S: SolverInterface>(
 /// structural rows in the baked template; no `add_rows` call is needed.
 /// When `baked_templates` was `None` on `simulate` entry, the startup re-bake
 /// already produced a local `Vec<StageTemplate>` before this function is reached.
+///
+/// `lookups` carries pre-built study-invariant reverse-lookup tables that are
+/// threaded through to [`extract_sim_stage_result`] so no allocation occurs on
+/// the per-stage hot path.
 // RATIONALE: solve_simulation_stage orchestrates the full per-stage simulation pipeline:
 // noise application, NCS patching, LP solve, result extraction, and output writing.
 // Each phase is a semantically distinct step; splitting further would fragment the
@@ -320,6 +356,7 @@ fn solve_simulation_stage<S: SolverInterface>(
     load_spec: &SimStageLoadSpec<'_>,
     output: &SimulationOutputSpec<'_>,
     ids: &SimStageIds,
+    lookups: &SimLookups,
 ) -> Result<(f64, SimulationStageResult), SimulationError> {
     // Precondition: ws.scratch.noise_buf, ws.scratch.load_rhs_buf, and
     // ws.scratch.ncs_col_upper_buf are populated by the caller
@@ -333,6 +370,16 @@ fn solve_simulation_stage<S: SolverInterface>(
     // The baked template already embeds all active cut rows as structural rows.
     // No add_rows call is needed.
     ws.solver.load_model(load_spec.baked_template);
+    // The anticipated-state ring buffer must advance once per stage in the
+    // simulation forward walk, mirroring `run_forward_stage` in `forward.rs`.
+    // The incoming slice is snapshotted into `ws.scratch.anticipated_state_buf`
+    // immediately before `ws.current_state` is overwritten with the unscaled
+    // primal below, then consumed by `shift_anticipated_state` to produce the
+    // outgoing ring-buffer state. Without this shift, the unbounded
+    // `anticipated_state` LP columns (which the Category 6 fixing rows leave
+    // at `incoming - decision` at the optimum) would leak into the next
+    // stage's incoming state, and fishing constraints at delivery stages
+    // would read stale slot 0 values.
     ws.patch_buf.fill_forward_patches(
         indexer,
         &ws.current_state,
@@ -501,6 +548,7 @@ fn solve_simulation_stage<S: SolverInterface>(
         indexer,
         ids,
         n_stochastic_ncs,
+        lookups,
     );
     // Save incoming lag values before overwriting state.
     let lag_start = indexer.inflow_lags.start;
@@ -509,6 +557,16 @@ fn solve_simulation_stage<S: SolverInterface>(
     ws.scratch
         .lag_matrix_buf
         .extend_from_slice(&ws.current_state[lag_start..lag_start + lag_len]);
+
+    // Save incoming anticipated-state slice before overwriting state with primal.
+    // Uses the pre-allocated anticipated_state_buf scratch buffer (no allocation).
+    // Mirrors the snapshot performed in `run_forward_stage` (forward.rs).
+    let ant_start = indexer.anticipated_state.start;
+    let ant_len = indexer.n_anticipated * indexer.k_max;
+    ws.scratch.anticipated_state_buf.clear();
+    ws.scratch
+        .anticipated_state_buf
+        .extend_from_slice(&ws.current_state[ant_start..ant_start + ant_len]);
 
     ws.current_state.clear();
     ws.current_state
@@ -555,6 +613,16 @@ fn solve_simulation_stage<S: SolverInterface>(
             par_order: downstream_par_order,
         },
     );
+    // Advance the anticipated-state ring buffer. Reads the snapshotted
+    // incoming slice from `anticipated_state_buf` and writes the post-shift
+    // outgoing state into `ws.current_state[anticipated_state]`. No-op when
+    // `n_anticipated == 0 || k_max == 0`.
+    crate::noise::shift_anticipated_state(
+        &mut ws.current_state,
+        &ws.scratch.anticipated_state_buf,
+        unscaled_primal_ref,
+        indexer,
+    );
 
     Ok((immediate_cost, result))
 }
@@ -569,6 +637,9 @@ fn solve_simulation_stage<S: SolverInterface>(
 /// their respective scratch fields while simultaneously passing `&mut` borrows to
 /// the fields this function actually mutates (`inflow_m3s_buf`, `row_lower_buf`).
 /// The borrow checker can verify disjointness at field granularity.
+///
+/// `lookups` carries pre-built study-invariant reverse-lookup tables passed down
+/// from [`process_scenario_stages`] to avoid per-stage allocation.
 #[allow(clippy::too_many_arguments)]
 fn extract_sim_stage_result(
     inflow_m3s_buf: &mut Vec<f64>,
@@ -583,6 +654,7 @@ fn extract_sim_stage_result(
     indexer: &crate::indexer::StageIndexer,
     ids: &SimStageIds,
     n_stochastic_ncs: usize,
+    lookups: &SimLookups,
 ) -> (f64, SimulationStageResult) {
     let t = ids.t;
     let theta_obj_coeff = ctx
@@ -645,7 +717,7 @@ fn extract_sim_stage_result(
         } else {
             &[]
         };
-    let result = extract_stage_result(
+    let result = extract_stage_result_with_lookups(
         &SolutionView {
             primal: unscaled_primal,
             dual: unscaled_dual,
@@ -684,8 +756,11 @@ fn extract_sim_stage_result(
             energy_conversion: output.energy_conversion,
             hydro_min_storage_hm3: output.hydro_min_storage_hm3,
             stage_index: t,
+            n_stages: ctx.templates.len(),
         },
         ids.stage_id_u32,
+        &lookups.hydro,
+        &lookups.thermal,
     );
     (immediate_cost, result)
 }
@@ -754,6 +829,7 @@ pub(crate) fn process_scenario_stages<S: SolverInterface>(
     load_spec: &SimScenarioLoadSpec<'_>,
     output: &SimulationOutputSpec<'_>,
     ids: &mut ScenarioIds<'_>,
+    lookups: &SimLookups,
 ) -> Result<(f64, Vec<SimulationStageResult>), SimulationError> {
     let TrainingContext {
         indexer,
@@ -836,6 +912,7 @@ pub(crate) fn process_scenario_stages<S: SolverInterface>(
                 stage_id_u32,
                 scenario_id: ids.scenario_id,
             },
+            lookups,
         )?;
         let cum_d = ctx
             .cumulative_discount_factors
@@ -960,7 +1037,8 @@ mod tests {
     use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
     use cobre_core::scenario::SamplingScheme;
     use cobre_solver::{
-        Basis, LpSolution, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
+        Basis, LpSolution, ProfiledSolver, RowBatch, SolverError, SolverInterface,
+        SolverStatistics, StageTemplate,
     };
     use cobre_stochastic::StochasticContext;
 
@@ -1178,6 +1256,10 @@ mod tests {
         fn name(&self) -> &'static str {
             "Mock"
         }
+        fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
+        fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
+        fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
+        fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
@@ -1441,8 +1523,8 @@ mod tests {
         vec![SolverWorkspace {
             rank: 0,
             worker_id: 0,
-            solver,
-            patch_buf: PatchBuffer::new(1, 0, 0, 0), // N=1, L=0
+            solver: ProfiledSolver::new(solver),
+            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0), // N=1, L=0
             current_state: Vec::with_capacity(1),
             scratch: ScratchBuffers {
                 noise_buf: Vec::new(),
@@ -1472,6 +1554,8 @@ mod tests {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
+                anticipated_state_buf: Vec::new(),
+                anticipated_state_out_col_indices_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -1685,8 +1769,8 @@ mod tests {
         let mut workspaces = vec![SolverWorkspace {
             rank: 0,
             worker_id: 0,
-            solver,
-            patch_buf: PatchBuffer::new(1, 0, n_load_buses, 1),
+            solver: ProfiledSolver::new(solver),
+            patch_buf: PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0),
             current_state: Vec::with_capacity(1),
             scratch: ScratchBuffers {
                 noise_buf: Vec::new(),
@@ -1716,6 +1800,8 @@ mod tests {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
+                anticipated_state_buf: Vec::new(),
+                anticipated_state_out_col_indices_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -2014,8 +2100,8 @@ mod tests {
         let mut workspaces = vec![SolverWorkspace {
             rank: 0,
             worker_id: 0,
-            solver,
-            patch_buf: PatchBuffer::new(1, 0, n_load_buses, 1),
+            solver: ProfiledSolver::new(solver),
+            patch_buf: PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0),
             current_state: Vec::with_capacity(1),
             scratch: ScratchBuffers {
                 noise_buf: Vec::new(),
@@ -2045,6 +2131,8 @@ mod tests {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
+                anticipated_state_buf: Vec::new(),
+                anticipated_state_out_col_indices_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -2328,8 +2416,8 @@ mod tests {
         vec![SolverWorkspace {
             rank: 0,
             worker_id: 0,
-            solver,
-            patch_buf: PatchBuffer::new(hydro_count, 0, 0, 0),
+            solver: ProfiledSolver::new(solver),
+            patch_buf: PatchBuffer::new(hydro_count, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(hydro_count),
             scratch: ScratchBuffers {
                 noise_buf: Vec::new(),
@@ -2359,6 +2447,8 @@ mod tests {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
+                anticipated_state_buf: Vec::new(),
+                anticipated_state_out_col_indices_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),

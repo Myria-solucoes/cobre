@@ -45,17 +45,26 @@ use crate::simulation::types::{
 };
 
 /// Pre-computed reverse lookups from system hydro index to local FPHA/evaporation
-/// index. Built once per `extract_hydros` call to replace O(N) linear searches
-/// with O(1) array lookups.
-struct HydroReverseLookup {
+/// index.
+///
+/// Build once per simulation run via [`HydroReverseLookup::build`] and reuse
+/// across all (scenario, stage) pairs.  The lookup depends only on the
+/// study-invariant [`StageIndexer`] and `n_hydros`; it never changes between
+/// stages or scenarios.
+pub(crate) struct HydroReverseLookup {
     /// `fpha[h]` is `Some(local_idx)` if hydro `h` is FPHA, `None` otherwise.
-    fpha: Vec<Option<usize>>,
+    pub(crate) fpha: Vec<Option<usize>>,
     /// `evap[h]` is `Some(local_idx)` if hydro `h` has evaporation, `None` otherwise.
-    evap: Vec<Option<usize>>,
+    pub(crate) evap: Vec<Option<usize>>,
 }
 
 impl HydroReverseLookup {
-    fn build(indexer: &StageIndexer, n_hydros: usize) -> Self {
+    /// Build the reverse lookup table for hydro FPHA and evaporation indices.
+    ///
+    /// Allocates two `Vec<Option<usize>>` of length `n_hydros`. Call this once
+    /// per simulation run (or once per worker) and pass the result by reference
+    /// into each per-stage extraction call.
+    pub(crate) fn build(indexer: &StageIndexer, n_hydros: usize) -> Self {
         let mut fpha = vec![None; n_hydros];
         for (local, &sys) in indexer.fpha_hydro_indices.iter().enumerate() {
             fpha[sys] = Some(local);
@@ -66,6 +75,139 @@ impl HydroReverseLookup {
         }
         Self { fpha, evap }
     }
+}
+
+/// Pre-computed reverse lookup from system thermal index to anticipated-local index.
+///
+/// Build once per simulation run via [`ThermalReverseLookup::build`] and reuse
+/// across all (scenario, stage) pairs.  The lookup depends only on the
+/// study-invariant [`StageIndexer`] and `n_thermals`; it never changes between
+/// stages or scenarios.
+///
+/// Entry `t` is `Some(local_anticipated_idx)` when thermal `t` is anticipated,
+/// `None` otherwise. The `local_anticipated_idx` is the position of `t` within
+/// `indexer.anticipated_thermal_indices`, which downstream callers use to address
+/// anticipated-decision columns.
+pub(crate) struct ThermalReverseLookup {
+    /// `thermal_is_anticipated[t]` is `Some(local_anticipated_idx)` if thermal `t`
+    /// is anticipated, `None` otherwise.
+    pub(crate) thermal_is_anticipated: Vec<Option<usize>>,
+}
+
+impl ThermalReverseLookup {
+    /// Build the reverse lookup table for anticipated thermal indices.
+    ///
+    /// Allocates a `Vec<Option<usize>>` of length `n_thermals`. Call this once
+    /// per simulation run (or once per worker) and pass the result by reference
+    /// into each per-stage extraction call.
+    pub(crate) fn build(indexer: &StageIndexer, n_thermals: usize) -> Self {
+        let mut thermal_is_anticipated = vec![None; n_thermals];
+        for (local, &sys) in indexer.anticipated_thermal_indices.iter().enumerate() {
+            debug_assert!(
+                sys < n_thermals,
+                "anticipated_thermal_indices entry {sys} >= n_thermals {n_thermals}"
+            );
+            thermal_is_anticipated[sys] = Some(local);
+        }
+        Self {
+            thermal_is_anticipated,
+        }
+    }
+}
+
+/// Return the primal value for the anticipated-decision column of a thermal plant.
+///
+/// Returns `Some(v)` where `v = primal[anticipated_decision.start + local_idx]` when:
+/// - thermal `thermal_local` is anticipated (i.e., `lookup.thermal_is_anticipated[thermal_local]`
+///   is `Some(local_idx)`), AND
+/// - the decision is active at the current stage: `spec.stage_index + K_i < spec.n_stages`.
+///
+/// Returns `None` silently under any of:
+/// - the thermal is not anticipated,
+/// - `spec.stage_index + K_i >= spec.n_stages` (decision absent from LP — the
+///   strict-predicate boundary set by F2-002),
+/// - the plant is outside its entry/exit window (the LP builder sets `[0,0]` bounds for
+///   those columns; the activation predicate is the canonical test — do not read-then-check).
+#[inline]
+fn compute_anticipated_decision_mw(
+    view: &SolutionView<'_>,
+    spec: &StageExtractionSpec<'_>,
+    lookup: &ThermalReverseLookup,
+    thermal_local: usize,
+) -> Option<f64> {
+    let local_idx = lookup.thermal_is_anticipated[thermal_local]?;
+    let k_i = spec.indexer.anticipated_lead_stages[local_idx];
+    // Canonical predicate: matches `StageIndexer::anticipated_decision_active_at_stage`
+    // in indexer.rs and the LP-builder gates at matrix.rs:245, :291, :1047.
+    if spec.stage_index.saturating_add(k_i) >= spec.n_stages {
+        return None;
+    }
+    let col = spec.indexer.anticipated_decision.start + local_idx;
+    debug_assert!(
+        col < view.primal.len(),
+        "anticipated_decision col {col} out of primal bounds {}",
+        view.primal.len(),
+    );
+    Some(view.primal[col])
+}
+
+/// Return the committed MW for an anticipated thermal at any stage
+/// in `[0, T-1]` (the always-active fishing predicate makes every
+/// stage a delivery stage; pre-horizon stages deliver the seeded
+/// `values_mw[slot 0]` advanced by the ring-buffer shift).
+///
+/// Reads slot 0 of the `anticipated_state` ring buffer:
+/// `primal[anticipated_state.start + 0 * n_anticipated + local_idx]`
+/// = `primal[anticipated_state.start + local_idx]` (slot-major, plant-minor).
+///
+/// At extraction time slot 0 carries the committed MW, sourced as follows:
+///
+/// - **Per-block path** (`indexer.thermal.non_empty() && n_blks > 0`): the fishing
+///   constraint couples per-block thermal generation (`MWh`) to the slot-0 column
+///   (`MW × block_hours_total`), so the LP solver pins
+///   `s_{i,0} = (sum_blk h_blk * g_blk) / sum_blk h_blk` — the block-hours-weighted
+///   average MW, i.e., the committed scalar. This is NOT the same as any
+///   individual per-block generation `g_blk` when block hours or per-block
+///   generations are non-uniform.
+///
+/// - **No-block path** (`indexer.thermal.is_empty() || n_blks == 0`): the fishing
+///   constraint LHS sum over zero blocks vanishes, so the constraint does not
+///   couple slot 0 to anything. Category 6 (`anticipated_state_fixing`) instead
+///   pins `s_{i,0} = incoming_slot_0` from the ring buffer, which is the committed
+///   MW propagated from earlier stages via the ring-buffer shift (`noise.rs:253`).
+///
+/// In both paths the correct read is the slot-0 column.
+///
+/// Returns `Some(v)` when thermal `thermal_local` is anticipated and the
+/// fishing predicate is active for its plant (`indexer.rs:1555`). At
+/// pre-horizon stages, the value read is the seeded `values_mw[slot 0]`
+/// injected by the setup pipeline and advanced via the per-stage ring-buffer shift.
+///
+/// Returns `None` silently when the thermal is not anticipated.
+#[inline]
+fn compute_anticipated_committed_mw(
+    view: &SolutionView<'_>,
+    spec: &StageExtractionSpec<'_>,
+    lookup: &ThermalReverseLookup,
+    thermal_local: usize,
+) -> Option<f64> {
+    let local_idx = lookup.thermal_is_anticipated[thermal_local]?;
+    if !spec
+        .indexer
+        .is_anticipated_fishing_active(local_idx, spec.stage_index, spec.n_stages)
+    {
+        return None;
+    }
+    // Slot-major, plant-minor layout (see `StageIndexer::anticipated_state`):
+    //   col = anticipated_state.start + slot * n_anticipated + plant
+    // Slot 0 = anticipated_state.start + local_idx (the `0 * n_anticipated` term).
+    let col = spec.indexer.anticipated_state.start + local_idx;
+    debug_assert!(
+        col < view.primal.len(),
+        "anticipated_state slot-0 col {col} out of primal bounds {}",
+        view.primal.len(),
+    );
+    Some(view.primal[col])
 }
 
 /// System entity counts needed to populate per-entity result [`Vec`]s.
@@ -275,6 +417,10 @@ pub struct StageExtractionSpec<'a> {
     /// [`EnergyConversionSet::accumulated_productivity`] so that per-stage
     /// productivity scalars are read for the correct stage.
     pub stage_index: usize,
+    /// Total number of study stages in the planning horizon. Used by
+    /// anticipated-thermal extraction to evaluate the horizon-boundary predicate
+    /// `t + K_i <= n_stages`.
+    pub n_stages: usize,
 }
 
 impl StageExtractionSpec<'_> {
@@ -635,17 +781,16 @@ fn extract_hydros(
     view: &SolutionView<'_>,
     spec: &StageExtractionSpec<'_>,
     stage_id: u32,
+    lookup: &HydroReverseLookup,
 ) -> Vec<SimulationHydroResult> {
     let indexer = spec.indexer;
-    let n_hydros = spec.entity_counts.hydro_ids.len();
-    let lookup = HydroReverseLookup::build(indexer, n_hydros);
     if indexer.turbine.is_empty() || indexer.n_blks == 0 {
         spec.entity_counts
             .hydro_ids
             .iter()
             .enumerate()
             .map(|(h, &hydro_id)| {
-                extract_hydro_no_turbine(view, spec, &lookup, h, hydro_id, stage_id)
+                extract_hydro_no_turbine(view, spec, lookup, h, hydro_id, stage_id)
             })
             .collect()
     } else {
@@ -654,7 +799,7 @@ fn extract_hydros(
             .iter()
             .enumerate()
             .flat_map(|(h, &hydro_id)| {
-                extract_hydro_per_block(view, spec, &lookup, h, hydro_id, stage_id)
+                extract_hydro_per_block(view, spec, lookup, h, hydro_id, stage_id)
             })
             .collect()
     }
@@ -665,6 +810,7 @@ fn extract_thermals(
     view: &SolutionView<'_>,
     spec: &StageExtractionSpec<'_>,
     stage_id: u32,
+    lookup: &ThermalReverseLookup,
 ) -> Vec<SimulationThermalResult> {
     let indexer = spec.indexer;
     let n_blks = indexer.n_blks;
@@ -672,44 +818,48 @@ fn extract_thermals(
         spec.entity_counts
             .thermal_ids
             .iter()
-            .map(|&thermal_id| SimulationThermalResult {
+            .enumerate()
+            .map(|(t, &thermal_id)| SimulationThermalResult {
                 stage_id,
                 block_id: None,
                 thermal_id,
                 generation_mw: 0.0,
                 generation_cost: 0.0,
-                is_gnl: false,
-                gnl_committed_mw: None,
-                gnl_decision_mw: None,
+                is_anticipated: lookup.thermal_is_anticipated[t].is_some(),
+                anticipated_committed_mw: compute_anticipated_committed_mw(view, spec, lookup, t),
+                anticipated_decision_mw: compute_anticipated_decision_mw(view, spec, lookup, t),
                 operative_state_code: 1,
             })
             .collect()
     } else {
-        spec.entity_counts
-            .thermal_ids
-            .iter()
-            .enumerate()
-            .flat_map(|(t, &thermal_id)| {
-                (0..n_blks).map(move |b| {
-                    let col = indexer.thermal.start + t * n_blks + b;
-                    let gen_mw = view.primal[col];
-                    #[allow(clippy::cast_possible_truncation)]
-                    SimulationThermalResult {
-                        stage_id,
-                        block_id: Some(b as u32),
-                        thermal_id,
-                        generation_mw: gen_mw,
-                        generation_cost: gen_mw * view.objective_coeffs[col]
-                            / spec.col_scale_factor(col)
-                            * COST_SCALE_FACTOR,
-                        is_gnl: false,
-                        gnl_committed_mw: None,
-                        gnl_decision_mw: None,
-                        operative_state_code: 1,
-                    }
-                })
-            })
-            .collect()
+        let mut results = Vec::with_capacity(spec.entity_counts.thermal_ids.len() * n_blks);
+        for (t, &thermal_id) in spec.entity_counts.thermal_ids.iter().enumerate() {
+            let is_anticipated = lookup.thermal_is_anticipated[t].is_some();
+            let anticipated_decision_mw = compute_anticipated_decision_mw(view, spec, lookup, t);
+            // The committed value is per-plant per-stage (slot 0 of the
+            // anticipated_state ring buffer), so it does not vary across blocks.
+            // Hoisted out of the inner loop to compute once per thermal.
+            let anticipated_committed_mw = compute_anticipated_committed_mw(view, spec, lookup, t);
+            for b in 0..n_blks {
+                let col = indexer.thermal.start + t * n_blks + b;
+                let gen_mw = view.primal[col];
+                #[allow(clippy::cast_possible_truncation)]
+                results.push(SimulationThermalResult {
+                    stage_id,
+                    block_id: Some(b as u32),
+                    thermal_id,
+                    generation_mw: gen_mw,
+                    generation_cost: gen_mw * view.objective_coeffs[col]
+                        / spec.col_scale_factor(col)
+                        * COST_SCALE_FACTOR,
+                    is_anticipated,
+                    anticipated_committed_mw,
+                    anticipated_decision_mw,
+                    operative_state_code: 1,
+                });
+            }
+        }
+        results
     }
 }
 
@@ -852,11 +1002,48 @@ fn extract_buses(
 /// - `stage_id` is 0-based
 ///
 /// Violations are caught by `debug_assert!` in debug builds.
+///
+/// # Performance
+///
+/// This public entry point builds the hydro and thermal reverse-lookup tables on
+/// every call.  On the hot simulation path, use the crate-internal
+/// `extract_stage_result_with_lookups` variant which accepts pre-built lookups
+/// built once per simulation run, eliminating per-(scenario, stage)
+/// allocations.
 #[must_use]
 pub fn extract_stage_result(
     view: &SolutionView<'_>,
     spec: &StageExtractionSpec<'_>,
     stage_id: u32,
+) -> SimulationStageResult {
+    let n_hydros = spec.entity_counts.hydro_ids.len();
+    let n_thermals = spec.entity_counts.thermal_ids.len();
+    let hydro_lookup = HydroReverseLookup::build(spec.indexer, n_hydros);
+    let thermal_lookup = ThermalReverseLookup::build(spec.indexer, n_thermals);
+    extract_stage_result_with_lookups(view, spec, stage_id, &hydro_lookup, &thermal_lookup)
+}
+
+/// Extract a [`SimulationStageResult`] using pre-built reverse-lookup tables.
+///
+/// Identical to [`extract_stage_result`] but avoids building the
+/// [`HydroReverseLookup`] and [`ThermalReverseLookup`] tables on every call.
+///
+/// The lookup tables depend only on the study-invariant [`StageIndexer`] and entity
+/// counts; they never change between stages or scenarios.  Build them once per
+/// simulation run (or per worker thread) and pass them by reference here to
+/// eliminate per-`(scenario, stage)` allocations on the hot path.
+///
+/// # Preconditions
+///
+/// Same as [`extract_stage_result`] plus:
+/// - `hydro_lookup` was built from the same `(indexer, n_hydros)` pair used here.
+/// - `thermal_lookup` was built from the same `(indexer, n_thermals)` pair used here.
+pub(crate) fn extract_stage_result_with_lookups(
+    view: &SolutionView<'_>,
+    spec: &StageExtractionSpec<'_>,
+    stage_id: u32,
+    hydro_lookup: &HydroReverseLookup,
+    thermal_lookup: &ThermalReverseLookup,
 ) -> SimulationStageResult {
     let indexer = spec.indexer;
     debug_assert!(
@@ -907,8 +1094,8 @@ pub fn extract_stage_result(
     SimulationStageResult {
         stage_id,
         costs,
-        hydros: extract_hydros(view, spec, stage_id),
-        thermals: extract_thermals(view, spec, stage_id),
+        hydros: extract_hydros(view, spec, stage_id, hydro_lookup),
+        thermals: extract_thermals(view, spec, stage_id, thermal_lookup),
         exchanges: extract_exchanges(view, spec, stage_id),
         buses: extract_buses(view, spec, stage_id),
         pumping_stations,
@@ -1578,6 +1765,7 @@ mod tests {
                 energy_conversion: &ec,
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
+                n_stages: 1,
             },
             3,
         );
@@ -1624,6 +1812,7 @@ mod tests {
                 energy_conversion: &ec,
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
+                n_stages: 1,
             },
             0,
         );
@@ -1670,6 +1859,7 @@ mod tests {
                 energy_conversion: &ec,
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
+                n_stages: 1,
             },
             0,
         );
@@ -1718,6 +1908,7 @@ mod tests {
                 energy_conversion: &ec,
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
+                n_stages: 1,
             },
             0,
         );
@@ -1778,6 +1969,7 @@ mod tests {
                 energy_conversion: &ec,
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
+                n_stages: 1,
             },
             2,
         );
@@ -1820,6 +2012,7 @@ mod tests {
                 energy_conversion: &ec,
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
+                n_stages: 1,
             },
             stage_id,
         );
@@ -1868,6 +2061,7 @@ mod tests {
                 energy_conversion: &ec,
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
+                n_stages: 1,
             },
             0,
         );
@@ -1919,6 +2113,10 @@ mod tests {
                 n_blks: 1,
                 has_inflow_penalty: false,
                 max_deficit_segments: 1,
+                n_anticipated: 0,
+                k_max: 0,
+                anticipated_lead_stages: vec![],
+                anticipated_thermal_indices: vec![],
             },
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
@@ -2022,6 +2220,7 @@ mod tests {
                 energy_conversion: &ec,
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
+                n_stages: 1,
             },
             0,
         );
@@ -2080,6 +2279,1374 @@ mod tests {
         assert!((cost.exchange_cost - 75_000.0).abs() < 1e-9); // 15 * 5 * 1000
     }
 
+    /// Verify that `is_anticipated` is set to `true` for thermals whose global
+    /// index appears in `anticipated_thermal_indices`, and `false` for all others.
+    ///
+    /// Setup: 2 thermals (ids 10 and 20), 1 block. Thermal at global index 1
+    /// (id=20) is anticipated. The per-block branch is exercised by using
+    /// `n_blks=1` with a non-empty thermal range.
+    #[test]
+    fn extract_thermals_marks_anticipated_thermals_when_indices_nonempty() {
+        // N=0 hydros, T=2 thermals, B=0 buses, K=1 block, n_anticipated=1 (index 1)
+        let indexer = StageIndexer::with_equipment(
+            &crate::indexer::EquipmentCounts {
+                hydro_count: 0,
+                max_par_order: 0,
+                n_thermals: 2,
+                n_lines: 0,
+                n_buses: 0,
+                n_blks: 1,
+                has_inflow_penalty: false,
+                max_deficit_segments: 1,
+                n_anticipated: 1,
+                k_max: 1,
+                anticipated_lead_stages: vec![1],
+                anticipated_thermal_indices: vec![1],
+            },
+            &crate::indexer::FphaColumnLayout {
+                hydro_indices: vec![],
+                planes_per_hydro: vec![],
+            },
+        );
+        // With N=0, L=0, A=1, K_max=1:
+        //   anticipated_state = [0, 1)  (A*K_max = 1 slot)
+        //   theta = N*(3+L) + A*K_max = 0 + 1 = 1
+        //   thermal = [theta+1, theta+1+T*K) = [2, 4)  — t0→2, t1→3
+        assert_eq!(indexer.theta, 1);
+        assert_eq!(indexer.thermal, 2..4);
+
+        // n_cols must cover at least anticipated_decision.end (last column used)
+        let n_cols = indexer.anticipated_decision.end.max(4);
+        let mut primal = vec![0.0_f64; n_cols];
+        primal[1] = 0.0; // theta
+        primal[2] = 50.0; // thermal t0 b0 (gen_mw)
+        primal[3] = 30.0; // thermal t1 b0 (gen_mw)
+
+        let mut obj = vec![0.0_f64; n_cols];
+        obj[2] = 10.0; // thermal t0 cost coefficient
+        obj[3] = 20.0; // thermal t1 cost coefficient
+
+        let counts = EntityCounts {
+            hydro_ids: vec![],
+            hydro_productivities: vec![],
+            thermal_ids: vec![10, 20],
+            line_ids: vec![],
+            bus_ids: vec![],
+            pumping_station_ids: vec![],
+            contract_ids: vec![],
+            non_controllable_ids: vec![],
+        };
+
+        let ec = zero_energy_conversion(0, 2);
+        let result = extract_stage_result(
+            &SolutionView {
+                primal: &primal,
+                dual: &[],
+                objective: 0.0,
+                objective_coeffs: &obj,
+                row_lower: &[],
+            },
+            &StageExtractionSpec {
+                indexer: &indexer,
+                entity_counts: &counts,
+                inflow_m3s_per_hydro: &[],
+                block_hours: &[1.0],
+                generic_constraint_entries: &[],
+                ncs_col_start: 0,
+                n_ncs: 0,
+                ncs_entity_ids: &[],
+                ncs_col_upper: &[],
+                diversion_upstream: &HashMap::new(),
+                hydro_productivities: &[],
+                col_scale: &[],
+                row_scale: &[],
+                cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[],
+                stage_index: 0,
+                n_stages: 2,
+            },
+            0,
+        );
+
+        // Per-block path: 2 thermals × 1 block = 2 entries
+        assert_eq!(result.thermals.len(), 2);
+
+        // Thermal 10 at global index 0: NOT anticipated
+        assert_eq!(result.thermals[0].thermal_id, 10);
+        assert!(
+            !result.thermals[0].is_anticipated,
+            "thermal 10 should not be anticipated"
+        );
+        assert_eq!(result.thermals[0].anticipated_committed_mw, None);
+        assert_eq!(result.thermals[0].anticipated_decision_mw, None);
+
+        // Thermal 20 at global index 1: IS anticipated
+        assert_eq!(result.thermals[1].thermal_id, 20);
+        assert!(
+            result.thermals[1].is_anticipated,
+            "thermal 20 should be anticipated"
+        );
+        // Always-active fishing: committed_mw reads slot 0 of anticipated_state
+        // (primal[anticipated_state.start + 0] = 0.0 in this zero-initialised fixture).
+        assert_eq!(result.thermals[1].anticipated_committed_mw, Some(0.0));
+        // With stage_index=0, n_stages=2, K_i=1: t+K_i=1 <= n_stages -> decision is active.
+        // primal[anticipated_decision.start + 0] defaults to 0.0 in this fixture.
+        assert_eq!(result.thermals[1].anticipated_decision_mw, Some(0.0));
+    }
+
+    /// Verify that `is_anticipated` is `false` for every thermal when
+    /// `anticipated_thermal_indices` is empty (no anticipated thermals configured).
+    #[test]
+    fn extract_thermals_marks_no_thermals_anticipated_when_indices_empty() {
+        // N=0 hydros, T=2 thermals, B=0 buses, K=1 block, n_anticipated=0
+        let indexer = StageIndexer::with_equipment(
+            &crate::indexer::EquipmentCounts {
+                hydro_count: 0,
+                max_par_order: 0,
+                n_thermals: 2,
+                n_lines: 0,
+                n_buses: 0,
+                n_blks: 1,
+                has_inflow_penalty: false,
+                max_deficit_segments: 1,
+                n_anticipated: 0,
+                k_max: 0,
+                anticipated_lead_stages: vec![],
+                anticipated_thermal_indices: vec![],
+            },
+            &crate::indexer::FphaColumnLayout {
+                hydro_indices: vec![],
+                planes_per_hydro: vec![],
+            },
+        );
+
+        let n_cols = indexer.generation_below_slack.end.max(3);
+        let primal = vec![0.0_f64; n_cols];
+        let obj = vec![0.0_f64; n_cols];
+
+        let counts = EntityCounts {
+            hydro_ids: vec![],
+            hydro_productivities: vec![],
+            thermal_ids: vec![10, 20],
+            line_ids: vec![],
+            bus_ids: vec![],
+            pumping_station_ids: vec![],
+            contract_ids: vec![],
+            non_controllable_ids: vec![],
+        };
+
+        let ec = zero_energy_conversion(0, 2);
+        let result = extract_stage_result(
+            &SolutionView {
+                primal: &primal,
+                dual: &[],
+                objective: 0.0,
+                objective_coeffs: &obj,
+                row_lower: &[],
+            },
+            &StageExtractionSpec {
+                indexer: &indexer,
+                entity_counts: &counts,
+                inflow_m3s_per_hydro: &[],
+                block_hours: &[1.0],
+                generic_constraint_entries: &[],
+                ncs_col_start: 0,
+                n_ncs: 0,
+                ncs_entity_ids: &[],
+                ncs_col_upper: &[],
+                diversion_upstream: &HashMap::new(),
+                hydro_productivities: &[],
+                col_scale: &[],
+                row_scale: &[],
+                cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[],
+                stage_index: 0,
+                n_stages: 2,
+            },
+            0,
+        );
+
+        // Per-block path: 2 thermals × 1 block = 2 entries, both non-anticipated
+        assert_eq!(result.thermals.len(), 2);
+        assert!(
+            !result.thermals[0].is_anticipated,
+            "thermal 10 should not be anticipated"
+        );
+        assert!(
+            !result.thermals[1].is_anticipated,
+            "thermal 20 should not be anticipated"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Tests for compute_anticipated_decision_mw
+    // -------------------------------------------------------------------------
+
+    /// Shared fixture builder for the anticipated-decision tests.
+    ///
+    /// N=0 hydros, T=2 thermals (IDs 10 and 20), B=0 buses, K=1 block,
+    /// `n_anticipated=1` (global index 1, ID 20), `k_max=2`, `K_i=2`.
+    ///
+    /// Layout:
+    ///   `n_ant_state = 1*2 = 2`  →  theta = 2
+    ///   thermal = [3, 5)         →  `anticipated_decision.start = 5`
+    fn make_anticipated_decision_indexer_k2() -> crate::indexer::StageIndexer {
+        StageIndexer::with_equipment(
+            &crate::indexer::EquipmentCounts {
+                hydro_count: 0,
+                max_par_order: 0,
+                n_thermals: 2,
+                n_lines: 0,
+                n_buses: 0,
+                n_blks: 1,
+                has_inflow_penalty: false,
+                max_deficit_segments: 1,
+                n_anticipated: 1,
+                k_max: 2,
+                anticipated_lead_stages: vec![2],
+                anticipated_thermal_indices: vec![1],
+            },
+            &crate::indexer::FphaColumnLayout {
+                hydro_indices: vec![],
+                planes_per_hydro: vec![],
+            },
+        )
+    }
+
+    /// Returns a primal vector sized to cover `anticipated_decision.end`, with
+    /// the decision column for local index 0 set to `sentinel`.
+    fn make_primal_with_decision_sentinel(
+        indexer: &crate::indexer::StageIndexer,
+        sentinel: f64,
+    ) -> Vec<f64> {
+        let n_cols = indexer.anticipated_decision.end.max(indexer.thermal.end);
+        let mut primal = vec![0.0_f64; n_cols];
+        primal[indexer.anticipated_decision.start] = sentinel;
+        primal
+    }
+
+    /// Single anticipated thermal (local index 0, global index 1, ID 20),
+    /// `K_i=2`, `stage_index=0`, `n_stages=3`.  `t+K_i = 2 <= 3` — decision is active.
+    ///
+    /// Expects `anticipated_decision_mw == Some(123.5)` for the record with ID 20.
+    #[test]
+    fn extract_thermals_reads_anticipated_decision_when_in_horizon() {
+        let indexer = make_anticipated_decision_indexer_k2();
+        let primal = make_primal_with_decision_sentinel(&indexer, 123.5);
+        let obj = vec![0.0_f64; primal.len()];
+
+        let counts = EntityCounts {
+            hydro_ids: vec![],
+            hydro_productivities: vec![],
+            thermal_ids: vec![10, 20],
+            line_ids: vec![],
+            bus_ids: vec![],
+            pumping_station_ids: vec![],
+            contract_ids: vec![],
+            non_controllable_ids: vec![],
+        };
+
+        let ec = zero_energy_conversion(0, 2);
+        let result = extract_stage_result(
+            &SolutionView {
+                primal: &primal,
+                dual: &[],
+                objective: 0.0,
+                objective_coeffs: &obj,
+                row_lower: &[],
+            },
+            &StageExtractionSpec {
+                indexer: &indexer,
+                entity_counts: &counts,
+                inflow_m3s_per_hydro: &[],
+                block_hours: &[1.0],
+                generic_constraint_entries: &[],
+                ncs_col_start: 0,
+                n_ncs: 0,
+                ncs_entity_ids: &[],
+                ncs_col_upper: &[],
+                diversion_upstream: &HashMap::new(),
+                hydro_productivities: &[],
+                col_scale: &[],
+                row_scale: &[],
+                cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[],
+                stage_index: 0,
+                n_stages: 3,
+            },
+            0,
+        );
+
+        // 2 thermals × 1 block = 2 records.  Thermal 20 is at index 1.
+        assert_eq!(result.thermals.len(), 2);
+        assert_eq!(result.thermals[1].thermal_id, 20);
+        assert_eq!(
+            result.thermals[1].anticipated_decision_mw,
+            Some(123.5),
+            "expected Some(123.5) for thermal 20 at stage 0 with K_i=2, n_stages=3"
+        );
+    }
+
+    /// Same fixture, `stage_index=1`.  `t+K_i = 1+2 = 3 == n_stages` (boundary
+    /// is INACTIVE under F2-002 strict predicate `<`).
+    ///
+    /// Expects `anticipated_decision_mw == None` — the LP has [0,0] bounds at
+    /// this boundary column and the extraction predicate must match.
+    #[test]
+    fn extract_thermals_emits_none_at_horizon_boundary() {
+        let indexer = make_anticipated_decision_indexer_k2();
+        let primal = make_primal_with_decision_sentinel(&indexer, 123.5);
+        let obj = vec![0.0_f64; primal.len()];
+
+        let counts = EntityCounts {
+            hydro_ids: vec![],
+            hydro_productivities: vec![],
+            thermal_ids: vec![10, 20],
+            line_ids: vec![],
+            bus_ids: vec![],
+            pumping_station_ids: vec![],
+            contract_ids: vec![],
+            non_controllable_ids: vec![],
+        };
+
+        let ec = zero_energy_conversion(0, 2);
+        let result = extract_stage_result(
+            &SolutionView {
+                primal: &primal,
+                dual: &[],
+                objective: 0.0,
+                objective_coeffs: &obj,
+                row_lower: &[],
+            },
+            &StageExtractionSpec {
+                indexer: &indexer,
+                entity_counts: &counts,
+                inflow_m3s_per_hydro: &[],
+                block_hours: &[1.0],
+                generic_constraint_entries: &[],
+                ncs_col_start: 0,
+                n_ncs: 0,
+                ncs_entity_ids: &[],
+                ncs_col_upper: &[],
+                diversion_upstream: &HashMap::new(),
+                hydro_productivities: &[],
+                col_scale: &[],
+                row_scale: &[],
+                cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[],
+                stage_index: 1,
+                n_stages: 3,
+            },
+            0,
+        );
+
+        assert_eq!(result.thermals.len(), 2);
+        assert_eq!(result.thermals[1].thermal_id, 20);
+        assert_eq!(
+            result.thermals[1].anticipated_decision_mw, None,
+            "expected None for thermal 20 at boundary stage 1 (K_i=2, n_stages=3): \
+             t+K_i = 3 >= n_stages = 3 under F2-002 strict predicate"
+        );
+    }
+
+    /// Same fixture, `stage_index=2`.  `t+K_i = 2+2 = 4 > 3 = n_stages` — one past
+    /// the boundary.  Decision column is structurally absent.
+    ///
+    /// Expects `anticipated_decision_mw == None`.
+    #[test]
+    fn extract_thermals_emits_none_one_past_horizon_boundary() {
+        let indexer = make_anticipated_decision_indexer_k2();
+        let primal = make_primal_with_decision_sentinel(&indexer, 123.5);
+        let obj = vec![0.0_f64; primal.len()];
+
+        let counts = EntityCounts {
+            hydro_ids: vec![],
+            hydro_productivities: vec![],
+            thermal_ids: vec![10, 20],
+            line_ids: vec![],
+            bus_ids: vec![],
+            pumping_station_ids: vec![],
+            contract_ids: vec![],
+            non_controllable_ids: vec![],
+        };
+
+        let ec = zero_energy_conversion(0, 2);
+        let result = extract_stage_result(
+            &SolutionView {
+                primal: &primal,
+                dual: &[],
+                objective: 0.0,
+                objective_coeffs: &obj,
+                row_lower: &[],
+            },
+            &StageExtractionSpec {
+                indexer: &indexer,
+                entity_counts: &counts,
+                inflow_m3s_per_hydro: &[],
+                block_hours: &[1.0],
+                generic_constraint_entries: &[],
+                ncs_col_start: 0,
+                n_ncs: 0,
+                ncs_entity_ids: &[],
+                ncs_col_upper: &[],
+                diversion_upstream: &HashMap::new(),
+                hydro_productivities: &[],
+                col_scale: &[],
+                row_scale: &[],
+                cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[],
+                stage_index: 2,
+                n_stages: 3,
+            },
+            0,
+        );
+
+        assert_eq!(result.thermals.len(), 2);
+        assert_eq!(result.thermals[1].thermal_id, 20);
+        assert_eq!(
+            result.thermals[1].anticipated_decision_mw, None,
+            "expected None for thermal 20 at stage 2 with K_i=2, n_stages=3 (one past boundary)"
+        );
+    }
+
+    /// Two thermals (IDs 10 and 20), only thermal 20 is anticipated (global
+    /// index 1, local index 0).  `K_i=1`, `stage_index=0`, `n_stages=2`.
+    ///
+    /// Asserts that the record for thermal 10 (the regular thermal) has
+    /// `anticipated_decision_mw == None`.
+    #[test]
+    fn extract_thermals_emits_none_for_non_anticipated_thermals() {
+        // N=0, T=2, n_blks=1, n_anticipated=1 (index 1), k_max=1, K_i=1
+        // Layout: n_ant_state=1, theta=1, thermal=[2,4), anticipated_decision.start=4
+        let indexer = StageIndexer::with_equipment(
+            &crate::indexer::EquipmentCounts {
+                hydro_count: 0,
+                max_par_order: 0,
+                n_thermals: 2,
+                n_lines: 0,
+                n_buses: 0,
+                n_blks: 1,
+                has_inflow_penalty: false,
+                max_deficit_segments: 1,
+                n_anticipated: 1,
+                k_max: 1,
+                anticipated_lead_stages: vec![1],
+                anticipated_thermal_indices: vec![1],
+            },
+            &crate::indexer::FphaColumnLayout {
+                hydro_indices: vec![],
+                planes_per_hydro: vec![],
+            },
+        );
+
+        let n_cols = indexer.anticipated_decision.end.max(indexer.thermal.end);
+        let mut primal = vec![0.0_f64; n_cols];
+        primal[indexer.anticipated_decision.start] = 123.5;
+        let obj = vec![0.0_f64; n_cols];
+
+        let counts = EntityCounts {
+            hydro_ids: vec![],
+            hydro_productivities: vec![],
+            thermal_ids: vec![10, 20],
+            line_ids: vec![],
+            bus_ids: vec![],
+            pumping_station_ids: vec![],
+            contract_ids: vec![],
+            non_controllable_ids: vec![],
+        };
+
+        let ec = zero_energy_conversion(0, 2);
+        let result = extract_stage_result(
+            &SolutionView {
+                primal: &primal,
+                dual: &[],
+                objective: 0.0,
+                objective_coeffs: &obj,
+                row_lower: &[],
+            },
+            &StageExtractionSpec {
+                indexer: &indexer,
+                entity_counts: &counts,
+                inflow_m3s_per_hydro: &[],
+                block_hours: &[1.0],
+                generic_constraint_entries: &[],
+                ncs_col_start: 0,
+                n_ncs: 0,
+                ncs_entity_ids: &[],
+                ncs_col_upper: &[],
+                diversion_upstream: &HashMap::new(),
+                hydro_productivities: &[],
+                col_scale: &[],
+                row_scale: &[],
+                cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[],
+                stage_index: 0,
+                n_stages: 2,
+            },
+            0,
+        );
+
+        assert_eq!(result.thermals.len(), 2);
+        assert_eq!(result.thermals[0].thermal_id, 10);
+        assert_eq!(
+            result.thermals[0].anticipated_decision_mw, None,
+            "thermal 10 is not anticipated; expected None"
+        );
+    }
+
+    /// `n_blks=4`, one anticipated thermal (ID 30, global index 0, local index
+    /// 0).  `K_i=1`, `stage_index=0`, `n_stages=2`.  The decision column is
+    /// stage-level (not per-block), so the same value must appear in all 4
+    /// block records.
+    ///
+    /// Layout: N=0, T=1, `n_blks=4`, `n_anticipated=1`, `k_max=1`:
+    ///   `n_ant_state=1`, theta=1, thermal=[2,6), `anticipated_decision.start=6`
+    #[test]
+    fn extract_thermals_anticipated_decision_is_per_block_invariant() {
+        let indexer = StageIndexer::with_equipment(
+            &crate::indexer::EquipmentCounts {
+                hydro_count: 0,
+                max_par_order: 0,
+                n_thermals: 1,
+                n_lines: 0,
+                n_buses: 0,
+                n_blks: 4,
+                has_inflow_penalty: false,
+                max_deficit_segments: 1,
+                n_anticipated: 1,
+                k_max: 1,
+                anticipated_lead_stages: vec![1],
+                anticipated_thermal_indices: vec![0],
+            },
+            &crate::indexer::FphaColumnLayout {
+                hydro_indices: vec![],
+                planes_per_hydro: vec![],
+            },
+        );
+
+        let n_cols = indexer.anticipated_decision.end.max(indexer.thermal.end);
+        let mut primal = vec![0.0_f64; n_cols];
+        primal[indexer.anticipated_decision.start] = 123.5;
+        let obj = vec![0.0_f64; n_cols];
+
+        let counts = EntityCounts {
+            hydro_ids: vec![],
+            hydro_productivities: vec![],
+            thermal_ids: vec![30],
+            line_ids: vec![],
+            bus_ids: vec![],
+            pumping_station_ids: vec![],
+            contract_ids: vec![],
+            non_controllable_ids: vec![],
+        };
+
+        let ec = zero_energy_conversion(0, 1);
+        let result = extract_stage_result(
+            &SolutionView {
+                primal: &primal,
+                dual: &[],
+                objective: 0.0,
+                objective_coeffs: &obj,
+                row_lower: &[],
+            },
+            &StageExtractionSpec {
+                indexer: &indexer,
+                entity_counts: &counts,
+                inflow_m3s_per_hydro: &[],
+                block_hours: &[1.0, 1.0, 1.0, 1.0],
+                generic_constraint_entries: &[],
+                ncs_col_start: 0,
+                n_ncs: 0,
+                ncs_entity_ids: &[],
+                ncs_col_upper: &[],
+                diversion_upstream: &HashMap::new(),
+                hydro_productivities: &[],
+                col_scale: &[],
+                row_scale: &[],
+                cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[],
+                stage_index: 0,
+                n_stages: 2,
+            },
+            0,
+        );
+
+        // 1 thermal × 4 blocks = 4 records, all for thermal 30.
+        assert_eq!(
+            result.thermals.len(),
+            4,
+            "expected 4 block records (1 thermal × 4 blocks)"
+        );
+        for (blk, rec) in result.thermals.iter().enumerate() {
+            assert_eq!(rec.thermal_id, 30);
+            assert_eq!(
+                rec.anticipated_decision_mw,
+                Some(123.5),
+                "block {blk}: expected Some(123.5) for per-block invariance"
+            );
+        }
+    }
+
+    // Tests for compute_anticipated_committed_mw (consolidated helper that
+    // reads slot 0 of the anticipated_state ring buffer in both branches).
+    // -------------------------------------------------------------------------
+
+    /// Build a `StageIndexer` for the anticipated-committed tests.
+    ///
+    /// N=0 hydros, T=1 thermal (ID 10, global index 0), `n_blks=3`, `n_anticipated=1`
+    /// (global index 0, local index 0), `k_max=2`, `K_i=2`.
+    ///
+    /// Layout:
+    ///   `n_ant_state = 1*2 = 2`  →  theta = 2
+    ///   thermal = [3, 6)          (1 thermal * 3 blocks)
+    ///   `anticipated_decision.start = 6`
+    fn make_anticipated_committed_indexer_k2_3blks() -> crate::indexer::StageIndexer {
+        StageIndexer::with_equipment(
+            &crate::indexer::EquipmentCounts {
+                hydro_count: 0,
+                max_par_order: 0,
+                n_thermals: 1,
+                n_lines: 0,
+                n_buses: 0,
+                n_blks: 3,
+                has_inflow_penalty: false,
+                max_deficit_segments: 1,
+                n_anticipated: 1,
+                k_max: 2,
+                anticipated_lead_stages: vec![2],
+                anticipated_thermal_indices: vec![0],
+            },
+            &crate::indexer::FphaColumnLayout {
+                hydro_indices: vec![],
+                planes_per_hydro: vec![],
+            },
+        )
+    }
+
+    /// AC-2: Per-block branch, K=2, `stage_index=2` (delivery stage).
+    ///
+    /// The committed value is the slot-0 entry of the `anticipated_state` ring
+    /// buffer (per-plant, per-stage scalar), NOT the per-block thermal
+    /// generation. To guard against the F2-001 regression where the helper
+    /// returned `primal[thermal_col]` (the per-block generation) instead of
+    /// `primal[anticipated_state.start + local_idx]`, this fixture uses three
+    /// distinct per-block generation values (50/60/70 MW) and a distinct
+    /// slot-0 value (42.0 MW). The fix must read 42.0 for every block; the
+    /// bug would read 50/60/70.
+    ///
+    /// Per the fishing constraint
+    /// `sum_blk h_blk * g_blk = h_total * s_{i,0}`, a real LP would couple
+    /// these — but this is a synthetic primal vector, so the values are
+    /// independent and the test isolates which column the helper reads.
+    #[test]
+    fn extract_thermals_per_block_committed_at_delivery_stage() {
+        let indexer = make_anticipated_committed_indexer_k2_3blks();
+        // thermal = [3, 6): col 3 = block 0, col 4 = block 1, col 5 = block 2
+        assert_eq!(indexer.thermal.start, 3);
+        // anticipated_state = [0, 2): col 0 = slot 0, col 1 = slot 1
+        assert_eq!(indexer.anticipated_state.start, 0);
+        let n_cols = indexer.anticipated_decision.end.max(indexer.thermal.end);
+        let mut primal = vec![0.0_f64; n_cols];
+        primal[0] = 42.0; // ant_state slot 0 (the committed scalar)
+        primal[1] = 99.0; // ant_state slot 1 (unrelated; must not be read)
+        primal[2] = 0.0; // theta
+        primal[3] = 50.0; // thermal 10, block 0
+        primal[4] = 60.0; // thermal 10, block 1
+        primal[5] = 70.0; // thermal 10, block 2
+        let obj = vec![0.0_f64; n_cols];
+
+        // Also verify the helper directly for AC-1 coverage.
+        let lookup = super::ThermalReverseLookup::build(&indexer, 1);
+        let spec = StageExtractionSpec {
+            indexer: &indexer,
+            entity_counts: &EntityCounts {
+                hydro_ids: vec![],
+                hydro_productivities: vec![],
+                thermal_ids: vec![10],
+                line_ids: vec![],
+                bus_ids: vec![],
+                pumping_station_ids: vec![],
+                contract_ids: vec![],
+                non_controllable_ids: vec![],
+            },
+            inflow_m3s_per_hydro: &[],
+            block_hours: &[1.0, 1.0, 1.0],
+            generic_constraint_entries: &[],
+            ncs_col_start: 0,
+            n_ncs: 0,
+            ncs_entity_ids: &[],
+            ncs_col_upper: &[],
+            diversion_upstream: &HashMap::new(),
+            hydro_productivities: &[],
+            col_scale: &[],
+            row_scale: &[],
+            cumulative_discount_factor: 1.0,
+            energy_conversion: &zero_energy_conversion(0, 3),
+            hydro_min_storage_hm3: &[],
+            stage_index: 2,
+            n_stages: 3,
+        };
+        let view = SolutionView {
+            primal: &primal,
+            dual: &[],
+            objective: 0.0,
+            objective_coeffs: &obj,
+            row_lower: &[],
+        };
+
+        // Direct helper call: thermal_local=0. The helper must read slot 0 of
+        // anticipated_state (col 0), NOT a per-block thermal column.
+        assert_eq!(
+            super::compute_anticipated_committed_mw(&view, &spec, &lookup, 0),
+            Some(42.0),
+            "helper: expected slot-0 value 42.0, NOT a per-block thermal value"
+        );
+
+        // Full extraction path.
+        let counts = EntityCounts {
+            hydro_ids: vec![],
+            hydro_productivities: vec![],
+            thermal_ids: vec![10],
+            line_ids: vec![],
+            bus_ids: vec![],
+            pumping_station_ids: vec![],
+            contract_ids: vec![],
+            non_controllable_ids: vec![],
+        };
+        let ec = zero_energy_conversion(0, 3);
+        let result = extract_stage_result(
+            &SolutionView {
+                primal: &primal,
+                dual: &[],
+                objective: 0.0,
+                objective_coeffs: &obj,
+                row_lower: &[],
+            },
+            &StageExtractionSpec {
+                indexer: &indexer,
+                entity_counts: &counts,
+                inflow_m3s_per_hydro: &[],
+                block_hours: &[1.0, 1.0, 1.0],
+                generic_constraint_entries: &[],
+                ncs_col_start: 0,
+                n_ncs: 0,
+                ncs_entity_ids: &[],
+                ncs_col_upper: &[],
+                diversion_upstream: &HashMap::new(),
+                hydro_productivities: &[],
+                col_scale: &[],
+                row_scale: &[],
+                cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[],
+                stage_index: 2,
+                n_stages: 3,
+            },
+            0,
+        );
+
+        // 1 thermal * 3 blocks = 3 records. Every block carries the same
+        // (per-stage) committed scalar from slot 0, NOT its own generation.
+        // On the F2-001 buggy code path this assertion fails with the
+        // per-block thermal values [50, 60, 70].
+        assert_eq!(result.thermals.len(), 3);
+        for (blk, rec) in result.thermals.iter().enumerate() {
+            assert_eq!(
+                rec.anticipated_committed_mw,
+                Some(42.0),
+                "block {blk}: must read slot-0 ant_state (42.0), not per-block gen"
+            );
+            // Sanity: generation_mw is still the per-block thermal column,
+            // and the per-block values are distinct from 42.0 — so the
+            // F2-001 regression would surface as committed_mw == generation_mw.
+            assert_ne!(
+                rec.anticipated_committed_mw,
+                Some(rec.generation_mw),
+                "block {blk}: committed_mw must NOT alias generation_mw"
+            );
+        }
+    }
+
+    /// AC-3: Per-block branch, K=2, `stage_index=1` (pre-delivery under the
+    /// legacy maturity-gate, but the always-active fishing predicate reads
+    /// slot 0 of `anticipated_state` regardless of `K_i` vs `stage_index`).
+    /// With a zero-initialised `primal[anticipated_state.start + 0]`,
+    /// expects every block to read `Some(0.0)`.
+    #[test]
+    fn extract_thermals_per_block_committed_slot0_when_seed_zero() {
+        let indexer = make_anticipated_committed_indexer_k2_3blks();
+        let n_cols = indexer.anticipated_decision.end.max(indexer.thermal.end);
+        let mut primal = vec![0.0_f64; n_cols];
+        primal[3] = 50.0; // thermal 10, block 0
+        primal[4] = 60.0; // thermal 10, block 1
+        primal[5] = 70.0; // thermal 10, block 2
+        let obj = vec![0.0_f64; n_cols];
+
+        let counts = EntityCounts {
+            hydro_ids: vec![],
+            hydro_productivities: vec![],
+            thermal_ids: vec![10],
+            line_ids: vec![],
+            bus_ids: vec![],
+            pumping_station_ids: vec![],
+            contract_ids: vec![],
+            non_controllable_ids: vec![],
+        };
+        let ec = zero_energy_conversion(0, 3);
+        let result = extract_stage_result(
+            &SolutionView {
+                primal: &primal,
+                dual: &[],
+                objective: 0.0,
+                objective_coeffs: &obj,
+                row_lower: &[],
+            },
+            &StageExtractionSpec {
+                indexer: &indexer,
+                entity_counts: &counts,
+                inflow_m3s_per_hydro: &[],
+                block_hours: &[1.0, 1.0, 1.0],
+                generic_constraint_entries: &[],
+                ncs_col_start: 0,
+                n_ncs: 0,
+                ncs_entity_ids: &[],
+                ncs_col_upper: &[],
+                diversion_upstream: &HashMap::new(),
+                hydro_productivities: &[],
+                col_scale: &[],
+                row_scale: &[],
+                cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[],
+                stage_index: 1,
+                n_stages: 3,
+            },
+            0,
+        );
+
+        assert_eq!(result.thermals.len(), 3);
+        for (blk, rec) in result.thermals.iter().enumerate() {
+            assert_eq!(
+                rec.anticipated_committed_mw,
+                Some(0.0),
+                "block {blk}: always-active reads slot 0 = 0.0 regardless of stage"
+            );
+        }
+    }
+
+    /// AC-4: Per-block branch, K=2, `stage_index=2` (boundary: `k_i == stage_index`).
+    /// Expects every block to have `anticipated_committed_mw == Some(_)`.
+    #[test]
+    fn extract_thermals_per_block_committed_at_first_delivery_boundary() {
+        let indexer = make_anticipated_committed_indexer_k2_3blks();
+        let n_cols = indexer.anticipated_decision.end.max(indexer.thermal.end);
+        let mut primal = vec![0.0_f64; n_cols];
+        primal[3] = 50.0;
+        primal[4] = 60.0;
+        primal[5] = 70.0;
+        let obj = vec![0.0_f64; n_cols];
+
+        let counts = EntityCounts {
+            hydro_ids: vec![],
+            hydro_productivities: vec![],
+            thermal_ids: vec![10],
+            line_ids: vec![],
+            bus_ids: vec![],
+            pumping_station_ids: vec![],
+            contract_ids: vec![],
+            non_controllable_ids: vec![],
+        };
+        let ec = zero_energy_conversion(0, 3);
+        let result = extract_stage_result(
+            &SolutionView {
+                primal: &primal,
+                dual: &[],
+                objective: 0.0,
+                objective_coeffs: &obj,
+                row_lower: &[],
+            },
+            &StageExtractionSpec {
+                indexer: &indexer,
+                entity_counts: &counts,
+                inflow_m3s_per_hydro: &[],
+                block_hours: &[1.0, 1.0, 1.0],
+                generic_constraint_entries: &[],
+                ncs_col_start: 0,
+                n_ncs: 0,
+                ncs_entity_ids: &[],
+                ncs_col_upper: &[],
+                diversion_upstream: &HashMap::new(),
+                hydro_productivities: &[],
+                col_scale: &[],
+                row_scale: &[],
+                cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[],
+                stage_index: 2, // k_i == stage_index: boundary acceptance
+                n_stages: 3,
+            },
+            0,
+        );
+
+        assert_eq!(result.thermals.len(), 3);
+        for (blk, rec) in result.thermals.iter().enumerate() {
+            assert!(
+                rec.anticipated_committed_mw.is_some(),
+                "block {blk}: expected Some(_) at first delivery boundary (k_i == stage_index)"
+            );
+        }
+    }
+
+    /// AC-5: Two thermals, only thermal at global index 1 is anticipated.
+    /// Thermal at global index 0 must have `anticipated_committed_mw == None` for every block.
+    #[test]
+    fn extract_thermals_per_block_committed_none_for_non_anticipated() {
+        // N=0, T=2, n_blks=3, n_anticipated=1 (global index 1), k_max=2, K_i=2
+        let indexer = StageIndexer::with_equipment(
+            &crate::indexer::EquipmentCounts {
+                hydro_count: 0,
+                max_par_order: 0,
+                n_thermals: 2,
+                n_lines: 0,
+                n_buses: 0,
+                n_blks: 3,
+                has_inflow_penalty: false,
+                max_deficit_segments: 1,
+                n_anticipated: 1,
+                k_max: 2,
+                anticipated_lead_stages: vec![2],
+                anticipated_thermal_indices: vec![1],
+            },
+            &crate::indexer::FphaColumnLayout {
+                hydro_indices: vec![],
+                planes_per_hydro: vec![],
+            },
+        );
+
+        let n_cols = indexer.anticipated_decision.end.max(indexer.thermal.end);
+        let mut primal = vec![0.0_f64; n_cols];
+        // thermal 0 (non-anticipated): blocks at thermal.start + 0*3 + [0,1,2]
+        primal[indexer.thermal.start] = 10.0;
+        primal[indexer.thermal.start + 1] = 20.0;
+        primal[indexer.thermal.start + 2] = 30.0;
+        // thermal 1 (anticipated): blocks at thermal.start + 1*3 + [0,1,2]
+        primal[indexer.thermal.start + 3] = 40.0;
+        primal[indexer.thermal.start + 4] = 50.0;
+        primal[indexer.thermal.start + 5] = 60.0;
+        let obj = vec![0.0_f64; n_cols];
+
+        let counts = EntityCounts {
+            hydro_ids: vec![],
+            hydro_productivities: vec![],
+            thermal_ids: vec![10, 20],
+            line_ids: vec![],
+            bus_ids: vec![],
+            pumping_station_ids: vec![],
+            contract_ids: vec![],
+            non_controllable_ids: vec![],
+        };
+        let ec = zero_energy_conversion(0, 3);
+        let result = extract_stage_result(
+            &SolutionView {
+                primal: &primal,
+                dual: &[],
+                objective: 0.0,
+                objective_coeffs: &obj,
+                row_lower: &[],
+            },
+            &StageExtractionSpec {
+                indexer: &indexer,
+                entity_counts: &counts,
+                inflow_m3s_per_hydro: &[],
+                block_hours: &[1.0, 1.0, 1.0],
+                generic_constraint_entries: &[],
+                ncs_col_start: 0,
+                n_ncs: 0,
+                ncs_entity_ids: &[],
+                ncs_col_upper: &[],
+                diversion_upstream: &HashMap::new(),
+                hydro_productivities: &[],
+                col_scale: &[],
+                row_scale: &[],
+                cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[],
+                stage_index: 2, // delivery stage for thermal 20
+                n_stages: 3,
+            },
+            0,
+        );
+
+        // 2 thermals * 3 blocks = 6 records; thermal 10 is first 3.
+        assert_eq!(result.thermals.len(), 6);
+        for blk in 0..3 {
+            assert_eq!(result.thermals[blk].thermal_id, 10);
+            assert_eq!(
+                result.thermals[blk].anticipated_committed_mw, None,
+                "block {blk}: non-anticipated thermal 10 must have None"
+            );
+        }
+        // Thermal 20 (anticipated) at delivery stage must have Some(_).
+        for blk in 0..3 {
+            assert!(
+                result.thermals[3 + blk].anticipated_committed_mw.is_some(),
+                "block {blk}: anticipated thermal 20 must have Some(_) at delivery"
+            );
+        }
+    }
+
+    /// AC-6: No-block branch, K=1, `stage_index=1`, `n_stages=2` (delivery).
+    /// Expects `anticipated_committed_mw == Some(0.0)`.
+    #[test]
+    fn extract_thermals_no_block_committed_at_delivery_is_zero() {
+        // N=0, T=1, n_blks=0 (no-block branch), n_anticipated=1, k_max=1, K_i=1
+        let indexer = StageIndexer::with_equipment(
+            &crate::indexer::EquipmentCounts {
+                hydro_count: 0,
+                max_par_order: 0,
+                n_thermals: 1,
+                n_lines: 0,
+                n_buses: 0,
+                n_blks: 0,
+                has_inflow_penalty: false,
+                max_deficit_segments: 1,
+                n_anticipated: 1,
+                k_max: 1,
+                anticipated_lead_stages: vec![1],
+                anticipated_thermal_indices: vec![0],
+            },
+            &crate::indexer::FphaColumnLayout {
+                hydro_indices: vec![],
+                planes_per_hydro: vec![],
+            },
+        );
+        assert!(
+            indexer.thermal.is_empty(),
+            "n_blks=0 must yield empty thermal range"
+        );
+
+        // Also verify stage-level helper directly.
+        let lookup = super::ThermalReverseLookup::build(&indexer, 1);
+        let spec_delivery = StageExtractionSpec {
+            indexer: &indexer,
+            entity_counts: &EntityCounts {
+                hydro_ids: vec![],
+                hydro_productivities: vec![],
+                thermal_ids: vec![10],
+                line_ids: vec![],
+                bus_ids: vec![],
+                pumping_station_ids: vec![],
+                contract_ids: vec![],
+                non_controllable_ids: vec![],
+            },
+            inflow_m3s_per_hydro: &[],
+            block_hours: &[],
+            generic_constraint_entries: &[],
+            ncs_col_start: 0,
+            n_ncs: 0,
+            ncs_entity_ids: &[],
+            ncs_col_upper: &[],
+            diversion_upstream: &HashMap::new(),
+            hydro_productivities: &[],
+            col_scale: &[],
+            row_scale: &[],
+            cumulative_discount_factor: 1.0,
+            energy_conversion: &zero_energy_conversion(0, 2),
+            hydro_min_storage_hm3: &[],
+            stage_index: 1,
+            n_stages: 2,
+        };
+        // In the no-block branch the fishing-constraint LHS sum vanishes; Category 6
+        // pins slot 0 to incoming (0.0 here), so the helper returns Some(0.0) — same
+        // observable as before the F2-001 fix, but via slot-0 of anticipated_state.
+        let n_cols_helper = indexer.anticipated_decision.end.max(1);
+        let primal_helper = vec![0.0_f64; n_cols_helper];
+        let dual_helper: Vec<f64> = vec![];
+        let view_helper = SolutionView {
+            primal: &primal_helper,
+            dual: &dual_helper,
+            objective: 0.0,
+            objective_coeffs: &[],
+            row_lower: &[],
+        };
+        assert_eq!(
+            super::compute_anticipated_committed_mw(&view_helper, &spec_delivery, &lookup, 0),
+            Some(0.0),
+            "consolidated helper: expected Some(0.0) at delivery stage (slot-0 = incoming = 0.0)"
+        );
+
+        // Full extraction path.
+        let n_cols = indexer.anticipated_decision.end.max(1);
+        let primal = vec![0.0_f64; n_cols];
+        let obj = vec![0.0_f64; n_cols];
+
+        let counts = EntityCounts {
+            hydro_ids: vec![],
+            hydro_productivities: vec![],
+            thermal_ids: vec![10],
+            line_ids: vec![],
+            bus_ids: vec![],
+            pumping_station_ids: vec![],
+            contract_ids: vec![],
+            non_controllable_ids: vec![],
+        };
+        let ec = zero_energy_conversion(0, 2);
+        let result = extract_stage_result(
+            &SolutionView {
+                primal: &primal,
+                dual: &[],
+                objective: 0.0,
+                objective_coeffs: &obj,
+                row_lower: &[],
+            },
+            &StageExtractionSpec {
+                indexer: &indexer,
+                entity_counts: &counts,
+                inflow_m3s_per_hydro: &[],
+                block_hours: &[],
+                generic_constraint_entries: &[],
+                ncs_col_start: 0,
+                n_ncs: 0,
+                ncs_entity_ids: &[],
+                ncs_col_upper: &[],
+                diversion_upstream: &HashMap::new(),
+                hydro_productivities: &[],
+                col_scale: &[],
+                row_scale: &[],
+                cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[],
+                stage_index: 1, // delivery stage
+                n_stages: 2,
+            },
+            0,
+        );
+
+        assert_eq!(result.thermals.len(), 1);
+        assert_eq!(
+            result.thermals[0].anticipated_committed_mw,
+            Some(0.0),
+            "no-block delivery: expected Some(0.0)"
+        );
+    }
+
+    /// AC-7: No-block branch, K=1, `stage_index=0`, `n_stages=2`. Pre-delivery
+    /// under the legacy maturity-gate, but the always-active fishing predicate
+    /// reads slot 0 of `anticipated_state` regardless. Expects `Some(0.0)`
+    /// (zero-initialised slot 0).
+    #[test]
+    fn extract_thermals_no_block_committed_reads_slot0_when_seed_zero() {
+        let indexer = StageIndexer::with_equipment(
+            &crate::indexer::EquipmentCounts {
+                hydro_count: 0,
+                max_par_order: 0,
+                n_thermals: 1,
+                n_lines: 0,
+                n_buses: 0,
+                n_blks: 0,
+                has_inflow_penalty: false,
+                max_deficit_segments: 1,
+                n_anticipated: 1,
+                k_max: 1,
+                anticipated_lead_stages: vec![1],
+                anticipated_thermal_indices: vec![0],
+            },
+            &crate::indexer::FphaColumnLayout {
+                hydro_indices: vec![],
+                planes_per_hydro: vec![],
+            },
+        );
+
+        let n_cols = indexer.anticipated_decision.end.max(1);
+        let primal = vec![0.0_f64; n_cols];
+        let obj = vec![0.0_f64; n_cols];
+
+        let counts = EntityCounts {
+            hydro_ids: vec![],
+            hydro_productivities: vec![],
+            thermal_ids: vec![10],
+            line_ids: vec![],
+            bus_ids: vec![],
+            pumping_station_ids: vec![],
+            contract_ids: vec![],
+            non_controllable_ids: vec![],
+        };
+        let ec = zero_energy_conversion(0, 2);
+        let result = extract_stage_result(
+            &SolutionView {
+                primal: &primal,
+                dual: &[],
+                objective: 0.0,
+                objective_coeffs: &obj,
+                row_lower: &[],
+            },
+            &StageExtractionSpec {
+                indexer: &indexer,
+                entity_counts: &counts,
+                inflow_m3s_per_hydro: &[],
+                block_hours: &[],
+                generic_constraint_entries: &[],
+                ncs_col_start: 0,
+                n_ncs: 0,
+                ncs_entity_ids: &[],
+                ncs_col_upper: &[],
+                diversion_upstream: &HashMap::new(),
+                hydro_productivities: &[],
+                col_scale: &[],
+                row_scale: &[],
+                cumulative_discount_factor: 1.0,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[],
+                stage_index: 0, // before delivery
+                n_stages: 2,
+            },
+            0,
+        );
+
+        assert_eq!(result.thermals.len(), 1);
+        assert_eq!(
+            result.thermals[0].anticipated_committed_mw,
+            Some(0.0),
+            "no-block always-active: reads slot 0 = 0.0 regardless of stage"
+        );
+    }
+
+    /// Regression guard for F1-002: verify that using a pre-built
+    /// [`ThermalReverseLookup`] via [`extract_stage_result_with_lookups`]
+    /// produces bit-for-bit identical results to the standard
+    /// [`extract_stage_result`] path (which builds the lookup internally).
+    ///
+    /// If the two paths ever diverge, this test catches it immediately.
+    #[test]
+    fn extract_stage_result_prebuilt_lookup_matches_standard_path() {
+        use super::{HydroReverseLookup, ThermalReverseLookup, extract_stage_result_with_lookups};
+
+        let indexer = crate::indexer::StageIndexer::with_equipment(
+            &crate::indexer::EquipmentCounts {
+                hydro_count: 0,
+                max_par_order: 0,
+                n_thermals: 1,
+                n_lines: 0,
+                n_buses: 0,
+                n_blks: 2,
+                has_inflow_penalty: false,
+                max_deficit_segments: 1,
+                n_anticipated: 1,
+                k_max: 1,
+                anticipated_lead_stages: vec![1],
+                anticipated_thermal_indices: vec![0],
+            },
+            &crate::indexer::FphaColumnLayout {
+                hydro_indices: vec![],
+                planes_per_hydro: vec![],
+            },
+        );
+
+        let n_cols = indexer
+            .anticipated_decision
+            .end
+            .max(indexer.thermal.end)
+            .max(indexer.anticipated_state.end)
+            .max(indexer.theta + 1);
+        let mut primal = vec![0.0_f64; n_cols];
+        // Slot 0 of anticipated_state = committed MW scalar.
+        primal[indexer.anticipated_state.start] = 37.5;
+        // Anticipated decision column.
+        primal[indexer.anticipated_decision.start] = 80.0;
+        // Thermal columns: block 0, block 1.
+        if !indexer.thermal.is_empty() {
+            primal[indexer.thermal.start] = 40.0;
+            primal[indexer.thermal.start + 1] = 50.0;
+        }
+        let obj = vec![0.01_f64; n_cols];
+        let ec = zero_energy_conversion(0, 3);
+        let counts = EntityCounts {
+            hydro_ids: vec![],
+            hydro_productivities: vec![],
+            thermal_ids: vec![42],
+            line_ids: vec![],
+            bus_ids: vec![],
+            pumping_station_ids: vec![],
+            contract_ids: vec![],
+            non_controllable_ids: vec![],
+        };
+        let view = SolutionView {
+            primal: &primal,
+            dual: &[],
+            objective: 0.0,
+            objective_coeffs: &obj,
+            row_lower: &[],
+        };
+        let spec = StageExtractionSpec {
+            indexer: &indexer,
+            entity_counts: &counts,
+            inflow_m3s_per_hydro: &[],
+            block_hours: &[1.0, 1.0],
+            generic_constraint_entries: &[],
+            ncs_col_start: 0,
+            n_ncs: 0,
+            ncs_entity_ids: &[],
+            ncs_col_upper: &[],
+            diversion_upstream: &HashMap::new(),
+            hydro_productivities: &[],
+            col_scale: &[],
+            row_scale: &[],
+            cumulative_discount_factor: 1.0,
+            energy_conversion: &ec,
+            hydro_min_storage_hm3: &[],
+            stage_index: 2, // delivery stage (k_i=1, stage_index=2 > k_i)
+            n_stages: 3,
+        };
+
+        // Standard path: builds the lookup internally on every call.
+        let result_standard = extract_stage_result(&view, &spec, 2);
+
+        // Pre-built path: lookup built once, reused across calls (hot-path pattern).
+        let thermal_lookup = ThermalReverseLookup::build(&indexer, counts.thermal_ids.len());
+        let hydro_lookup = HydroReverseLookup::build(&indexer, counts.hydro_ids.len());
+        let result_prebuilt =
+            extract_stage_result_with_lookups(&view, &spec, 2, &hydro_lookup, &thermal_lookup);
+
+        // Verify bit-for-bit equality on the anticipated fields.
+        assert_eq!(
+            result_standard.thermals.len(),
+            result_prebuilt.thermals.len(),
+            "thermal result count must match"
+        );
+        for (std_t, pre_t) in result_standard
+            .thermals
+            .iter()
+            .zip(result_prebuilt.thermals.iter())
+        {
+            assert_eq!(
+                std_t.is_anticipated, pre_t.is_anticipated,
+                "is_anticipated must match"
+            );
+            assert_eq!(
+                std_t.anticipated_committed_mw.map(f64::to_bits),
+                pre_t.anticipated_committed_mw.map(f64::to_bits),
+                "anticipated_committed_mw bits must match"
+            );
+            assert_eq!(
+                std_t.anticipated_decision_mw.map(f64::to_bits),
+                pre_t.anticipated_decision_mw.map(f64::to_bits),
+                "anticipated_decision_mw bits must match"
+            );
+            assert_eq!(
+                std_t.generation_mw.to_bits(),
+                pre_t.generation_mw.to_bits(),
+                "generation_mw bits must match"
+            );
+        }
+    }
+
     #[test]
     fn extract_optional_entity_types_are_empty_when_absent() {
         let indexer = StageIndexer::new(1, 0);
@@ -2123,6 +3690,7 @@ mod tests {
                 energy_conversion: &ec,
                 hydro_min_storage_hm3: &[0.0],
                 stage_index: 0,
+                n_stages: 1,
             },
             0,
         );
@@ -2315,6 +3883,10 @@ mod tests {
                 n_blks: 1,
                 has_inflow_penalty: true,
                 max_deficit_segments: 1,
+                n_anticipated: 0,
+                k_max: 0,
+                anticipated_lead_stages: vec![],
+                anticipated_thermal_indices: vec![],
             },
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
@@ -2390,6 +3962,7 @@ mod tests {
                 energy_conversion: &ec,
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
+                n_stages: 1,
             },
             0,
         );
@@ -2426,6 +3999,10 @@ mod tests {
                 n_blks: 1,
                 has_inflow_penalty: false,
                 max_deficit_segments: 1,
+                n_anticipated: 0,
+                k_max: 0,
+                anticipated_lead_stages: vec![],
+                anticipated_thermal_indices: vec![],
             },
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
@@ -2481,6 +4058,7 @@ mod tests {
                 energy_conversion: &ec,
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
+                n_stages: 1,
             },
             0,
         );
@@ -2510,6 +4088,10 @@ mod tests {
                 n_blks: 0,
                 has_inflow_penalty: true,
                 max_deficit_segments: 1,
+                n_anticipated: 0,
+                k_max: 0,
+                anticipated_lead_stages: vec![],
+                anticipated_thermal_indices: vec![],
             },
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
@@ -2583,6 +4165,7 @@ mod tests {
                 energy_conversion: &ec,
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
+                n_stages: 1,
             },
             0,
         );
@@ -2623,6 +4206,10 @@ mod tests {
                 n_blks: 1,
                 has_inflow_penalty: false,
                 max_deficit_segments: 1,
+                n_anticipated: 0,
+                k_max: 0,
+                anticipated_lead_stages: vec![],
+                anticipated_thermal_indices: vec![],
             },
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![0],
@@ -2698,6 +4285,7 @@ mod tests {
                 energy_conversion: &ec,
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
+                n_stages: 1,
             },
             0,
         );
@@ -2772,6 +4360,7 @@ mod tests {
                 energy_conversion: &ec,
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
+                n_stages: 1,
             },
             0,
         );
@@ -2809,6 +4398,10 @@ mod tests {
                 n_blks: 1,
                 has_inflow_penalty: false,
                 max_deficit_segments: 1,
+                n_anticipated: 0,
+                k_max: 0,
+                anticipated_lead_stages: vec![],
+                anticipated_thermal_indices: vec![],
             },
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
@@ -2883,6 +4476,7 @@ mod tests {
                 energy_conversion: &ec,
                 hydro_min_storage_hm3: &[0.0],
                 stage_index: 0,
+                n_stages: 1,
             },
             0,
         );
@@ -2958,6 +4552,7 @@ mod tests {
                 energy_conversion: &ec,
                 hydro_min_storage_hm3: &[0.0],
                 stage_index: 0,
+                n_stages: 1,
             },
             0,
         );
@@ -3039,6 +4634,7 @@ mod tests {
                 energy_conversion: &ec,
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
+                n_stages: 1,
             },
             0,
         );
@@ -3114,6 +4710,7 @@ mod tests {
                 energy_conversion: &ec,
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
+                n_stages: 1,
             },
             0,
         );
@@ -3207,6 +4804,7 @@ mod tests {
                 energy_conversion: &ec,
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
+                n_stages: 1,
             },
             0,
         );
@@ -3322,6 +4920,7 @@ mod tests {
                 energy_conversion: &ec,
                 hydro_min_storage_hm3: &[0.0; 2],
                 stage_index: 0,
+                n_stages: 1,
             },
             0,
         );
@@ -3450,6 +5049,7 @@ mod tests {
                 energy_conversion: &ec,
                 hydro_min_storage_hm3: &[100.0],
                 stage_index: 0,
+                n_stages: 1,
             },
             0,
         );
@@ -3510,6 +5110,7 @@ mod tests {
                 energy_conversion: &ec,
                 hydro_min_storage_hm3: &[100.0],
                 stage_index: 0,
+                n_stages: 1,
             },
             0,
         );
@@ -3559,6 +5160,7 @@ mod tests {
                 energy_conversion: &ec,
                 hydro_min_storage_hm3: &[100.0],
                 stage_index: 0,
+                n_stages: 1,
             },
             0,
         );

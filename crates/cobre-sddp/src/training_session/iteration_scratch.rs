@@ -70,7 +70,10 @@ impl IterationScratch {
     /// * `template_0_num_rows` — number of rows in the stage-0 template (for `CutRowMap`).
     /// * `hydro_count` — number of hydro plants (for `PatchBuffer`).
     /// * `max_par_order` — maximum PAR model order (for `PatchBuffer`).
+    /// * `n_anticipated` — number of anticipated thermals (for `PatchBuffer` Category 6).
+    /// * `k_max` — maximum anticipated lead-stage horizon (for `PatchBuffer` Category 6).
     /// * `stage_ctx` — stage context providing base templates for the pre-bake loop.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         max_local_fwd: usize,
         num_stages: usize,
@@ -79,6 +82,8 @@ impl IterationScratch {
         template_0_num_rows: usize,
         hydro_count: usize,
         max_par_order: usize,
+        n_anticipated: usize,
+        k_max: usize,
         stage_ctx: &StageContext<'_>,
     ) -> Self {
         // ── Trajectory records ─────────────────────────────────────────────
@@ -94,10 +99,16 @@ impl IterationScratch {
             .collect();
 
         // ── Patch buffer ───────────────────────────────────────────────────
-        // Standalone patch buffer for the lower bound evaluation which uses
-        // the single `solver` argument directly. Trailing `0, 0` preserve
-        // the pre-refactor argument list verbatim.
-        let patch_buf = PatchBuffer::new(hydro_count, max_par_order, 0, 0);
+        // Standalone patch buffer for the lower-bound evaluation which uses
+        // the single `solver` argument directly. The lower-bound path calls
+        // `fill_forward_patches` (Categories 1, 2, 6) and `fill_z_inflow_patches`
+        // (Category 5); it does NOT call `fill_load_patches` (Category 4), so
+        // `n_load_buses` and `max_blocks` remain zero. Category 6
+        // (anticipated_state_fixing) capacity MUST be sized by the actual
+        // `n_anticipated * k_max`: when these are zero, the LB anticipated-state
+        // rows default to `0 == 0` and silently force every anticipated_state
+        // column to zero, ignoring past commitments in `initial_state`.
+        let patch_buf = PatchBuffer::new(hydro_count, max_par_order, 0, 0, n_anticipated, k_max);
 
         // ── Cut row batch buffers (reused across iterations) ───────────────
         let cut_batches: Vec<RowBatch> = (0..num_stages)
@@ -253,6 +264,8 @@ mod tests {
             template_0_num_rows,
             hydro_count,
             max_par_order,
+            0,
+            0,
             &stage_ctx,
         );
 
@@ -307,6 +320,8 @@ mod tests {
             template_0_num_rows,
             hydro_count,
             max_par_order,
+            0,
+            0,
             &stage_ctx,
         );
 
@@ -320,5 +335,117 @@ mod tests {
                 "baked_templates[{t}].num_cols must match stage_ctx template"
             );
         }
+    }
+
+    /// Regression for F3-001: `IterationScratch::new` must size the lower-bound
+    /// patch buffer's Category 6 capacity to `n_anticipated * k_max`.
+    ///
+    /// Before the fix the trailing two arguments were hard-coded zero, so the
+    /// LB patch buffer had no slots for the `anticipated_state_fixing` rows.
+    /// `fill_forward_patches` then skipped Category 6 silently and the LP's
+    /// `anticipated_state_fixing` rows kept their template default of `0 == 0`,
+    /// forcing every `anticipated_state` column to zero in the LB solve and
+    /// ignoring past commitments stored in `initial_state`.
+    ///
+    /// This test exercises a non-trivial `(n_anticipated, k_max) = (3, 2)` and
+    /// asserts that the resulting buffer can hold all `N*(2+L) + A*K + N`
+    /// patches required by the forward-pass fill path.
+    #[test]
+    fn iteration_scratch_new_sizes_patch_buffer_for_anticipated_thermals() {
+        let max_local_fwd = 1;
+        let num_stages = 2;
+        let n_state = 4;
+        let fcf_pool_0_capacity = 4;
+        let template_0_num_rows = 4;
+        let hydro_count = 2;
+        let max_par_order = 1;
+        let n_anticipated = 3;
+        let k_max = 2;
+
+        let templates = vec![minimal_template(); num_stages];
+        let stage_ctx = make_stage_ctx(&templates);
+
+        let scratch = IterationScratch::new(
+            max_local_fwd,
+            num_stages,
+            n_state,
+            fcf_pool_0_capacity,
+            template_0_num_rows,
+            hydro_count,
+            max_par_order,
+            n_anticipated,
+            k_max,
+            &stage_ctx,
+        );
+
+        // Forward-pass layout capacity:
+        //   N*(2+L) + A*K + M*B + N
+        // with M = 0 and B = 0 in the LB patch buffer (no load patches).
+        let expected_capacity =
+            hydro_count * (2 + max_par_order) + n_anticipated * k_max + hydro_count;
+        assert_eq!(
+            scratch.patch_buf.indices.len(),
+            expected_capacity,
+            "patch_buf indices length must include A*K slots for Category 6",
+        );
+        assert_eq!(
+            scratch.patch_buf.lower.len(),
+            expected_capacity,
+            "patch_buf lower length must include A*K slots for Category 6",
+        );
+        assert_eq!(
+            scratch.patch_buf.upper.len(),
+            expected_capacity,
+            "patch_buf upper length must include A*K slots for Category 6",
+        );
+
+        // forward_patch_count starts at `N*(2+L) + A*K` before any load or
+        // z-inflow patches have been filled — exactly the slot count that
+        // `fill_forward_patches` will write into.
+        let expected_pre_fill_count = hydro_count * (2 + max_par_order) + n_anticipated * k_max;
+        assert_eq!(
+            scratch.patch_buf.forward_patch_count(),
+            expected_pre_fill_count,
+            "forward_patch_count must include the A*K Category 6 slots",
+        );
+    }
+
+    /// Regression for F3-001 (zero-anticipated case): when the study has no
+    /// anticipated thermals, the patch buffer must size identically to the
+    /// pre-anticipated layout. This guards against accidentally allocating
+    /// Category 6 capacity when the indexer reports `n_anticipated == 0`.
+    #[test]
+    fn iteration_scratch_new_patch_buffer_zero_anticipated_unchanged() {
+        let max_local_fwd = 1;
+        let num_stages = 2;
+        let n_state = 2;
+        let fcf_pool_0_capacity = 4;
+        let template_0_num_rows = 4;
+        let hydro_count = 2;
+        let max_par_order = 1;
+
+        let templates = vec![minimal_template(); num_stages];
+        let stage_ctx = make_stage_ctx(&templates);
+
+        let scratch = IterationScratch::new(
+            max_local_fwd,
+            num_stages,
+            n_state,
+            fcf_pool_0_capacity,
+            template_0_num_rows,
+            hydro_count,
+            max_par_order,
+            0,
+            0,
+            &stage_ctx,
+        );
+
+        // With A=0 and K=0, capacity reduces to N*(2+L) + N (z-inflow).
+        let expected_capacity = hydro_count * (2 + max_par_order) + hydro_count;
+        assert_eq!(
+            scratch.patch_buf.indices.len(),
+            expected_capacity,
+            "zero-anticipated patch_buf must match the pre-anticipated layout",
+        );
     }
 }

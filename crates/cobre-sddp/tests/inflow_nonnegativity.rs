@@ -299,6 +299,7 @@ fn build_system() -> cobre_core::System {
         0,
             n_stages: // n_contracts
         N_STAGES,
+            k_max: 0,
         },
         &BoundsDefaults {
             hydro: hydro_bounds_default,
@@ -456,6 +457,10 @@ fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixtur
             n_blks,
             has_inflow_penalty,
             max_deficit_segments: 1,
+            n_anticipated: 0,
+            k_max: 0,
+            anticipated_lead_stages: vec![],
+            anticipated_thermal_indices: vec![],
         },
         &cobre_sddp::indexer::FphaColumnLayout {
             hydro_indices: vec![],
@@ -604,7 +609,7 @@ fn simulate_fixture(
         0,
         0,
         HighsSolver::new().expect("HighsSolver::new must succeed"),
-        PatchBuffer::new(fx.indexer.hydro_count, fx.indexer.max_par_order, 0, 0),
+        PatchBuffer::new(fx.indexer.hydro_count, fx.indexer.max_par_order, 0, 0, 0, 0),
         fx.indexer.n_state,
         WorkspaceSizing {
             hydro_count: fx.indexer.hydro_count,
@@ -944,6 +949,10 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
             n_blks,
             has_inflow_penalty: true,
             max_deficit_segments: 1,
+            n_anticipated: 0,
+            k_max: 0,
+            anticipated_lead_stages: vec![],
+            anticipated_thermal_indices: vec![],
         },
         &cobre_sddp::indexer::FphaColumnLayout {
             hydro_indices: vec![],

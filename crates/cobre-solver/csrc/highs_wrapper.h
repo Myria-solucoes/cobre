@@ -209,6 +209,24 @@ int32_t cobre_highs_set_double_option(
     double      value
 );
 
+/** Get an integer-valued HiGHS option.
+ *  Wraps Highs_getIntOptionValue().
+ *  Returns a kHighsStatus constant. */
+int32_t cobre_highs_get_int_option(
+    const void* highs,
+    const char* option,
+    int32_t*    value
+);
+
+/** Get a double-valued HiGHS option.
+ *  Wraps Highs_getDoubleOptionValue().
+ *  Returns a kHighsStatus constant. */
+int32_t cobre_highs_get_double_option(
+    const void* highs,
+    const char* option,
+    double*     value
+);
+
 /* =========================================================================
  * Diagnostics
  * ========================================================================= */

@@ -773,9 +773,9 @@ Thermal unit dispatch results. One row per (stage, block, thermal) triplet. 10 c
 | `generation_mw`        | Float64 | No       | Average power generation over the block in MW.                                |
 | `generation_mwh`       | Float64 | No       | Total energy generated over the block in MWh.                                 |
 | `generation_cost`      | Float64 | No       | Monetary generation cost for this block.                                      |
-| `is_gnl`               | Boolean | No       | `true` if this unit operates under GNL (gas natural liquefied) pricing rules. |
-| `gnl_committed_mw`     | Float64 | Yes      | Committed capacity under GNL mode in MW. `null` for non-GNL units.            |
-| `gnl_decision_mw`      | Float64 | Yes      | Dispatch decision under GNL mode in MW. `null` for non-GNL units.             |
+| `is_anticipated`            | Boolean | No       | `true` if this unit is configured for anticipated dispatch.                         |
+| `anticipated_committed_mw`  | Float64 | Yes      | Committed capacity under anticipated dispatch in MW. `null` for non-anticipated units. |
+| `anticipated_decision_mw`   | Float64 | Yes      | Dispatch decision under anticipated dispatch in MW. `null` for non-anticipated units.  |
 | `operative_state_code` | Int8    | No       | Operative state code (see `codes.json` `operative_state` mapping).            |
 
 ---

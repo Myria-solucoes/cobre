@@ -63,6 +63,7 @@ pub mod risk_measure;
 pub(crate) mod scaling_report;
 pub mod setup;
 pub mod simulation;
+pub mod solver_phase;
 pub mod solver_stats;
 pub(crate) mod stage_solve;
 pub(crate) mod state_exchange;
@@ -72,6 +73,7 @@ pub mod training;
 pub(crate) mod training_output;
 pub(crate) mod training_session;
 pub(crate) mod trajectory;
+pub mod validate_phases;
 pub(crate) mod visited_states;
 pub mod workspace;
 
@@ -126,6 +128,8 @@ pub use simulation::{
     ScenarioCategoryCosts, SimulationError, SimulationHydroResult, SimulationScenarioResult,
     SimulationStageResult, SimulationSummary, aggregate_simulation, simulate,
 };
+// ── solver_phase ──────────────────────────────────────────────────────────────
+pub use solver_phase::{BACKWARD_PROFILE, FORWARD_PROFILE, Phase, SIMULATION_PROFILE};
 // ── solver_stats ──────────────────────────────────────────────────────────────
 pub use solver_stats::{
     SOLVER_STATS_DELTA_SCALAR_FIELDS, SolverStatsDelta, pack_delta_scalars, pack_scenario_stats,

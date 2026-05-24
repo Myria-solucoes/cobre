@@ -192,14 +192,12 @@ pub struct SimulationThermalResult {
     pub generation_mw: f64,
     /// Variable generation cost for this dispatch.
     pub generation_cost: f64,
-    /// Whether this unit participates in a GNL (Gas Natural Liquefied) model.
-    pub is_gnl: bool,
-    /// Committed capacity under the GNL model in MW, or [`None`] if
-    /// `is_gnl` is false.
-    pub gnl_committed_mw: Option<f64>,
-    /// Decision (contracted) capacity under the GNL model in MW, or [`None`]
-    /// if `is_gnl` is false.
-    pub gnl_decision_mw: Option<f64>,
+    /// Whether this unit uses anticipated dispatch.
+    pub is_anticipated: bool,
+    /// Realised delivery commitment in MW, or `None` if not anticipated.
+    pub anticipated_committed_mw: Option<f64>,
+    /// New anticipated commitment decided at this stage in MW, or `None`.
+    pub anticipated_decision_mw: Option<f64>,
     /// Operative state code for this thermal unit at this block.
     pub operative_state_code: i8,
 }
@@ -727,36 +725,36 @@ mod tests {
     }
 
     #[test]
-    fn thermal_result_gnl_fields_nullable() {
-        let gnl = SimulationThermalResult {
+    fn thermal_result_anticipated_fields_nullable() {
+        let anticipated = SimulationThermalResult {
             stage_id: 2,
             block_id: Some(1),
             thermal_id: 10,
             generation_mw: 200.0,
             generation_cost: 5000.0,
-            is_gnl: true,
-            gnl_committed_mw: Some(250.0),
-            gnl_decision_mw: Some(200.0),
+            is_anticipated: true,
+            anticipated_committed_mw: Some(250.0),
+            anticipated_decision_mw: Some(200.0),
             operative_state_code: 1,
         };
-        assert!(gnl.is_gnl);
-        assert_eq!(gnl.gnl_committed_mw, Some(250.0));
-        assert_eq!(gnl.gnl_decision_mw, Some(200.0));
+        assert!(anticipated.is_anticipated);
+        assert_eq!(anticipated.anticipated_committed_mw, Some(250.0));
+        assert_eq!(anticipated.anticipated_decision_mw, Some(200.0));
 
-        let non_gnl = SimulationThermalResult {
+        let non_anticipated = SimulationThermalResult {
             stage_id: 2,
             block_id: Some(1),
             thermal_id: 11,
             generation_mw: 100.0,
             generation_cost: 3000.0,
-            is_gnl: false,
-            gnl_committed_mw: None,
-            gnl_decision_mw: None,
+            is_anticipated: false,
+            anticipated_committed_mw: None,
+            anticipated_decision_mw: None,
             operative_state_code: 1,
         };
-        assert!(!non_gnl.is_gnl);
-        assert_eq!(non_gnl.gnl_committed_mw, None);
-        assert_eq!(non_gnl.gnl_decision_mw, None);
+        assert!(!non_anticipated.is_anticipated);
+        assert_eq!(non_anticipated.anticipated_committed_mw, None);
+        assert_eq!(non_anticipated.anticipated_decision_mw, None);
     }
 
     #[test]

@@ -351,7 +351,7 @@ support, host architecture, and build profile.
 ### Output Format
 
 ```
-cobre   v0.6.2
+cobre   v0.7.0
 solver: HiGHS
 comm:   local
 zstd:   enabled

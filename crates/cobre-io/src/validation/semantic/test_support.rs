@@ -134,7 +134,7 @@ pub(super) fn make_thermal(id: i32, min_mw: f64, max_mw: f64) -> Thermal {
         cost_per_mwh: 100.0,
         min_generation_mw: min_mw,
         max_generation_mw: max_mw,
-        gnl_config: None,
+        anticipated_config: None,
     }
 }
 
@@ -194,6 +194,7 @@ pub(super) fn make_data(
             storage: vec![],
             filling_storage: vec![],
             past_inflows: vec![],
+            past_anticipated_commitments: vec![],
             recent_observations: vec![],
         },
         buses: vec![Bus {
@@ -261,6 +262,7 @@ pub(super) fn make_data_5b(
             storage: vec![],
             filling_storage: vec![],
             past_inflows: vec![],
+            past_anticipated_commitments: vec![],
             recent_observations: vec![],
         },
         buses,
@@ -606,6 +608,7 @@ pub(super) fn make_data_estimation(
             storage: vec![],
             filling_storage: vec![],
             past_inflows: vec![],
+            past_anticipated_commitments: vec![],
             recent_observations: vec![],
         },
         buses: vec![Bus {
@@ -716,6 +719,7 @@ pub(super) fn make_data_past_inflows(
             storage: vec![],
             filling_storage: vec![],
             past_inflows,
+            past_anticipated_commitments: vec![],
             recent_observations: vec![],
         },
         buses: vec![Bus {

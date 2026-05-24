@@ -274,6 +274,7 @@ fn build_par_a_fixture() -> (cobre_core::System, PrecomputedPar) {
             n_pumping: 0,
             n_contracts: 0,
             n_stages: N_STUDY,
+            k_max: 0,
         },
         &BoundsDefaults {
             hydro: hydro_bounds_default,
@@ -505,6 +506,7 @@ fn build_classical_fixture() -> (cobre_core::System, PrecomputedPar) {
             n_pumping: 0,
             n_contracts: 0,
             n_stages: N_STUDY,
+            k_max: 0,
         },
         &BoundsDefaults {
             hydro: hydro_bounds_default,

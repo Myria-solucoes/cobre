@@ -411,6 +411,81 @@ fn main() -> Result<(), SolverError> {
 }
 ```
 
+## Solver profiles
+
+`SolveProfile` is a set of LP-solver tuning values that callers swap in at
+phase boundaries. It defines how the solver is configured for the default solve
+attempt — the retry ladder layers additional behavior on top, without
+overriding the profile.
+
+### `SolveProfile` fields
+
+| Field                          | Type  | Units / meaning |
+|--------------------------------|-------|-----------------|
+| `primal_feasibility_tolerance` | `f64` | Absolute primal feasibility tolerance. Smaller values are stricter. |
+| `dual_feasibility_tolerance`   | `f64` | Absolute dual feasibility tolerance. Same strictness convention. |
+| `simplex_iteration_limit`      | `u32` | Per-attempt simplex iteration cap. The sentinel value `DEFAULT_PROFILE_HEURISTIC_SENTINEL` (`0`) signals the solver to use its historical per-call heuristic (`num_cols * 50`, capped at `100_000`). Any non-zero value is applied verbatim as a flat cap. |
+| `ipm_iteration_limit`          | `u32` | Per-attempt IPM iteration cap. The sentinel value `DEFAULT_PROFILE_IPM_UNBOUNDED_SENTINEL` (`0`) means no cap. Any positive value is applied verbatim. |
+
+`SolveProfile` is `Copy` and `PartialEq`, enabling the wrapper to compare
+the requested profile against the currently-applied profile and skip FFI
+option-setter calls when nothing has changed.
+
+### Default profile
+
+`SolveProfile::default()` returns values that match the historical hard-coded
+configuration bit-for-bit, so callers that never configure profiles see no
+behavioral change:
+
+| Field                          | Default value |
+|--------------------------------|---------------|
+| `primal_feasibility_tolerance` | `1e-9`        |
+| `dual_feasibility_tolerance`   | `1e-9`        |
+| `simplex_iteration_limit`      | `0` (use heuristic — see `DEFAULT_PROFILE_HEURISTIC_SENTINEL`) |
+| `ipm_iteration_limit`          | `10_000`      |
+
+### `ProfiledSolver<S>` wrapper
+
+`ProfiledSolver<S>` wraps any `SolverInterface` implementor with per-phase
+profile tracking. It resolves `S` at compile time via monomorphization, so
+wrapping carries no virtual-dispatch overhead on the hot path.
+
+Key methods:
+
+- **`ProfiledSolver::new(inner)`** — wraps the inner solver, assuming its
+  current state is consistent with `SolveProfile::default()`. Issues no FFI
+  calls on construction.
+- **`set_profile(&mut self, profile: &SolveProfile)`** — applies a new
+  profile. Only fields that differ from the currently-applied profile trigger
+  setter calls on the inner solver. The dispatch order is fixed: primal
+  feasibility → dual feasibility → simplex cap → IPM cap. If the new profile
+  equals the current profile, the call returns immediately with zero inner
+  method calls.
+- **`current_profile(&self) -> &SolveProfile`** — returns the last
+  successfully applied profile, or `SolveProfile::default()` if no profile
+  has been applied since construction.
+- **`inner(&self) -> &S`** / **`inner_mut(&mut self) -> &mut S`** — shared
+  and exclusive references to the wrapped solver, intended for test adapters
+  and inspection sites; not used on the hot path.
+
+`ProfiledSolver<S>` implements `SolverInterface` by transparently forwarding
+all trait method calls to the inner solver.
+
+### Retry-level tolerance composition
+
+Profile tolerance values compose with the retry-level tolerances via a `max`
+rule:
+
+```text
+applied_tolerance = max(level_default, profile_value)
+```
+
+This means a strict profile (small tolerance) is never silently relaxed by an
+early retry level, and a loose profile is never tightened by the profile
+mechanism. The retry ladder uses its own level defaults as a floor, not as an
+override. The rule applies to both primal and dual feasibility tolerances at all
+retry levels that override them (levels 3, 7, 10, and 11 of the HiGHS backend).
+
 ## Build requirements
 
 ### Git submodule

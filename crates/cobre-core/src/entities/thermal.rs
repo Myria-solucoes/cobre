@@ -6,15 +6,25 @@
 
 use crate::EntityId;
 
-/// Gás Natural Liquefeito (GNL) configuration for staged dispatch anticipation.
+/// Anticipated dispatch configuration for thermal plants requiring advance commitment.
 ///
-/// GNL models the commitment and start-up lag of thermal units that require
-/// advance scheduling over multiple stages.
+/// Plants with `lead_stages >= 1` commit `lead_stages` stages before generation.
+/// The field is `u32` so that negative JSON literals are rejected at serde
+/// deserialise time with a `ParseError`; zero is rejected by the semantic
+/// validator with a `SchemaError`.
+///
+/// `deny_unknown_fields` matches the IO-layer `RawAnticipatedConfig` (see
+/// `crates/cobre-io/src/system/thermals.rs`) so that any deserialisation path
+/// that bypasses the IO raw parser (programmatic JSON loads, future internal
+/// state-snapshot tooling) still rejects unknown keys consistently. Postcard
+/// is positional and ignores this attribute on the wire — broadcast
+/// compatibility is unaffected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct GnlConfig {
-    /// Number of stages of dispatch anticipation.
-    pub lag_stages: i32,
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
+pub struct AnticipatedConfig {
+    /// Number of stages of dispatch anticipation. Must be ≥ 1.
+    pub lead_stages: u32,
 }
 
 /// Thermal power plant with a scalar marginal cost.
@@ -44,8 +54,8 @@ pub struct Thermal {
     pub min_generation_mw: f64,
     /// Maximum electrical generation (installed capacity) \[MW\].
     pub max_generation_mw: f64,
-    /// GNL dispatch anticipation configuration. None = no anticipation lag.
-    pub gnl_config: Option<GnlConfig>,
+    /// Anticipated dispatch configuration. None = no anticipation lag.
+    pub anticipated_config: Option<AnticipatedConfig>,
 }
 
 #[cfg(test)]
@@ -63,7 +73,7 @@ mod tests {
             cost_per_mwh: 50.0,
             min_generation_mw: 0.0,
             max_generation_mw: 657.0,
-            gnl_config: None,
+            anticipated_config: None,
         };
 
         assert_eq!(thermal.id, EntityId::from(1));
@@ -71,14 +81,14 @@ mod tests {
         assert_eq!(thermal.bus_id, EntityId::from(10));
         assert_eq!(thermal.entry_stage_id, None);
         assert_eq!(thermal.exit_stage_id, None);
-        assert!((thermal.cost_per_mwh - 50.0).abs() < f64::EPSILON);
-        assert!((thermal.min_generation_mw - 0.0).abs() < f64::EPSILON);
-        assert!((thermal.max_generation_mw - 657.0).abs() < f64::EPSILON);
-        assert_eq!(thermal.gnl_config, None);
+        assert_eq!(thermal.cost_per_mwh, 50.0);
+        assert_eq!(thermal.min_generation_mw, 0.0);
+        assert_eq!(thermal.max_generation_mw, 657.0);
+        assert_eq!(thermal.anticipated_config, None);
     }
 
     #[test]
-    fn test_thermal_with_gnl() {
+    fn test_thermal_with_anticipated() {
         let thermal = Thermal {
             id: EntityId::from(2),
             name: "Pecém I".to_string(),
@@ -88,29 +98,21 @@ mod tests {
             cost_per_mwh: 120.0,
             min_generation_mw: 100.0,
             max_generation_mw: 360.0,
-            gnl_config: Some(GnlConfig { lag_stages: 2 }),
+            anticipated_config: Some(AnticipatedConfig { lead_stages: 2 }),
         };
 
-        assert_eq!(thermal.gnl_config, Some(GnlConfig { lag_stages: 2 }));
+        assert_eq!(
+            thermal.anticipated_config,
+            Some(AnticipatedConfig { lead_stages: 2 })
+        );
         assert_eq!(thermal.entry_stage_id, Some(1));
         assert_eq!(thermal.exit_stage_id, Some(120));
     }
 
     #[test]
-    fn test_thermal_without_gnl() {
-        let thermal = Thermal {
-            id: EntityId::from(3),
-            name: "Candiota".to_string(),
-            bus_id: EntityId::from(5),
-            entry_stage_id: None,
-            exit_stage_id: None,
-            cost_per_mwh: 60.0,
-            min_generation_mw: 0.0,
-            max_generation_mw: 446.0,
-            gnl_config: None,
-        };
-
-        assert_eq!(thermal.gnl_config, None);
+    fn test_anticipated_config_lead_stages_as_usize_5() {
+        let config = AnticipatedConfig { lead_stages: 5 };
+        assert_eq!(config.lead_stages as usize, 5_usize);
     }
 
     #[cfg(feature = "serde")]
@@ -125,10 +127,11 @@ mod tests {
             cost_per_mwh: 80.0,
             min_generation_mw: 100.0,
             max_generation_mw: 360.0,
-            gnl_config: Some(GnlConfig { lag_stages: 2 }),
+            anticipated_config: Some(AnticipatedConfig { lead_stages: 2 }),
         };
         let json = serde_json::to_string(&thermal).unwrap();
         let deserialized: Thermal = serde_json::from_str(&json).unwrap();
         assert_eq!(thermal, deserialized);
+        assert!(json.contains("\"anticipated_config\":{\"lead_stages\":2}"));
     }
 }

@@ -53,7 +53,7 @@ pub enum SddpError {
 
     /// Case directory loading or validation failed.
     ///
-    /// Wraps a [`cobre_io::LoadError`] from any layer of the five-stage
+    /// Wraps a [`cobre_io::LoadError`] from any layer of the six-layer
     /// validation pipeline.
     #[error("I/O error: {0}")]
     Io(#[from] LoadError),

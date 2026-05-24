@@ -39,5 +39,14 @@ Documentation = "https://cobre-rs.github.io/cobre-docs/"
 features = ["pyo3/extension-module"]
 module-name = "cobre"
 
+[tool.pyright]
+venvPath = "../.."
+venv = ".venv"
+pythonVersion = "3.12"
+include = ["tests"]
+stubPath = "stubs"
+reportMissingTypeStubs = "none"
+reportMissingModuleSource = "none"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
