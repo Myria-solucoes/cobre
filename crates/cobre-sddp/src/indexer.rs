@@ -42,7 +42,7 @@
 //!
 //! The `anticipated_state_out` block immediately follows `anticipated_decision`
 //! and has the same length `A`. It holds the outgoing state variable for the
-//! cut-mapping definition row (ticket-009). Both blocks collapse to length 0
+//! cut-mapping definition row. Both blocks collapse to length 0
 //! together when `n_anticipated == 0`.
 //!
 //! When the inflow non-negativity penalty method is active (`has_inflow_penalty == true`),
@@ -391,10 +391,10 @@ pub struct StageIndexer {
     /// Length: `n_anticipated`. Placed immediately after
     /// [`Self::anticipated_decision`] in the control region so that
     /// `anticipated_state_out.start == anticipated_decision.end`. Together
-    /// with the definition row added in ticket-008, this variable is pinned to
-    /// the corresponding `anticipated_decision` column by an equality
-    /// constraint, making it the correct target for cut-coefficient mapping
-    /// (ticket-009 `state_to_lp_column` Equal branch).
+    /// with the `anticipated_state_out` definition row, this variable is
+    /// pinned to the corresponding `anticipated_decision` column by an
+    /// equality constraint, making it the correct target for cut-coefficient
+    /// mapping via `state_to_lp_column`'s Equal branch.
     ///
     /// Empty (`0..0`) when `n_anticipated == 0` or when built via
     /// [`StageIndexer::new`].
@@ -2926,8 +2926,8 @@ mod tests {
     }
 
     /// `K_i == 0` excludes all slots for that plant (defensive — the parse
-    /// layer in ticket-006 rejects `K_i == 0`, but the helper must remain
-    /// robust if invoked with zero).
+    /// layer rejects `K_i == 0`, but the helper must remain robust if
+    /// invoked with zero).
     #[test]
     fn nonzero_mask_anticipated_state_boundary_k_zero_excluded() {
         // 2 anticipated plants, k_max = 2. Lead stages = [2, 0].
@@ -2974,8 +2974,9 @@ mod tests {
         k_max: usize,
     ) -> EquipmentCounts {
         // Default the per-plant K_i array to a uniform `k_max` of length
-        // `n_anticipated` to satisfy the ticket-013 debug asserts. Tests that
-        // need a mixed K_i array must construct `EquipmentCounts` directly.
+        // `n_anticipated` so debug asserts on per-plant lead-stage
+        // bookkeeping hold. Tests that need a mixed K_i array must construct
+        // `EquipmentCounts` directly.
         let anticipated_lead_stages = if n_anticipated == 0 {
             vec![]
         } else {
@@ -3240,7 +3241,7 @@ mod tests {
 
     /// When `n_anticipated == 0` the layout produced by
     /// `with_equipment_and_evaporation` must be byte-identical to a build with
-    /// the original (pre-ticket-013) layout: `line_fwd.start == thermal.end`
+    /// the legacy non-anticipated layout: `line_fwd.start == thermal.end`
     /// and no shift downstream.
     #[test]
     fn anticipated_decision_no_anticipated_matches_existing() {
@@ -3486,8 +3487,8 @@ mod tests {
     /// `line_fwd.start == anticipated_state_out.end` for various
     /// `n_anticipated`. Sweep includes 0 (no shift), 1, 2, 5.
     ///
-    /// Since ticket-006 inserted `anticipated_state_out` between
-    /// `anticipated_decision` and `line_fwd`, the new layout invariant is:
+    /// `anticipated_state_out` is inserted between `anticipated_decision`
+    /// and `line_fwd`, so the layout invariant is:
     ///   `anticipated_decision.end` == `anticipated_state_out.start`
     ///   `anticipated_state_out.end` == `line_fwd.start`
     #[test]
@@ -4312,7 +4313,7 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // state_to_lp_column branch tests (ticket-009)
+    // state_to_lp_column branch tests
     // ─────────────────────────────────────────────────────────────────────────
 
     /// K=1, single plant: slot 0 hits the Equal branch and must route to

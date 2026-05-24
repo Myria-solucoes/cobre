@@ -1908,10 +1908,10 @@ mod tests {
         assert_eq!(empty.n_stages(), 0);
     }
 
-    // ─── ticket-019 boundary tests for thermal-bounds padding ─────────────────
+    // ─── Thermal-bounds padding boundary tests ───────────────────────────────
     //
     // These tests pin down the lookup contract at the four boundary stage
-    // indices that epic-05 LP-template wiring will exercise:
+    // indices that the LP-template wiring exercises:
     //
     //   * `T - 1` — last study stage (real, possibly overridden).
     //   * `T`     — first padded stage (must inherit plant base).
@@ -1923,9 +1923,9 @@ mod tests {
     // `Thermal` entity construction; this module only verifies the uniform
     // `BoundsDefaults.thermal` fill behavior.
 
-    /// Sentinel default used by ticket-019 boundary tests. Values are picked
-    /// so an off-by-one read returns a value that does not collide with any
-    /// plausible production default.
+    /// Sentinel default used by the thermal-padding boundary tests. Values are
+    /// picked so an off-by-one read returns a value that does not collide with
+    /// any plausible production default.
     const T_DEFAULT: ThermalStageBounds = ThermalStageBounds {
         min_generation_mw: 7.0,
         max_generation_mw: 77.0,

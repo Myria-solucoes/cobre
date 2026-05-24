@@ -1491,9 +1491,9 @@ mod tests {
         }
     }
 
-    /// Given `k_max == 0`, behavior is bit-identical to the pre-ticket-017
-    /// baseline: the fill loop iterates `0..n_stages` and no padding cells
-    /// exist.
+    /// Given `k_max == 0`, behavior is bit-identical to the baseline before
+    /// padding support was added: the fill loop iterates `0..n_stages` and no
+    /// padding cells exist.
     #[test]
     fn test_k_max_zero_preserves_existing_behavior() {
         let mut t0 = make_thermal(0, 0.0, 100.0);
@@ -1518,10 +1518,10 @@ mod tests {
         assert_eq!(result.thermal_stage_axis_len(), 4 + 3);
     }
 
-    // ── ticket-019 boundary tests for thermal padding (resolver) ──────────────
+    // ── Thermal padding boundary tests (resolver) ─────────────────────────────
     //
     // These tests pin down the per-thermal base-fill semantics of the resolver
-    // at the four boundary stage indices that epic-05 consumers will exercise.
+    // at the four boundary stage indices that LP-template consumers exercise.
     // The accessor-only invariants (uniform-default fill, `n_stages()`
     // unchanged, `thermal_stage_axis_len()` extended) live in
     // `crates/cobre-core/src/resolved.rs::tests`.

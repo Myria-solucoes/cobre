@@ -1956,7 +1956,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Anticipated-state roundtrip tests (epic-06 / ticket-029)
+    // Anticipated-state roundtrip tests
     // ---------------------------------------------------------------------------
 
     /// Roundtrip a basis whose `state_at_capture` has the
@@ -2155,10 +2155,10 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // ProfiledSolver integration — ticket-006 AC
+    // ProfiledSolver integration
     // ---------------------------------------------------------------------------
 
-    /// AC (ticket-006): A freshly constructed workspace must expose a solver whose
+    /// A freshly constructed workspace must expose a solver whose
     /// `current_profile()` equals `SolveProfile::default()`.
     ///
     /// This confirms that `ProfiledSolver::new` wraps the inner solver without
@@ -2294,7 +2294,7 @@ mod tests {
         );
         assert_eq!(
             BASIS_BROADCAST_WIRE_VERSION, 1,
-            "wire version constant must stay at 1 after Epic 03"
+            "broadcast wire-format version constant must remain stable across releases"
         );
 
         // Full round-trip confirms no data drift.

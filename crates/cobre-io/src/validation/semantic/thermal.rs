@@ -1267,14 +1267,14 @@ mod tests {
         );
     }
 
-    // ── ticket-019: boundary_tests sub-module ─────────────────────────────────
+    // ── boundary_tests sub-module ─────────────────────────────────────────────
     //
-    // Re-organizes the ticket-018 strict-inequality boundary tests into a
-    // discoverable named sub-module using the
-    // `..._acceptance_boundary` / `..._rejection_boundary` suffix convention
-    // established by epic-03. Each test below mirrors a ticket-018 test (the
-    // originals are preserved above to keep the existing test surface stable
-    // — see ticket-019 §"DO NOT delete the existing ticket-018 tests").
+    // Re-organizes the strict-inequality boundary tests into a discoverable
+    // named sub-module using the
+    // `..._acceptance_boundary` / `..._rejection_boundary` suffix convention.
+    // Each test below mirrors a corresponding strict-inequality boundary test
+    // (the originals are preserved above to keep the existing test surface
+    // stable — DO NOT delete the strict-inequality boundary tests above).
     //
     // The predicate under test is the strict-inequality guard `stage_id < 0
     // || stage_id >= n_stages` in `validate_semantic_hydro_thermal`. The

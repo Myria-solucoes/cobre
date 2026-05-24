@@ -3355,7 +3355,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // build_initial_state — anticipated_state seed (ticket-028)
+    // build_initial_state — anticipated_state seed
     // -----------------------------------------------------------------------
 
     /// Build a `StageIndexer` that has N=1 hydro, L=0 lags, and the given
@@ -5719,8 +5719,6 @@ mod tests {
     /// Given a `StudySetup::new` call on a system with one anticipated thermal
     /// (`K_i = 2`), when the test inspects the resulting indexer metadata, then
     /// `n_anticipated == 1`, `k_max == 2`, and `anticipated_lead_stages == [2]`.
-    ///
-    /// AC-6 of ticket-020.
     #[test]
     fn setup_wires_anticipated_metadata_into_indexer() {
         let system = minimal_system_with_anticipated_lead_stages(2, 2);

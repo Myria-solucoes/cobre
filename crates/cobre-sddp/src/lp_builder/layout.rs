@@ -178,8 +178,8 @@ pub(crate) struct StageLayout {
     ///
     /// Equals the count of plants with `stage_idx + K_p < n_stages`
     /// (strict gate). Zero when `n_anticipated == 0` or when no plant is
-    /// active at this stage. Used by the matrix-fill helpers in ticket-008
-    /// to drive the active-row iteration.
+    /// active at this stage. Used by the matrix-fill helpers to drive the
+    /// active-row iteration.
     #[allow(dead_code)]
     pub(crate) n_anticipated_state_out_def_rows: usize,
     /// Start of anticipated-state columns (ring-buffer slots for committed MW).
@@ -1024,8 +1024,9 @@ mod tests {
     /// `col_turbine_start == idx.theta + 1` where `idx` is the legacy
     /// `StageIndexer::new(0, 0)` (zero hydros, zero lag order).
     ///
-    /// This verifies that the pre-ticket-020 decision-region offset is
-    /// preserved when no anticipated thermals are present.
+    /// This verifies that the decision-region offset before the
+    /// `anticipated_state_out` insertion is preserved when no anticipated
+    /// thermals are present.
     #[test]
     fn stage_layout_zero_anticipated_matches_pre_anticipated_offsets() {
         let fixtures = ZeroEntityFixtures::new();
@@ -1047,12 +1048,12 @@ mod tests {
         );
     }
 
-    // ── AC-1 (ticket-021) ─────────────────────────────────────────────────────
+    // ── Anticipated-decision column positioning ──────────────────────────────
 
-    /// AC-1: `col_anticipated_decision_start` falls between thermal end and
+    /// `col_anticipated_decision_start` falls between thermal end and
     /// `col_line_fwd_start` when `n_anticipated=2, n_thermals=3, n_blks=4`.
     ///
-    /// After ticket-007, the layout in the control region is:
+    /// The layout in the control region is:
     /// `thermal | anticipated_decision (2 cols) | anticipated_state_out (2 cols) | line_fwd`
     /// So `col_line_fwd_start == col_anticipated_decision_start + 2 * n_anticipated`.
     #[test]
@@ -1190,9 +1191,9 @@ mod tests {
         );
     }
 
-    // ── AC-1 (ticket-023) ─────────────────────────────────────────────────────
+    // ── Anticipated-fishing row positioning ──────────────────────────────────
 
-    /// AC-1: `row_anticipated_fishing_start` immediately follows the operational
+    /// `row_anticipated_fishing_start` immediately follows the operational
     /// violation row block, i.e. equals `row_min_generation_start + n_op_rows`.
     ///
     /// Uses a zero-hydro context so `n_op_rows == 0`, which means the fishing
@@ -1297,7 +1298,7 @@ mod tests {
         );
     }
 
-    // ── ticket-007 tests ──────────────────────────────────────────────────────
+    // ── Anticipated-decision range tests ──────────────────────────────────────
 
     /// Build a `ResolvedBounds` with zero entities but the given `n_stages`.
     ///
