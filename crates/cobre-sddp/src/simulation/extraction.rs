@@ -175,13 +175,12 @@ fn compute_anticipated_decision_mw(
 ///
 /// In both paths the correct read is the slot-0 column.
 ///
-/// Returns `Some(v)` when:
-/// - thermal `thermal_local` is anticipated (i.e.,
-///   `lookup.thermal_is_anticipated[thermal_local]` is `Some(local_idx)`), AND
-/// - the current stage is at or beyond the delivery stage: `k_i <= spec.stage_index`.
+/// Returns `Some(v)` when thermal `thermal_local` is anticipated and the
+/// fishing predicate is active for its plant. At pre-horizon stages, the value
+/// read is the seeded `values_mw[slot 0]` injected by the setup pipeline and
+/// advanced via the per-stage ring-buffer shift.
 ///
-/// Returns `None` silently when the thermal is not anticipated or the delivery stage
-/// has not yet been reached (`k_i > spec.stage_index`).
+/// Returns `None` silently when the thermal is not anticipated.
 #[inline]
 fn compute_anticipated_committed_mw(
     view: &SolutionView<'_>,
@@ -190,8 +189,10 @@ fn compute_anticipated_committed_mw(
     thermal_local: usize,
 ) -> Option<f64> {
     let local_idx = lookup.thermal_is_anticipated[thermal_local]?;
-    let k_i = spec.indexer.anticipated_lead_stages[local_idx];
-    if k_i > spec.stage_index {
+    if !spec
+        .indexer
+        .is_anticipated_fishing_active(local_idx, spec.stage_index, spec.n_stages)
+    {
         return None;
     }
     // Slot-major, plant-minor layout (see `StageIndexer::anticipated_state`):
@@ -2382,7 +2383,9 @@ mod tests {
             result.thermals[1].is_anticipated,
             "thermal 20 should be anticipated"
         );
-        assert_eq!(result.thermals[1].anticipated_committed_mw, None);
+        // Always-active fishing: committed_mw reads slot 0 of anticipated_state
+        // (primal[anticipated_state.start + 0] = 0.0 in this zero-initialised fixture).
+        assert_eq!(result.thermals[1].anticipated_committed_mw, Some(0.0));
         // With stage_index=0, n_stages=2, K_i=1: t+K_i=1 <= n_stages -> decision is active.
         // primal[anticipated_decision.start + 0] defaults to 0.0 in this fixture.
         assert_eq!(result.thermals[1].anticipated_decision_mw, Some(0.0));
@@ -3067,10 +3070,13 @@ mod tests {
         }
     }
 
-    /// AC-3: Per-block branch, K=2, `stage_index=1` (one stage before delivery).
-    /// Expects all blocks to have `anticipated_committed_mw == None`.
+    /// AC-3: Per-block branch, K=2, `stage_index=1` (pre-delivery under the
+    /// legacy maturity-gate, but the always-active fishing predicate reads
+    /// slot 0 of `anticipated_state` regardless of `K_i` vs `stage_index`).
+    /// With a zero-initialised `primal[anticipated_state.start + 0]`,
+    /// expects every block to read `Some(0.0)`.
     #[test]
-    fn extract_thermals_per_block_committed_none_before_delivery() {
+    fn extract_thermals_per_block_committed_slot0_when_seed_zero() {
         let indexer = make_anticipated_committed_indexer_k2_3blks();
         let n_cols = indexer.anticipated_decision.end.max(indexer.thermal.end);
         let mut primal = vec![0.0_f64; n_cols];
@@ -3124,8 +3130,9 @@ mod tests {
         assert_eq!(result.thermals.len(), 3);
         for (blk, rec) in result.thermals.iter().enumerate() {
             assert_eq!(
-                rec.anticipated_committed_mw, None,
-                "block {blk}: expected None one stage before delivery"
+                rec.anticipated_committed_mw,
+                Some(0.0),
+                "block {blk}: always-active reads slot 0 = 0.0 regardless of stage"
             );
         }
     }
@@ -3426,10 +3433,12 @@ mod tests {
         );
     }
 
-    /// AC-7: No-block branch, K=1, `stage_index=0`, `n_stages=2` (before delivery).
-    /// Expects `anticipated_committed_mw == None`.
+    /// AC-7: No-block branch, K=1, `stage_index=0`, `n_stages=2`. Pre-delivery
+    /// under the legacy maturity-gate, but the always-active fishing predicate
+    /// reads slot 0 of `anticipated_state` regardless. Expects `Some(0.0)`
+    /// (zero-initialised slot 0).
     #[test]
-    fn extract_thermals_no_block_committed_before_delivery_is_none() {
+    fn extract_thermals_no_block_committed_reads_slot0_when_seed_zero() {
         let indexer = StageIndexer::with_equipment(
             &crate::indexer::EquipmentCounts {
                 hydro_count: 0,
@@ -3499,8 +3508,9 @@ mod tests {
 
         assert_eq!(result.thermals.len(), 1);
         assert_eq!(
-            result.thermals[0].anticipated_committed_mw, None,
-            "no-block pre-delivery: expected None"
+            result.thermals[0].anticipated_committed_mw,
+            Some(0.0),
+            "no-block always-active: reads slot 0 = 0.0 regardless of stage"
         );
     }
 

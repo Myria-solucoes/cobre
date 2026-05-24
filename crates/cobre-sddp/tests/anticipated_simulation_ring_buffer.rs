@@ -613,13 +613,15 @@ fn simulation_ring_buffer_shifts_anticipated_state_k1() {
             .and_then(|th| th.anticipated_committed_mw)
     };
 
-    // ── Sanity: stage 0 has a decision; committed is None (no commitment ──
-    // has matured yet — fishing rows only become active when k_i <= t).
+    // ── Sanity: stage 0 has a decision; under always-active fishing the
+    // committed value reads the seed at slot 0 (`values_mw[0] = 7.0`).
     let d0 =
         decision_at(0).expect("anticipated_decision_mw must exist at stage 0 (t + K < n_stages)");
+    let c0 = committed_at(0)
+        .expect("anticipated_committed_mw must be Some at stage 0 under always-active fishing");
     assert!(
-        committed_at(0).is_none(),
-        "anticipated_committed_mw must be None at stage 0 with K=1 (fishing inactive)",
+        (c0 - 7.0).abs() < 1e-6,
+        "committed_at(0) must equal the K=1 seed values_mw[0]=7.0; got {c0}",
     );
     // With the cheap anticipated thermal (cost 10 $/MWh) saving expensive
     // backup dispatch (5000 $/MWh) at the K=1 delivery stage, any policy
@@ -733,17 +735,21 @@ fn simulation_ring_buffer_shifts_anticipated_state_k2() {
             .and_then(|th| th.anticipated_committed_mw)
     };
 
-    // With K=2, fishing is inactive at stages 0 and 1 (k_i > stage_idx)
-    // so committed is None there. The seed values [100, 50] never appear
-    // as `committed`: the two ring-buffer shifts at the ends of stages 0
-    // and 1 displace them from slot 0 before fishing fires.
+    // With K=2 and always-active fishing, slot 0 of the ring buffer is
+    // populated at every stage. Pre-horizon stages read seed values:
+    //   stage 0 -> values_mw[0] = 50.0 (initial slot 0)
+    //   stage 1 -> values_mw[1] = 30.0 (after the stage-0 ring-buffer shift)
+    let c0 =
+        committed_at(0).expect("committed_at(0) must be Some under always-active fishing with K=2");
     assert!(
-        committed_at(0).is_none(),
-        "committed at stage 0 must be None with K=2 (fishing inactive)",
+        (c0 - 50.0).abs() < 1e-6,
+        "committed_at(0) must equal K=2 seed values_mw[0]=50.0; got {c0}",
     );
+    let c1 =
+        committed_at(1).expect("committed_at(1) must be Some under always-active fishing with K=2");
     assert!(
-        committed_at(1).is_none(),
-        "committed at stage 1 must be None with K=2 (fishing inactive)",
+        (c1 - 30.0).abs() < 1e-6,
+        "committed_at(1) must equal K=2 seed values_mw[1]=30.0 (shifted to slot 0); got {c1}",
     );
 
     let d0 = decision_at(0).expect("decision at stage 0 must exist (0 + K < n_stages)");

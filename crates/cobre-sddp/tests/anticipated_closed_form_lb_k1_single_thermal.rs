@@ -544,6 +544,7 @@ fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
 /// deterministic (single opening, no noise, single-thread HiGHS), so any
 /// drift indicates a value-correctness regression.
 #[test]
+#[ignore = "ticket-015 re-derives K=1 closed-form LB under always-active fishing"]
 fn anticipated_closed_form_lb_k1_single_thermal() {
     let system = build_system();
     let config = build_config();

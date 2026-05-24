@@ -9810,10 +9810,14 @@ fn test_anticipated_delivery_thermal_cost_is_zero() {
     }
 }
 
-/// AC-8: per-block thermal cost of the anticipated thermal is standard before delivery.
+/// AC-8: per-block thermal cost of the anticipated thermal is zeroed at all stages.
 ///
-/// At stages 0 and 1 (before K_i=2 matures), thermal 0 must carry its normal cost.
-/// Expected: `objective[col_thermal_start + 0 * 1 + 0] == 50.0 * 744.0 / 1000.0 = 37.2`.
+/// Under the always-active fishing predicate, `zero_anticipated_delivery_thermal_cost`
+/// zeroes the anticipated thermal's per-block cost at every stage, including
+/// pre-horizon stages 0 and 1 (before K_i=2 matures). The cost-zeroing and
+/// fishing-row predicates share `StageIndexer::is_anticipated_fishing_active`
+/// as their single source of truth.
+/// Expected: `objective[col_thermal_start + 0 * 1 + 0] == 0.0` at every stage.
 #[test]
 fn test_anticipated_pre_delivery_thermal_cost_unchanged() {
     let lead_stages = 2_usize;
@@ -9830,14 +9834,13 @@ fn test_anticipated_pre_delivery_thermal_cost_unchanged() {
     .expect("build ok");
 
     let col_thermal_0 = two_thermal_col_thermal_start(lead_stages); // thermal 0, blk 0
-    let expected = 50.0 * 744.0 / COST_SCALE_FACTOR;
 
-    // Pre-delivery stages for K_i=2: stage_idx in {0, 1}.
+    // Always-active predicate: cost is zeroed at all stages, including pre-delivery.
     for stage_idx in [0_usize, 1] {
         let obj = result.templates[stage_idx].objective[col_thermal_0];
         assert_eq!(
-            obj, expected,
-            "stage {stage_idx}: anticipated thermal 0 cost must equal {expected} (pre-delivery)"
+            obj, 0.0,
+            "stage {stage_idx}: anticipated thermal 0 cost must be 0.0 (always-active zeroing)"
         );
     }
 }
@@ -9875,10 +9878,13 @@ fn test_non_anticipated_thermal_cost_unchanged_under_anticipated_zero_out() {
 }
 
 /// AC-10: predicate parity — the set of stages where per-block thermal cost is zero
-/// equals the set of stages where `K_i <= stage_idx`.
+/// equals the set of ALL stages (always-active rule).
 ///
-/// For K_i=2 and n_stages=4: delivery stages = {2, 3} (indices where K_i <= stage_idx).
-/// Pre-delivery stages = {0, 1}.
+/// Under the always-active fishing predicate, `zero_anticipated_delivery_thermal_cost`
+/// zeroes the anticipated thermal's per-block cost at every stage. For K_i=2 and
+/// n_stages=4: all stages {0, 1, 2, 3} have zero cost. Both the fishing-row and
+/// cost-zeroing predicates share `StageIndexer::is_anticipated_fishing_active`
+/// as their single source of truth.
 #[test]
 fn test_zero_out_and_fishing_active_predicate_align() {
     let lead_stages = 2_usize;
@@ -9897,18 +9903,18 @@ fn test_zero_out_and_fishing_active_predicate_align() {
 
     let col_thermal_0 = two_thermal_col_thermal_start(lead_stages);
 
-    // Collect stages where the cost is zero (delivery stages per zero-out logic).
+    // Collect stages where the cost is zero (always-active predicate → all stages).
     let zeroed_stages: Vec<usize> = (0..n_stages)
         .filter(|&s| result.templates[s].objective[col_thermal_0] == 0.0)
         .collect();
 
-    // Collect stages where K_i <= stage_idx (fishing-row predicate).
-    let fishing_active_stages: Vec<usize> = (0..n_stages).filter(|&s| lead_stages <= s).collect();
+    // Always-active: cost is zeroed at every stage.
+    let all_stages: Vec<usize> = (0..n_stages).collect();
 
     assert_eq!(
-        zeroed_stages, fishing_active_stages,
-        "stages with zero-out thermal cost must exactly match stages where K_i <= stage_idx \
-         (fishing-row predicate). Got zeroed={zeroed_stages:?}, fishing={fishing_active_stages:?}"
+        zeroed_stages, all_stages,
+        "stages with zero-out thermal cost must equal all stages under always-active predicate. \
+         Got zeroed={zeroed_stages:?}, expected={all_stages:?}"
     );
 }
 
@@ -10616,16 +10622,21 @@ fn col_ant_state_start_zero_hydros() -> usize {
     0 // N*(1+L) = 0 when N=0
 }
 
-// ── AC-1: fishing rows zero at stage 0 ───────────────────────────────────────
+// ── AC-1: fishing rows present at stage 0 (always-active) ───────────────────
 
 /// AC-1: with two anticipated thermals (K_0=1, K_1=2) and n_stages=4, at stage 0
-/// no plant has matured (`K_i > 0` for both), so `n_anticipated_fishing_rows == 0`.
+/// both plants are active under the always-active predicate, so
+/// `n_anticipated_fishing_rows == n_anticipated == 2`.
 ///
-/// Checked indirectly: `num_rows` at stage 0 equals `num_rows` at stage 0 of
-/// the baseline system with the same geometry but zero anticipation (no fishing rows).
-/// Additionally, the load-balance row count does not change.
+/// Under always-active fishing, every stage carries one fishing row per anticipated
+/// plant regardless of `K_i`. The row layout is:
+///   `num_rows = fishing_start + n_fishing + n_state_out_def`
+///
+/// At stage 0: 2 fishing rows + 2 state_out_def rows (both 0+1<4 and 0+2<4).
+/// At stage 1: 2 fishing rows + 2 state_out_def rows (both 1+1<4 and 1+2<4).
+/// Both stages therefore have identical row counts.
 #[test]
-fn test_anticipated_fishing_rows_zero_at_stage_zero() {
+fn test_anticipated_fishing_rows_match_n_anticipated_at_stage_zero() {
     let system = two_anticipated_thermal_system(4);
     let result = build_stage_templates(
         &system,
@@ -10638,40 +10649,34 @@ fn test_anticipated_fishing_rows_zero_at_stage_zero() {
     )
     .expect("build ok");
 
-    // At stage 0: K_0=1 > 0, K_1=2 > 0 → n_anticipated_fishing_rows == 0.
-    // row_anticipated_fishing_start == row_generic_start when no fishing rows.
-    // num_rows at stage 0 must equal num_rows at stages with no matured plants.
-    // Since row counts grow with n_anticipated_fishing_rows, stages 1+ have more rows.
     let rows_stage_0 = result.templates[0].num_rows;
     let rows_stage_1 = result.templates[1].num_rows;
 
-    // Stage 1 has 1 fishing row (K_0=1 <= 1), stage 0 has 0 → difference must be 1.
-    // Both stages have the same n_anticipated_state_out_def_rows (2 each), so
-    // the delta remains exactly 1.
+    // Under always-active fishing, stage 0 and stage 1 both carry 2 fishing rows
+    // and 2 state_out_def rows, so their row counts must be equal.
     assert_eq!(
-        rows_stage_1,
-        rows_stage_0 + 1,
-        "stage 1 must have exactly 1 more row than stage 0 (one fishing row for K_0=1)"
+        rows_stage_0, rows_stage_1,
+        "stage 0 and stage 1 must have equal row counts (fishing always-active at every stage)"
     );
-    // Directly verify: fishing row start == n_state + n_buses*n_blks = 5.
-    // At stage 0 there are no fishing rows but there are 2 state_out_def rows
-    // (both plants active: 0+1<4 and 0+2<4), so num_rows == fishing_start + 2.
+    // Directly verify: at stage 0 there are 2 fishing rows + 2 state_out_def rows.
+    // fishing_start = n_state + n_buses*n_blks = 5.
     let fishing_row_start = two_ant_fishing_row_start();
     assert_eq!(
         rows_stage_0,
-        fishing_row_start + 2,
-        "at stage 0, num_rows must equal row_anticipated_fishing_start + 2 \
-         (no fishing rows but 2 state_out_def rows; no generic constraints)"
+        fishing_row_start + 4,
+        "at stage 0, num_rows must equal row_anticipated_fishing_start + 4 \
+         (2 fishing rows always-active + 2 state_out_def rows)"
     );
 }
 
-// ── AC-2: fishing row count grows with stage ──────────────────────────────────
+// ── AC-2: fishing row count is constant across stages (always-active) ────────
 
 /// AC-2: with two anticipated thermals (K_0=1, K_1=2) and n_stages=4,
-/// stages 1, 2, 3 have 1, 2, 2 fishing rows respectively.
+/// fishing rows are always 2 at every stage (always-active predicate).
 ///
-/// After ticket-007, `num_rows` includes both fishing rows and
-/// `anticipated_state_out_def` rows. Active-def predicate: `stage + K_i < 4`.
+/// `num_rows` includes both fishing rows and `anticipated_state_out_def` rows.
+/// The fishing count is fixed at `n_anticipated = 2` for every stage.
+/// The `state_out_def` count varies only with the strict `stage + K_i < 4` gate.
 ///
 /// State_out_def rows per stage:
 ///   stage 0: K_0=1: 0+1=1 < 4 ✓, K_1=2: 0+2=2 < 4 ✓ → 2 rows
@@ -10679,10 +10684,10 @@ fn test_anticipated_fishing_rows_zero_at_stage_zero() {
 ///   stage 2: K_0=1: 2+1=3 < 4 ✓, K_1=2: 2+2=4 < 4 ✗ → 1 row
 ///   stage 3: K_0=1: 3+1=4 < 4 ✗, K_1=2: 3+2=5 < 4 ✗ → 0 rows
 ///
-/// Combined fishing + state_out_def deltas relative to stage 0 (0+2 rows):
-///   stage 1: 1 fishing + 2 state_out_def = base + 1
-///   stage 2: 2 fishing + 1 state_out_def = base + 1
-///   stage 3: 2 fishing + 0 state_out_def = base + 0
+/// Combined fishing + state_out_def counts (base = stage 0: 2 fishing + 2 def):
+///   stage 1: 2 fishing + 2 state_out_def = base     (same as stage 0)
+///   stage 2: 2 fishing + 1 state_out_def = base - 1
+///   stage 3: 2 fishing + 0 state_out_def = base - 2
 #[test]
 fn test_anticipated_fishing_rows_count_by_stage() {
     let system = two_anticipated_thermal_system(4);
@@ -10697,21 +10702,21 @@ fn test_anticipated_fishing_rows_count_by_stage() {
     )
     .expect("build ok");
 
-    // base = stage 0: 0 fishing rows + 2 state_out_def rows.
+    // base = stage 0: 2 fishing rows (always-active) + 2 state_out_def rows.
     let base = result.templates[0].num_rows;
     assert_eq!(
-        result.templates[1].num_rows,
-        base + 1,
-        "stage 1: 1 fishing + 2 state_out_def = base + 1"
+        result.templates[1].num_rows, base,
+        "stage 1: 2 fishing + 2 state_out_def = base (equal to stage 0)"
     );
     assert_eq!(
         result.templates[2].num_rows,
-        base + 1,
-        "stage 2: 2 fishing + 1 state_out_def = base + 1 (net unchanged from stage 1)"
+        base - 1,
+        "stage 2: 2 fishing + 1 state_out_def = base - 1 (K_1=2 def inactive: 2+2=4)"
     );
     assert_eq!(
-        result.templates[3].num_rows, base,
-        "stage 3: 2 fishing + 0 state_out_def = base (net decreases from stage 2)"
+        result.templates[3].num_rows,
+        base - 2,
+        "stage 3: 2 fishing + 0 state_out_def = base - 2 (both def inactive)"
     );
 }
 
@@ -10843,24 +10848,20 @@ fn test_anticipated_fishing_csc_state_slot_negative_block_hours_total() {
     );
 }
 
-// ── AC-6: boundary acceptance K_i == stage_idx ───────────────────────────────
+// ── AC-6: fishing always present; state_out_def drops at the maturity boundary ─
 
-/// AC-6: a plant with K_i=2 matures exactly at stage_idx=2 (equality accepted).
+/// AC-6: one anticipated thermal K=2, n_stages=4.
 ///
-/// System: one anticipated thermal K=2, n_stages=4.
-/// At stage 2: K_i=2 <= stage_idx=2 → n_anticipated_fishing_rows == 1.
+/// Under always-active fishing the fishing row is present at every stage.
+/// The `state_out_def` row drops when `stage + K_i >= n_stages` (strict gate).
 ///
-/// After ticket-007, `num_rows` includes both fishing rows and
-/// `anticipated_state_out_def` rows. Active-def predicate: `stage + K_i < 4`.
+/// Row layout per stage (`fishing_start = one_ant_fishing_row_start(2, 1) = 3`):
+///   stage 1: 1 fishing (always-active) + 1 state_out_def (1+2=3 < 4) = fishing_start + 2
+///   stage 2: 1 fishing (always-active) + 0 state_out_def (2+2=4, NOT < 4) = fishing_start + 1
 ///
-///   stage 1: 0 fishing + 1 state_out_def (1+2=3 < 4) = fishing_start + 1
-///   stage 2: 1 fishing + 0 state_out_def (2+2=4 < 4 fails) = fishing_start + 1
-///
-/// The fishing row is correctly added at stage 2, but one state_out_def row is
-/// simultaneously removed (the plant is no longer eligible for future delivery).
-/// The net `num_rows` delta between stage 1 and stage 2 is therefore 0.
-/// Verified via `num_rows` equality between stage 1 and stage 2 plus a direct
-/// bound check confirming the fishing row at stage 2.
+/// The state_out_def row is lost at stage 2 while the fishing row was already
+/// present, so `num_rows` at stage 2 is exactly 1 less than at stage 1.
+/// Verified via a direct row-count comparison and fishing-row bounds at both stages.
 #[test]
 fn test_anticipated_fishing_active_at_maturity_boundary() {
     let system = one_anticipated_thermal_system(4, 2, 0.0, 100.0);
@@ -10875,28 +10876,33 @@ fn test_anticipated_fishing_active_at_maturity_boundary() {
     )
     .expect("build ok");
 
-    // At stage 1: K_i=2 > 1 → 0 fishing rows, 1 state_out_def row.
-    // At stage 2: K_i=2 <= 2 → 1 fishing row, 0 state_out_def rows.
-    // The fishing row gained and state_out_def row lost cancel: num_rows is equal.
+    // Under always-active fishing:
+    //   stage 1: 1 fishing + 1 state_out_def row
+    //   stage 2: 1 fishing + 0 state_out_def rows  (2+2=4, NOT < 4)
+    // The state_out_def row is lost at stage 2; the fishing row was already there.
     let rows_stage_1 = result.templates[1].num_rows;
     let rows_stage_2 = result.templates[2].num_rows;
     assert_eq!(
-        rows_stage_2, rows_stage_1,
-        "stage 2: fishing row gained but state_out_def row lost — num_rows unchanged vs stage 1"
+        rows_stage_1,
+        rows_stage_2 + 1,
+        "stage 2 must have exactly 1 fewer row than stage 1 \
+         (state_out_def drops at the maturity boundary; fishing was already present)"
     );
 
-    // Directly verify that stage 2 has a fishing row at the expected offset.
-    // one_ant_fishing_row_start(k_max=2, n_blks=1) = 2 + 1 = 3.
+    // Verify that the fishing row is present at both stage 1 and stage 2
+    // (always-active: equality bounds 0==0 at every stage).
     let fishing_row_start = one_ant_fishing_row_start(2, 1);
-    let t2 = &result.templates[2];
-    assert_eq!(
-        t2.row_lower[fishing_row_start], 0.0,
-        "stage 2 fishing row must have row_lower == 0.0 (equality row)"
-    );
-    assert_eq!(
-        t2.row_upper[fishing_row_start], 0.0,
-        "stage 2 fishing row must have row_upper == 0.0 (equality row)"
-    );
+    for stage_idx in [1_usize, 2] {
+        let t = &result.templates[stage_idx];
+        assert_eq!(
+            t.row_lower[fishing_row_start], 0.0,
+            "stage {stage_idx} fishing row must have row_lower == 0.0 (equality row, always-active)"
+        );
+        assert_eq!(
+            t.row_upper[fishing_row_start], 0.0,
+            "stage {stage_idx} fishing row must have row_upper == 0.0 (equality row, always-active)"
+        );
+    }
 }
 
 // ── AC-7: boundary rejection K_i == stage_idx + 1 ────────────────────────────
@@ -11792,11 +11798,12 @@ fn rt_expected_num_cols(k: usize) -> usize {
 /// Expected `num_rows` for the roundtrip geometry with anticipation K=k and
 /// stage index `stage_idx`.
 ///
-/// Fishing row active iff `k <= stage_idx`.
+/// Fishing row always-active (one row per anticipated plant = 1 plant here).
 /// `anticipated_state_out_def` row active iff `stage_idx + k < 4` (strict gate;
 /// n_stages=4 in the roundtrip geometry).
 fn rt_expected_num_rows(k: usize, stage_idx: usize) -> usize {
-    let fishing = usize::from(k <= stage_idx);
+    // Always-active predicate: 1 fishing row at every stage (n_anticipated=1).
+    let fishing = 1_usize;
     let state_out_def = usize::from(stage_idx + k < 4);
     13 + k + fishing + state_out_def
 }
@@ -11984,13 +11991,23 @@ fn test_anticipated_thermals_lp_roundtrip_k1() {
         );
     }
 
-    // ── Fishing absent at stage 0 (K=1 > 0) (AC-1 implicit) ─────────────────
+    // ── Fishing always-active: stages 0..2 have equal row count (AC-1 implicit) ───
+    // Under always-active, fishing is present at every stage.
+    // state_out_def is active at stages 0,1,2 (0+1,1+1,2+1 all < 4) but not stage 3.
+    // So stages 0,1,2 share the same num_rows; stage 3 has one fewer.
     {
-        // num_rows at stage 0 must be one less than at stage 1.
         assert_eq!(
-            result.templates[0].num_rows + 1,
-            result.templates[1].num_rows,
-            "K=1: stage 1 must have exactly 1 more row than stage 0 (one fishing row activates)"
+            result.templates[0].num_rows, result.templates[1].num_rows,
+            "K=1: stage 0 and stage 1 must have equal row count (fishing always-active)"
+        );
+        assert_eq!(
+            result.templates[1].num_rows, result.templates[2].num_rows,
+            "K=1: stage 1 and stage 2 must have equal row count (state_out_def still active)"
+        );
+        assert_eq!(
+            result.templates[3].num_rows + 1,
+            result.templates[2].num_rows,
+            "K=1: stage 3 must have 1 fewer row than stage 2 (state_out_def inactive at stage 3)"
         );
     }
 }
@@ -12183,19 +12200,27 @@ fn test_anticipated_thermals_lp_roundtrip_k2() {
     }
 
     // ── Row-count invariants across stages (K=2 implicit) ───────────────────
-    // For K=2, n_stages=4:
-    //   Fishing (K<=stage):  absent at 0,1; active at 2,3 (+1 each).
+    // For K=2, n_stages=4 under always-active fishing:
+    //   Fishing: 1 row per stage at every stage (always-active predicate).
     //   State_out_def (s+K<4): active at 0,1 (+1 each); absent at 2,3.
-    // Net effect: fishing gain at stage 2 is exactly offset by def loss →
-    // all four stages have identical row counts.
+    // Net effect: stages 0 and 1 have one more row than stages 2 and 3.
     {
-        for t in 1..n_stages {
-            assert_eq!(
-                result.templates[t].num_rows, result.templates[0].num_rows,
-                "K=2: stage {t} must have same row count as stage 0 \
-                 (fishing gain at stage 2 cancels state_out_def loss)"
-            );
-        }
+        assert_eq!(
+            result.templates[1].num_rows, result.templates[0].num_rows,
+            "K=2: stage 1 must have same row count as stage 0 \
+             (both have fishing + state_out_def active)"
+        );
+        assert_eq!(
+            result.templates[2].num_rows, result.templates[3].num_rows,
+            "K=2: stage 2 must have same row count as stage 3 \
+             (both have fishing active, state_out_def absent)"
+        );
+        assert_eq!(
+            result.templates[0].num_rows,
+            result.templates[2].num_rows + 1,
+            "K=2: stage 0 must have exactly 1 more row than stage 2 \
+             (state_out_def active at stage 0, absent at stage 2)"
+        );
     }
 }
 
@@ -12403,12 +12428,16 @@ fn test_anticipated_thermals_lp_roundtrip_k3() {
         );
     }
 
-    // ── Fishing activates at stage 3 (AC-3 implicit) ─────────────────────────
+    // ── Row-count invariants under always-active fishing (K=3) ───────────────
+    // For K=3, n_stages=4:
+    //   Fishing: 1 row per stage at every stage (always-active predicate).
+    //   State_out_def (s+K<4): active at 0; absent at 1,2,3.
+    // So stage 0 has one extra row vs stages 1, 2, 3, which are equal.
     {
         assert_eq!(
-            result.templates[3].num_rows,
-            result.templates[2].num_rows + 1,
-            "K=3: stage 3 must have exactly 1 more row than stage 2 (fishing activates at K=3)"
+            result.templates[3].num_rows, result.templates[2].num_rows,
+            "K=3: stage 3 must have same row count as stage 2 \
+             (fishing always-active; state_out_def absent at both)"
         );
     }
 }

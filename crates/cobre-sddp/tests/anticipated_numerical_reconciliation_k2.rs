@@ -37,26 +37,23 @@
 //! in the objective. No backup needed since 150 MW = load exactly.
 //!
 //! **Zone C — Pre-horizon stages (t ∈ {0, 1}):**
-//! The ring buffer has not yet matured a commitment from inside the horizon
-//! (`past_anticipated_commitments = [0.0, 0.0]`). The fishing predicate
-//! (`K_i > stage_idx`) is INACTIVE at these pre-horizon stages (K_i=2, but
-//! stage_idx ∈ {0, 1} so K_i > stage_idx is false). Therefore the anticipated
-//! thermal is dispatched directly at its regular per-block cost of $10/MWh —
-//! 500× cheaper than backup — so the LP picks anticipated, not backup.
-//! Backup carries 0 MW.
+//! The always-active fishing predicate pins the anticipated thermal to seed
+//! slot 0 = 0 MW (`past_anticipated_commitments = [0.0, 0.0]`). The LP must
+//! dispatch backup at $5000/MWh to meet the 150 MW load. The cost-zeroing
+//! predicate is also always-active, so the anticipated thermal column has
+//! objective 0 — but its column upper bound is fishing-pinned to 0, leaving
+//! backup as the sole feasible source.
 //!
-//! Pre-horizon thermal cost = 2 stages × 150 MW × 744 h × $10/MWh
-//!                          = **$2,232,000**
+//! Pre-horizon backup cost = 2 stages × 150 MW × 744 h × $5000/MWh
+//!                         = **$1,116,000,000**
 //!
-//! **Total analytical optimum = $4,464,000 + $2,232,000 = $6,696,000**
-//!
-//! NO backup contribution at any stage.
+//! **Total analytical optimum = $4,464,000 + $1,116,000,000 = $1,120,464,000**
 //!
 //! ## What this test asserts
 //!
 //! After training for 10 iterations and running one deterministic simulation,
 //! the sum of per-stage `immediate_cost` values (LP objective minus theta at
-//! each stage) must equal $6,696,000 within $1,000 absolute tolerance.
+//! each stage) must equal $1,120,464,000 within $1,000 absolute tolerance.
 //!
 //! ## Entity IDs
 //!
@@ -65,15 +62,8 @@
 //! (IDs 3, 4, 5) so that combined nextest runs produce unambiguous per-entity
 //! attribution in failure messages.
 //!
-//! ## NOTE — Epic 04 will require updating this test
-//!
-//! Epic 04 will flip the fishing predicate to always-active. At that point
-//! pre-horizon stages will pin the anticipated thermal to its seed value (= 0
-//! in this fixture), forcing backup to dispatch 150 MW at $5000/MWh. The
-//! pre-horizon thermal cost ($2,232,000) will be replaced by a pre-horizon
-//! backup cost of 2 × 150 × 744 × 5000 = $1,116,000,000, and
-//! `EXPECTED_TOTAL_USD` will need updating. This test currently asserts the
-//! post-Epic-03, pre-Epic-04 state.
+//! This test asserts the post-always-active-fishing regime introduced when the
+//! fishing and cost-zeroing predicates were unified under a single source of truth.
 
 #![allow(
     clippy::unwrap_used,
@@ -129,17 +119,20 @@ use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context
 /// no incentive to over-commit when bus excess is free.
 const EXPECTED_DECISION_COST_USD: f64 = 4.0 * 150.0 * 744.0 * 10.0;
 
-/// Pre-horizon thermal cost: 2 stages × 150 MW × 744 h × $10/MWh = $2,232,000.
-/// At pre-horizon stages (t=0, t=1), the anticipated thermal's fishing
-/// constraint is INACTIVE (legacy predicate K_i > stage_idx is false here
-/// since K_i=2). The anticipated thermal is dispatched directly at its
-/// regular per-block cost of $10/MWh — 500× cheaper than backup at
-/// $5000/MWh — so the LP picks anticipated, not backup. Backup carries 0 MW.
-const EXPECTED_PRE_HORIZON_THERMAL_COST_USD: f64 = 2.0 * 150.0 * 744.0 * 10.0;
+/// Pre-horizon backup cost: 2 stages × 150 MW × 744 h × $5000/MWh = $1,116,000,000.
+/// At pre-horizon stages (t=0, t=1), the always-active fishing equality
+/// pins the anticipated thermal to slot 0 of the seed ring buffer. With
+/// past_anticipated_commitments.values_mw = [0.0, 0.0], slot 0 carries 0 MW
+/// at both pre-horizon stages, so the LP must dispatch backup (the only
+/// remaining thermal with a free column) at $5000/MWh to meet the 150 MW
+/// load. The cost-zeroing predicate is also always-active, so the
+/// anticipated thermal column has objective 0 — but its column upper bound
+/// is fishing-pinned to 0, leaving backup as the sole feasible source.
+const EXPECTED_PRE_HORIZON_BACKUP_COST_USD: f64 = 2.0 * 150.0 * 744.0 * 5000.0;
 
-/// Total analytical optimum = decision cost + pre-horizon thermal cost =
-/// $6,696,000. NO backup contribution at any stage.
-const EXPECTED_TOTAL_USD: f64 = EXPECTED_DECISION_COST_USD + EXPECTED_PRE_HORIZON_THERMAL_COST_USD;
+/// Total = active decision cost (stages 2..=5) + pre-horizon backup cost
+/// (stages 0, 1) = $4,464,000 + $1,116,000,000 = $1,120,464,000.
+const EXPECTED_TOTAL_USD: f64 = EXPECTED_DECISION_COST_USD + EXPECTED_PRE_HORIZON_BACKUP_COST_USD;
 
 // ---------------------------------------------------------------------------
 // StubComm — single-rank communicator for testing
@@ -587,10 +580,10 @@ fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
 /// - Zone B (delivery stages t∈{2,3,4,5}): anticipated thermal pinned to
 ///   matured d_{t-K}=150 MW; per-block cost zeroed by
 ///   `zero_anticipated_delivery_thermal_cost`; backup not needed → **$0**.
-/// - Zone C (pre-horizon stages t∈{0,1}): fishing predicate inactive →
-///   anticipated thermal dispatches 150 MW directly at $10/MWh. Backup not
-///   used. Pre-horizon cost = 2 × 150 × 744 × $10 = **$2,232,000**.
-/// - **Total = $4,464,000 + $2,232,000 = $6,696,000**
+/// - Zone C (pre-horizon stages t∈{0,1}): always-active fishing predicate pins
+///   the anticipated thermal to seed slot 0 = 0 MW. Backup dispatches 150 MW at
+///   $5000/MWh. Pre-horizon backup cost = 2 × 150 × 744 × $5000 = **$1,116,000,000**.
+/// - **Total = $4,464,000 + $1,116,000,000 = $1,120,464,000**
 ///
 /// ## Cost field used
 ///
@@ -611,7 +604,7 @@ fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
 #[test]
 fn lp_total_cost_matches_analytical_optimum_k2_discount_zero() {
     // Step 1: build and train the study.
-    // (Constants EXPECTED_DECISION_COST_USD, EXPECTED_PRE_HORIZON_THERMAL_COST_USD,
+    // (Constants EXPECTED_DECISION_COST_USD, EXPECTED_PRE_HORIZON_BACKUP_COST_USD,
     // and EXPECTED_TOTAL_USD are defined and documented at the module level.)
     let system = build_system_reconciliation_k2();
     let config = build_config();

@@ -287,14 +287,13 @@ pub(crate) struct StageLayout {
     pub(crate) row_anticipated_state_fixing_start: usize,
     /// Start of anticipated-fishing constraint rows (after operational violation rows).
     ///
-    /// One equality row per matured anticipated plant (`K_i <= stage_idx`).
-    /// Layout: `row_anticipated_fishing_start + active_pos`.
+    /// One equality row per anticipated plant (always-active predicate).
+    /// Layout: `row_anticipated_fishing_start + local_idx`.
     pub(crate) row_anticipated_fishing_start: usize,
     /// Number of anticipated-fishing rows at this stage.
     ///
-    /// Equals the count of anticipated plants with `K_i <= stage_idx`.
-    /// Stage-dependent; grows from 0 to `n_anticipated` as stages pass lead times.
-    /// Zero when `n_anticipated == 0` or no plant has matured.
+    /// Always equals `n_anticipated` under the always-active rule.
+    /// Zero when `n_anticipated == 0`.
     pub(crate) n_anticipated_fishing_rows: usize,
     /// Start of generic constraint rows (after operational violation rows).
     ///
@@ -757,12 +756,8 @@ impl StageLayout {
         let row_min_turbine_start = row_max_outflow_start + n_op_rows;
         let row_min_generation_start = row_min_turbine_start + n_op_rows;
 
-        // Anticipated-fishing rows: one per plant with K_i <= stage_idx.
-        let n_anticipated_fishing_rows = ctx
-            .anticipated_lead_stages
-            .iter()
-            .filter(|&&k_i| k_i <= stage_idx)
-            .count();
+        // One fishing row per anticipated plant at every stage (always-active).
+        let n_anticipated_fishing_rows = ctx.n_anticipated;
         let row_anticipated_fishing_start = row_min_generation_start + n_op_rows;
 
         // Anticipated-state-out definition rows: one per ACTIVE plant (strict gate).
@@ -1223,7 +1218,7 @@ mod tests {
             vec![0, 1], // arbitrary thermal indices
         );
         let stage = minimal_stage(); // 1 block
-        // stage_idx=1: K_0=1 active, K_1=2 inactive → 1 fishing row.
+        // stage_idx=1: always-active → both plants active → 2 fishing rows.
         let layout = StageLayout::new(&ctx, &stage, 1);
 
         // n_op_rows = n_hydros * n_blks = 0 * 1 = 0
@@ -1233,15 +1228,16 @@ mod tests {
             layout.row_min_generation_start + n_op_rows,
             "row_anticipated_fishing_start must equal row_min_generation_start + n_op_rows"
         );
-        // Sanity: exactly one matured plant at stage 1 → exactly one fishing row.
+        // Always-active: both plants active at every stage → 2 fishing rows.
         assert_eq!(
-            layout.n_anticipated_fishing_rows, 1,
-            "n_anticipated_fishing_rows must equal 1 at stage 1 (K_0=1 matured, K_1=2 not)"
+            layout.n_anticipated_fishing_rows, 2,
+            "n_anticipated_fishing_rows must equal n_anticipated (2) under always-active predicate"
         );
     }
 
-    /// `n_anticipated_fishing_rows` grows as stages pass each plant's lead time.
-    /// With `K_i=[1,2]`, the count is 0 at stage 0, then 1, 2, 2 at stages 1-3.
+    /// `n_anticipated_fishing_rows` equals `n_anticipated` at every stage under
+    /// the always-active predicate. With `K_i=[1,2]` and `n_anticipated=2`, the
+    /// count is 2 at every stage in `[0, 1, 2, 3]`.
     #[test]
     fn anticipated_fishing_row_count_grows_with_stage() {
         let n_anticipated = 2_usize;
@@ -1256,7 +1252,7 @@ mod tests {
         );
         let stage = minimal_stage(); // 1 block
 
-        for (stage_idx, expected) in [(0_usize, 0), (1, 1), (2, 2), (3, 2)] {
+        for (stage_idx, expected) in [(0_usize, 2), (1, 2), (2, 2), (3, 2)] {
             let layout = StageLayout::new(&ctx, &stage, stage_idx);
             assert_eq!(
                 layout.n_anticipated_fishing_rows, expected,

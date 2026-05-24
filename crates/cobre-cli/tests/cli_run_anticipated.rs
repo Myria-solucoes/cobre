@@ -349,9 +349,9 @@ fn cli_run_populates_anticipated_thermal_columns() {
         "no rows found for anticipated thermal id={anticipated_id} in thermals.parquet"
     );
 
-    // AC-4: Anticipated thermal at stage 0 — anticipated_decision_mw non-null and >= 0.0,
-    //        anticipated_committed_mw null (K=1: stage 0 < K, so decision placed but not
-    //        yet matured).
+    // AC-4: Anticipated thermal at stage 0 — anticipated_decision_mw non-null and >= 0.0;
+    //        anticipated_committed_mw non-null under always-active fishing (reads slot 0
+    //        of the seeded ring buffer regardless of K vs stage_idx).
     let stage_0_ant_rows: Vec<usize> = rows
         .thermal_ids
         .iter()
@@ -378,10 +378,16 @@ fn cli_run_populates_anticipated_thermal_columns() {
             "row {row_idx}: anticipated_decision_mw at stage 0 must be >= 0.0 and finite, \
              got {v}"
         );
+        let committed = rows.anticipated_committed_mw[row_idx];
         assert!(
-            rows.anticipated_committed_mw[row_idx].is_none(),
-            "row {row_idx}: anticipated thermal at stage 0 (decision stage, K=1) must have \
-             anticipated_committed_mw=null"
+            committed.is_some(),
+            "row {row_idx}: anticipated thermal at stage 0 under always-active fishing \
+             must have non-null anticipated_committed_mw (reads slot 0)"
+        );
+        let c = committed.unwrap();
+        assert!(
+            c >= 0.0 && c.is_finite(),
+            "row {row_idx}: anticipated_committed_mw at stage 0 must be >= 0.0 and finite, got {c}"
         );
     }
 

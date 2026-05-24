@@ -374,18 +374,23 @@ fn cli_run_k2_populates_anticipated_columns_and_state_dictionary() {
             "row {row_idx}: anticipated_decision_mw at stage 0 must be >= 0.0 and finite, \
              got {v}"
         );
+        let committed = rows.anticipated_committed_mw[row_idx];
         assert!(
-            rows.anticipated_committed_mw[row_idx].is_none(),
-            "row {row_idx}: anticipated thermal at stage 0 (K=2, delivery requires 2 <= 0) must \
-             have anticipated_committed_mw=null"
+            committed.is_some(),
+            "row {row_idx}: anticipated thermal at stage 0 under always-active fishing \
+             must have non-null anticipated_committed_mw (reads slot 0 of the ring buffer)"
+        );
+        let c = committed.unwrap();
+        assert!(
+            c >= 0.0 && c.is_finite(),
+            "row {row_idx}: anticipated_committed_mw at stage 0 must be >= 0.0 and finite, got {c}"
         );
     }
 
     // Anticipated thermal at stage 1 — anticipated_decision_mw null (horizon-boundary
     // INACTIVE under F2-002 strict predicate: t + K_i = 1 + 2 = 3 = n_stages, so
     // the decision column has [0, 0] bounds and the extraction returns None).
-    // anticipated_committed_mw also null (delivery requires K_i <= stage_index = 2 <= 1
-    // which is false).
+    // anticipated_committed_mw non-null under always-active fishing (reads slot 0).
     let stage_1_ant_rows: Vec<usize> = rows
         .thermal_ids
         .iter()
@@ -406,10 +411,17 @@ fn cli_run_k2_populates_anticipated_columns_and_state_dictionary() {
              anticipated_decision_mw=null (horizon-boundary inactive: \
              t + K_i = 3 >= n_stages = 3 under F2-002 strict predicate)"
         );
+        let committed = rows.anticipated_committed_mw[row_idx];
         assert!(
-            rows.anticipated_committed_mw[row_idx].is_none(),
-            "row {row_idx}: anticipated thermal at stage 1 (delivery requires K_i=2 <= \
-             stage_index=1, which is false) must have anticipated_committed_mw=null"
+            committed.is_some(),
+            "row {row_idx}: anticipated thermal at stage 1 under always-active fishing \
+             must have non-null anticipated_committed_mw (reads slot 0 of the ring buffer \
+             regardless of K_i vs stage_index)"
+        );
+        let c = committed.unwrap();
+        assert!(
+            c >= 0.0 && c.is_finite(),
+            "row {row_idx}: anticipated_committed_mw at stage 1 must be >= 0.0 and finite, got {c}"
         );
     }
 
