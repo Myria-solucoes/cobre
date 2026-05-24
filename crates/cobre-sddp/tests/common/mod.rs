@@ -4,14 +4,68 @@
 //! `StudySetup::new` that drives the same construction pipeline as the CLI.
 //! The parquet override flows through `hydro_models.productivity_override`,
 //! which `prepare_hydro_models` populates from disk.
+//!
+//! Also exports [`StubComm`], a single-rank communicator stub used in
+//! non-MPI integration tests.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, dead_code)]
 
 use std::path::Path;
 
+use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_sddp::{StudySetup, setup::StudyParams};
 
 pub mod anticipated_structural_assertions;
+
+/// Single-rank communicator stub for testing.
+///
+/// Implements `Communicator` for single-process test scenarios where no
+/// inter-rank communication is needed. All collective operations are no-ops;
+/// broadcasts and reductions copy data locally without communication.
+pub struct StubComm;
+
+impl Communicator for StubComm {
+    fn allgatherv<T: CommData>(
+        &self,
+        send: &[T],
+        recv: &mut [T],
+        _counts: &[usize],
+        _displs: &[usize],
+    ) -> Result<(), CommError> {
+        recv[..send.len()].clone_from_slice(send);
+        Ok(())
+    }
+
+    fn allreduce<T: CommData>(
+        &self,
+        send: &[T],
+        recv: &mut [T],
+        _op: ReduceOp,
+    ) -> Result<(), CommError> {
+        recv.clone_from_slice(send);
+        Ok(())
+    }
+
+    fn broadcast<T: CommData>(&self, _buf: &mut [T], _root: usize) -> Result<(), CommError> {
+        Ok(())
+    }
+
+    fn barrier(&self) -> Result<(), CommError> {
+        Ok(())
+    }
+
+    fn rank(&self) -> usize {
+        0
+    }
+
+    fn size(&self) -> usize {
+        1
+    }
+
+    fn abort(&self, error_code: i32) -> ! {
+        std::process::exit(error_code)
+    }
+}
 
 /// Build a [`StudySetup`] for a case directory.
 ///

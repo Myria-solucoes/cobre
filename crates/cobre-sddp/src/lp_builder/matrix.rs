@@ -989,7 +989,6 @@ pub(super) fn fill_anticipated_fishing_rows(
             continue;
         }
         let row = layout.row_anticipated_fishing_start + local_idx;
-        // Equality constraint: LHS == 0 (both bounds set to 0.0).
         row_lower[row] = 0.0;
         row_upper[row] = 0.0;
     }
@@ -1061,7 +1060,6 @@ pub(super) fn fill_anticipated_fishing_entries(
         }
         let row = layout.row_anticipated_fishing_start + local_idx;
         let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
-        // LHS: sum_{blk} block_hours[blk] * gt_i^(t, blk)   (converts MW → MWh per block).
         let mut block_hours_total: f64 = 0.0;
         for blk in 0..n_blks {
             let col_gen = layout.col_thermal_start + thermal_idx * n_blks + blk;
@@ -1069,10 +1067,6 @@ pub(super) fn fill_anticipated_fishing_entries(
             col_entries[col_gen].push((row, block_hours));
             block_hours_total += block_hours;
         }
-        // RHS coupling: anticipated_state[slot 0, plant local_idx] carries committed MW.
-        // Coefficient = -block_hours_total so both sides are in MWh.
-        // Slot-major layout: slot 0 → col_anticipated_state_start + 0 * n_anticipated + local_idx
-        //                             = col_anticipated_state_start + local_idx.
         let col_state = layout.col_anticipated_state_start + local_idx;
         col_entries[col_state].push((row, -block_hours_total));
     }
@@ -1291,20 +1285,13 @@ pub(super) fn fill_load_balance_entries(
     let n_blks = layout.n_blks;
     let row_load = layout.row_load_balance_start;
 
-    // Build a quick lookup from hydro index to FPHA local index.
-    // `fpha_local[h_idx]` is `Some(local_idx)` if hydro `h_idx` uses FPHA at this stage.
     let mut fpha_local: Vec<Option<usize>> = vec![None; ctx.n_hydros];
     for (local_idx, &h_idx) in layout.fpha_hydro_indices.iter().enumerate() {
         fpha_local[h_idx] = Some(local_idx);
     }
 
-    // Hydro contribution to load balance.
-    // - FPHA hydros: g_{h,k} column with coefficient +1.0
-    // - Constant-productivity hydros: rho * turbine_col (unchanged)
     for (h_idx, hydro) in ctx.hydros.iter().enumerate() {
         if let Some(local_idx) = fpha_local[h_idx] {
-            // FPHA: use the generation variable column.
-            // The resolved model for this stage must be Fpha.
             debug_assert!(
                 matches!(
                     ctx.production_models.model(h_idx, stage_idx),
@@ -1320,14 +1307,9 @@ pub(super) fn fill_load_balance_entries(
                 }
             }
         } else {
-            // Constant productivity: use the resolved per-stage production model
-            // from hydro_production_models.json.
             let rho = match ctx.production_models.model(h_idx, stage_idx) {
                 ResolvedProductionModel::ConstantProductivity { productivity } => *productivity,
                 ResolvedProductionModel::Fpha { .. } => {
-                    // This branch should not be reached because FPHA hydros are handled
-                    // by the `if let Some(local_idx) = fpha_local[h_idx]` branch above.
-                    // If we get here, the FPHA local-index table is inconsistent.
                     unreachable!(
                         "non-FPHA branch reached for FPHA resolved model at hydro {h_idx}"
                     );
@@ -1343,7 +1325,6 @@ pub(super) fn fill_load_balance_entries(
         }
     }
 
-    // Thermal generation.
     for (t_idx, thermal) in ctx.thermals.iter().enumerate() {
         if let Some(&b_idx) = ctx.bus_pos.get(&thermal.bus_id) {
             for blk in 0..n_blks {
@@ -1354,7 +1335,6 @@ pub(super) fn fill_load_balance_entries(
         }
     }
 
-    // Line flows (+1 at target, -1 at source for forward; reversed for reverse).
     for (l_idx, line) in ctx.lines.iter().enumerate() {
         let src_idx = ctx.bus_pos.get(&line.source_bus_id).copied();
         let tgt_idx = ctx.bus_pos.get(&line.target_bus_id).copied();
@@ -1373,11 +1353,6 @@ pub(super) fn fill_load_balance_entries(
             }
         }
     }
-
-    // Deficit (+1 for every segment) and excess (-1).
-    //
-    // All deficit segment columns for bus `b_idx` at block `blk` enter the same
-    // load-balance row with coefficient +1.0 (total deficit = sum of segments).
     for (b_idx, bus) in ctx.buses.iter().enumerate() {
         for blk in 0..n_blks {
             let row = row_load + b_idx * n_blks + blk;
@@ -1513,20 +1488,15 @@ pub(super) fn fill_evaporation_entries(
         let col_q_ev = layout.col_evap_start + local_idx * 3;
         let col_f_plus = layout.col_evap_start + local_idx * 3 + 1;
         let col_f_minus = layout.col_evap_start + local_idx * 3 + 2;
-        let col_v = h_idx; // outgoing storage column
-        let col_v_in = col_storage_in_start + h_idx; // incoming storage column
+        let col_v = h_idx;
+        let col_v_in = col_storage_in_start + h_idx;
 
         let row = layout.row_evap_start + local_idx;
 
-        // Q_ev_h: +1.0
         col_entries[col_q_ev].push((row, 1.0));
-        // v_h (outgoing storage): -k_evap_v / 2
         col_entries[col_v].push((row, -coeff.k_evap_v / 2.0));
-        // v_in_h (incoming storage, fixed by storage-fixing row): -k_evap_v / 2
         col_entries[col_v_in].push((row, -coeff.k_evap_v / 2.0));
-        // f_evap_plus: +1.0
         col_entries[col_f_plus].push((row, 1.0));
-        // f_evap_minus: -1.0
         col_entries[col_f_minus].push((row, -1.0));
     }
 }
