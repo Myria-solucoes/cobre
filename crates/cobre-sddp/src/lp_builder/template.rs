@@ -14,7 +14,7 @@ use crate::setup::template_postprocess::{
 };
 
 use super::layout::{StageLayout, TemplateBuildCtx};
-use super::{COST_SCALE_FACTOR, GenericConstraintRowEntry, matrix, scaling};
+use super::{matrix, scaling, GenericConstraintRowEntry, COST_SCALE_FACTOR};
 
 /// Outcome of [`build_stage_templates`]: one [`StageTemplate`] per study stage
 /// plus the per-stage `base_rows` offsets needed by `PatchBuffer`.
@@ -1299,8 +1299,11 @@ mod tests {
             row_perm[fish_start_b] = fish_start_a + 1;
             row_perm[fish_start_b + 1] = fish_start_a;
         }
-        // If only 1 fishing row is active (one plant matured but not the other),
-        // the SAME plant is active in both LPs — but at LOCAL index 0 in one and
+        // Under the always-active fishing predicate every anticipated plant
+        // emits exactly one fishing row at every stage; this branch handles the
+        // historical case of a partial active set still encountered in legacy
+        // fixtures that pre-date the predicate flip. The SAME plant is active
+        // in both LPs — but at LOCAL index 0 in one and
         // LOCAL index 1 in the other. The fishing-row index differs but corresponds
         // to the same plant's constraint. The mapping is still a single-row swap
         // when applicable.
@@ -1424,11 +1427,12 @@ mod tests {
     /// 3. Manually construct `ctx_b` by swapping both arrays in lockstep:
     ///    `anticipated_thermal_indices = [1, 0]`,
     ///    `anticipated_lead_stages = [3, 2]`.
-    /// 4. Build single-stage templates for both contexts at stages 0, 2, and 4.
-    ///    Stage 0: both decisions active, no fishing rows.
-    ///    Stage 2: both decisions active, one fishing row (plant K=2 matured).
-    ///    Stage 4: only the K=2 decision active (K=3 inactive since `4 + 3 >= 5`),
-    ///             both fishing rows active.
+    /// 4. Build single-stage templates for both contexts at stages 0, 2, and 3.
+    ///    Under the always-active fishing predicate every anticipated plant
+    ///    emits one fishing row at every stage, so all sampled stages carry
+    ///    the same number of fishing rows; the anticipated-decision active set
+    ///    is independent of the fishing predicate and still depends on
+    ///    `t + K_i < T` at each stage.
     /// 5. Assert LP equivalence under the canonical swap permutation
     ///    (column swap on anticipated_decision and slot-major state, row swap
     ///    on state-fixing and fishing rows when both plants are present).
@@ -1518,9 +1522,9 @@ mod tests {
 
         let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
 
-        // Test multiple stages to cover: no fishing rows (stage 0),
-        // partial fishing rows (stage 2: K=2 matured, K=3 not yet),
-        // full fishing rows (stage 3+: both matured).
+        // Test multiple stages to cover the active-decision boundary while
+        // the always-active fishing predicate keeps the fishing-row count
+        // constant at every stage (one row per anticipated plant).
         for stage_idx in [0_usize, 2, 3] {
             let stage = study_stages[stage_idx];
 

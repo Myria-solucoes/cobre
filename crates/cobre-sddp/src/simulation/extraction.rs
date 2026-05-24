@@ -36,7 +36,7 @@ use cobre_core::EntityId;
 
 use crate::energy_conversion::EnergyConversionSet;
 use crate::indexer::StageIndexer;
-use crate::lp_builder::{COST_SCALE_FACTOR, GenericConstraintRowEntry};
+use crate::lp_builder::{GenericConstraintRowEntry, COST_SCALE_FACTOR};
 use crate::simulation::types::{
     ScenarioCategoryCosts, SimulationBusResult, SimulationContractResult, SimulationCostResult,
     SimulationExchangeResult, SimulationGenericViolationResult, SimulationHydroResult,
@@ -151,13 +151,16 @@ fn compute_anticipated_decision_mw(
     Some(view.primal[col])
 }
 
-/// Return the matured committed MW for an anticipated thermal at a delivery stage.
+/// Return the committed MW for an anticipated thermal at any stage
+/// in `[0, T-1]` (the always-active fishing predicate makes every
+/// stage a delivery stage; pre-horizon stages deliver the seeded
+/// `values_mw[slot 0]` advanced by the ring-buffer shift).
 ///
 /// Reads slot 0 of the `anticipated_state` ring buffer:
 /// `primal[anticipated_state.start + 0 * n_anticipated + local_idx]`
 /// = `primal[anticipated_state.start + local_idx]` (slot-major, plant-minor).
 ///
-/// At extraction time slot 0 carries the matured committed MW, sourced as follows:
+/// At extraction time slot 0 carries the committed MW, sourced as follows:
 ///
 /// - **Per-block path** (`indexer.thermal.non_empty() && n_blks > 0`): the fishing
 ///   constraint couples per-block thermal generation (`MWh`) to the slot-0 column
@@ -170,15 +173,15 @@ fn compute_anticipated_decision_mw(
 /// - **No-block path** (`indexer.thermal.is_empty() || n_blks == 0`): the fishing
 ///   constraint LHS sum over zero blocks vanishes, so the constraint does not
 ///   couple slot 0 to anything. Category 6 (`anticipated_state_fixing`) instead
-///   pins `s_{i,0} = incoming_slot_0` from the ring buffer, which is the matured
-///   committed MW propagated from earlier stages.
+///   pins `s_{i,0} = incoming_slot_0` from the ring buffer, which is the committed
+///   MW propagated from earlier stages via the ring-buffer shift (`noise.rs:253`).
 ///
 /// In both paths the correct read is the slot-0 column.
 ///
 /// Returns `Some(v)` when thermal `thermal_local` is anticipated and the
-/// fishing predicate is active for its plant. At pre-horizon stages, the value
-/// read is the seeded `values_mw[slot 0]` injected by the setup pipeline and
-/// advanced via the per-stage ring-buffer shift.
+/// fishing predicate is active for its plant (`indexer.rs:1555`). At
+/// pre-horizon stages, the value read is the seeded `values_mw[slot 0]`
+/// injected by the setup pipeline and advanced via the per-stage ring-buffer shift.
 ///
 /// Returns `None` silently when the thermal is not anticipated.
 #[inline]
@@ -429,7 +432,11 @@ impl StageExtractionSpec<'_> {
     fn col_scale_factor(&self, col: usize) -> f64 {
         if col < self.col_scale.len() {
             let d = self.col_scale[col];
-            if d == 0.0 { 1.0 } else { d }
+            if d == 0.0 {
+                1.0
+            } else {
+                d
+            }
         } else {
             1.0
         }
@@ -1189,7 +1196,11 @@ fn compute_cost_result(
     let scale_factor = |col: usize| -> f64 {
         if col < col_scale.len() {
             let d = col_scale[col];
-            if d == 0.0 { 1.0 } else { d }
+            if d == 0.0 {
+                1.0
+            } else {
+                d
+            }
         } else {
             1.0
         }
@@ -1587,8 +1598,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        EntityCounts, SolutionView, StageExtractionSpec, accumulate_category_costs,
-        assign_scenarios, extract_stage_result,
+        accumulate_category_costs, assign_scenarios, extract_stage_result, EntityCounts,
+        SolutionView, StageExtractionSpec,
     };
     use crate::indexer::StageIndexer;
     use crate::simulation::types::{ScenarioCategoryCosts, SimulationCostResult};
@@ -1910,7 +1921,7 @@ mod tests {
         );
 
         assert_eq!(result.inflow_lags.len(), 2); // 2 hydros × 1 lag each
-        // Hydro 10, lag 0 → primal[2] = 50.0
+                                                 // Hydro 10, lag 0 → primal[2] = 50.0
         assert_eq!(result.inflow_lags[0].hydro_id, 10);
         assert_eq!(result.inflow_lags[0].lag_index, 0);
         assert_eq!(result.inflow_lags[0].inflow_m3s, 50.0);
@@ -2143,7 +2154,7 @@ mod tests {
         primal[1] = 200.0; // storage h1
         primal[2] = 50.0; // lag h0
         primal[3] = 60.0; // lag h1
-        // primal[4..6] = z_inflow (zeros)
+                          // primal[4..6] = z_inflow (zeros)
         primal[6] = 90.0; // storage_in h0
         primal[7] = 180.0; // storage_in h1
         primal[8] = 500.0; // theta
@@ -2151,7 +2162,7 @@ mod tests {
         primal[10] = 40.0; // turbine h1 b0
         primal[11] = 5.0; // spillage h0 b0
         primal[12] = 0.0; // spillage h1 b0
-        // primal[13..15] = diversion (zeros)
+                          // primal[13..15] = diversion (zeros)
         primal[15] = 80.0; // thermal t0 b0
         primal[16] = 15.0; // line_fwd l0 b0
         primal[17] = 0.0; // line_rev l0 b0
@@ -3522,7 +3533,7 @@ mod tests {
     /// If the two paths ever diverge, this test catches it immediately.
     #[test]
     fn extract_stage_result_prebuilt_lookup_matches_standard_path() {
-        use super::{HydroReverseLookup, ThermalReverseLookup, extract_stage_result_with_lookups};
+        use super::{extract_stage_result_with_lookups, HydroReverseLookup, ThermalReverseLookup};
 
         let indexer = crate::indexer::StageIndexer::with_equipment(
             &crate::indexer::EquipmentCounts {
@@ -4228,7 +4239,7 @@ mod tests {
         let mut primal = vec![0.0_f64; n_cols];
         primal[0] = 50.0; // storage h0
         primal[1] = 80.0; // storage h1
-        // primal[2..4] = z_inflow (zeros)
+                          // primal[2..4] = z_inflow (zeros)
         primal[4] = 45.0; // storage_in h0
         primal[5] = 75.0; // storage_in h1
         primal[6] = 0.0; // theta
@@ -4236,7 +4247,7 @@ mod tests {
         primal[8] = 30.0; // turbine h1 b0
         primal[9] = 0.0; // spillage h0 b0
         primal[10] = 0.0; // spillage h1 b0
-        // primal[11..13] = diversion (zeros)
+                          // primal[11..13] = diversion (zeros)
         primal[13] = 75.0; // FPHA generation h0 b0 — acceptance criterion value
 
         let obj = vec![0.0_f64; n_cols];
@@ -4422,12 +4433,12 @@ mod tests {
         let n_cols = indexer.generation_below_slack.end;
         let mut primal = vec![0.0_f64; n_cols];
         primal[0] = 200.0; // storage h0
-        // primal[1] = z_inflow h0 (zero)
+                           // primal[1] = z_inflow h0 (zero)
         primal[2] = 190.0; // storage_in h0
         primal[3] = 0.0; // theta
         primal[4] = 10.0; // turbine h0 b0
         primal[5] = 0.0; // spillage h0 b0
-        // primal[6] = diversion h0 b0 (zero)
+                         // primal[6] = diversion h0 b0 (zero)
         primal[7] = 3.5; // Q_ev — acceptance criterion value
 
         let obj = vec![0.0_f64; n_cols];
@@ -4500,8 +4511,8 @@ mod tests {
         primal[0] = 200.0;
         // primal[1] = z_inflow h0 (zero)
         primal[2] = 190.0; // storage_in h0
-        // primal[3] = theta = 0
-        // primal[6] = diversion h0 b0 (zero)
+                           // primal[3] = theta = 0
+                           // primal[6] = diversion h0 b0 (zero)
         primal[7] = 2.0; // Q_ev
         primal[8] = 0.5; // f_evap_plus (under-evaporation -> neg)
         primal[9] = 0.0; // f_evap_minus (over-evaporation -> pos)
@@ -4586,7 +4597,7 @@ mod tests {
 
         let mut obj = vec![0.0_f64; n_cols];
         obj[6] = 1.0; // theta coefficient (undiscounted)
-        // h0 turbine column 7: objective_coeff=0.01
+                      // h0 turbine column 7: objective_coeff=0.01
         obj[7] = 0.01;
 
         let dual = vec![0.0_f64; 2];
@@ -4661,8 +4672,8 @@ mod tests {
         let mut obj = vec![0.0_f64; n_cols];
         obj[6] = 1.0; // theta coefficient (undiscounted)
         obj[7] = 0.01; // turbined cost (scaled)
-        // objective in scaled space = theta_coeff * theta + turbine_coeff * turbine
-        //                           = 1.0 * 500 + 0.01 * 30 = 500.3
+                       // objective in scaled space = theta_coeff * theta + turbine_coeff * turbine
+                       //                           = 1.0 * 500 + 0.01 * 30 = 500.3
         let objective_val = 500.3_f64;
 
         let dual = vec![0.0_f64; 2];
@@ -4752,7 +4763,7 @@ mod tests {
 
         let mut obj = vec![0.0_f64; n_cols];
         obj[6] = 1.0; // theta coefficient (undiscounted)
-        // c_orig / K = 0.005.  With col_scale = 2.0: obj_coeff = 0.005 * 2.0 = 0.01.
+                      // c_orig / K = 0.005.  With col_scale = 2.0: obj_coeff = 0.005 * 2.0 = 0.01.
         obj[7] = 0.01;
 
         // Build col_scale: all 1.0 except column 7 = 2.0.

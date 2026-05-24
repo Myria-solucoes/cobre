@@ -48,10 +48,15 @@
 //! at the predecessor stage.
 //!
 //! The dual of the anticipated-state-fixing row at stage `t` reflects
-//! `dQ_t/dx_ant[slot, plant]`. For slots not yet matured at stage `t`
-//! (`k_i > stage_idx`), the dual flows through intermediate-stage cuts on the
-//! same slot. For matured slots (`k_i <= stage_idx`), the dual reflects the
-//! immediate fishing constraint.
+//! `dQ_t/dx_ant[slot, plant]`. Under the always-active fishing predicate
+//! (`StageIndexer::is_anticipated_fishing_active` at `indexer.rs:1555`), every
+//! slot at every stage participates in the dual chain: the fishing constraint is
+//! emitted at every stage unconditionally. The dual on the Cat 6
+//! state-fixing row at slot `s` flows back to the predecessor's LP column via
+//! `state_to_lp_column`'s branch decision (Less / Equal / Greater), which maps
+//! slot `K_p-1` to the decision column and slot `i < K_p-1` to slot `i+1`.
+//! See `indexer.rs:1429-1454` for the `state_to_lp_column` rustdoc and
+//! `artifacts/layout-decision.md` Section 2 for sign-chain derivations.
 //!
 //! The backward pass does not call `shift_anticipated_state`. The trial point
 //! `x_hat` is the forward-shifted state; cut extraction uses it as-is. This
@@ -104,15 +109,15 @@ use cobre_comm::Communicator;
 use cobre_solver::{RowBatch, SolutionView, SolverInterface, SolverStatistics};
 
 use crate::{
-    SddpError,
     context::{StageContext, TrainingContext},
     cut::pool::CutPool,
     forward::write_capture_metadata,
-    noise::{NcsNoiseOffsets, transform_inflow_noise, transform_load_noise, transform_ncs_noise},
+    noise::{transform_inflow_noise, transform_load_noise, transform_ncs_noise, NcsNoiseOffsets},
     risk_measure::RiskMeasure,
     solver_stats::SolverStatsDelta,
     state_exchange::ExchangeBuffers,
     workspace::{BasisStoreSliceMut, CapturedBasis, SolverWorkspace},
+    SddpError,
 };
 
 /// Per-`(rank, worker_id, opening)` solver delta collected during a single
@@ -724,7 +729,7 @@ mod tests {
 
     use cobre_core::scenario::SamplingScheme;
 
-    use super::{BackwardResult, run_backward_pass};
+    use super::{run_backward_pass, BackwardResult};
     use crate::{
         context::{StageContext, TrainingContext},
         cut::FutureCostFunction,
@@ -1064,7 +1069,6 @@ mod tests {
         use chrono::NaiveDate;
         use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
         use cobre_core::{
-            Bus, DeficitSegment, EntityId, SystemBuilder,
             scenario::{
                 CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile,
                 InflowModel,
@@ -1073,9 +1077,10 @@ mod tests {
                 Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
                 StageStateConfig,
             },
+            Bus, DeficitSegment, EntityId, SystemBuilder,
         };
         use cobre_stochastic::context::{
-            ClassSchemes, OpeningTreeInputs, build_stochastic_context,
+            build_stochastic_context, ClassSchemes, OpeningTreeInputs,
         };
         use std::collections::BTreeMap;
 
@@ -3028,7 +3033,7 @@ mod tests {
         };
         use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
         use cobre_stochastic::context::{
-            ClassSchemes, OpeningTreeInputs, build_stochastic_context,
+            build_stochastic_context, ClassSchemes, OpeningTreeInputs,
         };
 
         let bus0 = Bus {

@@ -660,7 +660,7 @@ pub struct StageIndexer {
     /// The fishing constraint reads:
     /// `gt_i^(t) - anticipated_state[slot=0, plant=i] = 0`
     /// where the dual on this row carries the cut subgradient w.r.t.
-    /// the matured state slot.
+    /// the slot read by the fishing constraint at delivery.
     pub anticipated_fishing: Range<usize>,
 
     /// First row index of the anticipated-fishing block.
@@ -1522,8 +1522,9 @@ impl StageIndexer {
     /// Rows are assigned in ascending `local_idx` order: plant `i` gets row
     /// `anticipated_fishing_start + i`.
     ///
-    /// The dual on this row carries the cut subgradient w.r.t. the matured
-    /// anticipated-state slot during backward-pass cut extraction.
+    /// The dual on this row carries the cut subgradient w.r.t. the
+    /// currently-delivering anticipated-state slot (slot 0 after the ring-buffer
+    /// shift) during backward-pass cut extraction.
     ///
     /// # Panics (debug builds only)
     ///

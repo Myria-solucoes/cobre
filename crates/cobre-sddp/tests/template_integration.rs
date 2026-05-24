@@ -7122,13 +7122,13 @@ fn generic_constraint_thermal_equal_two_slacks() {
 #[allow(clippy::cast_possible_wrap)]
 fn generic_constraint_two_hydros_sum_csc_entries() {
     use chrono::NaiveDate;
-    use cobre_core::ResolvedGenericConstraintBounds;
     use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
     use cobre_core::scenario::{InflowModel, LoadModel};
     use cobre_core::temporal::{
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
         StageStateConfig,
     };
+    use cobre_core::ResolvedGenericConstraintBounds;
     use cobre_core::{
         ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
         VariableRef,
@@ -10905,15 +10905,18 @@ fn test_anticipated_fishing_active_at_maturity_boundary() {
     }
 }
 
-// ── AC-7: boundary rejection K_i == stage_idx + 1 ────────────────────────────
+// ── Fishing-row count stage-invariance under always-active predicate ─────────
 
-/// AC-7: a plant with K_i=2 has NOT matured at stage_idx=1 (one before maturity).
+/// Under the always-active fishing predicate (`indexer.rs:1555`
+/// `is_anticipated_fishing_active`), every anticipated plant emits exactly one
+/// fishing row at every stage in `[0, n_stages)`. This test confirms the row
+/// count is stage-invariant by asserting equality between `num_rows` at two
+/// adjacent stages.
 ///
 /// System: one anticipated thermal K=2, n_stages=4.
-/// At stage 1: K_i=2 > 1 → n_anticipated_fishing_rows == 0.
-/// Verified via `num_rows` at stage 1 equaling stage 0 (both have 0 fishing rows).
+/// At every stage: `n_anticipated_fishing_rows == n_anticipated == 1`.
 #[test]
-fn test_anticipated_fishing_inactive_one_before_maturity_boundary() {
+fn test_anticipated_fishing_same_count_both_stages() {
     let system = one_anticipated_thermal_system(4, 2, 0.0, 100.0);
     let result = build_stage_templates(
         &system,
@@ -10926,13 +10929,15 @@ fn test_anticipated_fishing_inactive_one_before_maturity_boundary() {
     )
     .expect("build ok");
 
-    // At stage 0: K_i=2 > 0 → 0 fishing rows.
-    // At stage 1: K_i=2 > 1 → 0 fishing rows (same count as stage 0).
+    // Under the always-active predicate every stage carries one fishing row
+    // per anticipated plant. The two adjacent stages must therefore have the
+    // same total row count (the rest of the LP layout is also stage-invariant
+    // for this single-anticipated-thermal fixture).
     let rows_stage_0 = result.templates[0].num_rows;
     let rows_stage_1 = result.templates[1].num_rows;
     assert_eq!(
         rows_stage_1, rows_stage_0,
-        "stage 1: 0 fishing rows (K_i=2 > stage_idx=1, not yet matured)"
+        "stage 1 and stage 0 must have identical row counts (always-active fishing emits one row per anticipated plant at every stage)"
     );
 }
 
@@ -11065,7 +11070,7 @@ fn test_anticipated_state_fixing_csc_diagonal_plus_one() {
     let t = &result.templates[0];
     let n_anticipated = 2_usize;
     let k_max = 3_usize; // K_0=2, K_1=3 → k_max=3 (6 diagonal entries total)
-    // col_anticipated_state_start = row_anticipated_state_fixing_start = 0 (no hydros).
+                         // col_anticipated_state_start = row_anticipated_state_fixing_start = 0 (no hydros).
     let col_state_start = col_ant_state_start_zero_hydros();
     let row_fix_start = 0_usize;
 
@@ -11151,7 +11156,7 @@ fn test_anticipated_decision_inactive_no_state_write() {
     .expect("build ok");
 
     let t = &result.templates[3]; // stage 3: 3+2=5 > 4 → inactive
-    // n_anticipated=1, k_max=2, n_ant_state=2.
+                                  // n_anticipated=1, k_max=2, n_ant_state=2.
     let col_dec = anticipated_decision_col(2);
     // Check all n_ant_state state-fixing rows: none should have the decision entry.
     let row_fix_start = 0_usize;

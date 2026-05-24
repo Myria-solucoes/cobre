@@ -35,6 +35,24 @@
 //!
 //! ## Closed-form derivation
 //!
+//! ### Legacy behaviour (before always-active fishing)
+//!
+//! Under the pre-flip predicate `is_anticipated_fishing_active` returned TRUE
+//! only when `stage_idx >= K_i` (i.e. `stage_idx >= 1` for K=1). Stage 0 had
+//! no fishing row, the anticipated thermal dispatched freely at cost `c_a`, and
+//! the closed form was `T* = 2 · c_a · D = 1000.0`. That constant is now wrong.
+//!
+//! ### Always-active fishing (current behaviour)
+//!
+//! `StageIndexer::is_anticipated_fishing_active` at `indexer.rs:1555` now
+//! returns TRUE at every stage, including stage 0. The fishing row
+//! `g_a_t − x_state_t = 0` is therefore emitted at stage 0 as well, and
+//! `zero_anticipated_delivery_thermal_cost` zeros the per-block cost of the
+//! anticipated column at stage 0 (same always-active path). See the K=1
+//! sign-chain table in
+//! `artifacts/layout-decision.md`
+//! §2 for the cut-coefficient sign convention that applies here.
+//!
 //! Variables (all in MW; subscript denotes stage):
 //! - `g_a_t` — per-block anticipated thermal generation at stage `t`.
 //! - `g_b_t` — per-block backup thermal generation at stage `t`.
@@ -42,29 +60,39 @@
 //! - `θ_0` — stage-0 future-cost approximation (`≥ 0`).
 //! - `x_state_t` — anticipated-state slot 0 at stage `t` (free variable).
 //!
-//! Stage 0 (decision; fishing predicate `K_i ≤ stage_idx` is `1 ≤ 0` — FALSE,
-//! so no fishing row; decision predicate `t + K_i < n_stages` is `0 + 1 < 2` —
-//! TRUE, so `d_ant_0` is active):
+//! Stage 0 (always-active fishing; decision predicate `t + K_i < n_stages` is
+//! `0 + 1 < 2` — TRUE, so `d_ant_0` is active; fishing predicate now TRUE at
+//! every stage including 0; per-block anticipated cost zeroed by
+//! `zero_anticipated_delivery_thermal_cost`):
 //!
 //! ```text
-//!   min  c_a · g_a_0 + c_b · g_b_0 + c_a · d_ant_0 + θ_0
+//!   min  0 · g_a_0 + c_b · g_b_0 + c_a · d_ant_0 + θ_0
 //!   s.t. g_a_0 + g_b_0 + deficit_0 − excess_0 = D       (load balance)
-//!        x_state_0 + d_ant_0 = past[0] = 0              (state-fixing, slot 0)
+//!        g_a_0 − x_state_0 = 0                          (fishing row, always-active)
+//!        x_state_0 = past[0] = 0                        (state-fixing, slot 0; pure identity under Alt-A)
+//!        state_out_0 − d_ant_0 = 0                      (state-out definition row; couples decision to next-stage delivery)
 //!        θ_0 ≥ 0                                        (no cuts initially)
 //!        g_a_0 ∈ [0, M], g_b_0 ∈ [0, B], d_ant_0 ∈ [0, M]
 //!        deficit_0 ≥ 0, excess_0 ≥ 0
 //! ```
 //!
+//! Under the Alternative-A layout, the slot-0 state-fixing row is pure
+//! identity (it pins `x_state_0` to `past[0] = 0` only; no `d_ant_0` coupling
+//! on this row). The decision-vs-state coupling moves to the `state_out`
+//! definition row, which lets `d_ant_0` be optimised freely. Fishing then
+//! forces `g_a_0 = x_state_0 = 0`, so the load must be covered entirely by
+//! `g_b_0 = D` at cost `c_b · D = 5000`. `d_ant_0` is the new commitment;
+//! its objective coefficient `c_a` drives the trade-off between paying
+//! `c_a · d_ant_0` now and paying `c_b · max(0, D − d_ant_0)` at stage 1.
+//!
 //! The decision objective coefficient is set by
 //! `fill_anticipated_decision_objective` to
 //! `c_a · total_hours_per_stage[delivery=1] · cumulative_discount_factors[1] =
-//! c_a · 1 · 1 = c_a`. The per-block thermal cost at stage 0 is `c_a · 1 = c_a`
-//! (NOT zeroed because `zero_anticipated_delivery_thermal_cost` requires
-//! `K_i ≤ stage_idx`, false here).
+//! c_a · 1 · 1 = c_a`.
 //!
-//! Stage 1 (delivery; fishing `K_i ≤ 1` — TRUE; decision `1 + 1 < 2` — FALSE,
-//! so `d_ant_1 ∈ [0,0]` and the per-block anticipated cost is zeroed by
-//! `zero_anticipated_delivery_thermal_cost`):
+//! Stage 1 (delivery; fishing `is_anticipated_fishing_active` — TRUE; decision
+//! `1 + 1 < 2` — FALSE, so `d_ant_1 ∈ [0,0]` and per-block anticipated cost
+//! is zeroed by `zero_anticipated_delivery_thermal_cost`):
 //!
 //! ```text
 //!   min  c_b · g_b_1 + 0 · g_a_1
@@ -85,48 +113,50 @@
 //! The cost-to-go function is therefore
 //! `V_1(d_ant_0) = c_b · max(0, D − d_ant_0)`.
 //!
-//! At convergence `θ_0 = V_1(d_ant_0)`, so the total objective at stage 0 is
+//! At convergence `θ_0 = V_1(d_ant_0)`, so the total objective is
 //!
 //! ```text
-//!   T(d_ant_0) = c_a · g_a_0 + c_b · g_b_0 + c_a · d_ant_0 + c_b · max(0, D − d_ant_0)
+//!   T(d_ant_0) = c_b · D + c_a · d_ant_0 + c_b · max(0, D − d_ant_0)
+//!              (stage-0: g_b_0=D at cost c_b·D; g_a_0=0 at cost 0·0=0)
 //! ```
 //!
-//! At stage 0 the LP picks `g_a_0 = min(M, D) = D` and `g_b_0 = 0` (because
-//! `c_a < c_b` and `M ≥ D`), giving the fixed term `c_a · D`. The variable
-//! part is
+//! The variable part over `d_ant_0 ∈ [0, D]` is
 //!
 //! ```text
-//!   c_a · d_ant_0 + c_b · max(0, D − d_ant_0)
-//!     = c_a · d_ant_0 + c_b · D − c_b · d_ant_0      (for d_ant_0 ∈ [0, D])
+//!   c_a · d_ant_0 + c_b · D − c_b · d_ant_0
 //!     = c_b · D + (c_a − c_b) · d_ant_0
 //! ```
 //!
-//! Since `c_a − c_b = 10 − 100 = −90 < 0`, this region is minimised at the
-//! boundary `d_ant_0 = D`. For `d_ant_0 > D` the variable part becomes
-//! `c_a · d_ant_0`, strictly increasing in `d_ant_0`, so the kink at
-//! `d_ant_0 = D` is the unique global minimum.
+//! Since `c_a − c_b = 10 − 100 = −90 < 0`, this is minimised at `d_ant_0 = D`.
+//! For `d_ant_0 > D` the term becomes `c_a · d_ant_0`, strictly increasing, so
+//! the kink at `d_ant_0 = D` is the unique global minimum.
 //!
 //! ## Numerical evaluation
 //!
 //! With `c_a = 10`, `c_b = 100`, `D = 50`, `M = 100`:
 //!
 //! ```text
-//!   T*  = c_a · D                 (stage-0 dispatch, g_a_0 = D)
+//!   T*  = c_b · D                 (stage-0 backup dispatch, g_b_0 = D; g_a_0 = 0)
 //!       + c_a · D                 (stage-0 decision, d_ant_0 = D)
 //!       + 0                       (stage-1 cost, c_b · (D − D) = 0)
-//!       = 2 · c_a · D
-//!       = 2 · 10 · 50
-//!       = 1000.0  USD
+//!       = (c_a + c_b) · D
+//!       = (10 + 100) · 50
+//!       = 5500.0  USD
 //! ```
 //!
-//! Sanity checks (independent traversal of the piecewise total):
+//! Legacy value under the pre-flip predicate: `2 · c_a · D = 1000.0`. The
+//! always-active fishing predicate zeroes `g_a_0`'s per-block cost but forces
+//! backup to cover stage-0 load, raising the lower bound by `(c_b − c_a) · D`.
 //!
-//! - `d_ant_0 = 0`:   `T = c_a · D + 0 + c_b · D       = 500 + 0    + 5000 = 5500`
-//! - `d_ant_0 = D`:   `T = c_a · D + c_a · D + 0       = 500 + 500  + 0    = 1000` ← optimum
-//! - `d_ant_0 = M`:   `T = c_a · D + c_a · M + 0       = 500 + 1000 + 0    = 1500`
+//! Sanity checks (independent traversal of the piecewise total under
+//! always-active fishing — stage-0 backup covers D; decision cost = c_a·d_ant_0):
 //!
-//! All three values are decreasing into the kink at `d_ant_0 = D = 50`, then
-//! increasing away from it. The optimum is unambiguous.
+//! - `d_ant_0 = 0`:   `T = c_b·D + 0 + c_b·D       = 5000 + 0    + 5000 = 10000`
+//! - `d_ant_0 = D`:   `T = c_b·D + c_a·D + 0       = 5000 + 500  + 0    = 5500` ← optimum
+//! - `d_ant_0 = M`:   `T = c_b·D + c_a·M + 0       = 5000 + 1000 + 0    = 6000`
+//!
+//! The optimum is unambiguous — the kink at `d_ant_0 = D = 50` is the unique
+//! global minimum.
 //!
 //! ## Bit-for-bit determinism
 //!
@@ -174,9 +204,9 @@ use cobre_io::config::{
     SimulationConfig as IoSimulationConfig, StoppingRuleConfig, TrainingConfig,
     TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
-use cobre_sddp::{StudySetup, hydro_models::PrepareHydroModelsResult};
+use cobre_sddp::{hydro_models::PrepareHydroModelsResult, StudySetup};
 use cobre_solver::highs::HighsSolver;
-use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
+use cobre_stochastic::{build_stochastic_context, ClassSchemes, OpeningTreeInputs};
 
 // ---------------------------------------------------------------------------
 // Closed-form fixture parameters (single source of truth).
@@ -208,13 +238,22 @@ const C_B: f64 = 100.0;
 /// over backup dispatch.
 const C_DEFICIT: f64 = 1000.0;
 
-/// Closed-form lower bound: `T* = 2 · C_A · D_LOAD`. See module docs for the
-/// full derivation. Numerical value: `2 · 10 · 50 = 1000.0` USD.
+/// Closed-form lower bound under always-active fishing:
+/// `T* = (C_A + C_B) · D_LOAD`. See module docs for the full derivation.
+/// Numerical value: `(10 + 100) · 50 = 5500.0` USD.
+///
+/// Legacy value (pre-flip predicate `K_i ≤ stage_idx`): `2 · C_A · D_LOAD = 1000.0`.
+/// The always-active fishing predicate at `indexer.rs:1555`
+/// (`StageIndexer::is_anticipated_fishing_active`) emits a fishing row at stage 0,
+/// forcing `g_a_0 = 0` and requiring backup to cover stage-0 load. See the K=1
+/// sign-chain table in
+/// `artifacts/layout-decision.md`
+/// §2 for the cut-coefficient convention.
 ///
 /// Held to bit-for-bit equality. Sub-ULP noise from a future libhighs upgrade
 /// should be rare for this trivial fixture; if it occurs, demote to a 1e-12
 /// relative-tolerance check.
-const EXPECTED_LB: f64 = 1000.0;
+const EXPECTED_LB: f64 = (C_A + C_B) * D_LOAD; // = 5500.0
 
 const ANTICIPATED_ID: EntityId = EntityId(2);
 const BACKUP_ID: EntityId = EntityId(3);
@@ -538,13 +577,14 @@ fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
 // ---------------------------------------------------------------------------
 
 /// Closed-form canary: the LP-derived lower bound for the 2-stage K=1 fixture
-/// must equal the hand-derived value `2 · C_A · D_LOAD = 1000.0`.
+/// must equal the hand-derived value `(C_A + C_B) · D_LOAD = 5500.0` under
+/// always-active fishing (`StageIndexer::is_anticipated_fishing_active`,
+/// `indexer.rs:1555`).
 ///
 /// Bit-for-bit equality is asserted via `f64::to_bits`. The fixture is fully
 /// deterministic (single opening, no noise, single-thread HiGHS), so any
 /// drift indicates a value-correctness regression.
 #[test]
-#[ignore = "ticket-015 re-derives K=1 closed-form LB under always-active fishing"]
 fn anticipated_closed_form_lb_k1_single_thermal() {
     let system = build_system();
     let config = build_config();
@@ -574,9 +614,11 @@ fn anticipated_closed_form_lb_k1_single_thermal() {
         actual.to_bits(),
         EXPECTED_LB.to_bits(),
         "closed-form LB mismatch: actual = {actual}, expected = {EXPECTED_LB}. \
+         Under always-active fishing the answer is `(C_A + C_B) · D_LOAD = 5500.0` \
+         (stage-0 backup covers load; anticipated column cost zeroed by \
+         zero_anticipated_delivery_thermal_cost; see indexer.rs:1555). \
          If a libhighs upgrade introduces sub-ULP arithmetic drift, switch to \
-         a 1e-12 relative tolerance check. Re-derivation (5 minutes): see the \
-         module-level docstring; the answer is `2 · C_A · D_LOAD`.",
+         a 1e-12 relative tolerance check.",
     );
 
     // Final gap should also have closed to zero for this deterministic

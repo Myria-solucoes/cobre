@@ -186,7 +186,8 @@ pub(crate) struct StageLayout {
     ///
     /// Slot-major layout: column for slot `s`, plant `i` is at
     /// `col_anticipated_state_start + s * n_anticipated + i`.
-    /// Slot 0 (the matured commitment) is at `col_anticipated_state_start + i`.
+    /// Slot 0 (the currently-delivering commitment under the always-active
+    /// fishing predicate) is at `col_anticipated_state_start + i`.
     /// Zero when `n_anticipated == 0` (empty column range).
     /// Derived from `idx.anticipated_state.start` in `StageLayout::new`.
     pub(crate) col_anticipated_state_start: usize,
@@ -1218,7 +1219,7 @@ mod tests {
             vec![0, 1], // arbitrary thermal indices
         );
         let stage = minimal_stage(); // 1 block
-        // stage_idx=1: always-active → both plants active → 2 fishing rows.
+                                     // stage_idx=1: always-active → both plants active → 2 fishing rows.
         let layout = StageLayout::new(&ctx, &stage, 1);
 
         // n_op_rows = n_hydros * n_blks = 0 * 1 = 0

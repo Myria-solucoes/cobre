@@ -868,7 +868,10 @@ pub(super) fn fill_stage_rows(
         &mut row_upper,
     );
 
-    // Anticipated-fishing equality rows: one per active anticipated plant (K_i <= stage_idx).
+    // Anticipated-fishing equality rows: one per anticipated plant.
+    // The fishing predicate `StageIndexer::is_anticipated_fishing_active`
+    // (indexer.rs:1555) is always true under the always-active fishing
+    // flip, so this loop emits `n_anticipated` rows at every stage.
     // Row bounds 0 == 0; actual coefficients are filled in build_stage_matrix_entries.
     fill_anticipated_fishing_rows(
         ctx,
@@ -1925,7 +1928,7 @@ mod parameter_resolution_tests {
     use cobre_stochastic::par::precompute::PrecomputedPar;
     use std::collections::HashMap;
 
-    use crate::energy_conversion::{EnergyConversionSet, build_hydro_energy_productivity_override};
+    use crate::energy_conversion::{build_hydro_energy_productivity_override, EnergyConversionSet};
     use crate::hydro_models::PrepareHydroModelsResult;
     use crate::inflow_method::InflowNonNegativityMethod;
     use crate::resolved_parameters::build_resolved_parameters;
@@ -2413,10 +2416,10 @@ mod zero_cost_tests {
     use crate::resolved_parameters::ResolvedParameters;
 
     use super::{
-        ColumnBufs, StageLayout, TemplateBuildCtx, fill_anticipated_fishing_entries,
-        fill_anticipated_fishing_rows, fill_anticipated_state_out_columns,
-        fill_anticipated_state_out_def_entries, fill_anticipated_state_out_def_rows,
-        zero_anticipated_delivery_thermal_cost,
+        fill_anticipated_fishing_entries, fill_anticipated_fishing_rows,
+        fill_anticipated_state_out_columns, fill_anticipated_state_out_def_entries,
+        fill_anticipated_state_out_def_rows, zero_anticipated_delivery_thermal_cost, ColumnBufs,
+        StageLayout, TemplateBuildCtx,
     };
 
     /// Build a minimal two-block `Stage` at the given index.
