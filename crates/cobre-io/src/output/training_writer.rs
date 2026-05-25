@@ -54,6 +54,8 @@ use crate::output::schemas::{convergence_schema, iteration_timing_schema};
 ///         total_generated: 0,
 ///         total_active: 0,
 ///         peak_active: 0,
+///         cuts_in_lp: 0,
+///         cuts_active: 0,
 ///     },
 ///     cut_selection_records: Vec::new(),
 ///     worker_timing_records: Vec::new(),
@@ -315,10 +317,12 @@ pub fn write_row_selection_records(
     let mut populated_builder = Int32Builder::with_capacity(n);
     let mut active_before_builder = Int32Builder::with_capacity(n);
     let mut deactivated_builder = Int32Builder::with_capacity(n);
+    let mut reactivated_builder = Int32Builder::with_capacity(n);
     let mut active_after_builder = Int32Builder::with_capacity(n);
     let mut selection_time_builder = Float64Builder::with_capacity(n);
     let mut budget_evicted_builder = Int32Builder::with_capacity(n);
     let mut active_after_budget_builder = Int32Builder::with_capacity(n);
+    let mut cuts_in_lp_builder = Int32Builder::with_capacity(n);
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     for r in records {
@@ -327,10 +331,12 @@ pub fn write_row_selection_records(
         populated_builder.append_value(r.cuts_populated as i32);
         active_before_builder.append_value(r.cuts_active_before as i32);
         deactivated_builder.append_value(r.cuts_deactivated as i32);
+        reactivated_builder.append_value(r.cuts_reactivated as i32);
         active_after_builder.append_value(r.cuts_active_after as i32);
         selection_time_builder.append_value(r.selection_time_ms);
         budget_evicted_builder.append_option(r.budget_evicted.map(|v| v as i32));
         active_after_budget_builder.append_option(r.active_after_budget.map(|v| v as i32));
+        cuts_in_lp_builder.append_value(r.cuts_in_lp as i32);
     }
 
     let columns: Vec<ArrayRef> = vec![
@@ -339,10 +345,12 @@ pub fn write_row_selection_records(
         Arc::new(populated_builder.finish()),
         Arc::new(active_before_builder.finish()),
         Arc::new(deactivated_builder.finish()),
+        Arc::new(reactivated_builder.finish()),
         Arc::new(active_after_builder.finish()),
         Arc::new(selection_time_builder.finish()),
         Arc::new(budget_evicted_builder.finish()),
         Arc::new(active_after_budget_builder.finish()),
+        Arc::new(cuts_in_lp_builder.finish()),
     ];
 
     let batch = RecordBatch::try_new(Arc::clone(&schema), columns)
@@ -449,6 +457,8 @@ mod tests {
                 total_generated: 200,
                 total_active: 80,
                 peak_active: 95,
+                cuts_in_lp: 200,
+                cuts_active: 80,
             },
             cut_selection_records: vec![],
             worker_timing_records: vec![],
@@ -925,10 +935,12 @@ mod tests {
                 cuts_populated: 10,
                 cuts_active_before: 10,
                 cuts_deactivated: 0,
+                cuts_reactivated: 0,
                 cuts_active_after: 10,
                 selection_time_ms: 0.0,
                 budget_evicted: None,
                 active_after_budget: None,
+                cuts_in_lp: 10,
             },
             RowSelectionRecord {
                 iteration: 3,
@@ -936,10 +948,12 @@ mod tests {
                 cuts_populated: 8,
                 cuts_active_before: 8,
                 cuts_deactivated: 2,
+                cuts_reactivated: 0,
                 cuts_active_after: 6,
                 selection_time_ms: 1.5,
                 budget_evicted: None,
                 active_after_budget: None,
+                cuts_in_lp: 8,
             },
         ];
         write_row_selection_records(tmp.path(), &records, &config).unwrap();
@@ -953,7 +967,7 @@ mod tests {
             .unwrap();
         let batch: RecordBatch = reader.into_iter().next().unwrap().unwrap();
         assert_eq!(batch.num_rows(), 2);
-        assert_eq!(batch.num_columns(), 9);
+        assert_eq!(batch.num_columns(), 11);
     }
 
     #[test]
@@ -971,10 +985,12 @@ mod tests {
                 cuts_populated: 20,
                 cuts_active_before: 20,
                 cuts_deactivated: 0,
+                cuts_reactivated: 0,
                 cuts_active_after: 20,
                 selection_time_ms: 0.0,
                 budget_evicted: Some(3),
                 active_after_budget: Some(15),
+                cuts_in_lp: 20,
             },
             // Record with all budget columns None (budget disabled).
             RowSelectionRecord {
@@ -983,10 +999,12 @@ mod tests {
                 cuts_populated: 15,
                 cuts_active_before: 15,
                 cuts_deactivated: 2,
+                cuts_reactivated: 1,
                 cuts_active_after: 13,
                 selection_time_ms: 2.0,
                 budget_evicted: None,
                 active_after_budget: None,
+                cuts_in_lp: 15,
             },
         ];
         write_row_selection_records(tmp.path(), &records, &config).unwrap();
@@ -1000,7 +1018,7 @@ mod tests {
             .unwrap();
         let batch = reader.next().unwrap().unwrap();
         assert_eq!(batch.num_rows(), 2);
-        assert_eq!(batch.num_columns(), 9);
+        assert_eq!(batch.num_columns(), 11);
 
         // Verify nullable columns: row 0 has Some values, row 1 has None.
         let budget_evicted_col = batch.column_by_name("budget_evicted").unwrap();
@@ -1035,5 +1053,58 @@ mod tests {
             .downcast_ref::<arrow::array::Int32Array>()
             .unwrap();
         assert_eq!(budget_arr.value(0), 15);
+    }
+
+    #[test]
+    fn parquet_schema_includes_cuts_in_lp_and_cuts_active_columns() {
+        use arrow::datatypes::DataType;
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+        use super::super::RowSelectionRecord;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config = ParquetWriterConfig::default();
+        let records = vec![RowSelectionRecord {
+            iteration: 1,
+            stage: 0,
+            cuts_populated: 5,
+            cuts_active_before: 5,
+            cuts_deactivated: 0,
+            cuts_reactivated: 0,
+            cuts_active_after: 5,
+            selection_time_ms: 0.0,
+            budget_evicted: None,
+            active_after_budget: None,
+            cuts_in_lp: 5,
+        }];
+        write_row_selection_records(tmp.path(), &records, &config).unwrap();
+        let path = tmp.path().join("training/cut_selection/iterations.parquet");
+
+        let file = std::fs::File::open(&path).unwrap();
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+        let schema = builder.schema().clone();
+
+        let cuts_reactivated = schema
+            .field_with_name("cuts_reactivated")
+            .expect("cuts_reactivated column must exist in schema");
+        assert_eq!(
+            cuts_reactivated.data_type(),
+            &DataType::Int32,
+            "cuts_reactivated must be Int32"
+        );
+        assert!(
+            !cuts_reactivated.is_nullable(),
+            "cuts_reactivated must not be nullable"
+        );
+
+        let cuts_in_lp = schema
+            .field_with_name("cuts_in_lp")
+            .expect("cuts_in_lp column must exist in schema");
+        assert_eq!(
+            cuts_in_lp.data_type(),
+            &DataType::Int32,
+            "cuts_in_lp must be Int32"
+        );
+        assert!(!cuts_in_lp.is_nullable(), "cuts_in_lp must not be nullable");
     }
 }

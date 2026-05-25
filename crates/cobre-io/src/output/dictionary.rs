@@ -677,8 +677,18 @@ fn description_for(file: &str, column: &str) -> &'static str {
         ("cut_selection", "cuts_populated") => "Total cuts ever generated at this stage",
         ("cut_selection", "cuts_active_before") => "Active cuts before selection ran",
         ("cut_selection", "cuts_deactivated") => "Cuts deactivated by selection",
+        ("cut_selection", "cuts_reactivated") => {
+            "Cuts reactivated (previously deactivated, re-entered LP)"
+        }
         ("cut_selection", "cuts_active_after") => "Active cuts after selection",
         ("cut_selection", "selection_time_ms") => "Wall-clock time for selection at this stage",
+        ("cut_selection", "budget_evicted") => {
+            "Cuts evicted by budget enforcement (null when budget disabled)"
+        }
+        ("cut_selection", "active_after_budget") => {
+            "Active cuts after budget enforcement (null when budget disabled)"
+        }
+        ("cut_selection", "cuts_in_lp") => "Cuts currently loaded in the LP (populated count)",
         // ── solver_iterations ─────────────────────────────────────────────
         ("solver_iterations", "iteration") => "Iteration number (1-based) or scenario ID (0-based)",
         ("solver_iterations", "phase") => {
@@ -1502,8 +1512,8 @@ mod tests {
 
         let row_count = rdr.records().count();
         assert_eq!(
-            row_count, 206,
-            "variables.csv must have exactly 206 data rows (one per column across all schemas)"
+            row_count, 208,
+            "variables.csv must have exactly 208 data rows (one per column across all schemas)"
         );
     }
 

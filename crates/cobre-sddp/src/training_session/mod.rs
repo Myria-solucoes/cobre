@@ -824,10 +824,12 @@ impl<'a, S: SolverInterface + Send, C: Communicator> TrainingSession<'a, S, C> {
                         rows_populated: pool0.populated_count as u32,
                         rows_active_before: active_0,
                         rows_deactivated: 0,
+                        rows_reactivated: 0,
                         rows_active_after: active_0,
                         selection_time_ms: 0.0,
                         budget_evicted: None,
                         active_after_budget: None,
+                        rows_in_lp: pool0.cuts_in_lp() as u32,
                     });
                 }
 
@@ -854,20 +856,24 @@ impl<'a, S: SolverInterface + Send, C: Communicator> TrainingSession<'a, S, C> {
                     let active_before = pool.active_count() as u32;
                     let deact_indices = deact.deactivation_indices();
                     let n_deact = deact_indices.len() as u32;
+                    let n_reactivated = deact.reactivation_indices().len() as u32;
                     rows_deactivated += n_deact;
 
                     self.fcf.pools[stage].deactivate(&deact_indices);
 
                     let active_after = self.fcf.pools[stage].active_count() as u32;
+                    let rows_in_lp = self.fcf.pools[stage].cuts_in_lp() as u32;
                     per_stage.push(StageRowSelectionRecord {
                         stage: stage as u32,
                         rows_populated: populated,
                         rows_active_before: active_before,
                         rows_deactivated: n_deact,
+                        rows_reactivated: n_reactivated,
                         rows_active_after: active_after,
                         selection_time_ms: stage_sel_time_ms,
                         budget_evicted: None,
                         active_after_budget: None,
+                        rows_in_lp,
                     });
                 }
 

@@ -151,6 +151,8 @@ pub struct StageRowSelectionRecord {
     pub rows_active_before: u32,
     /// Rows deactivated by selection at this stage.
     pub rows_deactivated: u32,
+    /// Rows reactivated at this stage during this iteration.
+    pub rows_reactivated: u32,
     /// Active rows after selection.
     pub rows_active_after: u32,
     /// Wall-clock time for selection at this stage, in milliseconds.
@@ -163,6 +165,8 @@ pub struct StageRowSelectionRecord {
     ///
     /// `None` when budget enforcement is disabled.
     pub active_after_budget: Option<u32>,
+    /// Total rows in the LP at this stage at the end of the iteration.
+    pub rows_in_lp: u32,
 }
 
 /// Typed events emitted by an iterative optimization training loop and
@@ -994,18 +998,22 @@ mod tests {
             rows_populated: 100,
             rows_active_before: 80,
             rows_deactivated: 10,
+            rows_reactivated: 2,
             rows_active_after: 70,
             selection_time_ms: 1.5,
             budget_evicted: Some(5),
             active_after_budget: Some(65),
+            rows_in_lp: 100,
         };
         assert_eq!(record.stage, 3);
         assert_eq!(record.rows_populated, 100);
         assert_eq!(record.rows_active_before, 80);
         assert_eq!(record.rows_deactivated, 10);
+        assert_eq!(record.rows_reactivated, 2);
         assert_eq!(record.rows_active_after, 70);
         assert!((record.selection_time_ms - 1.5).abs() < f64::EPSILON);
         assert_eq!(record.budget_evicted, Some(5));
         assert_eq!(record.active_after_budget, Some(65));
+        assert_eq!(record.rows_in_lp, 100);
     }
 }
