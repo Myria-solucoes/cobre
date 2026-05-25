@@ -1220,7 +1220,7 @@ mod tests {
             vec![0, 1], // arbitrary thermal indices
         );
         let stage = minimal_stage(); // 1 block
-        // stage_idx=1: always-active → both plants active → 2 fishing rows.
+                                     // stage_idx=1: always-active → both plants active → 2 fishing rows.
         let layout = StageLayout::new(&ctx, &stage, 1);
 
         // n_op_rows = n_hydros * n_blks = 0 * 1 = 0

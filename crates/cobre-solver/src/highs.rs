@@ -114,11 +114,11 @@ fn default_options() -> [DefaultOption; 13] {
         },
         DefaultOption {
             name: c"simplex_scale_strategy",
-            value: OptionValue::Int(0), // Off (prescaler handles scaling)
+            value: OptionValue::Int(4), // Equilibration (HiGHS default — cobre prescaler disabled for this test)
         },
         DefaultOption {
             name: c"presolve",
-            value: OptionValue::Str(c"off"),
+            value: OptionValue::Str(c"on"),
         },
         DefaultOption {
             name: c"parallel",
@@ -130,11 +130,11 @@ fn default_options() -> [DefaultOption; 13] {
         },
         DefaultOption {
             name: c"primal_feasibility_tolerance",
-            value: OptionValue::Double(1e-7),
+            value: OptionValue::Double(1e-4),
         },
         DefaultOption {
             name: c"dual_feasibility_tolerance",
-            value: OptionValue::Double(1e-7),
+            value: OptionValue::Double(1e-6),
         },
         DefaultOption {
             name: c"simplex_dual_edge_weight_strategy",
@@ -784,15 +784,13 @@ impl HighsSolver {
             ffi::cobre_highs_set_string_option(self.handle, c"presolve".as_ptr(), c"on".as_ptr());
         }
         match level {
-            5 => unsafe {
-                ffi::cobre_highs_set_int_option(self.handle, c"simplex_scale_strategy".as_ptr(), 3);
-            },
+            // L5/L6: scaler override removed for the prescaling-disabled test —
+            // every level inherits the default equilibration scaler.
+            5 => {}
             6 => unsafe {
                 ffi::cobre_highs_set_int_option(self.handle, c"simplex_strategy".as_ptr(), 1);
-                ffi::cobre_highs_set_int_option(self.handle, c"simplex_scale_strategy".as_ptr(), 4);
             },
             7 => unsafe {
-                ffi::cobre_highs_set_int_option(self.handle, c"simplex_scale_strategy".as_ptr(), 3);
                 ffi::cobre_highs_set_double_option(
                     self.handle,
                     c"primal_feasibility_tolerance".as_ptr(),

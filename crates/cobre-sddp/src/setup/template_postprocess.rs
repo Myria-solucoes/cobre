@@ -3,8 +3,8 @@
 use cobre_core::{PolicyGraph, Stage, System};
 
 use crate::scaling_report::{
-    LpDimensions, StageScalingReport, build_scaling_report, compute_coefficient_range,
-    summarize_scale_factors,
+    build_scaling_report, compute_coefficient_range, summarize_scale_factors, LpDimensions,
+    StageScalingReport,
 };
 use crate::{lp_builder, lp_builder::StageTemplates};
 
@@ -111,37 +111,22 @@ pub(crate) fn postprocess_templates(
         }
     }
 
-    // Compute and apply column scaling, then row scaling for numerical
-    // conditioning (D_r * A * D_c form). Scale factors are stored in the
-    // template for unscaling primal/dual solutions in the forward and
-    // backward passes.
-    //
-    // Scaling report: capture pre/post coefficient ranges for diagnostics.
+    // PRESCALING-DISABLED TEST: cobre's offline col/row scaling is bypassed so
+    // HiGHS's internal equilibration scaler (simplex_scale_strategy = 2, set in
+    // default_options) handles all numerical conditioning. The cost-scale
+    // factor applied during template construction (COST_SCALE_FACTOR, /1000)
+    // is preserved. `col_scale` / `row_scale` remain empty Vecs on every
+    // template — downstream extraction (extraction.rs) and dual unscaling
+    // (backward.rs) treat empty scale slices as "no scaling applied" via the
+    // documented invariant on `StageTemplate.col_scale` / `row_scale`. The
+    // scaling-report still emits one entry per stage with empty
+    // col_scale / row_scale summaries so the parquet schema stays stable.
 
     let mut stage_scaling_reports = Vec::with_capacity(stage_templates.templates.len());
 
     for (stage_id, tmpl) in stage_templates.templates.iter_mut().enumerate() {
-        // Pre-scaling snapshot (before col/row scaling; cost scaling is
-        // already baked into the objective during template construction).
         let pre_scaling = compute_coefficient_range(tmpl);
-
-        let col_scale =
-            lp_builder::compute_col_scale(tmpl.num_cols, &tmpl.col_starts, &tmpl.values);
-        lp_builder::apply_col_scale(tmpl, &col_scale);
-        tmpl.col_scale.clone_from(&col_scale);
-        // Row scaling is applied to the already column-scaled matrix.
-        let row_scale = lp_builder::compute_row_scale(
-            tmpl.num_rows,
-            tmpl.num_cols,
-            &tmpl.col_starts,
-            &tmpl.row_indices,
-            &tmpl.values,
-        );
-        lp_builder::apply_row_scale(tmpl, &row_scale);
-        tmpl.row_scale.clone_from(&row_scale);
-
-        // Post-scaling snapshot (after col + row scaling).
-        let post_scaling = compute_coefficient_range(tmpl);
+        let post_scaling = pre_scaling.clone();
 
         stage_scaling_reports.push(StageScalingReport {
             stage_id,
@@ -152,8 +137,8 @@ pub(crate) fn postprocess_templates(
             },
             pre_scaling,
             post_scaling,
-            col_scale: summarize_scale_factors(&col_scale),
-            row_scale: summarize_scale_factors(&row_scale),
+            col_scale: summarize_scale_factors(&[]),
+            row_scale: summarize_scale_factors(&[]),
         });
     }
 

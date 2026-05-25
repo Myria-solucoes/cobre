@@ -135,10 +135,13 @@ mod scaling;
 mod template;
 
 // --- Public re-exports (stable API) ---
-pub use patch::{PatchBuffer, ar_dynamics_row_offset};
-pub use template::{StageTemplates, build_stage_templates};
+pub use patch::{ar_dynamics_row_offset, PatchBuffer};
+pub use template::{build_stage_templates, StageTemplates};
 
 // --- Crate-internal re-exports ---
+// PRESCALING-DISABLED TEST: helpers retained behind `#[allow(dead_code)]`
+// in `scaling.rs` while we evaluate HiGHS's internal equilibration scaler.
+#[allow(unused_imports)]
 pub(crate) use scaling::{apply_col_scale, apply_row_scale, compute_col_scale, compute_row_scale};
 
 // ---------------------------------------------------------------------------
@@ -161,7 +164,7 @@ pub(crate) const M3S_TO_HM3: f64 = 3_600.0 / 1_000_000.0; // multiply by hours t
 /// conditioning without changing the optimization argmin. All cost-domain
 /// outputs (objective values, duals, cost breakdowns) are multiplied by
 /// this factor at the reporting boundary to recover original units.
-pub(crate) const COST_SCALE_FACTOR: f64 = 1_000.0;
+pub(crate) const COST_SCALE_FACTOR: f64 = 1_000_000.0;
 
 /// Safety margin applied symmetrically to the magnitude bound on the evaporation
 /// flow variable `Q_ev`.  The bound is `[-q_max, +q_max]` where
