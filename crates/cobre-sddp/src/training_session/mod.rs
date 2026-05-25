@@ -22,7 +22,6 @@ use cobre_solver::SolverInterface;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 use crate::{
-    SddpError, TrainingConfig,
     backward_pass_state::{BackwardPassInputs, BackwardPassState},
     context::{StageContext, TrainingContext},
     convergence::ConvergenceMonitor,
@@ -34,13 +33,14 @@ use crate::{
     lower_bound::evaluate_lower_bound,
     lower_bound::{LbEvalScratchBundle, LbEvalSpec},
     solver_stats::{
-        SOLVER_STATS_DELTA_SCALAR_FIELDS, SolverStatsDelta, aggregate_solver_statistics,
-        pack_delta_scalars, unpack_delta_scalars,
+        aggregate_solver_statistics, pack_delta_scalars, unpack_delta_scalars, SolverStatsDelta,
+        SOLVER_STATS_DELTA_SCALAR_FIELDS,
     },
     state_exchange::ExchangeBuffers,
     stopping_rule::RULE_GRACEFUL_SHUTDOWN,
-    training::{TrainingOutcome, TrainingResult, broadcast_basis_cache},
+    training::{broadcast_basis_cache, TrainingOutcome, TrainingResult},
     workspace::{BasisStore, WorkspacePool, WorkspaceSizing},
+    SddpError, TrainingConfig,
 };
 
 // ---------------------------------------------------------------------------
@@ -119,6 +119,9 @@ pub(crate) struct TrainingSession<'a, S: SolverInterface + Send, C: Communicator
 
     // ── Result accumulators (updated each iteration; finalized in finalize()) ─
     results: TrainingResults,
+
+    // ── Optional solver diagnostics CSV (enabled by COBRE_SOLVER_DIAG env var) ─
+    diag_file: Option<std::io::BufWriter<std::fs::File>>,
 }
 
 impl<'a, S: SolverInterface + Send, C: Communicator> TrainingSession<'a, S, C> {
@@ -307,6 +310,33 @@ impl<'a, S: SolverInterface + Send, C: Communicator> TrainingSession<'a, S, C> {
             real_states_capacity,
         );
 
+        let diag_file = std::env::var("COBRE_SOLVER_DIAG").ok().map(|path| {
+            use std::io::Write;
+            let ranked_path = if ranks.num_ranks > 1 {
+                let stem = std::path::Path::new(&path);
+                let ext = stem
+                    .extension()
+                    .unwrap_or_default()
+                    .to_str()
+                    .unwrap_or("csv");
+                let base = stem.with_extension("");
+                format!("{}_rank{}.{ext}", base.display(), ranks.fwd_rank)
+            } else {
+                path.clone()
+            };
+            let file = std::fs::File::create(&ranked_path)
+                .unwrap_or_else(|e| panic!("COBRE_SOLVER_DIAG={ranked_path}: {e}"));
+            let mut w = std::io::BufWriter::new(file);
+            writeln!(
+                w,
+                "iteration,phase,lp_solves,simplex_iters,solve_ms,load_model_ms,\
+                 set_bounds_ms,basis_set_ms,basis_offered,basis_recon,\
+                 cuts_active,cuts_populated,cuts_in_lp,baked_rows"
+            )
+            .expect("diag header write");
+            w
+        });
+
         Ok(Self {
             solver,
             fcf,
@@ -326,6 +356,7 @@ impl<'a, S: SolverInterface + Send, C: Communicator> TrainingSession<'a, S, C> {
             fwd_state,
             bwd_state,
             results,
+            diag_file,
         })
     }
 
@@ -364,7 +395,8 @@ impl<'a, S: SolverInterface + Send, C: Communicator> TrainingSession<'a, S, C> {
         let iter_start = Instant::now();
 
         // ── Forward pass + sync ────────────────────────────────────────────
-        let (forward_result, sync_result, fwd_solve_time_ms) = self.run_forward_phase(iteration)?;
+        let (forward_result, sync_result, fwd_solve_time_ms, fwd_delta) =
+            self.run_forward_phase(iteration)?;
 
         // ── Backward pass ──────────────────────────────────────────────────
         let (backward_result, bwd_solve_time_ms) = self.run_backward_phase(iteration)?;
@@ -422,6 +454,8 @@ impl<'a, S: SolverInterface + Send, C: Communicator> TrainingSession<'a, S, C> {
 
         self.results.completed_iterations = iteration;
 
+        self.write_solver_diag(iteration, &fwd_delta, &backward_result);
+
         if should_stop {
             self.results.termination_reason = rule_results
                 .iter()
@@ -436,6 +470,58 @@ impl<'a, S: SolverInterface + Send, C: Communicator> TrainingSession<'a, S, C> {
         }
 
         Ok(IterationOutcome::Continue)
+    }
+
+    fn write_solver_diag(
+        &mut self,
+        iteration: u64,
+        fwd_delta: &SolverStatsDelta,
+        bwd: &crate::backward::BackwardResult,
+    ) {
+        let w = match self.diag_file.as_mut() {
+            Some(w) => w,
+            None => return,
+        };
+        use std::io::Write;
+
+        let bwd_agg = SolverStatsDelta::aggregate(
+            bwd.stage_stats
+                .iter()
+                .flat_map(|(_, entries)| entries.iter().map(|(_, _, _, d)| d)),
+        );
+
+        let mut total_active: usize = 0;
+        let mut total_populated: usize = 0;
+        let mut total_in_lp: usize = 0;
+        for pool in &self.fcf.pools {
+            total_active += pool.active_count();
+            total_populated += pool.populated_count;
+            total_in_lp += pool.cuts_in_lp();
+        }
+
+        let total_baked: usize = self
+            .scratch
+            .bake_row_batches
+            .iter()
+            .map(|b| b.num_rows)
+            .sum();
+
+        for (phase, d) in [("forward", fwd_delta), ("backward", &bwd_agg)] {
+            let _ = writeln!(
+                w,
+                "{iteration},{phase},{},{},{:.1},{:.1},{:.1},{:.1},{},{},\
+                 {total_active},{total_populated},{total_in_lp},{total_baked}",
+                d.lp_solves,
+                d.simplex_iterations,
+                d.solve_time_ms,
+                d.load_model_time_ms,
+                d.set_bounds_time_ms,
+                d.basis_set_time_ms,
+                d.basis_offered,
+                d.basis_reconstructions,
+            );
+        }
+        let _ = w.flush();
     }
 
     /// Assemble and return the successful `TrainingOutcome`.
@@ -564,7 +650,7 @@ impl<'a, S: SolverInterface + Send, C: Communicator> TrainingSession<'a, S, C> {
 
     /// Run the forward pass and forward synchronisation for one iteration.
     ///
-    /// Returns `(forward_result, sync_result, fwd_solve_time_ms)`.
+    /// Returns `(forward_result, sync_result, fwd_solve_time_ms, fwd_solver_delta)`.
     fn run_forward_phase(
         &mut self,
         iteration: u64,
@@ -573,6 +659,7 @@ impl<'a, S: SolverInterface + Send, C: Communicator> TrainingSession<'a, S, C> {
             crate::forward::ForwardResult,
             crate::forward::SyncResult,
             f64,
+            SolverStatsDelta,
         ),
         SddpError,
     > {
@@ -600,15 +687,16 @@ impl<'a, S: SolverInterface + Send, C: Communicator> TrainingSession<'a, S, C> {
         );
         let forward_result = fwd.run(&mut inputs)?;
 
-        let fwd_solve_time_ms = {
+        let fwd_delta = {
             let fwd_stats_after = aggregate_solver_statistics(
                 self.fwd_pool
                     .workspaces
                     .iter()
                     .map(|w| w.solver.statistics()),
             );
-            SolverStatsDelta::from_snapshots(&fwd_stats_before, &fwd_stats_after).solve_time_ms
+            SolverStatsDelta::from_snapshots(&fwd_stats_before, &fwd_stats_after)
         };
+        let fwd_solve_time_ms = fwd_delta.solve_time_ms;
 
         // Aggregate per-stage forward solver stats across MPI ranks before
         // logging. Without this, only rank 0's slice (its share of the
@@ -697,7 +785,7 @@ impl<'a, S: SolverInterface + Send, C: Communicator> TrainingSession<'a, S, C> {
             },
         );
 
-        Ok((forward_result, sync_result, fwd_solve_time_ms))
+        Ok((forward_result, sync_result, fwd_solve_time_ms, fwd_delta))
     }
 
     /// Run the backward pass for one iteration.
@@ -1075,7 +1163,6 @@ mod tests {
     use chrono::NaiveDate;
     use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
     use cobre_core::{
-        Bus, EntityId, SystemBuilder, TrainingEvent, WorkerTimingPhase,
         scenario::{
             CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile,
             SamplingScheme,
@@ -1084,17 +1171,17 @@ mod tests {
             Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
             StageStateConfig,
         },
+        Bus, EntityId, SystemBuilder, TrainingEvent, WorkerTimingPhase,
     };
     use cobre_solver::{
         Basis, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
     };
     use cobre_stochastic::{
-        ClassSchemes, OpeningTreeInputs, StochasticContext, build_stochastic_context,
+        build_stochastic_context, ClassSchemes, OpeningTreeInputs, StochasticContext,
     };
 
     use super::{IterationOutcome, TrainingSession};
     use crate::{
-        StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
         config::{CutManagementConfig, EventConfig, LoopConfig},
         context::{StageContext, TrainingContext},
         cut::fcf::FutureCostFunction,
@@ -1103,6 +1190,7 @@ mod tests {
         indexer::StageIndexer,
         inflow_method::InflowNonNegativityMethod,
         risk_measure::RiskMeasure,
+        StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
     };
 
     // ── Shared helpers (mirrors training.rs test helpers) ──────────────────
