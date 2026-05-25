@@ -19,7 +19,7 @@
 //! ```rust
 //! use cobre_sddp::cut::CutPool;
 //! use cobre_sddp::cut_selection::{
-//!     CutActivityUpdates, CutMetadata, CutSelectionStrategy, DeactivationSet,
+//!     CutActivityUpdates, CutMetadata, CutSelectionStrategy,
 //! };
 //!
 //! let strategy = CutSelectionStrategy::Level1 {
@@ -137,8 +137,16 @@ pub struct CutActivityUpdates {
     pub updates: Vec<(u32, ActivityChange)>,
 }
 
-/// Backward-compatible alias for [`CutActivityUpdates`].
-pub type DeactivationSet = CutActivityUpdates;
+impl From<ActivityChange> for bool {
+    /// Map an `ActivityChange` to a boolean suitable for `CutPool::set_active`.
+    ///
+    /// `Reactivate` maps to `true` (slot becomes active); `Deactivate` maps to
+    /// `false`.
+    #[inline]
+    fn from(change: ActivityChange) -> Self {
+        matches!(change, ActivityChange::Reactivate)
+    }
+}
 
 impl CutActivityUpdates {
     /// Construct a deactivation-only update set from a list of slot indices.
@@ -286,9 +294,8 @@ impl CutSelectionStrategy {
     /// Scan the cut pool metadata for a single stage and identify cuts to
     /// deactivate.
     ///
-    /// Returns a [`CutActivityUpdates`] (typed as [`DeactivationSet`] via the
-    /// alias) whose entries are the zero-based slot positions of cuts that
-    /// should be deactivated. The caller is responsible for applying the
+    /// Returns a [`CutActivityUpdates`] whose entries are the zero-based slot
+    /// positions of cuts that should be deactivated. The caller is responsible for applying the
     /// deactivation to the activity bitmap. This method does not modify the
     /// metadata — it is a pure query.
     ///
@@ -327,7 +334,7 @@ impl CutSelectionStrategy {
         pool: &crate::cut::CutPool,
         visited_states: &[f64],
         current_iteration: u64,
-    ) -> DeactivationSet {
+    ) -> CutActivityUpdates {
         self.select_for_stage(pool, visited_states, current_iteration, 0)
     }
 
@@ -349,7 +356,7 @@ impl CutSelectionStrategy {
         visited_states: &[f64],
         current_iteration: u64,
         stage_index: u32,
-    ) -> DeactivationSet {
+    ) -> CutActivityUpdates {
         let populated = pool.populated_count;
         let metadata = &pool.metadata[..populated];
         let active = &pool.active[..populated];
@@ -553,9 +560,7 @@ pub fn parse_cut_selection_config(
 #[cfg(test)]
 mod tests {
     use super::parse_cut_selection_config;
-    use super::{
-        ActivityChange, CutActivityUpdates, CutMetadata, CutSelectionStrategy, DeactivationSet,
-    };
+    use super::{ActivityChange, CutActivityUpdates, CutMetadata, CutSelectionStrategy};
     use crate::cut::CutPool;
     use cobre_io::config::RowSelectionConfig;
 
@@ -1495,8 +1500,13 @@ mod tests {
     }
 
     #[test]
-    fn deactivation_set_alias_compiles() {
-        let _: DeactivationSet = CutActivityUpdates::deactivations_only(0, vec![]);
+    fn activity_change_into_bool_maps_reactivate_true() {
+        assert!(<bool as From<ActivityChange>>::from(
+            ActivityChange::Reactivate
+        ));
+        assert!(!<bool as From<ActivityChange>>::from(
+            ActivityChange::Deactivate
+        ));
     }
 
     #[test]

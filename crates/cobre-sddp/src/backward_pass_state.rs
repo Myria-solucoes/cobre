@@ -850,10 +850,10 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
     let sync_start = Instant::now();
     let n_local = inputs
         .cut_sync_bufs
-        .pack_local_cuts(inputs.fcf, t, inputs.iteration);
+        .pack_local_records(inputs.fcf, t, inputs.iteration);
     inputs
         .cut_sync_bufs
-        .sync_packed_cuts(t, n_local, inputs.fcf, inputs.comm)?;
+        .sync_packed_records(t, n_local, inputs.fcf, inputs.comm)?;
     #[allow(clippy::cast_possible_truncation)]
     let cut_sync_ms = sync_start.elapsed().as_millis() as u64;
 

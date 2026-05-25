@@ -27,7 +27,7 @@ use crate::{
     context::{StageContext, TrainingContext},
     convergence::ConvergenceMonitor,
     cut::fcf::FutureCostFunction,
-    cut_selection::DeactivationSet,
+    cut_selection::CutActivityUpdates,
     cut_sync::CutSyncBuffers,
     forward::{build_cut_row_batch_into, sync_forward},
     forward_pass_state::{ForwardPassInputs, ForwardPassState},
@@ -833,7 +833,7 @@ impl<'a, S: SolverInterface + Send, C: Communicator> TrainingSession<'a, S, C> {
 
                 let archive_ref = self.visited_archive.as_ref();
                 #[allow(clippy::cast_possible_truncation)]
-                let deactivations: Vec<(usize, DeactivationSet, f64)> = (1..num_sel_stages)
+                let deactivations: Vec<(usize, CutActivityUpdates, f64)> = (1..num_sel_stages)
                     .into_par_iter()
                     .map(|stage| {
                         let pool = &self.fcf.pools[stage];

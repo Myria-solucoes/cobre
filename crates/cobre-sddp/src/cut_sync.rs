@@ -35,14 +35,26 @@
 //! pre-allocated `deserialize_headers_buf` and `deserialize_coefficients_buf`
 //! scratch buffers, eliminating all per-call heap allocations on the hot path.
 //!
+//! The [`pack_local_records`](CutSyncBuffers::pack_local_records) /
+//! [`sync_packed_records`](CutSyncBuffers::sync_packed_records) pair uses
+//! [`serialize_records_to_buffer`] / [`deserialize_records_from_buffer_into`]
+//! from [`cut::wire`] to support mixed cut + activity payloads (wire version 2).
+//!
 //! [`cut::wire`]: crate::cut::wire
 //! [`serialize_cut`]: crate::cut::wire::serialize_cut
+//! [`serialize_records_to_buffer`]: crate::cut::wire::serialize_records_to_buffer
+//! [`deserialize_records_from_buffer_into`]: crate::cut::wire::deserialize_records_from_buffer_into
 
 use cobre_comm::Communicator;
 
 use crate::{
     FutureCostFunction, SddpError,
-    cut::wire::{CutWireHeader, cut_wire_size, deserialize_cuts_from_buffer_into, serialize_cut},
+    cut::wire::{
+        ActivityUpdateRecord, CutWireHeader, activity_update_wire_size, cut_wire_size,
+        deserialize_cuts_from_buffer_into, deserialize_records_from_buffer_into, serialize_cut,
+        serialize_records_to_buffer,
+    },
+    cut_selection::ActivityChange,
 };
 
 /// Pre-allocated byte buffers for gathering cut wire records across all MPI
@@ -150,6 +162,20 @@ pub struct CutSyncBuffers {
     /// cut 1's, etc. Grown lazily; never shrunk. Eliminates the per-cut
     /// `Vec<f64>` allocation in the deserialization hot path.
     deserialize_coefficients_buf: Vec<f64>,
+
+    /// Scratch buffer for decoded mixed-record cuts from
+    /// [`deserialize_records_from_buffer_into`], reused across calls to
+    /// [`sync_packed_records`](Self::sync_packed_records).
+    ///
+    /// Cleared at the start of each call; grown lazily on demand.
+    deserialize_cuts_buf: Vec<(CutWireHeader, Vec<f64>)>,
+
+    /// Scratch buffer for decoded activity update records from
+    /// [`deserialize_records_from_buffer_into`], reused across calls to
+    /// [`sync_packed_records`](Self::sync_packed_records).
+    ///
+    /// Cleared at the start of each call; grown lazily on demand.
+    deserialize_activities_buf: Vec<ActivityUpdateRecord>,
 }
 
 impl CutSyncBuffers {
@@ -226,6 +252,8 @@ impl CutSyncBuffers {
             per_rank_cuts,
             deserialize_headers_buf: Vec::new(),
             deserialize_coefficients_buf: Vec::new(),
+            deserialize_cuts_buf: Vec::new(),
+            deserialize_activities_buf: Vec::new(),
         }
     }
 
@@ -378,29 +406,34 @@ impl CutSyncBuffers {
         Ok(remote_count)
     }
 
-    /// Pack the current iteration's local cuts directly from the FCF into the
-    /// send buffer, returning the number of cuts packed.
+    /// Pack the current iteration's local cuts and activity updates into the
+    /// send buffer, returning the number of records (cuts + activities) packed.
     ///
-    /// This replaces the two-step collect-then-serialize pattern by reading
-    /// coefficients directly from the pool's `coefficients` slice, avoiding
-    /// the per-cut `Vec<f64>` clone that `collect_local_cuts_for_stage` used.
+    /// Reads coefficients directly from the pool's `coefficients` slice to
+    /// avoid per-cut `Vec<f64>` clones. Only cuts generated at the given
+    /// `iteration` and currently active are included.
     ///
-    /// Only cuts generated at the given `iteration` and currently active are
-    /// included.
+    /// Activity records: for this ticket the activity payload is always empty
+    /// (no activity updates are packed here). The activity-update path is
+    /// integrated in a later step when the backward-pass template-update
+    /// produces `ActivityUpdateRecord` entries.
     ///
-    /// # Panics (debug builds only)
+    /// # Panics
     ///
-    /// Panics if the number of eligible cuts exceeds the send buffer capacity.
-    #[allow(clippy::cast_possible_truncation)]
-    pub fn pack_local_cuts(
+    /// Panics in debug builds if the number of eligible cuts exceeds the send
+    /// buffer capacity. The serialization step is infallible given the
+    /// pre-checked capacity, so its error path is treated as unreachable.
+    #[allow(clippy::cast_possible_truncation, clippy::expect_used)]
+    pub fn pack_local_records(
         &mut self,
         fcf: &FutureCostFunction,
         stage: usize,
         iteration: u64,
     ) -> usize {
         let pool = &fcf.pools[stage];
-        let mut n_packed = 0usize;
 
+        // Collect cut records eligible for this iteration.
+        let mut cuts: Vec<(CutWireHeader, &[f64])> = Vec::new();
         for slot in 0..pool.populated_count {
             if !pool.active[slot] {
                 continue;
@@ -409,38 +442,67 @@ impl CutSyncBuffers {
             if meta.iteration_generated != iteration {
                 continue;
             }
-
-            let start = n_packed * self.record_size;
-            debug_assert!(
-                start + self.record_size <= self.send_buf.len(),
-                "pack_local_cuts: cut {n_packed} exceeds send_buf capacity {}",
-                self.send_buf.len()
-            );
-            serialize_cut(
-                &mut self.send_buf[start..start + self.record_size],
-                slot as u32,
-                iteration as u32,
-                meta.forward_pass_index,
-                pool.intercepts[slot],
-                &pool.coefficients[slot * pool.state_dimension..(slot + 1) * pool.state_dimension],
-            );
-            n_packed += 1;
+            let header = CutWireHeader {
+                slot_index: slot as u32,
+                iteration: iteration as u32,
+                forward_pass_index: meta.forward_pass_index,
+                intercept: pool.intercepts[slot],
+            };
+            let coeffs =
+                &pool.coefficients[slot * pool.state_dimension..(slot + 1) * pool.state_dimension];
+            cuts.push((header, coeffs));
         }
 
-        n_packed
+        let n_cuts = cuts.len();
+        let total_activities = 0usize;
+        let required = self.record_size * n_cuts + activity_update_wire_size() * total_activities;
+
+        debug_assert!(
+            required <= self.send_buf.len(),
+            "pack_local_records: {n_cuts} cut(s) require {required} bytes, \
+             exceeds send_buf capacity {}",
+            self.send_buf.len()
+        );
+
+        // Activities slice is empty for this ticket; populated in a later step.
+        let activities: &[ActivityUpdateRecord] = &[];
+
+        // SAFETY: serialize_records_to_buffer writes exactly `required` bytes
+        // into send_buf[..required]; the debug_assert above guarantees capacity.
+        serialize_records_to_buffer(
+            &mut self.send_buf[..required],
+            &cuts,
+            activities,
+            self.n_state,
+        )
+        .expect("pack_local_records: serialize_records_to_buffer failed unexpectedly");
+
+        n_cuts
     }
 
-    /// Exchange pre-packed local cuts and insert remote cuts into the FCF.
+    /// Exchange pre-packed local records (cuts + activity updates) and apply
+    /// them to the FCF.
     ///
-    /// The caller must have already packed local cuts into the send buffer via
-    /// [`pack_local_cuts`](Self::pack_local_cuts). This method broadcasts the
-    /// packed data via `allgatherv`, then deserializes and inserts only remote
-    /// cuts into the FCF (the local rank's segment is skipped).
+    /// The caller must have already packed local records into the send buffer
+    /// via [`pack_local_records`](Self::pack_local_records). This method
+    /// broadcasts the packed data via `allgatherv`, then deserializes and
+    /// applies only remote records (the local rank's segment is skipped):
+    ///
+    /// - For each remote **cut record**: appends the cut to the FCF pool via
+    ///   [`FutureCostFunction::add_cut`].
+    /// - For each remote **activity update record**: applies the activation
+    ///   change via [`FutureCostFunction::set_active`].
+    ///
+    /// For this ticket no activity records are packed by `pack_local_records`,
+    /// so the activity loop is infrastructure only; it exercises the code path
+    /// but will not actually change FCF state until a later step populates
+    /// activity records.
     ///
     /// # Arguments
     ///
+    /// - `stage` — 0-based stage index for which records are being synchronized.
     /// - `n_local` — number of cuts packed into the send buffer.
-    /// - `fcf` — Future Cost Function to receive remote cuts.
+    /// - `fcf` — Future Cost Function to receive remote cuts and activity changes.
     /// - `comm` — communicator for the `allgatherv` call.
     ///
     /// # Returns
@@ -457,7 +519,7 @@ impl CutSyncBuffers {
     ///
     /// Returns `Err(SddpError::Communication(_))` if the underlying
     /// `allgatherv` call fails.
-    pub fn sync_packed_cuts<C: Communicator>(
+    pub fn sync_packed_records<C: Communicator>(
         &mut self,
         stage: usize,
         n_local: usize,
@@ -511,7 +573,7 @@ impl CutSyncBuffers {
             &self.displs,
         )?;
 
-        let mut remote_count = 0usize;
+        let mut remote_cut_count = 0usize;
 
         for r in 0..self.num_ranks {
             if r == my_rank {
@@ -521,26 +583,35 @@ impl CutSyncBuffers {
             let start = self.displs[r];
             let end = start + self.counts[r];
             let slice = &self.recv_buf[start..end];
-            deserialize_cuts_from_buffer_into(
+
+            deserialize_records_from_buffer_into(
                 slice,
                 self.n_state,
-                &mut self.deserialize_headers_buf,
-                &mut self.deserialize_coefficients_buf,
+                &mut self.deserialize_cuts_buf,
+                &mut self.deserialize_activities_buf,
             )?;
-            for (i, header) in self.deserialize_headers_buf.iter().enumerate() {
-                let coeff_start = i * self.n_state;
+
+            for (header, coefficients) in &self.deserialize_cuts_buf {
                 fcf.add_cut(
                     stage,
                     u64::from(header.iteration),
                     header.forward_pass_index,
                     header.intercept,
-                    &self.deserialize_coefficients_buf[coeff_start..coeff_start + self.n_state],
+                    coefficients,
                 );
-                remote_count += 1;
+                remote_cut_count += 1;
+            }
+
+            for activity in &self.deserialize_activities_buf {
+                let active = match activity.change {
+                    ActivityChange::Reactivate => true,
+                    ActivityChange::Deactivate => false,
+                };
+                fcf.set_active(activity.stage_index as usize, activity.slot_index, active);
             }
         }
 
-        Ok(remote_count)
+        Ok(remote_cut_count)
     }
 
     /// Return the send buffer capacity in bytes.
@@ -1179,7 +1250,7 @@ mod tests {
         let mut fcf = FutureCostFunction::new(1, 2, 6, 10, &[0; 1]);
 
         // n_local=2 but per_rank_cuts[0]=3.
-        let result = bufs.sync_packed_cuts(0, 2, &mut fcf, &TwoRankStubComm);
+        let result = bufs.sync_packed_records(0, 2, &mut fcf, &TwoRankStubComm);
         match result {
             Err(SddpError::Validation(ref msg)) => {
                 assert!(
