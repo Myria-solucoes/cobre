@@ -50,7 +50,6 @@ use crate::{
             emit_sim_progress, process_scenario_stages,
         },
     },
-    solver_phase::{Phase, SIMULATION_PROFILE},
     solver_stats::SolverStatsDelta,
     workspace::{CapturedBasis, SolverWorkspace},
 };
@@ -246,19 +245,6 @@ impl SimulationState {
                 threads_per_rank: n_workers as u32,
                 timestamp: String::new(),
             });
-        }
-
-        // Apply the simulation-phase solver profile to every worker workspace
-        // before the rayon parallel region begins.  In v1 all named profiles
-        // equal `SolveProfile::default()`, so this is a no-op (delta tracking
-        // skips all FFI calls), preserving bit-identical parity with the
-        // pre-profile branch.
-        for ws in inputs.workspaces.iter_mut() {
-            ws.solver.set_profile(&Phase::Simulation.profile());
-            debug_assert!(
-                ws.solver.current_profile() == &SIMULATION_PROFILE,
-                "solver profile must equal SIMULATION_PROFILE after set_profile"
-            );
         }
 
         let sampler = build_sim_sampler(training_ctx)?;

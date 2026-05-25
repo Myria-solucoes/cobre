@@ -723,8 +723,7 @@ fn run_backward_pass<S: SolverInterface + Send, C: Communicator>(
 mod tests {
     use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
     use cobre_solver::{
-        Basis, LpSolution, ProfiledSolver, RowBatch, SolverError, SolverInterface,
-        SolverStatistics, StageTemplate,
+        Basis, LpSolution, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
     };
 
     use cobre_core::scenario::SamplingScheme;
@@ -925,10 +924,6 @@ mod tests {
         fn name(&self) -> &'static str {
             "Mock"
         }
-        fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
-        fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
-        fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
-        fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
     }
 
     fn minimal_template_1_0() -> StageTemplate {
@@ -975,7 +970,7 @@ mod tests {
         vec![SolverWorkspace {
             rank: 0,
             worker_id: 0,
-            solver: ProfiledSolver::new(solver),
+            solver,
             patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
             scratch: crate::workspace::ScratchBuffers {
@@ -2519,7 +2514,7 @@ mod tests {
         })
         .unwrap();
 
-        let warm_start_calls = workspaces[0].solver.inner().warm_start_calls;
+        let warm_start_calls = workspaces[0].solver.warm_start_calls;
         assert_eq!(
             warm_start_calls, 1,
             "first opening at successor stage must call solve(Some(&basis)) \
@@ -2622,7 +2617,7 @@ mod tests {
         // P3b optimization: opening 0 cold-starts (no basis in store),
         // openings 1 and 2 use solve(None) (HiGHS internal hot-start) instead of
         // solve(Some(&working_basis)). No explicit warm-start calls for subsequent openings.
-        let warm_start_calls = workspaces[0].solver.inner().warm_start_calls;
+        let warm_start_calls = workspaces[0].solver.warm_start_calls;
         assert_eq!(
             warm_start_calls, 0,
             "P3b: no warm-start calls expected when BasisStore is empty \
@@ -2784,7 +2779,7 @@ mod tests {
         let mut workspaces_1 = vec![SolverWorkspace {
             rank: 0,
             worker_id: 0,
-            solver: ProfiledSolver::new(solver_1),
+            solver: solver_1,
             patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
             scratch: crate::workspace::ScratchBuffers {
@@ -2887,7 +2882,7 @@ mod tests {
             .map(|idx| SolverWorkspace {
                 rank: 0,
                 worker_id: idx,
-                solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
+                solver: MockSolver::always_ok(solution.clone()),
                 patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
                 current_state: Vec::with_capacity(n_state),
                 scratch: crate::workspace::ScratchBuffers {
@@ -3244,7 +3239,7 @@ mod tests {
         let ws = SolverWorkspace {
             rank: 0,
             worker_id: 0,
-            solver: ProfiledSolver::new(MockSolver::always_ok(solution)),
+            solver: MockSolver::always_ok(solution),
             patch_buf,
             current_state: Vec::with_capacity(n_state),
             scratch: crate::workspace::ScratchBuffers {
@@ -3416,7 +3411,7 @@ mod tests {
         let ws = SolverWorkspace {
             rank: 0,
             worker_id: 0,
-            solver: ProfiledSolver::new(MockSolver::always_ok(solution)),
+            solver: MockSolver::always_ok(solution),
             patch_buf,
             current_state: Vec::with_capacity(n_state),
             scratch: crate::workspace::ScratchBuffers {
@@ -3583,7 +3578,7 @@ mod tests {
         let ws = SolverWorkspace {
             rank: 0,
             worker_id: 0,
-            solver: ProfiledSolver::new(MockSolver::always_ok(solution)),
+            solver: MockSolver::always_ok(solution),
             patch_buf,
             current_state: Vec::with_capacity(n_state),
             scratch: crate::workspace::ScratchBuffers {
@@ -4376,7 +4371,7 @@ mod tests {
             .map(|idx| SolverWorkspace {
                 rank: 0,
                 worker_id: i32::try_from(idx).expect("worker_id fits in i32"),
-                solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
+                solver: MockSolver::always_ok(solution.clone()),
                 patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
                 current_state: Vec::with_capacity(n_state),
                 scratch: crate::workspace::ScratchBuffers {
@@ -4740,7 +4735,7 @@ mod tests {
             .map(|idx| SolverWorkspace {
                 rank: 0,
                 worker_id: i32::try_from(idx).expect("idx fits in i32"),
-                solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
+                solver: MockSolver::always_ok(solution.clone()),
                 patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
                 current_state: Vec::with_capacity(n_state),
                 scratch: crate::workspace::ScratchBuffers {
@@ -4965,7 +4960,7 @@ mod tests {
             .map(|idx| SolverWorkspace {
                 rank: 0,
                 worker_id: i32::try_from(idx).expect("idx fits in i32"),
-                solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
+                solver: MockSolver::always_ok(solution.clone()),
                 patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
                 current_state: Vec::with_capacity(n_state),
                 scratch: crate::workspace::ScratchBuffers {
@@ -5301,8 +5296,7 @@ mod tests {
         );
         // Confirm the solver ran exactly once.
         assert_eq!(
-            workspaces[0].solver.inner().call_count,
-            1,
+            workspaces[0].solver.call_count, 1,
             "solver must be called exactly once for a 1-opening backward pass"
         );
     }
@@ -5399,7 +5393,7 @@ mod tests {
             .map(|idx| SolverWorkspace {
                 rank: 0,
                 worker_id: i32::try_from(idx).expect("idx fits i32"),
-                solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
+                solver: MockSolver::always_ok(solution.clone()),
                 patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
                 current_state: Vec::with_capacity(n_state),
                 scratch: crate::workspace::ScratchBuffers {

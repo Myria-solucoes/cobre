@@ -1037,8 +1037,7 @@ mod tests {
     use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
     use cobre_core::scenario::SamplingScheme;
     use cobre_solver::{
-        Basis, LpSolution, ProfiledSolver, RowBatch, SolverError, SolverInterface,
-        SolverStatistics, StageTemplate,
+        Basis, LpSolution, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
     };
     use cobre_stochastic::StochasticContext;
 
@@ -1256,10 +1255,6 @@ mod tests {
         fn name(&self) -> &'static str {
             "Mock"
         }
-        fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
-        fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
-        fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
-        fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
@@ -1523,7 +1518,7 @@ mod tests {
         vec![SolverWorkspace {
             rank: 0,
             worker_id: 0,
-            solver: ProfiledSolver::new(solver),
+            solver,
             patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0), // N=1, L=0
             current_state: Vec::with_capacity(1),
             scratch: ScratchBuffers {
@@ -1769,7 +1764,7 @@ mod tests {
         let mut workspaces = vec![SolverWorkspace {
             rank: 0,
             worker_id: 0,
-            solver: ProfiledSolver::new(solver),
+            solver,
             patch_buf: PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0),
             current_state: Vec::with_capacity(1),
             scratch: ScratchBuffers {
@@ -2100,7 +2095,7 @@ mod tests {
         let mut workspaces = vec![SolverWorkspace {
             rank: 0,
             worker_id: 0,
-            solver: ProfiledSolver::new(solver),
+            solver,
             patch_buf: PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0),
             current_state: Vec::with_capacity(1),
             scratch: ScratchBuffers {
@@ -2416,7 +2411,7 @@ mod tests {
         vec![SolverWorkspace {
             rank: 0,
             worker_id: 0,
-            solver: ProfiledSolver::new(solver),
+            solver,
             patch_buf: PatchBuffer::new(hydro_count, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(hydro_count),
             scratch: ScratchBuffers {

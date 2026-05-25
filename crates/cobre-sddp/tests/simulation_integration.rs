@@ -153,10 +153,6 @@ impl SolverInterface for MockSolver {
     fn name(&self) -> &'static str {
         "MockIntegration"
     }
-    fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
-    fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
-    fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
-    fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
 }
 
 #[allow(clippy::cast_possible_wrap)]
@@ -992,10 +988,6 @@ impl SolverInterface for SizedMockSolver {
     fn name(&self) -> &'static str {
         "SizedMockSolver"
     }
-    fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
-    fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
-    fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
-    fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
 }
 
 /// Build a 1-hydro, 1-bus system with `min_outflow_m3s` > 0 for integration testing.

@@ -1278,8 +1278,7 @@ mod tests {
     };
     use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
     use cobre_solver::{
-        Basis, LpSolution, ProfiledSolver, RowBatch, SolverError, SolverInterface,
-        SolverStatistics, StageTemplate,
+        Basis, LpSolution, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
     };
     use cobre_stochastic::StochasticContext;
     use cobre_stochastic::context::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
@@ -1421,10 +1420,6 @@ mod tests {
         fn name(&self) -> &'static str {
             "Mock"
         }
-        fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
-        fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
-        fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
-        fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
@@ -1912,7 +1907,7 @@ mod tests {
         SolverWorkspace {
             rank: 0,
             worker_id: 0,
-            solver: ProfiledSolver::new(solver),
+            solver,
             patch_buf: crate::lp_builder::PatchBuffer::new(
                 indexer.hydro_count,
                 indexer.max_par_order,
@@ -2821,8 +2816,7 @@ mod tests {
         // First iteration: no cached bases → all cold-start.
         run_one_iteration(&mut ws, &mut basis_store).unwrap();
         assert_eq!(
-            ws.solver.inner().warm_start_calls,
-            0,
+            ws.solver.warm_start_calls, 0,
             "first iteration must use cold-start for all stages (warm_start_calls == 0)"
         );
 
@@ -2835,10 +2829,10 @@ mod tests {
         // Second iteration: cached bases present → all stages warm-start.
         run_one_iteration(&mut ws, &mut basis_store).unwrap();
         assert!(
-            ws.solver.inner().warm_start_calls > 0,
+            ws.solver.warm_start_calls > 0,
             "second iteration must use warm-start for at least one stage \
              (warm_start_calls > 0, got {})",
-            ws.solver.inner().warm_start_calls
+            ws.solver.warm_start_calls
         );
     }
 
@@ -3923,12 +3917,7 @@ mod tests {
         let mut ws = SolverWorkspace {
             rank: 0,
             worker_id: 0,
-            solver: ProfiledSolver::new(MockSolver::always_ok(fixed_solution(
-                4,
-                100.0,
-                indexer.theta,
-                30.0,
-            ))),
+            solver: MockSolver::always_ok(fixed_solution(4, 100.0, indexer.theta, 30.0)),
             patch_buf,
             current_state: Vec::with_capacity(indexer.n_state),
             scratch: crate::workspace::ScratchBuffers {
@@ -4071,12 +4060,7 @@ mod tests {
         let mut ws = SolverWorkspace {
             rank: 0,
             worker_id: 0,
-            solver: ProfiledSolver::new(MockSolver::always_ok(fixed_solution(
-                4,
-                100.0,
-                indexer.theta,
-                30.0,
-            ))),
+            solver: MockSolver::always_ok(fixed_solution(4, 100.0, indexer.theta, 30.0)),
             patch_buf,
             current_state: Vec::with_capacity(indexer.n_state),
             scratch: crate::workspace::ScratchBuffers {
@@ -4352,10 +4336,6 @@ mod tests {
         fn name(&self) -> &'static str {
             "RecordingMock"
         }
-        fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
-        fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
-        fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
-        fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
     }
 
     // ── Tests for append_new_cuts_to_lp ─────────────────────────────────

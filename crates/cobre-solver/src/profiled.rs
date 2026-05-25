@@ -1,14 +1,18 @@
 //! Generic `ProfiledSolver<S>` wrapper with per-phase LP-solver configuration.
 //!
-//! [`ProfiledSolver`] wraps any [`SolverInterface`] implementor, tracks the
-//! currently-applied [`SolveProfile`], and skips FFI option-setter calls when
-//! the new profile matches the current one (delta-only dispatch). All other
-//! [`SolverInterface`] methods are transparently forwarded to the inner solver.
+//! [`ProfiledSolver`] wraps any [`SolverInterface`] implementor and adds
+//! per-phase profile management via [`ProfiledSolver::set_profile`]. The
+//! wrapper tracks the currently-applied [`SolveProfile`] and skips FFI
+//! option-setter calls when the new profile matches the current one
+//! (delta-only dispatch). All other [`SolverInterface`] methods are
+//! forwarded transparently to the inner solver.
 //!
-//! # Construction
+//! # Construction and no-op guarantee
 //!
-//! `ProfiledSolver::new(inner)` assumes the inner solver is in a state
-//! consistent with `SolveProfile::default()` and issues no FFI calls.
+//! `ProfiledSolver::new(inner)` sets `current_profile` to
+//! `SolveProfile::default()` without issuing any FFI calls. The inner
+//! solver is assumed to be in a state consistent with the default profile,
+//! which is how `HighsSolver` has always been constructed.
 //!
 //! # Usage
 //!
@@ -17,8 +21,13 @@
 //!
 //! let inner = HighsSolver::new().expect("HiGHS init");
 //! let mut solver = ProfiledSolver::new(inner);
-//! solver.set_profile(&SolveProfile::default());
-//! assert_eq!(solver.current_profile(), &SolveProfile::default());
+//!
+//! // Apply a new profile at a phase boundary.
+//! let profile = SolveProfile::default();
+//! solver.set_profile(&profile);
+//!
+//! // Read back the currently applied profile.
+//! assert_eq!(solver.current_profile(), &profile);
 //! ```
 
 use crate::{
@@ -110,22 +119,6 @@ impl<S: SolverInterface> ProfiledSolver<S> {
     /// profile has been applied yet.
     pub fn current_profile(&self) -> &SolveProfile {
         &self.current_profile
-    }
-
-    /// Shared reference to the wrapped inner solver.
-    ///
-    /// Intended for test code and rare adapter sites that need to inspect
-    /// mock-specific fields on the inner solver. Not used on the hot path.
-    pub fn inner(&self) -> &S {
-        &self.inner
-    }
-
-    /// Exclusive reference to the wrapped inner solver.
-    ///
-    /// Intended for test code and rare adapter sites that need to mutate
-    /// mock-specific state on the inner solver. Not used on the hot path.
-    pub fn inner_mut(&mut self) -> &mut S {
-        &mut self.inner
     }
 }
 
