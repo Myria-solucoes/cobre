@@ -22,7 +22,6 @@ use cobre_solver::SolverInterface;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 use crate::{
-    SddpError, TrainingConfig,
     backward_pass_state::{BackwardPassInputs, BackwardPassState},
     context::{StageContext, TrainingContext},
     convergence::ConvergenceMonitor,
@@ -34,13 +33,14 @@ use crate::{
     lower_bound::evaluate_lower_bound,
     lower_bound::{LbEvalScratchBundle, LbEvalSpec},
     solver_stats::{
-        SOLVER_STATS_DELTA_SCALAR_FIELDS, SolverStatsDelta, aggregate_solver_statistics,
-        pack_delta_scalars, unpack_delta_scalars,
+        aggregate_solver_statistics, pack_delta_scalars, unpack_delta_scalars, SolverStatsDelta,
+        SOLVER_STATS_DELTA_SCALAR_FIELDS,
     },
     state_exchange::ExchangeBuffers,
     stopping_rule::RULE_GRACEFUL_SHUTDOWN,
-    training::{TrainingOutcome, TrainingResult, broadcast_basis_cache},
+    training::{broadcast_basis_cache, TrainingOutcome, TrainingResult},
     workspace::{BasisStore, WorkspacePool, WorkspaceSizing},
+    SddpError, TrainingConfig,
 };
 
 // ---------------------------------------------------------------------------
@@ -639,6 +639,7 @@ impl<'a, S: SolverInterface + Send, C: Communicator> TrainingSession<'a, S, C> {
             global_buf
                 .chunks_exact(SOLVER_STATS_DELTA_SCALAR_FIELDS)
                 .map(|chunk| {
+                    #[allow(clippy::expect_used)]
                     let arr: [f64; SOLVER_STATS_DELTA_SCALAR_FIELDS] = chunk.try_into().expect(
                         "chunks_exact yields slices of exactly SOLVER_STATS_DELTA_SCALAR_FIELDS",
                     );
@@ -1067,7 +1068,6 @@ mod tests {
     use chrono::NaiveDate;
     use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
     use cobre_core::{
-        Bus, EntityId, SystemBuilder, TrainingEvent, WorkerTimingPhase,
         scenario::{
             CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile,
             SamplingScheme,
@@ -1076,17 +1076,17 @@ mod tests {
             Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
             StageStateConfig,
         },
+        Bus, EntityId, SystemBuilder, TrainingEvent, WorkerTimingPhase,
     };
     use cobre_solver::{
         Basis, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
     };
     use cobre_stochastic::{
-        ClassSchemes, OpeningTreeInputs, StochasticContext, build_stochastic_context,
+        build_stochastic_context, ClassSchemes, OpeningTreeInputs, StochasticContext,
     };
 
     use super::{IterationOutcome, TrainingSession};
     use crate::{
-        StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
         config::{CutManagementConfig, EventConfig, LoopConfig},
         context::{StageContext, TrainingContext},
         cut::fcf::FutureCostFunction,
@@ -1095,6 +1095,7 @@ mod tests {
         indexer::StageIndexer,
         inflow_method::InflowNonNegativityMethod,
         risk_measure::RiskMeasure,
+        StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
     };
 
     // ── Shared helpers (mirrors training.rs test helpers) ──────────────────
