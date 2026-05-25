@@ -3,11 +3,12 @@
 //! This module provides two public facilities:
 //!
 //! - [`PatchBuffer`]: pre-allocates the parallel arrays consumed by
-//!   `SolverInterface::set_row_bounds` and fills them with scenario-dependent
-//!   values before each LP solve.  Allocating once at training start and
-//!   reusing the same buffer across all iterations and stages is critical for
-//!   hot-path performance: the training loop calls `fill_forward_patches`,
-//!   `fill_load_patches`, or `fill_state_patches` millions of times.
+//!   `SolverInterface::set_row_bounds` and `SolverInterface::set_col_bounds`
+//!   and fills them with scenario-dependent values before each LP solve.
+//!   Allocating once at training start and reusing the same buffer across all
+//!   iterations and stages is critical for hot-path performance: the training
+//!   loop calls `fill_forward_patches`, `fill_load_patches`, or
+//!   `fill_col_state_patches` millions of times.
 //!
 //! - [`build_stage_templates`]: constructs a `Vec<StageTemplate>` from a
 //!   loaded `System` — one template per study stage.  The template encodes
@@ -20,12 +21,13 @@
 //! ### Column layout (contiguous regions)
 //!
 //! ```text
-//! [0,  N)              outgoing storage      (N = n_hydros)
-//! [N,  N*(1+L))        AR lag variables      (N*L lags, hydro-major)
-//! [N*(1+L), N*(2+L))   z_inflow              (realized inflow, free, not state)
-//! [N*(2+L), N*(3+L))   incoming storage      (fixed by storage-fixing rows)
-//! N*(3+L)              theta                 (future cost, scalar)
-//! N*(3+L)+1 ..         decision variables:
+//! [0,  N)                               outgoing storage      (N = n_hydros)
+//! [N,  N*(1+L))                         AR lag variables      (N*L lags, hydro-major)
+//! [N*(1+L), N*(1+L) + A*K_max)          anticipated_state     (A*K_max slots, slot-major)
+//! [N*(1+L)+A*K_max, N*(2+L)+A*K_max)   z_inflow              (realized inflow, free)
+//! [N*(2+L)+A*K_max, N*(3+L)+A*K_max)   storage_in            (incoming storage; state-pinning column)
+//! N*(3+L)+A*K_max                       theta                 (future cost, scalar)
+//! N*(3+L)+A*K_max+1 ..                  decision variables:
 //!   hydro turbine:       N*K columns
 //!   hydro spillage:      N*K columns
 //!   hydro diversion:     N*K columns (zero-bounded for non-diverting hydros)
@@ -46,56 +48,86 @@
 //!   generic slack:       n_generic_slack columns  (VARIES per stage)
 //! ```
 //!
+//! When `A == 0` (no anticipated thermals), the `anticipated_state` block is
+//! absent and the layout collapses: `z_inflow` starts at `N*(1+L)`, `theta` at
+//! `N*(3+L)`.  Use [`crate::indexer::StageIndexer`] to resolve all column offsets.
+//!
 //! ### Row layout (contiguous regions)
 //!
 //! ```text
-//! [0,  N)              storage-fixing constraints
-//! [N,  N*(1+L))        AR lag-fixing constraints
-//! [N*(1+L), N*(2+L))   z_inflow definition constraints (structural, equality)
-//! N*(2+L) ..           structural constraints (non-dual region):
-//!   water balance:       N rows   (one per hydro)
-//!   load balance:        B*K rows (one per bus per block)
+//! [0, N)               z_inflow definition  (equality, RHS = realized inflow)
+//! [N, 2N)              water balance        (equality, RHS = noise innovation)
+//! [2N, 2N + B*K)       load balance         (equality, RHS = scenario load demand)
+//! 2N + B*K ..          structural constraints:
 //!   FPHA:                n_fpha_rows
 //!   evaporation:         n_evap rows
 //!   min-outflow:         N*K rows (one per hydro per block)
 //!   max-outflow:         N*K rows (one per hydro per block)
 //!   min-turbine:         N*K rows (one per hydro per block)
 //!   min-generation:      N*K rows (one per hydro per block)
+//!   anticipated fishing: n_anticipated rows
+//!   anticipated_state_out_def: n_active_anticipated rows (stage-dependent)
 //!   generic:             n_generic_rows  (VARIES per stage)
 //! ```
 //!
 //! The AR dynamics (noise patch target) rows are the water balance constraints
-//! beginning at row `base_rows[stage]` (= `N*(2+L)` for stages without extra
-//! variable-offset rows). The `base_rows` value returned alongside the templates
-//! encodes this offset for each stage so that [`PatchBuffer`] can update the
-//! correct RHS during forward-pass solves.
+//! beginning at row `base_rows[stage]` (= `N` for a stage with N hydros). The
+//! `base_rows` value returned alongside the templates encodes this offset for
+//! each stage so that [`PatchBuffer`] can update the correct RHS during
+//! forward-pass solves.
+//!
+//! ### State pinning
+//!
+//! State pinning lives on **incoming-state columns** rather than rows.
+//! Use [`crate::indexer::StageIndexer::state_to_lp_incoming_column`] to
+//! resolve the column index for state vector entry `j`.  Both forward-pass
+//! state pinning (`set_col_bounds(&[col], &[v], &[v])`) and backward-pass
+//! cut-subgradient extraction (`view.reduced_costs[col] * col_scale[col]`)
+//! use the same column index.  The `storage_fixing`, `lag_fixing`, and
+//! `anticipated_state_fixing` row ranges in [`crate::indexer::StageIndexer`]
+//! are permanent empty sentinels (`0..0`).
 //!
 //! ## Patch sequence (Training Loop SS4.2a)
 //!
-//! Each forward-pass solve requires up to `N*(2+L) + N + M*K` row-bound patches
-//! (where M is the number of stochastic load buses and K is the block count):
+//! Each forward-pass solve writes up to `2N + M*K` row patches and up to
+//! `N*(1+L) + A*K_max` column-bound patches (where M is the number of
+//! stochastic load buses and K is the block count):
+//!
+//! - **Row buffer** (written by `fill_forward_patches`, `fill_load_patches`,
+//!   `fill_z_inflow_patches`):
 //!
 //! ```text
-//! Category 1 -- storage fixing    rows [0, N)
-//!     patch row h = state[h]   for h in [0, N)
-//!
-//! Category 2 -- AR lag fixing     rows [N, N*(1+L))
-//!     patch row N + l*N + h = state[N + l*N + h]
-//!     for h in [0, N), l in [0, L)
-//!
-//! Category 3 -- noise innovation   N rows at base_rows[stage] (= N*(2+L))
+//! Category 3 -- noise innovation   N rows at base_rows[stage]
 //!     patch water_balance_row(base_row, h) = noise[h]   for h in [0, N)
 //!
 //! Category 4 -- load balance patches   M*K rows (optional, stochastic load)
 //!     patch load_row_start + bus_pos[i]*K + blk = load_rhs[i*K + blk]
 //!     for i in [0, M), blk in [0, K)
 //!
-//! Category 5 -- z-inflow RHS      N rows at N*(1+L)
+//! Category 5 -- z-inflow RHS      N rows at z_inflow_row_start (= 0)
 //!     patch z_inflow_row(h) = base_h + noise_scale_h * eta_h   for h in [0, N)
 //! ```
 //!
-//! The backward pass uses only categories 1 and 2 (`N*(1+L)` patches); noise
-//! innovations are drawn from the fixed opening tree by the caller.
+//! - **Column buffer** (written by `fill_col_state_patches`):
+//!
+//! ```text
+//! Category 1 -- incoming storage  cols [storage_in.start, storage_in.end)
+//!     col_lower[h] == col_upper[h] == state[h]   for h in [0, N)
+//!
+//! Category 2 -- AR lag state      cols [inflow_lags.start, inflow_lags.end)
+//!     col_lower[N + l*N + h] == col_upper[...] == state[N + l*N + h]
+//!     for h in [0, N), l in [0, L)
+//!
+//! Category 6 -- anticipated state cols [anticipated_state.start, .end)
+//!     col_lower[slot] == col_upper[slot] == state[N*(1+L) + slot]
+//!     for slot in [0, A*K_max)
+//! ```
+//!
+//! Each column-buffer entry `c` has `col_lower[c] == col_upper[c]` to pin the
+//! variable to the state value via tight bounds.  The backward pass writes only
+//! the column buffer (state pinning); noise innovations come from the fixed
+//! opening tree and are written to the row buffer via `fill_forward_patches`
+//! with the opening-specific noise vector.
 //! When `n_load_buses == 0`, Category 4 is empty and has no effect.
 //!
 //! ## Row index types
@@ -103,28 +135,32 @@
 //! All indices are stored as `usize` to match the `set_row_bounds` interface
 //! signature directly; no casting is required at the call site.
 //!
-//! ## Worked example (SS4.2a): N = 3, L = 2
+//! ## Worked example (SS4.2a): N = 3, L = 2, no anticipated thermals
 //!
 //! ```text
-//! Patch  Category       Row index              Value
-//!     0  storage-fix    0                      state[0]  (H0)
-//!     1  storage-fix    1                      state[1]  (H1)
-//!     2  storage-fix    2                      state[2]  (H2)
-//!     3  lag-fix        N + 0*N + 0 = 3        state[3]  (H0 lag 0)
-//!     4  lag-fix        N + 0*N + 1 = 4        state[4]  (H1 lag 0)
-//!     5  lag-fix        N + 0*N + 2 = 5        state[5]  (H2 lag 0)
-//!     6  lag-fix        N + 1*N + 0 = 6        state[6]  (H0 lag 1)
-//!     7  lag-fix        N + 1*N + 1 = 7        state[7]  (H1 lag 1)
-//!     8  lag-fix        N + 1*N + 2 = 8        state[8]  (H2 lag 1)
-//!     9  noise-fix      N*(2+L) + 0 = 12       noise[0]  (H0)
-//!    10  noise-fix      N*(2+L) + 1 = 13       noise[1]  (H1)
-//!    11  noise-fix      N*(2+L) + 2 = 14       noise[2]  (H2)
-//!    12  z-inflow       N*(1+L) + 0 = 9        z_rhs[0]  (H0)
-//!    13  z-inflow       N*(1+L) + 1 = 10       z_rhs[1]  (H1)
-//!    14  z-inflow       N*(1+L) + 2 = 11       z_rhs[2]  (H2)
+//! Row patches (Categories 3 and 5):
+//! Patch  Category     Row index   Value
+//!     0  noise-fix    3 + 0 = 3   noise[0]  (H0; base_rows[s] = N = 3)
+//!     1  noise-fix    3 + 1 = 4   noise[1]  (H1)
+//!     2  noise-fix    3 + 2 = 5   noise[2]  (H2)
+//!     3  z-inflow     0 + 0 = 0   z_rhs[0]  (H0; z_inflow_row_start = 0)
+//!     4  z-inflow     0 + 1 = 1   z_rhs[1]  (H1)
+//!     5  z-inflow     0 + 2 = 2   z_rhs[2]  (H2)
+//!
+//! Column patches (Categories 1 and 2; via fill_col_state_patches):
+//! Entry  Category     Column index  Value
+//!     0  storage      12 + 0 = 12   state[0]  (H0; storage_in.start = N*(2+L) = 12)
+//!     1  storage      12 + 1 = 13   state[1]  (H1)
+//!     2  storage      12 + 2 = 14   state[2]  (H2)
+//!     3  lag          3 + 0 = 3     state[3]  (H0 lag 0; inflow_lags.start = N = 3)
+//!     4  lag          3 + 1 = 4     state[4]  (H1 lag 0)
+//!     5  lag          3 + 2 = 5     state[5]  (H2 lag 0)
+//!     6  lag          3 + 3 = 6     state[6]  (H0 lag 1)
+//!     7  lag          3 + 4 = 7     state[7]  (H1 lag 1)
+//!     8  lag          3 + 5 = 8     state[8]  (H2 lag 1)
 //! ```
 //!
-//! Total: 15 = 3*(2+2) + 3 patches.
+//! Total row patches: 6 = N + N.  Total column patches: 9 = N*(1+L).
 
 use cobre_core::ConstraintSense;
 

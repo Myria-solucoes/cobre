@@ -557,7 +557,7 @@ pub fn evaluate_lower_bound<S: SolverInterface, C: Communicator>(
             "evaluate_lower_bound: stage 0 must have at least one opening"
         );
 
-        // Phase 1: populate scratch buffers and perform append-only LP load.
+        // Populate scratch buffers and perform append-only LP load.
         lb_init_rank0(
             solver,
             fcf,

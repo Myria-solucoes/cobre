@@ -638,10 +638,10 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Row buffer capacity: ticket-007 requirement (AC-2)
+    // Row buffer capacity
     // -------------------------------------------------------------------------
 
-    /// AC-2: `PatchBuffer::new(3, 2, 0, 0, 0, 0).indices.len() == 6` (N + N = 6).
+    /// `PatchBuffer::new(3, 2, 0, 0, 0, 0).indices.len() == 6` (N + N = 6).
     #[test]
     fn row_buffer_capacity_after_phase1() {
         let buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
@@ -770,7 +770,7 @@ mod tests {
 
     /// Category 3 (noise) indices start at slot 0.
     ///
-    /// After ticket-007, fill_forward_patches writes only Category 3 at [0, N).
+    /// `fill_forward_patches` writes only Category 3 (noise) at `[0, N)`.
     #[test]
     fn fill_forward_patches_writes_only_noise() {
         let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);

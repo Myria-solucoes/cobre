@@ -16,6 +16,7 @@ use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_sddp::{StudySetup, setup::StudyParams};
 
 pub mod anticipated_structural_assertions;
+pub mod parity_hash;
 
 /// Single-rank communicator stub for testing.
 ///

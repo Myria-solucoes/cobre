@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Stage-LP state pinning now uses column bounds (`set_col_bounds`) on
+  the incoming-state columns instead of equality rows. The
+  `storage_fixing`, `lag_fixing`, and `anticipated_state_fixing` row
+  ranges in `StageIndexer` are now permanent empty sentinels (`0..0`);
+  callers must use `StageIndexer::state_to_lp_incoming_column` to
+  resolve the column index for both pinning and dual extraction.
+- Cut subgradient extraction now reads `view.reduced_costs[col]`
+  (unscaled by multiplying by `col_scale[col]`) instead of
+  `view.dual[row]`. The per-LP backward solve avoids `N + N*L + A*K`
+  redundant equality rows per stage.
+
 ## [0.7.0] - 2026-05-24
 
 ### Added

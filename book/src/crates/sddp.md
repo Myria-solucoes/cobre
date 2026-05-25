@@ -245,26 +245,35 @@ The FCF is built once before training begins. Total slot capacity is
 
 ### `PatchBuffer`
 
-A `PatchBuffer` holds the three parallel arrays consumed by the LP solver's
-`set_row_bounds` call. It is sized for `N * (2 + L) + M * B` patches, where
-N is the number of hydro plants, L is the maximum PAR order, M is the number
-of stochastic load buses, and B is the maximum block count across stages:
+A `PatchBuffer` holds the pre-allocated row-bound and column-bound arrays
+consumed by the LP solver's `set_row_bounds` and `set_col_bounds` calls.
+It carries two regions:
 
-- **Category 1** `[0, N)` — storage-fixing: equality constraint at incoming storage.
-- **Category 2** `[N, N*(1+L))` — lag-fixing: equality constraint at AR lagged inflows.
-- **Category 3** `[N*(1+L), N*(2+L))` — noise-fixing: equality constraint at scenario noise.
-- **Category 4** `[N*(2+L), N*(2+L) + M*B_active)` — load balance row patches: equality
-  constraint at stochastic load demand per bus per block (optional; empty when
-  `n_load_buses == 0`).
+- **Row-bound region** — sized for `N + M*B + N` patches (N hydros, M stochastic
+  load buses, B max blocks), holding Categories 3, 4, and 5:
+  - **Category 3** `[0, N)` — noise innovation: water-balance RHS at scenario noise.
+  - **Category 4** `[N, N + M*B_active)` — load balance row patches: equality
+    constraint at stochastic load demand per bus per block (optional; empty when
+    `n_load_buses == 0`).
+  - **Category 5** `[N + M*B, 2N + M*B)` — z-inflow definition RHS.
 
-The backward pass uses only categories 1 and 2 (`fill_state_patches`) for
-the state-fixing rows, then applies Category 4 (`fill_load_patches`) to set
-the stochastic load demand at each bus before solving the successor LP.
-The forward pass uses all four categories (`fill_forward_patches` followed by
-`fill_load_patches`).
+- **Column-bound region** — sized for `N*(1+L) + A*K` entries (A anticipated
+  thermals, K max lead stages), holding Categories 1, 2, and 6:
+  - **Category 1** — incoming storage columns: `col_lower[h] == col_upper[h] == state[h]`
+    for each hydro `h`.
+  - **Category 2** — AR lag columns: tight bounds at each lag state value.
+  - **Category 6** — anticipated-state columns: tight bounds at each ring-buffer slot.
+
+State pinning (Categories 1, 2, 6) is applied exclusively via column bounds
+(`fill_col_state_patches`); there are no equality rows for state fixing.
+The backward pass writes only the column-bound region; noise innovations come
+from the fixed opening tree and are written to the row-bound region via
+`fill_forward_patches`.
+The forward pass writes both regions (`fill_forward_patches`,
+`fill_col_state_patches`, and optionally `fill_load_patches`).
 
 When `n_load_buses == 0`, Category 4 is empty and `forward_patch_count`
-returns `N*(2+L)` unchanged, making load noise an optional zero-cost extension.
+returns `N` unchanged, making load noise an optional zero-cost extension.
 
 ### `ExchangeBuffers` and `CutSyncBuffers`
 

@@ -2900,7 +2900,7 @@ mod zero_cost_tests {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Phase 1: state-fixing diagonals must be absent from the CSC output
+    // State-fixing diagonals must be absent from the CSC output
     // ─────────────────────────────────────────────────────────────────────────
 
     /// Asserts `build_stage_matrix_entries` produces no state-fixing
@@ -2914,8 +2914,8 @@ mod zero_cost_tests {
     /// the test builds a fixture with `n_anticipated = 2, k_max = 3` and
     /// asserts every `(slot, plant)` column at
     /// `col_anticipated_state_start + slot*A + plant` has no entry at
-    /// row `slot*A + plant` (the row that `fill_anticipated_state_fixing_
-    /// entries` used to emit before its deletion in ticket-004).
+    /// row `slot*A + plant` (the diagonal entry that existed in the
+    /// pre-cutover layout, before state pinning moved to column bounds).
     ///
     /// The storage/lag assertions are included as zero-iteration loops in
     /// this fixture (`n_hydros` = 0) so the test documents the intent and

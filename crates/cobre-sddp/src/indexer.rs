@@ -75,12 +75,12 @@
 //!
 //! ## Row layout (Solver Abstraction SS2.2)
 //!
-//! Phase 1: state fixing is now done via column bounds (`set_col_bounds`), so the
-//! `storage_fixing` and `lag_fixing` row ranges collapse to `0..0` at every stage.
-//! z-inflow rows start at row 0 (the first row in the LP).
+//! State pinning uses column bounds (`set_col_bounds`) on the incoming-state
+//! columns, so the `storage_fixing`, `lag_fixing`, and `anticipated_state_fixing`
+//! row ranges are always empty (`0..0`). z-inflow rows start at row 0.
 //!
 //! ```text
-//! [0, N)   z_inflow_rows — z-inflow definition rows (first block after state-fixing removal)
+//! [0, N)   z_inflow_rows — z-inflow definition rows
 //! ```
 //!
 //! After evaporation rows, 4 operational violation constraint row regions are
@@ -274,26 +274,41 @@ pub struct StageIndexer {
     /// Scalar: there is exactly one theta variable per stage LP.
     pub theta: usize,
 
-    /// Total state dimension `N*(1+L)`.
+    /// State-vector dimension.
+    ///
+    /// Without anticipated thermals: `N*(1+L)`.
+    /// With `A` anticipated thermals at `K_max` lead stages each:
+    /// `N*(1+L) + A*K_max`.
     ///
     /// The state vector consists of the `N` outgoing storage volumes followed
-    /// by the `N*L` lag variables. State transfer copies
+    /// by the `N*L` lag variables (and `A*K_max` anticipated-state slots when
+    /// anticipated thermals are present). State transfer copies
     /// `primal[0..n_transfer]` (all but the oldest lag row).
+    ///
+    /// ## Semantic distinction
+    ///
+    /// `n_state` is the state-vector **dimension** used by cut storage and
+    /// broadcast payloads. It is **not** a valid LP row index. Do not slice
+    /// the LP row buffer as `[0, n_state)` — no state-fixing rows exist.
+    /// Use [`StageIndexer::state_to_lp_incoming_column`] to resolve the
+    /// column index for state-pinning and cut-subgradient extraction.
     pub n_state: usize,
 
     /// Row range for storage-fixing constraints.
     ///
-    /// Phase 1: state fixing has moved to column bounds. This range is ALWAYS
-    /// empty (`0..0`) at every stage. The field is retained so that downstream
-    /// consumers (diagnostics, future code archaeology) continue to compile; they
-    /// will observe a sentinel empty range.
+    /// Always empty (`0..0`): state pinning uses column bounds
+    /// (`set_col_bounds` on the incoming-state columns) rather than equality
+    /// rows. The field is retained as a permanent sentinel for API stability;
+    /// downstream consumers will observe an empty range.
+    /// Use [`StageIndexer::state_to_lp_incoming_column`] to resolve the
+    /// column index for state pinning and cut-subgradient extraction.
     pub storage_fixing: Range<usize>,
 
     /// Row range for AR lag-fixing constraints.
     ///
-    /// Phase 1: state fixing has moved to column bounds. This range is ALWAYS
-    /// empty (`0..0`) at every stage. The field is retained for the same reason
-    /// as `storage_fixing` above.
+    /// Always empty (`0..0`): state pinning uses column bounds rather than
+    /// equality rows. Retained as a permanent sentinel for the same reason
+    /// as `storage_fixing`.
     pub lag_fixing: Range<usize>,
 
     /// Column range `[N*(1+L), N*(1+L) + n_anticipated*K_max)` for
@@ -312,12 +327,10 @@ pub struct StageIndexer {
 
     /// Row range for anticipated-state-fixing constraints.
     ///
-    /// Phase 1: state fixing has moved to column bounds. This range is ALWAYS
-    /// empty (`0..0`) at every stage regardless of `n_anticipated`. The field is
-    /// retained so that downstream consumers continue to compile; they will
-    /// observe a sentinel empty range. The column range [`Self::anticipated_state`]
-    /// is unchanged and still carries the state-pinning semantics via
-    /// `set_col_bounds`.
+    /// Always empty (`0..0`) regardless of `n_anticipated`: state pinning for
+    /// anticipated thermals also uses column bounds. Retained as a permanent
+    /// sentinel for API stability. The column range [`Self::anticipated_state`]
+    /// carries the state-pinning semantics via `set_col_bounds`.
     pub anticipated_state_fixing: Range<usize>,
 
     /// Number of anticipated thermals (plants with
@@ -842,13 +855,13 @@ impl StageIndexer {
     /// assert_eq!(idx.storage_in, 12..15);
     /// assert_eq!(idx.theta,   15);
     /// assert_eq!(idx.n_state,  9);
-    /// // Phase 1: state-fixing rows are gone; both ranges are empty sentinels.
+    /// // State-fixing row ranges are permanent empty sentinels.
     /// assert_eq!(idx.storage_fixing, 0..0);
     /// assert_eq!(idx.lag_fixing, 0..0);
     /// // Equipment ranges are empty when built via `new`.
     /// assert!(idx.turbine.is_empty());
     /// assert_eq!(idx.n_blks, 0);
-    /// // Phase 1: z_inflow rows now start at row 0 (no state-fixing prefix).
+    /// // z_inflow rows start at row 0.
     /// assert_eq!(idx.z_inflow_rows, 0..3);
     /// assert_eq!(idx.z_inflow_row_start, 0);
     /// ```
@@ -869,15 +882,13 @@ impl StageIndexer {
         let theta = n * (3 + l);
         let n_state = n * (1 + l);
 
-        // Phase 1: state fixing moved to column bounds. The row ranges
-        // collapse to 0..0 at every stage. The column ranges (storage,
-        // inflow_lags, anticipated_state) carry the state-pinning semantics
-        // via set_col_bounds.
+        // State fixing uses column bounds; the row ranges are permanent empty
+        // sentinels. The column ranges (storage, inflow_lags, anticipated_state)
+        // carry the state-pinning semantics via set_col_bounds.
         let storage_fixing = 0..0;
         let lag_fixing = 0..0;
 
-        // Phase 1: z_inflow rows now start at row 0 — the state-fixing prefix
-        // is gone so z_inflow is the first row block in the LP.
+        // z_inflow rows start at row 0 — the first row block in the LP.
         let z_inflow_start_row = 0_usize;
         let z_inflow_rows = z_inflow_start_row..z_inflow_start_row + n;
         let z_inflow_row_start = z_inflow_start_row;
@@ -1136,14 +1147,14 @@ impl StageIndexer {
         } else {
             0..0
         };
-        // Phase 1: anticipated-state fixing moved to column bounds.
+        // Anticipated-state fixing uses column bounds; row range is a permanent empty sentinel.
         let anticipated_state_fixing = 0..0;
         let z_inflow_start = anticipated_state_end;
         let z_inflow = z_inflow_start..z_inflow_start + hydro_count;
         let storage_in_start = z_inflow.end;
         let storage_in = storage_in_start..storage_in_start + hydro_count;
         let theta = storage_in.end;
-        // Phase 1: z_inflow rows now start at row 0 (ROW start, not column start).
+        // z_inflow rows start at row 0 (ROW start, not column start).
         let z_inflow_start_row = 0_usize;
         let z_inflow_rows = z_inflow_start_row..z_inflow_start_row + hydro_count;
         let z_inflow_row_start = z_inflow_start_row;
@@ -1209,9 +1220,8 @@ impl StageIndexer {
         let n_evap_hydros = evap_hydro_indices.len();
         let evap_col_start = generation_end;
 
-        // Phase 1: state-fixing rows are gone. z_inflow rows start at row 0
-        // (z_inflow_start_row declared above); water_balance follows z_inflow
-        // at row hydro_count.
+        // z_inflow rows start at row 0 (z_inflow_start_row declared above);
+        // water_balance follows z_inflow at row hydro_count.
         let water_balance_start = z_inflow_start_row + hydro_count;
         let load_balance_start = water_balance_start + hydro_count;
         let load_balance_end = load_balance_start + n_buses * n_blks;
@@ -1831,20 +1841,19 @@ mod tests {
 
     #[test]
     fn storage_fixing_range_3_2() {
-        // Phase 1: storage_fixing is always an empty sentinel.
+        // storage_fixing is a permanent empty sentinel.
         assert_eq!(indexer_3_2().storage_fixing, 0..0);
     }
 
     #[test]
     fn lag_fixing_range_3_2() {
-        // Phase 1: lag_fixing is always an empty sentinel.
+        // lag_fixing is a permanent empty sentinel.
         assert_eq!(indexer_3_2().lag_fixing, 0..0);
     }
 
     #[test]
     fn row_column_symmetry_3_2() {
-        // Phase 1: state-fixing rows are gone; the fixing ranges no longer
-        // mirror the column ranges.
+        // State-fixing row ranges are permanent empty sentinels; column ranges are unchanged.
         let idx = indexer_3_2();
         assert_eq!(idx.storage_fixing, 0..0);
         assert_eq!(idx.lag_fixing, 0..0);
@@ -1871,8 +1880,7 @@ mod tests {
 
     #[test]
     fn row_column_symmetry_production_scale() {
-        // Phase 1: state-fixing rows are gone; the fixing ranges no longer
-        // mirror the column ranges.
+        // State-fixing row ranges are permanent empty sentinels; column ranges are unchanged.
         let idx = indexer_160_12();
         assert_eq!(idx.storage_fixing, 0..0);
         assert_eq!(idx.lag_fixing, 0..0);
@@ -1891,7 +1899,7 @@ mod tests {
         assert_eq!(idx.storage_in, 2..3);
         assert_eq!(idx.theta, 3);
         assert_eq!(idx.n_state, 1);
-        // Phase 1: storage_fixing and lag_fixing are always empty sentinels.
+        // storage_fixing and lag_fixing are permanent empty sentinels.
         assert_eq!(idx.storage_fixing, 0..0);
         assert_eq!(idx.lag_fixing, 0..0);
     }
@@ -2393,7 +2401,7 @@ mod tests {
         assert_eq!(ei.q_ev_col, 15);
         assert_eq!(ei.f_evap_plus_col, 16);
         assert_eq!(ei.f_evap_minus_col, 17);
-        // Phase 1: row placed after load_balance.end = 5 (state-fixing rows removed)
+        // Row placed after load_balance.end = 5.
         assert_eq!(ei.evap_row, 5);
     }
 
@@ -2443,7 +2451,7 @@ mod tests {
         assert_eq!(ei1.f_evap_plus_col, 32);
         assert_eq!(ei1.f_evap_minus_col, 33);
 
-        // Phase 1: rows placed after fpha_rows region: fpha_row_cursor = 9 + 3*1 = 12
+        // Rows placed after fpha_rows region: fpha_row_cursor = 9 + 3*1 = 12.
         assert_eq!(ei0.evap_row, 12);
         assert_eq!(ei1.evap_row, 13);
 
@@ -2691,11 +2699,11 @@ mod tests {
         assert_eq!(idx.z_inflow_row_start, 0);
     }
 
-    // Phase 1: z_inflow rows now start at row 0 (state-fixing rows removed).
+    // z_inflow rows start at row 0.
     #[test]
     fn z_inflow_row_fields() {
         let idx = StageIndexer::new(5, 1);
-        // Phase 1: z_inflow rows start at row 0, length = hydro_count = 5.
+        // z_inflow rows start at row 0, length = hydro_count = 5.
         assert_eq!(idx.z_inflow_rows, 0..5);
         assert_eq!(idx.z_inflow_row_start, 0);
         assert_eq!(idx.z_inflow.len(), 5);
@@ -2708,7 +2716,7 @@ mod tests {
         // N*(1+L) = 2*(1+1) = 4 (column range unchanged)
         assert_eq!(idx.z_inflow, 4..6);
         assert_eq!(idx.z_inflow.len(), 2);
-        // Phase 1: z_inflow rows start at row 0, length = hydro_count = 2.
+        // z_inflow rows start at row 0, length = hydro_count = 2.
         assert_eq!(idx.z_inflow_rows, 0..2);
         assert_eq!(idx.z_inflow_row_start, 0);
     }
@@ -3099,7 +3107,7 @@ mod tests {
         );
 
         assert_eq!(idx.anticipated_state, 9..15);
-        // Phase 1: anticipated_state_fixing is always 0..0 (state fixing via column bounds).
+        // anticipated_state_fixing is a permanent empty sentinel; state fixing uses column bounds.
         assert_eq!(idx.anticipated_state_fixing, 0..0);
         assert_eq!(idx.z_inflow, 15..18);
         assert_eq!(idx.storage_in, 18..21);
@@ -3120,7 +3128,7 @@ mod tests {
         );
 
         assert_eq!(idx.anticipated_state, 0..6);
-        // Phase 1: anticipated_state_fixing is always 0..0 (state fixing via column bounds).
+        // anticipated_state_fixing is a permanent empty sentinel; state fixing uses column bounds.
         assert_eq!(idx.anticipated_state_fixing, 0..0);
         assert_eq!(idx.n_state, 6);
         assert_eq!(idx.z_inflow, 6..6);
@@ -3158,8 +3166,8 @@ mod tests {
         assert_eq!(idx.k_max, 0);
     }
 
-    /// Phase 1: `anticipated_state_fixing` is ALWAYS empty (`0..0`); it no longer
-    /// mirrors `anticipated_state` now that state fixing is via column bounds.
+    /// `anticipated_state_fixing` is always empty (`0..0`);
+    /// state pinning uses column bounds, not rows.
     #[test]
     fn anticipated_state_fixing_mirrors_state() {
         for (n_anticipated, k_max) in [(0, 0), (1, 1), (1, 3), (2, 3), (5, 4)] {
@@ -3176,7 +3184,7 @@ mod tests {
         }
     }
 
-    /// Phase 1: all three state-fixing ranges are empty in every constructor.
+    /// All three state-fixing row ranges are permanent empty sentinels in every constructor.
     ///
     /// Covers `StageIndexer::new`, `StageIndexer::with_equipment`, and
     /// `StageIndexer::with_equipment_and_evaporation` (with anticipated thermals).
