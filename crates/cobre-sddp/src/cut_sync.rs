@@ -413,10 +413,11 @@ impl CutSyncBuffers {
     /// avoid per-cut `Vec<f64>` clones. Only cuts generated at the given
     /// `iteration` and currently active are included.
     ///
-    /// Activity records: for this ticket the activity payload is always empty
-    /// (no activity updates are packed here). The activity-update path is
-    /// integrated in a later step when the backward-pass template-update
-    /// produces `ActivityUpdateRecord` entries.
+    /// Activity records: the activity payload is currently always empty (no
+    /// activity updates are packed here). Cut deactivations are applied to
+    /// the local FCF directly by the cut-selection step; cross-rank propagation
+    /// of activity updates rides on the same wire layout once a future change
+    /// populates `ActivityUpdateRecord` entries here.
     ///
     /// # Panics
     ///
@@ -464,11 +465,13 @@ impl CutSyncBuffers {
             self.send_buf.len()
         );
 
-        // Activities slice is empty for this ticket; populated in a later step.
+        // Activities slice is currently empty; the wire layout reserves space
+        // for `ActivityUpdateRecord` entries that a future change can populate.
         let activities: &[ActivityUpdateRecord] = &[];
 
-        // SAFETY: serialize_records_to_buffer writes exactly `required` bytes
-        // into send_buf[..required]; the debug_assert above guarantees capacity.
+        // Rationale: `serialize_records_to_buffer` writes exactly `required`
+        // bytes into `send_buf[..required]`; the debug_assert above guarantees
+        // capacity.
         serialize_records_to_buffer(
             &mut self.send_buf[..required],
             &cuts,
@@ -493,10 +496,10 @@ impl CutSyncBuffers {
     /// - For each remote **activity update record**: applies the activation
     ///   change via [`FutureCostFunction::set_active`].
     ///
-    /// For this ticket no activity records are packed by `pack_local_records`,
-    /// so the activity loop is infrastructure only; it exercises the code path
-    /// but will not actually change FCF state until a later step populates
-    /// activity records.
+    /// `pack_local_records` currently packs no activity records, so the
+    /// activity loop here is infrastructure only — it exercises the receive
+    /// path but does not change FCF state until a future change populates
+    /// activity records on the send side.
     ///
     /// # Arguments
     ///

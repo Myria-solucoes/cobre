@@ -764,8 +764,13 @@ mod tests {
             7u32,
             "forward_pass_index at offset 9"
         );
-        // padding at offset 13-16 must be zero
-        assert_eq!(&buf[13..17], &[0u8; 4], "padding at offset 13 must be zero");
+        // record tag at offset 13 (RECORD_TAG_CUT = 0) and padding at 14-16.
+        assert_eq!(buf[13], RECORD_TAG_CUT, "record tag at offset 13");
+        assert_eq!(
+            &buf[14..17],
+            &[0u8; 3],
+            "padding at offsets 14-16 must be zero"
+        );
         // intercept at offset 17-24
         assert_eq!(
             f64::from_ne_bytes(buf[17..25].try_into().unwrap()),

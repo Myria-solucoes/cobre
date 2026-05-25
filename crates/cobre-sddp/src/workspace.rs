@@ -1046,10 +1046,12 @@ impl<S: SolverInterface> WorkspacePool<S> {
                     map.insert(slot);
                 }
                 maps.push(map);
-                // Snapshot the FCF's current activity vector verbatim; the
-                // post-cut-sync template update step diffs this against the
-                // FCF's desired activity to decide which slots toggle.
-                prev_activity.push(pool.active.clone());
+                // Snapshot the FCF's current activity for populated slots only;
+                // `pool.active` is sized to capacity, so a verbatim clone would
+                // leave trailing `false` entries that fire spurious toggles when
+                // those slots later populate. The post-cut-sync template update
+                // step diffs this slice against the FCF's desired activity.
+                prev_activity.push(pool.active[..pool.populated_count].to_vec());
             }
             ws.cut_row_maps = maps;
             ws.prev_applied_activity = prev_activity;
@@ -2636,15 +2638,16 @@ mod tests {
             1,
             "outer vec length must equal num_stages"
         );
-        let expected = fcf.pools[0].active.clone();
+        let populated = fcf.pools[0].populated_count;
+        let expected = fcf.pools[0].active[..populated].to_vec();
         assert_eq!(
             ws.prev_applied_activity[0].len(),
-            expected.len(),
-            "inner vec length must equal pool.active.len() (== capacity)"
+            populated,
+            "inner vec length must equal populated_count (not capacity)"
         );
         assert_eq!(
             ws.prev_applied_activity[0], expected,
-            "prev_applied_activity must mirror fcf.pools[stage].active verbatim"
+            "prev_applied_activity must mirror fcf.pools[stage].active for populated slots"
         );
     }
 }
