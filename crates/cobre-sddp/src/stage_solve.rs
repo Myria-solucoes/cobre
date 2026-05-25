@@ -10,8 +10,8 @@ use cobre_solver::{SolutionView, SolverInterface, StageTemplate};
 
 use crate::{
     basis_reconstruct::{
-        PaddingContext, ReconstructionStats, ReconstructionTarget, enforce_basic_count_invariant,
-        reconstruct_basis,
+        enforce_basic_count_invariant, reconstruct_basis, PaddingContext, ReconstructionStats,
+        ReconstructionTarget,
     },
     context::StageContext,
     cut::pool::CutPool,
@@ -193,28 +193,21 @@ pub fn run_stage_solve<'ws, S: SolverInterface>(
         // in slot-ascending order; `active_mask` lets `reconstruct_basis`
         // override the basis status to `LOWER` for inactive slots, whose
         // rows can never bind.
-        let pool = inputs.pool;
+        // BENCHMARK Run 1: active-only bake — iterate active cuts and skip the
+        // active_mask override (no inactive baked rows exist to override).
         let source = crate::basis_reconstruct::ReconstructionSource {
             target: ReconstructionTarget {
                 base_row_count: inputs.stage_context.templates[inputs.stage_index].num_rows,
                 num_cols: inputs.stage_context.templates[inputs.stage_index].num_cols,
             },
-            cut_metadata: &pool.metadata,
+            cut_metadata: &inputs.pool.metadata,
             basis_activity_window: inputs.basis_activity_window,
-            active_mask: Some(&pool.active[..pool.populated_count]),
+            active_mask: None,
         };
-        let populated_cuts = (0..pool.populated_count).map(|slot| {
-            let start = slot * pool.state_dimension;
-            (
-                slot,
-                pool.intercepts[slot],
-                &pool.coefficients[start..start + pool.state_dimension],
-            )
-        });
         let recon_stats = reconstruct_basis(
             captured,
             source,
-            populated_cuts,
+            inputs.pool.active_cuts(),
             padding,
             &mut ws.scratch_basis,
             &mut ws.scratch.recon_slot_lookup,
@@ -318,17 +311,17 @@ fn map_solver_error(
 mod tests {
     use cobre_solver::{HighsSolver, SolverError, SolverInterface, StageTemplate};
 
-    use super::{Phase, StageInputs, run_stage_solve};
+    use super::{run_stage_solve, Phase, StageInputs};
     use crate::{
-        SddpError,
         basis_reconstruct::{
-            HIGHS_BASIS_STATUS_BASIC as B, HIGHS_BASIS_STATUS_LOWER as L, ReconstructionStats,
+            ReconstructionStats, HIGHS_BASIS_STATUS_BASIC as B, HIGHS_BASIS_STATUS_LOWER as L,
         },
         context::StageContext,
         cut::pool::CutPool,
         indexer::StageIndexer,
         lp_builder::PatchBuffer,
         workspace::{CapturedBasis, SolverWorkspace, WorkspaceSizing},
+        SddpError,
     };
 
     // -----------------------------------------------------------------------

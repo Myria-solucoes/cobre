@@ -1028,34 +1028,16 @@ impl<S: SolverInterface> WorkspacePool<S> {
     /// activity has actually changed since construction.
     pub fn init_cut_row_maps(
         &mut self,
-        fcf: &crate::cut::fcf::FutureCostFunction,
-        templates: &[cobre_solver::types::StageTemplate],
+        _fcf: &crate::cut::fcf::FutureCostFunction,
+        _templates: &[cobre_solver::types::StageTemplate],
     ) {
-        let num_stages = fcf.pools.len();
-        for ws in &mut self.workspaces {
-            let mut maps: Vec<crate::cut::CutRowMap> = Vec::with_capacity(num_stages);
-            let mut prev_activity: Vec<Vec<bool>> = Vec::with_capacity(num_stages);
-            for (pool, template) in fcf.pools.iter().zip(templates.iter()).take(num_stages) {
-                let pool_capacity = pool.capacity;
-                let base_row_offset = template.num_rows;
-                let mut map = crate::cut::CutRowMap::new(pool_capacity, base_row_offset);
-                // Every populated slot — including currently-inactive ones —
-                // gets a stable LP row index assigned in slot-ascending order
-                // so reactivation can resolve the row without re-mapping.
-                for slot in 0..pool.populated_count {
-                    map.insert(slot);
-                }
-                maps.push(map);
-                // Snapshot the FCF's current activity for populated slots only;
-                // `pool.active` is sized to capacity, so a verbatim clone would
-                // leave trailing `false` entries that fire spurious toggles when
-                // those slots later populate. The post-cut-sync template update
-                // step diffs this slice against the FCF's desired activity.
-                prev_activity.push(pool.active[..pool.populated_count].to_vec());
-            }
-            ws.cut_row_maps = maps;
-            ws.prev_applied_activity = prev_activity;
-        }
+        // BENCHMARK Run 1: active-only bake — leave cut_row_maps and
+        // prev_applied_activity empty so `apply_template_update`'s
+        // empty-vec early return makes it a no-op. The active-only bake
+        // already handles cut visibility via the per-iteration rebake;
+        // the post-cut-sync template update step is not needed for the
+        // pre-regression baseline. Revert to the populated-slot loop for
+        // Phase 2.
     }
 }
 
@@ -1239,8 +1221,8 @@ mod tests {
         BasisStore, CapturedBasis, ScratchBuffers, SolverWorkspace, WorkspacePool, WorkspaceSizing,
     };
     use cobre_solver::{
-        Basis, SolutionView, SolverError, SolverInterface, SolverStatistics,
         types::{RowBatch, StageTemplate},
+        Basis, SolutionView, SolverError, SolverInterface, SolverStatistics,
     };
 
     use crate::cut::fcf::FutureCostFunction;

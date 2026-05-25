@@ -28,7 +28,7 @@ use crate::{
     cut::fcf::FutureCostFunction,
     cut_selection::CutActivityUpdates,
     cut_sync::CutSyncBuffers,
-    forward::{build_warm_start_cut_batch_into, sync_forward},
+    forward::{build_cut_row_batch_into, sync_forward},
     forward_pass_state::{ForwardPassInputs, ForwardPassState},
     lower_bound::evaluate_lower_bound,
     lower_bound::{LbEvalScratchBundle, LbEvalSpec},
@@ -962,7 +962,7 @@ impl<'a, S: SolverInterface + Send, C: Communicator> TrainingSession<'a, S, C> {
         let mut total_rows_baked: u64 = 0;
         let indexer = self.training_ctx.indexer;
         for t in 0..self.ranks.num_stages {
-            build_warm_start_cut_batch_into(
+            build_cut_row_batch_into(
                 &mut self.scratch.bake_row_batches[t],
                 self.fcf,
                 t,

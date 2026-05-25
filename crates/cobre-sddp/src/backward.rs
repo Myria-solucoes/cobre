@@ -109,16 +109,16 @@ use cobre_comm::Communicator;
 use cobre_solver::{RowBatch, SolutionView, SolverInterface, SolverStatistics};
 
 use crate::{
-    SddpError,
     context::{StageContext, TrainingContext},
     cut::pool::CutPool,
     forward::write_capture_metadata,
     indexer::StageIndexer,
-    noise::{NcsNoiseOffsets, transform_inflow_noise, transform_load_noise, transform_ncs_noise},
+    noise::{transform_inflow_noise, transform_load_noise, transform_ncs_noise, NcsNoiseOffsets},
     risk_measure::RiskMeasure,
     solver_stats::SolverStatsDelta,
     state_exchange::ExchangeBuffers,
     workspace::{BasisStoreSliceMut, CapturedBasis, SolverWorkspace},
+    SddpError,
 };
 
 /// Per-`(rank, worker_id, opening)` solver delta collected during a single
@@ -526,7 +526,13 @@ fn save_basis_at_omega_zero<S: SolverInterface + Send>(
     let basis_row_capacity = base_row_count + cut_row_count;
     if let Some(captured) = basis_slice.get_mut(m, s).as_mut() {
         ws.solver.get_basis(&mut captured.basis);
-        write_capture_metadata(captured, base_row_count, cut_row_count, x_hat);
+        write_capture_metadata(
+            captured,
+            succ.successor_pool,
+            base_row_count,
+            cut_row_count,
+            x_hat,
+        );
     } else {
         let mut captured = CapturedBasis::new(
             num_cols,
@@ -536,7 +542,13 @@ fn save_basis_at_omega_zero<S: SolverInterface + Send>(
             x_hat.len(),
         );
         ws.solver.get_basis(&mut captured.basis);
-        write_capture_metadata(&mut captured, base_row_count, cut_row_count, x_hat);
+        write_capture_metadata(
+            &mut captured,
+            succ.successor_pool,
+            base_row_count,
+            cut_row_count,
+            x_hat,
+        );
         *basis_slice.get_mut(m, s) = Some(captured);
     }
 }
@@ -729,7 +741,7 @@ mod tests {
 
     use cobre_core::scenario::SamplingScheme;
 
-    use super::{BackwardResult, run_backward_pass};
+    use super::{run_backward_pass, BackwardResult};
     use crate::{
         context::{StageContext, TrainingContext},
         cut::FutureCostFunction,
@@ -1074,7 +1086,6 @@ mod tests {
         use chrono::NaiveDate;
         use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
         use cobre_core::{
-            Bus, DeficitSegment, EntityId, SystemBuilder,
             scenario::{
                 CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile,
                 InflowModel,
@@ -1083,9 +1094,10 @@ mod tests {
                 Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
                 StageStateConfig,
             },
+            Bus, DeficitSegment, EntityId, SystemBuilder,
         };
         use cobre_stochastic::context::{
-            ClassSchemes, OpeningTreeInputs, build_stochastic_context,
+            build_stochastic_context, ClassSchemes, OpeningTreeInputs,
         };
         use std::collections::BTreeMap;
 
@@ -3044,7 +3056,7 @@ mod tests {
         };
         use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
         use cobre_stochastic::context::{
-            ClassSchemes, OpeningTreeInputs, build_stochastic_context,
+            build_stochastic_context, ClassSchemes, OpeningTreeInputs,
         };
 
         let bus0 = Bus {

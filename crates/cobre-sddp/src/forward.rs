@@ -19,17 +19,17 @@ use cobre_core::{TrainingEvent, WelfordAccumulator};
 use cobre_solver::{RowBatch, SolverInterface, StageTemplate};
 use cobre_stochastic::context::ClassSchemes;
 use cobre_stochastic::{
-    ClassDimensions, ForwardSampler, ForwardSamplerConfig, build_forward_sampler,
+    build_forward_sampler, ClassDimensions, ForwardSampler, ForwardSamplerConfig,
 };
 
 use crate::{
     context::{StageContext, TrainingContext},
-    cut::FutureCostFunction,
     cut::pool::CutPool,
+    cut::FutureCostFunction,
     error::SddpError,
     indexer::StageIndexer,
     lp_builder::COST_SCALE_FACTOR,
-    noise::{NcsNoiseOffsets, transform_inflow_noise, transform_load_noise, transform_ncs_noise},
+    noise::{transform_inflow_noise, transform_load_noise, transform_ncs_noise, NcsNoiseOffsets},
     solver_stats::SolverStatsDelta,
     trajectory::TrajectoryRecord,
     workspace::{BasisStore, BasisStoreSliceMut, CapturedBasis, SolverWorkspace},
@@ -911,12 +911,16 @@ pub(crate) struct StageKey<'a> {
 #[allow(clippy::cast_possible_truncation)]
 pub(crate) fn write_capture_metadata(
     captured: &mut CapturedBasis,
+    pool: &CutPool,
     base_row_count: usize,
     cut_row_count: usize,
     current_state: &[f64],
 ) {
     captured.cut_row_slots.clear();
-    for slot in 0..cut_row_count {
+    // BENCHMARK Run 1: active-only bake — LP rows correspond to active cuts in
+    // active_cuts() iteration order. Record those slot ids so the next
+    // reconstruct can match them. Revert to the slot-index loop for Phase 2.
+    for (slot, _intercept, _coeffs) in pool.active_cuts().take(cut_row_count) {
         captured.cut_row_slots.push(slot as u32);
     }
     captured.state_at_capture.clear();
@@ -1227,6 +1231,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         ws.solver.get_basis(&mut captured.basis);
         write_capture_metadata(
             captured,
+            pool,
             ctx.templates[t].num_rows,
             cut_row_count,
             &ws.current_state[..indexer.n_state],
@@ -1242,6 +1247,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         ws.solver.get_basis(&mut captured.basis);
         write_capture_metadata(
             &mut captured,
+            pool,
             ctx.templates[t].num_rows,
             cut_row_count,
             &ws.current_state[..indexer.n_state],
@@ -1409,17 +1415,16 @@ mod tests {
     use cobre_solver::{
         Basis, LpSolution, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
     };
+    use cobre_stochastic::context::{build_stochastic_context, ClassSchemes, OpeningTreeInputs};
     use cobre_stochastic::StochasticContext;
-    use cobre_stochastic::context::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
     use cobre_comm::LocalBackend;
 
     use super::{
-        ForwardPassBatch, ForwardResult, SyncResult, build_cut_row_batch,
-        build_delta_cut_row_batch_into, partition, run_forward_pass, sync_forward,
+        build_cut_row_batch, build_delta_cut_row_batch_into, partition, run_forward_pass,
+        sync_forward, ForwardPassBatch, ForwardResult, SyncResult,
     };
     use crate::{
-        StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
         config::{CutManagementConfig, EventConfig, LoopConfig},
         context::{StageContext, TrainingContext},
         cut::FutureCostFunction,
@@ -1429,6 +1434,7 @@ mod tests {
         risk_measure::RiskMeasure,
         trajectory::TrajectoryRecord,
         workspace::{BackwardAccumulators, BasisStore, SolverWorkspace},
+        StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
     };
 
     // ── Mock solver ──────────────────────────────────────────────────────────
