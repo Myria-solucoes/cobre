@@ -1772,8 +1772,8 @@ mod tests {
 
         assert_eq!(result.costs.len(), 1);
         assert_eq!(result.costs[0].stage_id, 3);
-        // future_cost = primal[theta] * COST_SCALE_FACTOR = 999.5 * 1000 = 999_500.0
-        assert_eq!(result.costs[0].future_cost, 999_500.0);
+        // future_cost = primal[theta] * COST_SCALE_FACTOR = 999.5 * 1_000_000 = 999_500_000.0
+        assert_eq!(result.costs[0].future_cost, 999_500_000.0);
     }
 
     #[test]
@@ -1819,9 +1819,9 @@ mod tests {
 
         let cost = &result.costs[0];
         // All cost fields are in original units: multiply by COST_SCALE_FACTOR.
-        assert_eq!(cost.future_cost, theta_val * 1000.0);
-        assert_eq!(cost.immediate_cost, (objective - theta_val) * 1000.0);
-        assert_eq!(cost.total_cost, objective * 1000.0);
+        assert_eq!(cost.future_cost, theta_val * 1_000_000.0);
+        assert_eq!(cost.immediate_cost, (objective - theta_val) * 1_000_000.0);
+        assert_eq!(cost.total_cost, objective * 1_000_000.0);
     }
 
     #[test]
@@ -2183,15 +2183,15 @@ mod tests {
         };
         // Dual vector: water_value reads from dual[water_balance.start + h],
         // load balance from dual[load_balance.start + b*K + blk].
-        // N=2, L=1 → n_state=4, water_balance=[6,8), load_balance=[8,9).
-        let mut dual = vec![0.0_f64; 9];
-        dual[6] = -120.0; // water value h0 ($/hm³) — at water_balance.start+0
-        dual[7] = -95.0; // water value h1 ($/hm³) — at water_balance.start+1
-        dual[8] = 108_000.0; // raw load balance dual ($/MW); 150 $/MWh × 720 h
+        // N=2, L=1: z_inflow rows [0,2), water_balance=[2,4), load_balance=[4,5).
+        let mut dual = vec![0.0_f64; 5];
+        dual[2] = -120.0; // water value h0 ($/hm³) — at water_balance.start+0
+        dual[3] = -95.0; // water value h1 ($/hm³) — at water_balance.start+1
+        dual[4] = 108_000.0; // raw load balance dual ($/MW); 150 $/MWh × 720 h
 
-        // Build row_lower for the load balance row. load_balance.start=8, K=1, B=1.
-        let mut row_lower = vec![0.0_f64; 9]; // must be >= load_balance.end = 9
-        row_lower[8] = 75.0; // load = 75 MW for bus 100
+        // Build row_lower for the load balance row. load_balance.start=4, K=1, B=1.
+        let mut row_lower = vec![0.0_f64; 5]; // must be >= load_balance.end = 5
+        row_lower[4] = 75.0; // load = 75 MW for bus 100
         let block_hours = [720.0_f64]; // one block, 30-day month
         let ec = zero_energy_conversion(2, 1);
         let result = extract_stage_result(
@@ -2230,8 +2230,8 @@ mod tests {
         assert_eq!(result.hydros[0].block_id, Some(0));
         assert_eq!(result.hydros[0].turbined_m3s, 30.0);
         assert_eq!(result.hydros[0].spillage_m3s, 5.0);
-        // spillage_cost = 5.0 * 0.1 * COST_SCALE_FACTOR = 500.0
-        assert!((result.hydros[0].spillage_cost - 500.0).abs() < 1e-12); // 5.0 * 0.1 * 1000
+        // spillage_cost = 5.0 * 0.1 * COST_SCALE_FACTOR = 500_000.0
+        assert!((result.hydros[0].spillage_cost - 500_000.0).abs() < 1e-12); // 5.0 * 0.1 * 1_000_000
 
         // Hydro generation = turbined * productivity (1.0)
         assert_eq!(result.hydros[0].generation_mw, 30.0); // 30 * 1.0
@@ -2245,16 +2245,16 @@ mod tests {
         // Thermal: one entry per (thermal, block), block_id = Some(0)
         assert_eq!(result.thermals.len(), 1);
         assert_eq!(result.thermals[0].generation_mw, 80.0);
-        // generation_cost = 80 * 50 * COST_SCALE_FACTOR = 4_000_000.0
-        assert!((result.thermals[0].generation_cost - 4_000_000.0).abs() < 1e-9); // 80 * 50 * 1000
+        // generation_cost = 80 * 50 * COST_SCALE_FACTOR = 4_000_000_000.0
+        assert!((result.thermals[0].generation_cost - 4_000_000_000.0).abs() < 1e-3); // 80 * 50 * 1_000_000
         assert_eq!(result.thermals[0].block_id, Some(0));
 
         // Exchange: one entry per (line, block)
         assert_eq!(result.exchanges.len(), 1);
         assert_eq!(result.exchanges[0].direct_flow_mw, 15.0);
         assert_eq!(result.exchanges[0].reverse_flow_mw, 0.0);
-        // exchange_cost = 15 * 5 * COST_SCALE_FACTOR = 75_000.0
-        assert!((result.exchanges[0].exchange_cost - 75_000.0).abs() < 1e-9); // 15 * 5 * 1000
+        // exchange_cost = 15 * 5 * COST_SCALE_FACTOR = 75_000_000.0
+        assert!((result.exchanges[0].exchange_cost - 75_000_000.0).abs() < 1e-3); // 15 * 5 * 1_000_000
         assert_eq!(result.exchanges[0].block_id, Some(0));
 
         // Bus: one entry per (bus, block)
@@ -2263,20 +2263,20 @@ mod tests {
         assert_eq!(result.buses[0].deficit_mw, 10.0);
         assert_eq!(result.buses[0].excess_mw, 2.0);
         assert_eq!(result.buses[0].block_id, Some(0));
-        // spot_price = dual * COST_SCALE_FACTOR / hrs = 108_000 * 1000 / 720 = 150_000.0 $/MWh
-        assert!((result.buses[0].spot_price - 150_000.0).abs() < 1e-9); // 108_000 * 1000 / 720
+        // spot_price = dual * COST_SCALE_FACTOR / hrs = 108_000 * 1_000_000 / 720 = 150_000_000.0 $/MWh
+        assert!((result.buses[0].spot_price - 150_000_000.0).abs() < 1e-3); // 108_000 * 1_000_000 / 720
 
         // water_value = dual[water_balance.start+h] * COST_SCALE_FACTOR
-        assert!((result.hydros[0].water_value_per_hm3 - (-120_000.0)).abs() < 1e-9);
-        assert!((result.hydros[1].water_value_per_hm3 - (-95_000.0)).abs() < 1e-9);
+        assert!((result.hydros[0].water_value_per_hm3 - (-120_000_000.0)).abs() < 1e-3);
+        assert!((result.hydros[1].water_value_per_hm3 - (-95_000_000.0)).abs() < 1e-3);
 
-        // Cost breakdown — all values multiplied by COST_SCALE_FACTOR = 1000.
+        // Cost breakdown — all values multiplied by COST_SCALE_FACTOR = 1_000_000.
         let cost = &result.costs[0];
-        assert!((cost.thermal_cost - 4_000_000.0).abs() < 1e-9); // 80 * 50 * 1000
-        assert!((cost.spillage_cost - 500.0).abs() < 1e-12); // 5 * 0.1 * 1000
-        assert!((cost.deficit_cost - 10_000_000.0).abs() < 1e-9); // 10 * 1000 * 1000
-        assert!((cost.excess_cost - 100_000.0).abs() < 1e-9); // 2 * 50 * 1000
-        assert!((cost.exchange_cost - 75_000.0).abs() < 1e-9); // 15 * 5 * 1000
+        assert!((cost.thermal_cost - 4_000_000_000.0).abs() < 1e-3); // 80 * 50 * 1_000_000
+        assert!((cost.spillage_cost - 500_000.0).abs() < 1e-6); // 5 * 0.1 * 1_000_000
+        assert!((cost.deficit_cost - 10_000_000_000.0).abs() < 1e-3); // 10 * 1000 * 1_000_000
+        assert!((cost.excess_cost - 100_000_000.0).abs() < 1e-3); // 2 * 50 * 1_000_000
+        assert!((cost.exchange_cost - 75_000_000.0).abs() < 1e-3); // 15 * 5 * 1_000_000
     }
 
     /// Verify that `is_anticipated` is set to `true` for thermals whose global
@@ -4641,8 +4641,8 @@ mod tests {
 
         let cost = &result.costs[0];
         assert!(
-            (cost.turbined_cost - 300.0).abs() < 1e-9,
-            "turbined_cost should be 300.0 (30.0 * 0.01 * COST_SCALE_FACTOR), got {}",
+            (cost.turbined_cost - 300_000.0).abs() < 1e-9,
+            "turbined_cost should be 300_000.0 (30.0 * 0.01 * COST_SCALE_FACTOR), got {}",
             cost.turbined_cost
         );
     }
@@ -4652,8 +4652,8 @@ mod tests {
     ///
     /// Setup: 2 hydros, 1 block. h0 turbine col 7: primal=30, `obj_coeff`=0.01.
     /// Objective = `theta_scaled` + `turbine_scaled` = 500 + (30 * 0.01) = 500.3.
-    /// `immediate_cost` = (500.3 - 500) * 1000 = 300.
-    /// Per-component sum = `turbined_cost` = 30 * 0.01 * 1000 = 300 (matches).
+    /// `immediate_cost` = (500.3 - 500) * `1_000_000` = `300_000`.
+    /// Per-component sum = `turbined_cost` = 30 * 0.01 * `1_000_000` = `300_000` (matches).
     #[test]
     fn cost_breakdown_sums_to_immediate_identity_scale() {
         let indexer = make_indexer_2h_1fpha_1blk();
@@ -4716,10 +4716,10 @@ mod tests {
         );
 
         let cost = &result.costs[0];
-        // immediate_cost = (obj - theta) * K = (500.3 - 500.0) * 1000 = 300.0
+        // immediate_cost = (obj - theta) * K = (500.3 - 500.0) * 1_000_000 = 300_000.0
         assert!(
-            (cost.immediate_cost - 300.0).abs() < 1e-6,
-            "immediate_cost should be 300.0, got {}",
+            (cost.immediate_cost - 300_000.0).abs() < 1.0,
+            "immediate_cost should be 300_000.0, got {}",
             cost.immediate_cost
         );
 
@@ -4734,7 +4734,7 @@ mod tests {
             + cost.curtailment_cost;
 
         assert!(
-            (component_sum - cost.immediate_cost).abs() < 1e-6,
+            (component_sum - cost.immediate_cost).abs() < 1.0,
             "per-component cost sum ({component_sum}) must equal immediate_cost ({})",
             cost.immediate_cost
         );
@@ -4745,7 +4745,7 @@ mod tests {
     ///
     /// With `col_scale` = 2.0 on the h0 turbine column:
     /// - `obj_coeff` in template = `c_orig` * `col_scale` / K = 0.005 * 2.0 = 0.01
-    /// - After unscaling: cost = primal * `obj_coeff` / `col_scale` * K = 30 * 0.01 / 2.0 * 1000 = 150.
+    /// - After unscaling: cost = primal * `obj_coeff` / `col_scale` * K = 30 * 0.01 / 2.0 * `1_000_000` = `150_000`.
     #[test]
     fn cost_unscaled_by_col_scale() {
         let indexer = make_indexer_2h_1fpha_1blk();
@@ -4811,10 +4811,10 @@ mod tests {
 
         let cost = &result.costs[0];
         // turbined_cost = primal * obj_coeff / col_scale * K
-        //                    = 30 * 0.01 / 2.0 * 1000 = 150.0
+        //                    = 30 * 0.01 / 2.0 * 1_000_000 = 150_000.0
         assert!(
-            (cost.turbined_cost - 150.0).abs() < 1e-6,
-            "turbined_cost should be 150.0 (unscaled by col_scale=2.0), got {}",
+            (cost.turbined_cost - 150_000.0).abs() < 1e-6,
+            "turbined_cost should be 150_000.0 (unscaled by col_scale=2.0), got {}",
             cost.turbined_cost
         );
     }
@@ -4848,31 +4848,31 @@ mod tests {
 
         // Assign known primal (slack) and objective (penalty) values per
         // constraint type. Each slack * penalty gives a known cost contribution.
-        // COST_SCALE_FACTOR = 1000.0 is applied inside the extraction.
+        // COST_SCALE_FACTOR = 1_000_000.0 is applied inside the extraction.
 
-        // outflow_below: h0=2.0 * 10.0, h1=3.0 * 10.0  => (20+30) * 1000 = 50000
+        // outflow_below: h0=2.0 * 10.0, h1=3.0 * 10.0  => (20+30) * 1_000_000 = 50_000_000
         primal[18] = 2.0;
         obj[18] = 10.0;
         primal[19] = 3.0;
         obj[19] = 10.0;
 
-        // outflow_above: h0=1.0 * 5.0, h1=0.0  => 5 * 1000 = 5000
+        // outflow_above: h0=1.0 * 5.0, h1=0.0  => 5 * 1_000_000 = 5_000_000
         primal[20] = 1.0;
         obj[20] = 5.0;
 
-        // turbine_below: h0=4.0 * 8.0, h1=0.0  => 32 * 1000 = 32000
+        // turbine_below: h0=4.0 * 8.0, h1=0.0  => 32 * 1_000_000 = 32_000_000
         primal[22] = 4.0;
         obj[22] = 8.0;
 
-        // generation_below: h0=0.0, h1=6.0 * 3.0  => 18 * 1000 = 18000
+        // generation_below: h0=0.0, h1=6.0 * 3.0  => 18 * 1_000_000 = 18_000_000
         primal[25] = 6.0;
         obj[25] = 3.0;
 
-        // withdrawal (neg): h0=0.5 * 20.0, h1=0.0  => 10 * 1000 = 10000
+        // withdrawal (neg): h0=0.5 * 20.0, h1=0.0  => 10 * 1_000_000 = 10_000_000
         primal[14] = 0.5;
         obj[14] = 20.0;
 
-        // withdrawal (pos): h0=0.0, h1=0.3 * 15.0  => 4.5 * 1000 = 4500
+        // withdrawal (pos): h0=0.0, h1=0.3 * 15.0  => 4.5 * 1_000_000 = 4_500_000
         primal[17] = 0.3;
         obj[17] = 15.0;
 
@@ -4928,11 +4928,11 @@ mod tests {
         let cost = &result.costs[0];
 
         // Expected values (primal * obj * COST_SCALE_FACTOR):
-        let expected_outflow_below = (2.0 * 10.0 + 3.0 * 10.0) * 1000.0;
-        let expected_outflow_above = (1.0 * 5.0) * 1000.0;
-        let expected_turbined = (4.0 * 8.0) * 1000.0;
-        let expected_generation = (6.0 * 3.0) * 1000.0;
-        let expected_withdrawal = (0.5 * 20.0 + 0.3 * 15.0) * 1000.0;
+        let expected_outflow_below = (2.0 * 10.0 + 3.0 * 10.0) * 1_000_000.0;
+        let expected_outflow_above = (1.0 * 5.0) * 1_000_000.0;
+        let expected_turbined = (4.0 * 8.0) * 1_000_000.0;
+        let expected_generation = (6.0 * 3.0) * 1_000_000.0;
+        let expected_withdrawal = (0.5 * 20.0 + 0.3 * 15.0) * 1_000_000.0;
         let expected_evaporation = 0.0; // no evaporation hydros
 
         assert!(

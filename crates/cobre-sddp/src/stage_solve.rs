@@ -211,17 +211,22 @@ pub fn run_stage_solve<'ws, S: SolverInterface>(
         // excess BASIC in the non-cut template rows), and (b) the Scheme 2
         // fallback tail-override in reconstruct_basis where the activity-
         // driven LOWER guesses exceed the preserved-LOWER promotion budget.
-        // base_row_for_invariant = n_state bounds promotion to rows
-        // [n_state, num_row); state-fixing rows at [0, n_state) are
-        // equality constraints and never BASIC, so excluding them is safe.
         //
         // num_row_for_invariant uses the actual reconstructed basis length
         // rather than baked.num_rows because active_cuts() may include delta
         // cuts (added during the current backward pass) that extend beyond
         // the baked template row count. The two values agree when there are
         // no delta cuts (forward path and first backward stage per iteration).
+        //
+        // base_row_for_invariant = 0 because the demotion loop only touches
+        // rows whose current status is BASIC, and equality rows (z_inflow,
+        // water_balance, FPHA, evaporation) are never BASIC by LP duality.
+        // Scanning from index 0 is therefore safe and matches the demotion
+        // semantics post-Phase 1 (state-fixing rows removed, all remaining
+        // non-cut rows are a mix of equalities and inequalities, the former
+        // automatically excluded by the BASIC check inside the loop).
         let num_row_for_invariant = ws.scratch_basis.row_status.len();
-        let base_row_for_invariant = inputs.indexer.n_state;
+        let base_row_for_invariant = 0;
 
         enforce_basic_count_invariant(
             &mut ws.scratch_basis,

@@ -1498,6 +1498,56 @@ impl StageIndexer {
         }
     }
 
+    /// Map a state-vector index to the LP column pinned by
+    /// [`fill_col_state_patches`](crate::lp_builder::PatchBuffer::fill_col_state_patches).
+    ///
+    /// This is the **incoming-state column** — the column whose bound is set to
+    /// `lb = ub = v` when state-fixing is applied via `set_col_bounds`. The
+    /// column indices returned here are exactly those written into
+    /// `PatchBuffer::col_indices[..state_col_patch_count()]` by
+    /// `fill_col_state_patches`, in state-vector order.
+    ///
+    /// Use this method in the backward pass to read `view.reduced_costs[col]`
+    /// for the cut subgradient, one entry per state-vector component
+    /// `j ∈ [0, n_state)`.
+    ///
+    /// ## Mapping by range
+    ///
+    /// - `j ∈ [0, N)` (storage): returns `self.storage_in.start + j`.
+    /// - `j ∈ [N, N*(1+L))` (AR lags): returns
+    ///   `self.inflow_lags.start + (j − N)`.
+    /// - `j ∈ [N*(1+L), n_state)` (anticipated state): returns
+    ///   `self.anticipated_state.start + (j − N*(1+L))`.
+    ///
+    /// ## Contrast with [`state_to_lp_column`]
+    ///
+    /// [`state_to_lp_column`] returns the **outgoing** column used for
+    /// cut-row coefficient construction in the forward pass (`forward.rs`).
+    /// For the storage range, `state_to_lp_column(j) = j` (the outgoing
+    /// storage column), while this method returns `storage_in.start + j`
+    /// (the incoming storage column). The two columns are related via the
+    /// water-balance equality row, and by KKT duality the reduced cost on
+    /// the incoming column equals the dual of the equivalent equality row
+    /// that a row-based state-fixing formulation would produce.
+    ///
+    /// [`state_to_lp_column`]: Self::state_to_lp_column
+    #[inline]
+    #[must_use]
+    pub fn state_to_lp_incoming_column(&self, j: usize) -> usize {
+        let n = self.hydro_count;
+        let lag_end = n * (1 + self.max_par_order);
+        if j < n {
+            // Storage range: incoming storage column.
+            self.storage_in.start + j
+        } else if j < lag_end {
+            // AR lag range: incoming lag column.
+            self.inflow_lags.start + (j - n)
+        } else {
+            // Anticipated-state range: anticipated state column.
+            self.anticipated_state.start + (j - lag_end)
+        }
+    }
+
     /// Iterator over `(local_idx, lp_column)` for anticipated decisions active
     /// at `stage_idx`.
     ///
@@ -4410,6 +4460,194 @@ mod tests {
         let idx = StageIndexer::new(3, 2);
         assert_eq!(idx.anticipated_state_out, 0..0);
         assert_eq!(idx.n_state, 9);
+    }
+
+    // ── state_to_lp_incoming_column tests ────────────────────────────────────
+
+    /// Storage range: for a `with_equipment` indexer with `N=3, L=2, A=0`,
+    /// `state_to_lp_incoming_column(j)` for `j ∈ [0, N)` returns
+    /// `storage_in.start + j`.
+    #[test]
+    fn state_to_lp_incoming_column_storage_range() {
+        // N=3, L=2: storage_in.start = N*(2+L) = 3*4 = 12.
+        let idx = StageIndexer::with_equipment_and_evaporation(
+            &eq_with_anticipated(3, 2, 0, 0, 1, 1, false, 0, 0),
+            &fpha(vec![], vec![]),
+            &evap(vec![]),
+        );
+        // storage_in.start should be N*(2+L) = 12.
+        assert_eq!(idx.storage_in.start, 12);
+        for j in 0..3_usize {
+            assert_eq!(
+                idx.state_to_lp_incoming_column(j),
+                idx.storage_in.start + j,
+                "j={j}: expected storage_in.start + {j}"
+            );
+        }
+    }
+
+    /// AR lag range: for a `with_equipment` indexer with `N=3, L=2, A=0`,
+    /// `state_to_lp_incoming_column(j)` for `j ∈ [N, N*(1+L))` returns
+    /// `inflow_lags.start + (j − N)`.
+    #[test]
+    fn state_to_lp_incoming_column_lag_range() {
+        // N=3, L=2: inflow_lags = 3..9.
+        let idx = StageIndexer::with_equipment_and_evaporation(
+            &eq_with_anticipated(3, 2, 0, 0, 1, 1, false, 0, 0),
+            &fpha(vec![], vec![]),
+            &evap(vec![]),
+        );
+        assert_eq!(idx.inflow_lags.start, 3);
+        for j in 3..9_usize {
+            assert_eq!(
+                idx.state_to_lp_incoming_column(j),
+                idx.inflow_lags.start + (j - 3),
+                "j={j}: expected inflow_lags.start + {}",
+                j - 3
+            );
+        }
+    }
+
+    /// Anticipated-state range: for an indexer with `N=0, L=0, A=1, K=2`,
+    /// `state_to_lp_incoming_column(j)` for `j ∈ [0, n_state)` returns
+    /// `anticipated_state.start + j` (since `lag_end` = N*(1+L) = 0).
+    #[test]
+    fn state_to_lp_incoming_column_anticipated_range() {
+        // N=0, L=0, A=1, K=2: n_state = 0 + 1*2 = 2.
+        // anticipated_state.start = N*(1+L) = 0.
+        let idx = StageIndexer::with_equipment_and_evaporation(
+            &eq_with_anticipated(0, 0, 0, 0, 1, 1, false, 1, 2),
+            &fpha(vec![], vec![]),
+            &evap(vec![]),
+        );
+        assert_eq!(idx.anticipated_state.start, 0);
+        assert_eq!(idx.n_state, 2);
+        for j in 0..2_usize {
+            assert_eq!(
+                idx.state_to_lp_incoming_column(j),
+                idx.anticipated_state.start + j,
+                "j={j}: expected anticipated_state.start + {j}"
+            );
+        }
+    }
+
+    /// Combined boundary-case test: `N=3, L=2, A=1, K=2`.
+    /// Checks j = 0, 2, 3, 8, 9, 10 (the boundary points from the spec).
+    #[test]
+    fn state_to_lp_incoming_column_combined_with_equipment_indexer() {
+        // N=3, L=2, A=1, K=2:
+        //   n_state = N*(1+L) + A*K = 3*3 + 1*2 = 11.
+        //   storage_in.start = N*(2+L) + A*K_max = 3*4 + 1*2 = 14.
+        //   inflow_lags.start = N = 3.
+        //   anticipated_state.start = N*(1+L) = 9.
+        //   lag_end = N*(1+L) = 9.
+        let idx = StageIndexer::with_equipment_and_evaporation(
+            &eq_with_anticipated(3, 2, 0, 0, 1, 1, false, 1, 2),
+            &fpha(vec![], vec![]),
+            &evap(vec![]),
+        );
+        assert_eq!(idx.n_state, 11);
+        // j=0: storage range → storage_in.start + 0.
+        assert_eq!(
+            idx.state_to_lp_incoming_column(0),
+            idx.storage_in.start,
+            "j=0"
+        );
+        // j=2: storage range → storage_in.start + 2.
+        assert_eq!(
+            idx.state_to_lp_incoming_column(2),
+            idx.storage_in.start + 2,
+            "j=2"
+        );
+        // j=3: first lag → inflow_lags.start + 0.
+        assert_eq!(
+            idx.state_to_lp_incoming_column(3),
+            idx.inflow_lags.start,
+            "j=3"
+        );
+        // j=8: last lag → inflow_lags.start + 5.
+        assert_eq!(
+            idx.state_to_lp_incoming_column(8),
+            idx.inflow_lags.start + 5,
+            "j=8"
+        );
+        // j=9: first anticipated-state → anticipated_state.start + 0.
+        assert_eq!(
+            idx.state_to_lp_incoming_column(9),
+            idx.anticipated_state.start,
+            "j=9"
+        );
+        // j=10: last anticipated-state → anticipated_state.start + 1.
+        assert_eq!(
+            idx.state_to_lp_incoming_column(10),
+            idx.anticipated_state.start + 1,
+            "j=10"
+        );
+        // All returned columns must be within the LP's column range.
+        for j in 0..idx.n_state {
+            let col = idx.state_to_lp_incoming_column(j);
+            assert!(
+                col < idx.theta + 1,
+                "j={j}: column {col} out of range (theta={})",
+                idx.theta
+            );
+        }
+    }
+
+    /// For the lag range, `state_to_lp_incoming_column` and `state_to_lp_column`
+    /// return different values under `with_equipment` (the former returns the
+    /// incoming-lag column, the latter returns the `z_inflow` or lag-out column).
+    /// For the storage range under `with_equipment`, the results differ because
+    /// `storage_in.start > 0` while `state_to_lp_column` returns `j` (outgoing,
+    /// which starts at column 0).
+    #[test]
+    fn state_to_lp_incoming_column_differs_from_state_to_lp_column_for_lag() {
+        // N=2, L=1: storage_in.start = N*(2+L) = 2*3 = 6.
+        // state_to_lp_column(0) = 0 (outgoing storage).
+        // state_to_lp_incoming_column(0) = storage_in.start + 0 = 6.
+        let idx = StageIndexer::with_equipment_and_evaporation(
+            &eq_with_anticipated(2, 1, 0, 0, 1, 1, false, 0, 0),
+            &fpha(vec![], vec![]),
+            &evap(vec![]),
+        );
+        // Storage range: incoming ≠ outgoing under with_equipment.
+        assert_ne!(
+            idx.state_to_lp_incoming_column(0),
+            idx.state_to_lp_column(0),
+            "storage range should differ: incoming={} outgoing={}",
+            idx.state_to_lp_incoming_column(0),
+            idx.state_to_lp_column(0)
+        );
+        // j=0: incoming returns storage_in.start, outgoing returns 0.
+        assert_eq!(idx.state_to_lp_incoming_column(0), idx.storage_in.start);
+        assert_eq!(idx.state_to_lp_column(0), 0);
+
+        // Lag range (j=2, j=3): incoming returns inflow_lags column;
+        // outgoing returns z_inflow (lag=0) or lag-out (lag>=1) column.
+        // j=2: lag 0, hydro 0. incoming = inflow_lags.start + 0.
+        //                       outgoing = z_inflow.start + 0.
+        assert_eq!(
+            idx.state_to_lp_incoming_column(2),
+            idx.inflow_lags.start,
+            "j=2 incoming should be inflow_lags.start"
+        );
+        assert_eq!(
+            idx.state_to_lp_column(2),
+            idx.z_inflow.start,
+            "j=2 outgoing should be z_inflow.start"
+        );
+        assert_ne!(
+            idx.state_to_lp_incoming_column(2),
+            idx.state_to_lp_column(2),
+            "lag range should differ for j=2"
+        );
+        // j=3: lag 0, hydro 1. incoming = inflow_lags.start + 1.
+        //                       outgoing = z_inflow.start + 1.
+        assert_ne!(
+            idx.state_to_lp_incoming_column(3),
+            idx.state_to_lp_column(3),
+            "lag range should differ for j=3"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────

@@ -96,7 +96,7 @@ const MAX_GEN_ANT: f64 = 50.0;
 // template.rs). Duals therefore live in scaled units too, and the cut storage
 // at backward.rs preserves that scaling end-to-end (forward.rs consumes them
 // unrescaled).
-const COST_SCALE_FACTOR: f64 = 1_000.0;
+const COST_SCALE_FACTOR: f64 = 1_000_000.0;
 
 // Closed-form expected coefficients at stage 0 FCF, in scaled cost units.
 // All three slots carry the same magnitude: -c_reg / COST_SCALE * BLOCK_HOURS = -0.1.
@@ -114,9 +114,9 @@ const COST_SCALE_FACTOR: f64 = 1_000.0;
 // Slot 0: dual of the same-stage fishing equality at stage 1, which is active
 //   under the always-active fishing predicate (indexer.rs `is_anticipated_fishing_active`).
 //   Analogous to the K=2 slot-0 result.
-const EXPECTED_COEFF_SLOT2: f64 = -C_REG / COST_SCALE_FACTOR * BLOCK_HOURS; // = -0.1
-const EXPECTED_COEFF_SLOT1: f64 = -C_REG / COST_SCALE_FACTOR * BLOCK_HOURS; // = -0.1
-const EXPECTED_COEFF_SLOT0: f64 = -C_REG / COST_SCALE_FACTOR * BLOCK_HOURS; // = -0.1
+const EXPECTED_COEFF_SLOT2: f64 = -C_REG / COST_SCALE_FACTOR * BLOCK_HOURS; // = -0.0001
+const EXPECTED_COEFF_SLOT1: f64 = -C_REG / COST_SCALE_FACTOR * BLOCK_HOURS; // = -0.0001
+const EXPECTED_COEFF_SLOT0: f64 = -C_REG / COST_SCALE_FACTOR * BLOCK_HOURS; // = -0.0001
 const TOL: f64 = 1e-6;
 
 // Thermal column ordering inside the built `System`. `System::build()` sorts

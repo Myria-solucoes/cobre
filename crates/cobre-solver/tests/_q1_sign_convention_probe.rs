@@ -1,7 +1,7 @@
-//! Q1 microbenchmark — sign convention of `reduced_cost` for fixed-at-bound columns.
+//! `Q1` microbenchmark — sign convention of `reduced_cost` for fixed-at-bound columns.
 //!
 //! For the LP simplification plan (column-bound state-fixing): we need to know
-//! whether HiGHS reports `reduced_cost` for a column with `lb == ub` such that
+//! whether `HiGHS` reports `reduced_cost` for a column with `lb == ub` such that
 //! it numerically matches the row dual of the equivalent equality row.
 //!
 //! Two equivalent LPs are constructed:
@@ -25,7 +25,12 @@
 
 #![cfg_attr(
     test,
-    allow(clippy::unwrap_used, clippy::float_cmp, clippy::print_stdout)
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::float_cmp,
+        clippy::print_stdout
+    )
 )]
 
 use cobre_solver::{HighsSolver, RowBatch, SolverInterface, StageTemplate};
@@ -72,7 +77,7 @@ fn q1_sign_convention_row_equality_vs_column_bound() {
     let dual_r = view_r.dual.to_vec();
     let rc_r = view_r.reduced_costs.to_vec();
     let obj_r = view_r.objective;
-    drop(view_r);
+    // view_r is Copy; let the borrow end naturally by not using it further.
 
     // ── LP-C: column-bound variant ─────────────────────────────────────────
     // 3 columns, 1 row: row 0 = x2+x3 >= 4. x1 is fixed via col bounds.
@@ -104,7 +109,7 @@ fn q1_sign_convention_row_equality_vs_column_bound() {
     let dual_c = view_c.dual.to_vec();
     let rc_c = view_c.reduced_costs.to_vec();
     let obj_c = view_c.objective;
-    drop(view_c);
+    // view_c is Copy; let the borrow end naturally by not using it further.
 
     println!("\n=== LP-R (equality-row variant) ===");
     println!("  primal x        = {x_r:?}");

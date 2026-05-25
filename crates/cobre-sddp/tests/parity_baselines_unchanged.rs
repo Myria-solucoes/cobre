@@ -37,63 +37,63 @@ use std::path::{Path, PathBuf};
 const EXPECTED_HASHES: &[(&str, &str)] = &[
     (
         "D01",
-        "93a6d643a1e0aad4b2d23260c05c7f2fec55f4084948a84ab4ac48dc8dc974c2",
+        "6f754531715e6e574c0a3d96664fecdf650cc6ecb07abde124ea73e49588750f",
     ),
     (
         "D02",
-        "02057f4df2b03630de34039dc8274caf22e27eedff6668268f11727edccbfa4d",
+        "70e3e1a268ced563f15dcd7471fe408e1cc407a1aca1723a93a6dd8fe7845797",
     ),
     (
         "D03",
-        "dc80579fd558423040e5e47a4827cd48cb843dc4d8ce24475ce4ca9525ff1e4e",
+        "4f53e5961ddca1d07a970c006d8eb3f11ee12761aba76d5b632401cafc3fe596",
     ),
     (
         "D04",
-        "41a3a7a6dc9a918276ba5e6a1fd72f235640566ea7cfed93f4402c242363ceb9",
+        "0fe09e7e7c9a9b4b920a785b6b2ece208d38779d68e22c3e7bc6f0fffe339775",
     ),
     (
         "D05",
-        "7a887f1762ed147c65442c6e6ddec4e8db6b5309b7a2cfd2440a64529f7cd8b3",
+        "5592a33c1b26f1907e8154f3d17fd2dcd9e3c6598576ee42e96ef17d01fd0b83",
     ),
     (
         "D06",
-        "7e089dbeac378cc286721e7fad9dd13d707fe8421d1248f2481e8716a815742c",
+        "b1511f8e7b7406ba190699222a52e0383aad25ee1e95d03c1177c0e1e77efac0",
     ),
     (
         "D07",
-        "5b39ddf297c6f32c61578b38d3121d66b7e2539b13cb81f093e1bd25a6872f28",
+        "ade7d37e9a018eefc6b34a4ab024cda80fd8d60b70778ba8c0ddaaec0745546b",
     ),
     (
         "D08",
-        "d5dd47c2a9946ed5dd6d24241e0b5100b1b8123215eb2ab76cdd68f3ee2d3297",
+        "69b23609a36d9a67ae63e8d2c466bf955142c2f10aa90131fa870e4c7a570d99",
     ),
     (
         "D09",
-        "4c4ae3bd684b0bb770267e93e7b9fd5f75d067b91a054974d14e83c7432bf919",
+        "b459b9dc1b63fd540308445ff1016deee2dc05de872cb0b2381d7b0c74b57254",
     ),
     (
         "D10",
-        "db4f9fcdfc76533cff9ee77ca51d551d354db40da44a0207bff57c0eebb50d00",
+        "0f846604dab0dc09f52e476fd2a837a4613f3d2ebcb71722c84bc4a5295b33a4",
     ),
     (
         "D11",
-        "4f5fe3be2084e07ecd401f85d446ae73ff882e58838cd18464337a566f4c5bd3",
+        "c98e6883311d88245a1bd058ec6a6d81395e649a01294001e7479e83799194da",
     ),
     (
         "D13",
-        "30b08bcd0a08a3b2a30bfa401725e452c1b2b5c258a8d590884b777b61e04abe",
+        "037e7bc27e5711085cae9fc8124934fd688ed7b41313b3cf040f1ea9f4126b58",
     ),
     (
         "D14",
-        "a4e9c92e924eff45f969f604c67e38ed3ff05f9c995297bbbd31fa33e50acbc0",
+        "fd861a800d99ab10cc6520f491d3688e9d7e8c76f8342b7ca1df52e059a22fd8",
     ),
     (
         "D15",
-        "d437f0b2468cc74fbff832238f7021659976694f6d894c0d077a70d98ac79804",
+        "5e08b53a627715aee52efa23b6a06a3db541bcc520cfdad49fcbac720830aade",
     ),
     (
         "D17",
-        "9bec6d92849a8ade7cd8682274ffd78c61ef93f1c90723fe1a95d69ae761ebaf",
+        "0a7593b638dad98378a19c939658869d09ba5d09c1fc1922b112b0314fe2b2ec",
     ),
 ];
 

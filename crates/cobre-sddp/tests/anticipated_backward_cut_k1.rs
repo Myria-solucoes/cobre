@@ -105,11 +105,11 @@ const X0_SEED: f64 = 10.0;
 // template.rs). Duals therefore live in scaled units too, and the cut storage
 // at backward.rs preserves that scaling end-to-end (forward.rs consumes them
 // unrescaled).
-const COST_SCALE_FACTOR: f64 = 1_000.0;
+const COST_SCALE_FACTOR: f64 = 1_000_000.0;
 
 // Closed-form expected values for stage-0 FCF cut at the anticipated_state
 // index, in the LP's scaled cost units.
-const EXPECTED_COEFFICIENT: f64 = -C_REG / COST_SCALE_FACTOR; // = -0.1
+const EXPECTED_COEFFICIENT: f64 = -C_REG / COST_SCALE_FACTOR; // = -0.0001
 const EXPECTED_INTERCEPT: f64 = C_REG * D_1 / COST_SCALE_FACTOR; // = 2.0
 const TOL: f64 = 1e-6;
 

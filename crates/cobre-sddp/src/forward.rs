@@ -886,6 +886,8 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         );
     }
 
+    ws.patch_buf
+        .fill_col_state_patches(indexer, &ws.current_state, &ctx.templates[t].col_scale);
     ws.patch_buf.fill_forward_patches(
         indexer,
         &ws.current_state,
@@ -906,6 +908,12 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         indexer.z_inflow_row_start,
         &ws.scratch.z_inflow_rhs_buf,
         &ctx.templates[t].row_scale,
+    );
+    let cp = ws.patch_buf.state_col_patch_count();
+    ws.solver.set_col_bounds(
+        &ws.patch_buf.col_indices[..cp],
+        &ws.patch_buf.col_lower[..cp],
+        &ws.patch_buf.col_upper[..cp],
     );
     let pc = ws.patch_buf.forward_patch_count();
     ws.solver.set_row_bounds(
@@ -2094,16 +2102,16 @@ mod tests {
 
         // AC: scenario_costs has exactly 2 entries (one per forward pass).
         assert_eq!(result.scenario_costs.len(), 2);
-        // AC: all 6 records have stage_cost = (100 - 30) * COST_SCALE_FACTOR = 70_000.
+        // AC: all 6 records have stage_cost = (100 - 30) * COST_SCALE_FACTOR = 70_000_000.
         for (i, record) in records.iter().enumerate() {
             assert_eq!(
-                record.stage_cost, 70_000.0,
-                "record[{i}].stage_cost should be 70_000.0 ((objective - theta) * COST_SCALE_FACTOR)"
+                record.stage_cost, 70_000_000.0,
+                "record[{i}].stage_cost should be 70_000_000.0 ((objective - theta) * COST_SCALE_FACTOR)"
             );
         }
-        // AC: each scenario cost = 70_000 * 3 stages = 210_000.
-        assert_eq!(result.scenario_costs[0], 210_000.0);
-        assert_eq!(result.scenario_costs[1], 210_000.0);
+        // AC: each scenario cost = 70_000_000 * 3 stages = 210_000_000.
+        assert_eq!(result.scenario_costs[0], 210_000_000.0);
+        assert_eq!(result.scenario_costs[1], 210_000_000.0);
     }
 
     /// AC: mock solver returns `Infeasible` at stage 1, scenario 0.
@@ -2348,16 +2356,16 @@ mod tests {
         )
         .unwrap();
 
-        // stage_cost per solve = (100 - 30) * COST_SCALE_FACTOR = 70_000
-        // total_cost per scenario = 70_000 * 3 stages = 210_000
+        // stage_cost per solve = (100 - 30) * COST_SCALE_FACTOR = 70_000_000
+        // total_cost per scenario = 70_000_000 * 3 stages = 210_000_000
         assert_eq!(result.scenario_costs.len(), 2);
-        assert_eq!(result.scenario_costs[0], 210_000.0);
-        assert_eq!(result.scenario_costs[1], 210_000.0);
-        // Derived statistics: sum = 420_000, sum_sq = 210_000^2 * 2.
+        assert_eq!(result.scenario_costs[0], 210_000_000.0);
+        assert_eq!(result.scenario_costs[1], 210_000_000.0);
+        // Derived statistics: sum = 420_000_000, sum_sq = 210_000_000^2 * 2.
         let cost_sum: f64 = result.scenario_costs.iter().sum();
         let cost_sum_sq: f64 = result.scenario_costs.iter().map(|c| c * c).sum();
-        assert_eq!(cost_sum, 420_000.0);
-        assert_eq!(cost_sum_sq, 210_000.0_f64.powi(2) * 2.0);
+        assert_eq!(cost_sum, 420_000_000.0);
+        assert_eq!(cost_sum_sq, 210_000_000.0_f64.powi(2) * 2.0);
     }
 
     // ── Unit tests: SyncResult ───────────────────────────────────────────────
@@ -3629,8 +3637,8 @@ mod tests {
         assert_eq!(result.scenario_costs.len(), 2);
         for (i, record) in records.iter().enumerate() {
             assert_eq!(
-                record.stage_cost, 70_000.0,
-                "none_method: record[{i}].stage_cost should be 70_000.0 ((objective - theta) * COST_SCALE_FACTOR)"
+                record.stage_cost, 70_000_000.0,
+                "none_method: record[{i}].stage_cost should be 70_000_000.0 ((objective - theta) * COST_SCALE_FACTOR)"
             );
         }
     }
@@ -4030,7 +4038,7 @@ mod tests {
             ws.scratch.load_rhs_buf[0]
         );
 
-        let cat4_start = 2;
+        let cat4_start = 1;
         assert_eq!(
             ws.patch_buf.lower[cat4_start], ws.scratch.load_rhs_buf[0],
             "patch_buf lower must equal load_rhs_buf[0]"
@@ -4173,7 +4181,7 @@ mod tests {
             ws.scratch.load_rhs_buf[0]
         );
 
-        let cat4_start = 2;
+        let cat4_start = 1;
         assert_eq!(
             ws.patch_buf.lower[cat4_start], 0.0,
             "patch lower must be 0.0 (clamped)"
@@ -4185,10 +4193,10 @@ mod tests {
     }
 
     /// Verify that when `n_load_buses == 0` no load patches are applied and
-    /// `forward_patch_count()` equals `N*(2+L)`.
+    /// `forward_patch_count()` equals `N`.
     ///
     /// With N=1 hydro, L=0 PAR order, and no load buses the patch count must be
-    /// exactly `1 * (2 + 0) = 2`.
+    /// exactly `1`.
     #[test]
     fn forward_pass_no_load_buses_unchanged() {
         // Use the existing 1-hydro-3-stage context that has no load buses.
@@ -4263,12 +4271,12 @@ mod tests {
         .unwrap();
 
         // With n_load_buses=0, active_load_patches stays 0.
-        // forward_patch_count = N*(2+L) = 1*(2+0) = 2.
+        // forward_patch_count = N = 1.
         // The PatchBuffer was constructed for 1 hydro (single_workspace uses indexer.hydro_count=1).
         assert_eq!(
             ws.patch_buf.forward_patch_count(),
-            2,
-            "forward_patch_count must be N*(2+L)=2 when n_load_buses=0, got {}",
+            1,
+            "forward_patch_count must be N=1 when n_load_buses=0, got {}",
             ws.patch_buf.forward_patch_count()
         );
         // load_rhs_buf must remain empty (never pushed to).

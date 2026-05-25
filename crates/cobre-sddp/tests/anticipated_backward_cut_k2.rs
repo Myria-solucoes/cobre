@@ -127,7 +127,7 @@ const MAX_GEN_ANT: f64 = 50.0;
 // template.rs). Duals therefore live in scaled units too, and the cut storage
 // at backward.rs preserves that scaling end-to-end (forward.rs consumes them
 // unrescaled).
-const COST_SCALE_FACTOR: f64 = 1_000.0;
+const COST_SCALE_FACTOR: f64 = 1_000_000.0;
 
 // Closed-form expected coefficients at stage 0 FCF, in scaled cost units.
 // Both slots carry the same magnitude: -c_reg / COST_SCALE * BLOCK_HOURS = -0.1.
@@ -136,8 +136,8 @@ const COST_SCALE_FACTOR: f64 = 1_000.0;
 // Slot 1: dual flowing through the baked stage-1 FCF cut (originating from
 //   stage 2's slot-0 fishing dual routed via the Less-branch ring-buffer shift;
 //   see indexer.rs:state_to_lp_column).
-const EXPECTED_COEFF_SLOT1: f64 = -C_REG / COST_SCALE_FACTOR * BLOCK_HOURS; // = -0.1
-const EXPECTED_COEFF_SLOT0: f64 = -C_REG / COST_SCALE_FACTOR * BLOCK_HOURS; // = -0.1
+const EXPECTED_COEFF_SLOT1: f64 = -C_REG / COST_SCALE_FACTOR * BLOCK_HOURS; // = -0.0001
+const EXPECTED_COEFF_SLOT0: f64 = -C_REG / COST_SCALE_FACTOR * BLOCK_HOURS; // = -0.0001
 const TOL: f64 = 1e-6;
 
 // Thermal column ordering inside the built `System`. `System::build()` sorts

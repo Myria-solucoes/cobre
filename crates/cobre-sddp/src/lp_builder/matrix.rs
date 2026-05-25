@@ -2330,11 +2330,10 @@ mod zero_cost_tests {
     use chrono::NaiveDate;
     use cobre_core::{
         Block, BlockMode, BoundsCountsSpec, BoundsDefaults, CascadeTopology, ContractStageBounds,
-        EntityId, Hydro, HydroGenerationModel, HydroPenalties, HydroStageBounds, LineStageBounds,
-        NoiseMethod, PumpingStageBounds, ResolvedBounds, ResolvedExchangeFactors,
-        ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds,
-        ResolvedNcsFactors, ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig,
-        StageStateConfig, ThermalStageBounds,
+        HydroStageBounds, LineStageBounds, NoiseMethod, PumpingStageBounds, ResolvedBounds,
+        ResolvedExchangeFactors, ResolvedGenericConstraintBounds, ResolvedLoadFactors,
+        ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, ScenarioSourceConfig, Stage,
+        StageRiskConfig, StageStateConfig, ThermalStageBounds,
     };
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -2919,7 +2918,7 @@ mod zero_cost_tests {
     /// entries` used to emit before its deletion in ticket-004).
     ///
     /// The storage/lag assertions are included as zero-iteration loops in
-    /// this fixture (n_hydros = 0) so the test documents the intent and
+    /// this fixture (`n_hydros` = 0) so the test documents the intent and
     /// would catch a future regression in any fixture that adds hydros.
     #[test]
     fn state_fixing_diagonals_absent_from_csc() {

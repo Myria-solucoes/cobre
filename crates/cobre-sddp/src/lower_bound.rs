@@ -402,8 +402,8 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
 
         // No shift_anticipated_state call here: the lower-bound evaluator
         // solves each stage at a fixed trial point, never advancing the ring
-        // buffer. The trial point itself carries the anticipated-state slots,
-        // patched by fill_forward_patches as Category 6.
+        // buffer.
+        patch_buf.fill_col_state_patches(indexer, initial_state, &spec.template.col_scale);
         patch_buf.fill_forward_patches(
             indexer,
             initial_state,
@@ -415,6 +415,12 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
             indexer.z_inflow_row_start,
             &scratch.z_inflow_rhs_buf,
             &spec.template.row_scale,
+        );
+        let cp = patch_buf.state_col_patch_count();
+        solver.set_col_bounds(
+            &patch_buf.col_indices[..cp],
+            &patch_buf.col_lower[..cp],
+            &patch_buf.col_upper[..cp],
         );
         let n_patches = patch_buf.forward_patch_count();
         solver.set_row_bounds(
@@ -974,8 +980,8 @@ mod tests {
         .unwrap();
 
         assert!(
-            (lb - 100_000.0).abs() < 1e-7,
-            "single opening expectation LB must equal objective 100.0 * COST_SCALE_FACTOR = 100_000.0, got {lb}"
+            (lb - 100_000_000.0).abs() < 1e-7,
+            "single opening expectation LB must equal objective 100.0 * COST_SCALE_FACTOR = 100_000_000.0, got {lb}"
         );
     }
 
@@ -1028,10 +1034,10 @@ mod tests {
         )
         .unwrap();
 
-        // E[60, 80, 100] with uniform probs = (60+80+100)/3 = 80.0; * COST_SCALE_FACTOR = 80_000.0
+        // E[60, 80, 100] with uniform probs = (60+80+100)/3 = 80.0; * COST_SCALE_FACTOR = 80_000_000.0
         assert!(
-            (lb - 80_000.0).abs() < 1e-7,
-            "three openings expectation LB must equal 80_000.0, got {lb}"
+            (lb - 80_000_000.0).abs() < 1e-7,
+            "three openings expectation LB must equal 80_000_000.0, got {lb}"
         );
     }
 
@@ -1091,10 +1097,10 @@ mod tests {
         .unwrap();
 
         // CVaR(alpha=0.5, lambda=1.0) with 2 uniform-probability openings
-        // concentrates all weight on the worst (150.0); * COST_SCALE_FACTOR = 150_000.0.
+        // concentrates all weight on the worst (150.0); * COST_SCALE_FACTOR = 150_000_000.0.
         assert!(
-            (lb - 150_000.0).abs() < 1e-7,
-            "pure CVaR(0.5, 1.0) with 2 openings must equal 150_000.0, got {lb}"
+            (lb - 150_000_000.0).abs() < 1e-7,
+            "pure CVaR(0.5, 1.0) with 2 openings must equal 150_000_000.0, got {lb}"
         );
     }
 
@@ -1149,10 +1155,10 @@ mod tests {
         )
         .unwrap();
 
-        // CVaR(alpha=1) = Expectation = (50+150)/2 = 100.0; * COST_SCALE_FACTOR = 100_000.0
+        // CVaR(alpha=1) = Expectation = (50+150)/2 = 100.0; * COST_SCALE_FACTOR = 100_000_000.0
         assert!(
-            (lb - 100_000.0).abs() < 1e-7,
-            "CVaR(alpha=1, lambda=1) must equal expectation 100_000.0, got {lb}"
+            (lb - 100_000_000.0).abs() < 1e-7,
+            "CVaR(alpha=1, lambda=1) must equal expectation 100_000_000.0, got {lb}"
         );
     }
 
@@ -1317,10 +1323,10 @@ mod tests {
         )
         .unwrap();
 
-        // E[200, 300] = 250.0; * COST_SCALE_FACTOR = 250_000.0
+        // E[200, 300] = 250.0; * COST_SCALE_FACTOR = 250_000_000.0
         assert!(
-            (lb - 250_000.0).abs() < 1e-7,
-            "integration round-trip must produce 250_000.0, got {lb}"
+            (lb - 250_000_000.0).abs() < 1e-7,
+            "integration round-trip must produce 250_000_000.0, got {lb}"
         );
     }
 
@@ -1457,9 +1463,9 @@ mod tests {
         )
         .unwrap();
 
-        // E[60, 80] = 70.0; * COST_SCALE_FACTOR = 70_000.0
+        // E[60, 80] = 70.0; * COST_SCALE_FACTOR = 70_000_000.0
         assert!(
-            (lb - 70_000.0).abs() < 1e-7,
+            (lb - 70_000_000.0).abs() < 1e-7,
             "None method must produce correct LB, got {lb}"
         );
     }
@@ -1790,10 +1796,12 @@ mod tests {
         )
         .unwrap();
 
-        // set_col_bounds must have been called exactly once per opening.
+        // set_col_bounds is called twice per opening: once for state-fixing and
+        // once for NCS bounds.
         assert_eq!(
-            solver.set_col_bounds_calls, actual_n_openings,
-            "set_col_bounds must be called once per opening ({actual_n_openings} openings), \
+            solver.set_col_bounds_calls,
+            2 * actual_n_openings,
+            "set_col_bounds must be called twice per opening ({actual_n_openings} openings), \
              got {} calls — NCS bounds are not being patched per opening",
             solver.set_col_bounds_calls
         );

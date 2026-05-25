@@ -439,9 +439,15 @@ fn cli_run_populates_anticipated_thermal_columns() {
             .expect("stage-0 decision must be Some (asserted above)");
         let committed = rows.anticipated_committed_mw[stage_1_idx]
             .expect("stage-1 committed must be Some (asserted above)");
-        assert_eq!(
-            decision.to_bits(),
-            committed.to_bits(),
+        // F3-006 ring-buffer transport invariant: decision must equal committed.
+        // Bit equality is preferred but IEEE 754 +0.0 / -0.0 are numerically
+        // equivalent at zero and either may surface depending on solver vertex
+        // selection at an inactive anticipated slot. Treat them as equal at
+        // zero, otherwise require bit equality.
+        let zero_equiv =
+            decision == 0.0 && committed == 0.0 && decision.is_finite() && committed.is_finite();
+        assert!(
+            zero_equiv || decision.to_bits() == committed.to_bits(),
             "ring-buffer transport: stage-0 decision {decision} must equal stage-1 \
              committed {committed} bit-for-bit (the F1-001 simulation shift contract)"
         );

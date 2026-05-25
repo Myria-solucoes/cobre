@@ -379,10 +379,9 @@ mod tests {
         );
 
         // Forward-pass layout capacity:
-        //   N*(2+L) + A*K + M*B + N
+        //   N + M*B + N
         // with M = 0 and B = 0 in the LB patch buffer (no load patches).
-        let expected_capacity =
-            hydro_count * (2 + max_par_order) + n_anticipated * k_max + hydro_count;
+        let expected_capacity = hydro_count + hydro_count;
         assert_eq!(
             scratch.patch_buf.indices.len(),
             expected_capacity,
@@ -399,10 +398,10 @@ mod tests {
             "patch_buf upper length must include A*K slots for Category 6",
         );
 
-        // forward_patch_count starts at `N*(2+L) + A*K` before any load or
+        // forward_patch_count starts at `N` before any load or
         // z-inflow patches have been filled — exactly the slot count that
         // `fill_forward_patches` will write into.
-        let expected_pre_fill_count = hydro_count * (2 + max_par_order) + n_anticipated * k_max;
+        let expected_pre_fill_count = hydro_count;
         assert_eq!(
             scratch.patch_buf.forward_patch_count(),
             expected_pre_fill_count,
@@ -440,8 +439,8 @@ mod tests {
             &stage_ctx,
         );
 
-        // With A=0 and K=0, capacity reduces to N*(2+L) + N (z-inflow).
-        let expected_capacity = hydro_count * (2 + max_par_order) + hydro_count;
+        // With A=0 and K=0, capacity reduces to N + N (z-inflow) = 2*N.
+        let expected_capacity = hydro_count + hydro_count;
         assert_eq!(
             scratch.patch_buf.indices.len(),
             expected_capacity,

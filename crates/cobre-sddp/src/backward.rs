@@ -113,6 +113,7 @@ use crate::{
     context::{StageContext, TrainingContext},
     cut::pool::CutPool,
     forward::write_capture_metadata,
+    indexer::StageIndexer,
     noise::{NcsNoiseOffsets, transform_inflow_noise, transform_load_noise, transform_ncs_noise},
     risk_measure::RiskMeasure,
     solver_stats::SolverStatsDelta,
@@ -320,6 +321,9 @@ fn patch_opening_bounds<S: SolverInterface + Send>(
     // opening at a fixed trial point produced by the forward sampler. The
     // ring-buffer advance happens once in the forward pass; the backward
     // and simulation paths reuse those slot values without re-shifting.
+    //
+    ws.patch_buf
+        .fill_col_state_patches(training_ctx.indexer, x_hat, &ctx.templates[s].col_scale);
     ws.patch_buf.fill_forward_patches(
         training_ctx.indexer,
         x_hat,
@@ -340,6 +344,12 @@ fn patch_opening_bounds<S: SolverInterface + Send>(
         training_ctx.indexer.z_inflow_row_start,
         &ws.scratch.z_inflow_rhs_buf,
         &ctx.templates[s].row_scale,
+    );
+    let cp = ws.patch_buf.state_col_patch_count();
+    ws.solver.set_col_bounds(
+        &ws.patch_buf.col_indices[..cp],
+        &ws.patch_buf.col_lower[..cp],
+        &ws.patch_buf.col_upper[..cp],
     );
     let pc = ws.patch_buf.forward_patch_count();
     ws.solver.set_row_bounds(
@@ -390,34 +400,36 @@ fn resolve_backward_basis<'a>(
 ///
 /// # Dual-fill layout
 ///
-/// `state_duals`: unscaled duals for state-fixing rows `[0, n_state)`.
-/// Scaling: `dual_original[i] = row_scale[i] * dual_scaled[i]`; when
-/// `row_scale` is empty the raw duals are used directly.
+/// `state_duals`: unscaled reduced costs at the LP columns pinned by
+/// `fill_col_state_patches`, one entry per state-vector index.
+/// Scaling: `rc_original[j] = col_scale[col] * rc_scaled[j]`;
+/// when `col_scale` is empty the raw reduced costs are used directly.
 ///
 /// `cut_duals`: raw duals for cut rows `[template_num_rows, template_num_rows + num_cuts)`.
 /// These always have implicit `row_scale = 1.0`.
 fn extract_duals_from_view(
     view: &SolutionView<'_>,
     n_state: usize,
-    row_scale: &[f64],
+    indexer: &StageIndexer,
+    col_scale: &[f64],
     succ: &SuccessorSpec<'_>,
     state_duals: &mut Vec<f64>,
     cut_duals: &mut Vec<f64>,
 ) -> f64 {
     let objective = view.objective;
 
-    // Unscale state-fixing-row duals from scaled to original units.
-    // `state_duals` carries pre-warmed capacity; `clear` + `extend` reuses it.
+    // Unscale state-fixing-column reduced costs from scaled to original units.
+    // `state_duals` carries pre-warmed capacity; `clear` + `push` reuses it.
     state_duals.clear();
-    if row_scale.is_empty() {
-        state_duals.extend_from_slice(&view.dual[..n_state]);
-    } else {
-        state_duals.extend(
-            view.dual[..n_state]
-                .iter()
-                .zip(row_scale)
-                .map(|(&d, &rs)| d * rs),
-        );
+    for j in 0..n_state {
+        let col = indexer.state_to_lp_incoming_column(j);
+        let rc = view.reduced_costs[col];
+        let unscaled = if col_scale.is_empty() {
+            rc
+        } else {
+            rc * col_scale[col]
+        };
+        state_duals.push(unscaled);
     }
     debug_assert_eq!(
         state_duals.len(),
@@ -622,7 +634,8 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
         let objective = extract_duals_from_view(
             &view,
             indexer.n_state,
-            &ctx.templates[s].row_scale,
+            indexer,
+            &ctx.templates[s].col_scale,
             succ,
             &mut state_duals,
             &mut cut_duals,
@@ -950,11 +963,17 @@ mod tests {
     }
 
     fn solution_1_0(objective: f64, dual_storage: f64) -> LpSolution {
+        // For StageIndexer::new(1, 0): storage_in.start = N*(2+L) = 1*(2+0) = 2.
+        // state_to_lp_incoming_column(0) = storage_in.start + 0 = 2.
+        // Cut subgradients are read from reduced_costs[storage_in_col], so
+        // reduced_costs[2] must hold the same value as the storage-fixing dual.
+        let mut reduced_costs = vec![0.0; 3];
+        reduced_costs[2] = dual_storage;
         LpSolution {
             objective,
             primal: vec![0.0, 0.0, 0.0],
             dual: vec![dual_storage],
-            reduced_costs: vec![0.0; 3],
+            reduced_costs,
             iterations: 0,
             solve_time_seconds: 0.0,
         }
@@ -3509,11 +3528,11 @@ mod tests {
         })
         .unwrap();
 
-        // With n_load_buses=0, forward_patch_count = N*(2+L) + z_inflow = 1*(2+0)+1 = 3.
+        // With n_load_buses=0, forward_patch_count = N + z_inflow = 1 + 1 = 2.
         assert_eq!(
             workspaces[0].patch_buf.forward_patch_count(),
-            3,
-            "forward_patch_count must be N*(2+L)+N=3 when n_load_buses=0, got {}",
+            2,
+            "forward_patch_count must be N+z_inflow=2 when n_load_buses=0, got {}",
             workspaces[0].patch_buf.forward_patch_count()
         );
         // load_rhs_buf must remain empty.

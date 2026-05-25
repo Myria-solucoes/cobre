@@ -1148,11 +1148,11 @@ mod tests {
 
     #[test]
     fn test_workspace_buffer_dimensions() {
-        // N=3, L=2 → patch_buf length = 3*(2+2) + 3 (z-inflow) = 15
+        // N=3, L=2, M=0, B=0 → patch_buf length = N + M*B + N = 3 + 0 + 3 = 6
         // n_state=9 → current_state capacity = 9
         let pool = WorkspacePool::new(0, 4, 9, sizing(3, 2, 0), || MockSolver);
         for ws in &pool.workspaces {
-            assert_eq!(ws.patch_buf.indices.len(), 15, "patch_buf length");
+            assert_eq!(ws.patch_buf.indices.len(), 6, "patch_buf length");
             assert_eq!(ws.current_state.capacity(), 9, "current_state capacity");
             assert_eq!(ws.current_state.len(), 0, "current_state starts empty");
         }

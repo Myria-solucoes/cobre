@@ -380,6 +380,8 @@ fn solve_simulation_stage<S: SolverInterface>(
     // at `incoming - decision` at the optimum) would leak into the next
     // stage's incoming state, and fishing constraints at delivery stages
     // would read stale slot 0 values.
+    ws.patch_buf
+        .fill_col_state_patches(indexer, &ws.current_state, &ctx.templates[t].col_scale);
     ws.patch_buf.fill_forward_patches(
         indexer,
         &ws.current_state,
@@ -400,6 +402,12 @@ fn solve_simulation_stage<S: SolverInterface>(
         indexer.z_inflow_row_start,
         &ws.scratch.z_inflow_rhs_buf,
         &ctx.templates[t].row_scale,
+    );
+    let cp = ws.patch_buf.state_col_patch_count();
+    ws.solver.set_col_bounds(
+        &ws.patch_buf.col_indices[..cp],
+        &ws.patch_buf.col_lower[..cp],
+        &ws.patch_buf.col_upper[..cp],
     );
     let pc = ws.patch_buf.forward_patch_count();
     ws.solver.set_row_bounds(
@@ -1902,7 +1910,7 @@ mod tests {
         );
 
         // The load patch must also be reflected in the patch buffer.
-        let cat4_start = 2; // n_hydros * (2 + max_par_order) = 1 * 2 = 2
+        let cat4_start = 1; // n_hydros = 1
         assert_eq!(
             workspaces[0].patch_buf.lower[cat4_start], workspaces[0].scratch.load_rhs_buf[0],
             "patch_buf lower at load slot must equal load_rhs_buf[0]"
@@ -1931,10 +1939,9 @@ mod tests {
     }
 
     /// when `n_load_buses == 0`,
-    /// `load_rhs_buf` remains empty and `forward_patch_count` equals
-    /// `N*(2+L)` as with the training forward pass.
+    /// `load_rhs_buf` remains empty and `forward_patch_count` equals `N`.
     ///
-    /// With N=1, L=0: `forward_patch_count = 1 * (2 + 0) = 2`.
+    /// With N=1, L=0: `forward_patch_count = 1`.
     #[test]
     fn simulation_no_load_buses_unchanged() {
         let n_stages = 1;
@@ -2029,11 +2036,11 @@ mod tests {
             workspaces[0].scratch.load_rhs_buf.is_empty(),
             "load_rhs_buf must be empty when n_load_buses=0"
         );
-        // forward_patch_count = N*(2+L) = 1*(2+0) = 2 (no load patches added).
+        // forward_patch_count = N = 1 (no load patches added).
         assert_eq!(
             workspaces[0].patch_buf.forward_patch_count(),
-            2,
-            "forward_patch_count must be N*(2+L)=2 when n_load_buses=0, got {}",
+            1,
+            "forward_patch_count must be N=1 when n_load_buses=0, got {}",
             workspaces[0].patch_buf.forward_patch_count()
         );
     }

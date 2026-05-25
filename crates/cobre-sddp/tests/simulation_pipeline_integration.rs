@@ -919,8 +919,8 @@ fn simulate_channel_closed_returns_error() {
 /// Acceptance criterion: `total_cost` in cost buffer equals sum of
 /// `(objective - primal[theta])` across all stages for each scenario.
 ///
-/// With objective=100.0 and theta=30.0: `stage_cost` = (100 - 30) * `COST_SCALE_FACTOR` = `70_000` per stage.
-/// For 3 stages: `total_cost` = 3 \* `70_000` = `210_000`.
+/// With objective=100.0 and theta=30.0: `stage_cost` = (100 - 30) * `COST_SCALE_FACTOR` = `70_000_000` per stage.
+/// For 3 stages: `total_cost` = 3 \* `70_000_000` = `210_000_000`.
 #[test]
 fn simulate_total_cost_equals_sum_of_stage_costs() {
     let n_stages = 3;
@@ -942,10 +942,10 @@ fn simulate_total_cost_equals_sum_of_stage_costs() {
 
     let objective = 100.0_f64;
     let theta_val = 30.0_f64;
-    // stage_cost = (objective - theta) * COST_SCALE_FACTOR = 70 * 1000 = 70_000
-    let expected_stage_cost = (objective - theta_val) * 1000.0; // 70_000.0
+    // stage_cost = (objective - theta) * COST_SCALE_FACTOR = 70 * 1_000_000 = 70_000_000
+    let expected_stage_cost = (objective - theta_val) * 1_000_000.0; // 70_000_000.0
     #[allow(clippy::cast_precision_loss)]
-    let expected_total_cost = expected_stage_cost * n_stages as f64; // 210_000.0
+    let expected_total_cost = expected_stage_cost * n_stages as f64; // 210_000_000.0
 
     let solution = fixed_solution(objective, theta_val);
     let solver = MockSolver::always_ok(solution);
@@ -1801,9 +1801,9 @@ fn simulate_progress_scenario_cost_equals_total_cost() {
     };
     let initial_state = vec![50.0_f64];
 
-    // objective=100, theta=30 → stage_cost = (100-30)*COST_SCALE_FACTOR = 70_000.0 every scenario.
+    // objective=100, theta=30 → stage_cost = (100-30)*COST_SCALE_FACTOR = 70_000_000.0 every scenario.
     let solution = fixed_solution(100.0, 30.0);
-    let expected_stage_cost = 70_000.0_f64;
+    let expected_stage_cost = 70_000_000.0_f64;
 
     let solver = MockSolver::always_ok(solution);
     let comm = StubComm { rank: 0, size: 1 };
