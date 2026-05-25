@@ -10,6 +10,11 @@
 //!   active cuts).
 //! - [`total_active_cuts`] — aggregate count across all stages.
 //! - [`deactivate`] — delegate cut deactivation to a specific stage pool.
+//! - [`set_active`] — canonical activation toggle: set a single slot's
+//!   activity flag and keep the cached count consistent.
+//! - [`cuts_in_lp`] — LP-row-count metric for a single stage (populated
+//!   count, independent of activity state).
+//! - [`cuts_in_lp_total`] — aggregate LP-row count across all stages.
 //!
 //! ## Stage indexing
 //!
@@ -29,6 +34,9 @@
 //! [`evaluate_at_state`]: FutureCostFunction::evaluate_at_state
 //! [`total_active_cuts`]: FutureCostFunction::total_active_cuts
 //! [`deactivate`]: FutureCostFunction::deactivate
+//! [`set_active`]: FutureCostFunction::set_active
+//! [`cuts_in_lp`]: FutureCostFunction::cuts_in_lp
+//! [`cuts_in_lp_total`]: FutureCostFunction::cuts_in_lp_total
 //!
 //! ## Example
 //!
@@ -44,6 +52,8 @@
 //! let cuts: Vec<_> = fcf.active_cuts(1).collect();
 //! assert_eq!(cuts.len(), 1);
 //! assert_eq!(fcf.total_active_cuts(), 1);
+//! assert_eq!(fcf.cuts_in_lp(1), 1);
+//! assert_eq!(fcf.cuts_in_lp_total(), 1);
 //! ```
 
 use super::pool::CutPool;
@@ -353,6 +363,65 @@ impl FutureCostFunction {
             self.pools.len()
         );
         self.pools[stage].deactivate(indices);
+    }
+
+    /// Toggle the activity flag for a single slot at the given stage.
+    ///
+    /// Delegates to [`CutPool::set_active`] for `pools[stage]`.
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Panics if `stage >= pools.len()` or if `slot >= pools[stage].populated_count`.
+    ///
+    /// # Parameters
+    ///
+    /// - `stage`: 0-based stage index.
+    /// - `slot`: 0-based slot index within the stage pool.
+    /// - `active`: desired activity state.
+    ///
+    /// [`CutPool::set_active`]: super::pool::CutPool::set_active
+    pub fn set_active(&mut self, stage: usize, slot: u32, active: bool) {
+        debug_assert!(
+            stage < self.pools.len(),
+            "stage index {stage} is out of bounds (num_stages = {})",
+            self.pools.len()
+        );
+        self.pools[stage].set_active(slot, active);
+    }
+
+    /// Return the LP-row count for the given stage.
+    ///
+    /// Delegates to [`CutPool::cuts_in_lp`] for `pools[stage]`. Returns the
+    /// `populated_count` of the stage pool — the number of slots that have
+    /// been populated at least once, regardless of activity state.
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Panics if `stage >= pools.len()`.
+    ///
+    /// # Parameters
+    ///
+    /// - `stage`: 0-based stage index.
+    ///
+    /// [`CutPool::cuts_in_lp`]: super::pool::CutPool::cuts_in_lp
+    #[must_use]
+    pub fn cuts_in_lp(&self, stage: usize) -> usize {
+        debug_assert!(
+            stage < self.pools.len(),
+            "stage index {stage} is out of bounds (num_stages = {})",
+            self.pools.len()
+        );
+        self.pools[stage].cuts_in_lp()
+    }
+
+    /// Return the total LP-row count across all stages.
+    ///
+    /// Sums [`cuts_in_lp`] over every pool in the FCF.
+    ///
+    /// [`cuts_in_lp`]: FutureCostFunction::cuts_in_lp
+    #[must_use]
+    pub fn cuts_in_lp_total(&self) -> usize {
+        self.pools.iter().map(CutPool::cuts_in_lp).sum()
     }
 
     /// Compute sparsity reports for all stages.
@@ -789,5 +858,40 @@ mod tests {
         let fcf = FutureCostFunction::new_with_warm_start(&stages, 1, 5).unwrap();
         assert_eq!(fcf.pools[0].warm_start_count, 2);
         assert_eq!(fcf.total_active_cuts(), 1); // only the active one
+    }
+
+    // ── set_active / cuts_in_lp / cuts_in_lp_total tests ────────────────────
+
+    #[test]
+    fn fcf_set_active_delegates_to_pool() {
+        let mut fcf = FutureCostFunction::new(3, 1, 1, 10, &[0; 3]);
+        // Add 3 cuts to stage 1: slots 0, 1, 2
+        fcf.add_cut(1, 0, 0, 10.0, &[1.0]);
+        fcf.add_cut(1, 1, 0, 20.0, &[2.0]);
+        fcf.add_cut(1, 2, 0, 30.0, &[3.0]);
+        let prior = fcf.total_active_cuts();
+
+        fcf.set_active(1, 0, false);
+
+        assert!(!fcf.pools[1].active[0]);
+        assert_eq!(fcf.total_active_cuts(), prior - 1);
+    }
+
+    #[test]
+    fn fcf_cuts_in_lp_total_aggregates_across_stages() {
+        let mut fcf = FutureCostFunction::new(3, 1, 1, 10, &[0; 3]);
+        // 2 cuts at stage 0
+        fcf.add_cut(0, 0, 0, 1.0, &[1.0]);
+        fcf.add_cut(0, 1, 0, 2.0, &[2.0]);
+        // 3 cuts at stage 1
+        fcf.add_cut(1, 0, 0, 3.0, &[3.0]);
+        fcf.add_cut(1, 1, 0, 4.0, &[4.0]);
+        fcf.add_cut(1, 2, 0, 5.0, &[5.0]);
+        // 0 cuts at stage 2
+
+        assert_eq!(fcf.cuts_in_lp_total(), 5);
+        assert_eq!(fcf.cuts_in_lp(0), 2);
+        assert_eq!(fcf.cuts_in_lp(1), 3);
+        assert_eq!(fcf.cuts_in_lp(2), 0);
     }
 }

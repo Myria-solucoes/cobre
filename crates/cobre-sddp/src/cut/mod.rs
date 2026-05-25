@@ -8,8 +8,13 @@
 //!
 //! - [`pool`] — [`CutPool`]: pre-allocated per-stage cut storage with
 //!   deterministic slot assignment, activity tracking, and state evaluation.
+//!   [`CutPool::set_active`] is the canonical toggle for the activity flag;
+//!   [`CutPool::cuts_in_lp`] returns the LP-row-count metric (populated count).
 //! - [`fcf`] — [`FutureCostFunction`]: all-stages container wrapping one
-//!   [`CutPool`] per stage; provides the high-level API for the training loop.
+//!   [`CutPool`] per stage; provides the high-level API for the training loop,
+//!   including [`FutureCostFunction::set_active`],
+//!   [`FutureCostFunction::cuts_in_lp`], and
+//!   [`FutureCostFunction::cuts_in_lp_total`].
 //! - [`wire`] — [`CutWireHeader`] and serialization functions for the MPI
 //!   cut-exchange wire format (24-byte header + variable coefficient tail).
 //!

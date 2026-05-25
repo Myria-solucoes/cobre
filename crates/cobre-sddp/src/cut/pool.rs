@@ -22,10 +22,17 @@
 //! Each slot carries an `active` flag. Inactive cuts are retained in the pool
 //! for reproducibility but excluded from LP construction and from
 //! [`evaluate_at_state`] queries. The [`CutSelectionStrategy`] determines
-//! which cuts to deactivate; [`deactivate`] applies the decision.
+//! which cuts to activate or deactivate; [`set_active`] is the canonical
+//! toggle that sets the flag and keeps [`active_count`] consistent.
+//! [`deactivate`] is a convenience wrapper that calls `set_active(slot, false)`
+//! for each index. [`cuts_in_lp`] returns the number of populated slots —
+//! the LP-row-count metric for append-only LP tracking.
 //!
 //! [`evaluate_at_state`]: CutPool::evaluate_at_state
+//! [`set_active`]: CutPool::set_active
 //! [`deactivate`]: CutPool::deactivate
+//! [`active_count`]: CutPool::active_count
+//! [`cuts_in_lp`]: CutPool::cuts_in_lp
 //! [`CutSelectionStrategy`]: crate::cut_selection::CutSelectionStrategy
 //!
 //! ## Example
@@ -41,6 +48,7 @@
 //! let coeffs = vec![1.0; 9];
 //! pool.add_cut(0, 0, 5.0, &coeffs);
 //! assert_eq!(pool.active_count(), 1);
+//! assert_eq!(pool.cuts_in_lp(), 1);
 //! ```
 
 use crate::cut::WARM_START_ITERATION;
@@ -62,11 +70,16 @@ use crate::cut_selection::CutMetadata;
 /// high-water mark to avoid scanning unpopulated slots.
 ///
 /// A `cached_active_count` field is maintained incrementally by [`add_cut`]
-/// and [`deactivate`], making [`active_count`] an O(1) query.
+/// (increment), [`set_active`] (increment or decrement), and [`deactivate`]
+/// (decrement via `set_active`), making [`active_count`] an O(1) query.
+/// [`cuts_in_lp`] returns the `populated_count` — the number of slots that
+/// have been populated at least once, regardless of activity state.
 ///
 /// [`add_cut`]: CutPool::add_cut
+/// [`set_active`]: CutPool::set_active
 /// [`deactivate`]: CutPool::deactivate
 /// [`active_count`]: CutPool::active_count
+/// [`cuts_in_lp`]: CutPool::cuts_in_lp
 #[derive(Debug, Clone)]
 pub struct CutPool {
     /// Flat coefficient storage. Coefficients for slot `i` occupy the range
@@ -398,6 +411,36 @@ impl CutPool {
         self.cached_active_count
     }
 
+    /// Return the number of populated slots — the LP-row-count metric.
+    ///
+    /// Each call to [`add_cut`] increments `populated_count` when the slot
+    /// index is at or beyond the current high-water mark. This count is the
+    /// total number of cut rows that have ever been inserted into the pool,
+    /// regardless of whether they are currently active or inactive.
+    ///
+    /// [`add_cut`]: CutPool::add_cut
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use cobre_sddp::cut::pool::CutPool;
+    ///
+    /// let mut pool = CutPool::new(10, 1, 1, 0);
+    /// pool.add_cut(0, 0, 1.0, &[1.0]);
+    /// pool.add_cut(1, 0, 2.0, &[2.0]);
+    /// assert_eq!(pool.cuts_in_lp(), 2);
+    ///
+    /// // Deactivation does not change the LP-row count.
+    /// pool.deactivate(&[0]);
+    /// assert_eq!(pool.cuts_in_lp(), 2);
+    /// assert_eq!(pool.active_count(), 1);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn cuts_in_lp(&self) -> usize {
+        self.populated_count
+    }
+
     /// Deactivate the cuts at the given slot indices.
     ///
     /// Sets `active[i] = false` for each index in `indices`. Indices are
@@ -429,16 +472,65 @@ impl CutPool {
     /// ```
     pub fn deactivate(&mut self, indices: &[u32]) {
         for &idx in indices {
-            let i = idx as usize;
-            debug_assert!(i < self.capacity, "deactivate index {i} out of bounds");
-            debug_assert!(
-                self.active[i],
-                "deactivate called with index {i} that is already inactive"
-            );
-            if i < self.capacity && self.active[i] {
-                self.active[i] = false;
-                self.cached_active_count -= 1;
-            }
+            self.set_active(idx, false);
+        }
+    }
+
+    /// Toggle the activity flag for a single slot.
+    ///
+    /// Sets `active[slot] = active` and keeps `cached_active_count` consistent:
+    ///
+    /// - If `active == false` and the slot is currently active, `active[slot]`
+    ///   is set to `false` and `cached_active_count` is decremented by 1.
+    /// - If `active == true` and the slot is currently inactive, `active[slot]`
+    ///   is set to `true` and `cached_active_count` is incremented by 1.
+    /// - If the slot already has the requested state, the call is a no-op.
+    ///
+    /// This method does **not** update `metadata[slot].active_window`; the
+    /// window bookkeeping is the responsibility of the cut-selection scoring
+    /// path, which mirrors the existing behavior of [`deactivate`].
+    ///
+    /// [`deactivate`]: CutPool::deactivate
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Panics if `slot >= populated_count`. In release builds the bounds check
+    /// is skipped, matching the existing [`deactivate`] debug-assert pattern.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use cobre_sddp::cut::pool::CutPool;
+    ///
+    /// let mut pool = CutPool::new(10, 1, 1, 0);
+    /// pool.add_cut(0, 0, 1.0, &[1.0]);
+    /// pool.add_cut(1, 0, 2.0, &[2.0]);
+    /// pool.add_cut(2, 0, 3.0, &[3.0]);
+    ///
+    /// pool.set_active(1, false);
+    /// assert_eq!(pool.active_count(), 2);
+    /// assert!(!pool.active[1]);
+    /// assert_eq!(pool.cuts_in_lp(), 3); // populated count unchanged
+    ///
+    /// pool.set_active(1, true);
+    /// assert_eq!(pool.active_count(), 3);
+    /// assert!(pool.active[1]);
+    /// ```
+    pub fn set_active(&mut self, slot: u32, active: bool) {
+        let i = slot as usize;
+        debug_assert!(
+            i < self.populated_count,
+            "set_active slot {i} out of populated range"
+        );
+        if self.active[i] == active {
+            return;
+        }
+        if active {
+            self.active[i] = true;
+            self.cached_active_count += 1;
+        } else {
+            self.active[i] = false;
+            self.cached_active_count -= 1;
         }
     }
 
@@ -1515,5 +1607,85 @@ mod tests {
             cap_after_second2 >= cap_after_first2,
             "candidates_buf capacity must not shrink across calls (was {cap_after_first2}, now {cap_after_second2})"
         );
+    }
+
+    // ── set_active / cuts_in_lp tests ────────────────────────────────────────
+
+    #[test]
+    fn set_active_false_decrements_active_count() {
+        let mut pool = CutPool::new(10, 4, 1, 0);
+        pool.add_cut(0, 0, 1.0, &[1.0, 0.0, 0.0, 0.0]);
+        pool.add_cut(1, 0, 2.0, &[0.0, 1.0, 0.0, 0.0]);
+        pool.add_cut(2, 0, 3.0, &[0.0, 0.0, 1.0, 0.0]);
+
+        pool.set_active(1, false);
+
+        assert!(!pool.active[1]);
+        assert_eq!(pool.active_count(), 2);
+        assert_eq!(pool.cuts_in_lp(), 3);
+    }
+
+    #[test]
+    fn set_active_true_reactivates_deactivated_slot() {
+        let mut pool = CutPool::new(10, 4, 1, 0);
+        pool.add_cut(0, 0, 1.0, &[1.0, 0.0, 0.0, 0.0]);
+        pool.add_cut(1, 0, 2.0, &[0.0, 1.0, 0.0, 0.0]);
+        pool.add_cut(2, 0, 3.0, &[0.0, 0.0, 1.0, 0.0]);
+        pool.deactivate(&[1]);
+
+        pool.set_active(1, true);
+
+        assert!(pool.active[1]);
+        assert_eq!(pool.active_count(), 3);
+        assert_eq!(pool.cuts_in_lp(), 3);
+    }
+
+    #[test]
+    fn set_active_idempotent_when_state_unchanged() {
+        let mut pool = CutPool::new(10, 4, 1, 0);
+        pool.add_cut(0, 0, 1.0, &[1.0, 0.0, 0.0, 0.0]);
+        pool.add_cut(1, 0, 2.0, &[0.0, 1.0, 0.0, 0.0]);
+        pool.add_cut(2, 0, 3.0, &[0.0, 0.0, 1.0, 0.0]);
+
+        // slot 1 is already active — second call must be a no-op
+        pool.set_active(1, true);
+        pool.set_active(1, true);
+
+        assert_eq!(pool.active_count(), 3);
+    }
+
+    #[test]
+    fn deactivate_delegates_to_set_active() {
+        let mut pool_a = CutPool::new(10, 4, 1, 0);
+        pool_a.add_cut(0, 0, 1.0, &[1.0, 0.0, 0.0, 0.0]);
+        pool_a.add_cut(1, 0, 2.0, &[0.0, 1.0, 0.0, 0.0]);
+        pool_a.add_cut(2, 0, 3.0, &[0.0, 0.0, 1.0, 0.0]);
+        pool_a.deactivate(&[1, 2]);
+
+        let mut pool_b = CutPool::new(10, 4, 1, 0);
+        pool_b.add_cut(0, 0, 1.0, &[1.0, 0.0, 0.0, 0.0]);
+        pool_b.add_cut(1, 0, 2.0, &[0.0, 1.0, 0.0, 0.0]);
+        pool_b.add_cut(2, 0, 3.0, &[0.0, 0.0, 1.0, 0.0]);
+        pool_b.set_active(1, false);
+        pool_b.set_active(2, false);
+
+        assert_eq!(pool_a.active, pool_b.active);
+        assert_eq!(pool_a.cached_active_count, pool_b.cached_active_count);
+    }
+
+    #[test]
+    fn cuts_in_lp_returns_populated_count() {
+        let mut pool = CutPool::new(10, 1, 1, 0);
+        pool.add_cut(0, 0, 1.0, &[1.0]);
+        pool.add_cut(1, 0, 2.0, &[2.0]);
+
+        assert_eq!(pool.cuts_in_lp(), 2);
+        assert_eq!(pool.cuts_in_lp(), pool.populated_count);
+
+        pool.deactivate(&[0]);
+
+        // Deactivation must not change the populated count.
+        assert_eq!(pool.cuts_in_lp(), 2);
+        assert_eq!(pool.active_count(), 1);
     }
 }
