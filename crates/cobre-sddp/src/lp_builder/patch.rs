@@ -1,6 +1,6 @@
 use crate::indexer::StageIndexer;
 
-/// Pre-allocated row-bound patch arrays for one SDDP stage LP solve.
+/// Pre-allocated row-bound and column-bound patch arrays for one SDDP stage LP solve.
 ///
 /// Holds three parallel `Vec`s of equal length ready for a single
 /// `SolverInterface::set_row_bounds` call.  The buffer is sized for
@@ -8,6 +8,12 @@ use crate::indexer::StageIndexer;
 /// iterations, where `M` is the number of stochastic load buses, `B` is
 /// the maximum block count across stages, `A` is the number of anticipated
 /// thermals, and `K` is the maximum lead-time horizon (`k_max`).
+///
+/// In addition to the row-bound region, the buffer carries a parallel
+/// column-bound region (`col_indices` / `col_lower` / `col_upper`) sized to
+/// `N*(1+L) + A*K` entries — the count of state-fixing slots for Categories
+/// 1 (storage), 2 (lag), and 6 (anticipated-state).  The column-bound region
+/// is populated by `fill_col_state_patches` (added in a subsequent ticket).
 ///
 /// # Memory layout
 ///
@@ -62,6 +68,26 @@ pub struct PatchBuffer {
     /// `upper[i] == lower[i]`.
     pub upper: Vec<f64>,
 
+    /// Column indices to patch in the column-bound region.
+    ///
+    /// Length `N*(1+L) + A*K` — one entry for each state-fixing slot covering
+    /// Categories 1 (storage, N entries), 2 (lag, N*L entries), and
+    /// 6 (anticipated-state, A*K entries).  Populated by `fill_col_state_patches`
+    /// (added in a subsequent ticket); zero-initialised at construction.
+    pub col_indices: Vec<usize>,
+
+    /// New lower bounds for each patched column in the column-bound region.
+    ///
+    /// Length `N*(1+L) + A*K`.  Populated together with `col_indices` and
+    /// `col_upper` by `fill_col_state_patches`.
+    pub col_lower: Vec<f64>,
+
+    /// New upper bounds for each patched column in the column-bound region.
+    ///
+    /// Length `N*(1+L) + A*K`.  For tight bound constraints,
+    /// `col_upper[i] == col_lower[i]`.
+    pub col_upper: Vec<f64>,
+
     /// Number of operating hydro plants (N).
     hydro_count: usize,
 
@@ -114,9 +140,12 @@ impl PatchBuffer {
     ///   Pass `0` when there are no anticipated thermals.
     ///
     /// The buffer's `indices`, `lower`, and `upper` vectors are sized to
-    /// `N*(2+L) + A*K + M*B + N` and zero-initialised.  Call
+    /// `N*(2+L) + A*K + M*B + N` and zero-initialised.  The column-bound
+    /// region (`col_indices`, `col_lower`, `col_upper`) is sized to
+    /// `N*(1+L) + A*K` and zero-initialised; it is populated by
+    /// `fill_col_state_patches` (added in a subsequent ticket).  Call
     /// [`fill_forward_patches`], [`fill_load_patches`], or
-    /// [`fill_state_patches`] to populate them before each LP solve.
+    /// [`fill_state_patches`] to populate the row-bound region before each LP solve.
     ///
     /// When `n_anticipated == 0` or `k_max == 0`, the Category 6 capacity is
     /// zero and the buffer behaves identically to the pre-anticipated layout.
@@ -127,9 +156,11 @@ impl PatchBuffer {
     /// use cobre_sddp::lp_builder::PatchBuffer;
     ///
     /// // 3-hydro AR(2) system, no stochastic load, no anticipated thermals
-    /// // Capacity = N*(2+L) + A*K + M*B + N = 3*(2+2) + 0 + 0 + 3 = 15
+    /// // Row capacity = N*(2+L) + A*K + M*B + N = 3*(2+2) + 0 + 0 + 3 = 15
+    /// // Col capacity = N*(1+L) + A*K = 3*(1+2) + 0 = 9
     /// let buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
     /// assert_eq!(buf.indices.len(), 15);
+    /// assert_eq!(buf.col_indices.len(), 9);
     ///
     /// // 3-hydro AR(2) system with 2 stochastic load buses, up to 3 blocks
     /// // Capacity = 3*(2+2) + 0 + 2*3 + 3 = 12 + 6 + 3 = 21
@@ -173,10 +204,16 @@ impl PatchBuffer {
             + n_ant_state
             + n_load_buses * max_blocks
             + hydro_count;
+        // Column-bound region covers state-fixing slots for Categories 1, 2, and 6:
+        // N*(1+L) + A*K entries.
+        let col_capacity = hydro_count * (1 + max_par_order) + n_ant_state;
         Self {
             indices: vec![0; capacity],
             lower: vec![0.0; capacity],
             upper: vec![0.0; capacity],
+            col_indices: vec![0; col_capacity],
+            col_lower: vec![0.0; col_capacity],
+            col_upper: vec![0.0; col_capacity],
             hydro_count,
             max_par_order,
             load_bus_count: n_load_buses,
@@ -433,6 +470,139 @@ impl PatchBuffer {
         }
     }
 
+    /// Fill `N*(1+L) + A*K` column-bound patches for a state-fixing solve.
+    ///
+    /// Populates the column-bound region (`col_indices`, `col_lower`, `col_upper`)
+    /// with the column-bound counterparts of Categories 1, 2, and 6:
+    ///
+    /// | Entry range              | Category                              | Column targets                            |
+    /// | ------------------------ | ------------------------------------- | ----------------------------------------- |
+    /// | `[0, N)`                 | Storage-fixing (Category 1)           | `storage_in.start + h` for `h ∈ [0, N)`  |
+    /// | `[N, N*(1+L))`           | AR lag-fixing (Category 2)            | `inflow_lags.start + lag*N + h`           |
+    /// | `[N*(1+L), N*(1+L)+A*K)` | Anticipated-state-fixing (Category 6) | `anticipated_state.start + slot*A + plant`|
+    ///
+    /// Column-bound state fixing enforces `x == v` by setting `lb = ub = v / col_scale[col]`
+    /// in the scaled LP (contrast with the row-equality path, which multiplies by `row_scale[row]`).
+    ///
+    /// All patches write equality bounds: `col_lower[i] == col_upper[i]` for every entry.
+    ///
+    /// After this call, pass
+    /// `&buf.col_indices[..state_col_patch_count()]`,
+    /// `&buf.col_lower[..state_col_patch_count()]`,
+    /// `&buf.col_upper[..state_col_patch_count()]`
+    /// to `SolverInterface::set_col_bounds`.
+    ///
+    /// # Arguments
+    ///
+    /// - `indexer` — LP layout map for this stage. Must be built via
+    ///   `with_equipment` or `with_equipment_and_evaporation` so that
+    ///   `storage_in`, `inflow_lags`, and `anticipated_state` ranges are populated.
+    /// - `state` — incoming state vector of length `n_state = N*(1+L) + A*K`.
+    ///   Prefix `[0, N)` is incoming storage, `[N, N*(1+L))` is AR lags,
+    ///   `[N*(1+L), N*(1+L)+A*K)` is the anticipated-state ring-buffer.
+    /// - `col_scale` — per-column scaling factors from the stage template.
+    ///   Pass `&[]` when no column scaling is active. When non-empty, must
+    ///   be at least `indexer.anticipated_state.end` entries long so every
+    ///   Category 1, 2, and 6 column can be indexed.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if `state.len() != indexer.n_state`.
+    pub fn fill_col_state_patches(
+        &mut self,
+        indexer: &StageIndexer,
+        state: &[f64],
+        col_scale: &[f64],
+    ) {
+        debug_assert_eq!(
+            state.len(),
+            indexer.n_state,
+            "state slice length {got} != n_state {expected}",
+            got = state.len(),
+            expected = indexer.n_state,
+        );
+
+        let n = self.hydro_count;
+        let l = self.max_par_order;
+
+        // Category 1: storage-fixing (col = storage_in.start + h)
+        // The incoming storage column is distinct from the outgoing storage column
+        // at [0, N). Using the wrong column would pin the water-balance output
+        // variable rather than the state-carrying variable.
+        let storage_in_start = indexer.storage_in.start;
+        for (h, &sv) in state[..n].iter().enumerate() {
+            let col = storage_in_start + h;
+            let scaled = if col_scale.is_empty() {
+                sv
+            } else {
+                sv / col_scale[col]
+            };
+            self.col_indices[h] = col;
+            self.col_lower[h] = scaled;
+            self.col_upper[h] = scaled;
+        }
+
+        // Category 2: AR lag-fixing (col = inflow_lags.start + lag*N + h)
+        let inflow_lags_start = indexer.inflow_lags.start;
+        for lag in 0..l {
+            for h in 0..n {
+                let slot = n + lag * n + h;
+                let col = inflow_lags_start + lag * n + h;
+                let sv = state[slot];
+                let scaled = if col_scale.is_empty() {
+                    sv
+                } else {
+                    sv / col_scale[col]
+                };
+                self.col_indices[slot] = col;
+                self.col_lower[slot] = scaled;
+                self.col_upper[slot] = scaled;
+            }
+        }
+
+        // Category 6: anticipated-state-fixing (col = anticipated_state.start + slot*A + plant)
+        let cat6_start = n * (1 + l);
+        self.fill_anticipated_state_col_patches(indexer, state, col_scale, cat6_start);
+    }
+
+    /// Write the `A*K` Category 6 anticipated-state-fixing column-bound patches
+    /// into the column-bound buffer starting at `cat6_start`.
+    ///
+    /// Each patch targets the column `anticipated_state.start + slot * A + plant`
+    /// and sets `lb = ub = state[col] / col_scale[col]` (or `state[col]` when
+    /// `col_scale` is empty). Iteration order is slot-major, plant-minor —
+    /// matching the LP ring-buffer layout and the row-equality counterpart
+    /// `fill_anticipated_state_patches`.
+    ///
+    /// When `n_anticipated == 0` or `k_max == 0` this is a no-op.
+    fn fill_anticipated_state_col_patches(
+        &mut self,
+        indexer: &StageIndexer,
+        state: &[f64],
+        col_scale: &[f64],
+        cat6_start: usize,
+    ) {
+        let n_ant = self.n_anticipated;
+        let k = self.k_max;
+        let ant_state_col_start = indexer.anticipated_state.start;
+        for slot in 0..k {
+            for plant in 0..n_ant {
+                let off = slot * n_ant + plant;
+                let buf_slot = cat6_start + off;
+                let col = ant_state_col_start + off;
+                let sv = state[col];
+                let scaled = if col_scale.is_empty() {
+                    sv
+                } else {
+                    sv / col_scale[col]
+                };
+                self.col_indices[buf_slot] = col;
+                self.col_lower[buf_slot] = scaled;
+                self.col_upper[buf_slot] = scaled;
+            }
+        }
+    }
+
     /// Fill Category 4 load balance row patches for a forward-pass solve.
     ///
     /// Writes `n_load_buses * n_blocks` equality patches into the Category 4
@@ -610,6 +780,24 @@ impl PatchBuffer {
     pub fn state_patch_count(&self) -> usize {
         self.hydro_count * (1 + self.max_par_order) + self.n_anticipated * self.k_max
     }
+
+    /// Capacity of the column-bound region: `N*(1+L) + A*K`.
+    ///
+    /// Returns the number of entries allocated in `col_indices`, `col_lower`,
+    /// and `col_upper` — one for each state-fixing slot covering Categories 1
+    /// (storage, N entries), 2 (lag, N*L entries), and 6 (anticipated-state,
+    /// A*K entries).
+    ///
+    /// This mirrors [`state_patch_count`] for the row-bound region.  The two
+    /// methods are kept independent so that future capacity drift between the
+    /// row and column regions does not silently couple them.
+    ///
+    /// [`state_patch_count`]: PatchBuffer::state_patch_count
+    #[must_use]
+    #[inline]
+    pub fn state_col_patch_count(&self) -> usize {
+        self.hydro_count * (1 + self.max_par_order) + self.n_anticipated * self.k_max
+    }
 }
 
 /// Compute the row index of hydro `h`'s AR dynamics constraint.
@@ -650,7 +838,7 @@ pub fn ar_dynamics_row_offset(base_row: usize, hydro_index: usize) -> usize {
     clippy::cast_possible_truncation
 )]
 mod tests {
-    use super::{ar_dynamics_row_offset, PatchBuffer};
+    use super::{PatchBuffer, ar_dynamics_row_offset};
     use crate::indexer::StageIndexer;
 
     /// Convenience: make an indexer without repeating N/L everywhere.
@@ -662,6 +850,94 @@ mod tests {
     fn new_3_2_sizes_to_15() {
         // N*(2+L) + A*K + N = 3*(2+2) + 0 + 3 = 15 (includes z-inflow capacity)
         let buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
+        assert_eq!(buf.indices.len(), 15);
+        assert_eq!(buf.lower.len(), 15);
+        assert_eq!(buf.upper.len(), 15);
+    }
+
+    // -------------------------------------------------------------------------
+    // Column-bound region capacity tests
+    // -------------------------------------------------------------------------
+
+    /// N=3, L=2: col capacity = N*(1+L) + A*K = 3*3 + 0 = 9.
+    #[test]
+    fn col_buffer_capacity_3_2_sizes_to_9() {
+        let buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
+        assert_eq!(buf.col_indices.len(), 9);
+        assert_eq!(buf.col_lower.len(), 9);
+        assert_eq!(buf.col_upper.len(), 9);
+    }
+
+    /// A=1, K=2, N=0: col capacity = 0 + 1*2 = 2.
+    #[test]
+    fn col_buffer_capacity_with_anticipated() {
+        let buf = PatchBuffer::new(0, 0, 0, 0, 1, 2);
+        assert_eq!(buf.col_indices.len(), 2);
+        assert_eq!(buf.col_lower.len(), 2);
+        assert_eq!(buf.col_upper.len(), 2);
+    }
+
+    /// N=3, L=2, A=2, K=3: col capacity = 3*3 + 2*3 = 9 + 6 = 15.
+    #[test]
+    fn col_buffer_capacity_combined_state_and_anticipated() {
+        let buf = PatchBuffer::new(3, 2, 0, 0, 2, 3);
+        assert_eq!(buf.col_indices.len(), 15);
+        assert_eq!(buf.col_lower.len(), 15);
+        assert_eq!(buf.col_upper.len(), 15);
+    }
+
+    /// All zero counts: col capacity = 0.
+    #[test]
+    fn col_buffer_capacity_zero_hydros() {
+        let buf = PatchBuffer::new(0, 0, 0, 0, 0, 0);
+        assert_eq!(buf.col_indices.len(), 0);
+        assert_eq!(buf.col_lower.len(), 0);
+        assert_eq!(buf.col_upper.len(), 0);
+    }
+
+    /// Production scale: N=160, L=12 → col capacity = 160*13 = 2080.
+    #[test]
+    fn col_buffer_capacity_production_scale() {
+        let buf = PatchBuffer::new(160, 12, 0, 0, 0, 0);
+        assert_eq!(buf.col_indices.len(), 2080);
+        assert_eq!(buf.col_lower.len(), 2080);
+        assert_eq!(buf.col_upper.len(), 2080);
+    }
+
+    /// `state_col_patch_count` matches `state_patch_count` for the same entity counts.
+    ///
+    /// Both compute `N*(1+L) + A*K`; they are kept as independent methods so
+    /// future capacity changes to one region do not silently affect the other.
+    #[test]
+    fn state_col_patch_count_matches_row_state_patch_count() {
+        let buf = PatchBuffer::new(3, 2, 0, 0, 1, 2);
+        assert_eq!(buf.state_col_patch_count(), buf.state_patch_count());
+    }
+
+    /// Column buffer is zero-initialised at construction.
+    #[test]
+    fn col_buffer_zero_initialised() {
+        let buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
+        assert_eq!(buf.col_indices.len(), 9);
+        assert!(
+            buf.col_indices.iter().all(|&v| v == 0),
+            "col_indices not zero-initialised"
+        );
+        assert!(
+            buf.col_lower.iter().all(|&v| v == 0.0),
+            "col_lower not zero-initialised"
+        );
+        assert!(
+            buf.col_upper.iter().all(|&v| v == 0.0),
+            "col_upper not zero-initialised"
+        );
+    }
+
+    /// Row buffer capacity is unchanged: `PatchBuffer::new(3, 2, 0, 0, 0, 0).indices.len() == 15`.
+    #[test]
+    fn row_buffer_capacity_unchanged_in_ticket_001() {
+        let buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
+        // N*(2+L) + A*K + M*B + N = 3*(2+2) + 0 + 0 + 3 = 15
         assert_eq!(buf.indices.len(), 15);
         assert_eq!(buf.lower.len(), 15);
         assert_eq!(buf.upper.len(), 15);
@@ -1280,5 +1556,235 @@ mod tests {
         );
         assert_eq!(buf.lower[1], 5.0, "slot 1 lower");
         assert_eq!(buf.upper[1], 5.0, "slot 1 upper");
+    }
+
+    // -------------------------------------------------------------------------
+    // fill_col_state_patches unit tests
+    // -------------------------------------------------------------------------
+
+    /// Build an augmented indexer for N=3, L=2, A=0, K=0 to use across
+    /// Category 1 and 2 column-patch tests.
+    fn idx_augmented_3_2() -> StageIndexer {
+        use crate::indexer::{EquipmentCounts, EvapConfig, FphaColumnLayout};
+        StageIndexer::with_equipment_and_evaporation(
+            &EquipmentCounts {
+                hydro_count: 3,
+                max_par_order: 2,
+                n_thermals: 0,
+                n_lines: 0,
+                n_buses: 1,
+                n_blks: 1,
+                has_inflow_penalty: false,
+                max_deficit_segments: 1,
+                n_anticipated: 0,
+                k_max: 0,
+                anticipated_lead_stages: vec![],
+                anticipated_thermal_indices: vec![],
+            },
+            &FphaColumnLayout {
+                hydro_indices: vec![],
+                planes_per_hydro: vec![],
+            },
+            &EvapConfig {
+                hydro_indices: vec![],
+            },
+        )
+    }
+
+    /// Category 1 col_indices[0..3] = [storage_in.start, +1, +2].
+    #[test]
+    fn fill_col_state_patches_category1_indices() {
+        let indexer = idx_augmented_3_2();
+        let state = [10.0_f64, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
+        buf.fill_col_state_patches(&indexer, &state, &[]);
+
+        let s = indexer.storage_in.start;
+        assert_eq!(buf.col_indices[0], s);
+        assert_eq!(buf.col_indices[1], s + 1);
+        assert_eq!(buf.col_indices[2], s + 2);
+    }
+
+    /// Category 1 col_lower[0..3] == col_upper[0..3] == [10.0, 20.0, 30.0].
+    #[test]
+    fn fill_col_state_patches_category1_values() {
+        let indexer = idx_augmented_3_2();
+        let state = [10.0_f64, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
+        buf.fill_col_state_patches(&indexer, &state, &[]);
+
+        assert_eq!(buf.col_lower[0], 10.0);
+        assert_eq!(buf.col_upper[0], 10.0);
+        assert_eq!(buf.col_lower[1], 20.0);
+        assert_eq!(buf.col_upper[1], 20.0);
+        assert_eq!(buf.col_lower[2], 30.0);
+        assert_eq!(buf.col_upper[2], 30.0);
+    }
+
+    /// Category 2 col_indices[3..9] matches lag column targets; col_lower matches lag values.
+    ///
+    /// Lag-column formula: `inflow_lags.start + lag*N + h`.
+    /// - lag=0: cols `[il, il+1, il+2]`
+    /// - lag=1: cols `[il+3, il+4, il+5]`
+    /// State layout: lags at `state[3..9]` = [1,2,3,4,5,6].
+    #[test]
+    fn fill_col_state_patches_category2_indices_and_values() {
+        let indexer = idx_augmented_3_2();
+        let state = [10.0_f64, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
+        buf.fill_col_state_patches(&indexer, &state, &[]);
+
+        let il = indexer.inflow_lags.start;
+        // lag=0
+        assert_eq!(buf.col_indices[3], il);
+        assert_eq!(buf.col_indices[4], il + 1);
+        assert_eq!(buf.col_indices[5], il + 2);
+        // lag=1
+        assert_eq!(buf.col_indices[6], il + 3);
+        assert_eq!(buf.col_indices[7], il + 4);
+        assert_eq!(buf.col_indices[8], il + 5);
+
+        assert_eq!(buf.col_lower[3], 1.0);
+        assert_eq!(buf.col_upper[3], 1.0);
+        assert_eq!(buf.col_lower[6], 4.0);
+        assert_eq!(buf.col_upper[6], 4.0);
+        assert_eq!(buf.col_lower[8], 6.0);
+        assert_eq!(buf.col_upper[8], 6.0);
+    }
+
+    /// Category 6 column-bound patches for N=0, L=0, A=1, K=2.
+    ///
+    /// col_indices[0..2] = [anticipated_state.start, +1],
+    /// col_lower[0..2] == col_upper[0..2] == [7.0, 11.0] (slot-major / plant-minor).
+    #[test]
+    fn fill_col_state_patches_anticipated_category6() {
+        use crate::indexer::{EquipmentCounts, EvapConfig, FphaColumnLayout};
+
+        let indexer = StageIndexer::with_equipment_and_evaporation(
+            &EquipmentCounts {
+                hydro_count: 0,
+                max_par_order: 0,
+                n_thermals: 0,
+                n_lines: 0,
+                n_buses: 1,
+                n_blks: 1,
+                has_inflow_penalty: false,
+                max_deficit_segments: 1,
+                n_anticipated: 1,
+                k_max: 2,
+                anticipated_lead_stages: vec![2],
+                anticipated_thermal_indices: vec![0],
+            },
+            &FphaColumnLayout {
+                hydro_indices: vec![],
+                planes_per_hydro: vec![],
+            },
+            &EvapConfig {
+                hydro_indices: vec![],
+            },
+        );
+
+        // n_state = 0 + 1*2 = 2; anticipated_state.start = 0
+        let ant_start = indexer.anticipated_state.start;
+        let mut state = vec![0.0_f64; indexer.n_state];
+        state[ant_start] = 7.0;
+        state[ant_start + 1] = 11.0;
+
+        let mut buf = PatchBuffer::new(0, 0, 0, 0, 1, 2);
+        buf.fill_col_state_patches(&indexer, &state, &[]);
+
+        assert_eq!(buf.col_indices[0], ant_start);
+        assert_eq!(buf.col_indices[1], ant_start + 1);
+        assert_eq!(buf.col_lower[0], 7.0);
+        assert_eq!(buf.col_upper[0], 7.0);
+        assert_eq!(buf.col_lower[1], 11.0);
+        assert_eq!(buf.col_upper[1], 11.0);
+    }
+
+    /// Every patch in the active col region has col_lower[i] == col_upper[i].
+    #[test]
+    fn fill_col_state_patches_equality_constraints() {
+        let indexer = idx_augmented_3_2();
+        let state = [10.0_f64, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
+        buf.fill_col_state_patches(&indexer, &state, &[]);
+
+        let count = buf.state_col_patch_count();
+        for i in 0..count {
+            assert_eq!(
+                buf.col_lower[i],
+                buf.col_upper[i],
+                "col patch {i}: lower {lo} != upper {up}",
+                lo = buf.col_lower[i],
+                up = buf.col_upper[i],
+            );
+        }
+    }
+
+    /// col_scale divides: col_lower[h] == state[h] / col_scale[col] for Category 1.
+    ///
+    /// With col_scale[storage_in.start + h] = 2.0 for all h, and state = [10, 20, 30, ...],
+    /// expected col_lower[0..3] = [5.0, 10.0, 15.0].
+    #[test]
+    fn fill_col_state_patches_unscaled_with_col_scale() {
+        let indexer = idx_augmented_3_2();
+        let state = [10.0_f64, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
+
+        // Build a col_scale long enough to cover anticipated_state.end.
+        // Fill with 1.0 everywhere, then override the storage_in columns to 2.0.
+        let ncols = indexer.anticipated_state.end.max(indexer.storage_in.end);
+        let mut col_scale = vec![1.0_f64; ncols];
+        let s = indexer.storage_in.start;
+        col_scale[s] = 2.0;
+        col_scale[s + 1] = 2.0;
+        col_scale[s + 2] = 2.0;
+
+        buf.fill_col_state_patches(&indexer, &state, &col_scale);
+
+        assert_eq!(buf.col_lower[0], 5.0);
+        assert_eq!(buf.col_upper[0], 5.0);
+        assert_eq!(buf.col_lower[1], 10.0);
+        assert_eq!(buf.col_upper[1], 10.0);
+        assert_eq!(buf.col_lower[2], 15.0);
+        assert_eq!(buf.col_upper[2], 15.0);
+    }
+
+    /// When n_anticipated == 0, Category 6 is empty and state_col_patch_count() == N*(1+L).
+    #[test]
+    fn fill_col_state_patches_zero_anticipated_collapses_correctly() {
+        let indexer = idx_augmented_3_2();
+        let state = [10.0_f64, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
+        buf.fill_col_state_patches(&indexer, &state, &[]);
+
+        // N*(1+L) + A*K = 3*3 + 0 = 9
+        assert_eq!(buf.state_col_patch_count(), 9);
+        assert_eq!(buf.col_indices.len(), 9);
+    }
+
+    /// After fill_col_state_patches, the row buffer (indices/lower/upper) is untouched.
+    ///
+    /// Catches accidental cross-buffer writes; the row buffer must remain
+    /// zero-initialised since no row-equality filler has been called.
+    #[test]
+    fn row_buffer_unchanged_after_fill_col_state_patches() {
+        let indexer = idx_augmented_3_2();
+        let state = [10.0_f64, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
+        buf.fill_col_state_patches(&indexer, &state, &[]);
+
+        assert!(
+            buf.indices.iter().all(|&v| v == 0),
+            "row indices modified by fill_col_state_patches"
+        );
+        assert!(
+            buf.lower.iter().all(|&v| v == 0.0),
+            "row lower modified by fill_col_state_patches"
+        );
+        assert!(
+            buf.upper.iter().all(|&v| v == 0.0),
+            "row upper modified by fill_col_state_patches"
+        );
     }
 }
