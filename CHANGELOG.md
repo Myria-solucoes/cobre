@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-05-25
+
 ### Changed
 
 - Stage-LP state pinning now uses column bounds (`set_col_bounds`) on
@@ -21,6 +23,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (unscaled by multiplying by `col_scale[col]`) instead of
   `view.dual[row]`. The per-LP backward solve avoids `N + N*L + A*K`
   redundant equality rows per stage.
+- Cut deactivation now toggles a cut row's RHS bounds to the
+  `f64::INFINITY` sentinel (trivially satisfied) instead of
+  removing the row from the LP. The cut pool is append-only:
+  every cut ever generated remains stored at a stable slot
+  index for the lifetime of the run. Stage-LP cut rows are
+  stable across iterations, including after cut-selection
+  deactivation.
+- Cut-sync wire format bumped to version 2. The wire carries
+  an explicit version byte (offset 0) and a record-type tag
+  (offset 13) so that activity updates can travel through the
+  same allgatherv channel as new cuts. Version-1 wire payloads
+  are rejected by version-2 receivers; cross-version MPI runs
+  are not a supported deployment mode.
+- `training/metadata.json` `row_pool` now carries two new
+  fields: `cuts_in_lp` (rows in the LP, including inactive
+  sentinel rows) and `cuts_active` (active cuts only). Both
+  are `u64` and default to `0` when deserialising older
+  manifests that lack the fields.
 
 ## [0.7.0] - 2026-05-24
 

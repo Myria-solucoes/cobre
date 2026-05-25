@@ -94,10 +94,10 @@ near zero.
 | `state_exchange`      | `ExchangeBuffers`: step 3 allgatherv of trial point state vectors                                                                                                                                                                                                                  |
 | `backward`            | `run_backward_pass`: step 4 Benders cut generation with work-stealing parallelism                                                                                                                                                                                                  |
 | `cut_sync`            | `CutSyncBuffers`: step 5 allgatherv of new cut wire records                                                                                                                                                                                                                        |
-| `cut_selection`       | `CutSelectionStrategy`, `CutMetadata`, `DeactivationSet`: step 5a Stage 1 pool pruning                                                                                                                                                                                             |
+| `cut_selection`       | `CutSelectionStrategy`, `CutMetadata`, `CutActivityUpdates`: step 5a Stage 1 pool pruning                                                                                                                                                                                          |
 | `lower_bound`         | `evaluate_lower_bound`: step 5b risk-adjusted LB computation (parallelized across openings)                                                                                                                                                                                        |
 | `convergence`         | `ConvergenceMonitor`: step 6 bound tracking and stopping rule evaluation                                                                                                                                                                                                           |
-| `cut`                 | `CutPool`, `FutureCostFunction`, `CutRowMap`, `WARM_START_ITERATION`: cut data structures, wire format, and LP row mapping                                                                                                                                                         |
+| `cut`                 | `CutPool`, `FutureCostFunction`, `CutRowMap`, `WARM_START_ITERATION`: append-only cut storage with RHS-toggle deactivation, wire format, and LP row mapping                                                                                                                        |
 | `basis_reconstruct`   | `reconstruct_basis`: slot-tracked warm-start basis reconstruction — reconciles stored cut rows by slot identity and classifies newly added cuts at the capture-time state                                                                                                          |
 | `config`              | `TrainingConfig`: algorithm parameters                                                                                                                                                                                                                                             |
 | `context`             | `StageContext`, `TrainingContext`: hot-path argument bundles that absorb parameters into context structs                                                                                                                                                                           |
@@ -236,12 +236,57 @@ Callers borrow `StudySetup` to construct `TrainingContext` and `StageContext`; t
 ### `FutureCostFunction`
 
 The Future Cost Function (FCF) holds one `CutPool` per stage. Each `CutPool`
-is a pre-allocated flat array of cut slots. Cuts are inserted deterministically
+is an append-only flat array of cut slots. Cuts are inserted deterministically
 by `(iteration, forward_pass_index)` to guarantee bit-for-bit identical FCF
-state across all MPI ranks.
+state across all MPI ranks. Once a slot is populated it retains a stable
+integer index for the lifetime of the run — no slot is ever reused or removed.
 
 The FCF is built once before training begins. Total slot capacity is
 `warm_start_cuts + max_iterations * forward_passes` per stage.
+
+Cut deactivation is applied via `set_active(stage, slot, false)`. An inactive
+cut remains in storage and in the stage LP; only its row bounds are toggled to
+`[-f64::INFINITY, +f64::INFINITY]`, making the constraint trivially satisfied
+without affecting the slot index or LP row index. The LP row index of each
+cut slot is therefore stable across iterations, including after cut-selection
+deactivation.
+
+Two aggregate metrics are available per stage and are written to
+`training/metadata.json` under the `row_pool` object: `cuts_in_lp` counts the
+rows in the stage LP (active inactive sentinel rows together — equal to
+`populated_count`, the high-water mark of cuts ever inserted at that stage);
+`cuts_active` counts only the currently active subset.
+
+### Cut pool memory and LP shape
+
+The stage LP grows monotonically: each stage LP carries
+`base_rows + populated_count` rows, where `base_rows` is the fixed structural
+row count and `populated_count` is the number of cut slots ever populated at
+that stage. Sentinel rows for inactive cuts occupy a row in the LP permanently
+but contribute no binding constraint.
+
+The worst-case coefficient storage per rank is bounded by:
+
+```text
+populated_per_stage × state_dimension × 8 bytes × num_stages
+```
+
+For the convertido production scale (117 stages, 159 state dimensions, up to
+10 000 populated cuts per stage) this formula gives approximately 1.5 GB per
+rank. The actual measured value at process end on the convertido benchmark is
+(actual value from manual convertido benchmark to be inserted).
+
+Inactive cuts still consume pricing time during the LP solve: the row
+coefficients participate in dual-simplex scanning even when the RHS is at the
+infinity sentinel. This is a deliberate tradeoff — stable row indices enable
+allocation-free iteration and correct basis warm-start across cut-set changes,
+at the cost of a proportionally larger LP for runs that deactivate many cuts.
+
+The `cuts_in_lp` and `cuts_active` fields in `training/metadata.json` under
+`row_pool` expose this tradeoff quantitatively: `cuts_in_lp` is the total LP
+row count (active + inactive), and `cuts_active` is the active subset. Both
+fields are `u64` and default to `0` when deserialising older manifests that
+lack them.
 
 ### `PatchBuffer`
 
@@ -560,19 +605,36 @@ region to preserve bit-for-bit determinism across thread counts.
 
 ### Model persistence and incremental cuts
 
-`CutRowMap` provides O(1) slot-to-row lookup for the persistent lower-bound
-LP so the append path skips cuts that are already present. The LB LP is
-strictly append-only: cuts are never removed from it, which keeps the lower
-bound monotonically non-decreasing. The shared row pool's active/inactive
-bit is not propagated to the LB LP — pool-deactivated rows remain as LP
-rows in the LB solver.
+`CutRowMap` provides O(1) slot-to-row lookup so the append path skips cuts
+that are already present in a given LP.
+
+Both the stage LP and the LB LP are append-only: cuts are added but never
+removed. The stage LP toggles inactive cuts' RHS to
+`[-f64::INFINITY, +f64::INFINITY]` (trivially satisfied) rather than dropping
+the row; the LB LP does not toggle activity at all (it never deactivates cuts).
+Cut row positions are stable across iterations in both LPs, and the lower
+bound remains monotonically non-decreasing because the LB LP accumulates
+every cut ever generated.
 
 ### Cut wire format
 
-The cut wire format used by `CutSyncBuffers` is a fixed-size record:
-24 bytes of header (slot index, iteration, forward pass index, intercept)
-followed by `n_state * 8` bytes of coefficients. The record size is
-`cut_wire_size(n_state) = 24 + n_state * 8` bytes.
+The cut wire format used by `CutSyncBuffers` is at version 2
+(`CUT_WIRE_VERSION = 2`). Each record carries a version byte at offset 0
+(value `2`) and a record-type tag at offset 13 to distinguish two record
+variants:
+
+- **Cut record**: a 24-byte header (slot index, iteration, forward pass
+  index, intercept) followed by `n_state * 8` bytes of coefficients. The
+  total record size is `cut_wire_size(n_state) = 24 + n_state * 8` bytes.
+- **Activity-update record**: a fixed-size payload encoding `(stage, slot,
+  ActivityChange)`, where `ActivityChange` is either `Deactivate` (apply
+  the sentinel RHS) or `Reactivate` (restore the original intercept).
+  Activity-update records travel through the same allgatherv channel as
+  new cuts so that RHS toggles propagate to all ranks in the same step.
+
+Version-1 wire payloads are rejected by version-2 receivers with
+`SddpError::Validation`. Cross-version MPI runs are not a supported
+deployment mode.
 
 ### Basis cache wire format
 
