@@ -15,8 +15,8 @@ use rayon::iter::{
 
 use crate::{
     backward::{
-        load_backward_lp, process_trial_point_backward, BackwardResult, StageWorkerOpeningDelta,
-        StagedCut, SuccessorSpec,
+        BackwardResult, StageWorkerOpeningDelta, StagedCut, SuccessorSpec, load_backward_lp,
+        process_trial_point_backward,
     },
     config::CutManagementConfig,
     context::{StageContext, TrainingContext},
@@ -26,8 +26,8 @@ use crate::{
     forward::{build_delta_cut_row_batch_into, partition},
     risk_measure::RiskMeasure,
     solver_stats::{
-        pack_worker_opening_stats, unpack_worker_opening_stats, SolverStatsDelta,
-        StageWorkerStatsBuffer, WORKER_STATS_ENTRY_STRIDE,
+        SolverStatsDelta, StageWorkerStatsBuffer, WORKER_STATS_ENTRY_STRIDE,
+        pack_worker_opening_stats, unpack_worker_opening_stats,
     },
     state_exchange::ExchangeBuffers,
     training_session::{
@@ -1271,15 +1271,15 @@ mod tests {
         use chrono::NaiveDate;
         use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
         use cobre_core::{
+            Bus, DeficitSegment, EntityId, SystemBuilder,
             scenario::{CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile},
             temporal::{
                 Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
                 StageStateConfig,
             },
-            Bus, DeficitSegment, EntityId, SystemBuilder,
         };
         use cobre_stochastic::context::{
-            build_stochastic_context, ClassSchemes, OpeningTreeInputs,
+            ClassSchemes, OpeningTreeInputs, build_stochastic_context,
         };
         use std::collections::BTreeMap;
 

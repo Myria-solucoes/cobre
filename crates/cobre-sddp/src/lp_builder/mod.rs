@@ -135,8 +135,8 @@ mod scaling;
 mod template;
 
 // --- Public re-exports (stable API) ---
-pub use patch::{ar_dynamics_row_offset, PatchBuffer};
-pub use template::{build_stage_templates, StageTemplates};
+pub use patch::{PatchBuffer, ar_dynamics_row_offset};
+pub use template::{StageTemplates, build_stage_templates};
 
 // --- Crate-internal re-exports ---
 // PRESCALING-DISABLED TEST: helpers retained behind `#[allow(dead_code)]`
