@@ -221,22 +221,6 @@ int32_t cobre_highs_set_double_option(
     return (int32_t)Highs_setDoubleOptionValue(highs, option, value);
 }
 
-int32_t cobre_highs_get_int_option(
-    const void* highs,
-    const char* option,
-    int32_t*    value
-) {
-    return (int32_t)Highs_getIntOptionValue(highs, option, (HighsInt*)value);
-}
-
-int32_t cobre_highs_get_double_option(
-    const void* highs,
-    const char* option,
-    double*     value
-) {
-    return (int32_t)Highs_getDoubleOptionValue(highs, option, value);
-}
-
 /* =========================================================================
  * Diagnostics
  * ========================================================================= */
