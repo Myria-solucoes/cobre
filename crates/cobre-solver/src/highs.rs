@@ -130,7 +130,7 @@ fn default_options() -> [DefaultOption; 13] {
         },
         DefaultOption {
             name: c"primal_feasibility_tolerance",
-            value: OptionValue::Double(1e-4),
+            value: OptionValue::Double(1e-6),
         },
         DefaultOption {
             name: c"dual_feasibility_tolerance",
