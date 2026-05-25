@@ -1318,8 +1318,8 @@ mod tests {
     ///
     /// State pinning uses column bounds, so the `[0, n_state)` row prefix
     /// from the pre-cutover layout is absent. `num_rows` equals the count of
-    /// structural rows only (z_inflow, water balance, load balance, FPHA,
-    /// evap, operational, fishing, anticipated_state_out_def, generic).
+    /// structural rows only (`z_inflow`, water balance, load balance, FPHA,
+    /// evap, operational, fishing, `anticipated_state_out_def`, generic).
     #[test]
     fn num_rows_drops_by_n_state_with_anticipated_thermals() {
         let n_anticipated = 2_usize;
