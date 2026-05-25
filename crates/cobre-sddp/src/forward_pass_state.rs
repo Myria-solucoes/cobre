@@ -983,6 +983,7 @@ mod tests {
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
             worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+            cut_row_maps: Vec::new(),
         }
     }
 

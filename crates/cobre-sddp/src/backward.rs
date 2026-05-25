@@ -1026,6 +1026,7 @@ mod tests {
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
             worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+            cut_row_maps: Vec::new(),
         }]
     }
 
@@ -2835,6 +2836,7 @@ mod tests {
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
             worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+            cut_row_maps: Vec::new(),
         }];
         let mut basis_store_1 = empty_basis_store(exchange.local_count(), n_stages);
         let ctx = StageContext {
@@ -2938,6 +2940,7 @@ mod tests {
                 scratch_basis: Basis::new(0, 0),
                 backward_accum: BackwardAccumulators::default(),
                 worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+                cut_row_maps: Vec::new(),
             })
             .collect();
         let mut basis_store_4 = empty_basis_store(exchange.local_count(), n_stages);
@@ -3295,6 +3298,7 @@ mod tests {
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
             worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+            cut_row_maps: Vec::new(),
         };
         let mut workspaces = vec![ws];
 
@@ -3467,6 +3471,7 @@ mod tests {
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
             worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+            cut_row_maps: Vec::new(),
         };
         let mut workspaces = vec![ws];
         let comm = StubComm;
@@ -3634,6 +3639,7 @@ mod tests {
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
             worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+            cut_row_maps: Vec::new(),
         };
         let mut workspaces = vec![ws];
         let comm = StubComm;
@@ -4427,6 +4433,7 @@ mod tests {
                 scratch_basis: Basis::new(0, 0),
                 backward_accum: BackwardAccumulators::default(),
                 worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+                cut_row_maps: Vec::new(),
             })
             .collect();
 
@@ -4791,6 +4798,7 @@ mod tests {
                 scratch_basis: Basis::new(0, 0),
                 backward_accum: BackwardAccumulators::default(),
                 worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+                cut_row_maps: Vec::new(),
             })
             .collect();
 
@@ -5016,6 +5024,7 @@ mod tests {
                 scratch_basis: Basis::new(0, 0),
                 backward_accum: BackwardAccumulators::default(),
                 worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+                cut_row_maps: Vec::new(),
             })
             .collect();
 
@@ -5449,6 +5458,7 @@ mod tests {
                 scratch_basis: Basis::new(0, 0),
                 backward_accum: BackwardAccumulators::default(),
                 worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+                cut_row_maps: Vec::new(),
             })
             .collect();
 
