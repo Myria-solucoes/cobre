@@ -167,9 +167,10 @@ pub struct ReconstructionSource<'a> {
     /// Under the warm-start bake model the LP carries a row for every
     /// populated slot — including currently inactive slots whose row is
     /// encoded at sentinel `[-INF, +INF]` bounds. The reconstructed basis
-    /// must emit `HIGHS_BASIS_STATUS_LOWER` for those rows regardless of
-    /// the stored status (a slot that was active in a previous iteration
-    /// may now be inactive). Indexed by target-LP cut row order.
+    /// must emit `HIGHS_BASIS_STATUS_BASIC` for those rows regardless of
+    /// the stored status: a free row's slack must be basic to satisfy
+    /// `HiGHS`'s `col_basic + row_basic == num_row` invariant. Indexed by
+    /// target-LP cut row order.
     ///
     /// Pass `None` to fall back to the legacy behaviour (status driven
     /// solely by the stored basis and the activity classifier); this is
@@ -499,9 +500,10 @@ fn build_slot_lookup(reconcilable_slots: &[u32], slot_lookup: &mut Vec<Option<u3
 ///   Otherwise classify `BASIC` (safe slack default).
 ///
 /// When `active_mask` is `Some` the slot's mask entry overrides the
-/// classification: an inactive slot is always emitted as `LOWER` (its row is
-/// trivially satisfied at sentinel bounds and never binding), bypassing both
-/// the preserved-status copy and the activity-window guess. The candidate /
+/// classification: an inactive slot is always emitted as `BASIC` (its row is
+/// trivially satisfied at sentinel bounds, and `HiGHS` requires the slack of
+/// a free row to be basic), bypassing both the preserved-status copy and the
+/// activity-window guess. The candidate /
 /// new-lower bookkeeping is also skipped because an inactive row never
 /// participates in promotion or tail-override logic.
 ///

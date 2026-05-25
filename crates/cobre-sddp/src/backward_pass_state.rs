@@ -754,12 +754,11 @@ fn apply_template_update<S: SolverInterface + Send>(
     stage: usize,
     new_cuts_batch: &RowBatch,
 ) {
-    // Workspaces constructed without the post-CHUNK-1 initialization path
-    // (e.g. test fixtures that bypass `WorkspacePool::init_cut_row_maps`)
-    // carry empty `cut_row_maps` and `prev_applied_activity` vectors. The
-    // helper is a no-op in that case — the data structures required to
-    // resolve LP rows and diff the activity mask are not present, so there
-    // is nothing meaningful to update.
+    // Test fixtures that bypass `WorkspacePool::init_cut_row_maps` leave
+    // `cut_row_maps` and `prev_applied_activity` empty. The helper is a no-op
+    // in that case — production callers always run the init path so the data
+    // structures required to resolve LP rows and diff the activity mask are
+    // populated before the first `apply_template_update` call.
     if ws.cut_row_maps.is_empty() || ws.prev_applied_activity.is_empty() {
         return;
     }

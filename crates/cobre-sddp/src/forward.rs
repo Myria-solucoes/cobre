@@ -549,7 +549,9 @@ pub fn build_delta_cut_row_batch_into(
 /// Build a `RowBatch` containing every populated cut in the pool, with inactive
 /// cuts encoded at sentinel `[-INF, +INF]` row bounds.
 ///
-/// Infrastructure for future ticket; not yet wired into the training loop.
+/// Used by the per-iteration template rebake to produce stable cut-row
+/// positions across iterations: every populated slot occupies a row regardless
+/// of its activity state, so toggling activity does not shift later rows.
 ///
 /// The resulting `RowBatch` has `num_rows == fcf.pools[stage].populated_count`
 /// and the row order matches slot order ascending. Active slots emit
