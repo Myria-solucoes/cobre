@@ -575,7 +575,7 @@ impl HighsSolver {
         //   L0: cold restart
         //   L1: + presolve
         //   L2: + dual simplex
-        //   L3: + relaxed tolerances 1e-8
+        //   L3: + relaxed tolerances 1e-6
         //   L4: + IPM
         //
         // Phase 2 (levels 5-11): Extended strategies. Each level starts from
@@ -739,18 +739,18 @@ impl HighsSolver {
             2 => unsafe {
                 ffi::cobre_highs_set_int_option(self.handle, c"simplex_strategy".as_ptr(), 1);
             },
-            // Level 3: + relaxed tolerances 1e-8.
+            // Level 3: + relaxed tolerances 1e-6.
             // Cumulative: presolve + dual simplex + relaxed tolerances.
             3 => unsafe {
                 ffi::cobre_highs_set_double_option(
                     self.handle,
                     c"primal_feasibility_tolerance".as_ptr(),
-                    1e-8,
+                    1e-6,
                 );
                 ffi::cobre_highs_set_double_option(
                     self.handle,
                     c"dual_feasibility_tolerance".as_ptr(),
-                    1e-8,
+                    1e-6,
                 );
             },
             // Level 4: + IPM.
@@ -796,12 +796,12 @@ impl HighsSolver {
                 ffi::cobre_highs_set_double_option(
                     self.handle,
                     c"primal_feasibility_tolerance".as_ptr(),
-                    1e-8,
+                    1e-6,
                 );
                 ffi::cobre_highs_set_double_option(
                     self.handle,
                     c"dual_feasibility_tolerance".as_ptr(),
-                    1e-8,
+                    1e-6,
                 );
             },
             8 => unsafe {
@@ -818,12 +818,12 @@ impl HighsSolver {
                 ffi::cobre_highs_set_double_option(
                     self.handle,
                     c"primal_feasibility_tolerance".as_ptr(),
-                    1e-7,
+                    1e-6,
                 );
                 ffi::cobre_highs_set_double_option(
                     self.handle,
                     c"dual_feasibility_tolerance".as_ptr(),
-                    1e-7,
+                    1e-6,
                 );
             },
             11 => unsafe {
@@ -837,12 +837,12 @@ impl HighsSolver {
                 ffi::cobre_highs_set_double_option(
                     self.handle,
                     c"primal_feasibility_tolerance".as_ptr(),
-                    1e-7,
+                    1e-6,
                 );
                 ffi::cobre_highs_set_double_option(
                     self.handle,
                     c"dual_feasibility_tolerance".as_ptr(),
-                    1e-7,
+                    1e-6,
                 );
             },
             _ => unreachable!(),
