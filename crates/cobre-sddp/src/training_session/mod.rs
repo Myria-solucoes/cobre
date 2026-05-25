@@ -852,10 +852,11 @@ impl<'a, S: SolverInterface + Send, C: Communicator> TrainingSession<'a, S, C> {
                     let pool = &self.fcf.pools[stage];
                     let populated = pool.populated_count as u32;
                     let active_before = pool.active_count() as u32;
-                    let n_deact = deact.indices.len() as u32;
+                    let deact_indices = deact.deactivation_indices();
+                    let n_deact = deact_indices.len() as u32;
                     rows_deactivated += n_deact;
 
-                    self.fcf.pools[stage].deactivate(&deact.indices);
+                    self.fcf.pools[stage].deactivate(&deact_indices);
 
                     let active_after = self.fcf.pools[stage].active_count() as u32;
                     per_stage.push(StageRowSelectionRecord {

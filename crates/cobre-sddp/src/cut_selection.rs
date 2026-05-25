@@ -1,7 +1,7 @@
 //! Cut selection strategy for controlling cut pool growth during SDDP training.
 //!
 //! This module defines [`CutSelectionStrategy`] (three variants: Level1, LML1,
-//! Dominated), [`CutMetadata`] (per-cut tracking data), and [`DeactivationSet`]
+//! Dominated), [`CutMetadata`] (per-cut tracking data), and [`CutActivityUpdates`]
 //! (the output of a selection scan for one stage).
 //!
 //! ## Design
@@ -19,7 +19,7 @@
 //! ```rust
 //! use cobre_sddp::cut::CutPool;
 //! use cobre_sddp::cut_selection::{
-//!     CutMetadata, CutSelectionStrategy, DeactivationSet,
+//!     CutActivityUpdates, CutMetadata, CutSelectionStrategy, DeactivationSet,
 //! };
 //!
 //! let strategy = CutSelectionStrategy::Level1 {
@@ -40,7 +40,7 @@
 //! pool.metadata[0].active_count = 0;
 //! pool.metadata[1].active_count = 3;
 //! let deact = strategy.select(&pool, &[], 10);
-//! assert_eq!(deact.indices, vec![0]);
+//! assert_eq!(deact.deactivation_indices(), vec![0]);
 //! ```
 
 // ---------------------------------------------------------------------------
@@ -109,24 +109,76 @@ pub struct CutMetadata {
 }
 
 // ---------------------------------------------------------------------------
-// DeactivationSet
+// CutActivityUpdates
 // ---------------------------------------------------------------------------
 
-/// Set of cut indices to deactivate at a single stage.
-///
-/// Returned by [`CutSelectionStrategy::select`]. The caller applies each
-/// index to the activity bitmap by clearing the corresponding bit and
-/// decrementing the active count. Indices are zero-based slot positions in
-/// the pre-allocated cut pool.
-///
-/// The set may be empty if no cuts meet the deactivation criteria.
-#[derive(Debug, Clone)]
-pub struct DeactivationSet {
-    /// Stage index (0-based) that this deactivation set belongs to.
-    pub stage_index: u32,
+/// Direction of an activity change for a cut slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityChange {
+    /// Flip the slot from active to inactive (RHS sentinel applied).
+    Deactivate,
+    /// Flip the slot from inactive to active (original intercept restored).
+    Reactivate,
+}
 
-    /// Cut slot indices to deactivate.
-    pub indices: Vec<u32>,
+/// Set of cut activity changes at a single stage.
+///
+/// Returned by [`CutSelectionStrategy::select`]. Each entry is a
+/// `(slot, change)` pair where `change` is `ActivityChange::Deactivate`
+/// or `ActivityChange::Reactivate`. The caller applies each change to
+/// the activity bitmap via [`CutPool::set_active`].
+///
+/// The list may be empty if no cuts meet any activity-change criterion.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CutActivityUpdates {
+    /// Stage index (0-based) that this update set belongs to.
+    pub stage_index: u32,
+    /// `(slot, change)` updates to apply.
+    pub updates: Vec<(u32, ActivityChange)>,
+}
+
+/// Backward-compatible alias for [`CutActivityUpdates`].
+pub type DeactivationSet = CutActivityUpdates;
+
+impl CutActivityUpdates {
+    /// Construct a deactivation-only update set from a list of slot indices.
+    ///
+    /// All entries are tagged [`ActivityChange::Deactivate`]. Used by the
+    /// selection strategies that only emit deactivation decisions.
+    #[must_use]
+    pub fn deactivations_only(stage_index: u32, indices: Vec<u32>) -> Self {
+        Self {
+            stage_index,
+            updates: indices
+                .into_iter()
+                .map(|i| (i, ActivityChange::Deactivate))
+                .collect(),
+        }
+    }
+
+    /// Return the slots being deactivated (filter for `Deactivate` variant).
+    #[must_use]
+    pub fn deactivation_indices(&self) -> Vec<u32> {
+        self.updates
+            .iter()
+            .filter_map(|(slot, change)| match change {
+                ActivityChange::Deactivate => Some(*slot),
+                ActivityChange::Reactivate => None,
+            })
+            .collect()
+    }
+
+    /// Return the slots being reactivated (filter for `Reactivate` variant).
+    #[must_use]
+    pub fn reactivation_indices(&self) -> Vec<u32> {
+        self.updates
+            .iter()
+            .filter_map(|(slot, change)| match change {
+                ActivityChange::Reactivate => Some(*slot),
+                ActivityChange::Deactivate => None,
+            })
+            .collect()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -234,13 +286,14 @@ impl CutSelectionStrategy {
     /// Scan the cut pool metadata for a single stage and identify cuts to
     /// deactivate.
     ///
-    /// Returns a [`DeactivationSet`] whose `indices` are the zero-based slot
-    /// positions of cuts that should be deactivated. The caller is responsible
-    /// for applying the deactivation to the activity bitmap. This method does
-    /// not modify the metadata — it is a pure query.
+    /// Returns a [`CutActivityUpdates`] (typed as [`DeactivationSet`] via the
+    /// alias) whose entries are the zero-based slot positions of cuts that
+    /// should be deactivated. The caller is responsible for applying the
+    /// deactivation to the activity bitmap. This method does not modify the
+    /// metadata — it is a pure query.
     ///
     /// `stage_index` identifies which stage this selection runs for (used to
-    /// populate [`DeactivationSet::stage_index`]).
+    /// populate [`CutActivityUpdates::stage_index`]).
     ///
     /// Only slots where `active[i]` is `true` are considered. Slots that are
     /// already inactive (e.g. unpopulated slots below the high-water mark or
@@ -266,7 +319,7 @@ impl CutSelectionStrategy {
     /// pool.metadata[0].active_count = 0;
     /// pool.metadata[1].active_count = 2;
     /// let deact = strategy.select(&pool, &[], 10);
-    /// assert_eq!(deact.indices, vec![0]);
+    /// assert_eq!(deact.deactivation_indices(), vec![0]);
     /// ```
     #[must_use]
     pub fn select(
@@ -333,10 +386,7 @@ impl CutSelectionStrategy {
             }
         };
 
-        DeactivationSet {
-            stage_index,
-            indices,
-        }
+        CutActivityUpdates::deactivations_only(stage_index, indices)
     }
 }
 
@@ -503,7 +553,9 @@ pub fn parse_cut_selection_config(
 #[cfg(test)]
 mod tests {
     use super::parse_cut_selection_config;
-    use super::{CutMetadata, CutSelectionStrategy, DeactivationSet};
+    use super::{
+        ActivityChange, CutActivityUpdates, CutMetadata, CutSelectionStrategy, DeactivationSet,
+    };
     use crate::cut::CutPool;
     use cobre_io::config::RowSelectionConfig;
 
@@ -593,7 +645,7 @@ mod tests {
         let pool = make_pool(&[make_meta(0, 1), make_meta(1, 5)], &[true, true]);
         let deact = strategy.select(&pool, &[], 10);
         assert_eq!(
-            deact.indices,
+            deact.deactivation_indices(),
             vec![0],
             "only the inactive cut is deactivated"
         );
@@ -608,7 +660,7 @@ mod tests {
         let pool = make_pool(&[make_meta(3, 1), make_meta(7, 5)], &[true, true]);
         let deact = strategy.select(&pool, &[], 10);
         assert!(
-            deact.indices.is_empty(),
+            deact.deactivation_indices().is_empty(),
             "no cuts should be deactivated when all have activity"
         );
     }
@@ -624,7 +676,7 @@ mod tests {
             &[true, true, true],
         );
         let deact = strategy.select(&pool, &[], 10);
-        assert_eq!(deact.indices, vec![0, 1]);
+        assert_eq!(deact.deactivation_indices(), vec![0, 1]);
     }
 
     #[test]
@@ -635,7 +687,7 @@ mod tests {
         };
         let pool = CutPool::new(0, 1, 1, 0);
         let deact = strategy.select(&pool, &[], 10);
-        assert!(deact.indices.is_empty());
+        assert!(deact.deactivation_indices().is_empty());
     }
 
     #[test]
@@ -646,7 +698,7 @@ mod tests {
         };
         let pool = make_pool(&[make_meta(0, 5)], &[true]);
         let deact = strategy.select(&pool, &[], 20);
-        assert_eq!(deact.indices, vec![0]);
+        assert_eq!(deact.deactivation_indices(), vec![0]);
     }
 
     #[test]
@@ -659,7 +711,7 @@ mod tests {
         };
         let pool = make_pool(&[make_meta(0, 12)], &[true]);
         let deact = strategy.select(&pool, &[], 20);
-        assert!(deact.indices.is_empty());
+        assert!(deact.deactivation_indices().is_empty());
     }
 
     #[test]
@@ -671,7 +723,7 @@ mod tests {
         let pool = make_pool(&[make_meta(0, 10)], &[true]);
         let deact = strategy.select(&pool, &[], 20);
         assert!(
-            deact.indices.is_empty(),
+            deact.deactivation_indices().is_empty(),
             "boundary case: exactly at window edge, retained"
         );
     }
@@ -687,7 +739,7 @@ mod tests {
             &[true, true, true],
         );
         let deact = strategy.select(&pool, &[], 20);
-        assert_eq!(deact.indices, vec![0, 2]);
+        assert_eq!(deact.deactivation_indices(), vec![0, 2]);
     }
 
     #[test]
@@ -707,7 +759,7 @@ mod tests {
             &[true],
         );
         let deact = strategy.select(&pool, &[], 10);
-        assert!(deact.indices.contains(&0));
+        assert!(deact.deactivation_indices().contains(&0));
     }
 
     #[test]
@@ -727,7 +779,7 @@ mod tests {
             &[true],
         );
         let deact = strategy.select(&pool, &[], 20);
-        assert!(deact.indices.contains(&0));
+        assert!(deact.deactivation_indices().contains(&0));
     }
 
     #[test]
@@ -754,13 +806,10 @@ mod tests {
 
     #[test]
     fn deactivation_set_derives_debug_and_clone() {
-        let deact = DeactivationSet {
-            stage_index: 2,
-            indices: vec![0, 3, 7],
-        };
+        let deact = CutActivityUpdates::deactivations_only(2, vec![0, 3, 7]);
         let cloned = deact.clone();
         assert_eq!(cloned.stage_index, 2);
-        assert_eq!(cloned.indices, vec![0, 3, 7]);
+        assert_eq!(cloned.deactivation_indices(), vec![0, 3, 7]);
         assert!(!format!("{deact:?}").is_empty());
     }
 
@@ -1032,7 +1081,7 @@ mod tests {
         };
         let deact = strategy.select_for_stage(&pool, &[], 5, 0);
         assert!(
-            deact.indices.is_empty(),
+            deact.deactivation_indices().is_empty(),
             "no cuts should be selected: slot 0 is already inactive, \
              slots 1 and 2 have activity"
         );
@@ -1067,7 +1116,7 @@ mod tests {
 
         // Slots 0 and 1 deactivated, slots 2-4 retained.
         assert_eq!(
-            deact.indices,
+            deact.deactivation_indices(),
             vec![0, 1],
             "only cuts with last_active_iter 1 and 5 should be deactivated"
         );
@@ -1104,7 +1153,7 @@ mod tests {
         );
         let deact = strategy.select(&pool, &[], 10);
         assert_eq!(
-            deact.indices,
+            deact.deactivation_indices(),
             vec![1],
             "only the older cut (iter 5) should be deactivated; \
              the current-iteration cut (iter 10) must be spared"
@@ -1132,7 +1181,7 @@ mod tests {
         );
         let deact = strategy.select(&pool, &[], 10);
         assert!(
-            deact.indices.is_empty(),
+            deact.deactivation_indices().is_empty(),
             "current-iteration cut must not be deactivated even with memory_window=0"
         );
     }
@@ -1198,7 +1247,7 @@ mod tests {
         );
         let states: Vec<f64> = vec![0.0, 1.0, 3.0];
         let deact = strategy.select(&pool, &states, 10);
-        assert_eq!(deact.indices, vec![0, 3, 4]);
+        assert_eq!(deact.deactivation_indices(), vec![0, 3, 4]);
     }
 
     /// SS1.3 test 2: cut dominated at 2/3 states but tied at 1 -> retained.
@@ -1223,7 +1272,7 @@ mod tests {
         let states: Vec<f64> = vec![0.0, 1.0, 3.0];
         let deact = strategy.select(&pool, &states, 10);
         assert!(
-            deact.indices.is_empty(),
+            deact.deactivation_indices().is_empty(),
             "cut 0 achieves max at x=0 and x=1, must not be deactivated"
         );
     }
@@ -1252,7 +1301,7 @@ mod tests {
         let states: Vec<f64> = vec![0.0, 1.0, 3.0];
         let deact = strategy.select(&pool, &states, 10);
         assert_eq!(
-            deact.indices,
+            deact.deactivation_indices(),
             vec![2],
             "only cut 2 (constant 2) should be dominated"
         );
@@ -1273,7 +1322,7 @@ mod tests {
         );
         let deact = strategy.select(&pool, &[], 10);
         assert!(
-            deact.indices.is_empty(),
+            deact.deactivation_indices().is_empty(),
             "empty visited_states must produce empty deactivation set"
         );
     }
@@ -1294,7 +1343,7 @@ mod tests {
         let states: Vec<f64> = vec![0.0, 1.0];
         let deact = strategy.select(&pool, &states, 10);
         assert!(
-            deact.indices.is_empty(),
+            deact.deactivation_indices().is_empty(),
             "single active cut cannot be dominated"
         );
     }
@@ -1317,7 +1366,7 @@ mod tests {
         let states: Vec<f64> = vec![0.0, 1.0];
         let deact = strategy.select(&pool, &states, 10);
         assert!(
-            deact.indices.is_empty(),
+            deact.deactivation_indices().is_empty(),
             "cut from current iteration must not be deactivated even if dominated"
         );
     }
@@ -1403,16 +1452,70 @@ mod tests {
         let deact_dom = dom.select(&pool, &states, 11);
 
         assert!(
-            deact_l1.indices.len() <= deact_lml1.indices.len(),
+            deact_l1.deactivation_indices().len() <= deact_lml1.deactivation_indices().len(),
             "Level1 ({}) should deactivate <= LML1 ({})",
-            deact_l1.indices.len(),
-            deact_lml1.indices.len()
+            deact_l1.deactivation_indices().len(),
+            deact_lml1.deactivation_indices().len()
         );
         assert!(
-            deact_lml1.indices.len() <= deact_dom.indices.len(),
+            deact_lml1.deactivation_indices().len() <= deact_dom.deactivation_indices().len(),
             "LML1 ({}) should deactivate <= Dominated ({})",
-            deact_lml1.indices.len(),
-            deact_dom.indices.len()
+            deact_lml1.deactivation_indices().len(),
+            deact_dom.deactivation_indices().len()
         );
+    }
+
+    #[test]
+    fn activity_change_deactivate_and_reactivate_are_distinct() {
+        assert_ne!(ActivityChange::Deactivate, ActivityChange::Reactivate);
+    }
+
+    #[test]
+    fn cut_activity_updates_deactivations_only_constructor() {
+        let updates = CutActivityUpdates::deactivations_only(7, vec![0, 1, 2]);
+        assert_eq!(updates.stage_index, 7);
+        assert_eq!(updates.updates.len(), 3);
+        for (_, change) in &updates.updates {
+            assert_eq!(*change, ActivityChange::Deactivate);
+        }
+    }
+
+    #[test]
+    fn cut_activity_updates_deactivation_indices_filters_correctly() {
+        let updates = CutActivityUpdates {
+            stage_index: 0,
+            updates: vec![
+                (0, ActivityChange::Deactivate),
+                (1, ActivityChange::Reactivate),
+                (2, ActivityChange::Deactivate),
+            ],
+        };
+        assert_eq!(updates.deactivation_indices(), vec![0, 2]);
+        assert_eq!(updates.reactivation_indices(), vec![1]);
+    }
+
+    #[test]
+    fn deactivation_set_alias_compiles() {
+        let _: DeactivationSet = CutActivityUpdates::deactivations_only(0, vec![]);
+    }
+
+    #[test]
+    fn select_for_stage_returns_cut_activity_updates_with_deactivate_only() {
+        let mut pool = CutPool::new(3, 1, 1, 0);
+        pool.add_cut(0, 0, 1.0, &[0.0]);
+        pool.add_cut(1, 0, 2.0, &[0.0]);
+        pool.metadata[0].active_count = 0;
+        pool.metadata[1].active_count = 0;
+
+        let strategy = CutSelectionStrategy::Level1 {
+            threshold: 0,
+            check_frequency: 1,
+        };
+        let result = strategy.select_for_stage(&pool, &[], 10, 0);
+
+        assert!(!result.updates.is_empty());
+        for (_, change) in &result.updates {
+            assert_eq!(*change, ActivityChange::Deactivate);
+        }
     }
 }
