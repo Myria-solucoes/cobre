@@ -1076,32 +1076,6 @@ pub(super) fn fill_anticipated_fishing_entries(
     );
 }
 
-/// Fill the anticipated-state-fixing CSC diagonal entries.
-///
-/// For each `(slot, plant)` pair in `[0, k_max) × [0, n_anticipated)`, pushes
-/// `+1.0` on column `col_anticipated_state_start + slot * n_anticipated + plant`
-/// at row `row_anticipated_state_fixing_start + slot * n_anticipated + plant`.
-///
-/// This pins each anticipated-state ring-buffer slot to its corresponding state-fixing
-/// equality row (mirror of the storage-fixing and lag-fixing diagonals in
-/// `fill_state_and_water_entries`). Row bounds default to `0 == 0` (initialised
-/// in `fill_stage_rows`); the RHS is patched at solve time by `fill_state_patches`.
-///
-/// No-op when `n_anticipated == 0` (`n_ant_state == 0`, loops execute zero times).
-fn fill_anticipated_state_fixing_entries(
-    layout: &StageLayout,
-    col_entries: &mut [Vec<(usize, f64)>],
-) {
-    for slot in 0..layout.k_max {
-        for plant in 0..layout.n_anticipated {
-            let col = layout.col_anticipated_state_start + slot * layout.n_anticipated + plant;
-            let row =
-                layout.row_anticipated_state_fixing_start + slot * layout.n_anticipated + plant;
-            col_entries[col].push((row, 1.0));
-        }
-    }
-}
-
 /// Fill CSC entries for the `anticipated_state_out` definition equality rows.
 ///
 /// For each active anticipated plant `i` (`stage_idx + K_i < n_stages`),
@@ -1145,15 +1119,12 @@ pub(super) fn fill_anticipated_state_out_def_entries(
     );
 }
 
-/// Build the CSC matrix entries for one stage.
+/// Fill water-balance row entries into `col_entries`.
 ///
-/// Returns one `Vec<(row, value)>` per column. Entries within each column are
-/// sorted by row index before return (CSC invariant).
-/// Fill state-region and water-balance entries into `col_entries`.
-///
-/// Writes entries for storage-fixing rows, AR lag-fixing rows,
-/// and the water-balance rows (outgoing/incoming storage, turbine, spillage,
-/// upstream cascade, and AR lag dynamics).
+/// Writes entries for the water-balance rows (outgoing/incoming
+/// storage, turbine, spillage, upstream cascade, and AR lag
+/// dynamics). State pinning has moved to column bounds (Phase 1); the
+/// row-equality diagonals previously written here are gone.
 pub(super) fn fill_state_and_water_entries(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -1168,21 +1139,6 @@ pub(super) fn fill_state_and_water_entries(
     let row_water = layout.row_water_balance_start;
     let col_storage_in_start = layout.col_storage_in_start;
     let col_inflow_lags_start = layout.col_inflow_lags_start;
-
-    // State rows: storage-fixing (incoming storage column → row h).
-    for h in 0..n_h {
-        let col = col_storage_in_start + h;
-        col_entries[col].push((h, 1.0));
-    }
-
-    // State rows: lag-fixing (lag column → diagonal row).
-    for lag in 0..lag_order {
-        for h in 0..n_h {
-            let col = col_inflow_lags_start + lag * n_h + h;
-            let row = n_h + lag * n_h + h;
-            col_entries[col].push((row, 1.0));
-        }
-    }
 
     // Water balance: outgoing storage (+1), incoming storage (-1),
     // turbine/spillage (+tau), upstream turbine/spillage (-tau),
@@ -1827,7 +1783,6 @@ pub(super) fn build_stage_matrix_entries(
     let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
 
     fill_state_and_water_entries(ctx, stage, stage_idx, layout, &mut col_entries);
-    fill_anticipated_state_fixing_entries(layout, &mut col_entries);
     fill_anticipated_state_out_def_entries(ctx, stage_idx, layout, &mut col_entries);
     fill_load_balance_entries(ctx, stage_idx, layout, &mut col_entries);
     fill_ncs_load_balance_entries(ctx, layout, &mut col_entries);
@@ -2375,10 +2330,11 @@ mod zero_cost_tests {
     use chrono::NaiveDate;
     use cobre_core::{
         Block, BlockMode, BoundsCountsSpec, BoundsDefaults, CascadeTopology, ContractStageBounds,
-        HydroStageBounds, LineStageBounds, NoiseMethod, PumpingStageBounds, ResolvedBounds,
-        ResolvedExchangeFactors, ResolvedGenericConstraintBounds, ResolvedLoadFactors,
-        ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, ScenarioSourceConfig, Stage,
-        StageRiskConfig, StageStateConfig, ThermalStageBounds,
+        EntityId, Hydro, HydroGenerationModel, HydroPenalties, HydroStageBounds, LineStageBounds,
+        NoiseMethod, PumpingStageBounds, ResolvedBounds, ResolvedExchangeFactors,
+        ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds,
+        ResolvedNcsFactors, ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig,
+        StageStateConfig, ThermalStageBounds,
     };
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -2386,10 +2342,10 @@ mod zero_cost_tests {
     use crate::resolved_parameters::ResolvedParameters;
 
     use super::{
-        ColumnBufs, StageLayout, TemplateBuildCtx, fill_anticipated_fishing_entries,
-        fill_anticipated_fishing_rows, fill_anticipated_state_out_columns,
-        fill_anticipated_state_out_def_entries, fill_anticipated_state_out_def_rows,
-        zero_anticipated_delivery_thermal_cost,
+        ColumnBufs, StageLayout, TemplateBuildCtx, build_stage_matrix_entries,
+        fill_anticipated_fishing_entries, fill_anticipated_fishing_rows,
+        fill_anticipated_state_out_columns, fill_anticipated_state_out_def_entries,
+        fill_anticipated_state_out_def_rows, zero_anticipated_delivery_thermal_cost,
     };
 
     /// Build a minimal two-block `Stage` at the given index.
@@ -2941,6 +2897,90 @@ mod zero_cost_tests {
                  got {:?}",
                 col_entries[col_decision]
             );
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Phase 1: state-fixing diagonals must be absent from the CSC output
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Asserts `build_stage_matrix_entries` produces no state-fixing
+    /// diagonals in the CSC output.
+    ///
+    /// Coverage strategy: storage-fixing and lag-fixing diagonals are
+    /// guaranteed absent by structural deletion of their for-loops in
+    /// `fill_state_and_water_entries` (verified by C1+C2 grep — the
+    /// functions/loops emitting those entries no longer exist in the
+    /// source). Anticipated-state-fixing diagonals are checked dynamically:
+    /// the test builds a fixture with `n_anticipated = 2, k_max = 3` and
+    /// asserts every `(slot, plant)` column at
+    /// `col_anticipated_state_start + slot*A + plant` has no entry at
+    /// row `slot*A + plant` (the row that `fill_anticipated_state_fixing_
+    /// entries` used to emit before its deletion in ticket-004).
+    ///
+    /// The storage/lag assertions are included as zero-iteration loops in
+    /// this fixture (n_hydros = 0) so the test documents the intent and
+    /// would catch a future regression in any fixture that adds hydros.
+    #[test]
+    fn state_fixing_diagonals_absent_from_csc() {
+        let (fixtures, stage) = build_anticipated_ctx_n_stages_6();
+        let ctx = fixtures.make_ctx(
+            2,          // n_anticipated
+            3,          // k_max
+            vec![2, 3], // anticipated_lead_stages
+            vec![0, 1], // anticipated_thermal_indices
+            0,          // n_thermals
+        );
+
+        let layout = StageLayout::new(&ctx, &stage, 0);
+        let col_entries = build_stage_matrix_entries(&ctx, &stage, 0, &layout);
+
+        let a = ctx.n_anticipated;
+        let k = ctx.k_max;
+        for slot in 0..k {
+            for plant in 0..a {
+                let col = layout.col_anticipated_state_start + slot * a + plant;
+                let diag_row = slot * a + plant;
+                let has_diag = col_entries[col]
+                    .iter()
+                    .any(|&(r, v)| r == diag_row && (v - 1.0).abs() < 1e-15);
+                assert!(
+                    !has_diag,
+                    "anticipated-state-fixing diagonal (row={diag_row}, val=1.0) must be absent \
+                     from col {col} (slot={slot}, plant={plant})"
+                );
+            }
+        }
+
+        // Storage-fixing and lag-fixing diagonal absence assertions. With
+        // n_hydros = 0 in this fixture these loops execute zero iterations,
+        // but the structure documents intent and the same assertion shape
+        // catches a regression in any future fixture with non-zero hydros.
+        let n_h = ctx.n_hydros;
+        let lag_order = ctx.max_par_order;
+        for h in 0..n_h {
+            let col = layout.col_storage_in_start + h;
+            let has_diag = col_entries[col]
+                .iter()
+                .any(|&(r, v)| r == h && (v - 1.0).abs() < 1e-15);
+            assert!(
+                !has_diag,
+                "storage-fixing diagonal (row={h}, val=1.0) must be absent from col {col}"
+            );
+        }
+        for lag in 0..lag_order {
+            for h in 0..n_h {
+                let col = layout.col_inflow_lags_start + lag * n_h + h;
+                let diag_row = n_h + lag * n_h + h;
+                let has_diag = col_entries[col]
+                    .iter()
+                    .any(|&(r, v)| r == diag_row && (v - 1.0).abs() < 1e-15);
+                assert!(
+                    !has_diag,
+                    "lag-fixing diagonal (row={diag_row}, val=1.0) must be absent from col {col} \
+                     (lag={lag}, h={h})"
+                );
+            }
         }
     }
 }
