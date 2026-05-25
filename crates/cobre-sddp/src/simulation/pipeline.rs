@@ -1564,6 +1564,8 @@ mod tests {
             backward_accum: BackwardAccumulators::default(),
             worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
             cut_row_maps: Vec::new(),
+            prev_applied_activity: Vec::new(),
+            template_update_buf: crate::workspace::TemplateUpdateBuf::default(),
         }]
     }
 
@@ -1811,6 +1813,8 @@ mod tests {
             backward_accum: BackwardAccumulators::default(),
             worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
             cut_row_maps: Vec::new(),
+            prev_applied_activity: Vec::new(),
+            template_update_buf: crate::workspace::TemplateUpdateBuf::default(),
         }];
 
         // load_balance_row_starts[0]=2 (load balance row is row 2 in the template).
@@ -2142,6 +2146,8 @@ mod tests {
             backward_accum: BackwardAccumulators::default(),
             worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
             cut_row_maps: Vec::new(),
+            prev_applied_activity: Vec::new(),
+            template_update_buf: crate::workspace::TemplateUpdateBuf::default(),
         }];
 
         let load_balance_row_starts = vec![2usize];
@@ -2459,6 +2465,8 @@ mod tests {
             backward_accum: BackwardAccumulators::default(),
             worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
             cut_row_maps: Vec::new(),
+            prev_applied_activity: Vec::new(),
+            template_update_buf: crate::workspace::TemplateUpdateBuf::default(),
         }]
     }
 

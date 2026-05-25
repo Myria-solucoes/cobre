@@ -186,18 +186,35 @@ pub fn run_stage_solve<'ws, S: SolverInterface>(
         // baked template. base_row_count is set to the non-baked template
         // row count so reconstruct_basis handles cut rows via slot identity
         // rather than positional copy from the stored basis.
+        //
+        // Under the warm-start bake model the LP carries one row per
+        // populated slot (including inactive slots encoded at sentinel
+        // `[-INF, +INF]` bounds). The iterator yields every populated slot
+        // in slot-ascending order; `active_mask` lets `reconstruct_basis`
+        // override the basis status to `LOWER` for inactive slots, whose
+        // rows can never bind.
+        let pool = inputs.pool;
         let source = crate::basis_reconstruct::ReconstructionSource {
             target: ReconstructionTarget {
                 base_row_count: inputs.stage_context.templates[inputs.stage_index].num_rows,
                 num_cols: inputs.stage_context.templates[inputs.stage_index].num_cols,
             },
-            cut_metadata: &inputs.pool.metadata,
+            cut_metadata: &pool.metadata,
             basis_activity_window: inputs.basis_activity_window,
+            active_mask: Some(&pool.active[..pool.populated_count]),
         };
+        let populated_cuts = (0..pool.populated_count).map(|slot| {
+            let start = slot * pool.state_dimension;
+            (
+                slot,
+                pool.intercepts[slot],
+                &pool.coefficients[start..start + pool.state_dimension],
+            )
+        });
         let recon_stats = reconstruct_basis(
             captured,
             source,
-            inputs.pool.active_cuts(),
+            populated_cuts,
             padding,
             &mut ws.scratch_basis,
             &mut ws.scratch.recon_slot_lookup,
@@ -213,10 +230,11 @@ pub fn run_stage_solve<'ws, S: SolverInterface>(
         // driven LOWER guesses exceed the preserved-LOWER promotion budget.
         //
         // num_row_for_invariant uses the actual reconstructed basis length
-        // rather than baked.num_rows because active_cuts() may include delta
-        // cuts (added during the current backward pass) that extend beyond
-        // the baked template row count. The two values agree when there are
-        // no delta cuts (forward path and first backward stage per iteration).
+        // rather than baked.num_rows because the populated-cuts iterator may
+        // yield delta cuts (added during the current backward pass) that
+        // extend beyond the baked template row count. The two values agree
+        // when there are no delta cuts (forward path and first backward
+        // stage per iteration).
         //
         // base_row_for_invariant = 0 because the demotion loop only touches
         // rows whose current status is BASIC, and equality rows (z_inflow,

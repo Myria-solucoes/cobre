@@ -35,7 +35,7 @@ use cobre_stochastic::{OpeningTree, StochasticContext, evaluate_par_batch, solve
 use crate::{
     cut::FutureCostFunction,
     error::SddpError,
-    forward::build_cut_row_batch_into,
+    forward::build_warm_start_cut_batch_into,
     indexer::StageIndexer,
     inflow_method::InflowNonNegativityMethod,
     lp_builder::COST_SCALE_FACTOR,
@@ -275,7 +275,7 @@ fn lb_init_rank0<S: SolverInterface>(
         );
     } else {
         // Test-only path: full rebuild every call.
-        build_cut_row_batch_into(lb_cut_batch, fcf, 0, indexer, &spec.template.col_scale);
+        build_warm_start_cut_batch_into(lb_cut_batch, fcf, 0, indexer, &spec.template.col_scale);
         solver.load_model(spec.template);
         if lb_cut_batch.num_rows > 0 {
             solver.add_rows(lb_cut_batch);

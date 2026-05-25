@@ -984,6 +984,8 @@ mod tests {
             backward_accum: BackwardAccumulators::default(),
             worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
             cut_row_maps: Vec::new(),
+            prev_applied_activity: Vec::new(),
+            template_update_buf: crate::workspace::TemplateUpdateBuf::default(),
         }
     }
 

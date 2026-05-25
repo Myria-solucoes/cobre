@@ -39,7 +39,7 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelI
 use crate::{
     FutureCostFunction,
     context::{StageContext, TrainingContext},
-    forward::{build_cut_row_batch_into, partition},
+    forward::{build_warm_start_cut_batch_into, partition},
     simulation::{
         config::SimulationConfig,
         error::SimulationError,
@@ -529,7 +529,7 @@ fn rebake_templates_if_needed(
 
     let mut owned = Vec::with_capacity(num_stages);
     for t in 0..num_stages {
-        build_cut_row_batch_into(bake_batch, fcf, t, indexer, &ctx.templates[t].col_scale);
+        build_warm_start_cut_batch_into(bake_batch, fcf, t, indexer, &ctx.templates[t].col_scale);
         let mut baked = StageTemplate::empty();
         cobre_solver::bake_rows_into_template(&ctx.templates[t], bake_batch, &mut baked);
         owned.push(baked);

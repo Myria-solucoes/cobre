@@ -893,27 +893,28 @@ pub(crate) struct StageKey<'a> {
     pub(crate) basis_activity_window: u32,
 }
 
-/// Populate `CapturedBasis` metadata after a forward solve.
+/// Populate `CapturedBasis` metadata after a stage solve.
 ///
 /// `cut_row_count` is the number of cut rows actually in the LP (derived from
-/// `basis_row_capacity - base_row_count`).  On terminal stages the pool may
-/// hold cuts that the LP does not load, so iterating `pool.active_cuts()`
-/// blindly would over-count; `take(cut_row_count)` limits to the LP shape.
+/// `basis_row_capacity - base_row_count`). Under the warm-start bake model
+/// the baked template carries one row per populated slot — including
+/// inactive slots encoded at sentinel `[-INF, +INF]` bounds — so LP row `k`
+/// corresponds to pool slot `k` for `k in 0..cut_row_count`. The metadata
+/// captures that identity by pushing `slot as u32` in row-index order.
 ///
 /// `row_status` is defensively resized to `base_row_count + cut_row_count` so
 /// the metadata invariant holds even when the underlying solver's `get_basis`
-/// is a no-op (e.g. test mocks).  For real solvers this is a no-op since they
+/// is a no-op (e.g. test mocks). For real solvers this is a no-op since they
 /// write the correct length.
 #[allow(clippy::cast_possible_truncation)]
 pub(crate) fn write_capture_metadata(
     captured: &mut CapturedBasis,
-    pool: &CutPool,
     base_row_count: usize,
     cut_row_count: usize,
     current_state: &[f64],
 ) {
     captured.cut_row_slots.clear();
-    for (slot, _intercept, _coeffs) in pool.active_cuts().take(cut_row_count) {
+    for slot in 0..cut_row_count {
         captured.cut_row_slots.push(slot as u32);
     }
     captured.state_at_capture.clear();
@@ -1224,7 +1225,6 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         ws.solver.get_basis(&mut captured.basis);
         write_capture_metadata(
             captured,
-            pool,
             ctx.templates[t].num_rows,
             cut_row_count,
             &ws.current_state[..indexer.n_state],
@@ -1240,7 +1240,6 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         ws.solver.get_basis(&mut captured.basis);
         write_capture_metadata(
             &mut captured,
-            pool,
             ctx.templates[t].num_rows,
             cut_row_count,
             &ws.current_state[..indexer.n_state],
@@ -2080,6 +2079,8 @@ mod tests {
             backward_accum: BackwardAccumulators::default(),
             worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
             cut_row_maps: Vec::new(),
+            prev_applied_activity: Vec::new(),
+            template_update_buf: crate::workspace::TemplateUpdateBuf::default(),
         }
     }
 
@@ -4084,6 +4085,8 @@ mod tests {
             backward_accum: BackwardAccumulators::default(),
             worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
             cut_row_maps: Vec::new(),
+            prev_applied_activity: Vec::new(),
+            template_update_buf: crate::workspace::TemplateUpdateBuf::default(),
         };
 
         let templates = vec![minimal_template_1_0_with_base(100.0)];
@@ -4228,6 +4231,8 @@ mod tests {
             backward_accum: BackwardAccumulators::default(),
             worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
             cut_row_maps: Vec::new(),
+            prev_applied_activity: Vec::new(),
+            template_update_buf: crate::workspace::TemplateUpdateBuf::default(),
         };
 
         let templates = vec![minimal_template_1_0_with_base(100.0)];

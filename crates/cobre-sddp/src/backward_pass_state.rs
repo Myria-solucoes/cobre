@@ -716,6 +716,127 @@ struct StageOutput {
     cut_sync_ms: u64,
 }
 
+/// Apply post-cut-sync template updates to one workspace's stage LP.
+///
+/// Performs two LP edits on the workspace's stage template:
+///   1. `add_rows(new_cuts_batch)` for cuts newly generated this iteration
+///      (local cuts produced by the trial-point loop plus cuts received via
+///      `sync_packed_records`). Each new slot is recorded in
+///      `ws.cut_row_maps[stage]` so subsequent calls can resolve its LP row.
+///   2. `set_row_bounds(...)` for each cut slot whose desired activity (from
+///      `fcf.pools[stage].active`) differs from the workspace's
+///      `prev_applied_activity[stage]` mask. Inactive slots are encoded at
+///      sentinel `[-INF, +INF]` bounds; reactivation restores the cut's
+///      intercept at the row's lower bound.
+///
+/// The two LP edits collapse into at most two FFI calls
+/// (`add_rows` + a single batched `set_row_bounds`) so the per-call cost is
+/// independent of the number of toggled slots.
+///
+/// `ws.prev_applied_activity[stage]` is updated to match the post-update
+/// activity state. The slot-to-row map invariant is: every populated slot
+/// (active or inactive) has a stable LP row index recorded in
+/// `ws.cut_row_maps[stage]`; toggling a slot's activity reuses the same row.
+///
+/// # Panics
+///
+/// Panics if `cut_row_maps` has not been initialised via
+/// `WorkspacePool::init_cut_row_maps` (the function indexes into
+/// `ws.cut_row_maps[stage]` and `ws.prev_applied_activity[stage]`).
+///
+/// Panics in debug builds if a populated slot is missing from
+/// `ws.cut_row_maps[stage]`; this would mean the slot was added to the FCF
+/// pool without the map's `insert` being called and indicates a programmer
+/// error in the cut-sync wiring rather than a recoverable runtime condition.
+fn apply_template_update<S: SolverInterface + Send>(
+    ws: &mut SolverWorkspace<S>,
+    fcf: &FutureCostFunction,
+    stage: usize,
+    new_cuts_batch: &RowBatch,
+) {
+    // Workspaces constructed without the post-CHUNK-1 initialization path
+    // (e.g. test fixtures that bypass `WorkspacePool::init_cut_row_maps`)
+    // carry empty `cut_row_maps` and `prev_applied_activity` vectors. The
+    // helper is a no-op in that case — the data structures required to
+    // resolve LP rows and diff the activity mask are not present, so there
+    // is nothing meaningful to update.
+    if ws.cut_row_maps.is_empty() || ws.prev_applied_activity.is_empty() {
+        return;
+    }
+
+    let pool = &fcf.pools[stage];
+
+    // ── Step 1: register newly-added cuts and append their rows ──────────
+    let new_rows = new_cuts_batch.num_rows;
+    if new_rows > 0 {
+        ws.solver.add_rows(new_cuts_batch);
+        // New slots arrive contiguously at the high end of `populated_count`
+        // because both local trial-point cuts and cut-sync inserts append.
+        // The `expect` is invariant-guarded: callers built `new_cuts_batch`
+        // from cuts already inserted into `pool`, so the subtraction never
+        // underflows.
+        #[allow(clippy::expect_used)]
+        let first_new_slot = pool
+            .populated_count
+            .checked_sub(new_rows)
+            .expect("populated_count must include the newly-added cuts");
+        for slot in first_new_slot..pool.populated_count {
+            ws.cut_row_maps[stage].insert(slot);
+        }
+    }
+
+    // ── Step 2: collect activity toggles into the pre-allocated scratch ──
+    let buf = &mut ws.template_update_buf;
+    buf.rows.clear();
+    buf.lowers.clear();
+    buf.uppers.clear();
+
+    // Pre-grow `prev_applied_activity` to track new populated slots. New
+    // cuts are baked active at insertion time, so the freshly tracked
+    // entries default to `true` (the activity-baseline contract from
+    // `WorkspacePool::init_cut_row_maps`).
+    if ws.prev_applied_activity[stage].len() < pool.populated_count {
+        ws.prev_applied_activity[stage].resize(pool.populated_count, true);
+    }
+
+    let prev = &mut ws.prev_applied_activity[stage];
+    for (slot, applied) in prev.iter_mut().enumerate().take(pool.populated_count) {
+        let desired = pool.active[slot];
+        if desired == *applied {
+            continue;
+        }
+        // `expect` is invariant-guarded: `WorkspacePool::init_cut_row_maps`
+        // inserts every populated slot at construction; the cut-sync wiring
+        // (`apply_template_update` step 1) inserts every subsequently-added
+        // slot. A populated slot without a row would indicate a wiring bug.
+        #[allow(clippy::expect_used)]
+        let row = ws.cut_row_maps[stage]
+            .lp_row_for_slot(slot)
+            .expect("row must exist for any populated slot under the warm-start bake model");
+        let (lower, upper) = if desired {
+            // Mirror the bake convention in `build_warm_start_cut_batch_into`:
+            // an active cut row enforces `coef·x + theta >= intercept`, which
+            // HiGHS encodes as `row_lower = intercept`, `row_upper = +INF`.
+            #[allow(clippy::cast_possible_truncation)]
+            (fcf.intercept_for_slot(stage, slot as u32), f64::INFINITY)
+        } else {
+            (-f64::INFINITY, f64::INFINITY)
+        };
+        buf.rows.push(row);
+        buf.lowers.push(lower);
+        buf.uppers.push(upper);
+        *applied = desired;
+    }
+
+    if buf.rows.is_empty() {
+        return;
+    }
+
+    // ── Step 3: issue the batched FFI call ────────────────────────────────
+    ws.solver
+        .set_row_bounds(&buf.rows, &buf.lowers, &buf.uppers);
+}
+
 /// Execute one backward stage (index `t`, solving at successor `t + 1`).
 ///
 /// Performs state exchange, builds the successor LP batch, runs the parallel
@@ -856,6 +977,25 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
         .sync_packed_records(t, n_local, inputs.fcf, inputs.comm)?;
     #[allow(clippy::cast_possible_truncation)]
     let cut_sync_ms = sync_start.elapsed().as_millis() as u64;
+
+    // Post-cut-sync template update: append newly-generated cut rows to each
+    // workspace's stage LP and re-issue row bounds for any slot whose desired
+    // activity differs from the previously-applied state. The new-cuts batch
+    // is rebuilt from the FCF at stage `t` using the iteration filter so the
+    // batch carries cuts contributed by every rank (local trial points plus
+    // remote inserts from `sync_packed_records`).
+    build_delta_cut_row_batch_into(
+        &mut inputs.cut_batches[t],
+        inputs.fcf,
+        t,
+        indexer,
+        &ctx.templates[t].col_scale,
+        inputs.iteration,
+    );
+    let new_cuts_batch = &inputs.cut_batches[t];
+    for ws in inputs.workspaces.iter_mut() {
+        apply_template_update(ws, inputs.fcf, t, new_cuts_batch);
+    }
 
     state.sync_stage_metadata(
         successor,
@@ -1227,6 +1367,8 @@ mod tests {
             backward_accum: BackwardAccumulators::default(),
             worker_timing_buf: WorkerPhaseTimings::default(),
             cut_row_maps: Vec::new(),
+            prev_applied_activity: Vec::new(),
+            template_update_buf: crate::workspace::TemplateUpdateBuf::default(),
         }]
     }
 
@@ -1692,6 +1834,350 @@ mod tests {
             inputs.workspaces[0].backward_accum.state_duals_buf.len(),
             n_state,
             "state_duals_buf must have length n_state after backward pass"
+        );
+    }
+
+    // ── apply_template_update tests ─────────────────────────────────────────
+    //
+    // Tests exercise the post-cut-sync template update step in isolation.
+    // Each builds a minimal FCF + workspace pair, manipulates activity flags
+    // and/or inserts new cuts, and asserts on the workspace's solver state
+    // and the `prev_applied_activity` mask.
+
+    /// Counting solver that records FFI calls so tests can assert on the
+    /// batching contract for `apply_template_update`. The counters are only
+    /// observed by tests; production code paths never read them.
+    struct CountingSolver {
+        add_rows_call_count: usize,
+        last_add_rows_num_rows: usize,
+        set_row_bounds_call_count: usize,
+        last_set_row_bounds_rows: Vec<usize>,
+        last_set_row_bounds_lowers: Vec<f64>,
+        last_set_row_bounds_uppers: Vec<f64>,
+    }
+
+    impl CountingSolver {
+        fn new() -> Self {
+            Self {
+                add_rows_call_count: 0,
+                last_add_rows_num_rows: 0,
+                set_row_bounds_call_count: 0,
+                last_set_row_bounds_rows: Vec::new(),
+                last_set_row_bounds_lowers: Vec::new(),
+                last_set_row_bounds_uppers: Vec::new(),
+            }
+        }
+    }
+
+    impl SolverInterface for CountingSolver {
+        fn name(&self) -> &'static str {
+            "counting"
+        }
+        fn solver_name_version(&self) -> String {
+            "CountingSolver 0.0.0".to_string()
+        }
+        fn load_model(&mut self, _template: &StageTemplate) {}
+        fn add_rows(&mut self, cuts: &RowBatch) {
+            self.add_rows_call_count += 1;
+            self.last_add_rows_num_rows = cuts.num_rows;
+        }
+        fn set_col_bounds(&mut self, _indices: &[usize], _lower: &[f64], _upper: &[f64]) {}
+        fn set_row_bounds(&mut self, indices: &[usize], lower: &[f64], upper: &[f64]) {
+            self.set_row_bounds_call_count += 1;
+            self.last_set_row_bounds_rows.clear();
+            self.last_set_row_bounds_rows.extend_from_slice(indices);
+            self.last_set_row_bounds_lowers.clear();
+            self.last_set_row_bounds_lowers.extend_from_slice(lower);
+            self.last_set_row_bounds_uppers.clear();
+            self.last_set_row_bounds_uppers.extend_from_slice(upper);
+        }
+        fn solve(
+            &mut self,
+            _basis: Option<&Basis>,
+        ) -> Result<cobre_solver::SolutionView<'_>, SolverError> {
+            Ok(cobre_solver::SolutionView {
+                objective: 0.0,
+                primal: &[],
+                dual: &[],
+                reduced_costs: &[],
+                iterations: 0,
+                solve_time_seconds: 0.0,
+            })
+        }
+        fn get_basis(&mut self, out: &mut Basis) {
+            *out = Basis::new(0, 0);
+        }
+        fn statistics(&self) -> SolverStatistics {
+            SolverStatistics::default()
+        }
+    }
+
+    /// Build a single-stage FCF with `n_cuts` already-populated cuts and an
+    /// activity mask `active_mask` per slot. The state dimension is 1.
+    /// `n_cuts` cuts are inserted at slots `0..n_cuts` via distinct iterations.
+    /// The capacity is sized for headroom (`n_cuts + 4`) so callers can
+    /// append additional cuts past the initial set without overflowing.
+    fn make_apply_test_fcf(n_cuts: usize, active_mask: &[bool]) -> FutureCostFunction {
+        assert_eq!(n_cuts, active_mask.len());
+        #[allow(clippy::cast_possible_truncation)]
+        let max_iterations = (n_cuts + 4) as u64;
+        let mut fcf = FutureCostFunction::new(1, 1, 1, max_iterations, &[0]);
+        for (i, &is_active) in active_mask.iter().enumerate().take(n_cuts) {
+            let intercept = (i as f64 + 1.0) * 10.0;
+            #[allow(clippy::cast_possible_truncation)]
+            let iteration = i as u64;
+            fcf.add_cut(0, iteration, 0, intercept, &[1.0]);
+            if !is_active {
+                #[allow(clippy::cast_possible_truncation)]
+                let slot = i as u32;
+                fcf.set_active(0, slot, false);
+            }
+        }
+        fcf
+    }
+
+    /// Build a workspace whose `cut_row_maps[0]` and `prev_applied_activity[0]`
+    /// are initialised in line with `WorkspacePool::init_cut_row_maps`. Uses
+    /// `CountingSolver` so callers can assert on FFI call counts.
+    fn make_apply_test_workspace(
+        fcf: &FutureCostFunction,
+        base_row_offset: usize,
+    ) -> SolverWorkspace<CountingSolver> {
+        use crate::cut::CutRowMap;
+        use crate::lp_builder::PatchBuffer;
+        let pool = &fcf.pools[0];
+        let mut map = CutRowMap::new(pool.capacity, base_row_offset);
+        for slot in 0..pool.populated_count {
+            map.insert(slot);
+        }
+        SolverWorkspace {
+            rank: 0,
+            worker_id: 0,
+            solver: CountingSolver::new(),
+            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
+            current_state: Vec::new(),
+            scratch: crate::workspace::ScratchBuffers {
+                noise_buf: Vec::new(),
+                inflow_m3s_buf: Vec::new(),
+                lag_matrix_buf: Vec::new(),
+                par_inflow_buf: Vec::new(),
+                eta_floor_buf: Vec::new(),
+                zero_targets_buf: Vec::new(),
+                ncs_col_upper_buf: Vec::new(),
+                ncs_col_lower_buf: Vec::new(),
+                ncs_col_indices_buf: Vec::new(),
+                load_rhs_buf: Vec::new(),
+                row_lower_buf: Vec::new(),
+                z_inflow_rhs_buf: Vec::new(),
+                effective_eta_buf: Vec::new(),
+                unscaled_primal: Vec::new(),
+                unscaled_dual: Vec::new(),
+                lag_accumulator: Vec::new(),
+                lag_weight_accum: 0.0,
+                downstream_accumulator: Vec::new(),
+                downstream_weight_accum: 0.0,
+                downstream_completed_lags: Vec::new(),
+                downstream_n_completed: 0,
+                current_state_scratch: Vec::new(),
+                recon_slot_lookup: Vec::new(),
+                promotion_scratch: crate::basis_reconstruct::PromotionScratch::default(),
+                trajectory_costs_buf: Vec::new(),
+                raw_noise_buf: Vec::new(),
+                perm_scratch: Vec::new(),
+                anticipated_state_buf: Vec::new(),
+                anticipated_state_out_col_indices_buf: Vec::new(),
+            },
+            scratch_basis: Basis::new(0, 0),
+            backward_accum: BackwardAccumulators::default(),
+            worker_timing_buf: WorkerPhaseTimings::default(),
+            cut_row_maps: vec![map],
+            prev_applied_activity: vec![pool.active.clone()],
+            template_update_buf: crate::workspace::TemplateUpdateBuf::default(),
+        }
+    }
+
+    /// Build a `RowBatch` carrying `n_rows` rows; per-row content is not
+    /// inspected by `CountingSolver` so the contents are filler.
+    fn make_dummy_batch(n_rows: usize) -> RowBatch {
+        RowBatch {
+            num_rows: n_rows,
+            row_starts: (0..=n_rows).map(|i| i as i32).collect(),
+            col_indices: (0..n_rows).map(|_| 0_i32).collect(),
+            values: vec![1.0; n_rows],
+            row_lower: vec![0.0; n_rows],
+            row_upper: vec![f64::INFINITY; n_rows],
+        }
+    }
+
+    /// Appending a new cut must (a) call `add_rows` once with the supplied
+    /// batch and (b) extend `cut_row_maps[stage]` so the new slot resolves to
+    /// a fresh LP row index after the call.
+    #[test]
+    fn apply_template_update_appends_new_cuts_via_add_rows() {
+        let base_row_offset = 2;
+        let mut fcf = make_apply_test_fcf(3, &[true, true, true]);
+        let mut ws = make_apply_test_workspace(&fcf, base_row_offset);
+        let prev_total = ws.cut_row_maps[0].total_cut_rows();
+
+        // Add a fourth cut to the FCF, mirroring what `add_cut` in
+        // `run_one_backward_stage` does before the cut-sync exchange. The
+        // iteration is chosen so the deterministic slot formula
+        // (`warm_start_count + iteration * forward_passes + forward_pass_index`)
+        // places it at slot 3, past the three slots seeded above.
+        fcf.add_cut(0, 3, 0, 99.0, &[1.0]);
+        let batch = make_dummy_batch(1);
+
+        apply_template_update(&mut ws, &fcf, 0, &batch);
+
+        assert_eq!(
+            ws.solver.add_rows_call_count, 1,
+            "add_rows must fire exactly once when new_cuts_batch is non-empty"
+        );
+        assert_eq!(
+            ws.solver.last_add_rows_num_rows, 1,
+            "the appended batch must carry the one new cut"
+        );
+        assert_eq!(
+            ws.cut_row_maps[0].total_cut_rows(),
+            prev_total + 1,
+            "cut_row_maps must grow by the number of newly-appended cuts"
+        );
+        assert_eq!(
+            ws.cut_row_maps[0].lp_row_for_slot(3),
+            Some(base_row_offset + prev_total),
+            "the new slot must resolve to the next contiguous LP row"
+        );
+    }
+
+    /// When the FCF activity exactly matches `prev_applied_activity`, the
+    /// helper must not issue any `set_row_bounds` FFI call: the scratch buffer
+    /// is empty and the counter remains at zero.
+    #[test]
+    fn apply_template_update_skips_no_op_toggles() {
+        let fcf = make_apply_test_fcf(3, &[true, true, true]);
+        let mut ws = make_apply_test_workspace(&fcf, 2);
+
+        let empty_batch = make_dummy_batch(0);
+        apply_template_update(&mut ws, &fcf, 0, &empty_batch);
+
+        assert_eq!(
+            ws.solver.add_rows_call_count, 0,
+            "add_rows must not fire when new_cuts_batch is empty"
+        );
+        assert_eq!(
+            ws.solver.set_row_bounds_call_count, 0,
+            "set_row_bounds must not fire when no slot's activity has changed"
+        );
+        assert!(
+            ws.template_update_buf.rows.is_empty(),
+            "the scratch buffer remains empty when no toggles are needed"
+        );
+    }
+
+    /// Deactivating a cut between calls must (a) drive a single
+    /// `set_row_bounds` FFI call carrying the sentinel `[-INF, +INF]` bounds
+    /// for the deactivated row and (b) update `prev_applied_activity`.
+    #[test]
+    fn apply_template_update_deactivates_cut_via_inf_bounds() {
+        let mut fcf = make_apply_test_fcf(3, &[true, true, true]);
+        let mut ws = make_apply_test_workspace(&fcf, 2);
+
+        // Mark slot 1 inactive — mirrors a remote rank's cut-sync update.
+        fcf.set_active(0, 1, false);
+
+        let empty_batch = make_dummy_batch(0);
+        apply_template_update(&mut ws, &fcf, 0, &empty_batch);
+
+        assert!(
+            !ws.prev_applied_activity[0][1],
+            "the prev_applied_activity mask must reflect the deactivation"
+        );
+        assert_eq!(
+            ws.solver.set_row_bounds_call_count, 1,
+            "set_row_bounds must fire exactly once for the deactivation"
+        );
+        assert_eq!(
+            ws.solver.last_set_row_bounds_rows,
+            vec![
+                ws.cut_row_maps[0]
+                    .lp_row_for_slot(1)
+                    .expect("slot 1 must be mapped")
+            ]
+        );
+        assert_eq!(ws.solver.last_set_row_bounds_lowers, vec![-f64::INFINITY]);
+        assert_eq!(ws.solver.last_set_row_bounds_uppers, vec![f64::INFINITY]);
+    }
+
+    /// Reactivating a previously deactivated cut must restore the intercept
+    /// at the row's lower bound and update `prev_applied_activity`.
+    #[test]
+    fn apply_template_update_reactivates_cut_via_intercept_restoration() {
+        let mut fcf = make_apply_test_fcf(3, &[true, false, true]);
+        let mut ws = make_apply_test_workspace(&fcf, 2);
+
+        // Reactivate slot 1.
+        fcf.set_active(0, 1, true);
+
+        let empty_batch = make_dummy_batch(0);
+        apply_template_update(&mut ws, &fcf, 0, &empty_batch);
+
+        assert!(
+            ws.prev_applied_activity[0][1],
+            "the prev_applied_activity mask must reflect the reactivation"
+        );
+        assert_eq!(
+            ws.solver.set_row_bounds_call_count, 1,
+            "set_row_bounds must fire exactly once for the reactivation"
+        );
+        assert_eq!(
+            ws.solver.last_set_row_bounds_lowers,
+            vec![fcf.intercept_for_slot(0, 1)],
+            "row_lower must equal the cut's stored intercept on reactivation"
+        );
+        assert_eq!(ws.solver.last_set_row_bounds_uppers, vec![f64::INFINITY]);
+    }
+
+    /// Multiple toggles in a single call must collapse into one batched
+    /// `set_row_bounds` FFI call with slices of length equal to the toggle
+    /// count.
+    #[test]
+    fn apply_template_update_batches_set_row_bounds_into_single_call() {
+        let mut fcf = make_apply_test_fcf(5, &[true, true, true, true, true]);
+        let mut ws = make_apply_test_workspace(&fcf, 2);
+
+        // Deactivate slots 0, 2, 4 in a single FCF batch (mirrors a remote
+        // rank's cut-sync updates).
+        fcf.set_active(0, 0, false);
+        fcf.set_active(0, 2, false);
+        fcf.set_active(0, 4, false);
+
+        let empty_batch = make_dummy_batch(0);
+        apply_template_update(&mut ws, &fcf, 0, &empty_batch);
+
+        assert_eq!(
+            ws.solver.set_row_bounds_call_count, 1,
+            "set_row_bounds must fire exactly once even with three toggles"
+        );
+        assert_eq!(
+            ws.solver.last_set_row_bounds_rows.len(),
+            3,
+            "the batched call must carry one entry per toggled slot"
+        );
+        assert_eq!(ws.solver.last_set_row_bounds_lowers.len(), 3);
+        assert_eq!(ws.solver.last_set_row_bounds_uppers.len(), 3);
+        // All three toggled rows are deactivations, so the bounds are
+        // sentinel `[-INF, +INF]` for every entry.
+        assert!(
+            ws.solver
+                .last_set_row_bounds_lowers
+                .iter()
+                .all(|&v| v == -f64::INFINITY)
+        );
+        assert!(
+            ws.solver
+                .last_set_row_bounds_uppers
+                .iter()
+                .all(|&v| v == f64::INFINITY)
         );
     }
 }

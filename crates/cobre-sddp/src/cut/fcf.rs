@@ -344,6 +344,31 @@ impl FutureCostFunction {
         self.pools.iter().map(CutPool::active_count).sum()
     }
 
+    /// Return the intercept value for the cut at `(stage, slot)`.
+    ///
+    /// Reads directly from `pools[stage].intercepts[slot]`. The returned value
+    /// is independent of the slot's activity flag; an inactive slot still has
+    /// a stored intercept that may be required when reactivating its LP row.
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Panics if `stage >= pools.len()` or if `slot >= pools[stage].intercepts.len()`.
+    ///
+    /// # Parameters
+    ///
+    /// - `stage`: 0-based stage index.
+    /// - `slot`: 0-based slot index within the stage pool.
+    #[must_use]
+    #[inline]
+    pub fn intercept_for_slot(&self, stage: usize, slot: u32) -> f64 {
+        debug_assert!(
+            stage < self.pools.len(),
+            "stage index {stage} is out of bounds (num_stages = {})",
+            self.pools.len()
+        );
+        self.pools[stage].intercepts[slot as usize]
+    }
+
     /// Deactivate the cuts at the given slot indices for the specified stage.
     ///
     /// Delegates to `pools[stage].deactivate(indices)`.
@@ -875,6 +900,21 @@ mod tests {
 
         assert!(!fcf.pools[1].active[0]);
         assert_eq!(fcf.total_active_cuts(), prior - 1);
+    }
+
+    #[test]
+    fn intercept_for_slot_returns_pool_intercept() {
+        let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
+        // Stage 1: three cuts with distinct intercepts at slots 0, 1, 2.
+        fcf.add_cut(1, 0, 0, 11.0, &[1.0]);
+        fcf.add_cut(1, 1, 0, 22.0, &[2.0]);
+        fcf.add_cut(1, 2, 0, 33.0, &[3.0]);
+        // Deactivate the middle slot; intercept lookup must still return its value.
+        fcf.set_active(1, 1, false);
+
+        assert_eq!(fcf.intercept_for_slot(1, 0), 11.0);
+        assert_eq!(fcf.intercept_for_slot(1, 1), 22.0);
+        assert_eq!(fcf.intercept_for_slot(1, 2), 33.0);
     }
 
     #[test]

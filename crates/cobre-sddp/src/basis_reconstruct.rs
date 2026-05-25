@@ -54,6 +54,7 @@
 //!     target: ReconstructionTarget { base_row_count: 3, num_cols: 4 },
 //!     cut_metadata: &[],
 //!     basis_activity_window: DEFAULT_BASIS_ACTIVITY_WINDOW,
+//!     active_mask: None,
 //! };
 //! let mut out = Basis::new(0, 0);
 //! let mut lookup: Vec<Option<u32>> = vec![None; 16];
@@ -161,6 +162,20 @@ pub struct ReconstructionSource<'a> {
     /// (runtime knob, validated 1..=31 at `StudyParams::from_config`).
     /// The mask is `(1u32 << basis_activity_window) - 1`.
     pub basis_activity_window: u32,
+    /// Optional per-slot activity mask aligned with the target LP cut rows.
+    ///
+    /// Under the warm-start bake model the LP carries a row for every
+    /// populated slot — including currently inactive slots whose row is
+    /// encoded at sentinel `[-INF, +INF]` bounds. The reconstructed basis
+    /// must emit `HIGHS_BASIS_STATUS_LOWER` for those rows regardless of
+    /// the stored status (a slot that was active in a previous iteration
+    /// may now be inactive). Indexed by target-LP cut row order.
+    ///
+    /// Pass `None` to fall back to the legacy behaviour (status driven
+    /// solely by the stored basis and the activity classifier); this is
+    /// the right choice for tests with no inactive populated slots and
+    /// for call sites that do not yet plumb the mask through.
+    pub active_mask: Option<&'a [bool]>,
 }
 
 // ---------------------------------------------------------------------------
@@ -336,6 +351,7 @@ where
     let target = source.target;
     let cut_metadata = source.cut_metadata;
     let basis_activity_window = source.basis_activity_window;
+    let active_mask = source.active_mask;
     debug_assert!(
         (1..=31).contains(&basis_activity_window),
         "basis_activity_window must be 1..=31 (validated upstream at StudyParams); got {basis_activity_window}",
@@ -385,6 +401,7 @@ where
         promotion_scratch,
         out,
         &mut stats,
+        active_mask,
     );
     // Phase (e): Scheme 1 symmetric promotion + Scheme 2 tail fallback.
     apply_promotion_and_tail_fallback(lower_deficit, promotion_scratch, target, out, &mut stats);
@@ -481,10 +498,18 @@ fn build_slot_lookup(reconcilable_slots: &[u32], slot_lookup: &mut Vec<Option<u3
 ///   classify `LOWER` (tight guess) and record in `promotion_scratch.new_lower_indices`.
 ///   Otherwise classify `BASIC` (safe slack default).
 ///
+/// When `active_mask` is `Some` the slot's mask entry overrides the
+/// classification: an inactive slot is always emitted as `LOWER` (its row is
+/// trivially satisfied at sentinel bounds and never binding), bypassing both
+/// the preserved-status copy and the activity-window guess. The candidate /
+/// new-lower bookkeeping is also skipped because an inactive row never
+/// participates in promotion or tail-override logic.
+///
 /// Returns `lower_deficit`: the number of new cuts classified `LOWER` minus
 /// the number of Scheme 1 promotions that will be available (computed in phase (e)).
 /// Phase (e) uses this value to determine how many preserved-LOWER slots to
 /// promote and how many Scheme 2 tail overrides to apply.
+#[allow(clippy::too_many_arguments)]
 fn classify_cut_rows<'a, I>(
     current_cut_rows: I,
     stored: &CapturedBasis,
@@ -495,6 +520,7 @@ fn classify_cut_rows<'a, I>(
     promotion_scratch: &mut PromotionScratch,
     out: &mut Basis,
     stats: &mut ReconstructionStats,
+    active_mask: Option<&[bool]>,
 ) -> usize
 where
     I: Iterator<Item = (usize, f64, &'a [f64])>,
@@ -509,6 +535,23 @@ where
             "cut row index {out_row_index} must be >= base_row_count {}",
             target.base_row_count,
         );
+
+        // Inactive populated slots carry sentinel `[-INF, +INF]` row bounds
+        // in the LP and can never bind. The row's slack variable is free, so
+        // the row is naturally `BASIC` in any consistent basis; emitting
+        // anything else would over-constrain the column-basic / row-basic
+        // count check that HiGHS enforces via `isBasisConsistent`. The mask
+        // check is plumbed only when the caller supplies an aligned activity
+        // vector (production hot path); tests and legacy call sites pass
+        // `None` and retain the activity-window driven classification.
+        let inactive_override = active_mask
+            .and_then(|mask| mask.get(target_slot))
+            .is_some_and(|&active| !active);
+        if inactive_override {
+            stats.preserved += 1;
+            out.row_status.push(HIGHS_BASIS_STATUS_BASIC);
+            continue;
+        }
 
         let row_status_byte = if let Some(pos) = slot_lookup.get(target_slot).and_then(|o| *o) {
             // Slot was in the stored basis — copy its row status.
@@ -818,6 +861,7 @@ mod tests {
             },
             cut_metadata: &[],
             basis_activity_window: DEFAULT_BASIS_ACTIVITY_WINDOW,
+            active_mask: None,
         }
     }
 
@@ -1348,10 +1392,12 @@ mod tests {
         );
 
         // Mimic the write_capture_metadata implementation (since it lives in
-        // forward.rs and is private).  This test verifies the contract.
+        // forward.rs and is private). Under the warm-start bake model each LP
+        // cut row `k` corresponds to pool slot `k`, so the slot identities
+        // are simply `0..cut_row_count`.
         captured.cut_row_slots.clear();
         #[allow(clippy::cast_possible_truncation)]
-        for (slot, _intercept, _coeffs) in pool.active_cuts().take(cut_row_count) {
+        for slot in 0..cut_row_count {
             captured.cut_row_slots.push(slot as u32);
         }
         captured.state_at_capture.clear();
@@ -1362,9 +1408,13 @@ mod tests {
         // Verify invariants:
         assert_eq!(
             captured.cut_row_slots.len(),
-            pool.active_cuts().count(),
-            "cut_row_slots.len() must equal pool.active_cuts().count()",
+            cut_row_count,
+            "cut_row_slots.len() must equal cut_row_count",
         );
+        // Pool is referenced only to make the test self-documenting about
+        // the data shape; the slot identities themselves come from the row
+        // count under the warm-start bake model.
+        let _ = pool.populated_count;
         assert_eq!(
             captured.state_at_capture.len(),
             n_state,
@@ -1910,6 +1960,7 @@ mod tests {
             },
             cut_metadata: &meta,
             basis_activity_window: DEFAULT_BASIS_ACTIVITY_WINDOW,
+            active_mask: None,
         };
 
         let stats = reconstruct_basis(
@@ -1966,6 +2017,7 @@ mod tests {
             },
             cut_metadata: &meta,
             basis_activity_window: DEFAULT_BASIS_ACTIVITY_WINDOW,
+            active_mask: None,
         };
 
         let stats = reconstruct_basis(
@@ -2015,6 +2067,7 @@ mod tests {
             },
             cut_metadata: &meta,
             basis_activity_window: DEFAULT_BASIS_ACTIVITY_WINDOW,
+            active_mask: None,
         };
 
         let stats = reconstruct_basis(
@@ -2096,6 +2149,7 @@ mod tests {
             },
             cut_metadata: &meta,
             basis_activity_window: DEFAULT_BASIS_ACTIVITY_WINDOW,
+            active_mask: None,
         };
 
         let stats = reconstruct_basis(
@@ -2209,6 +2263,7 @@ mod tests {
             },
             cut_metadata: &meta,
             basis_activity_window: DEFAULT_BASIS_ACTIVITY_WINDOW,
+            active_mask: None,
         };
 
         let stats = reconstruct_basis(
@@ -2305,6 +2360,7 @@ mod tests {
             },
             cut_metadata: &meta,
             basis_activity_window: DEFAULT_BASIS_ACTIVITY_WINDOW,
+            active_mask: None,
         };
 
         let stats = reconstruct_basis(
@@ -2413,6 +2469,7 @@ mod tests {
             },
             cut_metadata: &meta,
             basis_activity_window: DEFAULT_BASIS_ACTIVITY_WINDOW,
+            active_mask: None,
         };
 
         let stats = reconstruct_basis(
@@ -2517,6 +2574,7 @@ mod tests {
             },
             cut_metadata: &[], // no activity metadata needed for preservation
             basis_activity_window: DEFAULT_BASIS_ACTIVITY_WINDOW,
+            active_mask: None,
         };
 
         let mut out = Basis::new(0, 0);
@@ -2632,6 +2690,7 @@ mod tests {
             },
             cut_metadata: &pool.metadata,
             basis_activity_window: DEFAULT_BASIS_ACTIVITY_WINDOW,
+            active_mask: None,
         };
 
         let mut out = Basis::new(0, 0);
@@ -2781,6 +2840,7 @@ mod tests {
             },
             cut_metadata: pool.metadata.as_slice(),
             basis_activity_window: DEFAULT_BASIS_ACTIVITY_WINDOW,
+            active_mask: None,
         };
 
         let stats = reconstruct_basis(
@@ -2914,6 +2974,7 @@ mod tests {
             },
             cut_metadata: pool.metadata.as_slice(),
             basis_activity_window: DEFAULT_BASIS_ACTIVITY_WINDOW,
+            active_mask: None,
         };
 
         let stats = reconstruct_basis(
@@ -3043,6 +3104,7 @@ mod tests {
                 },
                 cut_metadata: &meta,
                 basis_activity_window: DEFAULT_BASIS_ACTIVITY_WINDOW,
+                active_mask: None,
             },
             delta_cuts.iter().map(|(s, i, c)| (*s, *i, c.as_slice())),
             PaddingContext {
@@ -3102,6 +3164,7 @@ mod tests {
                 },
                 cut_metadata: &meta,
                 basis_activity_window: DEFAULT_BASIS_ACTIVITY_WINDOW,
+                active_mask: None,
             },
             delta_cuts.iter().map(|(s, i, c)| (*s, *i, c.as_slice())),
             PaddingContext {
@@ -3213,6 +3276,7 @@ mod tests {
             },
             cut_metadata: &meta,
             basis_activity_window: DEFAULT_BASIS_ACTIVITY_WINDOW,
+            active_mask: None,
         };
 
         // ── Run 1 ──────────────────────────────────────────────────────────
@@ -3259,6 +3323,7 @@ mod tests {
             },
             cut_metadata: &meta,
             basis_activity_window: DEFAULT_BASIS_ACTIVITY_WINDOW,
+            active_mask: None,
         };
 
         reconstruct_basis(
@@ -3353,6 +3418,7 @@ mod tests {
                 },
                 cut_metadata: &metadata,
                 basis_activity_window: DEFAULT_BASIS_ACTIVITY_WINDOW, // 5
+                active_mask: None,
             };
             let mut out = Basis::new(0, 0);
             let mut lookup: Vec<Option<u32>> = vec![None; 8];
@@ -3393,6 +3459,7 @@ mod tests {
                 },
                 cut_metadata: &metadata,
                 basis_activity_window: 10,
+                active_mask: None,
             };
             let mut out = Basis::new(0, 0);
             let mut lookup: Vec<Option<u32>> = vec![None; 8];
@@ -3505,6 +3572,75 @@ mod tests {
                 new_tight: 0,
                 new_slack: 1
             },
+        );
+    }
+
+    /// Inactive populated slots in the warm-start bake model carry sentinel
+    /// `[-INF, +INF]` row bounds in the LP. The row's slack variable is
+    /// free, so it is naturally `BASIC` in any consistent basis; the mask
+    /// override forces that status regardless of the stored row's previous
+    /// classification (which may have been `LOWER` when the slot was active).
+    #[test]
+    fn reconstruct_basis_emits_basic_for_inactive_populated_slots() {
+        // Stored basis: 1 template row, 3 cut rows for slots [0, 1, 2]. Slot
+        // 1 was `LOWER` when last active; the inactive override must flip it
+        // to `BASIC` regardless.
+        let stored = make_stored_basis(1, 2, &[0, 1, 2], &[B, L, B], &[1.0]);
+
+        // Target LP has the same 3 populated slots in the same order; slot 1
+        // is currently inactive (sentinel-bound row).
+        let cuts: Vec<(usize, f64, Vec<f64>)> = vec![
+            (0, 0.0, vec![0.0]),
+            (1, 0.0, vec![0.0]),
+            (2, 0.0, vec![0.0]),
+        ];
+        let active_mask: [bool; 3] = [true, false, true];
+
+        let source = ReconstructionSource {
+            target: ReconstructionTarget {
+                base_row_count: 1,
+                num_cols: 2,
+            },
+            cut_metadata: &[],
+            basis_activity_window: DEFAULT_BASIS_ACTIVITY_WINDOW,
+            active_mask: Some(&active_mask),
+        };
+        let mut out = Basis::new(0, 0);
+        let mut lookup: Vec<Option<u32>> = vec![None; 8];
+        let mut scratch = PromotionScratch::default();
+
+        let _stats = reconstruct_basis(
+            &stored,
+            source,
+            cuts.iter().map(|(s, i, c)| (*s, *i, c.as_slice())),
+            PaddingContext {
+                state: &[1.0],
+                theta: 0.0,
+                tolerance: 1e-7,
+            },
+            &mut out,
+            &mut lookup,
+            &mut scratch,
+        );
+
+        // Row 0 is the template row (BASIC by stored copy). Cut rows start
+        // at index 1. Slot 1's row (index `base + 1`) must be `BASIC` from
+        // the mask override even though the stored status was `LOWER`; the
+        // surrounding active rows preserve their stored statuses.
+        let base_row_count = 1usize;
+        assert_eq!(
+            out.row_status[base_row_count], B,
+            "active slot 0 must preserve stored BASIC status",
+        );
+        assert_eq!(
+            out.row_status[base_row_count + 1],
+            B,
+            "inactive slot 1 must be overridden to BASIC",
+        );
+        assert_eq!(
+            out.row_status[base_row_count + 2],
+            B,
+            "active slot 2 must preserve stored BASIC status",
         );
     }
 }
