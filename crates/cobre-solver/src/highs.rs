@@ -467,6 +467,25 @@ impl HighsSolver {
                 c"dual_feasibility_tolerance".as_ptr(),
                 self.current_profile.dual_feasibility_tolerance,
             );
+            // Also re-apply the algorithmic strategy int options. Post-retry
+            // `restore_default_settings` resets these to HiGHS defaults; the
+            // profile values must be reinstalled before the default-attempt
+            // path runs so backward-tuned profiles survive the retry boundary.
+            ffi::cobre_highs_set_int_option(
+                self.handle,
+                c"simplex_dual_edge_weight_strategy".as_ptr(),
+                self.current_profile.simplex_dual_edge_weight_strategy,
+            );
+            ffi::cobre_highs_set_int_option(
+                self.handle,
+                c"simplex_scale_strategy".as_ptr(),
+                self.current_profile.simplex_scale_strategy,
+            );
+            ffi::cobre_highs_set_int_option(
+                self.handle,
+                c"simplex_price_strategy".as_ptr(),
+                self.current_profile.simplex_price_strategy,
+            );
         }
     }
 
