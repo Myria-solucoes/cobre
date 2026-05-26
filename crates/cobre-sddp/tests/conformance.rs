@@ -92,6 +92,10 @@ impl MockSolver {
 }
 
 impl SolverInterface for MockSolver {
+    type Profile = cobre_solver::HighsProfile;
+
+    fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
+
     fn solver_name_version(&self) -> String {
         "MockSolver 0.0.0".to_string()
     }

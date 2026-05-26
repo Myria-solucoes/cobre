@@ -319,10 +319,13 @@ impl BackwardPassState {
     /// - `inputs.ctx.base_rows.len() != num_stages`
     /// - `inputs.risk_measures.len() != num_stages`
     /// - `inputs.baked.len() != num_stages`
-    pub fn run<S: SolverInterface + Send, C: Communicator>(
+    pub fn run<S, C: Communicator>(
         &mut self,
         inputs: &mut BackwardPassInputs<'_, S, C>,
-    ) -> Result<BackwardResult, SddpError> {
+    ) -> Result<BackwardResult, SddpError>
+    where
+        S: SolverInterface<Profile = cobre_solver::HighsProfile> + Send,
+    {
         let training_ctx = inputs.training_ctx;
         let num_stages = training_ctx.horizon.num_stages();
 
@@ -344,7 +347,7 @@ impl BackwardPassState {
 
         // Apply the backward-phase solver profile to every worker workspace before
         // the per-stage loop begins.  In v1 all named profiles equal
-        // `SolveProfile::default()`, so this is a no-op (delta tracking skips all
+        // `HighsProfile::default()`, so this is a no-op (delta tracking skips all
         // FFI calls), preserving bit-identical parity with the pre-profile branch.
         for ws in inputs.workspaces.iter_mut() {
             ws.solver.set_profile(&Phase::Backward.profile());
@@ -1123,6 +1126,10 @@ mod tests {
     }
 
     impl SolverInterface for MockSolver {
+        type Profile = cobre_solver::HighsProfile;
+
+        fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
+
         fn name(&self) -> &'static str {
             "mock"
         }

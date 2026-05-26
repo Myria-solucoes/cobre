@@ -24,10 +24,58 @@ use std::os::raw::c_void;
 use std::time::Instant;
 
 use crate::{
-    DEFAULT_PROFILE_HEURISTIC_SENTINEL, DEFAULT_PROFILE_IPM_UNBOUNDED_SENTINEL, SolveProfile,
-    SolverInterface, ffi,
+    DEFAULT_PROFILE_HEURISTIC_SENTINEL, DEFAULT_PROFILE_IPM_UNBOUNDED_SENTINEL, SolverInterface,
+    ffi,
     types::{RowBatch, SolutionView, SolverError, SolverStatistics, StageTemplate},
 };
+
+/// HiGHS-specific solver profile carrying the full per-phase tuning surface.
+///
+/// `HighsProfile` is the associated `Profile` type for `HighsSolver`. Other
+/// solvers (e.g. CLP) define their own concrete profile types with their
+/// native option names. Profile constants used by applications are typed as
+/// the concrete profile of the solver in use.
+///
+/// Field defaults match the historical hard-coded `default_options()` table
+/// bit-for-bit, so callers that never set a non-default profile observe no
+/// behavioral change.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HighsProfile {
+    /// Primal feasibility tolerance.
+    pub primal_feasibility_tolerance: f64,
+    /// Dual feasibility tolerance.
+    pub dual_feasibility_tolerance: f64,
+    /// Per-attempt simplex iteration cap. `DEFAULT_PROFILE_HEURISTIC_SENTINEL`
+    /// (0) selects the historical heuristic `num_cols * 50 max 100_000`.
+    pub simplex_iteration_limit: u32,
+    /// Per-attempt IPM iteration cap. `DEFAULT_PROFILE_IPM_UNBOUNDED_SENTINEL`
+    /// (0) means unbounded (`i32::MAX`).
+    pub ipm_iteration_limit: u32,
+    /// `HiGHS` `simplex_dual_edge_weight_strategy` (`-1`=Choose, `0`=Dantzig,
+    /// `1`=Devex, `2`=`SteepestEdge`).
+    pub simplex_dual_edge_weight_strategy: i32,
+    /// `HiGHS` `simplex_scale_strategy` (`0`=Off, `1`=Choose, `2`=Curtis–Reid,
+    /// `4`=Equilibration). The cobre prescaler already normalizes matrix
+    /// entries, so the default is `0` (off).
+    pub simplex_scale_strategy: i32,
+    /// `HiGHS` `simplex_price_strategy` (`0`=Col, `1`=Row, `2`=`RowHyperSparse`,
+    /// `3`=`RowSparse`).
+    pub simplex_price_strategy: i32,
+}
+
+impl Default for HighsProfile {
+    fn default() -> Self {
+        Self {
+            primal_feasibility_tolerance: 1e-6,
+            dual_feasibility_tolerance: 1e-6,
+            simplex_iteration_limit: DEFAULT_PROFILE_HEURISTIC_SENTINEL,
+            ipm_iteration_limit: 10_000,
+            simplex_dual_edge_weight_strategy: 1,
+            simplex_scale_strategy: 0,
+            simplex_price_strategy: 1,
+        }
+    }
+}
 
 // ─── Default HiGHS configuration ─────────────────────────────────────────────
 //
@@ -115,7 +163,7 @@ fn default_options() -> [DefaultOption; 13] {
         },
         DefaultOption {
             name: c"simplex_scale_strategy",
-            value: OptionValue::Int(4), // Equilibration (HiGHS default — cobre prescaler disabled for this test)
+            value: OptionValue::Int(0), // Off (cobre prescaler already normalizes; see docstring at top of file)
         },
         DefaultOption {
             name: c"presolve",
@@ -223,11 +271,11 @@ pub struct HighsSolver {
     stats: SolverStatistics,
     /// Cached solver profile applied by the last `set_*_profile` call.
     ///
-    /// Initialised to `SolveProfile::default()` at construction, which
+    /// Initialised to `HighsProfile::default()` at construction, which
     /// preserves the historical hardcoded behaviour bit-for-bit. Updated by
     /// the four `SolverInterface` profile setter methods; read by
     /// `set_iteration_limits` on every solve attempt.
-    current_profile: SolveProfile,
+    current_profile: HighsProfile,
 }
 
 // SAFETY: `HighsSolver` holds a raw pointer to a `HiGHS` C++ object. The `HiGHS`
@@ -324,7 +372,7 @@ impl HighsSolver {
                 retry_level_histogram: vec![0u64; 12],
                 ..SolverStatistics::default()
             },
-            current_profile: SolveProfile::default(),
+            current_profile: HighsProfile::default(),
         })
     }
 
@@ -1078,6 +1126,34 @@ pub fn highs_version() -> String {
 }
 
 impl SolverInterface for HighsSolver {
+    type Profile = HighsProfile;
+
+    fn apply_profile(&mut self, profile: &HighsProfile) {
+        self.set_primal_feasibility_tolerance(profile.primal_feasibility_tolerance);
+        self.set_dual_feasibility_tolerance(profile.dual_feasibility_tolerance);
+        self.set_simplex_iteration_limit_profile(profile.simplex_iteration_limit);
+        self.set_ipm_iteration_limit_profile(profile.ipm_iteration_limit);
+        // SAFETY: self.handle is a valid HiGHS pointer; ffi setters accept any i32.
+        unsafe {
+            ffi::cobre_highs_set_int_option(
+                self.handle,
+                c"simplex_dual_edge_weight_strategy".as_ptr(),
+                profile.simplex_dual_edge_weight_strategy,
+            );
+            ffi::cobre_highs_set_int_option(
+                self.handle,
+                c"simplex_scale_strategy".as_ptr(),
+                profile.simplex_scale_strategy,
+            );
+            ffi::cobre_highs_set_int_option(
+                self.handle,
+                c"simplex_price_strategy".as_ptr(),
+                profile.simplex_price_strategy,
+            );
+        }
+        self.current_profile = *profile;
+    }
+
     fn name(&self) -> &'static str {
         "HiGHS"
     }
@@ -2839,20 +2915,20 @@ mod research_tests {
     }
 
     /// Verify that a freshly constructed `HighsSolver` exposes a `current_profile`
-    /// equal to `SolveProfile::default()`.
+    /// equal to `HighsProfile::default()`.
     ///
     /// This ensures that callers that never call any profile setter observe the
     /// historical hardcoded behaviour bit-for-bit.
     #[test]
     fn new_highs_solver_starts_with_default_profile() {
         use super::super::HighsSolver;
-        use crate::SolveProfile;
+        use crate::HighsProfile;
 
         let solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
         assert_eq!(
             solver.current_profile,
-            SolveProfile::default(),
-            "current_profile must equal SolveProfile::default() immediately after construction"
+            HighsProfile::default(),
+            "current_profile must equal HighsProfile::default() immediately after construction"
         );
     }
 }

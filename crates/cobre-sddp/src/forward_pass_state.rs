@@ -310,10 +310,13 @@ impl ForwardPassState {
     /// - `inputs.records.len() != inputs.local_forward_passes * num_stages`
     /// - `inputs.training_ctx.initial_state.len() != indexer.n_state`
     /// - `inputs.baked.len() != num_stages`
-    pub(crate) fn run<S: SolverInterface + Send>(
+    pub(crate) fn run<S>(
         &mut self,
         inputs: &mut ForwardPassInputs<'_, S>,
-    ) -> Result<ForwardResult, SddpError> {
+    ) -> Result<ForwardResult, SddpError>
+    where
+        S: SolverInterface<Profile = cobre_solver::HighsProfile> + Send,
+    {
         let training_ctx = inputs.training_ctx;
         let TrainingContext {
             horizon,
@@ -412,7 +415,7 @@ impl ForwardPassState {
 
         // Apply the forward-phase solver profile to every worker workspace before
         // the parallel region begins.  In v1 all named profiles equal
-        // `SolveProfile::default()`, so this is a no-op (delta tracking skips all
+        // `HighsProfile::default()`, so this is a no-op (delta tracking skips all
         // FFI calls), preserving bit-identical parity with the pre-profile branch.
         for ws in inputs.workspaces.iter_mut() {
             ws.solver.set_profile(&Phase::Forward.profile());
@@ -879,6 +882,10 @@ mod tests {
     }
 
     impl SolverInterface for MockSolver {
+        type Profile = cobre_solver::HighsProfile;
+
+        fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
+
         fn load_model(&mut self, _template: &StageTemplate) {}
         fn add_rows(&mut self, _rows: &RowBatch) {}
         fn set_row_bounds(&mut self, _i: &[usize], _lo: &[f64], _hi: &[f64]) {}

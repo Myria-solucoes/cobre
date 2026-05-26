@@ -1239,7 +1239,7 @@ pub fn build_sampler_from_ctx<'a>(
 /// `ForwardPassInputs` and calls `run` on them.
 /// Production callers use `TrainingSession::run_forward_phase` which drives
 /// `fwd_state.run(...)` directly.
-pub fn run_forward_pass<S: SolverInterface + Send>(
+pub fn run_forward_pass<S>(
     workspaces: &mut [SolverWorkspace<S>],
     basis_store: &mut BasisStore,
     ctx: &StageContext<'_>,
@@ -1248,7 +1248,10 @@ pub fn run_forward_pass<S: SolverInterface + Send>(
     training_ctx: &TrainingContext<'_>,
     batch: &ForwardPassBatch<'_>,
     records: &mut [TrajectoryRecord],
-) -> Result<ForwardResult, SddpError> {
+) -> Result<ForwardResult, SddpError>
+where
+    S: SolverInterface<Profile = cobre_solver::HighsProfile> + Send,
+{
     use crate::forward_pass_state::{ForwardPassInputs, ForwardPassState};
     let n_workers = workspaces.len().max(1);
     let num_stages = training_ctx.horizon.num_stages();
@@ -1398,6 +1401,10 @@ mod tests {
     }
 
     impl SolverInterface for MockSolver {
+        type Profile = cobre_solver::HighsProfile;
+
+        fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
+
         fn solver_name_version(&self) -> String {
             "MockSolver 0.0.0".to_string()
         }
@@ -4322,6 +4329,10 @@ mod tests {
     }
 
     impl SolverInterface for RecordingMockSolver {
+        type Profile = cobre_solver::HighsProfile;
+
+        fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
+
         fn solver_name_version(&self) -> String {
             "MockSolver 0.0.0".to_string()
         }

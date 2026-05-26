@@ -24,7 +24,7 @@ mod tests {
     use std::cell::Cell;
 
     use cobre_solver::types::{Basis, RowBatch, SolutionView, SolverError, SolverStatistics};
-    use cobre_solver::{HighsSolver, ProfiledSolver, SolveProfile, SolverInterface, StageTemplate};
+    use cobre_solver::{HighsProfile, HighsSolver, ProfiledSolver, SolverInterface, StageTemplate};
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -460,18 +460,18 @@ mod tests {
     // ProfiledSolver::solve() must call apply_profile() before forwarding to
     // the inner solver. This ensures that any HiGHS internal option reset
     // between solves is overridden by the active profile. The regression test
-    // verifies that each solve() call dispatches exactly the 4 profile setter
-    // calls (primal feas, dual feas, simplex cap, ipm cap) to the inner solver.
+    // verifies that each solve() call dispatches exactly one apply_profile call
+    // to the inner solver.
 
-    /// Counts calls to the four profile setter methods.
+    /// Counts calls to `apply_profile`.
     struct SetterCountMock {
-        setter_call_count: Cell<usize>,
+        apply_profile_call_count: Cell<usize>,
     }
 
     impl SetterCountMock {
         fn new() -> Self {
             Self {
-                setter_call_count: Cell::new(0),
+                apply_profile_call_count: Cell::new(0),
             }
         }
     }
@@ -480,6 +480,13 @@ mod tests {
     unsafe impl Send for SetterCountMock {}
 
     impl SolverInterface for SetterCountMock {
+        type Profile = HighsProfile;
+
+        fn apply_profile(&mut self, _profile: &HighsProfile) {
+            self.apply_profile_call_count
+                .set(self.apply_profile_call_count.get() + 1);
+        }
+
         fn load_model(&mut self, _t: &StageTemplate) {}
         fn add_rows(&mut self, _r: &RowBatch) {}
         fn set_row_bounds(&mut self, _i: &[usize], _l: &[f64], _u: &[f64]) {}
@@ -500,55 +507,49 @@ mod tests {
         fn solver_name_version(&self) -> String {
             "SetterCountMock 0.0.0".to_string()
         }
-        fn set_primal_feasibility_tolerance(&mut self, _v: f64) {
-            self.setter_call_count.set(self.setter_call_count.get() + 1);
-        }
-        fn set_dual_feasibility_tolerance(&mut self, _v: f64) {
-            self.setter_call_count.set(self.setter_call_count.get() + 1);
-        }
-        fn set_simplex_iteration_limit_profile(&mut self, _v: u32) {
-            self.setter_call_count.set(self.setter_call_count.get() + 1);
-        }
-        fn set_ipm_iteration_limit_profile(&mut self, _v: u32) {
-            self.setter_call_count.set(self.setter_call_count.get() + 1);
-        }
+        fn set_primal_feasibility_tolerance(&mut self, _v: f64) {}
+        fn set_dual_feasibility_tolerance(&mut self, _v: f64) {}
+        fn set_simplex_iteration_limit_profile(&mut self, _v: u32) {}
+        fn set_ipm_iteration_limit_profile(&mut self, _v: u32) {}
     }
 
-    /// Regression: each `ProfiledSolver::solve()` must dispatch exactly 4
-    /// profile setter calls to the inner solver (one per profile field), even
-    /// without any intervening `set_profile` call.
+    /// Regression: each `ProfiledSolver::solve()` must dispatch exactly one
+    /// `apply_profile` call to the inner solver (to survive any solver-internal
+    /// option reset between solves), even without any intervening `set_profile`
+    /// call.
     ///
     /// After N solves with no `set_profile` call in between, the total
-    /// setter-call count must equal 4 * n.
+    /// `apply_profile` count must equal N.
     #[test]
     fn profile_reapplied_on_every_solve() {
         let mock = SetterCountMock::new();
         let mut solver = ProfiledSolver::new(mock);
 
         // Apply a non-default profile once at phase entry (simulates phase boundary).
-        let non_default = SolveProfile {
+        let non_default = HighsProfile {
             primal_feasibility_tolerance: 1e-7,
             dual_feasibility_tolerance: 1e-7,
             simplex_iteration_limit: 50_000,
             ipm_iteration_limit: 5_000,
+            simplex_dual_edge_weight_strategy: 0,
+            simplex_scale_strategy: 0,
+            simplex_price_strategy: 2,
         };
         solver.set_profile(&non_default);
 
-        // set_profile dispatched 4 setter calls for the non-default profile.
+        // set_profile dispatched one apply_profile call for the non-default profile.
         // Reset the counter so we only measure solve-triggered calls.
-        solver.inner_mut().setter_call_count.set(0);
+        solver.inner_mut().apply_profile_call_count.set(0);
 
         let n: usize = 3;
         for _ in 0..n {
             let _ = solver.solve(None);
         }
 
-        let count = solver.inner().setter_call_count.get();
+        let count = solver.inner().apply_profile_call_count.get();
         assert_eq!(
-            count,
-            4 * n,
-            "each solve() must dispatch 4 setter calls; expected {}, got {count}",
-            4 * n
+            count, n,
+            "each solve() must dispatch one apply_profile call; expected {n}, got {count}"
         );
     }
 }

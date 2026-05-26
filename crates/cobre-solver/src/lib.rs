@@ -45,9 +45,7 @@ pub use types::{
 };
 
 pub mod profile;
-pub use profile::{
-    DEFAULT_PROFILE_HEURISTIC_SENTINEL, DEFAULT_PROFILE_IPM_UNBOUNDED_SENTINEL, SolveProfile,
-};
+pub use profile::{DEFAULT_PROFILE_HEURISTIC_SENTINEL, DEFAULT_PROFILE_IPM_UNBOUNDED_SENTINEL};
 
 pub mod profiled;
 pub use profiled::ProfiledSolver;
@@ -56,6 +54,7 @@ pub mod baking;
 pub use baking::bake_rows_into_template;
 
 pub mod highs;
+pub use highs::HighsProfile;
 pub use highs::HighsSolver;
 pub use highs::highs_version;
 

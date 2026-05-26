@@ -32,7 +32,7 @@ impl StudySetup {
     ///
     /// Returns `SddpError::Infeasible`, `SddpError::Solver`, or
     /// `SddpError::Communication` on LP, solver, or MPI failure.
-    pub fn train<S: SolverInterface + Send, C: Communicator>(
+    pub fn train<S, C: Communicator>(
         &mut self,
         solver: &mut S,
         comm: &C,
@@ -40,7 +40,10 @@ impl StudySetup {
         solver_factory: impl Fn() -> Result<S, SolverError>,
         event_sender: Option<Sender<TrainingEvent>>,
         shutdown_flag: Option<&Arc<AtomicBool>>,
-    ) -> Result<TrainingOutcome, SddpError> {
+    ) -> Result<TrainingOutcome, SddpError>
+    where
+        S: SolverInterface<Profile = cobre_solver::HighsProfile> + Send,
+    {
         let training_config = TrainingConfig {
             loop_config: LoopConfig {
                 forward_passes: self.loop_params.forward_passes,

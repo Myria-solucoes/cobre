@@ -1,37 +1,39 @@
 //! Generic `ProfiledSolver<S>` wrapper with per-phase LP-solver configuration.
 //!
 //! [`ProfiledSolver`] wraps any [`SolverInterface`] implementor, tracks the
-//! currently-applied [`SolveProfile`], and skips FFI option-setter calls when
-//! the new profile matches the current one (delta-only dispatch). All other
-//! [`SolverInterface`] methods are transparently forwarded to the inner solver.
+//! currently-applied solver profile (typed as `S::Profile`), and skips FFI
+//! option-setter calls when the new profile matches the current one
+//! (delta-only dispatch via `PartialEq`). All other [`SolverInterface`] methods
+//! are transparently forwarded to the inner solver.
 //!
 //! # Construction
 //!
 //! `ProfiledSolver::new(inner)` assumes the inner solver is in a state
-//! consistent with `SolveProfile::default()` and issues no FFI calls.
+//! consistent with `S::Profile::default()` and issues no FFI calls.
 //!
 //! # Usage
 //!
 //! ```rust
-//! use cobre_solver::{ProfiledSolver, SolveProfile, SolverInterface, HighsSolver};
+//! use cobre_solver::{HighsProfile, ProfiledSolver, SolverInterface, HighsSolver};
 //!
 //! let inner = HighsSolver::new().expect("HiGHS init");
 //! let mut solver = ProfiledSolver::new(inner);
-//! solver.set_profile(&SolveProfile::default());
-//! assert_eq!(solver.current_profile(), &SolveProfile::default());
+//! solver.set_profile(&HighsProfile::default());
+//! assert_eq!(solver.current_profile(), &HighsProfile::default());
 //! ```
 
 use crate::{
-    SolveProfile, SolverInterface,
+    SolverInterface,
     types::{Basis, RowBatch, SolutionView, SolverError, SolverStatistics, StageTemplate},
 };
 
 /// Wraps any [`SolverInterface`] implementor with per-phase profile
 /// configuration.
 ///
-/// Tracks the currently-applied profile and skips no-op FFI calls when the
-/// same profile is reapplied. The wrapper itself implements [`SolverInterface`]
-/// by transparently forwarding all method calls to the inner solver.
+/// Tracks the currently-applied profile (typed as `S::Profile`) and skips
+/// no-op FFI calls when the same profile is reapplied (delta-only dispatch
+/// via `PartialEq`). The wrapper itself implements [`SolverInterface`] by
+/// transparently forwarding all method calls to the inner solver.
 /// [`ProfiledSolver::set_profile`] is the only non-trait-method addition.
 ///
 /// # Generic parameter
@@ -40,7 +42,7 @@ use crate::{
 /// time (monomorphization) to preserve zero-cost forwarding on the hot path.
 pub struct ProfiledSolver<S: SolverInterface> {
     inner: S,
-    current_profile: SolveProfile,
+    current_profile: S::Profile,
 }
 
 impl<S: SolverInterface> ProfiledSolver<S> {
@@ -48,23 +50,20 @@ impl<S: SolverInterface> ProfiledSolver<S> {
     ///
     /// The wrapper does NOT issue any FFI calls on construction — the inner
     /// solver is assumed to be in a state consistent with
-    /// `SolveProfile::default()`, which is exactly how it has been
+    /// `S::Profile::default()`, which is exactly how it has been
     /// constructed historically.
     pub fn new(inner: S) -> Self {
         Self {
             inner,
-            current_profile: SolveProfile::default(),
+            current_profile: S::Profile::default(),
         }
     }
 
     /// Apply a new profile to the inner solver.
     ///
-    /// Only fields that differ from `current_profile` trigger trait-method
-    /// calls on the inner solver. The dispatch order is deterministic:
-    /// primal feasibility → dual feasibility → simplex cap → IPM cap.
-    ///
     /// If `profile == current_profile`, this method returns immediately with
-    /// zero inner method calls.
+    /// zero inner method calls. Otherwise it delegates to
+    /// `inner.apply_profile(profile)` which issues all necessary FFI calls.
     ///
     /// After the call returns, `current_profile() == profile`.
     ///
@@ -72,61 +71,31 @@ impl<S: SolverInterface> ProfiledSolver<S> {
     ///
     /// Callers invoke this once per phase boundary. It is NOT intended to be
     /// called inside the hot solve loop.
-    pub fn set_profile(&mut self, profile: &SolveProfile) {
+    pub fn set_profile(&mut self, profile: &S::Profile) {
         if *profile == self.current_profile {
             return;
         }
-        // Exact bit-equality is intentional: `SolveProfile` is `Copy + PartialEq`
-        // precisely so that field-level delta tracking can compare stored vs. requested
-        // values without a margin-of-error. The goal is to avoid FFI calls only when
-        // the exact same bitpattern was previously applied — not to express a numerical
-        // tolerance concept. `float_cmp` is suppressed for this reason.
-        #[allow(clippy::float_cmp)]
-        if profile.primal_feasibility_tolerance != self.current_profile.primal_feasibility_tolerance
-        {
-            self.inner
-                .set_primal_feasibility_tolerance(profile.primal_feasibility_tolerance);
-        }
-        #[allow(clippy::float_cmp)]
-        if profile.dual_feasibility_tolerance != self.current_profile.dual_feasibility_tolerance {
-            self.inner
-                .set_dual_feasibility_tolerance(profile.dual_feasibility_tolerance);
-        }
-        if profile.simplex_iteration_limit != self.current_profile.simplex_iteration_limit {
-            self.inner
-                .set_simplex_iteration_limit_profile(profile.simplex_iteration_limit);
-        }
-        if profile.ipm_iteration_limit != self.current_profile.ipm_iteration_limit {
-            self.inner
-                .set_ipm_iteration_limit_profile(profile.ipm_iteration_limit);
-        }
+        self.inner.apply_profile(profile);
         self.current_profile = *profile;
     }
 
     /// Read-only access to the currently applied profile.
     ///
     /// Returns the profile that was last successfully applied via
-    /// [`ProfiledSolver::set_profile`], or `SolveProfile::default()` if no
+    /// [`ProfiledSolver::set_profile`], or `S::Profile::default()` if no
     /// profile has been applied yet.
-    pub fn current_profile(&self) -> &SolveProfile {
+    pub fn current_profile(&self) -> &S::Profile {
         &self.current_profile
     }
 
     /// Re-apply the current profile to the inner solver unconditionally.
     ///
     /// Unlike [`set_profile`], which skips FFI calls when the profile is
-    /// unchanged, this method always dispatches all four setter calls. It is
-    /// used internally before each solve to survive any `HiGHS` internal
+    /// unchanged, this method always delegates to `inner.apply_profile`.
+    /// It is used internally before each solve to survive any solver-internal
     /// option reset that may occur between solves.
-    fn apply_profile(&mut self) {
-        self.inner
-            .set_primal_feasibility_tolerance(self.current_profile.primal_feasibility_tolerance);
-        self.inner
-            .set_dual_feasibility_tolerance(self.current_profile.dual_feasibility_tolerance);
-        self.inner
-            .set_simplex_iteration_limit_profile(self.current_profile.simplex_iteration_limit);
-        self.inner
-            .set_ipm_iteration_limit_profile(self.current_profile.ipm_iteration_limit);
+    fn reapply_profile(&mut self) {
+        self.inner.apply_profile(&self.current_profile);
     }
 
     /// Shared reference to the wrapped inner solver.
@@ -148,6 +117,13 @@ impl<S: SolverInterface> ProfiledSolver<S> {
 
 // Transparent `SolverInterface` forwarding.
 impl<S: SolverInterface> SolverInterface for ProfiledSolver<S> {
+    type Profile = S::Profile;
+
+    fn apply_profile(&mut self, profile: &S::Profile) {
+        self.inner.apply_profile(profile);
+        self.current_profile = *profile;
+    }
+
     fn load_model(&mut self, template: &StageTemplate) {
         self.inner.load_model(template);
     }
@@ -165,8 +141,8 @@ impl<S: SolverInterface> SolverInterface for ProfiledSolver<S> {
     }
 
     fn solve(&mut self, basis: Option<&Basis>) -> Result<SolutionView<'_>, SolverError> {
-        // Re-apply profile before solve to survive any HiGHS internal option reset.
-        self.apply_profile();
+        // Re-apply profile before solve to survive any solver-internal option reset.
+        self.reapply_profile();
         self.inner.solve(basis)
     }
 
@@ -213,7 +189,7 @@ mod tests {
 
     use super::ProfiledSolver;
     use crate::{
-        SolveProfile, SolverInterface,
+        HighsProfile, SolverInterface,
         types::{Basis, RowBatch, SolutionView, SolverError, SolverStatistics, StageTemplate},
     };
 
@@ -227,10 +203,7 @@ mod tests {
         SetRowBounds,
         SetColBounds,
         Solve,
-        SetPrimalFeas(f64),
-        SetDualFeas(f64),
-        SetSimplexCap(u32),
-        SetIpmCap(u32),
+        ApplyProfile(HighsProfile),
     }
 
     /// A minimal [`SolverInterface`] implementor that records every invocation
@@ -266,6 +239,14 @@ mod tests {
     unsafe impl Send for RecordingMockSolver {}
 
     impl SolverInterface for RecordingMockSolver {
+        type Profile = HighsProfile;
+
+        fn apply_profile(&mut self, profile: &HighsProfile) {
+            self.calls
+                .borrow_mut()
+                .push(RecordedCall::ApplyProfile(*profile));
+        }
+
         fn load_model(&mut self, _template: &StageTemplate) {
             self.calls.borrow_mut().push(RecordedCall::LoadModel);
         }
@@ -304,44 +285,22 @@ mod tests {
             "RecordingMockSolver 0.0.0".to_string()
         }
 
-        fn set_primal_feasibility_tolerance(&mut self, value: f64) {
-            self.calls
-                .borrow_mut()
-                .push(RecordedCall::SetPrimalFeas(value));
-        }
+        fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
 
-        fn set_dual_feasibility_tolerance(&mut self, value: f64) {
-            self.calls
-                .borrow_mut()
-                .push(RecordedCall::SetDualFeas(value));
-        }
+        fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
 
-        fn set_simplex_iteration_limit_profile(&mut self, value: u32) {
-            self.calls
-                .borrow_mut()
-                .push(RecordedCall::SetSimplexCap(value));
-        }
+        fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
 
-        fn set_ipm_iteration_limit_profile(&mut self, value: u32) {
-            self.calls.borrow_mut().push(RecordedCall::SetIpmCap(value));
-        }
+        fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    /// Filter recorded calls to extract only profile setter calls.
+    /// Filter recorded calls to extract only `apply_profile` calls.
     fn filter_profile_calls(calls: &[RecordedCall]) -> Vec<&RecordedCall> {
         calls
             .iter()
-            .filter(|c| {
-                matches!(
-                    c,
-                    RecordedCall::SetPrimalFeas(_)
-                        | RecordedCall::SetDualFeas(_)
-                        | RecordedCall::SetSimplexCap(_)
-                        | RecordedCall::SetIpmCap(_)
-                )
-            })
+            .filter(|c| matches!(c, RecordedCall::ApplyProfile(_)))
             .collect()
     }
 
@@ -400,46 +359,49 @@ mod tests {
     // ── AC-4 ─────────────────────────────────────────────────────────────────
 
     /// AC-4: `set_profile` with a profile equal to `current_profile` issues
-    /// zero FFI setter calls.
+    /// zero `apply_profile` calls (noop delta-tracking).
     #[test]
     fn set_profile_noop_when_unchanged() {
         let mock = RecordingMockSolver::new();
         let mut solver = ProfiledSolver::new(mock);
 
         // Apply the default profile — same as the initial `current_profile`.
-        solver.set_profile(&SolveProfile::default());
+        solver.set_profile(&HighsProfile::default());
 
         let calls = solver.inner.recorded_calls();
         let profile_calls = filter_profile_calls(&calls);
         assert!(
             profile_calls.is_empty(),
-            "expected zero profile setter calls when profile unchanged, got: {profile_calls:?}"
+            "expected zero apply_profile calls when profile unchanged, got: {profile_calls:?}"
         );
     }
 
     // ── AC-5 ─────────────────────────────────────────────────────────────────
 
-    /// AC-5: `set_profile` with exactly one field changed dispatches exactly
-    /// one setter call matching that field, and no other setter calls.
+    /// AC-5: `set_profile` with any field differing from `current_profile`
+    /// dispatches exactly one `apply_profile` call carrying the complete new
+    /// profile value.
+    ///
+    /// In the associated-type design, `apply_profile` is a single atomic call
+    /// on the inner solver — there is no per-field dispatch. The noop guard is
+    /// purely a `PartialEq` comparison on the whole profile.
     #[test]
-    fn set_profile_dispatches_only_changed_field() {
-        let default = SolveProfile::default();
-
+    fn set_profile_dispatches_apply_profile_when_changed() {
         // ── sub-test 1: only primal tolerance changed ──
         {
             let mock = RecordingMockSolver::new();
             let mut solver = ProfiledSolver::new(mock);
-            let p = SolveProfile {
+            let p = HighsProfile {
                 primal_feasibility_tolerance: 1e-7,
-                ..default
+                ..HighsProfile::default()
             };
             solver.set_profile(&p);
             let calls = solver.inner.recorded_calls();
-            let setter_calls = filter_profile_calls(&calls);
+            let profile_calls = filter_profile_calls(&calls);
             assert_eq!(
-                setter_calls,
-                vec![&RecordedCall::SetPrimalFeas(1e-7)],
-                "expected only SetPrimalFeas(1e-7) for primal-only change"
+                profile_calls,
+                vec![&RecordedCall::ApplyProfile(p)],
+                "expected one ApplyProfile(p) for primal-only change"
             );
         }
 
@@ -447,17 +409,17 @@ mod tests {
         {
             let mock = RecordingMockSolver::new();
             let mut solver = ProfiledSolver::new(mock);
-            let p = SolveProfile {
+            let p = HighsProfile {
                 dual_feasibility_tolerance: 1e-7,
-                ..default
+                ..HighsProfile::default()
             };
             solver.set_profile(&p);
             let calls = solver.inner.recorded_calls();
-            let setter_calls = filter_profile_calls(&calls);
+            let profile_calls = filter_profile_calls(&calls);
             assert_eq!(
-                setter_calls,
-                vec![&RecordedCall::SetDualFeas(1e-7)],
-                "expected only SetDualFeas(1e-7) for dual-only change"
+                profile_calls,
+                vec![&RecordedCall::ApplyProfile(p)],
+                "expected one ApplyProfile(p) for dual-only change"
             );
         }
 
@@ -465,17 +427,17 @@ mod tests {
         {
             let mock = RecordingMockSolver::new();
             let mut solver = ProfiledSolver::new(mock);
-            let p = SolveProfile {
+            let p = HighsProfile {
                 simplex_iteration_limit: 50_000,
-                ..default
+                ..HighsProfile::default()
             };
             solver.set_profile(&p);
             let calls = solver.inner.recorded_calls();
-            let setter_calls = filter_profile_calls(&calls);
+            let profile_calls = filter_profile_calls(&calls);
             assert_eq!(
-                setter_calls,
-                vec![&RecordedCall::SetSimplexCap(50_000)],
-                "expected only SetSimplexCap(50_000) for simplex-only change"
+                profile_calls,
+                vec![&RecordedCall::ApplyProfile(p)],
+                "expected one ApplyProfile(p) for simplex-cap-only change"
             );
         }
 
@@ -483,51 +445,85 @@ mod tests {
         {
             let mock = RecordingMockSolver::new();
             let mut solver = ProfiledSolver::new(mock);
-            let p = SolveProfile {
+            let p = HighsProfile {
                 ipm_iteration_limit: 5_000,
-                ..default
+                ..HighsProfile::default()
             };
             solver.set_profile(&p);
             let calls = solver.inner.recorded_calls();
-            let setter_calls = filter_profile_calls(&calls);
+            let profile_calls = filter_profile_calls(&calls);
             assert_eq!(
-                setter_calls,
-                vec![&RecordedCall::SetIpmCap(5_000)],
-                "expected only SetIpmCap(5_000) for ipm-only change"
+                profile_calls,
+                vec![&RecordedCall::ApplyProfile(p)],
+                "expected one ApplyProfile(p) for ipm-cap-only change"
+            );
+        }
+
+        // ── sub-test 5: only dual edge weight strategy changed ──
+        {
+            let mock = RecordingMockSolver::new();
+            let mut solver = ProfiledSolver::new(mock);
+            let p = HighsProfile {
+                simplex_dual_edge_weight_strategy: 0, // Dantzig
+                ..HighsProfile::default()
+            };
+            solver.set_profile(&p);
+            let calls = solver.inner.recorded_calls();
+            let profile_calls = filter_profile_calls(&calls);
+            assert_eq!(
+                profile_calls,
+                vec![&RecordedCall::ApplyProfile(p)],
+                "expected one ApplyProfile(p) for dual-edge-weight-only change"
+            );
+        }
+
+        // ── sub-test 6: only price strategy changed ──
+        {
+            let mock = RecordingMockSolver::new();
+            let mut solver = ProfiledSolver::new(mock);
+            let p = HighsProfile {
+                simplex_price_strategy: 2, // RowHyperSparse
+                ..HighsProfile::default()
+            };
+            solver.set_profile(&p);
+            let calls = solver.inner.recorded_calls();
+            let profile_calls = filter_profile_calls(&calls);
+            assert_eq!(
+                profile_calls,
+                vec![&RecordedCall::ApplyProfile(p)],
+                "expected one ApplyProfile(p) for price-strategy-only change"
             );
         }
     }
 
     // ── AC-6 ─────────────────────────────────────────────────────────────────
 
-    /// AC-6: When all four profile fields differ, `set_profile` dispatches
-    /// exactly four setter calls in the deterministic order:
-    /// `SetPrimalFeas` → `SetDualFeas` → `SetSimplexCap` → `SetIpmCap`.
+    /// AC-6: When all profile fields differ from the default, `set_profile`
+    /// dispatches exactly one `apply_profile` call carrying the complete new
+    /// profile.
     #[test]
-    fn set_profile_full_change_uses_deterministic_order() {
+    fn set_profile_full_change_dispatches_single_apply_profile() {
         let mock = RecordingMockSolver::new();
         let mut solver = ProfiledSolver::new(mock);
 
-        let p = SolveProfile {
+        let p = HighsProfile {
             primal_feasibility_tolerance: 1e-7,
             dual_feasibility_tolerance: 1e-7,
             simplex_iteration_limit: 50_000,
             ipm_iteration_limit: 5_000,
+            simplex_dual_edge_weight_strategy: 0, // Dantzig
+            simplex_scale_strategy: 2,            // Curtis-Reid
+            simplex_price_strategy: 2,            // RowHyperSparse
         };
         solver.set_profile(&p);
 
         let calls = solver.inner.recorded_calls();
-        let setter_calls: Vec<_> = filter_profile_calls(&calls).into_iter().cloned().collect();
+        let profile_calls: Vec<_> = filter_profile_calls(&calls).into_iter().cloned().collect();
 
         assert_eq!(
-            setter_calls,
-            vec![
-                RecordedCall::SetPrimalFeas(1e-7),
-                RecordedCall::SetDualFeas(1e-7),
-                RecordedCall::SetSimplexCap(50_000),
-                RecordedCall::SetIpmCap(5_000),
-            ],
-            "setter calls must appear in deterministic order: primal, dual, simplex, ipm"
+            profile_calls,
+            vec![RecordedCall::ApplyProfile(p)],
+            "expected exactly one ApplyProfile call with the complete profile"
         );
     }
 
@@ -535,7 +531,8 @@ mod tests {
 
     /// AC-7: `ProfiledSolver<S>` forwards `load_model`, `add_rows`,
     /// `set_row_bounds`, `set_col_bounds`, and `solve` transparently to the
-    /// inner solver.
+    /// inner solver. `solve` also triggers an `ApplyProfile` call via
+    /// `reapply_profile()` before delegating to the inner solver.
     #[test]
     fn solver_interface_methods_forward_to_inner() {
         let mock = RecordingMockSolver::new();
@@ -570,6 +567,14 @@ mod tests {
         assert!(
             calls.contains(&RecordedCall::Solve),
             "expected Solve in call log, got: {calls:?}"
+        );
+        // `solve()` calls `reapply_profile()` before delegating — verify the
+        // ApplyProfile call appears in the log.
+        let profile_calls = filter_profile_calls(&calls);
+        assert_eq!(
+            profile_calls.len(),
+            1,
+            "expected exactly one ApplyProfile call from solve(), got: {calls:?}"
         );
     }
 }

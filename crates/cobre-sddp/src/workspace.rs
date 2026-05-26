@@ -1092,7 +1092,7 @@ mod tests {
         BasisStore, CapturedBasis, ScratchBuffers, SolverWorkspace, WorkspacePool, WorkspaceSizing,
     };
     use cobre_solver::{
-        Basis, SolutionView, SolveProfile, SolverError, SolverInterface, SolverStatistics,
+        Basis, HighsProfile, SolutionView, SolverError, SolverInterface, SolverStatistics,
         types::{RowBatch, StageTemplate},
     };
 
@@ -1100,6 +1100,10 @@ mod tests {
     struct MockSolver;
 
     impl SolverInterface for MockSolver {
+        type Profile = cobre_solver::HighsProfile;
+
+        fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
+
         fn solver_name_version(&self) -> String {
             "MockSolver 0.0.0".to_string()
         }
@@ -2285,7 +2289,7 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     /// A freshly constructed workspace must expose a solver whose
-    /// `current_profile()` equals `SolveProfile::default()`.
+    /// `current_profile()` equals `HighsProfile::default()`.
     ///
     /// Confirms that `ProfiledSolver::new` wraps the inner solver without
     /// issuing any FFI calls and that `WorkspacePool::new` correctly initialises
@@ -2296,8 +2300,8 @@ mod tests {
         for ws in &pool.workspaces {
             assert_eq!(
                 ws.solver.current_profile(),
-                &SolveProfile::default(),
-                "solver.current_profile() must equal SolveProfile::default() after construction"
+                &HighsProfile::default(),
+                "solver.current_profile() must equal HighsProfile::default() after construction"
             );
         }
 
@@ -2312,7 +2316,7 @@ mod tests {
         );
         assert_eq!(
             ws.solver.current_profile(),
-            &SolveProfile::default(),
+            &HighsProfile::default(),
             "SolverWorkspace::new must initialise solver with default profile"
         );
     }

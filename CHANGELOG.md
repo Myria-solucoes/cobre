@@ -11,71 +11,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Stage-LP state pinning uses column bounds (`set_col_bounds`) on the
+  incoming-state columns instead of equality rows. The `storage_fixing`,
+  `lag_fixing`, and `anticipated_state_fixing` row ranges in
+  `StageIndexer` are permanent empty sentinels (`0..0`); callers must
+  use `StageIndexer::state_to_lp_incoming_column` to resolve the column
+  index for both pinning and dual extraction.
+- Cut subgradient extraction reads `view.reduced_costs[col]` (unscaled
+  by multiplying by `col_scale[col]`) instead of `view.dual[row]`. The
+  per-LP backward solve avoids `N + N*L + A*K` redundant equality rows
+  per stage.
+- Cut deactivation toggles a cut row's RHS bounds to the
+  `f64::INFINITY` sentinel (trivially satisfied) instead of removing
+  the row from the LP. The cut pool is append-only: every cut ever
+  generated remains stored at a stable slot index for the lifetime of
+  the run. Stage-LP cut rows are stable across iterations, including
+  after cut-selection deactivation.
 - Iteration template rebake now includes only active cuts. The
   per-iteration baked stage template carries one row per active cut in
-  `active_cuts()` iteration order — inactive cuts are no longer encoded
-  at sentinel `[-INF, +INF]` bounds. Recovers ~29% wall-time regression
-  on production-scale convertido cases observed after 0.7.1.
-- Cut-sync wire format reverted from version 2 to version 1. The
-  activity-update record type (introduced in 0.7.1) was never activated
-  — all selection deactivations are local only. The allgatherv channel
-  carries cut records exclusively; the version byte at offset 0 is `1`.
-  Version-2 payloads are rejected. Cross-version MPI runs are not
-  supported.
-- `training/metadata.json` `row_pool` no longer contains a `cuts_in_lp`
-  field. The `cuts_active` field (active cuts at end-of-run) and
-  `peak_active` remain. Existing manifests that carry `cuts_in_lp` are
-  silently accepted — the field is dropped on read.
-- `training/convergence.parquet` row-selection schema loses the
-  `cuts_in_lp` column (schema version 10 columns, down from 11).
-  Existing parquet files with 11 columns are not forward-compatible;
-  re-run to regenerate.
+  `active_cuts()` iteration order — inactive cuts are not encoded at
+  sentinel `[-INF, +INF]` bounds. Recovers ~29% wall-time regression
+  observed on production-scale convertido cases under the earlier
+  sentinel-bake design.
+- `HiGHS` `simplex_scale_strategy` default reconciled to `0` (off),
+  matching the long-standing docstring at the top of `highs.rs`: the
+  cobre prescaler already normalizes matrix entries, so the solver's
+  internal equilibration is redundant. Affects all phases.
+- `training/metadata.json` `row_pool` carries `cuts_active` (active
+  cuts at end-of-run) and `peak_active`. The `cuts_in_lp` field
+  introduced earlier in this development cycle is removed; the value
+  was tied to the sentinel-bake model and is no longer meaningful.
+  Existing manifests that carry `cuts_in_lp` are silently accepted —
+  the field is dropped on read.
+- `training/convergence.parquet` row-selection schema carries
+  10 columns. The `cuts_in_lp` column from the sentinel-bake model is
+  removed; `cuts_active` stays.
 
 ### Added
 
-- Per-phase LP solve profile mechanism. The LP solver is now wrapped by
-  `ProfiledSolver<S>`, which carries a `SolveProfile` (feasibility
-  tolerances and iteration caps) and applies it to the inner solver at
-  phase boundaries. Forward, Backward, and Simulation phases each
-  receive a profile constant (`FORWARD_PROFILE`, `BACKWARD_PROFILE`,
-  `SIMULATION_PROFILE`) applied per worker before each parallel region.
-  The profile is also re-applied automatically before every solve to
-  survive `HiGHS` internal option resets. Default profile values match
-  the historical hard-coded `HiGHS` options bit-for-bit; downstream
-  callers see no behavior change until a non-default profile is wired.
+- Per-phase LP solve profile mechanism. The LP solver is wrapped by
+  `ProfiledSolver<S>`, which carries a solver-specific profile type
+  (`S::Profile`) and applies it to the inner solver at phase boundaries.
+  The profile type is exposed via the `SolverInterface::Profile`
+  associated type, so different solvers (e.g. `HiGHS`, CLP) can each
+  declare their full native tuning surface without a lossy abstraction.
+  For the `HiGHS` backend the concrete type is `HighsProfile`, with
+  fields for feasibility tolerances, iteration caps, dual edge-weight
+  strategy, scale strategy, and price strategy. The profile is
+  re-applied automatically before every solve to survive solver-internal
+  option resets.
+- Backward-phase LP solver tuning. The new `BACKWARD_PROFILE` overrides
+  two `HiGHS` options against the default:
+  `simplex_dual_edge_weight_strategy` switches from Devex (1) to
+  Dantzig (0) for lower per-pivot edge-weight maintenance cost, and
+  `simplex_price_strategy` switches from Row (1) to Row Hyper-Sparse
+  (2) for sparser cut rows in the backward LPs. Forward and simulation
+  phases retain the default profile.
 
-## [0.7.1] - 2026-05-25
+### Note
 
-### Changed
-
-- Stage-LP state pinning now uses column bounds (`set_col_bounds`) on
-  the incoming-state columns instead of equality rows. The
-  `storage_fixing`, `lag_fixing`, and `anticipated_state_fixing` row
-  ranges in `StageIndexer` are now permanent empty sentinels (`0..0`);
-  callers must use `StageIndexer::state_to_lp_incoming_column` to
-  resolve the column index for both pinning and dual extraction.
-- Cut subgradient extraction now reads `view.reduced_costs[col]`
-  (unscaled by multiplying by `col_scale[col]`) instead of
-  `view.dual[row]`. The per-LP backward solve avoids `N + N*L + A*K`
-  redundant equality rows per stage.
-- Cut deactivation now toggles a cut row's RHS bounds to the
-  `f64::INFINITY` sentinel (trivially satisfied) instead of
-  removing the row from the LP. The cut pool is append-only:
-  every cut ever generated remains stored at a stable slot
-  index for the lifetime of the run. Stage-LP cut rows are
-  stable across iterations, including after cut-selection
-  deactivation.
-- Cut-sync wire format bumped to version 2. The wire carries
-  an explicit version byte (offset 0) and a record-type tag
-  (offset 13) so that activity updates can travel through the
-  same allgatherv channel as new cuts. Version-1 wire payloads
-  are rejected by version-2 receivers; cross-version MPI runs
-  are not a supported deployment mode.
-- `training/metadata.json` `row_pool` now carries two new
-  fields: `cuts_in_lp` (rows in the LP, including inactive
-  sentinel rows) and `cuts_active` (active cuts only). Both
-  are `u64` and default to `0` when deserialising older
-  manifests that lack the fields.
+The cut-sync wire format was briefly bumped to version 2 during
+development to carry an `ActivityUpdateRecord` alongside cut records;
+this never shipped and has been removed. The wire format remains at
+version 1 (cut records only); cross-version MPI runs are not a
+supported deployment mode.
 
 ## [0.7.0] - 2026-05-24
 

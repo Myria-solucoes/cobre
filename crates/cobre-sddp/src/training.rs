@@ -388,7 +388,7 @@ pub(crate) fn broadcast_basis_cache<C: Communicator>(
 ///
 /// Always panics if `comm.rank() > i32::MAX`. MPI world sizes are bounded well
 /// below this on all real systems.
-pub fn train<S: SolverInterface + Send, C: Communicator>(
+pub fn train<S, C: Communicator>(
     solver: &mut S,
     config: TrainingConfig,
     fcf: &mut FutureCostFunction,
@@ -396,7 +396,10 @@ pub fn train<S: SolverInterface + Send, C: Communicator>(
     training_ctx: &TrainingContext<'_>,
     comm: &C,
     solver_factory: impl Fn() -> Result<S, cobre_solver::SolverError>,
-) -> Result<TrainingOutcome, SddpError> {
+) -> Result<TrainingOutcome, SddpError>
+where
+    S: SolverInterface<Profile = cobre_solver::HighsProfile> + Send,
+{
     let mut session = TrainingSession::new(
         solver,
         config,
@@ -548,6 +551,10 @@ mod tests {
     }
 
     impl SolverInterface for MockSolver {
+        type Profile = cobre_solver::HighsProfile;
+
+        fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
+
         fn solver_name_version(&self) -> String {
             "MockSolver 0.0.0".to_string()
         }

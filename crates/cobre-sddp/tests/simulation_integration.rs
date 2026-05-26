@@ -30,7 +30,7 @@ use cobre_core::{
     },
 };
 use cobre_solver::{
-    Basis, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
+    Basis, HighsProfile, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
 };
 use cobre_stochastic::{
     ClassSchemes, OpeningTreeInputs, StochasticContext, build_stochastic_context,
@@ -119,6 +119,10 @@ impl MockSolver {
 }
 
 impl SolverInterface for MockSolver {
+    type Profile = HighsProfile;
+
+    fn apply_profile(&mut self, _profile: &HighsProfile) {}
+
     fn solver_name_version(&self) -> String {
         "MockSolver 0.0.0".to_string()
     }
@@ -954,6 +958,10 @@ impl SizedMockSolver {
 }
 
 impl SolverInterface for SizedMockSolver {
+    type Profile = HighsProfile;
+
+    fn apply_profile(&mut self, _profile: &HighsProfile) {}
+
     fn solver_name_version(&self) -> String {
         "MockSolver 0.0.0".to_string()
     }

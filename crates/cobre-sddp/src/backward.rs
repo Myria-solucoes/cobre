@@ -711,9 +711,12 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
 /// feasible solution during the backward sweep. Returns
 /// `Err(SddpError::Solver(_))` for all other terminal LP solver failures.
 #[cfg(test)]
-fn run_backward_pass<S: SolverInterface + Send, C: Communicator>(
+fn run_backward_pass<S, C: Communicator>(
     inputs: &mut crate::backward_pass_state::BackwardPassInputs<'_, S, C>,
-) -> Result<BackwardResult, SddpError> {
+) -> Result<BackwardResult, SddpError>
+where
+    S: SolverInterface<Profile = cobre_solver::HighsProfile> + Send,
+{
     let n_workers_local = inputs.workspaces.len();
     let n_ranks = inputs.comm.size();
     let num_stages = inputs.training_ctx.horizon.num_stages();
@@ -886,6 +889,10 @@ mod tests {
     }
 
     impl SolverInterface for MockSolver {
+        type Profile = cobre_solver::HighsProfile;
+
+        fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
+
         fn solver_name_version(&self) -> String {
             "MockSolver 0.0.0".to_string()
         }
