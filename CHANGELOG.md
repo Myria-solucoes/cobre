@@ -33,10 +33,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sentinel `[-INF, +INF]` bounds. Recovers ~29% wall-time regression
   observed on production-scale convertido cases under the earlier
   sentinel-bake design.
-- `HiGHS` `simplex_scale_strategy` default reconciled to `0` (off),
-  matching the long-standing docstring at the top of `highs.rs`: the
-  cobre prescaler already normalizes matrix entries, so the solver's
-  internal equilibration is redundant. Affects all phases.
 - `training/metadata.json` `row_pool` carries `cuts_active` (active
   cuts at end-of-run) and `peak_active`. The `cuts_in_lp` field
   introduced earlier in this development cycle is removed; the value

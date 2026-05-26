@@ -111,16 +111,17 @@ pub(crate) fn postprocess_templates(
         }
     }
 
-    // PRESCALING-DISABLED TEST: cobre's offline col/row scaling is bypassed so
-    // HiGHS's internal equilibration scaler (simplex_scale_strategy = 2, set in
-    // default_options) handles all numerical conditioning. The cost-scale
-    // factor applied during template construction (COST_SCALE_FACTOR, /1000)
-    // is preserved. `col_scale` / `row_scale` remain empty Vecs on every
-    // template — downstream extraction (extraction.rs) and dual unscaling
-    // (backward.rs) treat empty scale slices as "no scaling applied" via the
-    // documented invariant on `StageTemplate.col_scale` / `row_scale`. The
-    // scaling-report still emits one entry per stage with empty
-    // col_scale / row_scale summaries so the parquet schema stays stable.
+    // PRESCALING-DISABLED: cobre's offline col/row scaling is bypassed so
+    // HiGHS's internal equilibration scaler (simplex_scale_strategy = 4,
+    // set in cobre-solver's default_options) handles all numerical
+    // conditioning. The cost-scale factor applied during template
+    // construction (COST_SCALE_FACTOR, /1000) is preserved.
+    // `col_scale` / `row_scale` remain empty Vecs on every template —
+    // downstream extraction (extraction.rs) and dual unscaling (backward.rs)
+    // treat empty scale slices as "no scaling applied" via the documented
+    // invariant on `StageTemplate.col_scale` / `row_scale`. The scaling-report
+    // still emits one entry per stage with empty col_scale / row_scale
+    // summaries so the parquet schema stays stable.
 
     let mut stage_scaling_reports = Vec::with_capacity(stage_templates.templates.len());
 

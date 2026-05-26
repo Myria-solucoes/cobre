@@ -71,7 +71,7 @@ impl Default for HighsProfile {
             simplex_iteration_limit: DEFAULT_PROFILE_HEURISTIC_SENTINEL,
             ipm_iteration_limit: 10_000,
             simplex_dual_edge_weight_strategy: 1,
-            simplex_scale_strategy: 0,
+            simplex_scale_strategy: 4,
             simplex_price_strategy: 1,
         }
     }
@@ -134,11 +134,11 @@ impl DefaultOption {
 /// retry escalation. The values are tuned for master LPs dominated by many
 /// slack rows that are warm-started across consecutive solves.
 ///
-/// `simplex_scale_strategy` is set to 0 (off) because the calling algorithm's
-/// prescaler already normalizes matrix entries toward 1.0; the solver's
-/// internal equilibration scaling is redundant and can distort cost ordering
-/// for large-RHS rows. Retry escalation levels 5+ override this to more
-/// aggressive strategies as a fallback for hard problems.
+/// `simplex_scale_strategy` is set to 4 (Equilibration). Callers may supply
+/// per-column / per-row prescaling factors via `StageTemplate.col_scale` /
+/// `row_scale`; when those slices are empty the template arrives unscaled
+/// and `HiGHS`'s internal equilibration is responsible for all numerical
+/// conditioning. Retry escalation levels 5+ keep this strategy.
 ///
 /// The last four entries diverge from `HiGHS` defaults to suit warm-started
 /// solves on master LPs with tens of thousands of mostly-slack rows: Devex
@@ -163,7 +163,7 @@ fn default_options() -> [DefaultOption; 13] {
         },
         DefaultOption {
             name: c"simplex_scale_strategy",
-            value: OptionValue::Int(0), // Off (cobre prescaler already normalizes; see docstring at top of file)
+            value: OptionValue::Int(4), // Equilibration — cobre's offline prescaler is not currently wired (see lp_builder/scaling.rs)
         },
         DefaultOption {
             name: c"presolve",

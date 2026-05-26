@@ -42,7 +42,7 @@ pub const FORWARD_PROFILE: HighsProfile = HighsProfile {
     simplex_iteration_limit: DEFAULT_PROFILE_HEURISTIC_SENTINEL,
     ipm_iteration_limit: 10_000,
     simplex_dual_edge_weight_strategy: 1, // Devex (default)
-    simplex_scale_strategy: 0,            // Off (default)
+    simplex_scale_strategy: 4,            // Equilibration (default)
     simplex_price_strategy: 1,            // Row (default)
 };
 
@@ -60,7 +60,7 @@ pub const BACKWARD_PROFILE: HighsProfile = HighsProfile {
     simplex_iteration_limit: DEFAULT_PROFILE_HEURISTIC_SENTINEL,
     ipm_iteration_limit: 10_000,
     simplex_dual_edge_weight_strategy: 0, // Dantzig override
-    simplex_scale_strategy: 0,            // Off (matches default)
+    simplex_scale_strategy: 4,            // Equilibration (matches default)
     simplex_price_strategy: 2,            // RowHyperSparse override
 };
 
@@ -74,7 +74,7 @@ pub const SIMULATION_PROFILE: HighsProfile = HighsProfile {
     simplex_iteration_limit: DEFAULT_PROFILE_HEURISTIC_SENTINEL,
     ipm_iteration_limit: 10_000,
     simplex_dual_edge_weight_strategy: 1, // Devex (default)
-    simplex_scale_strategy: 0,            // Off (default)
+    simplex_scale_strategy: 4,            // Equilibration (default)
     simplex_price_strategy: 1,            // Row (default)
 };
 
@@ -108,7 +108,7 @@ const _: () = {
     assert!(FORWARD_PROFILE.simplex_iteration_limit == DEFAULT_PROFILE_HEURISTIC_SENTINEL);
     assert!(FORWARD_PROFILE.ipm_iteration_limit == 10_000);
     assert!(FORWARD_PROFILE.simplex_dual_edge_weight_strategy == 1);
-    assert!(FORWARD_PROFILE.simplex_scale_strategy == 0);
+    assert!(FORWARD_PROFILE.simplex_scale_strategy == 4);
     assert!(FORWARD_PROFILE.simplex_price_strategy == 1);
 
     // BACKWARD_PROFILE — dual_edge_weight=0 (Dantzig) and price=2 (RowHyperSparse)
@@ -117,7 +117,7 @@ const _: () = {
     assert!(BACKWARD_PROFILE.simplex_iteration_limit == DEFAULT_PROFILE_HEURISTIC_SENTINEL);
     assert!(BACKWARD_PROFILE.ipm_iteration_limit == 10_000);
     assert!(BACKWARD_PROFILE.simplex_dual_edge_weight_strategy == 0);
-    assert!(BACKWARD_PROFILE.simplex_scale_strategy == 0);
+    assert!(BACKWARD_PROFILE.simplex_scale_strategy == 4);
     assert!(BACKWARD_PROFILE.simplex_price_strategy == 2);
 
     // SIMULATION_PROFILE — all fields equal HighsProfile::default()
@@ -126,7 +126,7 @@ const _: () = {
     assert!(SIMULATION_PROFILE.simplex_iteration_limit == DEFAULT_PROFILE_HEURISTIC_SENTINEL);
     assert!(SIMULATION_PROFILE.ipm_iteration_limit == 10_000);
     assert!(SIMULATION_PROFILE.simplex_dual_edge_weight_strategy == 1);
-    assert!(SIMULATION_PROFILE.simplex_scale_strategy == 0);
+    assert!(SIMULATION_PROFILE.simplex_scale_strategy == 4);
     assert!(SIMULATION_PROFILE.simplex_price_strategy == 1);
 };
 

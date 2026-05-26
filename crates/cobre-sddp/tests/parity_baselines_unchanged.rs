@@ -57,7 +57,7 @@ const EXPECTED_HASHES: &[(&str, &str)] = &[
     ),
     (
         "D06",
-        "02f3fbb87510dca59b4f780526ac0e33214a1fea2845faae301b866ca2276f13",
+        "b1511f8e7b7406ba190699222a52e0383aad25ee1e95d03c1177c0e1e77efac0",
     ),
     (
         "D07",
