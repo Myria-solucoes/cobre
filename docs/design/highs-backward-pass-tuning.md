@@ -360,19 +360,83 @@ SteepestEdge is **strictly dominated** by both alternatives on our
 workload. The expected mid-point on the pricing/cost trade-off curve
 is not on this objective surface.
 
-### 4.5 Phase 4 — isolate the price-strategy contribution (run_7, planned)
+### 4.5 Phase 4 — isolate the price-strategy contribution (run_7)
 
 Phases 2 and 3 conflated two changes (edge-weight + price-strategy).
-We do not know how much of run_5's modest win came from RowHyperSparse
-vs how much from Dantzig.
+We did not know how much of run_5's modest win came from
+RowHyperSparse vs how much from Dantzig.
 
 Set `BACKWARD_PROFILE.simplex_dual_edge_weight_strategy = 1` (Devex,
 matching `HighsProfile::default`). Keep only the price-strategy
 override.
 
-This is the experiment whose result is pending at the time of writing.
-The result will close the edge-weight axis and either justify keeping
-the RowHyperSparse override or motivate dropping it.
+Measurement (run_7):
+
+| Metric           | run_1 default | run_5 Dantzig+HS | run_6 SteepEdge+HS | **run_7 HS only** |
+| ---------------- | ------------: | ---------------: | -----------------: | ----------------: |
+| mean ms          |          72.6 |             70.8 |               76.2 |          **71.9** |
+| p50 ms           |          62.2 |             62.2 |               62.4 |              62.1 |
+| p99 ms           |         222.6 |            207.2 |              269.3 |             217.5 |
+| p99.9 ms         |         325.2 |            337.2 |              405.9 |         **314.1** |
+| max ms           |           764 |            1 230 |                823 |           **585** |
+| std ms           |          42.5 |             40.6 |               51.1 |              41.9 |
+| mean iters       |           255 |              317 |                248 |               257 |
+| max iters        |         2 222 |            4 243 |              2 511 |         **2 196** |
+| µs/pivot         |           284 |              223 |                308 |               280 |
+| total backward s |        70 232 |           68 507 |             73 723 |            69 562 |
+| **total wall s** |         437.1 |            433.8 |              463.6 |         **430.9** |
+
+Reading the result:
+
+- **run_7 has the lowest total wall** of any configuration tested
+  (-1.4% vs run_1, -0.7% vs run_5). Backward wall 397.9 s is also a
+  new best.
+- **max ms dropped to 585** — half of run_5's 1 230 ms. The Dantzig
+  override in run_5 was the source of the long tail; removing it
+  recovers Devex's bounded behaviour.
+- **max iters dropped to 2 196** — the lowest of any run. Devex's
+  iteration efficiency is restored.
+- **p99.9 ms is the lowest** of any configuration (314 ms).
+- Iteration count returned to Devex levels (257 vs run_1's 255 — flat).
+- µs/pivot at 280, ~1.5% lower than run_1's 284 — the small per-pivot
+  win from sparse-row PRICE.
+
+Cut-sync wall settled at 8.5 s, between run_1's 5.8 s and run_5's
+10.8 s. The monotonic-growth hypothesis from §9 is not supported by
+run_7; the cut-sync variance is most plausibly MPI noise.
+
+### 4.6 Edge-weight × price-strategy decomposition
+
+With four datapoints we can now decompose the contributions on the
+two-dimensional knob space (with the third dimension, scaling, held
+at Equilibration throughout):
+
+|                 | Row (default)   | RowHyperSparse  |
+| --------------- | --------------- | --------------- |
+| Devex (default) | 72.6 ms (run_1) | 71.9 ms (run_7) |
+| Dantzig         | not measured    | 70.8 ms (run_5) |
+| SteepestEdge    | not measured    | 76.2 ms (run_6) |
+
+Reading the two axes:
+
+- **Price strategy effect** (Row → RowHyperSparse, with Devex held
+  constant): `72.6 → 71.9 = -1.0%` on mean. Small but clean. Max ms
+  drops 23.5% (`764 → 585`). p99.9 drops 3.4%.
+
+- **Edge-weight effect with RowHyperSparse held constant**
+  (Devex → Dantzig): `71.9 → 70.8 = -1.5%` on mean — but mean iters
+  grows from 257 to 317 (+23%), max ms from 585 to 1 230 (+110%),
+  max iters from 2 196 to 4 243 (+93%). The bulk gain is real but
+  the tail regression is steep.
+
+- **Edge-weight effect to SteepestEdge** (Devex → SteepestEdge with
+  RowHyperSparse held): `71.9 → 76.2 = +6.0%` on mean. SteepestEdge
+  is strictly worse here.
+
+The decomposition makes the choice unambiguous: take the
+price-strategy improvement (small but tail-stable) and leave the
+edge-weight at the Devex default (preserves iteration efficiency and
+the better tail).
 
 ## 5. Summary table
 
@@ -393,28 +457,39 @@ LP-vertex choice on degenerate faces without changing the policy.
 
 ## 6. Conclusions on HighsProfile-level tuning
 
-Three datapoints across the edge-weight axis tell a clear story.
+Four datapoints across the edge-weight × price-strategy plane tell a
+clear story.
 
-1. **The available win is small.** The best edge-weight choice
-   (Dantzig, run_5) buys 0.7% total wall and 2.5% backward wall over
-   defaults — and even that win is paired with a tail regression
-   (+61% max solve time). The expected mid-point (SteepestEdge) is
-   strictly worse.
+1. **The available win is small.** The best configuration measured
+   (run_7, RowHyperSparse only) buys 1.4% total wall and 2.2% backward
+   wall over defaults. No HighsProfile knob change measured exceeded
+   2.5% on backward wall. The expected Tier 2 win of 5–15% from the
+   analysis report did not materialize.
 
 2. **The Tier 2 headline was scaling-dependent.** The analysis
    report's 5–15% backward win estimate combined pricing changes with
    scaling-off. Scaling-off was based on the false-premise dead
    prescaler. With scaling honestly at Equilibration the available
-   pricing win is in the 0–5% range.
+   pricing win is in the 0–2% range.
 
-3. **The variance is not in HighsProfile's reach.** The broad
-   `p99/p50 ≈ 3.6` distribution is shaped by stage-position effects,
+3. **The single best HighsProfile-level intervention is
+   `simplex_price_strategy = 2` (RowHyperSparse) and nothing else.**
+   This single field captures the price-strategy win without paying
+   the iteration-count or tail-latency penalty that comes with
+   edge-weight changes (Dantzig and SteepestEdge both regressed on
+   the tail). The minimal override surface also keeps the drift-guard
+   audit cheap.
+
+4. **The variance is not in HighsProfile's reach.** The broad
+   `p99/p50 ≈ 3.5` distribution is shaped by stage-position effects,
    cut degeneracy, warm-start chain quality, and LU drift — none of
    which the edge-weight or price-strategy knobs significantly affect.
-   The 50th percentile is 62 ms in all three runs (Devex, Dantzig,
-   SteepestEdge). The bulk LP solve time is set by per-pivot row work
-   times iteration count, and those are bounded by LP size which is
-   bounded by cut count.
+   The p50 is 62 ms in all four runs (Devex, Dantzig, SteepestEdge,
+   RowHyperSparse-only). std varies only ±10%. Mean-iter count varies
+   ±25% but mean wall ms varies only ±5%, so the per-pivot cost and
+   iteration count trade off cleanly in opposite directions. The bulk
+   LP solve time is set by per-pivot row work times iteration count,
+   and those are bounded by LP size which is bounded by cut count.
 
 ## 7. Mitigation strategies that remain on the table
 
@@ -522,10 +597,9 @@ Effort: medium; requires adaptive state across solves.
 
 ## 9. Open questions
 
-- **Cut-sync wall growth.** Cut-sync wall grew monotonically across
-  runs 1 → 5 → 6 (5.8 → 10.8 → 16.5 s). Cut payload is identical;
-  this should be a constant. Worth a controlled re-run to see if it
-  reproduces or was MPI variance. If it persists, investigate.
+- **~~Cut-sync wall growth~~ resolved.** Cut-sync wall was 5.8 → 10.8
+  → 16.5 → 8.5 s across runs 1, 5, 6, 7. Not monotonic; most plausibly
+  MPI variance. Closed.
 
 - **Are stages 50–62 systematically harder, or coincidentally
   hard?** The mean solve time at late stages is ~1.5× early stages.
@@ -538,22 +612,45 @@ Effort: medium; requires adaptive state across solves.
   z-score on tail), we could pre-trigger cost perturbation for those
   openings rather than waiting for the retry ladder.
 
-## 10. Next planned step
+- **Why did run_7's active-cut count drift to 19 947 (vs run_1's
+  16 453)?** Same algorithm, same scenario seed; the only change is
+  the LP vertex choice on degenerate faces. Cut-selection scoring is
+  picking different binding-cut subsets. The lower-bound is
+  identical, so policy quality is unchanged — but the larger LP at
+  iteration 4 partially offsets the per-pivot savings. Worth checking
+  whether iteration 5+ behaviour amplifies this drift.
 
-Run 7: `BACKWARD_PROFILE.simplex_price_strategy = 2`, all other fields
-match `HighsProfile::default`. Isolates the price-strategy contribution
-from the edge-weight contribution. The result will:
+## 10. Where to go from here
 
-- Confirm whether RowHyperSparse alone justifies its 1-field override
-  (i.e. delivers a measurable mean / p99 improvement over Devex+Row),
-- or motivate dropping `BACKWARD_PROFILE` overrides entirely and
-  moving to the algorithmic mitigations in §7.1.
+Run 7 closed the edge-weight × price-strategy axis. The
+`BACKWARD_PROFILE` state at commit `12077a06` is the best HighsProfile
+configuration measured. Further HighsProfile-level changes are
+unlikely to deliver more than ~1% on total wall based on the four
+datapoints we have.
 
-After run 7 lands, the natural next decision point is whether to
-invest in §7.1 (architectural changes, larger expected win) or §7.2
-(more profile fields, marginal expected win). The data so far
-strongly suggests §7.1 — variance reduction needs an architectural
-attack, not a tuning attack.
+The natural next decision is whether to invest in §7.1 (architectural
+changes, larger expected win) or §7.2 (more profile fields, marginal
+expected win). The data argues strongly for §7.1 — variance reduction
+needs an architectural attack, not a tuning attack. Suggested
+prioritisation:
+
+1. **§7.1 / A1 — Cut aging.** Bounds LP size; the only path to
+   meaningful per-pivot cost reduction that we have. Estimated win
+   from the analysis report: significant (Tier 3 territory).
+2. **§7.1 / A2 — Drop backward warm-start basis.** Trades +7% wall
+   for ~1 000 LOC removal and tail-latency stabilisation. Re-enables
+   presolve on backward, which would shrink the active LP per solve.
+3. **§7.2 / S3 — Initial condition check + tolerance**. Targets
+   exactly the "warm-start chain has drifted too far" mechanism we
+   hypothesised in §3.3 and §3.4. Cheap to add; one new HighsProfile
+   field plus a tolerance.
+4. **§7.2 / S1 — Cost perturbation re-enable on backward only.**
+   Cheap to add. Risk needs careful audit because reduced costs are
+   what we extract for cut subgradients.
+
+The cut-sync variance hypothesis from §9 was not supported by run_7
+(8.5 s, mid-range). No follow-up needed unless it grows again in a
+production run.
 
 ## References
 
