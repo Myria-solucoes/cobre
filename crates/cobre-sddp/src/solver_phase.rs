@@ -4,14 +4,14 @@
 //! the LP solver for that phase. [`FORWARD_PROFILE`] and
 //! [`SIMULATION_PROFILE`] match [`HighsProfile::default()`] field-for-field.
 //! [`BACKWARD_PROFILE`] overrides two options — `simplex_dual_edge_weight_strategy`
-//! (Dantzig, value `0`) and `simplex_price_strategy` (`RowHyperSparse`, value `2`) —
-//! to reduce per-pivot overhead on backward-pass LPs that differ from the
-//! forward-pass topology.
+//! (`SteepestEdge`, value `2`) and `simplex_price_strategy` (`RowHyperSparse`,
+//! value `2`) — to reduce iteration count and per-pivot overhead on
+//! backward-pass LPs that differ from the forward-pass topology.
 //!
 //! Compile-time assertions at the bottom of this module catch any future drift
 //! between the named constants and the documented field values.
 
-use cobre_solver::{DEFAULT_PROFILE_HEURISTIC_SENTINEL, HighsProfile};
+use cobre_solver::{HighsProfile, DEFAULT_PROFILE_HEURISTIC_SENTINEL};
 
 /// The three algorithmic phases of the SDDP algorithm.
 ///
@@ -50,16 +50,16 @@ pub const FORWARD_PROFILE: HighsProfile = HighsProfile {
 ///
 /// Overrides two fields relative to [`HighsProfile::default()`]:
 ///
-/// | Field                               | Default | Backward | Rationale                                   |
-/// |-------------------------------------|---------|----------|---------------------------------------------|
-/// | `simplex_dual_edge_weight_strategy` | `1`     | `0`      | Dantzig: lower per-pivot overhead on small degenerate LPs |
-/// | `simplex_price_strategy`            | `1`     | `2`      | RowHyperSparse: exploits sparsity on backward LPs        |
+/// | Field                               | Default | Backward | Rationale                                                          |
+/// |-------------------------------------|---------|----------|--------------------------------------------------------------------|
+/// | `simplex_dual_edge_weight_strategy` | `1`     | `2`      | SteepestEdge: fewer pivots on degenerate LPs than Devex or Dantzig |
+/// | `simplex_price_strategy`            | `1`     | `2`      | RowHyperSparse: exploits sparsity on backward LPs                  |
 pub const BACKWARD_PROFILE: HighsProfile = HighsProfile {
     primal_feasibility_tolerance: 1e-6,
     dual_feasibility_tolerance: 1e-6,
     simplex_iteration_limit: DEFAULT_PROFILE_HEURISTIC_SENTINEL,
     ipm_iteration_limit: 10_000,
-    simplex_dual_edge_weight_strategy: 0, // Dantzig override
+    simplex_dual_edge_weight_strategy: 2, // SteepestEdge override
     simplex_scale_strategy: 4,            // Equilibration (matches default)
     simplex_price_strategy: 2,            // RowHyperSparse override
 };
@@ -111,12 +111,12 @@ const _: () = {
     assert!(FORWARD_PROFILE.simplex_scale_strategy == 4);
     assert!(FORWARD_PROFILE.simplex_price_strategy == 1);
 
-    // BACKWARD_PROFILE — dual_edge_weight=0 (Dantzig) and price=2 (RowHyperSparse)
+    // BACKWARD_PROFILE — dual_edge_weight=2 (SteepestEdge) and price=2 (RowHyperSparse)
     assert!(BACKWARD_PROFILE.primal_feasibility_tolerance == 1e-6);
     assert!(BACKWARD_PROFILE.dual_feasibility_tolerance == 1e-6);
     assert!(BACKWARD_PROFILE.simplex_iteration_limit == DEFAULT_PROFILE_HEURISTIC_SENTINEL);
     assert!(BACKWARD_PROFILE.ipm_iteration_limit == 10_000);
-    assert!(BACKWARD_PROFILE.simplex_dual_edge_weight_strategy == 0);
+    assert!(BACKWARD_PROFILE.simplex_dual_edge_weight_strategy == 2);
     assert!(BACKWARD_PROFILE.simplex_scale_strategy == 4);
     assert!(BACKWARD_PROFILE.simplex_price_strategy == 2);
 
@@ -134,7 +134,7 @@ const _: () = {
 mod tests {
     use cobre_solver::HighsProfile;
 
-    use super::{BACKWARD_PROFILE, FORWARD_PROFILE, Phase, SIMULATION_PROFILE};
+    use super::{Phase, BACKWARD_PROFILE, FORWARD_PROFILE, SIMULATION_PROFILE};
 
     /// `Phase::profile()` returns the matching named constant for each variant.
     #[test]
@@ -157,7 +157,7 @@ mod tests {
     fn backward_profile_overrides_dual_edge_weight_and_price() {
         let default = HighsProfile::default();
         assert_ne!(BACKWARD_PROFILE, default);
-        assert_eq!(BACKWARD_PROFILE.simplex_dual_edge_weight_strategy, 0);
+        assert_eq!(BACKWARD_PROFILE.simplex_dual_edge_weight_strategy, 2);
         assert_eq!(BACKWARD_PROFILE.simplex_price_strategy, 2);
         // Fields that are NOT overridden must match the default.
         assert_eq!(
