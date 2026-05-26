@@ -19,17 +19,17 @@ use cobre_core::{TrainingEvent, WelfordAccumulator};
 use cobre_solver::{RowBatch, SolverInterface, StageTemplate};
 use cobre_stochastic::context::ClassSchemes;
 use cobre_stochastic::{
-    build_forward_sampler, ClassDimensions, ForwardSampler, ForwardSamplerConfig,
+    ClassDimensions, ForwardSampler, ForwardSamplerConfig, build_forward_sampler,
 };
 
 use crate::{
     context::{StageContext, TrainingContext},
-    cut::pool::CutPool,
     cut::FutureCostFunction,
+    cut::pool::CutPool,
     error::SddpError,
     indexer::StageIndexer,
     lp_builder::COST_SCALE_FACTOR,
-    noise::{transform_inflow_noise, transform_load_noise, transform_ncs_noise, NcsNoiseOffsets},
+    noise::{NcsNoiseOffsets, transform_inflow_noise, transform_load_noise, transform_ncs_noise},
     solver_stats::SolverStatsDelta,
     trajectory::TrajectoryRecord,
     workspace::{BasisStore, BasisStoreSliceMut, CapturedBasis, SolverWorkspace},
@@ -546,128 +546,6 @@ pub fn build_delta_cut_row_batch_into(
     batch.num_rows = num_cuts;
 }
 
-/// Build a `RowBatch` containing every populated cut in the pool, with inactive
-/// cuts encoded at sentinel `[-INF, +INF]` row bounds.
-///
-/// Used by the per-iteration template rebake to produce stable cut-row
-/// positions across iterations: every populated slot occupies a row regardless
-/// of its activity state, so toggling activity does not shift later rows.
-///
-/// The resulting `RowBatch` has `num_rows == fcf.pools[stage].populated_count`
-/// and the row order matches slot order ascending. Active slots emit
-/// `[intercept, +INF]` (the standard `>=` inequality); inactive slots emit
-/// `[-INF, +INF]` so the constraint is trivially satisfied.
-///
-/// Mirrors the coefficient and column-resolution logic of
-/// [`build_cut_row_batch_into`]; the only divergence is iteration source
-/// (`0..populated_count` instead of `active_cuts`) and the conditional row
-/// bounds.
-///
-/// # Panics
-///
-/// Panics if the total number of non-zeros exceeds `i32::MAX` (the `HiGHS` API
-/// limit for CSR indices).
-pub fn build_warm_start_cut_batch_into(
-    batch: &mut RowBatch,
-    fcf: &FutureCostFunction,
-    stage: usize,
-    indexer: &StageIndexer,
-    col_scale: &[f64],
-) {
-    batch.clear();
-
-    let n_state = indexer.n_state;
-    let theta_col = indexer.theta;
-    let mask = &indexer.nonzero_state_indices;
-    let is_sparse = !mask.is_empty();
-
-    let pool = &fcf.pools[stage];
-    let num_cuts = pool.populated_count;
-
-    if num_cuts == 0 {
-        batch.row_starts.push(0_i32);
-        return;
-    }
-
-    let nnz_per_cut = if is_sparse {
-        mask.len() + 1
-    } else {
-        n_state + 1
-    };
-    let total_nnz = num_cuts * nnz_per_cut;
-
-    let mut nz_offset = 0;
-
-    for slot in 0..num_cuts {
-        let intercept = pool.intercepts[slot];
-        let coefficients =
-            &pool.coefficients[slot * pool.state_dimension..(slot + 1) * pool.state_dimension];
-
-        debug_assert_eq!(
-            coefficients.len(),
-            n_state,
-            "cut coefficients length {got} != n_state {expected}",
-            got = coefficients.len(),
-            expected = n_state,
-        );
-
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-        batch.row_starts.push(nz_offset as i32);
-
-        if is_sparse {
-            for &j in mask {
-                let lp_col = indexer.state_to_lp_column(j);
-                push_scaled_coefficient(batch, lp_col, coefficients[j], col_scale);
-            }
-        } else {
-            for (j, &c) in coefficients.iter().enumerate() {
-                let lp_col = indexer.state_to_lp_column(j);
-                debug_assert!(
-                    !(lp_col == j
-                        && indexer.n_anticipated > 0
-                        && j >= indexer.anticipated_state.start
-                        && j < indexer.anticipated_state.start
-                            + indexer.n_anticipated * indexer.k_max)
-                        || c == 0.0,
-                    "padding-slot j={j} has non-zero cut coefficient {c}; \
-                     shift_anticipated_state must have seeded a non-zero into a padding slot"
-                );
-                push_scaled_coefficient(batch, lp_col, c, col_scale);
-            }
-        }
-
-        debug_assert!(
-            i32::try_from(theta_col).is_ok(),
-            "theta_col={theta_col} exceeds i32::MAX"
-        );
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-        batch.col_indices.push(theta_col as i32);
-        let d_theta = if col_scale.is_empty() {
-            1.0
-        } else {
-            col_scale[theta_col]
-        };
-        batch.values.push(d_theta);
-
-        if pool.active[slot] {
-            batch.row_lower.push(intercept);
-            batch.row_upper.push(f64::INFINITY);
-        } else {
-            batch.row_lower.push(-f64::INFINITY);
-            batch.row_upper.push(f64::INFINITY);
-        }
-
-        nz_offset += nnz_per_cut;
-    }
-
-    #[allow(clippy::expect_used)]
-    batch.row_starts.push(
-        i32::try_from(total_nnz).expect("total_nnz exceeds i32::MAX; LP exceeds HiGHS API limit"),
-    );
-
-    batch.num_rows = num_cuts;
-}
-
 /// Append only the newly active cuts (not yet in the LP) to a live solver.
 ///
 /// Iterates over all active cuts in `fcf.pools[stage]`, checks `row_map` to
@@ -898,11 +776,11 @@ pub(crate) struct StageKey<'a> {
 /// Populate `CapturedBasis` metadata after a stage solve.
 ///
 /// `cut_row_count` is the number of cut rows actually in the LP (derived from
-/// `basis_row_capacity - base_row_count`). Under the warm-start bake model
-/// the baked template carries one row per populated slot — including
-/// inactive slots encoded at sentinel `[-INF, +INF]` bounds — so LP row `k`
-/// corresponds to pool slot `k` for `k in 0..cut_row_count`. The metadata
-/// captures that identity by pushing `slot as u32` in row-index order.
+/// `basis_row_capacity - base_row_count`). Under the active-only bake model
+/// the baked template carries one row per active cut in `active_cuts()`
+/// iteration order; LP row `k` corresponds to the k-th active slot. The
+/// metadata captures that identity by pushing each active `slot as u32` in
+/// iteration order.
 ///
 /// `row_status` is defensively resized to `base_row_count + cut_row_count` so
 /// the metadata invariant holds even when the underlying solver's `get_basis`
@@ -917,9 +795,6 @@ pub(crate) fn write_capture_metadata(
     current_state: &[f64],
 ) {
     captured.cut_row_slots.clear();
-    // BENCHMARK Run 1: active-only bake — LP rows correspond to active cuts in
-    // active_cuts() iteration order. Record those slot ids so the next
-    // reconstruct can match them. Revert to the slot-index loop for Phase 2.
     for (slot, _intercept, _coeffs) in pool.active_cuts().take(cut_row_count) {
         captured.cut_row_slots.push(slot as u32);
     }
@@ -1415,16 +1290,17 @@ mod tests {
     use cobre_solver::{
         Basis, LpSolution, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
     };
-    use cobre_stochastic::context::{build_stochastic_context, ClassSchemes, OpeningTreeInputs};
     use cobre_stochastic::StochasticContext;
+    use cobre_stochastic::context::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
     use cobre_comm::LocalBackend;
 
     use super::{
-        build_cut_row_batch, build_delta_cut_row_batch_into, partition, run_forward_pass,
-        sync_forward, ForwardPassBatch, ForwardResult, SyncResult,
+        ForwardPassBatch, ForwardResult, SyncResult, build_cut_row_batch,
+        build_delta_cut_row_batch_into, partition, run_forward_pass, sync_forward,
     };
     use crate::{
+        StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
         config::{CutManagementConfig, EventConfig, LoopConfig},
         context::{StageContext, TrainingContext},
         cut::FutureCostFunction,
@@ -1434,7 +1310,6 @@ mod tests {
         risk_measure::RiskMeasure,
         trajectory::TrajectoryRecord,
         workspace::{BackwardAccumulators, BasisStore, SolverWorkspace},
-        StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
     };
 
     // ── Mock solver ──────────────────────────────────────────────────────────
@@ -2086,9 +1961,6 @@ mod tests {
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
             worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
-            cut_row_maps: Vec::new(),
-            prev_applied_activity: Vec::new(),
-            template_update_buf: crate::workspace::TemplateUpdateBuf::default(),
         }
     }
 
@@ -4092,9 +3964,6 @@ mod tests {
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
             worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
-            cut_row_maps: Vec::new(),
-            prev_applied_activity: Vec::new(),
-            template_update_buf: crate::workspace::TemplateUpdateBuf::default(),
         };
 
         let templates = vec![minimal_template_1_0_with_base(100.0)];
@@ -4238,9 +4107,6 @@ mod tests {
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
             worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
-            cut_row_maps: Vec::new(),
-            prev_applied_activity: Vec::new(),
-            template_update_buf: crate::workspace::TemplateUpdateBuf::default(),
         };
 
         let templates = vec![minimal_template_1_0_with_base(100.0)];
@@ -4882,133 +4748,6 @@ mod tests {
         assert_eq!(batch.row_starts.len(), 2);
     }
 
-    // ── Tests for build_warm_start_cut_batch_into ─────────────────────────
-
-    fn empty_warm_batch() -> RowBatch {
-        RowBatch {
-            num_rows: 0,
-            row_starts: Vec::new(),
-            col_indices: Vec::new(),
-            values: Vec::new(),
-            row_lower: Vec::new(),
-            row_upper: Vec::new(),
-        }
-    }
-
-    /// A 3-cut pool with slot 1 deactivated: the batch must contain 3 rows,
-    /// active slots at their intercept lower bound, inactive slot at -INF.
-    #[test]
-    fn build_warm_start_cut_batch_into_includes_inactive_cuts_with_sentinel_rhs() {
-        use crate::cut::pool::CutPool;
-        use cobre_io::OwnedPolicyCutRecord;
-
-        let records = vec![
-            OwnedPolicyCutRecord {
-                cut_id: 0,
-                slot_index: 0,
-                coefficients: vec![1.0],
-                intercept: 10.0,
-                iteration: 0,
-                forward_pass_index: 0,
-                is_active: true,
-            },
-            OwnedPolicyCutRecord {
-                cut_id: 1,
-                slot_index: 1,
-                coefficients: vec![2.0],
-                intercept: 20.0,
-                iteration: 0,
-                forward_pass_index: 0,
-                is_active: false,
-            },
-            OwnedPolicyCutRecord {
-                cut_id: 2,
-                slot_index: 2,
-                coefficients: vec![3.0],
-                intercept: 30.0,
-                iteration: 0,
-                forward_pass_index: 0,
-                is_active: true,
-            },
-        ];
-        let pool = CutPool::new_with_warm_start(1, 1, 10, &records);
-
-        let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
-        fcf.pools[0] = pool;
-
-        let indexer = StageIndexer::new(1, 0);
-        let mut batch = empty_warm_batch();
-
-        super::build_warm_start_cut_batch_into(&mut batch, &fcf, 0, &indexer, &[]);
-
-        assert_eq!(batch.num_rows, 3);
-        // Active slot 0: row_lower == intercept (10.0), row_upper == +INF.
-        assert_eq!(batch.row_lower[0], 10.0);
-        assert_eq!(batch.row_upper[0], f64::INFINITY);
-        // Inactive slot 1: sentinel [-INF, +INF].
-        assert_eq!(batch.row_lower[1], -f64::INFINITY);
-        assert_eq!(batch.row_upper[1], f64::INFINITY);
-        // Active slot 2: row_lower == intercept (30.0), row_upper == +INF.
-        assert_eq!(batch.row_lower[2], 30.0);
-        assert_eq!(batch.row_upper[2], f64::INFINITY);
-    }
-
-    /// An empty pool must produce a zero-row batch.
-    #[test]
-    fn build_warm_start_cut_batch_into_empty_pool_produces_empty_batch() {
-        let fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
-        let indexer = StageIndexer::new(1, 0);
-        let mut batch = empty_warm_batch();
-
-        super::build_warm_start_cut_batch_into(&mut batch, &fcf, 0, &indexer, &[]);
-
-        assert_eq!(batch.num_rows, 0);
-        assert_eq!(batch.row_starts, vec![0_i32]);
-        assert!(batch.col_indices.is_empty());
-        assert!(batch.row_lower.is_empty());
-        assert!(batch.row_upper.is_empty());
-    }
-
-    /// With a non-empty `col_scale` the emitted coefficient must be unscaled.
-    ///
-    /// Mirrors the convention in `build_cut_row_batch_into`: the value pushed
-    /// for state column j is `-coeff * col_scale[j]`.
-    #[test]
-    fn build_warm_start_cut_batch_into_col_scale_unscaling() {
-        use crate::cut::pool::CutPool;
-        use cobre_io::OwnedPolicyCutRecord;
-
-        let records = vec![OwnedPolicyCutRecord {
-            cut_id: 0,
-            slot_index: 0,
-            coefficients: vec![4.0],
-            intercept: 5.0,
-            iteration: 0,
-            forward_pass_index: 0,
-            is_active: true,
-        }];
-        let pool = CutPool::new_with_warm_start(1, 1, 10, &records);
-
-        let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
-        fcf.pools[0] = pool;
-
-        // n_state = 1, so indexer has theta at column 1.  col_scale[0]=2.0,
-        // col_scale[1]=3.0 (theta column).
-        let indexer = StageIndexer::new(1, 0);
-        assert_eq!(indexer.n_state, 1);
-        let col_scale = vec![2.0_f64; indexer.theta + 1];
-        let mut batch = empty_warm_batch();
-
-        super::build_warm_start_cut_batch_into(&mut batch, &fcf, 0, &indexer, &col_scale);
-
-        assert_eq!(batch.num_rows, 1);
-        // State column value = -coeff * col_scale[0] = -4.0 * 2.0 = -8.0.
-        // The theta column value = col_scale[theta].
-        // col_indices[0] is the state column, col_indices[1] is theta.
-        assert_eq!(batch.values[0], -4.0 * col_scale[0]);
-        assert_eq!(batch.row_lower[0], 5.0);
-    }
-
     /// `build_delta_cut_row_batch_into` with a pool containing only warm-start
     /// cuts must emit zero rows regardless of the requested iteration.
     #[test]
@@ -5035,7 +4774,14 @@ mod tests {
         fcf.pools[0] = pool;
 
         let indexer = StageIndexer::new(1, 0);
-        let mut batch = empty_warm_batch();
+        let mut batch = RowBatch {
+            num_rows: 0,
+            row_starts: Vec::new(),
+            col_indices: Vec::new(),
+            values: Vec::new(),
+            row_lower: Vec::new(),
+            row_upper: Vec::new(),
+        };
 
         build_delta_cut_row_batch_into(&mut batch, &fcf, 0, &indexer, &[], 1);
 

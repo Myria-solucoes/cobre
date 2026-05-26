@@ -232,7 +232,6 @@ mod tests {
                 total_generated: 1_250_000,
                 total_active: 980_000,
                 peak_active: 1_100_000,
-                cuts_in_lp: 1_250_000,
                 cuts_active: 980_000,
             },
             distribution: DistributionInfo {

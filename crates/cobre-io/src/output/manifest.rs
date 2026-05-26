@@ -157,9 +157,6 @@ pub struct MetadataRowPool {
     pub total_active: u64,
     /// Highest number of simultaneously active rows observed.
     pub peak_active: u64,
-    /// Total rows loaded in the LP at termination.
-    #[serde(default)]
-    pub cuts_in_lp: u64,
     /// Rows currently active in the LP at termination.
     #[serde(default)]
     pub cuts_active: u64,
@@ -390,7 +387,6 @@ mod tests {
                 total_generated: 1_250_000,
                 total_active: 980_000,
                 peak_active: 1_100_000,
-                cuts_in_lp: 1_250_000,
                 cuts_active: 980_000,
             },
             distribution: make_distribution_info(),

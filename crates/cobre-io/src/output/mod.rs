@@ -199,9 +199,6 @@ pub struct RowPoolStatistics {
     /// Highest number of active rows observed at any point during training.
     pub peak_active: u64,
 
-    /// Total rows currently in the LP (sum of populated counts across all stages).
-    pub cuts_in_lp: u64,
-
     /// Total rows currently active in the LP.
     pub cuts_active: u64,
 }
@@ -236,10 +233,6 @@ pub struct RowSelectionRecord {
     ///
     /// `None` when budget enforcement is disabled.
     pub active_after_budget: Option<u32>,
-    /// Number of rows loaded in the LP at the end of the iteration.
-    ///
-    /// Equal to `cuts_populated` once all generated rows are retained.
-    pub cuts_in_lp: u32,
 }
 
 /// One row in `training/timing/iterations.parquet`.
@@ -469,7 +462,6 @@ impl SimulationOutput {
 ///         total_generated: 200,
 ///         total_active: 80,
 ///         peak_active: 95,
-///         cuts_in_lp: 200,
 ///         cuts_active: 80,
 ///     },
 ///     cut_selection_records: Vec::new(),
@@ -537,7 +529,6 @@ mod tests {
                 total_generated: 300,
                 total_active: 120,
                 peak_active: 150,
-                cuts_in_lp: 300,
                 cuts_active: 120,
             },
             cut_selection_records: vec![],
@@ -639,14 +630,12 @@ mod tests {
             total_generated: 500,
             total_active: 200,
             peak_active: 250,
-            cuts_in_lp: 500,
             cuts_active: 200,
         };
 
         assert_eq!(stats.total_generated, 500);
         assert_eq!(stats.total_active, 200);
         assert_eq!(stats.peak_active, 250);
-        assert_eq!(stats.cuts_in_lp, 500);
         assert_eq!(stats.cuts_active, 200);
     }
 
@@ -656,13 +645,12 @@ mod tests {
             total_generated: 10,
             total_active: 7,
             peak_active: 9,
-            cuts_in_lp: 10,
             cuts_active: 7,
         };
         let json = serde_json::to_string(&stats).expect("serialization must succeed");
         assert!(
-            json.contains("\"cuts_in_lp\""),
-            "JSON must contain cuts_in_lp key"
+            !json.contains("\"cuts_in_lp\""),
+            "JSON must not contain cuts_in_lp key"
         );
         assert!(
             json.contains("\"cuts_active\""),

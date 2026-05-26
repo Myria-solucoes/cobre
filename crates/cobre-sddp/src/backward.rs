@@ -109,16 +109,16 @@ use cobre_comm::Communicator;
 use cobre_solver::{RowBatch, SolutionView, SolverInterface, SolverStatistics};
 
 use crate::{
+    SddpError,
     context::{StageContext, TrainingContext},
     cut::pool::CutPool,
     forward::write_capture_metadata,
     indexer::StageIndexer,
-    noise::{transform_inflow_noise, transform_load_noise, transform_ncs_noise, NcsNoiseOffsets},
+    noise::{NcsNoiseOffsets, transform_inflow_noise, transform_load_noise, transform_ncs_noise},
     risk_measure::RiskMeasure,
     solver_stats::SolverStatsDelta,
     state_exchange::ExchangeBuffers,
     workspace::{BasisStoreSliceMut, CapturedBasis, SolverWorkspace},
-    SddpError,
 };
 
 /// Per-`(rank, worker_id, opening)` solver delta collected during a single
@@ -741,7 +741,7 @@ mod tests {
 
     use cobre_core::scenario::SamplingScheme;
 
-    use super::{run_backward_pass, BackwardResult};
+    use super::{BackwardResult, run_backward_pass};
     use crate::{
         context::{StageContext, TrainingContext},
         cut::FutureCostFunction,
@@ -1026,9 +1026,6 @@ mod tests {
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
             worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
-            cut_row_maps: Vec::new(),
-            prev_applied_activity: Vec::new(),
-            template_update_buf: crate::workspace::TemplateUpdateBuf::default(),
         }]
     }
 
@@ -1086,6 +1083,7 @@ mod tests {
         use chrono::NaiveDate;
         use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
         use cobre_core::{
+            Bus, DeficitSegment, EntityId, SystemBuilder,
             scenario::{
                 CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile,
                 InflowModel,
@@ -1094,10 +1092,9 @@ mod tests {
                 Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
                 StageStateConfig,
             },
-            Bus, DeficitSegment, EntityId, SystemBuilder,
         };
         use cobre_stochastic::context::{
-            build_stochastic_context, ClassSchemes, OpeningTreeInputs,
+            ClassSchemes, OpeningTreeInputs, build_stochastic_context,
         };
         use std::collections::BTreeMap;
 
@@ -2838,9 +2835,6 @@ mod tests {
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
             worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
-            cut_row_maps: Vec::new(),
-            prev_applied_activity: Vec::new(),
-            template_update_buf: crate::workspace::TemplateUpdateBuf::default(),
         }];
         let mut basis_store_1 = empty_basis_store(exchange.local_count(), n_stages);
         let ctx = StageContext {
@@ -2944,9 +2938,6 @@ mod tests {
                 scratch_basis: Basis::new(0, 0),
                 backward_accum: BackwardAccumulators::default(),
                 worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
-                cut_row_maps: Vec::new(),
-                prev_applied_activity: Vec::new(),
-                template_update_buf: crate::workspace::TemplateUpdateBuf::default(),
             })
             .collect();
         let mut basis_store_4 = empty_basis_store(exchange.local_count(), n_stages);
@@ -3056,7 +3047,7 @@ mod tests {
         };
         use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
         use cobre_stochastic::context::{
-            build_stochastic_context, ClassSchemes, OpeningTreeInputs,
+            ClassSchemes, OpeningTreeInputs, build_stochastic_context,
         };
 
         let bus0 = Bus {
@@ -3304,9 +3295,6 @@ mod tests {
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
             worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
-            cut_row_maps: Vec::new(),
-            prev_applied_activity: Vec::new(),
-            template_update_buf: crate::workspace::TemplateUpdateBuf::default(),
         };
         let mut workspaces = vec![ws];
 
@@ -3479,9 +3467,6 @@ mod tests {
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
             worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
-            cut_row_maps: Vec::new(),
-            prev_applied_activity: Vec::new(),
-            template_update_buf: crate::workspace::TemplateUpdateBuf::default(),
         };
         let mut workspaces = vec![ws];
         let comm = StubComm;
@@ -3649,9 +3634,6 @@ mod tests {
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
             worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
-            cut_row_maps: Vec::new(),
-            prev_applied_activity: Vec::new(),
-            template_update_buf: crate::workspace::TemplateUpdateBuf::default(),
         };
         let mut workspaces = vec![ws];
         let comm = StubComm;
@@ -4445,9 +4427,6 @@ mod tests {
                 scratch_basis: Basis::new(0, 0),
                 backward_accum: BackwardAccumulators::default(),
                 worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
-                cut_row_maps: Vec::new(),
-                prev_applied_activity: Vec::new(),
-                template_update_buf: crate::workspace::TemplateUpdateBuf::default(),
             })
             .collect();
 
@@ -4812,9 +4791,6 @@ mod tests {
                 scratch_basis: Basis::new(0, 0),
                 backward_accum: BackwardAccumulators::default(),
                 worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
-                cut_row_maps: Vec::new(),
-                prev_applied_activity: Vec::new(),
-                template_update_buf: crate::workspace::TemplateUpdateBuf::default(),
             })
             .collect();
 
@@ -5040,9 +5016,6 @@ mod tests {
                 scratch_basis: Basis::new(0, 0),
                 backward_accum: BackwardAccumulators::default(),
                 worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
-                cut_row_maps: Vec::new(),
-                prev_applied_activity: Vec::new(),
-                template_update_buf: crate::workspace::TemplateUpdateBuf::default(),
             })
             .collect();
 
@@ -5476,9 +5449,6 @@ mod tests {
                 scratch_basis: Basis::new(0, 0),
                 backward_accum: BackwardAccumulators::default(),
                 worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
-                cut_row_maps: Vec::new(),
-                prev_applied_activity: Vec::new(),
-                template_update_buf: crate::workspace::TemplateUpdateBuf::default(),
             })
             .collect();
 

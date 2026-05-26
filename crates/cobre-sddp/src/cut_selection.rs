@@ -112,80 +112,44 @@ pub struct CutMetadata {
 // CutActivityUpdates
 // ---------------------------------------------------------------------------
 
-/// Direction of an activity change for a cut slot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ActivityChange {
-    /// Flip the slot from active to inactive (RHS sentinel applied).
-    Deactivate,
-    /// Flip the slot from inactive to active (original intercept restored).
-    Reactivate,
-}
-
-/// Set of cut activity changes at a single stage.
+/// Set of cut deactivation updates at a single stage.
 ///
-/// Returned by [`CutSelectionStrategy::select`]. Each entry is a
-/// `(slot, change)` pair where `change` is `ActivityChange::Deactivate`
-/// or `ActivityChange::Reactivate`. The caller applies each change to
-/// the activity bitmap via [`CutPool::set_active`].
+/// Returned by [`CutSelectionStrategy::select`]. Each entry in `updates` is a
+/// slot index to deactivate. The caller applies the deactivations to the
+/// activity bitmap via [`CutPool::deactivate`].
 ///
-/// The list may be empty if no cuts meet any activity-change criterion.
+/// The list may be empty if no cuts meet the deactivation criterion.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CutActivityUpdates {
     /// Stage index (0-based) that this update set belongs to.
     pub stage_index: u32,
-    /// `(slot, change)` updates to apply.
-    pub updates: Vec<(u32, ActivityChange)>,
-}
-
-impl From<ActivityChange> for bool {
-    /// Map an `ActivityChange` to a boolean suitable for `CutPool::set_active`.
-    ///
-    /// `Reactivate` maps to `true` (slot becomes active); `Deactivate` maps to
-    /// `false`.
-    #[inline]
-    fn from(change: ActivityChange) -> Self {
-        matches!(change, ActivityChange::Reactivate)
-    }
+    /// Slot indices to deactivate.
+    pub updates: Vec<u32>,
 }
 
 impl CutActivityUpdates {
-    /// Construct a deactivation-only update set from a list of slot indices.
-    ///
-    /// All entries are tagged [`ActivityChange::Deactivate`]. Used by the
-    /// selection strategies that only emit deactivation decisions.
+    /// Construct a deactivation update set from a list of slot indices.
     #[must_use]
     pub fn deactivations_only(stage_index: u32, indices: Vec<u32>) -> Self {
         Self {
             stage_index,
-            updates: indices
-                .into_iter()
-                .map(|i| (i, ActivityChange::Deactivate))
-                .collect(),
+            updates: indices,
         }
     }
 
-    /// Return the slots being deactivated (filter for `Deactivate` variant).
+    /// Return the slots to deactivate.
     #[must_use]
     pub fn deactivation_indices(&self) -> Vec<u32> {
-        self.updates
-            .iter()
-            .filter_map(|(slot, change)| match change {
-                ActivityChange::Deactivate => Some(*slot),
-                ActivityChange::Reactivate => None,
-            })
-            .collect()
+        self.updates.clone()
     }
 
-    /// Return the slots being reactivated (filter for `Reactivate` variant).
+    /// Return the slots to reactivate.
+    ///
+    /// Always returns an empty vector: all current selection strategies
+    /// produce deactivation-only updates.
     #[must_use]
     pub fn reactivation_indices(&self) -> Vec<u32> {
-        self.updates
-            .iter()
-            .filter_map(|(slot, change)| match change {
-                ActivityChange::Reactivate => Some(*slot),
-                ActivityChange::Deactivate => None,
-            })
-            .collect()
+        vec![]
     }
 }
 
@@ -560,7 +524,7 @@ pub fn parse_cut_selection_config(
 #[cfg(test)]
 mod tests {
     use super::parse_cut_selection_config;
-    use super::{ActivityChange, CutActivityUpdates, CutMetadata, CutSelectionStrategy};
+    use super::{CutActivityUpdates, CutMetadata, CutSelectionStrategy};
     use crate::cut::CutPool;
     use cobre_io::config::RowSelectionConfig;
 
@@ -1471,46 +1435,25 @@ mod tests {
     }
 
     #[test]
-    fn activity_change_deactivate_and_reactivate_are_distinct() {
-        assert_ne!(ActivityChange::Deactivate, ActivityChange::Reactivate);
-    }
-
-    #[test]
     fn cut_activity_updates_deactivations_only_constructor() {
         let updates = CutActivityUpdates::deactivations_only(7, vec![0, 1, 2]);
         assert_eq!(updates.stage_index, 7);
         assert_eq!(updates.updates.len(), 3);
-        for (_, change) in &updates.updates {
-            assert_eq!(*change, ActivityChange::Deactivate);
-        }
+        assert_eq!(updates.updates, vec![0, 1, 2]);
     }
 
     #[test]
-    fn cut_activity_updates_deactivation_indices_filters_correctly() {
+    fn cut_activity_updates_deactivation_indices_returns_updates() {
         let updates = CutActivityUpdates {
             stage_index: 0,
-            updates: vec![
-                (0, ActivityChange::Deactivate),
-                (1, ActivityChange::Reactivate),
-                (2, ActivityChange::Deactivate),
-            ],
+            updates: vec![0, 2],
         };
         assert_eq!(updates.deactivation_indices(), vec![0, 2]);
-        assert_eq!(updates.reactivation_indices(), vec![1]);
+        assert!(updates.reactivation_indices().is_empty());
     }
 
     #[test]
-    fn activity_change_into_bool_maps_reactivate_true() {
-        assert!(<bool as From<ActivityChange>>::from(
-            ActivityChange::Reactivate
-        ));
-        assert!(!<bool as From<ActivityChange>>::from(
-            ActivityChange::Deactivate
-        ));
-    }
-
-    #[test]
-    fn select_for_stage_returns_cut_activity_updates_with_deactivate_only() {
+    fn select_for_stage_returns_cut_activity_updates_with_deactivations() {
         let mut pool = CutPool::new(3, 1, 1, 0);
         pool.add_cut(0, 0, 1.0, &[0.0]);
         pool.add_cut(1, 0, 2.0, &[0.0]);
@@ -1524,8 +1467,8 @@ mod tests {
         let result = strategy.select_for_stage(&pool, &[], 10, 0);
 
         assert!(!result.updates.is_empty());
-        for (_, change) in &result.updates {
-            assert_eq!(*change, ActivityChange::Deactivate);
-        }
+        // updates now contains raw slot indices (not (slot, change) pairs)
+        assert!(result.updates.contains(&0));
+        assert!(result.updates.contains(&1));
     }
 }

@@ -342,7 +342,6 @@ pub fn build_training_output(
         total_generated: fcf.pools.iter().map(|p| p.populated_count as u64).sum(),
         total_active: fcf.total_active_cuts() as u64,
         peak_active,
-        cuts_in_lp: fcf.cuts_in_lp_total() as u64,
         cuts_active: fcf.total_active_cuts() as u64,
     };
 
@@ -384,7 +383,6 @@ pub fn build_training_output(
                     selection_time_ms: rec.selection_time_ms,
                     budget_evicted: rec.budget_evicted,
                     active_after_budget: rec.active_after_budget,
-                    cuts_in_lp: rec.rows_in_lp,
                 }))
             } else {
                 None
@@ -1056,41 +1054,5 @@ mod tests {
         let output = build_training_output(&result, &events, &fcf);
 
         assert!(output.cut_selection_records.is_empty());
-    }
-
-    #[test]
-    fn output_includes_cuts_in_lp_field_equal_to_populated_count() {
-        let result = make_result("iteration_limit", 80.0, 100.0, 0.2, 1);
-        let events = vec![make_iteration_summary(1, 80.0, 100.0, 0.2)];
-
-        let mut fcf = FutureCostFunction::new(2, 1, 4, 10, &[0; 2]);
-
-        // Pool 0: 3 cuts, pool 1: 2 cuts — 5 total populated and in LP.
-        fcf.add_cut(0, 0, 0, 1.0, &[1.0]);
-        fcf.add_cut(0, 0, 1, 2.0, &[0.5]);
-        fcf.add_cut(0, 0, 2, 3.0, &[0.25]);
-        fcf.add_cut(1, 0, 0, 4.0, &[1.0]);
-        fcf.add_cut(1, 0, 1, 5.0, &[0.5]);
-        // Deactivate 2 of the 5 cuts so total_active == 3.
-        fcf.pools[0].deactivate(&[0, 1]);
-
-        let output = build_training_output(&result, &events, &fcf);
-
-        assert_eq!(
-            output.cut_stats.cuts_in_lp, 5,
-            "cuts_in_lp must equal total populated count"
-        );
-        assert_eq!(
-            output.cut_stats.cuts_active, 3,
-            "cuts_active must equal active cuts"
-        );
-        assert_eq!(
-            output.cut_stats.total_generated, 5,
-            "total_generated must be preserved"
-        );
-        assert_eq!(
-            output.cut_stats.total_active, 3,
-            "total_active must be preserved"
-        );
     }
 }

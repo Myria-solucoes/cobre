@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Iteration template rebake now includes only active cuts. The
+  per-iteration baked stage template carries one row per active cut in
+  `active_cuts()` iteration order — inactive cuts are no longer encoded
+  at sentinel `[-INF, +INF]` bounds. Recovers ~29% wall-time regression
+  on production-scale convertido cases observed after 0.7.1.
+- Cut-sync wire format reverted from version 2 to version 1. The
+  activity-update record type (introduced in 0.7.1) was never activated
+  — all selection deactivations are local only. The allgatherv channel
+  carries cut records exclusively; the version byte at offset 0 is `1`.
+  Version-2 payloads are rejected. Cross-version MPI runs are not
+  supported.
+- `training/metadata.json` `row_pool` no longer contains a `cuts_in_lp`
+  field. The `cuts_active` field (active cuts at end-of-run) and
+  `peak_active` remain. Existing manifests that carry `cuts_in_lp` are
+  silently accepted — the field is dropped on read.
+- `training/convergence.parquet` row-selection schema loses the
+  `cuts_in_lp` column (schema version 10 columns, down from 11).
+  Existing parquet files with 11 columns are not forward-compatible;
+  re-run to regenerate.
+
+### Upcoming
+
+- Per-phase solve profile mechanism with a backward-tuned profile is in
+  preparation. The LP solver will receive per-phase option sets via a
+  `SolveProfile` switch at phase entry; the backward phase will override
+  pricing, scaling, and price-strategy options to address the
+  warm-start basis pricing budget. Defaults remain bit-equivalent to the
+  current hard-coded HiGHS configuration.
+
 ## [0.7.1] - 2026-05-25
 
 ### Changed

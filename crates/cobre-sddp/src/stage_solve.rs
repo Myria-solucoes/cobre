@@ -10,8 +10,8 @@ use cobre_solver::{SolutionView, SolverInterface, StageTemplate};
 
 use crate::{
     basis_reconstruct::{
-        enforce_basic_count_invariant, reconstruct_basis, PaddingContext, ReconstructionStats,
-        ReconstructionTarget,
+        PaddingContext, ReconstructionStats, ReconstructionTarget, enforce_basic_count_invariant,
+        reconstruct_basis,
     },
     context::StageContext,
     cut::pool::CutPool,
@@ -182,19 +182,15 @@ pub fn run_stage_solve<'ws, S: SolverInterface>(
             tolerance: 1e-7,
         };
 
-        // All solves now use the baked path: cuts are structural rows in the
-        // baked template. base_row_count is set to the non-baked template
-        // row count so reconstruct_basis handles cut rows via slot identity
-        // rather than positional copy from the stored basis.
+        // All solves use the baked path: cuts are structural rows in the baked
+        // template. base_row_count is set to the non-baked template row count
+        // so reconstruct_basis handles cut rows via slot identity rather than
+        // positional copy from the stored basis.
         //
-        // Under the warm-start bake model the LP carries one row per
-        // populated slot (including inactive slots encoded at sentinel
-        // `[-INF, +INF]` bounds). The iterator yields every populated slot
-        // in slot-ascending order; `active_mask` lets `reconstruct_basis`
-        // override the basis status to `LOWER` for inactive slots, whose
-        // rows can never bind.
-        // BENCHMARK Run 1: active-only bake — iterate active cuts and skip the
-        // active_mask override (no inactive baked rows exist to override).
+        // The baked template carries one row per active cut in active_cuts()
+        // iteration order. reconstruct_basis iterates the same active cuts
+        // and matches stored slot ids to LP rows. Inactive cuts are not in
+        // the LP; active_mask is None.
         let source = crate::basis_reconstruct::ReconstructionSource {
             target: ReconstructionTarget {
                 base_row_count: inputs.stage_context.templates[inputs.stage_index].num_rows,
@@ -311,17 +307,17 @@ fn map_solver_error(
 mod tests {
     use cobre_solver::{HighsSolver, SolverError, SolverInterface, StageTemplate};
 
-    use super::{run_stage_solve, Phase, StageInputs};
+    use super::{Phase, StageInputs, run_stage_solve};
     use crate::{
+        SddpError,
         basis_reconstruct::{
-            ReconstructionStats, HIGHS_BASIS_STATUS_BASIC as B, HIGHS_BASIS_STATUS_LOWER as L,
+            HIGHS_BASIS_STATUS_BASIC as B, HIGHS_BASIS_STATUS_LOWER as L, ReconstructionStats,
         },
         context::StageContext,
         cut::pool::CutPool,
         indexer::StageIndexer,
         lp_builder::PatchBuffer,
         workspace::{CapturedBasis, SolverWorkspace, WorkspaceSizing},
-        SddpError,
     };
 
     // -----------------------------------------------------------------------

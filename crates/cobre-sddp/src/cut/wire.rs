@@ -1,72 +1,48 @@
 //! Wire format for MPI cut exchange.
 //!
 //! During the SDDP backward pass, each MPI rank broadcasts its newly generated
-//! cuts and activity updates to all other ranks via `allgatherv`. Because the
-//! coefficient count (`n_state`) is a runtime value, `allgatherv` is called
-//! with `T = u8` and records are packed into a contiguous byte buffer.
+//! cuts to all other ranks via `allgatherv`. Because the coefficient count
+//! (`n_state`) is a runtime value, `allgatherv` is called with `T = u8` and
+//! records are packed into a contiguous byte buffer.
 //!
-//! ## Wire format version 2 — two record types
+//! ## Wire format version 1 — cut records only
 //!
-//! Version 2 payloads contain two record types interleaved in a single buffer.
-//! Every record starts with a version byte (offset 0, must equal
-//! `CUT_WIRE_VERSION = 2`) and a record tag byte (offset 13, either
-//! `RECORD_TAG_CUT = 0` or `RECORD_TAG_ACTIVITY = 1`).
+//! Every record is a single cut record. Byte 0 is the version byte (must
+//! equal `CUT_WIRE_VERSION = 1`). Byte 13 is `RECORD_TAG_CUT = 0` (zeroed
+//! padding in v1; reserved for future tag dispatch).
 //!
-//! ### `CutRecord` (tag = 0)
+//! ### `CutRecord` byte layout
 //!
 //! Total size: `25 + n_state * 8` bytes.
 //!
 //! ```text
 //! Offset  Size  Field
 //! ------  ----  -----
-//!  0       1   version             (u8 = 2)
+//!  0       1   version             (u8 = 1)
 //!  1- 4    4   slot_index          (u32, native-endian)
 //!  5- 8    4   iteration           (u32, native-endian)
 //!  9-12    4   forward_pass_index  (u32, native-endian)
-//! 13       1   record_tag          (u8 = 0)
-//! 14-16    3   padding             (zeroed; future use)
+//! 13       1   record_tag          (u8 = RECORD_TAG_CUT = 0; padding)
+//! 14-16    3   padding             (zeroed; reserved)
 //! 17-24    8   intercept           (f64, native-endian)
 //! 25 ...   8*n coefficients[0..n]  (f64 each, native-endian)
 //! ```
 //!
-//! ### `ActivityUpdateRecord` (tag = 1)
-//!
-//! Total size: 25 bytes (padded to match the `CutRecord` minimum stride so the
-//! receiver loop can iterate with a uniform stride at `n_state = 0`).
-//!
-//! ```text
-//! Offset  Size  Field
-//! ------  ----  -----
-//!  0       1   version             (u8 = 2)
-//!  1- 4    4   slot_index          (u32, native-endian)
-//!  5- 8    4   stage_index         (u32, native-endian)
-//!  9-12    4   reserved            (zeroed)
-//! 13       1   record_tag          (u8 = 1)
-//! 14       1   activity_change_tag (u8: 0=Deactivate, 1=Reactivate)
-//! 15-24   10   reserved            (zeroed)
-//! ```
-//!
 //! ## Version compatibility
 //!
-//! Wire version 1 receivers fed a version 2 payload return
-//! `SddpError::Validation`. Wire version 2 receivers fed a version 1 payload
-//! return `SddpError::Validation`. No compatibility shim is provided.
+//! Receivers reject any record whose version byte does not equal
+//! `CUT_WIRE_VERSION`. No compatibility shim is provided; redeploy all
+//! nodes when upgrading.
 //!
 //! ## Functions
 //!
 //! - [`cut_wire_size`] — compute the byte size for one cut record.
-//! - [`activity_update_wire_size`] — byte size for one activity update record.
-//! - [`max_wire_record_size`] — maximum record size (cut records are larger).
 //! - [`serialize_cut`] — write one cut record into a byte buffer.
 //! - [`deserialize_cut`] — read one cut record from a byte buffer.
-//! - [`serialize_activity_update`] — write one activity update record.
-//! - [`deserialize_activity_update`] — read one activity update record.
-//! - [`serialize_records_to_buffer`] — pack cuts and activity updates into a buffer.
-//! - [`deserialize_records_from_buffer_into`] — unpack mixed records (no allocation).
-//! - [`deserialize_cuts_from_buffer`] — unpack cut-only records from a buffer.
+//! - [`deserialize_cuts_from_buffer`] — unpack cut records from a buffer.
 //! - [`deserialize_cuts_from_buffer_into`] — unpack cuts into caller-provided buffers.
 
-use crate::{SddpError, cut_selection::ActivityChange};
+use crate::SddpError;
 
 // ---------------------------------------------------------------------------
 // Wire version and record-tag constants
@@ -74,19 +50,14 @@ use crate::{SddpError, cut_selection::ActivityChange};
 
 /// Wire format version byte. Bump when the payload layout changes
 /// in a backward-incompatible way.
-pub const CUT_WIRE_VERSION: u8 = 2;
+pub const CUT_WIRE_VERSION: u8 = 1;
 
-/// Record-tag value identifying a cut record (offset 13 in every record).
+/// Record-tag value at offset 13 of every cut record.
+///
+/// In v1 this byte is zero (padding). The constant is documented here so that
+/// future record-tag dispatch can extend the format without breaking the byte
+/// layout.
 pub const RECORD_TAG_CUT: u8 = 0;
-
-/// Record-tag value identifying an activity update record (offset 13).
-pub const RECORD_TAG_ACTIVITY: u8 = 1;
-
-/// Activity-tag value encoding `ActivityChange::Deactivate` (offset 14 in activity records).
-pub const ACTIVITY_TAG_DEACTIVATE: u8 = 0;
-
-/// Activity-tag value encoding `ActivityChange::Reactivate` (offset 14 in activity records).
-pub const ACTIVITY_TAG_REACTIVATE: u8 = 1;
 
 // ---------------------------------------------------------------------------
 // CutWireHeader
@@ -115,26 +86,6 @@ pub struct CutWireHeader {
 }
 
 // ---------------------------------------------------------------------------
-// ActivityUpdateRecord
-// ---------------------------------------------------------------------------
-
-/// Parsed fields of an activity update wire record.
-///
-/// Activity updates are carried alongside cut records in the version-2 wire
-/// format. Each record occupies 25 bytes on the wire; the `change` field is
-/// encoded as a single byte at offset 14 (`ACTIVITY_TAG_DEACTIVATE` or
-/// `ACTIVITY_TAG_REACTIVATE`).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ActivityUpdateRecord {
-    /// Deterministic slot index of the cut whose activity is being changed.
-    pub slot_index: u32,
-    /// Stage index (0-based) that this update belongs to.
-    pub stage_index: u32,
-    /// Direction of the activity change.
-    pub change: ActivityChange,
-}
-
-// ---------------------------------------------------------------------------
 // cut_wire_size
 // ---------------------------------------------------------------------------
 
@@ -155,27 +106,6 @@ pub struct ActivityUpdateRecord {
 #[must_use]
 pub fn cut_wire_size(n_state: usize) -> usize {
     25 + n_state * 8
-}
-
-/// Return the byte size of one activity update wire record (always 25).
-///
-/// Activity update records have no trailing coefficient bytes and occupy a
-/// fixed 25 bytes on the wire, matching the minimum stride of a cut record at
-/// `n_state = 0`.
-#[inline]
-#[must_use]
-pub fn activity_update_wire_size() -> usize {
-    25
-}
-
-/// Return the maximum record size for the given `n_state`.
-///
-/// Cut records are always the larger of the two record types, so this is
-/// equivalent to [`cut_wire_size`].
-#[inline]
-#[must_use]
-pub fn max_wire_record_size(n_state: usize) -> usize {
-    cut_wire_size(n_state)
 }
 
 /// Serialize one cut record into `buf` starting at offset 0.
@@ -444,223 +374,6 @@ pub fn deserialize_cuts_from_buffer_into(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Activity update serialization
-// ---------------------------------------------------------------------------
-
-/// Serialize one activity update record into `buf` starting at offset 0.
-///
-/// The record is always 25 bytes (see [`activity_update_wire_size`]).
-///
-/// Layout:
-/// - byte 0: [`CUT_WIRE_VERSION`]
-/// - bytes 1–4: `slot_index` (u32, native-endian)
-/// - bytes 5–8: `stage_index` (u32, native-endian)
-/// - bytes 9–12: zeros (reserved)
-/// - byte 13: [`RECORD_TAG_ACTIVITY`]
-/// - byte 14: [`ACTIVITY_TAG_DEACTIVATE`] or [`ACTIVITY_TAG_REACTIVATE`]
-/// - bytes 15–24: zeros (reserved)
-///
-/// # Errors
-///
-/// Returns `Err(SddpError::Validation(_))` if `buf.len() < 25`.
-pub fn serialize_activity_update(
-    buf: &mut [u8],
-    rec: &ActivityUpdateRecord,
-) -> Result<usize, SddpError> {
-    if buf.len() < 25 {
-        return Err(SddpError::Validation(format!(
-            "cut_wire: activity update buffer too small: {} < 25",
-            buf.len()
-        )));
-    }
-    buf[0] = CUT_WIRE_VERSION;
-    buf[1..5].copy_from_slice(&rec.slot_index.to_ne_bytes());
-    buf[5..9].copy_from_slice(&rec.stage_index.to_ne_bytes());
-    buf[9] = 0;
-    buf[10] = 0;
-    buf[11] = 0;
-    buf[12] = 0;
-    buf[13] = RECORD_TAG_ACTIVITY;
-    buf[14] = match rec.change {
-        ActivityChange::Deactivate => ACTIVITY_TAG_DEACTIVATE,
-        ActivityChange::Reactivate => ACTIVITY_TAG_REACTIVATE,
-    };
-    buf[15] = 0;
-    buf[16] = 0;
-    buf[17] = 0;
-    buf[18] = 0;
-    buf[19] = 0;
-    buf[20] = 0;
-    buf[21] = 0;
-    buf[22] = 0;
-    buf[23] = 0;
-    buf[24] = 0;
-    Ok(25)
-}
-
-/// Deserialize one activity update record from `buf`.
-///
-/// # Errors
-///
-/// Returns `Err(SddpError::Validation(_))` if:
-/// - byte 0 != [`CUT_WIRE_VERSION`]
-/// - byte 13 != [`RECORD_TAG_ACTIVITY`]
-/// - byte 14 is neither [`ACTIVITY_TAG_DEACTIVATE`] nor
-///   [`ACTIVITY_TAG_REACTIVATE`]
-pub fn deserialize_activity_update(buf: &[u8]) -> Result<ActivityUpdateRecord, SddpError> {
-    if buf.len() < 25 {
-        return Err(SddpError::Validation(format!(
-            "cut_wire: activity update buffer too small: {} < 25",
-            buf.len()
-        )));
-    }
-    let version = buf[0];
-    if version != CUT_WIRE_VERSION {
-        return Err(SddpError::Validation(format!(
-            "cut_wire: unsupported version {version}"
-        )));
-    }
-    let record_tag = buf[13];
-    if record_tag != RECORD_TAG_ACTIVITY {
-        return Err(SddpError::Validation(format!(
-            "cut_wire: expected activity record (tag {RECORD_TAG_ACTIVITY}), got tag {record_tag}"
-        )));
-    }
-    let slot_index = u32::from_ne_bytes([buf[1], buf[2], buf[3], buf[4]]);
-    let stage_index = u32::from_ne_bytes([buf[5], buf[6], buf[7], buf[8]]);
-    let change = match buf[14] {
-        ACTIVITY_TAG_DEACTIVATE => ActivityChange::Deactivate,
-        ACTIVITY_TAG_REACTIVATE => ActivityChange::Reactivate,
-        other => {
-            return Err(SddpError::Validation(format!(
-                "cut_wire: unknown activity change tag {other}"
-            )));
-        }
-    };
-    Ok(ActivityUpdateRecord {
-        slot_index,
-        stage_index,
-        change,
-    })
-}
-
-// ---------------------------------------------------------------------------
-// Mixed-record buffer serialization / deserialization
-// ---------------------------------------------------------------------------
-
-/// Pack cuts and activity updates into a caller-provided byte buffer.
-///
-/// Each cut record occupies `cut_wire_size(n_state)` bytes; each activity
-/// update record occupies [`activity_update_wire_size`] (25) bytes. Records
-/// are written in order: all cuts first, then all activities.
-///
-/// Returns the total number of bytes written.
-///
-/// # Errors
-///
-/// Returns `Err(SddpError::Validation(_))` if `buf` is too small to hold
-/// all records.
-pub fn serialize_records_to_buffer(
-    buf: &mut [u8],
-    cuts: &[(CutWireHeader, &[f64])],
-    activities: &[ActivityUpdateRecord],
-    n_state: usize,
-) -> Result<usize, SddpError> {
-    let cut_size = cut_wire_size(n_state);
-    let act_size = activity_update_wire_size();
-    let total = cuts.len() * cut_size + activities.len() * act_size;
-    if buf.len() < total {
-        return Err(SddpError::Validation(format!(
-            "cut_wire: buffer too small for records: {} < {total}",
-            buf.len()
-        )));
-    }
-    let mut offset = 0usize;
-    for (header, coefficients) in cuts {
-        serialize_cut(
-            &mut buf[offset..offset + cut_size],
-            header.slot_index,
-            header.iteration,
-            header.forward_pass_index,
-            header.intercept,
-            coefficients,
-        );
-        offset += cut_size;
-    }
-    for rec in activities {
-        serialize_activity_update(&mut buf[offset..offset + act_size], rec)?;
-        offset += act_size;
-    }
-    Ok(offset)
-}
-
-/// Unpack a mixed buffer of cut records and activity update records.
-///
-/// Walks `buf` record by record, dispatching on byte 13 (the record tag):
-/// - `RECORD_TAG_CUT` (0): consumes `cut_wire_size(n_state)` bytes, appends
-///   to `out_cuts`.
-/// - `RECORD_TAG_ACTIVITY` (1): consumes 25 bytes, appends to `out_activities`.
-/// - Any other value: returns `Err(SddpError::Validation(_))`.
-///
-/// Both output vectors are cleared at the start of each call so they can be
-/// reused across iterations without releasing their heap allocation.
-///
-/// Returns `(n_cuts, n_activities)` decoded.
-///
-/// # Errors
-///
-/// Returns `Err(SddpError::Validation(_))` if any record contains an
-/// unrecognised version byte, an unknown record tag, or an unknown activity
-/// change tag.
-pub fn deserialize_records_from_buffer_into(
-    buf: &[u8],
-    n_state: usize,
-    out_cuts: &mut Vec<(CutWireHeader, Vec<f64>)>,
-    out_activities: &mut Vec<ActivityUpdateRecord>,
-) -> Result<(usize, usize), SddpError> {
-    out_cuts.clear();
-    out_activities.clear();
-
-    let cut_size = cut_wire_size(n_state);
-    let act_size = activity_update_wire_size();
-    let mut pos = 0usize;
-
-    while pos < buf.len() {
-        // Every record is at least 25 bytes; peek at byte 13 for the tag.
-        if pos + 25 > buf.len() {
-            return Err(SddpError::Validation(format!(
-                "cut_wire: truncated record at byte offset {pos}"
-            )));
-        }
-        let record_tag = buf[pos + 13];
-        match record_tag {
-            RECORD_TAG_CUT => {
-                if pos + cut_size > buf.len() {
-                    return Err(SddpError::Validation(format!(
-                        "cut_wire: truncated cut record at byte offset {pos}"
-                    )));
-                }
-                let (header, coefficients) = deserialize_cut(&buf[pos..pos + cut_size], n_state)?;
-                out_cuts.push((header, coefficients));
-                pos += cut_size;
-            }
-            RECORD_TAG_ACTIVITY => {
-                let rec = deserialize_activity_update(&buf[pos..pos + act_size])?;
-                out_activities.push(rec);
-                pos += act_size;
-            }
-            other => {
-                return Err(SddpError::Validation(format!(
-                    "cut_wire: unknown record tag {other} at byte offset {pos}"
-                )));
-            }
-        }
-    }
-
-    Ok((out_cuts.len(), out_activities.len()))
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -672,14 +385,11 @@ mod tests {
     )]
 
     use super::{
-        ACTIVITY_TAG_DEACTIVATE, ACTIVITY_TAG_REACTIVATE, ActivityUpdateRecord, CUT_WIRE_VERSION,
-        CutWireHeader, RECORD_TAG_ACTIVITY, RECORD_TAG_CUT, activity_update_wire_size,
-        cut_wire_size, deserialize_activity_update, deserialize_cut, deserialize_cuts_from_buffer,
-        deserialize_cuts_from_buffer_into, deserialize_records_from_buffer_into,
-        serialize_activity_update, serialize_cut, serialize_cuts_to_buffer,
-        serialize_records_to_buffer,
+        CUT_WIRE_VERSION, CutWireHeader, RECORD_TAG_CUT, cut_wire_size, deserialize_cut,
+        deserialize_cuts_from_buffer, deserialize_cuts_from_buffer_into, serialize_cut,
+        serialize_cuts_to_buffer,
     };
-    use crate::{SddpError, cut_selection::ActivityChange};
+    use crate::SddpError;
 
     #[test]
     fn cut_wire_size_zero_state_returns_25() {
@@ -1052,13 +762,13 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_cut_rejects_wrong_version() {
+    fn deserialize_cut_rejects_wrong_version_byte() {
         let n_state = 3;
         let mut buf = vec![0u8; cut_wire_size(n_state)];
         serialize_cut(&mut buf, 5, 3, 7, 42.0, &[1.0, 2.0, 3.0]);
 
-        // Overwrite the version byte with wire version 1 (the old format).
-        buf[0] = 1_u8;
+        // Overwrite the version byte with wire version 2 (the removed format).
+        buf[0] = 2_u8;
 
         let result = deserialize_cut(&buf, n_state);
         match result {
@@ -1081,11 +791,11 @@ mod tests {
         assert_eq!(cut_wire_size(2080), 16665);
     }
 
-    // ── New tests for version-2 wire format ──────────────────────────────────
+    // ── Version-1 wire format tests ──────────────────────────────────────────
 
     #[test]
-    fn wire_version_2_constant_value() {
-        assert_eq!(CUT_WIRE_VERSION, 2);
+    fn wire_version_1_constant_value() {
+        assert_eq!(CUT_WIRE_VERSION, 1);
     }
 
     #[test]
@@ -1100,33 +810,11 @@ mod tests {
     }
 
     #[test]
-    fn serialize_activity_update_round_trips() {
-        let rec = ActivityUpdateRecord {
-            slot_index: 42,
-            stage_index: 7,
-            change: ActivityChange::Reactivate,
-        };
-        let mut buf = vec![0u8; activity_update_wire_size()];
-        let written = serialize_activity_update(&mut buf, &rec).unwrap();
-        assert_eq!(written, 25);
-
-        assert_eq!(buf[0], CUT_WIRE_VERSION, "version byte at offset 0");
-        assert_eq!(buf[13], RECORD_TAG_ACTIVITY, "record tag at offset 13");
-        assert_eq!(
-            buf[14], ACTIVITY_TAG_REACTIVATE,
-            "activity tag at offset 14"
-        );
-
-        let recovered = deserialize_activity_update(&buf).unwrap();
-        assert_eq!(recovered, rec);
-    }
-
-    #[test]
-    fn deserialize_cut_rejects_wire_version_1() {
+    fn deserialize_cut_rejects_wrong_version() {
         let n_state = 2;
         let mut buf = vec![0u8; cut_wire_size(n_state)];
-        // Write a structurally valid cut record but stamp it as wire version 1.
-        buf[0] = 1; // old wire version
+        // Write a structurally valid cut record but stamp it as wire version 2 (old format).
+        buf[0] = 2; // wrong wire version
         buf[1..5].copy_from_slice(&10u32.to_ne_bytes()); // slot_index
         buf[5..9].copy_from_slice(&1u32.to_ne_bytes()); // iteration
         buf[9..13].copy_from_slice(&0u32.to_ne_bytes()); // forward_pass_index
@@ -1146,85 +834,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_payload_round_trips_cut_and_activity_records() {
-        let n_state = 2usize;
-
-        // Build 2 cuts.
-        let cut0_hdr = CutWireHeader {
-            slot_index: 0,
-            iteration: 1,
-            forward_pass_index: 0,
-            intercept: 10.0,
-        };
-        let cut0_coeffs = [1.5_f64, 2.5];
-        let cut1_hdr = CutWireHeader {
-            slot_index: 1,
-            iteration: 1,
-            forward_pass_index: 0,
-            intercept: 20.0,
-        };
-        let cut1_coeffs = [3.5_f64, 4.5];
-        let cuts: &[(CutWireHeader, &[f64])] =
-            &[(cut0_hdr, &cut0_coeffs), (cut1_hdr, &cut1_coeffs)];
-
-        // Build 3 activity updates.
-        let activities = [
-            ActivityUpdateRecord {
-                slot_index: 0,
-                stage_index: 5,
-                change: ActivityChange::Deactivate,
-            },
-            ActivityUpdateRecord {
-                slot_index: 1,
-                stage_index: 5,
-                change: ActivityChange::Reactivate,
-            },
-            ActivityUpdateRecord {
-                slot_index: 2,
-                stage_index: 6,
-                change: ActivityChange::Deactivate,
-            },
-        ];
-
-        // Allocate buffer for 2 cuts + 3 activities.
-        let cut_size = cut_wire_size(n_state);
-        let act_size = activity_update_wire_size();
-        let total = 2 * cut_size + 3 * act_size;
-        let mut buf = vec![0u8; total];
-
-        let written = serialize_records_to_buffer(&mut buf, cuts, &activities, n_state).unwrap();
-        assert_eq!(written, total);
-
-        // Deserialize and verify.
-        let mut out_cuts: Vec<(CutWireHeader, Vec<f64>)> = Vec::new();
-        let mut out_acts: Vec<ActivityUpdateRecord> = Vec::new();
-        let (n_cuts, n_acts) =
-            deserialize_records_from_buffer_into(&buf, n_state, &mut out_cuts, &mut out_acts)
-                .unwrap();
-
-        assert_eq!(n_cuts, 2, "must decode 2 cut records");
-        assert_eq!(n_acts, 3, "must decode 3 activity records");
-
-        // Verify cut content.
-        assert_eq!(out_cuts[0].0, cut0_hdr);
-        assert_eq!(out_cuts[0].1.len(), n_state);
-        assert_eq!(out_cuts[0].1[0].to_bits(), cut0_coeffs[0].to_bits());
-        assert_eq!(out_cuts[0].1[1].to_bits(), cut0_coeffs[1].to_bits());
-        assert_eq!(out_cuts[1].0, cut1_hdr);
-        assert_eq!(out_cuts[1].1[0].to_bits(), cut1_coeffs[0].to_bits());
-        assert_eq!(out_cuts[1].1[1].to_bits(), cut1_coeffs[1].to_bits());
-
-        // Verify activity content.
-        for (got, expected) in out_acts.iter().zip(activities.iter()) {
-            assert_eq!(got, expected);
-        }
-    }
-
-    #[test]
-    fn activity_update_deactivate_tag_byte_is_zero() {
-        assert_eq!(ACTIVITY_TAG_DEACTIVATE, 0u8);
-        assert_eq!(ACTIVITY_TAG_REACTIVATE, 1u8);
+    fn record_tag_cut_constant_is_zero() {
         assert_eq!(RECORD_TAG_CUT, 0u8);
-        assert_eq!(RECORD_TAG_ACTIVITY, 1u8);
     }
 }

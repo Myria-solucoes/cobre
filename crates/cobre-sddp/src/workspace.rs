@@ -600,29 +600,6 @@ pub(crate) struct ScratchBuffers {
     pub(crate) anticipated_state_out_col_indices_buf: Vec<usize>,
 }
 
-/// Pre-allocated scratch buffers for batched `set_row_bounds` calls issued
-/// after cut synchronisation.
-///
-/// One workspace owns one instance. The three Vecs are cleared at the start of
-/// each template-update call and refilled with the `(row, lower, upper)`
-/// triples for cut slots whose desired activity differs from the previously
-/// applied activity. The buffers grow monotonically (never shrink) to the
-/// maximum number of toggles observed so far so the hot path never allocates.
-///
-/// All three Vecs have equal length at every call boundary — one entry per
-/// LP row whose bounds need to be updated. The slices are passed in a single
-/// FFI call to `SolverInterface::set_row_bounds` so the per-call FFI overhead
-/// is independent of the number of toggled slots.
-#[derive(Clone, Debug, Default)]
-pub struct TemplateUpdateBuf {
-    /// LP row indices to update. Resolved from `CutRowMap::lp_row_for_slot`.
-    pub rows: Vec<usize>,
-    /// Lower bounds, one per row.
-    pub lowers: Vec<f64>,
-    /// Upper bounds, one per row.
-    pub uppers: Vec<f64>,
-}
-
 /// All per-thread mutable resources required for one LP solve sequence.
 ///
 /// Each field is exclusively owned by the thread — there is no shared state
@@ -684,46 +661,6 @@ pub struct SolverWorkspace<S: SolverInterface> {
     /// `bwd_setup_ms` → `WORKER_TIMING_SLOT_BWD_SETUP`,
     /// `fwd_setup_ms` → `WORKER_TIMING_SLOT_FWD_SETUP`.
     pub worker_timing_buf: cobre_core::WorkerPhaseTimings,
-
-    /// Per-stage stable slot-to-LP-row mapping for cut activity toggling.
-    ///
-    /// One [`crate::cut::CutRowMap`] per study stage. Capacity equals
-    /// `fcf.pools[stage].capacity`; the base row offset equals
-    /// `ctx.templates[stage].num_rows` (the number of structural rows in the
-    /// stage LP before any cut rows are appended).
-    ///
-    /// Initialised by [`WorkspacePool::init_cut_row_maps`] after pool
-    /// construction. Until that call the vec is empty.
-    ///
-    /// Once populated, `cut_row_maps[stage]` records the LP row index assigned
-    /// to each cut slot via append-only `insert` calls. The mapping is stable
-    /// across iterations because `HiGHS` assigns row indices sequentially
-    /// and never removes rows from the LP.
-    pub cut_row_maps: Vec<crate::cut::CutRowMap>,
-
-    /// Per-stage record of the activity flag last applied to the LP rows.
-    ///
-    /// One outer entry per study stage; each inner [`Vec<bool>`] is sized to
-    /// the matching pool capacity (`fcf.pools[stage].capacity`). Entries are
-    /// initialised to `true` so the default contract matches the baked
-    /// templates produced at training start, where every populated slot is
-    /// represented by an active LP row.
-    ///
-    /// Populated by [`WorkspacePool::init_cut_row_maps`] alongside
-    /// [`SolverWorkspace::cut_row_maps`]; the mask is then snapshotted from
-    /// the current FCF activity state so subsequent post-cut-sync template
-    /// updates diff the desired activity (from `fcf.pools[stage].active`)
-    /// against this previously applied state. Only entries that differ
-    /// drive an FFI `set_row_bounds` call.
-    pub prev_applied_activity: Vec<Vec<bool>>,
-
-    /// Pre-allocated scratch buffers backing the batched `set_row_bounds`
-    /// FFI call issued during post-cut-sync template updates.
-    ///
-    /// All three internal Vecs grow monotonically; the hot path clears them
-    /// and refills with `(row, lower, upper)` triples for slots whose desired
-    /// activity differs from [`SolverWorkspace::prev_applied_activity`].
-    pub template_update_buf: TemplateUpdateBuf,
 }
 
 impl<S: SolverInterface> SolverWorkspace<S> {
@@ -764,34 +701,7 @@ impl<S: SolverInterface> SolverWorkspace<S> {
                 sizing.n_state,
             ),
             worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
-            cut_row_maps: Vec::new(),
-            prev_applied_activity: Vec::new(),
-            template_update_buf: TemplateUpdateBuf::default(),
         }
-    }
-
-    /// Return an immutable reference to the per-stage cut row map for `stage`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `cut_row_maps` is empty (not yet initialised via
-    /// [`WorkspacePool::init_cut_row_maps`]) or if `stage >= cut_row_maps.len()`.
-    #[must_use]
-    #[inline]
-    pub fn cut_row_map(&self, stage: usize) -> &crate::cut::CutRowMap {
-        &self.cut_row_maps[stage]
-    }
-
-    /// Return a mutable reference to the per-stage cut row map for `stage`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `cut_row_maps` is empty (not yet initialised via
-    /// [`WorkspacePool::init_cut_row_maps`]) or if `stage >= cut_row_maps.len()`.
-    #[must_use]
-    #[inline]
-    pub fn cut_row_map_mut(&mut self, stage: usize) -> &mut crate::cut::CutRowMap {
-        &mut self.cut_row_maps[stage]
     }
 }
 
@@ -923,9 +833,6 @@ impl<S: SolverInterface> WorkspacePool<S> {
                         sizing.n_state,
                     ),
                     worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
-                    cut_row_maps: Vec::new(),
-                    prev_applied_activity: Vec::new(),
-                    template_update_buf: TemplateUpdateBuf::default(),
                 }
             })
             .collect();
@@ -983,9 +890,6 @@ impl<S: SolverInterface> WorkspacePool<S> {
                     sizing.n_state,
                 ),
                 worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
-                cut_row_maps: Vec::new(),
-                prev_applied_activity: Vec::new(),
-                template_update_buf: TemplateUpdateBuf::default(),
             });
         }
         Ok(Self { workspaces })
@@ -1000,44 +904,6 @@ impl<S: SolverInterface> WorkspacePool<S> {
         for ws in &mut self.workspaces {
             ws.scratch_basis = Basis::new(max_cols, max_rows);
         }
-    }
-
-    /// Initialise the per-stage cut row maps and applied-activity masks for
-    /// all workspaces in the pool.
-    ///
-    /// Call once after [`WorkspacePool::new`] or [`WorkspacePool::try_new`],
-    /// before the first training iteration. Mirrors the
-    /// [`WorkspacePool::resize_scratch_bases`] post-construction pattern.
-    ///
-    /// For each stage the map is created with:
-    /// - `pool_capacity` = `fcf.pools[stage].capacity`
-    /// - `base_row_offset` = `templates[stage].num_rows`
-    ///
-    /// Every populated slot — active or inactive — is inserted in slot-
-    /// ascending order so the LP row index assigned to each cut is stable and
-    /// independent of activity state. The cut row at an inactive slot still
-    /// exists in the baked template; toggling its activity later reuses the
-    /// same row index, while a slot that has never been populated retains
-    /// `None` in `lp_row_for_slot`.
-    ///
-    /// In the same pass [`SolverWorkspace::prev_applied_activity`] is sized to
-    /// the matching `pool_capacity` per stage and snapshotted from
-    /// `fcf.pools[stage].active`. This mirrors the activity flags that were
-    /// baked into the initial templates so the first post-cut-sync template
-    /// update only emits an FFI `set_row_bounds` call for slots whose
-    /// activity has actually changed since construction.
-    pub fn init_cut_row_maps(
-        &mut self,
-        _fcf: &crate::cut::fcf::FutureCostFunction,
-        _templates: &[cobre_solver::types::StageTemplate],
-    ) {
-        // BENCHMARK Run 1: active-only bake — leave cut_row_maps and
-        // prev_applied_activity empty so `apply_template_update`'s
-        // empty-vec early return makes it a no-op. The active-only bake
-        // already handles cut visibility via the per-iteration rebake;
-        // the post-cut-sync template update step is not needed for the
-        // pre-regression baseline. Revert to the populated-slot loop for
-        // Phase 2.
     }
 }
 
@@ -1221,11 +1087,9 @@ mod tests {
         BasisStore, CapturedBasis, ScratchBuffers, SolverWorkspace, WorkspacePool, WorkspaceSizing,
     };
     use cobre_solver::{
-        types::{RowBatch, StageTemplate},
         Basis, SolutionView, SolverError, SolverInterface, SolverStatistics,
+        types::{RowBatch, StageTemplate},
     };
-
-    use crate::cut::fcf::FutureCostFunction;
 
     /// Minimal no-op solver for workspace tests.
     struct MockSolver;
@@ -2405,231 +2269,5 @@ mod tests {
         assert_eq!(recovered.base_row_count, original.base_row_count);
         assert_eq!(recovered.cut_row_slots, original.cut_row_slots);
         assert_eq!(recovered.state_at_capture, original.state_at_capture);
-    }
-
-    // ---------------------------------------------------------------------------
-    // cut_row_maps tests
-    // ---------------------------------------------------------------------------
-
-    /// Construct a minimal `StageTemplate` with the given `num_rows` and all
-    /// other fields zeroed/empty. Used only for sizing assertions in unit tests.
-    fn make_template(num_rows: usize) -> StageTemplate {
-        StageTemplate {
-            num_cols: 0,
-            num_rows,
-            num_nz: 0,
-            col_starts: Vec::new(),
-            row_indices: Vec::new(),
-            values: Vec::new(),
-            col_lower: Vec::new(),
-            col_upper: Vec::new(),
-            objective: Vec::new(),
-            row_lower: Vec::new(),
-            row_upper: Vec::new(),
-            n_state: 0,
-            n_transfer: 0,
-            n_dual_relevant: 0,
-            n_hydro: 0,
-            max_par_order: 0,
-            col_scale: Vec::new(),
-            row_scale: Vec::new(),
-        }
-    }
-
-    /// `cut_row_maps` starts empty after construction; `total_cut_rows()` is 0
-    /// for every stage once initialised with no warm-start cuts.
-    #[test]
-    fn cut_row_maps_initialized_with_correct_pool_capacity() {
-        // 3 stages, state_dim=1, 1 forward pass, 10 iterations, no warm-start.
-        let fcf = FutureCostFunction::new(3, 1, 1, 10, &[0; 3]);
-        // pool capacity per stage = 0 + 10 * 1 = 10.
-        let expected_capacity = fcf.pools[0].capacity;
-        assert_eq!(
-            expected_capacity, 10,
-            "test setup: pool capacity must be 10"
-        );
-
-        let templates: Vec<StageTemplate> = (0..3).map(|_| make_template(5)).collect();
-
-        let mut pool = WorkspacePool::new(0, 2, 0, WorkspaceSizing::default(), || MockSolver);
-        pool.init_cut_row_maps(&fcf, &templates);
-
-        for ws in &pool.workspaces {
-            assert_eq!(
-                ws.cut_row_map(0).total_cut_rows(),
-                0,
-                "freshly initialised map must have 0 cut rows"
-            );
-            // `slot_to_row` is a private field; verify capacity indirectly by
-            // confirming lp_row_for_slot returns None for slot == capacity - 1
-            // (slot in range, but not yet inserted) and None for slot == capacity
-            // (out of range).
-            assert_eq!(
-                ws.cut_row_map(0).lp_row_for_slot(expected_capacity - 1),
-                None,
-                "last valid slot must return None before any insert"
-            );
-            assert_eq!(
-                ws.cut_row_map(0).lp_row_for_slot(expected_capacity),
-                None,
-                "out-of-range slot must return None"
-            );
-        }
-    }
-
-    /// `base_row_offset()` equals `templates[stage].num_rows` after
-    /// `init_cut_row_maps`.
-    #[test]
-    fn cut_row_maps_initialized_with_correct_base_row_offset() {
-        let fcf = FutureCostFunction::new(3, 1, 1, 5, &[0; 3]);
-        // Stage 0 has 7 structural rows, stage 1 has 3, stage 2 has 0.
-        let templates = vec![make_template(7), make_template(3), make_template(0)];
-
-        let mut pool = WorkspacePool::new(0, 1, 0, WorkspaceSizing::default(), || MockSolver);
-        pool.init_cut_row_maps(&fcf, &templates);
-
-        let ws = &pool.workspaces[0];
-        assert_eq!(
-            ws.cut_row_map(0).base_row_offset(),
-            7,
-            "stage 0 base_row_offset must equal templates[0].num_rows (7)"
-        );
-        assert_eq!(
-            ws.cut_row_map(1).base_row_offset(),
-            3,
-            "stage 1 base_row_offset must equal templates[1].num_rows (3)"
-        );
-        assert_eq!(
-            ws.cut_row_map(2).base_row_offset(),
-            0,
-            "stage 2 base_row_offset must equal templates[2].num_rows (0)"
-        );
-    }
-
-    /// Warm-start cuts are reflected in the map after `init_cut_row_maps`:
-    /// slots 0 and 1 of stage 0 map to `base` and `base + 1` respectively.
-    #[test]
-    fn cut_row_maps_warm_start_cuts_inserted_in_slot_order() {
-        let mut fcf = FutureCostFunction::new(3, 1, 2, 10, &[0, 0, 0]);
-        fcf.add_cut(0, 0, 0, 1.0, &[0.5]);
-        fcf.add_cut(0, 0, 1, 2.0, &[0.3]);
-
-        let templates = vec![make_template(4), make_template(4), make_template(4)];
-        let base = templates[0].num_rows;
-
-        let mut pool = WorkspacePool::new(0, 1, 0, WorkspaceSizing::default(), || MockSolver);
-        pool.init_cut_row_maps(&fcf, &templates);
-
-        let ws = &pool.workspaces[0];
-        assert_eq!(ws.cut_row_map(0).total_cut_rows(), 2);
-        assert_eq!(ws.cut_row_map(0).lp_row_for_slot(0), Some(base));
-        assert_eq!(ws.cut_row_map(0).lp_row_for_slot(1), Some(base + 1));
-    }
-
-    /// Cloning a workspace (via direct field clone) preserves the
-    /// `cut_row_maps` contents identically.
-    #[test]
-    fn cut_row_maps_cloned_in_workspace_clone() {
-        let mut fcf = FutureCostFunction::new(3, 1, 1, 10, &[0, 0, 0]);
-        fcf.add_cut(0, 0, 0, 5.0, &[1.0]);
-
-        let templates = vec![make_template(3), make_template(3), make_template(3)];
-
-        let mut pool = WorkspacePool::new(0, 1, 0, WorkspaceSizing::default(), || MockSolver);
-        pool.init_cut_row_maps(&fcf, &templates);
-
-        let original_map: Vec<Option<usize>> = (0..fcf.pools[0].capacity)
-            .map(|slot| pool.workspaces[0].cut_row_map(0).lp_row_for_slot(slot))
-            .collect();
-        let original_total = pool.workspaces[0].cut_row_map(0).total_cut_rows();
-        let original_base = pool.workspaces[0].cut_row_map(0).base_row_offset();
-
-        // Clone the cut_row_maps vec directly (CutRowMap derives Clone).
-        let cloned_maps = pool.workspaces[0].cut_row_maps.clone();
-
-        assert_eq!(
-            cloned_maps[0].total_cut_rows(),
-            original_total,
-            "cloned map must have identical total_cut_rows"
-        );
-        assert_eq!(
-            cloned_maps[0].base_row_offset(),
-            original_base,
-            "cloned map must have identical base_row_offset"
-        );
-        for (slot, original) in original_map.iter().enumerate() {
-            assert_eq!(
-                cloned_maps[0].lp_row_for_slot(slot),
-                *original,
-                "cloned map lp_row_for_slot({slot}) must match original"
-            );
-        }
-    }
-
-    /// `init_cut_row_maps` assigns a stable LP row index to every populated
-    /// slot, including currently-inactive ones. This is the foundation that
-    /// lets the post-cut-sync template update resolve `lp_row_for_slot` for a
-    /// slot that has been deactivated and is later reactivated.
-    #[test]
-    fn init_cut_row_maps_iterates_all_populated_slots() {
-        // Three populated cuts at stage 0; deactivate the middle slot before
-        // calling init. All three slots must still receive an LP row index.
-        let mut fcf = FutureCostFunction::new(1, 1, 1, 10, &[0; 1]);
-        fcf.add_cut(0, 0, 0, 1.0, &[0.5]);
-        fcf.add_cut(0, 1, 0, 2.0, &[0.7]);
-        fcf.add_cut(0, 2, 0, 3.0, &[0.9]);
-        fcf.set_active(0, 1, false);
-        assert_eq!(fcf.pools[0].populated_count, 3);
-
-        let templates = vec![make_template(4)];
-        let base = templates[0].num_rows;
-
-        let mut pool = WorkspacePool::new(0, 1, 0, WorkspaceSizing::default(), || MockSolver);
-        pool.init_cut_row_maps(&fcf, &templates);
-
-        let map = pool.workspaces[0].cut_row_map(0);
-        assert_eq!(
-            map.total_cut_rows(),
-            3,
-            "every populated slot must hold an LP row, including inactive ones"
-        );
-        assert_eq!(map.lp_row_for_slot(0), Some(base));
-        assert_eq!(map.lp_row_for_slot(1), Some(base + 1));
-        assert_eq!(map.lp_row_for_slot(2), Some(base + 2));
-    }
-
-    /// `init_cut_row_maps` snapshots the FCF's current activity vector into
-    /// `prev_applied_activity[stage]` so the first template update can diff
-    /// desired vs applied activity without an additional construction step.
-    #[test]
-    fn init_cut_row_maps_populates_prev_applied_activity_matching_fcf() {
-        let mut fcf = FutureCostFunction::new(1, 1, 1, 10, &[0; 1]);
-        fcf.add_cut(0, 0, 0, 1.0, &[0.5]);
-        fcf.add_cut(0, 1, 0, 2.0, &[0.7]);
-        fcf.add_cut(0, 2, 0, 3.0, &[0.9]);
-        fcf.set_active(0, 1, false);
-
-        let templates = vec![make_template(4)];
-
-        let mut pool = WorkspacePool::new(0, 1, 0, WorkspaceSizing::default(), || MockSolver);
-        pool.init_cut_row_maps(&fcf, &templates);
-
-        let ws = &pool.workspaces[0];
-        assert_eq!(
-            ws.prev_applied_activity.len(),
-            1,
-            "outer vec length must equal num_stages"
-        );
-        let populated = fcf.pools[0].populated_count;
-        let expected = fcf.pools[0].active[..populated].to_vec();
-        assert_eq!(
-            ws.prev_applied_activity[0].len(),
-            populated,
-            "inner vec length must equal populated_count (not capacity)"
-        );
-        assert_eq!(
-            ws.prev_applied_activity[0], expected,
-            "prev_applied_activity must mirror fcf.pools[stage].active for populated slots"
-        );
     }
 }

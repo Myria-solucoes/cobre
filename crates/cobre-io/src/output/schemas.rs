@@ -391,7 +391,6 @@ pub(crate) fn row_selection_schema() -> Schema {
         Field::new("selection_time_ms", DataType::Float64, false),
         Field::new("budget_evicted", DataType::Int32, true),
         Field::new("active_after_budget", DataType::Int32, true),
-        Field::new("cuts_in_lp", DataType::Int32, false),
     ])
 }
 
@@ -837,8 +836,8 @@ mod tests {
         let schema = row_selection_schema();
         assert_eq!(
             schema.fields().len(),
-            11,
-            "cut_selection schema must have 11 fields"
+            10,
+            "cut_selection schema must have 10 fields"
         );
         // First 7 fields (indices 0-6) are non-nullable Int32.
         for field in &schema.fields()[..7] {
@@ -861,12 +860,10 @@ mod tests {
             );
             assert!(field.is_nullable(), "field '{name}' must be nullable");
         }
-        // Field 11 (index 10): cuts_in_lp, non-nullable Int32.
-        let cuts_in_lp_field = schema
-            .field_with_name("cuts_in_lp")
-            .unwrap_or_else(|_| panic!("field 'cuts_in_lp' not found"));
-        assert_eq!(cuts_in_lp_field.data_type(), &DataType::Int32);
-        assert!(!cuts_in_lp_field.is_nullable());
+        assert!(
+            schema.field_with_name("cuts_in_lp").is_err(),
+            "cuts_in_lp must not be present in schema"
+        );
     }
 
     #[test]
@@ -984,7 +981,7 @@ mod tests {
             ("convergence", 13),
             ("iteration_timing", 18),
             ("rank_timing", 8),
-            ("cut_selection", 11),
+            ("cut_selection", 10),
             ("solver_iterations", 19),
             ("retry_histogram", 5),
         ];
