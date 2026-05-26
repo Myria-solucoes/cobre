@@ -242,6 +242,20 @@ unsafe extern "C" {
         value: c_double,
     ) -> c_int;
 
+    /// Get an integer-valued `HiGHS` option. Wraps `Highs_getIntOptionValue()`.
+    pub fn cobre_highs_get_int_option(
+        highs: *const c_void,
+        option: *const c_char,
+        value: *mut c_int,
+    ) -> c_int;
+
+    /// Get a double-valued `HiGHS` option. Wraps `Highs_getDoubleOptionValue()`.
+    pub fn cobre_highs_get_double_option(
+        highs: *const c_void,
+        option: *const c_char,
+        value: *mut c_double,
+    ) -> c_int;
+
     // ============================================================
     // Diagnostics
     // ============================================================

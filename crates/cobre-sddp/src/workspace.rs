@@ -4,7 +4,7 @@
 //! [`WorkspacePool`] allocates one workspace per worker thread.
 //! [`BasisStore`] provides per-scenario, per-stage basis storage for warm-starting LP solves.
 
-use cobre_solver::{Basis, SolverInterface};
+use cobre_solver::{Basis, ProfiledSolver, SolverInterface};
 
 use crate::backward::StagedCut;
 use crate::basis_reconstruct::PromotionScratch;
@@ -624,7 +624,12 @@ pub struct SolverWorkspace<S: SolverInterface> {
     /// `0..n_workers_local`.
     pub worker_id: i32,
     /// LP solver instance owned exclusively by this workspace.
-    pub solver: S,
+    ///
+    /// Wrapped in [`ProfiledSolver`] so that per-phase solver configuration
+    /// (tolerances, iteration limits) can be applied at phase boundaries via
+    /// [`ProfiledSolver::set_profile`] without modifying call sites that use
+    /// the solver through the [`SolverInterface`] trait.
+    pub solver: ProfiledSolver<S>,
     /// Pre-allocated row-bound patch buffer.
     pub patch_buf: PatchBuffer,
     /// Scratch buffer for the current state vector.
@@ -690,7 +695,7 @@ impl<S: SolverInterface> SolverWorkspace<S> {
         Self {
             rank,
             worker_id,
-            solver,
+            solver: ProfiledSolver::new(solver),
             patch_buf,
             current_state: Vec::with_capacity(n_state),
             scratch: ScratchBuffers::new(sizing),
@@ -815,7 +820,7 @@ impl<S: SolverInterface> WorkspacePool<S> {
                 SolverWorkspace {
                     rank,
                     worker_id,
-                    solver: solver_factory(),
+                    solver: ProfiledSolver::new(solver_factory()),
                     patch_buf: PatchBuffer::new(
                         sizing.hydro_count,
                         sizing.max_par_order,
@@ -872,7 +877,7 @@ impl<S: SolverInterface> WorkspacePool<S> {
             workspaces.push(SolverWorkspace {
                 rank,
                 worker_id,
-                solver: solver_factory()?,
+                solver: ProfiledSolver::new(solver_factory()?),
                 patch_buf: PatchBuffer::new(
                     sizing.hydro_count,
                     sizing.max_par_order,
@@ -1087,7 +1092,7 @@ mod tests {
         BasisStore, CapturedBasis, ScratchBuffers, SolverWorkspace, WorkspacePool, WorkspaceSizing,
     };
     use cobre_solver::{
-        Basis, SolutionView, SolverError, SolverInterface, SolverStatistics,
+        Basis, SolutionView, SolveProfile, SolverError, SolverInterface, SolverStatistics,
         types::{RowBatch, StageTemplate},
     };
 
@@ -1115,6 +1120,10 @@ mod tests {
         fn name(&self) -> &'static str {
             "Mock"
         }
+        fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
+        fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
+        fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
+        fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
     }
 
     /// Compile-time assertion that `SolverWorkspace<MockSolver>` is `Send`.
@@ -2269,5 +2278,42 @@ mod tests {
         assert_eq!(recovered.base_row_count, original.base_row_count);
         assert_eq!(recovered.cut_row_slots, original.cut_row_slots);
         assert_eq!(recovered.state_at_capture, original.state_at_capture);
+    }
+
+    // ---------------------------------------------------------------------------
+    // ProfiledSolver integration
+    // ---------------------------------------------------------------------------
+
+    /// A freshly constructed workspace must expose a solver whose
+    /// `current_profile()` equals `SolveProfile::default()`.
+    ///
+    /// Confirms that `ProfiledSolver::new` wraps the inner solver without
+    /// issuing any FFI calls and that `WorkspacePool::new` correctly initialises
+    /// every workspace.
+    #[test]
+    fn workspace_solver_initialised_with_default_profile() {
+        let pool = WorkspacePool::new(0, 2, 0, WorkspaceSizing::default(), || MockSolver);
+        for ws in &pool.workspaces {
+            assert_eq!(
+                ws.solver.current_profile(),
+                &SolveProfile::default(),
+                "solver.current_profile() must equal SolveProfile::default() after construction"
+            );
+        }
+
+        // Also verify SolverWorkspace::new directly.
+        let ws = SolverWorkspace::new(
+            0,
+            0,
+            MockSolver,
+            crate::lp_builder::PatchBuffer::new(0, 0, 0, 0, 0, 0),
+            0,
+            WorkspaceSizing::default(),
+        );
+        assert_eq!(
+            ws.solver.current_profile(),
+            &SolveProfile::default(),
+            "SolverWorkspace::new must initialise solver with default profile"
+        );
     }
 }

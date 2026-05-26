@@ -31,14 +31,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Existing parquet files with 11 columns are not forward-compatible;
   re-run to regenerate.
 
-### Upcoming
+### Added
 
-- Per-phase solve profile mechanism with a backward-tuned profile is in
-  preparation. The LP solver will receive per-phase option sets via a
-  `SolveProfile` switch at phase entry; the backward phase will override
-  pricing, scaling, and price-strategy options to address the
-  warm-start basis pricing budget. Defaults remain bit-equivalent to the
-  current hard-coded HiGHS configuration.
+- Per-phase LP solve profile mechanism. The LP solver is now wrapped by
+  `ProfiledSolver<S>`, which carries a `SolveProfile` (feasibility
+  tolerances and iteration caps) and applies it to the inner solver at
+  phase boundaries. Forward, Backward, and Simulation phases each
+  receive a profile constant (`FORWARD_PROFILE`, `BACKWARD_PROFILE`,
+  `SIMULATION_PROFILE`) applied per worker before each parallel region.
+  The profile is also re-applied automatically before every solve to
+  survive `HiGHS` internal option resets. Default profile values match
+  the historical hard-coded `HiGHS` options bit-for-bit; downstream
+  callers see no behavior change until a non-default profile is wired.
 
 ## [0.7.1] - 2026-05-25
 

@@ -225,6 +225,14 @@ impl SolverInterface for MockSolver {
     fn name(&self) -> &'static str {
         "Mock"
     }
+
+    fn set_primal_feasibility_tolerance(&mut self, _tolerance: f64) {}
+
+    fn set_dual_feasibility_tolerance(&mut self, _tolerance: f64) {}
+
+    fn set_simplex_iteration_limit_profile(&mut self, _limit: u32) {}
+
+    fn set_ipm_iteration_limit_profile(&mut self, _limit: u32) {}
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -2240,7 +2248,7 @@ fn simulate_baked_path_issues_zero_add_rows() {
 
     assert!(result.is_ok(), "baked path must succeed: {result:?}");
     let expected_load_count = n_scenarios as usize * n_stages;
-    let solver = &workspaces[0].solver;
+    let solver = workspaces[0].solver.inner();
     assert_eq!(
         solver.add_rows_count, 0,
         "baked path must call add_rows 0 times; got {}",
@@ -2359,7 +2367,7 @@ fn simulate_fallback_path_issues_expected_add_rows() {
 
     assert!(result.is_ok(), "fallback path must succeed: {result:?}");
     let expected_load_count = n_scenarios as usize * n_stages;
-    let solver = &workspaces[0].solver;
+    let solver = workspaces[0].solver.inner();
     // With zero cuts, `cut_batch.num_rows == 0` so the guard
     // `if cut_batch.num_rows > 0` prevents any `add_rows` call.
     assert_eq!(
@@ -2633,7 +2641,7 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
     );
 
     // Verify that solve(Some(&basis)) was called (warm-start path taken).
-    let solver = &workspaces[0].solver;
+    let solver = workspaces[0].solver.inner();
     assert_eq!(
         solver.solve_with_basis_count, 1,
         "warm-start solve must be called exactly once (1 scenario × 1 stage)"
@@ -2782,7 +2790,7 @@ fn simulate_with_empty_stage_bases_cold_starts() {
         "cold-start simulate must succeed: {result:?}"
     );
 
-    let solver = &workspaces[0].solver;
+    let solver = workspaces[0].solver.inner();
     let expected_solves = n_scenarios as usize * n_stages;
 
     assert_eq!(
