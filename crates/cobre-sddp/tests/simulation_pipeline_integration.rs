@@ -2649,25 +2649,25 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
         .as_ref()
         .expect("recorded_basis must be Some after a warm-start solve");
 
-    // Row count: base_row_count=2 + populated_count=13 = 15. Under the
-    // warm-start bake model the LP carries one row per populated slot
-    // (including the previously-unpopulated slots 0..9 which now sit at
-    // sentinel `[-INF, +INF]` bounds with `BASIC` row status).
-    let populated_count = fcf.pools[0].populated_count;
+    // Row count: base_row_count=2 + active_count=3 = 5. Under the
+    // active-only bake model the LP carries one row per active cut only;
+    // inactive populated slots are not present in the baked template.
+    // updated after active-only bake landed
+    let active_count = fcf.pools[0].active_count();
     assert_eq!(
         recorded.row_status.len(),
-        2 + populated_count,
+        2 + active_count,
         "reconstructed basis row_status must have length base_row_count(2) + \
-         populated_count({populated_count}) = {}, got {}",
-        2 + populated_count,
+         active_count({active_count}) = {}, got {}",
+        2 + active_count,
         recorded.row_status.len()
     );
 
     // The three slot identities recorded in the stored basis (10, 11, 12) are
-    // preserved verbatim at their respective LP row positions; the remaining
-    // populated-but-previously-untracked slots default to `BASIC` (no
-    // activity metadata available for the fallback classifier).
-    let preserved_offset = 2 + 10; // base rows + first stored slot
+    // preserved verbatim at their respective LP row positions.  Under the
+    // active-only bake model the active cuts are iterated in slot order
+    // (10, 11, 12) so slot 10 lands at target position 0, i.e. LP row 2.
+    let preserved_offset = 2; // base rows + position of slot 10 in active-cuts order (position 0)
     assert_eq!(
         recorded.row_status[preserved_offset], CUT_STATUS_0,
         "slot 10 must preserve its stored cut status"
