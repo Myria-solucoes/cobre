@@ -443,17 +443,26 @@ the better tail).
 All four runs, same case, same workers, same SDDP configuration. Only
 `BACKWARD_PROFILE` changes.
 
-| Run   | Profile (vs default)                | mean ms | p99 ms | max ms | µs/pivot | mean iters | total wall s | Convergence (cuts_active iter 4) |
-| ----- | ----------------------------------- | ------: | -----: | -----: | -------: | ---------: | -----------: | -------------------------------: |
-| run_1 | (none — defaults)                   |    72.6 |  222.6 |    764 |      284 |        255 |        437.1 |                           16 453 |
-| run_5 | Dantzig + RowHyperSparse            |    70.8 |  207.2 |  1 230 |      223 |        317 |        433.8 |                           16 607 |
-| run_6 | SteepestEdge + RowHyperSparse       |    76.2 |  269.3 |    823 |      308 |        248 |        463.6 |                           17 623 |
-| run_7 | RowHyperSparse only (Devex default) |     TBD |    TBD |    TBD |      TBD |        TBD |          TBD |                              TBD |
+| Run   | Profile (vs default)                | mean ms | p99 ms |  max ms | µs/pivot | mean iters | total wall s | Convergence (cuts_active iter 4) |
+| ----- | ----------------------------------- | ------: | -----: | ------: | -------: | ---------: | -----------: | -------------------------------: |
+| run_1 | (none — defaults)                   |    72.6 |  222.6 |     764 |      284 |        255 |        437.1 |                           16 453 |
+| run_5 | Dantzig + RowHyperSparse            |    70.8 |  207.2 |   1 230 |      223 |        317 |        433.8 |                           16 607 |
+| run_6 | SteepestEdge + RowHyperSparse       |    76.2 |  269.3 |     823 |      308 |        248 |        463.6 |                           17 623 |
+| run_7 | RowHyperSparse only (Devex default) |    71.9 |  217.5 | **585** |      280 |        257 |    **430.9** |                           19 947 |
 
-Cut counts at iteration 4 vary by <8% across runs, but the
+run_7 — the current `BACKWARD_PROFILE` state — has the **best total
+wall and best tail** of any configuration measured. The conclusion is
+that a single override (`simplex_price_strategy = 2`, RowHyperSparse)
+captures essentially all the available HighsProfile-level win for the
+backward pass.
+
+Cut counts at iteration 4 vary by ~20% across runs, but the
 lower-bound trajectories match within 0.05%. The algorithmic
 convergence is essentially identical; the solver tuning is moving
 LP-vertex choice on degenerate faces without changing the policy.
+run_7 has the highest active-cut count (19 947) — a side effect of
+the cut-selection scoring landing on different binding-cut sets when
+the LP vertex choice differs (see §9).
 
 ## 6. Conclusions on HighsProfile-level tuning
 
