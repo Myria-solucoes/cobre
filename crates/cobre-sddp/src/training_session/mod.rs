@@ -19,7 +19,6 @@ use std::time::Instant;
 use cobre_comm::{Communicator, ReduceOp};
 use cobre_core::{StageRowSelectionRecord, TrainingEvent};
 use cobre_solver::SolverInterface;
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 use crate::{
     SddpError, TrainingConfig,
@@ -278,11 +277,13 @@ where
         let results = TrainingResults::new(config.loop_config.start_iteration);
 
         // ── Iteration scratch (reused buffers for forward/backward/cut/lb) ──
+        let max_pool_capacity = fcf.pools.iter().map(|p| p.capacity).max().unwrap_or(0);
         let scratch = IterationScratch::new(
             ranks.max_local_fwd,
             ranks.num_stages,
             ranks.n_state,
             fcf.pools[0].capacity,
+            max_pool_capacity,
             stage_ctx.templates[0].num_rows,
             indexer.hydro_count,
             indexer.max_par_order,
@@ -847,18 +848,32 @@ where
             }
 
             let archive_ref = self.visited_archive.as_ref();
-            // Parallel selection over interior stages 1..=T-2. Stage 0 was
+            // Sequential selection over interior stages 1..=T-2. Stage 0 was
             // recorded above; stage T-1 (terminal) is skipped because the
             // backward pass produces no cuts at stage T-1, so the pool is
             // empty and selection would be a no-op.
+            //
+            // The outer loop is sequential (not `into_par_iter`) because
+            // the new m-block kernel uses fold-local v_block allocations
+            // and shares the same `worker_scratch` slice across all stages;
+            // concurrent stages would race for the same scratch slots.
+            // Design §4.2 confirms the 24-48 m-block tasks per stage
+            // saturate a 96-core machine via the inner parallelism alone.
+            let pools = &self.fcf.pools;
+            let worker_scratch = self.scratch.cut_selection_scratch_mut();
             #[allow(clippy::cast_possible_truncation)]
             let deactivations: Vec<(usize, CutActivityUpdates, f64)> = (1..num_sel_stages)
-                .into_par_iter()
                 .map(|stage| {
-                    let pool = &self.fcf.pools[stage];
+                    let pool = &pools[stage];
                     let states = archive_ref.map_or(&[] as &[f64], |a| a.states_for_stage(stage));
                     let start = Instant::now();
-                    let deact = strategy.select_for_stage(pool, states, iteration, stage as u32);
+                    let deact = strategy.select_for_stage_with_scratch(
+                        pool,
+                        states,
+                        iteration,
+                        stage as u32,
+                        worker_scratch,
+                    );
                     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
                     (stage, deact, elapsed_ms)
                 })

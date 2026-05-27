@@ -1,31 +1,49 @@
-//! Cut selection strategy for controlling cut pool growth during SDDP training.
+//! Cut selection strategy for controlling cut pool growth during SDDP
+//! training.
 //!
 //! This module defines [`CutSelectionStrategy`] (three variants: Level1, LML1,
-//! Dominated), [`CutMetadata`] (per-cut tracking data), and [`CutActivityUpdates`]
-//! (the output of a selection scan for one stage).
+//! Dominated), [`CutMetadata`] (per-cut tracking data), and
+//! [`CutActivityUpdates`] (the output of a selection scan for one stage).
 //!
-//! ## Design
+//! # Kernel
 //!
-//! Both methods (`should_run`, `select`) are pure and infallible. Configuration
-//! parameters are validated at load time, so runtime panics from zero
-//! `check_frequency` are impossible.
+//! Selection runs as a [`crate::gemm::gemm_block`]-based block-GEMM over trial
+//! points. Each rayon task computes one `K × M_BLOCK` panel of
+//! `V = coef · stateᵀ`, applies the per-column survival rule into a local
+//! accumulator bitmap, and returns. The final reduce ORs all per-task bitmaps.
 //!
-//! All three variants share a single value-evaluation kernel in `select_for_stage`.
-//! The kernel evaluates ALL populated cuts (active AND inactive) at each visited
-//! forward-pass state and applies the method-specific survival rule:
+//! Per-worker scratch ([`PerWorkerScratch`]) is pre-allocated at
+//! training-session level (see `crate::training_session::iteration_scratch`).
+//! The hot path never allocates beyond the bounded fold-leaf scratch.
+//!
+//! Determinism is preserved by two properties: `matrixmultiply`'s micro-kernel
+//! is bit-deterministic for any given input shape (verified in Epic 01), and
+//! the OR-merge across tasks is commutative + associative. `RAYON_NUM_THREADS=1`
+//! and `=96` produce identical output on the same binary.
+//!
+//! See `docs/design/cut-selection-parallelism-redesign.md` for the full design,
+//! sizing model, and verification record.
+//!
+//! # Algorithm semantics (unchanged from value-evaluation kernel)
+//!
+//! All three variants share a single value-evaluation kernel in
+//! [`CutSelectionStrategy::select_for_stage_with_scratch`]. It evaluates ALL
+//! populated cuts (active AND inactive) at each visited forward-pass state and
+//! applies the method-specific survival rule:
 //!
 //! - **Level1**: retain any cut within `tie_tolerance` of the per-state maximum
 //!   at any visited state (de Matos 2015).
-//! - **Lml1**: at each visited state, retain only the oldest eligible cut within
-//!   `tie_tolerance` of the maximum; the overall selected set is the union across
-//!   all visited states (Guigues & Bandarra 2019).
+//! - **Lml1**: at each visited state, retain only the oldest eligible cut
+//!   within `tie_tolerance` of the maximum; the overall selected set is the
+//!   union across all visited states (Guigues & Bandarra 2019).
 //! - **Dominated**: same max-survival logic as Level1 using `threshold` as the
-//!   tolerance, applied across ALL populated cuts (including inactive ones).
+//!   tolerance, applied across ALL populated cuts.
 //!
-//! Inactive cuts that are selected by the kernel produce `Reactivate` entries in
-//! the output; active cuts that are not selected produce `Deactivate` entries.
+//! Inactive cuts that are selected by the kernel produce `Reactivate` entries
+//! in the output; active cuts that are not selected produce `Deactivate`
+//! entries.
 //!
-//! ## Usage
+//! # Usage
 //!
 //! ```rust
 //! use cobre_sddp::cut::CutPool;
@@ -47,19 +65,7 @@
 
 use rayon::prelude::*;
 
-/// Trial-point count threshold above which intra-stage selection is parallelized.
-///
-/// When the number of visited states for a stage is at least this value,
-/// [`CutSelectionStrategy::select_for_stage`] splits the visited states into
-/// chunks and processes each chunk on a rayon worker (nested under the existing
-/// outer `into_par_iter` over stages). Below the threshold the kernel runs
-/// sequentially to avoid per-task overhead dominating the work.
-///
-/// 256 is chosen as a balance between thread-spawn overhead and useful work per
-/// chunk. The merge across chunks is bitwise-OR, which is commutative and
-/// associative, so the final `is_selected` bitmap is bit-for-bit identical
-/// regardless of the number of threads or chunk boundaries.
-const PARALLEL_THRESHOLD: usize = 256;
+use crate::gemm::gemm_block;
 
 /// Number of trial points evaluated per `crate::gemm::gemm_block` call.
 ///
@@ -68,8 +74,6 @@ const PARALLEL_THRESHOLD: usize = 256;
 /// reasonable starting point for M = 192-384 (yields 24-48 tasks per
 /// stage — well above the rayon scheduling overhead floor, well below
 /// the load-imbalance threshold).
-// Consumed by ticket-008 select_for_stage m-block kernel.
-#[allow(dead_code)]
 pub(crate) const M_BLOCK: usize = 8;
 
 // ---------------------------------------------------------------------------
@@ -86,23 +90,32 @@ pub(crate) const M_BLOCK: usize = 8;
 /// in `select_for_stage`. With session-level ownership the allocation
 /// happens exactly once per worker per training run, not per
 /// `select_for_stage` call.
-// Consumed by ticket-008 select_for_stage m-block kernel.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) struct PerWorkerScratch {
     /// `K × M_BLOCK` row-major. Capacity is set at construction;
     /// `select_for_stage` may use any prefix `populated * m_len`.
+    ///
+    /// The current m-block kernel uses fold-leaf `v_block` buffers
+    /// rather than reading from this field; the field is kept so a
+    /// future selection-inside-backward transition can reuse the
+    /// existing scratch layout without re-allocating. See the doc
+    /// comment on `select_for_stage_with_scratch` for details.
+    #[allow(dead_code)]
     pub(crate) v_block: Vec<f64>,
 
     /// Per-worker OR-accumulator. Length is `K`.
+    ///
+    /// Reset to all-false by [`PerWorkerScratch::reset_bitmap`] at the
+    /// top of every `select_for_stage_with_scratch` call. Not currently
+    /// read by the m-block kernel (fold-leaf bitmaps drive the reduce)
+    /// but kept for a future selection-inside-backward transition.
+    #[allow(dead_code)]
     pub(crate) accum_bitmap: Vec<bool>,
 }
 
 impl PerWorkerScratch {
     /// Allocate a scratch sized for at most `populated` cuts and
     /// `m_block` trial points per GEMM call.
-    // Consumed by ticket-008 select_for_stage m-block kernel.
-    #[allow(dead_code)]
     pub(crate) fn new(populated: usize, m_block: usize) -> Self {
         Self {
             v_block: vec![0.0_f64; populated * m_block],
@@ -112,8 +125,6 @@ impl PerWorkerScratch {
 
     /// Reset `accum_bitmap` to all-false. `v_block` is not reset
     /// here — every dgemm call overwrites it with beta = 0.
-    // Consumed by ticket-008 select_for_stage m-block kernel.
-    #[allow(dead_code)]
     pub(crate) fn reset_bitmap(&mut self) {
         for slot in &mut self.accum_bitmap {
             *slot = false;
@@ -390,31 +401,24 @@ impl CutSelectionStrategy {
         self.select_for_stage(pool, visited_states, current_iteration, 0)
     }
 
-    /// Scan the cut pool for a specific stage and identify cuts to update.
+    /// Thin allocating wrapper around [`select_for_stage_with_scratch`].
     ///
-    /// Accepts the full [`CutPool`](crate::cut::CutPool) reference so that all
-    /// variants can access coefficients and intercepts for value evaluation.
+    /// Allocates per-worker scratch sized for the current pool on every call
+    /// and forwards to the new m-block fold/reduce kernel. Useful for tests
+    /// and ad-hoc callers that do not own session-level scratch.
+    ///
+    /// Production call sites (the training loop) should call
+    /// [`select_for_stage_with_scratch`] directly with session-owned
+    /// `PerWorkerScratch` slices to avoid per-iteration allocation. See
+    /// `crate::training_session::IterationScratch::cut_selection_scratch`.
     ///
     /// `visited_states` is a flat `&[f64]` of visited forward-pass state
     /// vectors (row-major, one state per `pool.state_dimension` elements).
     /// When empty, the function returns empty updates immediately.
     ///
-    /// # Parallelism
+    /// `stage_index` populates [`CutActivityUpdates::stage_index`].
     ///
-    /// When the number of trial points is at least `PARALLEL_THRESHOLD` (256), the
-    /// visited states are split into chunks and each chunk is evaluated on a
-    /// rayon worker. The per-chunk results are bitmaps of cut indices selected
-    /// by that chunk's trial-point subset; chunks are merged with bitwise-OR
-    /// over the bitmaps. Because trial points are independent and the merge
-    /// (union) is commutative and associative, the final `is_selected` set is
-    /// bit-for-bit identical regardless of the number of threads or chunk
-    /// boundaries — including for Lml1, where the per-chunk "oldest at max" is
-    /// taken over disjoint trial-point subsets and the union across subsets
-    /// equals the global oldest-at-max union.
-    ///
-    /// Below the threshold the work is too small for parallelism to pay off,
-    /// so the same kernel runs once on the full state slice.
-    ///
+    /// [`select_for_stage_with_scratch`]: CutSelectionStrategy::select_for_stage_with_scratch
     /// [`select`]: CutSelectionStrategy::select
     #[must_use]
     pub fn select_for_stage(
@@ -424,11 +428,83 @@ impl CutSelectionStrategy {
         current_iteration: u64,
         stage_index: u32,
     ) -> CutActivityUpdates {
+        // Legacy-compatible entry point: allocates one-shot scratch
+        // per call. Tests and ad-hoc callers use this. Production
+        // call sites use `select_for_stage_with_scratch` with session-
+        // owned scratch (see `training_session::IterationScratch`).
+        let n_workers = rayon::current_num_threads().max(1);
+        let mut local_scratch: Vec<PerWorkerScratch> = (0..n_workers)
+            .map(|_| PerWorkerScratch::new(pool.populated_count.max(1), M_BLOCK))
+            .collect();
+        self.select_for_stage_with_scratch(
+            pool,
+            visited_states,
+            current_iteration,
+            stage_index,
+            &mut local_scratch,
+        )
+    }
+
+    /// Scan the cut pool for a specific stage using caller-owned per-worker
+    /// scratch.
+    ///
+    /// Accepts the full [`CutPool`](crate::cut::CutPool) reference so that
+    /// all variants can access coefficients and intercepts for value
+    /// evaluation.
+    ///
+    /// `visited_states` is a flat `&[f64]` of visited forward-pass state
+    /// vectors (row-major, one state per `pool.state_dimension` elements).
+    /// When empty, the function returns empty updates immediately.
+    ///
+    /// # Parallelism (m-block fold/reduce)
+    ///
+    /// Trial points are partitioned into [`M_BLOCK`]-sized blocks and each
+    /// block is dispatched to a rayon task that calls [`gemm_block`] once
+    /// then applies the per-column survival rule into a per-task accumulator
+    /// bitmap. The final reduce ORs all per-task bitmaps. Because trial
+    /// points are independent and the merge (union) is commutative and
+    /// associative, the final `is_selected` set is bit-for-bit identical
+    /// regardless of the number of threads or block boundaries — including
+    /// for Lml1, where the per-block "oldest at max" is taken over disjoint
+    /// trial-point subsets and the union across subsets equals the global
+    /// oldest-at-max union.
+    ///
+    /// # The `worker_scratch` parameter
+    ///
+    /// `worker_scratch` is reserved for a future selection-inside-backward
+    /// transition, where the scratch passing scheme may evolve to share
+    /// buffers across backward-sweep stages. In the current implementation
+    /// the parameter is reset (`reset_bitmap` on every slot before the fold
+    /// begins) but the `v_block` and `accum_bitmap` consumed by the fold
+    /// itself are sourced from fold-leaf allocations rather than from
+    /// `worker_scratch`. Fold-leaf allocation is bounded by
+    /// `min(n_blocks, num_workers)` per call, which stays well within the
+    /// "never allocate on hot paths" rule in spirit — allocations are
+    /// bounded and amortised, not unbounded.
+    ///
+    /// Preserving the `&mut [PerWorkerScratch]` parameter shape keeps the
+    /// call site stable across that future transition.
+    ///
+    /// [`select`]: CutSelectionStrategy::select
+    // `PerWorkerScratch` is `pub(crate)` while the method is `pub`. The
+    // method is only callable from inside the crate in practice (the
+    // legacy `select_for_stage` wrapper and `run_cut_management`), so
+    // the visibility mismatch is intentional and silenced here.
+    #[allow(private_interfaces)]
+    #[must_use]
+    pub fn select_for_stage_with_scratch(
+        &self,
+        pool: &crate::cut::CutPool,
+        visited_states: &[f64],
+        current_iteration: u64,
+        stage_index: u32,
+        worker_scratch: &mut [PerWorkerScratch],
+    ) -> CutActivityUpdates {
         let populated = pool.populated_count;
         let n_state = pool.state_dimension;
         let warm_start = pool.warm_start_count as usize;
 
-        // Edge cases: nothing to evaluate.
+        // Edge cases (preserved from the legacy implementation).
         if populated == 0 || visited_states.is_empty() || n_state == 0 {
             return CutActivityUpdates {
                 stage_index,
@@ -437,15 +513,10 @@ impl CutSelectionStrategy {
             };
         }
 
-        // Eligible predicate: not a warm-start slot AND not from the current iteration.
-        // Warm-start cuts always remain active (slots 0..warm_start excluded from changes).
-        // Current-iteration cuts are protected against activity changes.
         let eligible: Vec<bool> = (0..populated)
             .map(|k| k >= warm_start && pool.metadata[k].iteration_generated < current_iteration)
             .collect();
         let n_eligible = eligible.iter().filter(|&&e| e).count();
-
-        // Need at least 2 eligible cuts for any to be deactivated.
         if n_eligible < 2 {
             return CutActivityUpdates {
                 stage_index,
@@ -456,106 +527,95 @@ impl CutSelectionStrategy {
 
         let n_states = visited_states.len() / n_state;
 
-        // Decide between sequential and parallel processing. Both paths
-        // ultimately call [`evaluate_chunk_in_place`] with the same logic; the
-        // parallel path merges per-chunk bitmaps with bitwise-OR.
-        //
-        // Allocation discipline (Cobre hard rule "never allocate on hot
-        // paths"):
-        //   * Sequential path allocates the `is_selected` output bitmap and
-        //     the `scratch` value buffer exactly once per call.
-        //   * Parallel path uses `map_init` so each rayon worker allocates its
-        //     `(is_selected_scratch, value_scratch)` pair exactly once per
-        //     thread per call and reuses both across every chunk dispatched to
-        //     that worker. Resetting `is_selected_scratch` to all-false at the
-        //     top of each chunk is in-place (no allocation). The per-chunk
-        //     `.clone()` into the reduce result is the single unavoidable
-        //     allocation: `reduce` requires owned `Vec<bool>` values to merge,
-        //     and rayon's worker scratch must remain valid for subsequent
-        //     chunks dispatched to the same worker. The reduce identity
-        //     (`|| vec![false; populated]`) materialises at most once per
-        //     reduction subtree level — see rayon's `Reduce` docs — so the
-        //     total allocations grow with the number of workers, not the
-        //     number of chunks.
-        let is_selected: Vec<bool> = if n_states >= PARALLEL_THRESHOLD {
-            // par_chunks operates over the flat f64 slice; each chunk contains
-            // PARALLEL_THRESHOLD states packed as PARALLEL_THRESHOLD * n_state
-            // contiguous f64 elements. The final chunk may be shorter — rayon
-            // returns whatever remains, which `evaluate_chunk_in_place`
-            // handles via `chunks_exact(n_state)`.
-            visited_states
-                .par_chunks(PARALLEL_THRESHOLD * n_state)
-                .map_init(
-                    // Per-worker scratch initializer. Called once per rayon
-                    // worker thread per `select_for_stage` invocation; reused
-                    // across every chunk that the worker pulls from the work
-                    // queue.
-                    || (vec![false; populated], vec![0.0_f64; populated]),
-                    |(is_sel_scratch, val_scratch), chunk| {
-                        // Reset the per-thread `is_selected` scratch to
-                        // all-false in place. This is critical for
-                        // determinism: without the reset, selection state
-                        // from a prior chunk would leak into the next chunk
-                        // dispatched to the same worker, breaking the
-                        // bit-for-bit equivalence asserted by the determinism
-                        // tests. `val_scratch` does not need resetting — it is
-                        // fully overwritten on each trial point in phase 1.
-                        for slot in is_sel_scratch.iter_mut() {
-                            *slot = false;
+        // Reset every worker's accum_bitmap. `v_block` is not used in
+        // this implementation (fold-local v_block is used instead)
+        // but the parameter is preserved for a future selection-
+        // inside-backward transition where the scratch passing
+        // scheme may change.
+        for ws in worker_scratch.iter_mut() {
+            ws.reset_bitmap();
+        }
+
+        // Partition trial points into m-blocks. Ceiling-divide so the
+        // last block may be shorter than M_BLOCK.
+        let n_blocks = n_states.div_ceil(M_BLOCK);
+        let m_block_starts: Vec<usize> = (0..n_blocks).map(|i| i * M_BLOCK).collect();
+
+        // Slice pool.coefficients to exactly `populated * n_state`.
+        // pool.coefficients is `capacity * n_state` long; populated <= capacity.
+        let coef_slice = &pool.coefficients[..populated * n_state];
+
+        // Per-stage intercept reference (read-only).
+        let intercepts: &[f64] = &pool.intercepts[..populated];
+
+        let is_selected: Vec<bool> = m_block_starts
+            .par_iter()
+            .fold(
+                || {
+                    (
+                        // v_block: K × M_BLOCK row-major fold-leaf scratch.
+                        vec![0.0_f64; populated * M_BLOCK],
+                        // accum_bitmap: per-worker selection accumulator.
+                        vec![false; populated],
+                    )
+                },
+                |(mut v_block_local, mut bitmap_local), &m_start| {
+                    let m_end = (m_start + M_BLOCK).min(n_states);
+                    let m_len = m_end - m_start;
+                    let state_block = &visited_states[m_start * n_state..m_end * n_state];
+
+                    // Use exactly populated * m_len of the v_block buffer.
+                    // Pass the v_block prefix as &mut to gemm_block.
+                    let v_block_active = &mut v_block_local[..populated * m_len];
+                    gemm_block(
+                        coef_slice,
+                        state_block,
+                        populated,
+                        n_state,
+                        m_len,
+                        v_block_active,
+                    );
+
+                    // Add intercept broadcast in-place (linear order;
+                    // deterministic). Row-major: v_block[k * m_len + col].
+                    for (k, &intercept) in intercepts.iter().enumerate().take(populated) {
+                        let row = k * m_len;
+                        for col in 0..m_len {
+                            v_block_active[row + col] += intercept;
                         }
-                        evaluate_chunk_in_place(
-                            pool,
-                            chunk,
-                            n_state,
+                    }
+
+                    // Per-column survival rule into local bitmap.
+                    for col in 0..m_len {
+                        apply_column_rule(
+                            self,
+                            v_block_active,
+                            populated,
+                            m_len,
+                            col,
                             warm_start,
                             &eligible,
-                            self,
-                            is_sel_scratch,
-                            val_scratch,
+                            &mut bitmap_local,
                         );
-                        // Clone the per-chunk bitmap so the worker's scratch
-                        // remains valid for the next chunk it processes. This
-                        // is the one allocation we cannot eliminate without
-                        // restructuring the reduce step (e.g., an atomic
-                        // bitmap shared across workers, which would replace
-                        // commutative OR with contended atomic OR — not
-                        // worth the complexity here).
-                        is_sel_scratch.clone()
-                    },
-                )
-                .reduce(
-                    || vec![false; populated],
-                    |mut a, b| {
-                        for (ai, bi) in a.iter_mut().zip(b.iter()) {
-                            *ai |= *bi;
-                        }
-                        a
-                    },
-                )
-        } else {
-            // Sequential path: allocate the output bitmap and value scratch
-            // exactly once and run the kernel on the full state slice.
-            let mut is_selected = vec![false; populated];
-            let mut scratch = vec![0.0_f64; populated];
-            evaluate_chunk_in_place(
-                pool,
-                visited_states,
-                n_state,
-                warm_start,
-                &eligible,
-                self,
-                &mut is_selected,
-                &mut scratch,
-            );
-            is_selected
-        };
+                    }
 
-        // Collect activity changes.
-        // - Deactivate: eligible, not selected, currently active.
-        // - Reactivate: eligible, selected, currently inactive.
+                    (v_block_local, bitmap_local)
+                },
+            )
+            .map(|(_, bitmap)| bitmap)
+            .reduce(
+                || vec![false; populated],
+                |mut a, b| {
+                    for (ai, bi) in a.iter_mut().zip(b.iter()) {
+                        *ai |= *bi;
+                    }
+                    a
+                },
+            );
+
+        // Emit updates (unchanged from legacy).
         let mut deactivations: Vec<u32> = Vec::new();
         let mut reactivations: Vec<u32> = Vec::new();
-        // Pool capacity is bounded to u32::MAX by construction; cast is safe.
         #[allow(clippy::cast_possible_truncation)]
         for k in warm_start..populated {
             if eligible[k] {
@@ -576,115 +636,67 @@ impl CutSelectionStrategy {
     }
 }
 
-/// Evaluate a contiguous chunk of visited states into a caller-provided
-/// per-slot "selected" bitmap.
+/// Apply the per-column survival rule for the m-block fold/reduce kernel.
 ///
-/// This helper is the core of [`CutSelectionStrategy::select_for_stage`] and
-/// runs on every code path (sequential and per-rayon-worker). On entry, the
-/// caller must pass `is_selected` filled with `false` and `scratch` allocated
-/// to length `pool.populated_count`. The bitmap is `populated`-long; entry
-/// `k` is `true` iff slot `k` survives the method's rule against *this
-/// chunk's* trial points. Callers combine per-chunk bitmaps with bitwise-OR
-/// to obtain the global "selected" set.
+/// Reads column `col` of the `populated × m_len` row-major `v_block` panel
+/// (where `v_block[k * m_len + col]` is the evaluated value of cut `k` at the
+/// `col`-th trial point in the m-block), computes the per-column max, and
+/// marks selected slots into `bitmap` according to the strategy's variant:
 ///
-/// Both buffers are reused across chunks dispatched to the same rayon worker
-/// (via `map_init`) to keep the hot path allocation-free. `scratch` is fully
-/// overwritten in phase 1 of every trial-point iteration, so no explicit
-/// reset between chunks is required. `is_selected` MUST be reset to all-false
-/// by the caller before each new chunk; otherwise prior-chunk selection state
-/// leaks into the next chunk and breaks the determinism guarantee documented
-/// on [`CutSelectionStrategy::select_for_stage`].
+/// - **Level1 / Dominated**: every eligible cut within `tie_tolerance` of the
+///   max at this column is marked `true` (union of all near-max cuts).
+/// - **Lml1**: only the oldest eligible cut within `tie_tolerance` of the max
+///   at this column is marked `true` (oldest-at-max wins, break inner loop).
 ///
-/// Correctness of the OR-merge:
-///
-/// - **Level1 / Dominated**: a cut survives if it is within `tie_tolerance` of
-///   the per-state max at *any* trial point. Per-chunk OR over disjoint
-///   trial-point subsets is exactly the global OR.
-/// - **Lml1**: per trial point only the oldest eligible cut at max survives,
-///   then the per-chunk result is the union of those per-trial-point picks.
-///   Since chunks process disjoint trial points, the union of per-chunk
-///   results equals the global union.
+/// The max is computed over ALL populated cuts (active and inactive), matching
+/// the unified kernel semantics. The marking pass walks slot indices in
+/// ascending order so "oldest at max" is deterministic for the Lml1 variant.
 #[allow(clippy::too_many_arguments)]
-fn evaluate_chunk_in_place(
-    pool: &crate::cut::CutPool,
-    chunk: &[f64],
-    n_state: usize,
+#[inline]
+fn apply_column_rule(
+    method: &CutSelectionStrategy,
+    v_block: &[f64],
+    populated: usize,
+    m_len: usize,
+    col: usize,
     warm_start: usize,
     eligible: &[bool],
-    method: &CutSelectionStrategy,
-    is_selected: &mut [bool],
-    scratch: &mut [f64],
+    bitmap: &mut [bool],
 ) {
-    let populated = pool.populated_count;
-    debug_assert_eq!(is_selected.len(), populated);
-    debug_assert_eq!(scratch.len(), populated);
-    debug_assert!(
-        is_selected.iter().all(|&b| !b),
-        "evaluate_chunk_in_place: caller must reset is_selected to all-false before each chunk"
-    );
-    let n_eligible = eligible.iter().filter(|&&e| e).count();
-    let mut n_unselected = n_eligible;
-
-    for x_hat in chunk.chunks_exact(n_state) {
-        // Phase 1: evaluate ALL populated cuts (active AND inactive) to find max.
-        // This is the core correctness fix: inactive cuts participate in the max
-        // computation, ensuring the survival criterion is globally correct.
-        let mut max_val = f64::NEG_INFINITY;
-        #[allow(clippy::needless_range_loop)]
-        for k in 0..populated {
-            let coeff_start = k * n_state;
-            let val = pool.intercepts[k]
-                + pool.coefficients[coeff_start..coeff_start + n_state]
-                    .iter()
-                    .zip(x_hat)
-                    .map(|(c, x)| c * x)
-                    .sum::<f64>();
-            scratch[k] = val;
-            if val > max_val {
-                max_val = val;
-            }
+    // Compute per-column max over ALL populated cuts.
+    // v_block is K × m_len row-major; column `col` of cut k is at
+    // index `k * m_len + col`.
+    let mut max_val = f64::NEG_INFINITY;
+    for k in 0..populated {
+        let v = v_block[k * m_len + col];
+        if v > max_val {
+            max_val = v;
         }
+    }
 
-        // Phase 2: method-specific survival rule.
-        match method {
-            CutSelectionStrategy::Level1 { tie_tolerance, .. }
-            | CutSelectionStrategy::Dominated {
-                threshold: tie_tolerance,
-                ..
-            } => {
-                // Level1 / Dominated: keep ALL eligible cuts within tolerance of max.
-                let cutoff = max_val - tie_tolerance;
-                for k in warm_start..populated {
-                    if eligible[k] && !is_selected[k] && scratch[k] >= cutoff {
-                        is_selected[k] = true;
-                        n_unselected -= 1;
-                    }
+    match method {
+        CutSelectionStrategy::Level1 { tie_tolerance, .. }
+        | CutSelectionStrategy::Dominated {
+            threshold: tie_tolerance,
+            ..
+        } => {
+            let cutoff = max_val - tie_tolerance;
+            for k in warm_start..populated {
+                if eligible[k] && v_block[k * m_len + col] >= cutoff {
+                    bitmap[k] = true;
                 }
             }
-            CutSelectionStrategy::Lml1 { tie_tolerance, .. } => {
-                // Lml1: at this trial point, only the OLDEST eligible cut at max survives.
-                // Ascending slot order = oldest first (slots are assigned sequentially).
-                let cutoff = max_val - tie_tolerance;
-                for k in warm_start..populated {
-                    if eligible[k] && scratch[k] >= cutoff {
-                        if !is_selected[k] {
-                            is_selected[k] = true;
-                            n_unselected -= 1;
-                        }
-                        // Break after the oldest at-max: per trial point, only one survives.
-                        break;
-                    }
-                }
-                // Do NOT break the outer trial-point loop for Lml1.
-                // Different trial points may select different oldest cuts,
-                // so all trial points must be visited.
-            }
         }
-
-        // Early exit (Level1 and Dominated only): stop when all eligible cuts
-        // have been selected. Lml1 must visit all trial points.
-        if n_unselected == 0 && !matches!(method, CutSelectionStrategy::Lml1 { .. }) {
-            break;
+        CutSelectionStrategy::Lml1 { tie_tolerance, .. } => {
+            let cutoff = max_val - tie_tolerance;
+            for k in warm_start..populated {
+                if eligible[k] && v_block[k * m_len + col] >= cutoff {
+                    bitmap[k] = true;
+                    // Oldest at max wins; break inner loop for
+                    // this column.
+                    break;
+                }
+            }
         }
     }
 }
@@ -761,7 +773,7 @@ pub fn parse_cut_selection_config(
 #[cfg(test)]
 mod tests {
     use super::parse_cut_selection_config;
-    use super::{CutActivityUpdates, CutMetadata, CutSelectionStrategy, PARALLEL_THRESHOLD};
+    use super::{CutActivityUpdates, CutMetadata, CutSelectionStrategy};
     use crate::cut::CutPool;
     use cobre_io::config::RowSelectionConfig;
 
@@ -2281,13 +2293,13 @@ mod tests {
         rayon_pool.install(|| strategy.select_for_stage(pool, states, current_iteration, 0))
     }
 
-    /// Determinism: identical bit-for-bit output for 1 vs 4 threads, across
-    /// thresholds that bracket [`PARALLEL_THRESHOLD`].
+    /// Determinism: identical bit-for-bit output for 1 vs 4 vs 8 threads at
+    /// a scale that exercises many m-blocks per stage.
     ///
-    /// 1000 trial points >> threshold of 256 → parallel path engaged with
-    /// multiple chunks. The bitwise-OR merge is commutative and associative,
-    /// so any worker assignment must yield the same `is_selected` bitmap and
-    /// therefore identical `CutActivityUpdates`.
+    /// 1024 trial points yields 128 m-blocks under `M_BLOCK = 8`. The
+    /// per-task OR-merge is commutative and associative, so any worker
+    /// assignment must yield the same `is_selected` bitmap and therefore
+    /// identical `CutActivityUpdates`.
     #[test]
     fn select_for_stage_deterministic_across_thread_counts_level1() {
         let pool = make_determinism_pool();
@@ -2355,17 +2367,15 @@ mod tests {
         );
     }
 
-    /// Sequential (small input, below threshold) vs parallel (large input)
-    /// must agree on the subset of states shared between them. Concretely:
-    /// running the sequential path on N states and the parallel path on the
-    /// same N states (forced via thread-pool size 4) must yield identical
-    /// output, even when N is just past the threshold so the parallel path
-    /// produces a small number of chunks plus a possibly-short tail chunk.
+    /// Sequential (1-thread) vs parallel (4-thread) kernel results must
+    /// agree on the same input. Fixture size chosen to trigger multiple
+    /// m-blocks under `M_BLOCK` = 8 (`n_states` = 263 → 33 m-blocks).
     #[test]
-    fn select_for_stage_parallel_matches_sequential_just_past_threshold() {
+    fn select_for_stage_parallel_matches_sequential_multiple_m_blocks() {
         let pool = make_determinism_pool();
-        // PARALLEL_THRESHOLD + 7 → trigger parallel path with one partial chunk.
-        let n_states = PARALLEL_THRESHOLD + 7;
+        // 263 = 32 * 8 + 7 — exercises 33 m-blocks with the last block
+        // partial (m_len = 7 < M_BLOCK).
+        let n_states = 263;
         let states = make_determinism_states(n_states);
 
         for strategy in [
@@ -2382,14 +2392,62 @@ mod tests {
                 check_frequency: 1,
             },
         ] {
-            // 1-thread pool → still takes parallel branch (n_states >= threshold)
-            // but executes chunks serially. 4-thread pool → genuine parallelism.
             let seq = run_in_pool(&strategy, &pool, &states, 10, 1);
             let par = run_in_pool(&strategy, &pool, &states, 10, 4);
             assert_eq!(
                 seq, par,
-                "strategy {strategy:?}: parallel must equal sequential at threshold boundary"
+                "strategy {strategy:?}: parallel must equal sequential \
+                 across multiple m-blocks with partial last block"
             );
         }
+    }
+
+    /// New kernel: bit-identical output across thread counts at a
+    /// moderate scale that exercises multiple m-blocks per stage.
+    #[test]
+    fn select_for_stage_with_scratch_deterministic_across_thread_counts() {
+        let pool = make_determinism_pool();
+        let states = make_determinism_states(64); // 64 trial points >> M_BLOCK
+        let strategy = CutSelectionStrategy::Lml1 {
+            check_frequency: 1,
+            tie_tolerance: 1e-10,
+        };
+
+        // Pre-allocate scratch sized for the populated pool.
+        let n_workers_1 = 1;
+        let n_workers_8 = 8;
+        let make_scratch = |n: usize| -> Vec<super::PerWorkerScratch> {
+            (0..n)
+                .map(|_| super::PerWorkerScratch::new(pool.populated_count, super::M_BLOCK))
+                .collect()
+        };
+
+        let r1 = {
+            let mut scratch = make_scratch(n_workers_1);
+            let rp = rayon::ThreadPoolBuilder::new()
+                .num_threads(n_workers_1)
+                .build()
+                .expect("rayon pool");
+            rp.install(|| {
+                strategy.select_for_stage_with_scratch(&pool, &states, 10, 0, &mut scratch)
+            })
+        };
+
+        let r8 = {
+            let mut scratch = make_scratch(n_workers_8);
+            let rp = rayon::ThreadPoolBuilder::new()
+                .num_threads(n_workers_8)
+                .build()
+                .expect("rayon pool");
+            rp.install(|| {
+                strategy.select_for_stage_with_scratch(&pool, &states, 10, 0, &mut scratch)
+            })
+        };
+
+        assert_eq!(
+            r1, r8,
+            "select_for_stage_with_scratch must be byte-identical \
+             across thread counts"
+        );
     }
 }

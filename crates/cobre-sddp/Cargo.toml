@@ -65,6 +65,10 @@ harness = false
 name = "cut_application_anticipated_state"
 harness = false
 
+[[bench]]
+name = "cut_selection_kernel"
+harness = false
+
 # Override unsafe_code to "allow" for this crate because the cut-selection
 # kernel calls `matrixmultiply::dgemm` (a `pub unsafe fn`) via the safe
 # wrapper in `src/gemm.rs`. All other workspace lints are manually

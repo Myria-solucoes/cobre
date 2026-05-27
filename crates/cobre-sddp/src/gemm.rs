@@ -43,8 +43,6 @@
 /// for the zero-dim no-op contract. Release builds invoke UB if the
 /// slices are undersized for non-zero dimensions — the caller's contract
 /// is to size them correctly.
-// Consumed by ticket-008 select_for_stage m-block kernel.
-#[allow(dead_code)]
 #[inline]
 pub(crate) fn gemm_block(
     coef: &[f64],
