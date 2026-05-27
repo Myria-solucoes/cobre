@@ -17,9 +17,9 @@
 //! The hot path never allocates beyond the bounded fold-leaf scratch.
 //!
 //! Determinism is preserved by two properties: `matrixmultiply`'s micro-kernel
-//! is bit-deterministic for any given input shape (verified in Epic 01), and
-//! the OR-merge across tasks is commutative + associative. `RAYON_NUM_THREADS=1`
-//! and `=96` produce identical output on the same binary.
+//! is bit-deterministic for any given input shape, and the OR-merge across
+//! tasks is commutative + associative. `RAYON_NUM_THREADS=1` and `=96` produce
+//! identical output on the same binary.
 //!
 //! See `docs/design/cut-selection-parallelism-redesign.md` for the full design,
 //! sizing model, and verification record.
@@ -81,6 +81,15 @@ pub(crate) const M_BLOCK: usize = 8;
 // ---------------------------------------------------------------------------
 
 /// Per-worker scratch for the m-block fold/reduce kernel.
+///
+/// **Status: forward-compatible stub, not consumed by the current kernel.**
+/// The current `select_for_stage_with_scratch` allocates fresh fold-leaf
+/// `v_block` and bitmap buffers per call. This struct's fields are
+/// pre-allocated at session level and `reset_bitmap` is called per stage,
+/// but neither field is read by the kernel today. The shape is kept so a
+/// future selection-inside-backward transition can drop in
+/// `worker_scratch[i].v_block` / `accum_bitmap` slices in place of the
+/// fold-leaf allocations without re-plumbing the call sites.
 ///
 /// `v_block` holds one `K × M_BLOCK` GEMM output panel (row-major).
 /// `accum_bitmap` is the per-worker OR-accumulator over all m-blocks
@@ -428,10 +437,6 @@ impl CutSelectionStrategy {
         current_iteration: u64,
         stage_index: u32,
     ) -> CutActivityUpdates {
-        // Legacy-compatible entry point: allocates one-shot scratch
-        // per call. Tests and ad-hoc callers use this. Production
-        // call sites use `select_for_stage_with_scratch` with session-
-        // owned scratch (see `training_session::IterationScratch`).
         let n_workers = rayon::current_num_threads().max(1);
         let mut local_scratch: Vec<PerWorkerScratch> = (0..n_workers)
             .map(|_| PerWorkerScratch::new(pool.populated_count.max(1), M_BLOCK))
@@ -486,10 +491,8 @@ impl CutSelectionStrategy {
     /// call site stable across that future transition.
     ///
     /// [`select`]: CutSelectionStrategy::select
-    // `PerWorkerScratch` is `pub(crate)` while the method is `pub`. The
-    // method is only callable from inside the crate in practice (the
-    // legacy `select_for_stage` wrapper and `run_cut_management`), so
-    // the visibility mismatch is intentional and silenced here.
+    // `PerWorkerScratch` is `pub(crate)` while the method is `pub`; the
+    // visibility mismatch is intentional (callers are in-crate only).
     #[allow(private_interfaces)]
     #[must_use]
     pub fn select_for_stage_with_scratch(
@@ -504,7 +507,6 @@ impl CutSelectionStrategy {
         let n_state = pool.state_dimension;
         let warm_start = pool.warm_start_count as usize;
 
-        // Edge cases (preserved from the legacy implementation).
         if populated == 0 || visited_states.is_empty() || n_state == 0 {
             return CutActivityUpdates {
                 stage_index,
@@ -527,11 +529,9 @@ impl CutSelectionStrategy {
 
         let n_states = visited_states.len() / n_state;
 
-        // Reset every worker's accum_bitmap. `v_block` is not used in
-        // this implementation (fold-local v_block is used instead)
-        // but the parameter is preserved for a future selection-
-        // inside-backward transition where the scratch passing
-        // scheme may change.
+        // Reset every worker's accum_bitmap. See the `worker_scratch`
+        // section of the method doc-comment for why this slice is held
+        // across calls even though the kernel uses fold-leaf buffers.
         for ws in worker_scratch.iter_mut() {
             ws.reset_bitmap();
         }
@@ -541,11 +541,9 @@ impl CutSelectionStrategy {
         let n_blocks = n_states.div_ceil(M_BLOCK);
         let m_block_starts: Vec<usize> = (0..n_blocks).map(|i| i * M_BLOCK).collect();
 
-        // Slice pool.coefficients to exactly `populated * n_state`.
-        // pool.coefficients is `capacity * n_state` long; populated <= capacity.
+        // `pool.coefficients` is `capacity * n_state` long; trim to the
+        // populated prefix so dgemm sees exactly `populated * n_state`.
         let coef_slice = &pool.coefficients[..populated * n_state];
-
-        // Per-stage intercept reference (read-only).
         let intercepts: &[f64] = &pool.intercepts[..populated];
 
         let is_selected: Vec<bool> = m_block_starts
@@ -564,8 +562,6 @@ impl CutSelectionStrategy {
                     let m_len = m_end - m_start;
                     let state_block = &visited_states[m_start * n_state..m_end * n_state];
 
-                    // Use exactly populated * m_len of the v_block buffer.
-                    // Pass the v_block prefix as &mut to gemm_block.
                     let v_block_active = &mut v_block_local[..populated * m_len];
                     gemm_block(
                         coef_slice,
@@ -613,7 +609,6 @@ impl CutSelectionStrategy {
                 },
             );
 
-        // Emit updates (unchanged from legacy).
         let mut deactivations: Vec<u32> = Vec::new();
         let mut reactivations: Vec<u32> = Vec::new();
         #[allow(clippy::cast_possible_truncation)]
@@ -2233,7 +2228,7 @@ mod tests {
         let mut pool = CutPool::new(2, 1, 1, 0);
         pool.add_cut(0, 0, 10.0, &[0.0]); // higher value
         pool.add_cut(1, 0, 1.0, &[0.0]); // lower value
-        // Slot 0 from current iteration → ineligible. Slot 1 eligible.
+                                         // Slot 0 from current iteration → ineligible. Slot 1 eligible.
         pool.metadata[0].iteration_generated = 10; // current_iteration
         pool.metadata[1].iteration_generated = 5;
         // n_eligible = 1 (only slot 1). Guard returns empty.

@@ -78,11 +78,12 @@ pub(crate) fn gemm_block(
 
     // SAFETY:
     //   * The zero-dim early-return above guarantees k_rows, d, m_len
-    //     are all > 0. The three debug_assert_eq calls then establish
-    //     that `coef.len() == k_rows*d`, `state_block.len() == m_len*d`,
-    //     and `v_block.len() == k_rows*m_len`. In release builds the
-    //     caller's contract is to satisfy these dimensions before
-    //     invoking the wrapper.
+    //     are all > 0. `coef.len() >= k_rows*d`,
+    //     `state_block.len() >= m_len*d`, and `v_block.len() >= k_rows*m_len`
+    //     are required by the caller's contract. Debug builds assert this
+    //     via the three debug_assert_eq calls above; release builds rely on
+    //     the caller — the function's doc comment warns that mismatched
+    //     dimensions invoke UB in release.
     //   * `coef` and `state_block` are immutable shared borrows;
     //     `v_block` is an exclusive mutable borrow. The three slices
     //     come from distinct owners, so the raw pointers passed to

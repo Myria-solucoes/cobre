@@ -52,6 +52,14 @@ pub(crate) struct IterationScratch {
     pub lb_scratch: LbEvalScratch,
     /// Per-rayon-worker scratch for the cut-selection kernel.
     ///
+    /// **Status: forward-compatible stub.** The current m-block kernel
+    /// allocates fold-leaf `v_block` / bitmap buffers per call rather
+    /// than reading from these entries; `reset_bitmap` is called per
+    /// stage but no field is consumed by the kernel today. See the
+    /// doc on [`crate::cut_selection::PerWorkerScratch`] for the
+    /// rationale (forward-compat with the selection-inside-backward
+    /// transition tracked separately).
+    ///
     /// One entry per rayon worker, each sized for the maximum
     /// `pool.capacity` across all stages and `cut_selection::M_BLOCK`
     /// trial points per GEMM call. Pre-allocated at session init so
@@ -504,7 +512,7 @@ mod tests {
         let n_state = 4;
         let fcf_pool_0_capacity = 10;
         let max_pool_capacity = 25; // higher than pool 0 to verify it
-        // is the sizing parameter
+                                    // is the sizing parameter
         let template_0_num_rows = 5;
         let hydro_count = 1;
         let max_par_order = 1;

@@ -888,9 +888,8 @@ where
                 let n_reactivated = deact.reactivations.len() as u32;
                 rows_deactivated += n_deact;
 
-                // Apply both deactivations AND reactivations from the
-                // unified kernel output. Earlier code only applied
-                // deactivations, silently dropping reactivation entries.
+                // Apply both deactivations and reactivations from the
+                // unified kernel output.
                 self.fcf.pools[stage].apply_updates(&deact);
 
                 let active_after = self.fcf.pools[stage].active_count() as u32;
