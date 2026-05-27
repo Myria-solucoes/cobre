@@ -24,14 +24,13 @@
 // External crate imports
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 
 use chrono::NaiveDate;
 use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::{
-    Bus, DeficitSegment, EntityId, TrainingEvent,
     scenario::{
         CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile, SamplingScheme,
     },
@@ -39,16 +38,16 @@ use cobre_core::{
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
         StageStateConfig,
     },
+    Bus, DeficitSegment, EntityId, TrainingEvent,
 };
 use cobre_solver::{
     Basis, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
 };
 use cobre_stochastic::{
-    ClassSchemes, OpeningTreeInputs, StochasticContext, build_stochastic_context,
+    build_stochastic_context, ClassSchemes, OpeningTreeInputs, StochasticContext,
 };
 
 use cobre_sddp::{
-    SddpError, StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
     config::{CutManagementConfig, EventConfig, LoopConfig},
     context::{StageContext, TrainingContext},
     cut::fcf::FutureCostFunction,
@@ -56,7 +55,7 @@ use cobre_sddp::{
     indexer::StageIndexer,
     inflow_method::InflowNonNegativityMethod,
     risk_measure::RiskMeasure,
-    train,
+    train, SddpError, StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
 };
 
 // ===========================================================================
@@ -353,9 +352,9 @@ impl SolverInterface for ExpandingMockSolver {
 /// Build a `StochasticContext` with `n_stages` stages, 1 hydro, and seed 42.
 #[allow(clippy::cast_possible_wrap, clippy::too_many_lines)]
 fn make_stochastic_context(n_stages: usize, n_openings: usize) -> StochasticContext {
-    use cobre_core::SystemBuilder;
     use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
     use cobre_core::scenario::InflowModel;
+    use cobre_core::SystemBuilder;
 
     let bus = Bus {
         id: EntityId(0),
@@ -1229,10 +1228,10 @@ fn train_propagates_infeasible_error() {
 
 /// D17: Level1 cut selection produces convergent results with bounded pool.
 ///
-/// Verifies that enabling `CutSelectionStrategy::Level1 { threshold: 0,
-/// check_frequency: 2 }` does not break convergence. With the mock solver
-/// returning `dual: &[0.0, 0.0]`, all generated cuts have `active_count == 0`
-/// and are deactivated by Level1 selection.
+/// Verifies that enabling `CutSelectionStrategy::Level1 { check_frequency: 2,
+/// tie_tolerance: 1e-10 }` does not break convergence. With the stub kernel,
+/// no cuts are deactivated by Level1 selection (ticket-002 will implement the
+/// value-based kernel).
 ///
 /// Checks:
 /// - Lower bound is monotone non-decreasing.
@@ -1260,8 +1259,8 @@ fn d17_level1_cut_selection_convergence() {
         },
         cut_management: CutManagementConfig {
             cut_selection: Some(CutSelectionStrategy::Level1 {
-                threshold: 0,
                 check_frequency: 2,
+                tie_tolerance: 1e-10,
             }),
             budget: None,
             cut_activity_tolerance: 0.0,
@@ -1439,8 +1438,8 @@ fn d17_level1_cut_selection_reconstruction() {
             },
             cut_management: CutManagementConfig {
                 cut_selection: Some(CutSelectionStrategy::Level1 {
-                    threshold: 0,
                     check_frequency: 2,
+                    tie_tolerance: 1e-10,
                 }),
                 budget: None,
                 cut_activity_tolerance: 0.0,
@@ -1497,11 +1496,10 @@ fn d17_level1_cut_selection_reconstruction() {
 
 /// D18: Lml1 cut selection produces convergent results with bounded pool.
 ///
-/// Verifies that enabling `CutSelectionStrategy::Lml1 { memory_window: 3,
-/// check_frequency: 2 }` does not break convergence. The mock solver produces
-/// zero-activity cuts (dual = 0), so `last_active_iter` never advances past
-/// `iteration_generated`. After `memory_window` iterations, all older cuts
-/// are deactivated by Lml1.
+/// Verifies that enabling `CutSelectionStrategy::Lml1 { check_frequency: 2,
+/// tie_tolerance: 1e-10 }` does not break convergence. With the stub kernel,
+/// no cuts are deactivated by Lml1 selection (ticket-002 will implement the
+/// value-based kernel).
 ///
 /// Checks:
 /// - Lower bound is monotone non-decreasing.
@@ -1529,8 +1527,8 @@ fn d18_lml1_cut_selection_convergence() {
         },
         cut_management: CutManagementConfig {
             cut_selection: Some(CutSelectionStrategy::Lml1 {
-                memory_window: 3,
                 check_frequency: 2,
+                tie_tolerance: 1e-10,
             }),
             budget: None,
             cut_activity_tolerance: 0.0,
@@ -1659,9 +1657,9 @@ fn test_forward_basis_reconstruct_bit_identical_d01() {
 
     use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
     use cobre_core::scenario::ScenarioSource;
-    use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic};
-    use cobre_solver::SolverInterface;
+    use cobre_sddp::{hydro_models::prepare_hydro_models, setup::prepare_stochastic, StudySetup};
     use cobre_solver::highs::HighsSolver;
+    use cobre_solver::SolverInterface;
 
     struct LocalStubComm;
 

@@ -13,7 +13,7 @@
 //! Compile-time assertions at the bottom of this module catch any future drift
 //! between the named constants and the documented field values.
 
-use cobre_solver::{HighsProfile, DEFAULT_PROFILE_HEURISTIC_SENTINEL};
+use cobre_solver::{DEFAULT_PROFILE_HEURISTIC_SENTINEL, HighsProfile};
 
 /// The three algorithmic phases of the SDDP algorithm.
 ///
@@ -138,7 +138,7 @@ const _: () = {
 mod tests {
     use cobre_solver::HighsProfile;
 
-    use super::{Phase, BACKWARD_PROFILE, FORWARD_PROFILE, SIMULATION_PROFILE};
+    use super::{BACKWARD_PROFILE, FORWARD_PROFILE, Phase, SIMULATION_PROFILE};
 
     /// `Phase::profile()` returns the matching named constant for each variant.
     #[test]

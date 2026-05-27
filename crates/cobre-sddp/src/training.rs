@@ -1829,8 +1829,8 @@ mod tests {
 
     /// `cut_selection_level1_runs_at_frequency`
     ///
-    /// Given `train` with `cut_selection: Some(Level1 { threshold: 0,
-    /// check_frequency: 3 })` running for 5 iterations, then
+    /// Given `train` with `cut_selection: Some(Level1 { check_frequency: 3,
+    /// tie_tolerance: 1e-10 })` running for 5 iterations, then
     /// `PolicySelectionComplete` is emitted exactly once (at iteration 3).
     #[test]
     fn cut_selection_level1_runs_at_frequency() {
@@ -1861,8 +1861,8 @@ mod tests {
             },
             cut_management: CutManagementConfig {
                 cut_selection: Some(CutSelectionStrategy::Level1 {
-                    threshold: 0,
                     check_frequency: 3,
+                    tie_tolerance: 1e-10,
                 }),
                 budget: None,
                 cut_activity_tolerance: 0.0,
@@ -1981,8 +1981,8 @@ mod tests {
             },
             cut_management: CutManagementConfig {
                 cut_selection: Some(CutSelectionStrategy::Level1 {
-                    threshold: 0,
                     check_frequency: 2,
+                    tie_tolerance: 1e-10,
                 }),
                 budget: None,
                 cut_activity_tolerance: 0.0,

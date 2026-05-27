@@ -23,8 +23,8 @@
 //! };
 //!
 //! let strategy = CutSelectionStrategy::Level1 {
-//!     threshold: 0,
 //!     check_frequency: 5,
+//!     tie_tolerance: 1e-10,
 //! };
 //!
 //! // Should run at multiples of check_frequency (excluding 0).
@@ -32,15 +32,6 @@
 //! assert!(!strategy.should_run(3));
 //! assert!(strategy.should_run(5));
 //! assert!(strategy.should_run(10));
-//!
-//! // Cuts with zero active_count are deactivated.
-//! let mut pool = CutPool::new(2, 1, 1, 0);
-//! pool.add_cut(0, 0, 1.0, &[1.0]);
-//! pool.add_cut(1, 0, 2.0, &[2.0]);
-//! pool.metadata[0].active_count = 0;
-//! pool.metadata[1].active_count = 3;
-//! let deact = strategy.select(&pool, &[], 10);
-//! assert_eq!(deact.deactivation_indices(), vec![0]);
 //! ```
 
 // ---------------------------------------------------------------------------
@@ -70,16 +61,18 @@ pub struct CutMetadata {
 
     /// Cumulative number of times this cut was binding at an LP solution.
     ///
-    /// Used by [`CutSelectionStrategy::Level1`]: deactivate if
-    /// `active_count <= threshold`.
+    /// Used by budget enforcement (row eviction) and diagnostics; NOT used by
+    /// the value-based selection logic in [`CutSelectionStrategy::Level1`] or
+    /// [`CutSelectionStrategy::Lml1`].
     /// Initialised to 0; incremented inline by the backward pass when the
     /// associated cut row's dual exceeds `cut_activity_tolerance`.
     pub active_count: u64,
 
     /// Most recent iteration at which this cut was binding.
     ///
-    /// Used by [`CutSelectionStrategy::Lml1`]: deactivate if
-    /// `current_iteration - last_active_iter > memory_window`.
+    /// Used by budget enforcement (staleness-based eviction ordering) and
+    /// diagnostics; NOT used by the value-based selection logic in
+    /// [`CutSelectionStrategy::Level1`] or [`CutSelectionStrategy::Lml1`].
     /// Initialised to `iteration_generated`; updated inline by the backward
     /// pass during the per-stage cut-binding sync.
     pub last_active_iter: u64,
@@ -171,37 +164,40 @@ impl CutActivityUpdates {
 /// [`should_run`]: CutSelectionStrategy::should_run
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum CutSelectionStrategy {
-    /// Level-1 selection: retain any cut that has ever been binding.
+    /// Level-1 selection: retain any cut that is near-optimal at some visited
+    /// state (de Matos 2015).
     ///
-    /// A cut is deactivated only if its cumulative `active_count` is at or
-    /// below `threshold`. With `threshold = 0` (recommended), a cut is
-    /// deactivated if and only if it has never been binding at any visited
-    /// state. This is the least aggressive strategy and preserves the
-    /// convergence guarantee.
+    /// A cut is deactivated if, at every visited forward-pass state, its value
+    /// is more than `tie_tolerance` below the best active cut value. Cuts that
+    /// have never been within tolerance of the maximum are pruned. This is the
+    /// least aggressive value-based strategy and preserves the convergence
+    /// guarantee.
     Level1 {
-        /// Activity count threshold. A cut is deactivated when
-        /// `active_count <= threshold`. Typical value: 0.
-        threshold: u64,
-
         /// Number of iterations between selection runs. Must be > 0.
         check_frequency: u64,
+
+        /// Absolute tolerance for tie-breaking: a cut is considered active at a
+        /// state when its value is within `tie_tolerance` of the best cut value
+        /// at that state. Default: `1e-10`.
+        tie_tolerance: f64,
     },
 
-    /// Limited Memory Level-1 (LML1): retain cuts active within a recent window.
+    /// Limited Memory Level-1 (LML1): value-based selection with a recent
+    /// observation window (Guigues 2017/2019).
     ///
-    /// Each cut is timestamped with the most recent iteration at which it was
-    /// binding. Cuts whose timestamp is older than `memory_window` iterations
-    /// are deactivated. More aggressive than Level1 because cuts that were
-    /// active early but are now dominated by newer cuts will eventually be
-    /// removed.
+    /// A cut is deactivated if it has not been near-optimal at any visited state
+    /// within the recent observation window. More aggressive than Level1 because
+    /// cuts that were active early but are now dominated by newer cuts will
+    /// eventually be removed. Uses the same value-based criterion as Level1 but
+    /// applied over the recent history tracked in `active_window`.
     Lml1 {
-        /// Number of iterations to retain inactive cuts before deactivation.
-        /// A cut is deactivated when `current_iteration - last_active_iter >
-        /// memory_window`.
-        memory_window: u64,
-
         /// Number of iterations between selection runs. Must be > 0.
         check_frequency: u64,
+
+        /// Absolute tolerance for tie-breaking: a cut is considered active at a
+        /// state when its value is within `tie_tolerance` of the best cut value
+        /// at that state. Default: `1e-10`.
+        tie_tolerance: f64,
     },
 
     /// Dominated cut detection: remove cuts dominated at all visited states.
@@ -233,7 +229,7 @@ impl CutSelectionStrategy {
     /// ```rust
     /// use cobre_sddp::cut_selection::CutSelectionStrategy;
     ///
-    /// let s = CutSelectionStrategy::Level1 { threshold: 0, check_frequency: 5 };
+    /// let s = CutSelectionStrategy::Level1 { check_frequency: 5, tie_tolerance: 1e-10 };
     /// assert!(!s.should_run(0));
     /// assert!(!s.should_run(3));
     /// assert!(s.should_run(5));
@@ -272,9 +268,10 @@ impl CutSelectionStrategy {
     ///
     /// # Variant behavior
     ///
-    /// - **Level1**: deactivates cuts with `active_count <= threshold`.
-    /// - **Lml1**: deactivates cuts with
-    ///   `current_iteration - last_active_iter > memory_window`.
+    /// - **Level1**: stub — returns empty updates (ticket-002 implements the
+    ///   value-based kernel from de Matos 2015).
+    /// - **Lml1**: stub — returns empty updates (ticket-002 implements the
+    ///   value-based kernel from Guigues 2017/2019).
     /// - **Dominated**: deactivates cuts dominated at every visited state.
     ///
     /// # Examples
@@ -283,14 +280,13 @@ impl CutSelectionStrategy {
     /// use cobre_sddp::cut::{CutPool};
     /// use cobre_sddp::cut_selection::{CutMetadata, CutSelectionStrategy};
     ///
-    /// let strategy = CutSelectionStrategy::Level1 { threshold: 0, check_frequency: 5 };
+    /// // Level1 stub: returns empty CutActivityUpdates (kernel implemented in ticket-002).
+    /// let strategy = CutSelectionStrategy::Level1 { check_frequency: 5, tie_tolerance: 1e-10 };
     /// let mut pool = CutPool::new(2, 1, 1, 0);
     /// pool.add_cut(0, 0, 1.0, &[1.0]);
     /// pool.add_cut(1, 0, 2.0, &[2.0]);
-    /// pool.metadata[0].active_count = 0;
-    /// pool.metadata[1].active_count = 2;
     /// let deact = strategy.select(&pool, &[], 10);
-    /// assert_eq!(deact.deactivation_indices(), vec![0]);
+    /// assert!(deact.deactivation_indices().is_empty());
     /// ```
     #[must_use]
     pub fn select(
@@ -325,37 +321,23 @@ impl CutSelectionStrategy {
         let metadata = &pool.metadata[..populated];
         let active = &pool.active[..populated];
 
-        // Cut pool capacity is bounded by a u32 field in the pool header, so
-        // enumerate indices always fit in u32. The cast is safe by structural
-        // invariant established at pool construction time.
+        // STUB: Level1 and Lml1 return empty updates here.
+        // The value-based kernel (de Matos 2015 / Guigues 2017/2019) is
+        // implemented in ticket-002 and will replace these stubs.
+        // Dominated uses the existing geometrically-correct implementation.
         #[allow(clippy::cast_possible_truncation)]
         let indices = match self {
-            Self::Level1 { threshold, .. } => metadata
-                .iter()
-                .enumerate()
-                .filter(|(i, m)| {
-                    active[*i]
-                        && m.active_count <= *threshold
-                        && m.iteration_generated < current_iteration
-                })
-                .map(|(i, _)| i as u32)
-                .collect(),
-
-            Self::Lml1 { memory_window, .. } => metadata
-                .iter()
-                .enumerate()
-                .filter(|(i, m)| {
-                    active[*i]
-                        && m.iteration_generated < current_iteration
-                        && current_iteration.saturating_sub(m.last_active_iter) > *memory_window
-                })
-                .map(|(i, _)| i as u32)
-                .collect(),
+            // TODO(ticket-002): replace stubs with value-based Level1 / Lml1 kernels.
+            Self::Level1 { .. } | Self::Lml1 { .. } => vec![],
 
             Self::Dominated { threshold, .. } => {
                 select_dominated(pool, visited_states, *threshold, current_iteration)
             }
         };
+
+        // Suppress unused-variable warnings on metadata/active/populated while
+        // Level1/Lml1 are stubs.
+        let _ = (metadata, active, populated, current_iteration);
 
         CutActivityUpdates::deactivations_only(stage_index, indices)
     }
@@ -461,8 +443,12 @@ fn select_dominated(
 ///
 /// Returns `None` when disabled (default). Returns `Err` when explicitly
 /// enabled with invalid configuration (unknown method, `enabled = true` with no
-/// method, or `check_frequency = 0`). Defaults: `threshold = 0`,
-/// `check_frequency = 5`.
+/// method, or `check_frequency = 0`). Defaults: `check_frequency = 5`,
+/// `tie_tolerance = 1e-10`.
+///
+/// The `threshold` and `memory_window` fields on `RowSelectionConfig` are
+/// silently ignored — they are retained in the config struct for backward
+/// compatibility with existing config files only.
 ///
 /// # Errors
 ///
@@ -472,6 +458,8 @@ fn select_dominated(
 pub fn parse_cut_selection_config(
     config: &cobre_io::config::RowSelectionConfig,
 ) -> Result<Option<CutSelectionStrategy>, String> {
+    const DEFAULT_TIE_TOLERANCE: f64 = 1e-10;
+
     let enabled = config.enabled.unwrap_or(false);
     if !enabled {
         return Ok(None);
@@ -482,7 +470,6 @@ pub fn parse_cut_selection_config(
         .as_deref()
         .ok_or_else(|| "cut_selection.enabled is true but method is not specified".to_string())?;
 
-    let threshold = config.threshold.unwrap_or(0);
     let check_frequency = config.check_frequency.unwrap_or(5);
 
     if check_frequency == 0 {
@@ -491,18 +478,13 @@ pub fn parse_cut_selection_config(
 
     match method {
         "level1" => Ok(Some(CutSelectionStrategy::Level1 {
-            threshold: u64::from(threshold),
             check_frequency: u64::from(check_frequency),
+            tie_tolerance: config.tie_tolerance.unwrap_or(DEFAULT_TIE_TOLERANCE),
         })),
-        "lml1" => {
-            let window = config.memory_window.ok_or_else(|| {
-                "cut_selection.method='lml1' requires memory_window to be set".to_string()
-            })?;
-            Ok(Some(CutSelectionStrategy::Lml1 {
-                memory_window: u64::from(window),
-                check_frequency: u64::from(check_frequency),
-            }))
-        }
+        "lml1" => Ok(Some(CutSelectionStrategy::Lml1 {
+            check_frequency: u64::from(check_frequency),
+            tie_tolerance: config.tie_tolerance.unwrap_or(DEFAULT_TIE_TOLERANCE),
+        })),
         "domination" => {
             let epsilon = config.domination_epsilon.ok_or_else(|| {
                 "cut_selection.method='domination' requires domination_epsilon to be set"
@@ -556,8 +538,8 @@ mod tests {
     #[test]
     fn should_run_false_at_zero() {
         let s = CutSelectionStrategy::Level1 {
-            threshold: 0,
             check_frequency: 5,
+            tie_tolerance: 1e-10,
         };
         assert!(!s.should_run(0));
     }
@@ -565,8 +547,8 @@ mod tests {
     #[test]
     fn should_run_false_between_multiples() {
         let s = CutSelectionStrategy::Level1 {
-            threshold: 0,
             check_frequency: 5,
+            tie_tolerance: 1e-10,
         };
         assert!(!s.should_run(3));
         assert!(!s.should_run(7));
@@ -575,8 +557,8 @@ mod tests {
     #[test]
     fn should_run_true_at_multiples() {
         let s = CutSelectionStrategy::Level1 {
-            threshold: 0,
             check_frequency: 5,
+            tie_tolerance: 1e-10,
         };
         assert!(s.should_run(5));
         assert!(s.should_run(10));
@@ -586,8 +568,8 @@ mod tests {
     #[test]
     fn should_run_lml1_respects_check_frequency() {
         let s = CutSelectionStrategy::Lml1 {
-            memory_window: 10,
             check_frequency: 5,
+            tie_tolerance: 1e-10,
         };
         assert!(!s.should_run(0));
         assert!(!s.should_run(3));
@@ -606,10 +588,11 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "ticket-002"]
     fn level1_deactivates_zero_activity_cuts() {
         let strategy = CutSelectionStrategy::Level1 {
-            threshold: 0,
             check_frequency: 5,
+            tie_tolerance: 1e-10,
         };
         let pool = make_pool(&[make_meta(0, 1), make_meta(1, 5)], &[true, true]);
         let deact = strategy.select(&pool, &[], 10);
@@ -621,10 +604,11 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "ticket-002"]
     fn level1_retains_positive_activity_cuts() {
         let strategy = CutSelectionStrategy::Level1 {
-            threshold: 0,
             check_frequency: 5,
+            tie_tolerance: 1e-10,
         };
         let pool = make_pool(&[make_meta(3, 1), make_meta(7, 5)], &[true, true]);
         let deact = strategy.select(&pool, &[], 10);
@@ -635,10 +619,11 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "ticket-002"]
     fn level1_threshold_1_deactivates_cuts_with_count_at_most_1() {
         let strategy = CutSelectionStrategy::Level1 {
-            threshold: 1,
             check_frequency: 5,
+            tie_tolerance: 1e-10,
         };
         let pool = make_pool(
             &[make_meta(0, 1), make_meta(1, 5), make_meta(2, 8)],
@@ -651,8 +636,8 @@ mod tests {
     #[test]
     fn level1_empty_metadata_returns_empty_set() {
         let strategy = CutSelectionStrategy::Level1 {
-            threshold: 0,
             check_frequency: 5,
+            tie_tolerance: 1e-10,
         };
         let pool = CutPool::new(0, 1, 1, 0);
         let deact = strategy.select(&pool, &[], 10);
@@ -660,10 +645,11 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "ticket-002"]
     fn lml1_deactivates_cuts_outside_memory_window() {
         let strategy = CutSelectionStrategy::Lml1 {
-            memory_window: 10,
             check_frequency: 5,
+            tie_tolerance: 1e-10,
         };
         let pool = make_pool(&[make_meta(0, 5)], &[true]);
         let deact = strategy.select(&pool, &[], 20);
@@ -671,12 +657,13 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "ticket-002"]
     fn lml1_retains_cuts_within_memory_window() {
-        // memory_window=10, iteration=20. Cut with last_active_iter=12:
-        // 20 - 12 = 8, not > 10 → retained.
+        // With the stub implementation, all cuts are retained.
+        // ticket-002 will implement the value-based kernel.
         let strategy = CutSelectionStrategy::Lml1 {
-            memory_window: 10,
             check_frequency: 5,
+            tie_tolerance: 1e-10,
         };
         let pool = make_pool(&[make_meta(0, 12)], &[true]);
         let deact = strategy.select(&pool, &[], 20);
@@ -684,10 +671,11 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "ticket-002"]
     fn lml1_retains_cuts_exactly_at_boundary() {
         let strategy = CutSelectionStrategy::Lml1 {
-            memory_window: 10,
             check_frequency: 5,
+            tie_tolerance: 1e-10,
         };
         let pool = make_pool(&[make_meta(0, 10)], &[true]);
         let deact = strategy.select(&pool, &[], 20);
@@ -698,10 +686,11 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "ticket-002"]
     fn lml1_mixed_cuts_deactivates_correct_indices() {
         let strategy = CutSelectionStrategy::Lml1 {
-            memory_window: 10,
             check_frequency: 5,
+            tie_tolerance: 1e-10,
         };
         let pool = make_pool(
             &[make_meta(0, 5), make_meta(0, 12), make_meta(0, 1)],
@@ -712,10 +701,11 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "ticket-002"]
     fn ac_level1_threshold_0_deactivates_zero_activity_cut() {
         let strategy = CutSelectionStrategy::Level1 {
-            threshold: 0,
             check_frequency: 5,
+            tie_tolerance: 1e-10,
         };
         let pool = make_pool(
             &[CutMetadata {
@@ -732,10 +722,11 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "ticket-002"]
     fn ac_lml1_deactivates_cut_outside_memory_window() {
         let strategy = CutSelectionStrategy::Lml1 {
-            memory_window: 10,
             check_frequency: 5,
+            tie_tolerance: 1e-10,
         };
         let pool = make_pool(
             &[CutMetadata {
@@ -754,8 +745,8 @@ mod tests {
     #[test]
     fn select_for_stage_sets_stage_index() {
         let strategy = CutSelectionStrategy::Level1 {
-            threshold: 0,
             check_frequency: 5,
+            tie_tolerance: 1e-10,
         };
         let pool = make_pool(&[make_meta(0, 1)], &[true]);
         let deact = strategy.select_for_stage(&pool, &[], 10, 7);
@@ -765,8 +756,8 @@ mod tests {
     #[test]
     fn select_sets_stage_index_to_zero() {
         let strategy = CutSelectionStrategy::Level1 {
-            threshold: 0,
             check_frequency: 5,
+            tie_tolerance: 1e-10,
         };
         let pool = CutPool::new(0, 1, 1, 0);
         let deact = strategy.select(&pool, &[], 10);
@@ -817,6 +808,7 @@ mod tests {
             memory_window: None,
             domination_epsilon: None,
             basis_activity_window: None,
+            tie_tolerance: Some(1e-8),
         };
         let result = parse_cut_selection_config(&cfg);
         assert!(result.is_ok());
@@ -827,16 +819,49 @@ mod tests {
             matches!(
                 strategy,
                 CutSelectionStrategy::Level1 {
-                    threshold: 0,
                     check_frequency: 5,
-                }
+                    tie_tolerance,
+                } if (tie_tolerance - 1e-8).abs() < f64::EPSILON
             ),
             "unexpected variant: {strategy:?}"
         );
     }
 
+    /// AC: `level1` with no `tie_tolerance` uses the default 1e-10.
+    #[test]
+    fn test_parse_level1_default_tie_tolerance() {
+        let cfg = RowSelectionConfig {
+            enabled: Some(true),
+            method: Some("level1".to_string()),
+            threshold: None,
+            check_frequency: Some(5),
+            cut_activity_tolerance: None,
+            max_active_per_stage: None,
+            memory_window: None,
+            domination_epsilon: None,
+            basis_activity_window: None,
+            tie_tolerance: None,
+        };
+        let result = parse_cut_selection_config(&cfg);
+        assert!(result.is_ok());
+        let strategy = result
+            .unwrap()
+            .expect("must produce Some for enabled level1 without tie_tolerance");
+        assert!(
+            matches!(
+                strategy,
+                CutSelectionStrategy::Level1 {
+                    check_frequency: 5,
+                    tie_tolerance,
+                } if (tie_tolerance - 1e-10).abs() < 1e-20
+            ),
+            "unexpected variant or wrong default tie_tolerance: {strategy:?}"
+        );
+    }
+
     #[test]
     fn test_parse_lml1() {
+        // AC: `lml1` with explicit `tie_tolerance` uses the provided value.
         let cfg = RowSelectionConfig {
             enabled: Some(true),
             method: Some("lml1".to_string()),
@@ -844,9 +869,10 @@ mod tests {
             check_frequency: Some(5),
             cut_activity_tolerance: None,
             max_active_per_stage: None,
-            memory_window: Some(10),
+            memory_window: Some(10), // deprecated; silently ignored
             domination_epsilon: None,
             basis_activity_window: None,
+            tie_tolerance: Some(1e-8),
         };
         let result = parse_cut_selection_config(&cfg);
         assert!(result.is_ok());
@@ -855,33 +881,48 @@ mod tests {
             matches!(
                 strategy,
                 CutSelectionStrategy::Lml1 {
-                    memory_window: 10,
                     check_frequency: 5,
-                }
+                    tie_tolerance,
+                } if (tie_tolerance - 1e-8).abs() < f64::EPSILON
             ),
             "unexpected variant: {strategy:?}"
         );
     }
 
+    /// AC: `lml1` without `memory_window` and without `tie_tolerance` must succeed
+    /// and use the default `tie_tolerance` of 1e-10.
     #[test]
-    fn test_parse_lml1_missing_memory_window_errors() {
+    fn test_parse_lml1_missing_memory_window_succeeds() {
         let cfg = RowSelectionConfig {
             enabled: Some(true),
             method: Some("lml1".to_string()),
             threshold: None,
-            check_frequency: None,
+            check_frequency: Some(5),
             cut_activity_tolerance: None,
             max_active_per_stage: None,
             memory_window: None,
             domination_epsilon: None,
             basis_activity_window: None,
+            tie_tolerance: None,
         };
         let result = parse_cut_selection_config(&cfg);
-        assert!(result.is_err(), "lml1 without memory_window must error");
-        let msg = result.unwrap_err();
         assert!(
-            msg.contains("memory_window"),
-            "error must mention memory_window, got: {msg}"
+            result.is_ok(),
+            "lml1 without memory_window must not error: {:?}",
+            result.unwrap_err()
+        );
+        let strategy = result
+            .unwrap()
+            .expect("must produce Some for enabled lml1 without memory_window");
+        assert!(
+            matches!(
+                strategy,
+                CutSelectionStrategy::Lml1 {
+                    check_frequency: 5,
+                    tie_tolerance,
+                } if (tie_tolerance - 1e-10).abs() < 1e-20
+            ),
+            "unexpected variant or wrong default tie_tolerance: {strategy:?}"
         );
     }
 
@@ -897,6 +938,7 @@ mod tests {
             memory_window: None,
             domination_epsilon: Some(1e-6),
             basis_activity_window: None,
+            tie_tolerance: None,
         };
         let result = parse_cut_selection_config(&cfg);
         assert!(result.is_ok());
@@ -927,6 +969,7 @@ mod tests {
             memory_window: None,
             domination_epsilon: None,
             basis_activity_window: None,
+            tie_tolerance: None,
         };
         let result = parse_cut_selection_config(&cfg);
         assert!(
@@ -952,6 +995,7 @@ mod tests {
             memory_window: None,
             domination_epsilon: None,
             basis_activity_window: None,
+            tie_tolerance: None,
         };
         let result = parse_cut_selection_config(&cfg);
         assert!(result.is_err());
@@ -974,6 +1018,7 @@ mod tests {
             memory_window: None,
             domination_epsilon: None,
             basis_activity_window: None,
+            tie_tolerance: None,
         };
         let result = parse_cut_selection_config(&cfg);
         assert!(result.is_err());
@@ -991,6 +1036,7 @@ mod tests {
             memory_window: None,
             domination_epsilon: None,
             basis_activity_window: None,
+            tie_tolerance: None,
         };
         let result = parse_cut_selection_config(&cfg).unwrap();
         assert!(
@@ -1011,6 +1057,7 @@ mod tests {
             memory_window: None,
             domination_epsilon: None,
             basis_activity_window: None,
+            tie_tolerance: None,
         };
         let result = parse_cut_selection_config(&cfg);
         assert!(result.is_err());
@@ -1027,6 +1074,7 @@ mod tests {
     /// deactivated, `CutPool::deactivate` must skip the decrement. This test
     /// verifies the safety invariant via the cut pool directly.
     #[test]
+    #[ignore = "ticket-002"]
     fn select_skips_already_inactive_slots() {
         let mut pool = CutPool::new(10, 1, 1, 0);
         pool.add_cut(0, 0, 1.0, &[1.0]); // slot 0, active
@@ -1045,8 +1093,8 @@ mod tests {
         // Level1 selection: slot 0 is already inactive and must be skipped.
         // Slots 1 and 2 have active_count > 0 and are retained.
         let strategy = CutSelectionStrategy::Level1 {
-            threshold: 0,
             check_frequency: 1,
+            tie_tolerance: 1e-10,
         };
         let deact = strategy.select_for_stage(&pool, &[], 5, 0);
         assert!(
@@ -1066,10 +1114,11 @@ mod tests {
     /// - `last_active_iter=8`: 10-8=2 not > 3 → retained
     /// - `last_active_iter=10`: 10-10=0 not > 3 → retained
     #[test]
+    #[ignore = "ticket-002"]
     fn lml1_memory_window_boundary_behavior() {
         let strategy = CutSelectionStrategy::Lml1 {
-            memory_window: 3,
             check_frequency: 1,
+            tie_tolerance: 1e-10,
         };
         let pool = make_pool(
             &[
@@ -1096,10 +1145,11 @@ mod tests {
     /// yet). This prevents the pathology where every new cut is immediately
     /// killed, causing the lower bound to stagnate.
     #[test]
+    #[ignore = "ticket-002"]
     fn level1_spares_cuts_from_current_iteration() {
         let strategy = CutSelectionStrategy::Level1 {
-            threshold: 0,
             check_frequency: 1,
+            tie_tolerance: 1e-10,
         };
         let pool = make_pool(
             &[
@@ -1133,10 +1183,11 @@ mod tests {
     /// `iteration_generated` guard (defense-in-depth; `last_active_iter`
     /// initialization already protects, but the guard is explicit).
     #[test]
+    #[ignore = "ticket-002"]
     fn lml1_spares_cuts_from_current_iteration() {
         let strategy = CutSelectionStrategy::Lml1 {
-            memory_window: 0,
             check_frequency: 1,
+            tie_tolerance: 1e-10,
         };
         let pool = make_pool(
             &[CutMetadata {
@@ -1347,6 +1398,7 @@ mod tests {
     /// - LML1 (window=3) deactivates those + cuts with old `last_active_iter`
     /// - Dominated deactivates geometrically dominated cuts
     #[test]
+    #[ignore = "ticket-002"]
     fn aggressiveness_ordering_level1_leq_lml1_leq_dominated() {
         // 5 cuts (1D):
         // Cut 0: intercept=0, slope=0 (constant 0), activity=0, last_active=1
@@ -1399,17 +1451,17 @@ mod tests {
         );
         let states: Vec<f64> = vec![0.0, 1.0, 3.0, 5.0];
 
-        // Level1 threshold=0: deactivates cuts with active_count=0
+        // Level1: value-based (stub returns empty; ticket-002 will implement).
         let l1 = CutSelectionStrategy::Level1 {
-            threshold: 0,
             check_frequency: 1,
+            tie_tolerance: 1e-10,
         };
         let deact_l1 = l1.select(&pool, &[], 11);
 
-        // LML1 window=3: deactivates cuts with last_active_iter < 11-3=8
+        // LML1: value-based (stub returns empty; ticket-002 will implement).
         let lml1 = CutSelectionStrategy::Lml1 {
-            memory_window: 3,
             check_frequency: 1,
+            tie_tolerance: 1e-10,
         };
         let deact_lml1 = lml1.select(&pool, &[], 11);
 
@@ -1453,6 +1505,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "ticket-002"]
     fn select_for_stage_returns_cut_activity_updates_with_deactivations() {
         let mut pool = CutPool::new(3, 1, 1, 0);
         pool.add_cut(0, 0, 1.0, &[0.0]);
@@ -1461,8 +1514,8 @@ mod tests {
         pool.metadata[1].active_count = 0;
 
         let strategy = CutSelectionStrategy::Level1 {
-            threshold: 0,
             check_frequency: 1,
+            tie_tolerance: 1e-10,
         };
         let result = strategy.select_for_stage(&pool, &[], 10, 0);
 

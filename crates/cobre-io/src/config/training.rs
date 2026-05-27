@@ -74,19 +74,32 @@ pub struct RowSelectionConfig {
     #[serde(default)]
     pub method: Option<String>,
 
-    /// Activity-count threshold for the `"level1"` row-selection method.
+    /// Deprecated. Silently ignored. Retained for backward compatibility with
+    /// existing config files.
     ///
-    /// A row is deactivated when its `active_count <= threshold`. Typical
-    /// value: 0 (deactivate only fully-inactive rows). Ignored by the
-    /// `"lml1"` and `"domination"` methods.
+    /// Previously used as an activity-count threshold for the `"level1"`
+    /// row-selection method. The correct algorithm (de Matos 2015) is
+    /// value-based and uses `tie_tolerance` instead.
     #[serde(default)]
     pub threshold: Option<u32>,
 
-    /// Memory window size for the `"lml1"` method (iterations).
+    /// Deprecated. Silently ignored. Retained for backward compatibility with
+    /// existing config files.
     ///
-    /// Required when `method = "lml1"`. Ignored for other methods.
+    /// Previously used as the memory window size for the `"lml1"` method.
+    /// The correct algorithm (Guigues 2017/2019) is value-based and uses
+    /// `tie_tolerance` instead.
     #[serde(default)]
     pub memory_window: Option<u32>,
+
+    /// Tie-tolerance for the `"level1"` and `"lml1"` value-based row-selection
+    /// methods.
+    ///
+    /// A cut is considered tied at a visited state when its value is within
+    /// `tie_tolerance` of the best active cut value. Default: `1e-10`.
+    /// Ignored by the `"domination"` method.
+    #[serde(default)]
+    pub tie_tolerance: Option<f64>,
 
     /// Epsilon for the `"domination"` method.
     ///
