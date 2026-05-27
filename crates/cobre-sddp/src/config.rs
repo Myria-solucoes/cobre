@@ -53,8 +53,8 @@
 //! assert_eq!(config.events.checkpoint_interval, Some(50));
 //! ```
 
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use cobre_core::TrainingEvent;
 
@@ -285,8 +285,11 @@ pub struct EventConfig {
     /// Whether to allocate the visited-states archive for state export.
     ///
     /// When `true`, the archive is allocated so forward-pass trial points are
-    /// recorded for checkpoint persistence. When `false`, the archive is only
-    /// allocated if `cut_selection` requires it (i.e., `Dominated` variant).
+    /// recorded for checkpoint persistence. When `false`, the archive is
+    /// still allocated automatically if any
+    /// [`CutSelectionStrategy`] variant is
+    /// enabled, because the unified value-evaluation kernel evaluates every
+    /// populated cut at every state in this archive.
     /// Default: `false`.
     pub export_states: bool,
 }
@@ -305,8 +308,11 @@ pub(crate) struct EventParams {
     /// Whether to allocate the visited-states archive for state export.
     ///
     /// When `true`, the archive is allocated so forward-pass trial points are
-    /// recorded for checkpoint persistence. When `false`, the archive is only
-    /// allocated if `cut_selection` requires it (i.e., `Dominated` variant).
+    /// recorded for checkpoint persistence. When `false`, the archive is
+    /// still allocated automatically if any
+    /// [`CutSelectionStrategy`] variant is
+    /// enabled, because the unified value-evaluation kernel evaluates every
+    /// populated cut at every state in this archive.
     pub(crate) export_states: bool,
 }
 

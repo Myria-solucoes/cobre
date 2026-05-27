@@ -104,9 +104,12 @@ impl StageStates {
 
 /// Multi-stage archive of visited forward-pass states.
 ///
-/// One [`StageStates`] per stage.  Only created when
-/// [`CutSelectionStrategy::Dominated`](crate::CutSelectionStrategy::Dominated)
-/// is active.
+/// One [`StageStates`] per stage. Allocated whenever any
+/// [`CutSelectionStrategy`] variant is enabled, because the unified
+/// value-evaluation kernel evaluates every populated cut at every
+/// state in this archive. Also allocated when state export is
+/// requested via
+/// [`EventConfig::export_states`](crate::config::EventConfig::export_states).
 #[derive(Debug, Clone)]
 pub struct VisitedStatesArchive {
     stages: Vec<StageStates>,

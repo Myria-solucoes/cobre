@@ -139,7 +139,7 @@ pub struct CutMetadata {
 /// Either list may be empty.
 ///
 /// The caller applies changes to the activity bitmap via
-/// [`CutPool::deactivate`] and [`CutPool::set_active`].
+/// [`crate::cut::CutPool::apply_updates`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct CutActivityUpdates {
     /// Stage index (0-based) that this update set belongs to.
@@ -341,7 +341,7 @@ impl CutSelectionStrategy {
     ///
     /// # Parallelism
     ///
-    /// When the number of trial points is at least [`PARALLEL_THRESHOLD`], the
+    /// When the number of trial points is at least `PARALLEL_THRESHOLD` (256), the
     /// visited states are split into chunks and each chunk is evaluated on a
     /// rayon worker. The per-chunk results are bitmaps of cut indices selected
     /// by that chunk's trial-point subset; chunks are merged with bitwise-OR
@@ -2058,7 +2058,7 @@ mod tests {
         let mut pool = CutPool::new(2, 1, 1, 0);
         pool.add_cut(0, 0, 10.0, &[0.0]); // higher value
         pool.add_cut(1, 0, 1.0, &[0.0]); // lower value
-        // Slot 0 from current iteration → ineligible. Slot 1 eligible.
+                                         // Slot 0 from current iteration → ineligible. Slot 1 eligible.
         pool.metadata[0].iteration_generated = 10; // current_iteration
         pool.metadata[1].iteration_generated = 5;
         // n_eligible = 1 (only slot 1). Guard returns empty.
