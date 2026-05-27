@@ -820,6 +820,13 @@ where
 
                 // Stage 0 is exempt: its cuts are never the "successor" in the
                 // backward pass, so their binding activity is never updated.
+                // Stage T-1 (the terminal stage) is also exempt: the backward
+                // pass sweeps T-2 down to 0 (see `backward.rs` module docs),
+                // so the terminal-stage pool receives no cuts to select among.
+                // `num_sel_stages = num_stages - 1` (via the saturating_sub
+                // above) and the parallel loop ranges over `1..num_sel_stages`,
+                // which expands to stages 1..=T-2 — naturally excluding
+                // stage T-1 from selection.
                 #[allow(clippy::cast_possible_truncation)]
                 {
                     let pool0 = &self.fcf.pools[0];
@@ -839,6 +846,10 @@ where
                 }
 
                 let archive_ref = self.visited_archive.as_ref();
+                // Parallel selection over interior stages 1..=T-2. Stage 0 was
+                // recorded above; stage T-1 (terminal) is skipped because the
+                // backward pass produces no cuts at stage T-1, so the pool is
+                // empty and selection would be a no-op.
                 #[allow(clippy::cast_possible_truncation)]
                 let deactivations: Vec<(usize, CutActivityUpdates, f64)> = (1..num_sel_stages)
                     .into_par_iter()
@@ -888,6 +899,17 @@ where
                 // sliding window now that selection has consumed the current
                 // contents. Done AFTER the per-stage application loop so the
                 // immutable borrow held by `deactivations` is fully released.
+                //
+                // Trim runs AFTER selection so the kernel evaluates against
+                // the full accumulated archive (up to `2 * check_frequency`
+                // iterations of states); we then shrink back to a
+                // steady-state bound of `check_frequency` iterations.
+                // Selection benefits from seeing more visited states than the
+                // post-trim window — better selection quality — at the cost
+                // of a temporary ~2x memory peak just before this trim runs.
+                // The bound documented on
+                // [`VisitedStatesArchive::trim_to_window`] is the
+                // post-trim (steady-state) size.
                 if let Some(ref mut archive) = self.visited_archive {
                     let check_freq = match strategy {
                         crate::cut_selection::CutSelectionStrategy::Level1 {

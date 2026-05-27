@@ -214,8 +214,20 @@ impl VisitedStatesArchive {
     ///
     /// The training loop is expected to call this at the same cadence as the
     /// cut-selection check (i.e. every `check_frequency` iterations), so the
-    /// archive size stays bounded by `window_iterations * total_forward_passes`
-    /// regardless of total training length.
+    /// **steady-state** archive size stays bounded by `window_iterations *
+    /// total_forward_passes` regardless of total training length.
+    ///
+    /// ## Peak vs steady-state size
+    ///
+    /// The training loop calls this method **after** cut selection has
+    /// consumed the archive contents. Between two consecutive trims, the
+    /// archive accumulates up to a second window's worth of states (the
+    /// forward passes added since the previous trim plus the residual that
+    /// the previous trim retained). The **peak** pre-trim size is therefore
+    /// roughly `2 * window_iterations * total_forward_passes`. The bound
+    /// above is the post-trim (steady-state) size; the temporary ~2x peak
+    /// just before this call is by design — selection evaluates against the
+    /// full accumulated archive for better quality.
     pub fn trim_to_window(&mut self, window_iterations: u64) {
         let window_states = usize::try_from(window_iterations)
             .unwrap_or(usize::MAX)

@@ -397,17 +397,72 @@ impl CutSelectionStrategy {
         let n_states = visited_states.len() / n_state;
 
         // Decide between sequential and parallel processing. Both paths
-        // ultimately call [`evaluate_chunk`] with the same logic; parallel
-        // path merges per-chunk bitmaps with bitwise-OR.
+        // ultimately call [`evaluate_chunk_in_place`] with the same logic; the
+        // parallel path merges per-chunk bitmaps with bitwise-OR.
+        //
+        // Allocation discipline (Cobre hard rule "never allocate on hot
+        // paths"):
+        //   * Sequential path allocates the `is_selected` output bitmap and
+        //     the `scratch` value buffer exactly once per call.
+        //   * Parallel path uses `map_init` so each rayon worker allocates its
+        //     `(is_selected_scratch, value_scratch)` pair exactly once per
+        //     thread per call and reuses both across every chunk dispatched to
+        //     that worker. Resetting `is_selected_scratch` to all-false at the
+        //     top of each chunk is in-place (no allocation). The per-chunk
+        //     `.clone()` into the reduce result is the single unavoidable
+        //     allocation: `reduce` requires owned `Vec<bool>` values to merge,
+        //     and rayon's worker scratch must remain valid for subsequent
+        //     chunks dispatched to the same worker. The reduce identity
+        //     (`|| vec![false; populated]`) materialises at most once per
+        //     reduction subtree level — see rayon's `Reduce` docs — so the
+        //     total allocations grow with the number of workers, not the
+        //     number of chunks.
         let is_selected: Vec<bool> = if n_states >= PARALLEL_THRESHOLD {
             // par_chunks operates over the flat f64 slice; each chunk contains
             // PARALLEL_THRESHOLD states packed as PARALLEL_THRESHOLD * n_state
             // contiguous f64 elements. The final chunk may be shorter — rayon
-            // returns whatever remains, which `evaluate_chunk` handles via
-            // `chunks_exact(n_state)`.
+            // returns whatever remains, which `evaluate_chunk_in_place`
+            // handles via `chunks_exact(n_state)`.
             visited_states
                 .par_chunks(PARALLEL_THRESHOLD * n_state)
-                .map(|chunk| evaluate_chunk(pool, chunk, n_state, warm_start, &eligible, self))
+                .map_init(
+                    // Per-worker scratch initializer. Called once per rayon
+                    // worker thread per `select_for_stage` invocation; reused
+                    // across every chunk that the worker pulls from the work
+                    // queue.
+                    || (vec![false; populated], vec![0.0_f64; populated]),
+                    |(is_sel_scratch, val_scratch), chunk| {
+                        // Reset the per-thread `is_selected` scratch to
+                        // all-false in place. This is critical for
+                        // determinism: without the reset, selection state
+                        // from a prior chunk would leak into the next chunk
+                        // dispatched to the same worker, breaking the
+                        // bit-for-bit equivalence asserted by the determinism
+                        // tests. `val_scratch` does not need resetting — it is
+                        // fully overwritten on each trial point in phase 1.
+                        for slot in is_sel_scratch.iter_mut() {
+                            *slot = false;
+                        }
+                        evaluate_chunk_in_place(
+                            pool,
+                            chunk,
+                            n_state,
+                            warm_start,
+                            &eligible,
+                            self,
+                            is_sel_scratch,
+                            val_scratch,
+                        );
+                        // Clone the per-chunk bitmap so the worker's scratch
+                        // remains valid for the next chunk it processes. This
+                        // is the one allocation we cannot eliminate without
+                        // restructuring the reduce step (e.g., an atomic
+                        // bitmap shared across workers, which would replace
+                        // commutative OR with contended atomic OR — not
+                        // worth the complexity here).
+                        is_sel_scratch.clone()
+                    },
+                )
                 .reduce(
                     || vec![false; populated],
                     |mut a, b| {
@@ -418,7 +473,21 @@ impl CutSelectionStrategy {
                     },
                 )
         } else {
-            evaluate_chunk(pool, visited_states, n_state, warm_start, &eligible, self)
+            // Sequential path: allocate the output bitmap and value scratch
+            // exactly once and run the kernel on the full state slice.
+            let mut is_selected = vec![false; populated];
+            let mut scratch = vec![0.0_f64; populated];
+            evaluate_chunk_in_place(
+                pool,
+                visited_states,
+                n_state,
+                warm_start,
+                &eligible,
+                self,
+                &mut is_selected,
+                &mut scratch,
+            );
+            is_selected
         };
 
         // Collect activity changes.
@@ -447,14 +516,24 @@ impl CutSelectionStrategy {
     }
 }
 
-/// Evaluate a contiguous chunk of visited states and return the per-slot
-/// "selected" bitmap produced by the chunk.
+/// Evaluate a contiguous chunk of visited states into a caller-provided
+/// per-slot "selected" bitmap.
 ///
 /// This helper is the core of [`CutSelectionStrategy::select_for_stage`] and
-/// runs on every code path (sequential and per-rayon-worker). The bitmap is
-/// `populated`-long; entry `k` is `true` iff slot `k` survives the method's
-/// rule against *this chunk's* trial points. Callers combine per-chunk bitmaps
-/// with bitwise-OR to obtain the global "selected" set.
+/// runs on every code path (sequential and per-rayon-worker). On entry, the
+/// caller must pass `is_selected` filled with `false` and `scratch` allocated
+/// to length `pool.populated_count`. The bitmap is `populated`-long; entry
+/// `k` is `true` iff slot `k` survives the method's rule against *this
+/// chunk's* trial points. Callers combine per-chunk bitmaps with bitwise-OR
+/// to obtain the global "selected" set.
+///
+/// Both buffers are reused across chunks dispatched to the same rayon worker
+/// (via `map_init`) to keep the hot path allocation-free. `scratch` is fully
+/// overwritten in phase 1 of every trial-point iteration, so no explicit
+/// reset between chunks is required. `is_selected` MUST be reset to all-false
+/// by the caller before each new chunk; otherwise prior-chunk selection state
+/// leaks into the next chunk and breaks the determinism guarantee documented
+/// on [`CutSelectionStrategy::select_for_stage`].
 ///
 /// Correctness of the OR-merge:
 ///
@@ -465,18 +544,24 @@ impl CutSelectionStrategy {
 ///   then the per-chunk result is the union of those per-trial-point picks.
 ///   Since chunks process disjoint trial points, the union of per-chunk
 ///   results equals the global union.
-fn evaluate_chunk(
+#[allow(clippy::too_many_arguments)]
+fn evaluate_chunk_in_place(
     pool: &crate::cut::CutPool,
     chunk: &[f64],
     n_state: usize,
     warm_start: usize,
     eligible: &[bool],
     method: &CutSelectionStrategy,
-) -> Vec<bool> {
+    is_selected: &mut [bool],
+    scratch: &mut [f64],
+) {
     let populated = pool.populated_count;
-    let mut is_selected = vec![false; populated];
-    // Pre-allocate scratch buffer outside the trial-point loop (no allocation on hot path).
-    let mut scratch = vec![0.0_f64; populated];
+    debug_assert_eq!(is_selected.len(), populated);
+    debug_assert_eq!(scratch.len(), populated);
+    debug_assert!(
+        is_selected.iter().all(|&b| !b),
+        "evaluate_chunk_in_place: caller must reset is_selected to all-false before each chunk"
+    );
     let n_eligible = eligible.iter().filter(|&&e| e).count();
     let mut n_unselected = n_eligible;
 
@@ -542,8 +627,6 @@ fn evaluate_chunk(
             break;
         }
     }
-
-    is_selected
 }
 
 // ---------------------------------------------------------------------------
@@ -2058,7 +2141,7 @@ mod tests {
         let mut pool = CutPool::new(2, 1, 1, 0);
         pool.add_cut(0, 0, 10.0, &[0.0]); // higher value
         pool.add_cut(1, 0, 1.0, &[0.0]); // lower value
-                                         // Slot 0 from current iteration → ineligible. Slot 1 eligible.
+        // Slot 0 from current iteration → ineligible. Slot 1 eligible.
         pool.metadata[0].iteration_generated = 10; // current_iteration
         pool.metadata[1].iteration_generated = 5;
         // n_eligible = 1 (only slot 1). Guard returns empty.
