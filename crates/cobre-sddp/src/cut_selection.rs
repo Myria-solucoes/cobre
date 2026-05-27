@@ -1837,4 +1837,146 @@ mod tests {
             "cut from current iteration must not be deactivated even if dominated"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // AC6 set-inclusion property: Level1_selected ⊇ Lml1_selected
+    // -----------------------------------------------------------------------
+
+    /// AC6 (set-inclusion form): every cut that Lml1 keeps must also be kept by
+    /// Level1 — i.e., every slot in Lml1's deactivation list also appears in
+    /// Level1's deactivation list.  The existing aggressiveness ordering test
+    /// only checks that `|deact_L1|` <= `|deact_Lml1|`; this test directly verifies
+    /// the subset relationship on slot indices.
+    ///
+    /// Fixture: 4 cuts (1D), 2 trial points.
+    /// cut0: constant 1  (coeff=0, intercept=1)
+    /// cut1: constant 3  (coeff=0, intercept=3)
+    /// cut2: 2x          (coeff=2, intercept=0)
+    /// cut3: constant 0  (coeff=0, intercept=0) -- always below max
+    ///
+    /// At state [0.0]: values=[1,3,0,0] → max=3 (cut1). Level1 keeps cut1.
+    ///   Lml1 keeps oldest at max = cut1.
+    /// At state [2.0]: values=[1,3,4,0] → max=4 (cut2). Level1 keeps cut1,cut2.
+    ///   Lml1 keeps oldest at max = cut2.
+    ///
+    /// Level1 deactivates: {cut0, cut3}.
+    /// Lml1 deactivates: {cut0, cut3} (same here, but the property holds).
+    ///
+    /// Set-inclusion check: every slot in `deact_lml1` must also be in `deact_l1`.
+    #[test]
+    fn level1_selected_is_superset_of_lml1_selected() {
+        let meta = default_meta_vec(4, 1);
+        let pool = make_dominated_pool(
+            &[1.0, 3.0, 0.0, 0.0],
+            &[vec![0.0], vec![0.0], vec![2.0], vec![0.0]],
+            &[true; 4],
+            &meta,
+        );
+        let states: Vec<f64> = vec![0.0, 2.0];
+
+        let l1 = CutSelectionStrategy::Level1 {
+            check_frequency: 1,
+            tie_tolerance: 1e-10,
+        };
+        let lml1 = CutSelectionStrategy::Lml1 {
+            check_frequency: 1,
+            tie_tolerance: 1e-10,
+        };
+
+        let deact_l1 = l1.select(&pool, &states, 10);
+        let deact_lml1 = lml1.select(&pool, &states, 10);
+
+        // Set-inclusion: every slot Lml1 deactivates must also be deactivated by Level1.
+        // Equivalently: the Level1 survivor set is a superset of the Lml1 survivor set.
+        for slot in deact_lml1.deactivation_indices() {
+            assert!(
+                deact_l1.deactivation_indices().contains(&slot),
+                "slot {slot} deactivated by Lml1 but not by Level1; \
+                 Level1_selected must be a superset of Lml1_selected"
+            );
+        }
+        // Sanity: Level1 must not deactivate more than it could (count check too).
+        assert!(
+            deact_l1.deactivation_indices().len() <= deact_lml1.deactivation_indices().len(),
+            "Level1 must deactivate <= Lml1"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // AC3 variant: Dominated epsilon-tolerance test
+    // -----------------------------------------------------------------------
+
+    /// A cut 1e-7 below max everywhere survives with epsilon=1e-6 but is
+    /// deactivated with epsilon=0.
+    ///
+    /// Fixture: 2 cuts (1D constant), states [0.0].
+    /// cut0: constant 5.0  (max)
+    /// cut1: constant 4.9999999  (max - 1e-7)
+    ///
+    /// With epsilon=1e-6: cutoff = 5.0 - 1e-6 = 4.999999. cut1(4.9999999) > 4.999999 → survives.
+    /// With epsilon=0:    cutoff = 5.0.       cut1(4.9999999) < 5.0 → deactivated.
+    #[test]
+    fn dominated_epsilon_tolerance_cut_barely_below_max() {
+        let meta = default_meta_vec(2, 1);
+        let pool = make_dominated_pool(
+            &[5.0, 4.999_999_9],
+            &[vec![0.0], vec![0.0]],
+            &[true; 2],
+            &meta,
+        );
+        let states: Vec<f64> = vec![0.0];
+
+        // With epsilon=1e-6: cut1 is within tolerance → survives.
+        let dom_loose = CutSelectionStrategy::Dominated {
+            threshold: 1e-6,
+            check_frequency: 1,
+        };
+        let deact_loose = dom_loose.select(&pool, &states, 10);
+        assert!(
+            deact_loose.deactivation_indices().is_empty(),
+            "cut1 (1e-7 below max) must survive when epsilon=1e-6"
+        );
+
+        // With epsilon=0: cut1 is strictly below max → deactivated.
+        let dom_strict = CutSelectionStrategy::Dominated {
+            threshold: 0.0,
+            check_frequency: 1,
+        };
+        let deact_strict = dom_strict.select(&pool, &states, 10);
+        assert_eq!(
+            deact_strict.deactivation_indices(),
+            vec![1],
+            "cut1 (1e-7 below max) must be deactivated when epsilon=0"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Edge case: single eligible cut
+    // -----------------------------------------------------------------------
+
+    /// Level1 with exactly one eligible cut returns empty updates (`n_eligible` < 2
+    /// guard fires before any evaluation).
+    ///
+    /// Two slots total: slot 0 is from `current_iteration` (ineligible); slot 1 is
+    /// eligible. `n_eligible=1` → empty.
+    #[test]
+    fn level1_single_eligible_cut_returns_empty() {
+        let strategy = CutSelectionStrategy::Level1 {
+            check_frequency: 1,
+            tie_tolerance: 1e-10,
+        };
+        let mut pool = CutPool::new(2, 1, 1, 0);
+        pool.add_cut(0, 0, 10.0, &[0.0]); // higher value
+        pool.add_cut(1, 0, 1.0, &[0.0]); // lower value
+        // Slot 0 from current iteration → ineligible. Slot 1 eligible.
+        pool.metadata[0].iteration_generated = 10; // current_iteration
+        pool.metadata[1].iteration_generated = 5;
+        // n_eligible = 1 (only slot 1). Guard returns empty.
+        let result = strategy.select(&pool, &[0.0], 10);
+        assert!(
+            result.deactivation_indices().is_empty(),
+            "single eligible cut must not trigger any deactivations"
+        );
+        assert!(result.reactivation_indices().is_empty());
+    }
 }
