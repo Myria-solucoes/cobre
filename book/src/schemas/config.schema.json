@@ -474,7 +474,7 @@
         },
         "memory_window": {
           "default": null,
-          "description": "Memory window size for the `\"lml1\"` method (iterations).\n\nRequired when `method = \"lml1\"`. Ignored for other methods.",
+          "description": "Deprecated. Silently ignored. Retained for backward compatibility with\nexisting config files.\n\nPreviously used as the memory window size for the `\"lml1\"` method.\nThe correct algorithm (Guigues 2017/2019) is value-based and uses\n`tie_tolerance` instead.",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -492,11 +492,20 @@
         },
         "threshold": {
           "default": null,
-          "description": "Activity-count threshold for the `\"level1\"` row-selection method.\n\nA row is deactivated when its `active_count <= threshold`. Typical\nvalue: 0 (deactivate only fully-inactive rows). Ignored by the\n`\"lml1\"` and `\"domination\"` methods.",
+          "description": "Deprecated. Silently ignored. Retained for backward compatibility with\nexisting config files.\n\nPreviously used as an activity-count threshold for the `\"level1\"`\nrow-selection method. The correct algorithm (de Matos 2015) is\nvalue-based and uses `tie_tolerance` instead.",
           "format": "uint32",
           "minimum": 0,
           "type": [
             "integer",
+            "null"
+          ]
+        },
+        "tie_tolerance": {
+          "default": null,
+          "description": "Tie-tolerance for the `\"level1\"` and `\"lml1\"` value-based row-selection\nmethods.\n\nA row is considered tied at an evaluation point when its value is\nwithin `tie_tolerance` of the best active row value. Default: `1e-10`.\nIgnored by the `\"domination\"` method.",
+          "format": "double",
+          "type": [
+            "number",
             "null"
           ]
         }
@@ -672,7 +681,8 @@
             "max_active_per_stage": null,
             "memory_window": null,
             "method": null,
-            "threshold": null
+            "threshold": null,
+            "tie_tolerance": null
           },
           "description": "Row-selection settings."
         },

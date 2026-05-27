@@ -202,19 +202,24 @@ two-stage cut management pipeline that also includes budget enforcement
 [Performance Accelerators](../guide/performance-accelerators.md#cut-management-pipeline)
 guide for the full pipeline description.
 
-| Variant     | Deactivation condition                                               |
-| ----------- | -------------------------------------------------------------------- |
-| `Level1`    | `active_count <= threshold` (never active; least aggressive)         |
-| `Lml1`      | `iteration - last_active_iter > memory_window` (outside time window) |
-| `Dominated` | Dominated at all visited forward pass states (most aggressive)       |
+| Variant     | Deactivation condition                                                             |
+| ----------- | ---------------------------------------------------------------------------------- |
+| `Level1`    | Below `tie_tolerance` of the per-state max at every visited state                  |
+| `Lml1`      | Not the oldest eligible cut at the per-state max at any visited state              |
+| `Dominated` | Below `threshold` of the per-state max at every visited state (all populated cuts) |
 
 All variants respect a `check_frequency` parameter: selection only runs at
 iterations that are multiples of `check_frequency` and never at iteration 0.
 Stage 0 is always exempt.
 
-`Dominated` selection performs `O(|active cuts| x |visited states|)` work
-per stage per check. It uses the `VisitedStatesArchive` (always collected
-during training) and the `domination_epsilon` tolerance parameter.
+All three variants share a single value-evaluation kernel
+(`select_for_stage` in `cut_selection.rs`) that performs
+`O(|populated cuts| x |visited states|)` work per stage per check.
+The `VisitedStatesArchive` is always collected during training when any
+cut-selection variant is enabled; the archive feeds the kernel for
+`Level1`, `Lml1`, and `Dominated` alike. `Dominated` uses its `threshold`
+field as the tie tolerance; `Level1` and `Lml1` use `tie_tolerance`
+(default `1e-10`).
 
 ## Key data structures
 
@@ -515,11 +520,11 @@ pub enum Phase {
 }
 ```
 
-| Variant      | When it runs                                                                      |
-|--------------|-----------------------------------------------------------------------------------|
-| `Forward`    | Forward sweep: solving LPs from stage 1 to T to sample trajectories.             |
-| `Backward`   | Backward sweep: solving LPs from stage T to 1 to generate Benders cuts.          |
-| `Simulation` | Policy simulation: evaluating the trained policy on out-of-sample scenarios.      |
+| Variant      | When it runs                                                                 |
+| ------------ | ---------------------------------------------------------------------------- |
+| `Forward`    | Forward sweep: solving LPs from stage 1 to T to sample trajectories.         |
+| `Backward`   | Backward sweep: solving LPs from stage T to 1 to generate Benders cuts.      |
+| `Simulation` | Policy simulation: evaluating the trained policy on out-of-sample scenarios. |
 
 `Phase` is `Copy + Eq`, so it can be used in `match` patterns and stored
 cheaply by value. `Phase::profile()` returns the `SolveProfile` that should be
@@ -529,11 +534,11 @@ applied when entering that phase.
 
 Three `pub const` values define the per-phase solver configurations:
 
-| Constant            | Applied during            |
-|---------------------|---------------------------|
-| `FORWARD_PROFILE`   | `Phase::Forward` entry    |
-| `BACKWARD_PROFILE`  | `Phase::Backward` entry   |
-| `SIMULATION_PROFILE`| `Phase::Simulation` entry |
+| Constant             | Applied during            |
+| -------------------- | ------------------------- |
+| `FORWARD_PROFILE`    | `Phase::Forward` entry    |
+| `BACKWARD_PROFILE`   | `Phase::Backward` entry   |
+| `SIMULATION_PROFILE` | `Phase::Simulation` entry |
 
 In the current release all three constants equal `SolveProfile::default()`
 field-for-field, preserving bit-for-bit behavioral parity with the historical
@@ -627,7 +632,7 @@ variants:
   index, intercept) followed by `n_state * 8` bytes of coefficients. The
   total record size is `cut_wire_size(n_state) = 24 + n_state * 8` bytes.
 - **Activity-update record**: a fixed-size payload encoding `(stage, slot,
-  ActivityChange)`, where `ActivityChange` is either `Deactivate` (apply
+ActivityChange)`, where `ActivityChange` is either `Deactivate` (apply
   the sentinel RHS) or `Reactivate` (restore the original intercept).
   Activity-update records travel through the same allgatherv channel as
   new cuts so that RHS toggles propagate to all ranks in the same step.
