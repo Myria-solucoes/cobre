@@ -95,8 +95,8 @@ pub struct RowSelectionConfig {
     /// Tie-tolerance for the `"level1"` and `"lml1"` value-based row-selection
     /// methods.
     ///
-    /// A cut is considered tied at a visited state when its value is within
-    /// `tie_tolerance` of the best active cut value. Default: `1e-10`.
+    /// A row is considered tied at an evaluation point when its value is
+    /// within `tie_tolerance` of the best active row value. Default: `1e-10`.
     /// Ignored by the `"domination"` method.
     #[serde(default)]
     pub tie_tolerance: Option<f64>,

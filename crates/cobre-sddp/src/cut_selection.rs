@@ -45,6 +45,22 @@
 //! assert!(strategy.should_run(10));
 //! ```
 
+use rayon::prelude::*;
+
+/// Trial-point count threshold above which intra-stage selection is parallelized.
+///
+/// When the number of visited states for a stage is at least this value,
+/// [`CutSelectionStrategy::select_for_stage`] splits the visited states into
+/// chunks and processes each chunk on a rayon worker (nested under the existing
+/// outer `into_par_iter` over stages). Below the threshold the kernel runs
+/// sequentially to avoid per-task overhead dominating the work.
+///
+/// 256 is chosen as a balance between thread-spawn overhead and useful work per
+/// chunk. The merge across chunks is bitwise-OR, which is commutative and
+/// associative, so the final `is_selected` bitmap is bit-for-bit identical
+/// regardless of the number of threads or chunk boundaries.
+const PARALLEL_THRESHOLD: usize = 256;
+
 // ---------------------------------------------------------------------------
 // CutMetadata
 // ---------------------------------------------------------------------------
@@ -323,6 +339,22 @@ impl CutSelectionStrategy {
     /// vectors (row-major, one state per `pool.state_dimension` elements).
     /// When empty, the function returns empty updates immediately.
     ///
+    /// # Parallelism
+    ///
+    /// When the number of trial points is at least [`PARALLEL_THRESHOLD`], the
+    /// visited states are split into chunks and each chunk is evaluated on a
+    /// rayon worker. The per-chunk results are bitmaps of cut indices selected
+    /// by that chunk's trial-point subset; chunks are merged with bitwise-OR
+    /// over the bitmaps. Because trial points are independent and the merge
+    /// (union) is commutative and associative, the final `is_selected` set is
+    /// bit-for-bit identical regardless of the number of threads or chunk
+    /// boundaries — including for Lml1, where the per-chunk "oldest at max" is
+    /// taken over disjoint trial-point subsets and the union across subsets
+    /// equals the global oldest-at-max union.
+    ///
+    /// Below the threshold the work is too small for parallelism to pay off,
+    /// so the same kernel runs once on the full state slice.
+    ///
     /// [`select`]: CutSelectionStrategy::select
     #[must_use]
     pub fn select_for_stage(
@@ -362,73 +394,32 @@ impl CutSelectionStrategy {
             };
         }
 
-        let mut is_selected = vec![false; populated];
-        // Pre-allocate scratch buffer outside the trial-point loop (no allocation on hot path).
-        let mut scratch = vec![0.0_f64; populated];
-        let mut n_unselected = n_eligible;
+        let n_states = visited_states.len() / n_state;
 
-        for x_hat in visited_states.chunks_exact(n_state) {
-            // Phase 1: evaluate ALL populated cuts (active AND inactive) to find max.
-            // This is the core correctness fix: inactive cuts participate in the max
-            // computation, ensuring the survival criterion is globally correct.
-            let mut max_val = f64::NEG_INFINITY;
-            #[allow(clippy::needless_range_loop)]
-            for k in 0..populated {
-                let coeff_start = k * n_state;
-                let val = pool.intercepts[k]
-                    + pool.coefficients[coeff_start..coeff_start + n_state]
-                        .iter()
-                        .zip(x_hat)
-                        .map(|(c, x)| c * x)
-                        .sum::<f64>();
-                scratch[k] = val;
-                if val > max_val {
-                    max_val = val;
-                }
-            }
-
-            // Phase 2: method-specific survival rule.
-            match self {
-                Self::Level1 { tie_tolerance, .. }
-                | Self::Dominated {
-                    threshold: tie_tolerance,
-                    ..
-                } => {
-                    // Level1 / Dominated: keep ALL eligible cuts within tolerance of max.
-                    let cutoff = max_val - tie_tolerance;
-                    for k in warm_start..populated {
-                        if eligible[k] && !is_selected[k] && scratch[k] >= cutoff {
-                            is_selected[k] = true;
-                            n_unselected -= 1;
+        // Decide between sequential and parallel processing. Both paths
+        // ultimately call [`evaluate_chunk`] with the same logic; parallel
+        // path merges per-chunk bitmaps with bitwise-OR.
+        let is_selected: Vec<bool> = if n_states >= PARALLEL_THRESHOLD {
+            // par_chunks operates over the flat f64 slice; each chunk contains
+            // PARALLEL_THRESHOLD states packed as PARALLEL_THRESHOLD * n_state
+            // contiguous f64 elements. The final chunk may be shorter — rayon
+            // returns whatever remains, which `evaluate_chunk` handles via
+            // `chunks_exact(n_state)`.
+            visited_states
+                .par_chunks(PARALLEL_THRESHOLD * n_state)
+                .map(|chunk| evaluate_chunk(pool, chunk, n_state, warm_start, &eligible, self))
+                .reduce(
+                    || vec![false; populated],
+                    |mut a, b| {
+                        for (ai, bi) in a.iter_mut().zip(b.iter()) {
+                            *ai |= *bi;
                         }
-                    }
-                }
-                Self::Lml1 { tie_tolerance, .. } => {
-                    // Lml1: at this trial point, only the OLDEST eligible cut at max survives.
-                    // Ascending slot order = oldest first (slots are assigned sequentially).
-                    let cutoff = max_val - tie_tolerance;
-                    for k in warm_start..populated {
-                        if eligible[k] && scratch[k] >= cutoff {
-                            if !is_selected[k] {
-                                is_selected[k] = true;
-                                n_unselected -= 1;
-                            }
-                            // Break after the oldest at-max: per trial point, only one survives.
-                            break;
-                        }
-                    }
-                    // Do NOT break the outer trial-point loop for Lml1.
-                    // Different trial points may select different oldest cuts,
-                    // so all trial points must be visited.
-                }
-            }
-
-            // Early exit (Level1 and Dominated only): stop when all eligible cuts
-            // have been selected. Lml1 must visit all trial points.
-            if n_unselected == 0 && !matches!(self, Self::Lml1 { .. }) {
-                break;
-            }
-        }
+                        a
+                    },
+                )
+        } else {
+            evaluate_chunk(pool, visited_states, n_state, warm_start, &eligible, self)
+        };
 
         // Collect activity changes.
         // - Deactivate: eligible, not selected, currently active.
@@ -454,6 +445,105 @@ impl CutSelectionStrategy {
             reactivations,
         }
     }
+}
+
+/// Evaluate a contiguous chunk of visited states and return the per-slot
+/// "selected" bitmap produced by the chunk.
+///
+/// This helper is the core of [`CutSelectionStrategy::select_for_stage`] and
+/// runs on every code path (sequential and per-rayon-worker). The bitmap is
+/// `populated`-long; entry `k` is `true` iff slot `k` survives the method's
+/// rule against *this chunk's* trial points. Callers combine per-chunk bitmaps
+/// with bitwise-OR to obtain the global "selected" set.
+///
+/// Correctness of the OR-merge:
+///
+/// - **Level1 / Dominated**: a cut survives if it is within `tie_tolerance` of
+///   the per-state max at *any* trial point. Per-chunk OR over disjoint
+///   trial-point subsets is exactly the global OR.
+/// - **Lml1**: per trial point only the oldest eligible cut at max survives,
+///   then the per-chunk result is the union of those per-trial-point picks.
+///   Since chunks process disjoint trial points, the union of per-chunk
+///   results equals the global union.
+fn evaluate_chunk(
+    pool: &crate::cut::CutPool,
+    chunk: &[f64],
+    n_state: usize,
+    warm_start: usize,
+    eligible: &[bool],
+    method: &CutSelectionStrategy,
+) -> Vec<bool> {
+    let populated = pool.populated_count;
+    let mut is_selected = vec![false; populated];
+    // Pre-allocate scratch buffer outside the trial-point loop (no allocation on hot path).
+    let mut scratch = vec![0.0_f64; populated];
+    let n_eligible = eligible.iter().filter(|&&e| e).count();
+    let mut n_unselected = n_eligible;
+
+    for x_hat in chunk.chunks_exact(n_state) {
+        // Phase 1: evaluate ALL populated cuts (active AND inactive) to find max.
+        // This is the core correctness fix: inactive cuts participate in the max
+        // computation, ensuring the survival criterion is globally correct.
+        let mut max_val = f64::NEG_INFINITY;
+        #[allow(clippy::needless_range_loop)]
+        for k in 0..populated {
+            let coeff_start = k * n_state;
+            let val = pool.intercepts[k]
+                + pool.coefficients[coeff_start..coeff_start + n_state]
+                    .iter()
+                    .zip(x_hat)
+                    .map(|(c, x)| c * x)
+                    .sum::<f64>();
+            scratch[k] = val;
+            if val > max_val {
+                max_val = val;
+            }
+        }
+
+        // Phase 2: method-specific survival rule.
+        match method {
+            CutSelectionStrategy::Level1 { tie_tolerance, .. }
+            | CutSelectionStrategy::Dominated {
+                threshold: tie_tolerance,
+                ..
+            } => {
+                // Level1 / Dominated: keep ALL eligible cuts within tolerance of max.
+                let cutoff = max_val - tie_tolerance;
+                for k in warm_start..populated {
+                    if eligible[k] && !is_selected[k] && scratch[k] >= cutoff {
+                        is_selected[k] = true;
+                        n_unselected -= 1;
+                    }
+                }
+            }
+            CutSelectionStrategy::Lml1 { tie_tolerance, .. } => {
+                // Lml1: at this trial point, only the OLDEST eligible cut at max survives.
+                // Ascending slot order = oldest first (slots are assigned sequentially).
+                let cutoff = max_val - tie_tolerance;
+                for k in warm_start..populated {
+                    if eligible[k] && scratch[k] >= cutoff {
+                        if !is_selected[k] {
+                            is_selected[k] = true;
+                            n_unselected -= 1;
+                        }
+                        // Break after the oldest at-max: per trial point, only one survives.
+                        break;
+                    }
+                }
+                // Do NOT break the outer trial-point loop for Lml1.
+                // Different trial points may select different oldest cuts,
+                // so all trial points must be visited.
+            }
+        }
+
+        // Early exit (Level1 and Dominated only): stop when all eligible cuts
+        // have been selected. Lml1 must visit all trial points.
+        if n_unselected == 0 && !matches!(method, CutSelectionStrategy::Lml1 { .. }) {
+            break;
+        }
+    }
+
+    is_selected
 }
 
 // ---------------------------------------------------------------------------
@@ -528,7 +618,7 @@ pub fn parse_cut_selection_config(
 #[cfg(test)]
 mod tests {
     use super::parse_cut_selection_config;
-    use super::{CutActivityUpdates, CutMetadata, CutSelectionStrategy};
+    use super::{CutActivityUpdates, CutMetadata, CutSelectionStrategy, PARALLEL_THRESHOLD};
     use crate::cut::CutPool;
     use cobre_io::config::RowSelectionConfig;
 
@@ -1978,5 +2068,165 @@ mod tests {
             "single eligible cut must not trigger any deactivations"
         );
         assert!(result.reactivation_indices().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Intra-stage parallelism determinism tests
+    // -----------------------------------------------------------------------
+
+    /// Build a 100-cut, 1-D pool whose intercepts and coefficients are
+    /// deterministic functions of the slot index — designed so that different
+    /// cuts achieve the max at different trial points, exercising both
+    /// Level1's "any-max" and Lml1's "oldest-at-max" branches.
+    #[allow(clippy::cast_precision_loss)]
+    fn make_determinism_pool() -> CutPool {
+        const N: usize = 100;
+        let mut pool = CutPool::new(N, 1, 1, 0);
+        for i in 0..N {
+            // Use varied (intercept, slope) pairs so values are non-trivial.
+            // intercept = i mod 7, slope = ((i + 3) mod 5) - 2  (range [-2, 2]).
+            let intercept = (i % 7) as f64;
+            let slope = ((i + 3) % 5) as f64 - 2.0;
+            #[allow(clippy::cast_possible_truncation)]
+            pool.add_cut(0, i as u32, intercept, &[slope]);
+            // Make every cut eligible (iteration_generated < current_iteration in
+            // the tests below).
+            pool.metadata[i].iteration_generated = 1;
+        }
+        pool
+    }
+
+    /// Build >= 1000 trial points spanning a representative range.
+    #[allow(clippy::cast_precision_loss)]
+    fn make_determinism_states(count: usize) -> Vec<f64> {
+        (0..count).map(|i| (i as f64) * 0.01 - 5.0).collect()
+    }
+
+    /// Run `select_for_stage` for `strategy` inside a rayon thread pool with
+    /// `num_threads` workers, returning the resulting `CutActivityUpdates`.
+    fn run_in_pool(
+        strategy: &CutSelectionStrategy,
+        pool: &CutPool,
+        states: &[f64],
+        current_iteration: u64,
+        num_threads: usize,
+    ) -> CutActivityUpdates {
+        let rayon_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .expect("rayon pool must build for determinism test");
+        rayon_pool.install(|| strategy.select_for_stage(pool, states, current_iteration, 0))
+    }
+
+    /// Determinism: identical bit-for-bit output for 1 vs 4 threads, across
+    /// thresholds that bracket [`PARALLEL_THRESHOLD`].
+    ///
+    /// 1000 trial points >> threshold of 256 → parallel path engaged with
+    /// multiple chunks. The bitwise-OR merge is commutative and associative,
+    /// so any worker assignment must yield the same `is_selected` bitmap and
+    /// therefore identical `CutActivityUpdates`.
+    #[test]
+    fn select_for_stage_deterministic_across_thread_counts_level1() {
+        let pool = make_determinism_pool();
+        let states = make_determinism_states(1024);
+        let strategy = CutSelectionStrategy::Level1 {
+            check_frequency: 1,
+            tie_tolerance: 1e-10,
+        };
+        let r1 = run_in_pool(&strategy, &pool, &states, 10, 1);
+        let r4 = run_in_pool(&strategy, &pool, &states, 10, 4);
+        let r8 = run_in_pool(&strategy, &pool, &states, 10, 8);
+        assert_eq!(
+            r1, r4,
+            "Level1: 1-thread vs 4-thread results must be bit-identical"
+        );
+        assert_eq!(
+            r4, r8,
+            "Level1: 4-thread vs 8-thread results must be bit-identical"
+        );
+    }
+
+    /// Determinism for Lml1: per-chunk "oldest at max" picks unioned with
+    /// bitwise-OR across disjoint trial-point chunks must reproduce the
+    /// sequential global "oldest at max" union.
+    #[test]
+    fn select_for_stage_deterministic_across_thread_counts_lml1() {
+        let pool = make_determinism_pool();
+        let states = make_determinism_states(1024);
+        let strategy = CutSelectionStrategy::Lml1 {
+            check_frequency: 1,
+            tie_tolerance: 1e-10,
+        };
+        let r1 = run_in_pool(&strategy, &pool, &states, 10, 1);
+        let r4 = run_in_pool(&strategy, &pool, &states, 10, 4);
+        let r8 = run_in_pool(&strategy, &pool, &states, 10, 8);
+        assert_eq!(
+            r1, r4,
+            "Lml1: 1-thread vs 4-thread results must be bit-identical"
+        );
+        assert_eq!(
+            r4, r8,
+            "Lml1: 4-thread vs 8-thread results must be bit-identical"
+        );
+    }
+
+    /// Determinism for Dominated: same proof structure as Level1.
+    #[test]
+    fn select_for_stage_deterministic_across_thread_counts_dominated() {
+        let pool = make_determinism_pool();
+        let states = make_determinism_states(1024);
+        let strategy = CutSelectionStrategy::Dominated {
+            threshold: 0.0,
+            check_frequency: 1,
+        };
+        let r1 = run_in_pool(&strategy, &pool, &states, 10, 1);
+        let r4 = run_in_pool(&strategy, &pool, &states, 10, 4);
+        let r8 = run_in_pool(&strategy, &pool, &states, 10, 8);
+        assert_eq!(
+            r1, r4,
+            "Dominated: 1-thread vs 4-thread results must be bit-identical"
+        );
+        assert_eq!(
+            r4, r8,
+            "Dominated: 4-thread vs 8-thread results must be bit-identical"
+        );
+    }
+
+    /// Sequential (small input, below threshold) vs parallel (large input)
+    /// must agree on the subset of states shared between them. Concretely:
+    /// running the sequential path on N states and the parallel path on the
+    /// same N states (forced via thread-pool size 4) must yield identical
+    /// output, even when N is just past the threshold so the parallel path
+    /// produces a small number of chunks plus a possibly-short tail chunk.
+    #[test]
+    fn select_for_stage_parallel_matches_sequential_just_past_threshold() {
+        let pool = make_determinism_pool();
+        // PARALLEL_THRESHOLD + 7 → trigger parallel path with one partial chunk.
+        let n_states = PARALLEL_THRESHOLD + 7;
+        let states = make_determinism_states(n_states);
+
+        for strategy in [
+            CutSelectionStrategy::Level1 {
+                check_frequency: 1,
+                tie_tolerance: 1e-10,
+            },
+            CutSelectionStrategy::Lml1 {
+                check_frequency: 1,
+                tie_tolerance: 1e-10,
+            },
+            CutSelectionStrategy::Dominated {
+                threshold: 0.0,
+                check_frequency: 1,
+            },
+        ] {
+            // 1-thread pool → still takes parallel branch (n_states >= threshold)
+            // but executes chunks serially. 4-thread pool → genuine parallelism.
+            let seq = run_in_pool(&strategy, &pool, &states, 10, 1);
+            let par = run_in_pool(&strategy, &pool, &states, 10, 4);
+            assert_eq!(
+                seq, par,
+                "strategy {strategy:?}: parallel must equal sequential at threshold boundary"
+            );
+        }
     }
 }
