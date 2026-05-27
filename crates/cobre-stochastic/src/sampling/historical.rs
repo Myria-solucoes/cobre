@@ -566,12 +566,11 @@ pub fn standardize_historical_windows(
                     None
                 }
             });
-        if let Some(sid) = season_id {
-            if let Some(&h) = hydro_id_to_idx.get(&r.hydro_id) {
-                if let Some(idx) = table_idx(h, r.date.year(), sid) {
-                    obs_table[idx] = r.value_m3s;
-                }
-            }
+        if let Some(sid) = season_id
+            && let Some(&h) = hydro_id_to_idx.get(&r.hydro_id)
+            && let Some(idx) = table_idx(h, r.date.year(), sid)
+        {
+            obs_table[idx] = r.value_m3s;
         }
     }
 

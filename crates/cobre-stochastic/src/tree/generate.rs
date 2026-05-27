@@ -88,10 +88,10 @@ fn compute_effective_opening_counts(
             let mut effective = s.scenario_config.branching_factor;
 
             // Historical residuals clamping (existing logic).
-            if s.scenario_config.noise_method == NoiseMethod::HistoricalResiduals {
-                if let Some(lib) = historical_library {
-                    effective = effective.min(lib.n_windows());
-                }
+            if s.scenario_config.noise_method == NoiseMethod::HistoricalResiduals
+                && let Some(lib) = historical_library
+            {
+                effective = effective.min(lib.n_windows());
             }
 
             // External scenario clamping.

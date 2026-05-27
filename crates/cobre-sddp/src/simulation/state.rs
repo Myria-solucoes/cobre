@@ -195,14 +195,14 @@ impl SimulationState {
         debug_assert_inputs(inputs.ctx, num_stages, initial_state.len(), indexer.n_state);
 
         // Validate baked-template slice length if provided.
-        if let Some(baked) = inputs.baked_templates {
-            if baked.len() != num_stages {
-                return Err(SimulationError::InvalidConfiguration(format!(
-                    "baked_templates length {} != num_stages {}",
-                    baked.len(),
-                    num_stages
-                )));
-            }
+        if let Some(baked) = inputs.baked_templates
+            && baked.len() != num_stages
+        {
+            return Err(SimulationError::InvalidConfiguration(format!(
+                "baked_templates length {} != num_stages {}",
+                baked.len(),
+                num_stages
+            )));
         }
 
         // Populate `self.owned_baked` when the caller did not provide templates.

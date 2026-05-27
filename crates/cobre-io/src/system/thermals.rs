@@ -217,14 +217,14 @@ fn validate_anticipated_config(
     thermal_index: usize,
     path: &Path,
 ) -> Result<(), LoadError> {
-    if let Some(cfg) = config {
-        if cfg.lead_stages == 0 {
-            return Err(LoadError::SchemaError {
-                path: path.to_path_buf(),
-                field: format!("thermals[{thermal_index}].anticipated_config.lead_stages"),
-                message: "lead_stages must be >= 1, got 0".to_string(),
-            });
-        }
+    if let Some(cfg) = config
+        && cfg.lead_stages == 0
+    {
+        return Err(LoadError::SchemaError {
+            path: path.to_path_buf(),
+            field: format!("thermals[{thermal_index}].anticipated_config.lead_stages"),
+            message: "lead_stages must be >= 1, got 0".to_string(),
+        });
     }
     Ok(())
 }

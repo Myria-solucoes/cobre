@@ -37,7 +37,7 @@ too_many_arguments = "deny"
 [dependencies]
 
 [dev-dependencies]
-matrixmultiply = { version = "= 0.3.10", default-features = false }
+matrixmultiply = { workspace = true }
 
 [build-dependencies]
 cmake = "0.1"

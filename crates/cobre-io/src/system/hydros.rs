@@ -898,10 +898,10 @@ fn convert_penalty_overrides(raw: RawHydroPenaltyOverrides) -> HydroPenaltyOverr
 /// This helper extracts the identifier between backticks, returning a best-effort
 /// field name or `"<unknown>"` when no match is found.
 fn extract_field_from_serde_msg(msg: &str) -> String {
-    if let Some(start) = msg.find('`') {
-        if let Some(end) = msg[start + 1..].find('`') {
-            return msg[start + 1..start + 1 + end].to_string();
-        }
+    if let Some(start) = msg.find('`')
+        && let Some(end) = msg[start + 1..].find('`')
+    {
+        return msg[start + 1..start + 1 + end].to_string();
     }
     "<unknown>".to_string()
 }

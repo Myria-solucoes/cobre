@@ -1138,27 +1138,27 @@ fn validate_hydro_refs(
                 expected_type: "Bus",
             });
         }
-        if let Some(downstream_id) = hydro.downstream_id {
-            if !hydro_index.contains_key(&downstream_id) {
-                errors.push(ValidationError::InvalidReference {
-                    source_entity_type: "Hydro",
-                    source_id: hydro.id,
-                    field_name: "downstream_id",
-                    referenced_id: downstream_id,
-                    expected_type: "Hydro",
-                });
-            }
+        if let Some(downstream_id) = hydro.downstream_id
+            && !hydro_index.contains_key(&downstream_id)
+        {
+            errors.push(ValidationError::InvalidReference {
+                source_entity_type: "Hydro",
+                source_id: hydro.id,
+                field_name: "downstream_id",
+                referenced_id: downstream_id,
+                expected_type: "Hydro",
+            });
         }
-        if let Some(ref diversion) = hydro.diversion {
-            if !hydro_index.contains_key(&diversion.downstream_id) {
-                errors.push(ValidationError::InvalidReference {
-                    source_entity_type: "Hydro",
-                    source_id: hydro.id,
-                    field_name: "diversion.downstream_id",
-                    referenced_id: diversion.downstream_id,
-                    expected_type: "Hydro",
-                });
-            }
+        if let Some(ref diversion) = hydro.diversion
+            && !hydro_index.contains_key(&diversion.downstream_id)
+        {
+            errors.push(ValidationError::InvalidReference {
+                source_entity_type: "Hydro",
+                source_id: hydro.id,
+                field_name: "diversion.downstream_id",
+                referenced_id: diversion.downstream_id,
+                expected_type: "Hydro",
+            });
         }
     }
 }

@@ -25,7 +25,7 @@ exclude = [
 [workspace.package]
 version = "0.7.1"
 edition = "2024"
-rust-version = "1.86"
+rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/cobre-rs/cobre"
 homepage = "https://cobre-rs.github.io/cobre-docs/"
@@ -59,3 +59,6 @@ unwrap_used = "deny"
 expect_used = "warn"
 panic = "warn"
 too_many_arguments = "deny"
+
+[workspace.dependencies]
+matrixmultiply = { version = "= 0.3.10", default-features = false }

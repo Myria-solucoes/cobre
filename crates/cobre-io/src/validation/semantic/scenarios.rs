@@ -437,19 +437,19 @@ pub(super) fn check_load_factor_consistency(data: &ParsedData, ctx: &mut Validat
 
         // Rule 18: warn when the (bus_id, stage_id) pair has std_mw == 0.0.
         let key = (entry.bus_id.0, entry.stage_id);
-        if let Some(&std_mw) = load_std.get(&key) {
-            if std_mw == 0.0 {
-                ctx.add_warning(
-                    ErrorKind::ModelQuality,
-                    "scenarios/load_factors.json",
-                    Some(format!("LoadFactorEntry[{i}]")),
-                    format!(
-                        "LoadFactorEntry[{i}] (bus {}, stage {}) references a deterministic load \
+        if let Some(&std_mw) = load_std.get(&key)
+            && std_mw == 0.0
+        {
+            ctx.add_warning(
+                ErrorKind::ModelQuality,
+                "scenarios/load_factors.json",
+                Some(format!("LoadFactorEntry[{i}]")),
+                format!(
+                    "LoadFactorEntry[{i}] (bus {}, stage {}) references a deterministic load \
                          (std_mw == 0.0); block factors have no effect on deterministic loads",
-                        entry.bus_id.0, entry.stage_id
-                    ),
-                );
-            }
+                    entry.bus_id.0, entry.stage_id
+                ),
+            );
         }
     }
 }

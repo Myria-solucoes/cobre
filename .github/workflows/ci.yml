@@ -147,6 +147,8 @@ jobs:
           python-version: "3.12"
       - name: Infra genericity gate
         run: bash scripts/check-infra-genericity.sh
+      - name: Cut-selection determinism gate
+        run: bash scripts/check-cut-selection-determinism.sh
       - name: Check for plan-structure leaks
         run: bash scripts/check-no-plan-leaks.sh
       - name: Check Python parity

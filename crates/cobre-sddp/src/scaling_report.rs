@@ -162,7 +162,7 @@ fn median(values: &[f64]) -> f64 {
     // declaration-order-invariant (Cobre hard rule).
     sorted.sort_by(f64::total_cmp);
     let n = sorted.len();
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         f64::midpoint(sorted[n / 2 - 1], sorted[n / 2])
     } else {
         sorted[n / 2]

@@ -2309,12 +2309,12 @@ fn apply_contribution_validation(
                 // Recompute residual_std_ratio from stored sigma2 if available.
                 if reduced_order == 0 {
                     estimates[idx].residual_std_ratio = 1.0;
-                } else if let Some(sigma2_vec) = sigma2_map.get(&(hydro_id, season_id)) {
-                    if reduced_order <= sigma2_vec.len() {
-                        let sigma2 = sigma2_vec[reduced_order - 1];
-                        estimates[idx].residual_std_ratio =
-                            if sigma2 <= 0.0 { 1.0 } else { sigma2.sqrt() };
-                    }
+                } else if let Some(sigma2_vec) = sigma2_map.get(&(hydro_id, season_id))
+                    && reduced_order <= sigma2_vec.len()
+                {
+                    let sigma2 = sigma2_vec[reduced_order - 1];
+                    estimates[idx].residual_std_ratio =
+                        if sigma2 <= 0.0 { 1.0 } else { sigma2.sqrt() };
                 }
 
                 // Update the shared coefficient array.
@@ -2426,18 +2426,18 @@ fn seasonal_stats_to_rows(
 
     let mut rows = Vec::with_capacity(stats.len() * 10);
     for s in stats {
-        if let Some(&season_id) = stage_to_season.get(&s.stage_id) {
-            if let Some(stage_ids) = season_to_stages.get(&season_id) {
-                for &stage_id in stage_ids {
-                    rows.push(InflowSeasonalStatsRow {
-                        hydro_id: s.entity_id,
-                        stage_id,
-                        mean_m3s: s.mean,
-                        std_m3s: s.std,
-                    });
-                }
-                continue;
+        if let Some(&season_id) = stage_to_season.get(&s.stage_id)
+            && let Some(stage_ids) = season_to_stages.get(&season_id)
+        {
+            for &stage_id in stage_ids {
+                rows.push(InflowSeasonalStatsRow {
+                    hydro_id: s.entity_id,
+                    stage_id,
+                    mean_m3s: s.mean,
+                    std_m3s: s.std,
+                });
             }
+            continue;
         }
         // Fallback: emit just the original stage_id.
         rows.push(InflowSeasonalStatsRow {

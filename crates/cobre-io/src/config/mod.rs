@@ -151,10 +151,10 @@ pub fn parse_config(path: &Path) -> Result<Config, LoadError> {
 /// Extracts the identifier between backticks, returning a best-effort field name
 /// or `"<unknown>"` when no match is found.
 fn extract_field_from_serde_msg(msg: &str) -> String {
-    if let Some(start) = msg.find('`') {
-        if let Some(end) = msg[start + 1..].find('`') {
-            return msg[start + 1..start + 1 + end].to_string();
-        }
+    if let Some(start) = msg.find('`')
+        && let Some(end) = msg[start + 1..].find('`')
+    {
+        return msg[start + 1..start + 1 + end].to_string();
     }
     "<unknown>".to_string()
 }
@@ -329,14 +329,14 @@ fn validate_scenario_source_cfg(
         });
     }
 
-    if let Some(HistoricalYears::Range { from, to }) = source.historical_years {
-        if from > to {
-            return Err(LoadError::SchemaError {
-                path: path.to_path_buf(),
-                field: format!("{section}.scenario_source.historical_years"),
-                message: format!("range 'from' ({from}) must be <= 'to' ({to})"),
-            });
-        }
+    if let Some(HistoricalYears::Range { from, to }) = source.historical_years
+        && from > to
+    {
+        return Err(LoadError::SchemaError {
+            path: path.to_path_buf(),
+            field: format!("{section}.scenario_source.historical_years"),
+            message: format!("range 'from' ({from}) must be <= 'to' ({to})"),
+        });
     }
 
     Ok(())

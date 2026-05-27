@@ -360,10 +360,10 @@ where
     /// bound evaluation failures.
     pub(crate) fn run_iteration(&mut self, iteration: u64) -> Result<IterationOutcome, SddpError> {
         // Check external shutdown flag before starting.
-        if let Some(flag) = self.runtime.shutdown_flag.as_ref() {
-            if flag.load(Ordering::Relaxed) {
-                self.convergence_monitor.set_shutdown();
-            }
+        if let Some(flag) = self.runtime.shutdown_flag.as_ref()
+            && flag.load(Ordering::Relaxed)
+        {
+            self.convergence_monitor.set_shutdown();
         }
 
         let iter_start = Instant::now();
@@ -811,135 +811,131 @@ where
         // stages_processed) when step 4a ran; None otherwise.
         let mut sel_state: Option<(Vec<StageRowSelectionRecord>, u32, u64, u32)> = None;
 
-        if let Some(strategy) = self.config.cut_management.cut_selection.as_ref() {
-            if strategy.should_run(iteration) {
-                let sel_start = Instant::now();
-                let num_sel_stages = self.ranks.num_stages.saturating_sub(1);
-                let mut rows_deactivated = 0u32;
-                let mut per_stage = Vec::with_capacity(num_sel_stages);
+        if let Some(strategy) = self.config.cut_management.cut_selection.as_ref()
+            && strategy.should_run(iteration)
+        {
+            let sel_start = Instant::now();
+            let num_sel_stages = self.ranks.num_stages.saturating_sub(1);
+            let mut rows_deactivated = 0u32;
+            let mut per_stage = Vec::with_capacity(num_sel_stages);
 
-                // Stage 0 is exempt: its cuts are never the "successor" in the
-                // backward pass, so their binding activity is never updated.
-                // Stage T-1 (the terminal stage) is also exempt: the backward
-                // pass sweeps T-2 down to 0 (see `backward.rs` module docs),
-                // so the terminal-stage pool receives no cuts to select among.
-                // `num_sel_stages = num_stages - 1` (via the saturating_sub
-                // above) and the parallel loop ranges over `1..num_sel_stages`,
-                // which expands to stages 1..=T-2 — naturally excluding
-                // stage T-1 from selection.
-                #[allow(clippy::cast_possible_truncation)]
-                {
-                    let pool0 = &self.fcf.pools[0];
-                    let active_0 = pool0.active_count() as u32;
-                    per_stage.push(StageRowSelectionRecord {
-                        stage: 0,
-                        rows_populated: pool0.populated_count as u32,
-                        rows_active_before: active_0,
-                        rows_deactivated: 0,
-                        rows_reactivated: 0,
-                        rows_active_after: active_0,
-                        selection_time_ms: 0.0,
-                        budget_evicted: None,
-                        active_after_budget: None,
-                        rows_in_lp: pool0.cuts_in_lp() as u32,
-                    });
-                }
-
-                let archive_ref = self.visited_archive.as_ref();
-                // Parallel selection over interior stages 1..=T-2. Stage 0 was
-                // recorded above; stage T-1 (terminal) is skipped because the
-                // backward pass produces no cuts at stage T-1, so the pool is
-                // empty and selection would be a no-op.
-                #[allow(clippy::cast_possible_truncation)]
-                let deactivations: Vec<(usize, CutActivityUpdates, f64)> = (1..num_sel_stages)
-                    .into_par_iter()
-                    .map(|stage| {
-                        let pool = &self.fcf.pools[stage];
-                        let states =
-                            archive_ref.map_or(&[] as &[f64], |a| a.states_for_stage(stage));
-                        let start = Instant::now();
-                        let deact =
-                            strategy.select_for_stage(pool, states, iteration, stage as u32);
-                        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-                        (stage, deact, elapsed_ms)
-                    })
-                    .collect();
-
-                #[allow(clippy::cast_possible_truncation)]
-                for (stage, deact, stage_sel_time_ms) in deactivations {
-                    let pool = &self.fcf.pools[stage];
-                    let populated = pool.populated_count as u32;
-                    let active_before = pool.active_count() as u32;
-                    let n_deact = deact.updates.len() as u32;
-                    let n_reactivated = deact.reactivations.len() as u32;
-                    rows_deactivated += n_deact;
-
-                    // Apply both deactivations AND reactivations from the
-                    // unified kernel output. Earlier code only applied
-                    // deactivations, silently dropping reactivation entries.
-                    self.fcf.pools[stage].apply_updates(&deact);
-
-                    let active_after = self.fcf.pools[stage].active_count() as u32;
-                    let rows_in_lp = self.fcf.pools[stage].cuts_in_lp() as u32;
-                    per_stage.push(StageRowSelectionRecord {
-                        stage: stage as u32,
-                        rows_populated: populated,
-                        rows_active_before: active_before,
-                        rows_deactivated: n_deact,
-                        rows_reactivated: n_reactivated,
-                        rows_active_after: active_after,
-                        selection_time_ms: stage_sel_time_ms,
-                        budget_evicted: None,
-                        active_after_budget: None,
-                        rows_in_lp,
-                    });
-                }
-
-                // Trim the visited-states archive to the active strategy's
-                // sliding window now that selection has consumed the current
-                // contents. Done AFTER the per-stage application loop so the
-                // immutable borrow held by `deactivations` is fully released.
-                //
-                // Trim runs AFTER selection so the kernel evaluates against
-                // the full accumulated archive (up to `2 * check_frequency`
-                // iterations of states); we then shrink back to a
-                // steady-state bound of `check_frequency` iterations.
-                // Selection benefits from seeing more visited states than the
-                // post-trim window — better selection quality — at the cost
-                // of a temporary ~2x memory peak just before this trim runs.
-                // The bound documented on
-                // [`VisitedStatesArchive::trim_to_window`] is the
-                // post-trim (steady-state) size.
-                if let Some(ref mut archive) = self.visited_archive {
-                    let check_freq = match strategy {
-                        crate::cut_selection::CutSelectionStrategy::Level1 {
-                            check_frequency,
-                            ..
-                        }
-                        | crate::cut_selection::CutSelectionStrategy::Lml1 {
-                            check_frequency,
-                            ..
-                        }
-                        | crate::cut_selection::CutSelectionStrategy::Dominated {
-                            check_frequency,
-                            ..
-                        } => *check_frequency,
-                    };
-                    archive.trim_to_window(check_freq);
-                }
-
-                #[allow(clippy::cast_possible_truncation)]
-                let selection_time_ms = sel_start.elapsed().as_millis() as u64;
-                #[allow(clippy::cast_possible_truncation)]
-                let stages_processed_sel = num_sel_stages as u32;
-
-                sel_state = Some((
-                    per_stage,
-                    rows_deactivated,
-                    selection_time_ms,
-                    stages_processed_sel,
-                ));
+            // Stage 0 is exempt: its cuts are never the "successor" in the
+            // backward pass, so their binding activity is never updated.
+            // Stage T-1 (the terminal stage) is also exempt: the backward
+            // pass sweeps T-2 down to 0 (see `backward.rs` module docs),
+            // so the terminal-stage pool receives no cuts to select among.
+            // `num_sel_stages = num_stages - 1` (via the saturating_sub
+            // above) and the parallel loop ranges over `1..num_sel_stages`,
+            // which expands to stages 1..=T-2 — naturally excluding
+            // stage T-1 from selection.
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                let pool0 = &self.fcf.pools[0];
+                let active_0 = pool0.active_count() as u32;
+                per_stage.push(StageRowSelectionRecord {
+                    stage: 0,
+                    rows_populated: pool0.populated_count as u32,
+                    rows_active_before: active_0,
+                    rows_deactivated: 0,
+                    rows_reactivated: 0,
+                    rows_active_after: active_0,
+                    selection_time_ms: 0.0,
+                    budget_evicted: None,
+                    active_after_budget: None,
+                    rows_in_lp: pool0.cuts_in_lp() as u32,
+                });
             }
+
+            let archive_ref = self.visited_archive.as_ref();
+            // Parallel selection over interior stages 1..=T-2. Stage 0 was
+            // recorded above; stage T-1 (terminal) is skipped because the
+            // backward pass produces no cuts at stage T-1, so the pool is
+            // empty and selection would be a no-op.
+            #[allow(clippy::cast_possible_truncation)]
+            let deactivations: Vec<(usize, CutActivityUpdates, f64)> = (1..num_sel_stages)
+                .into_par_iter()
+                .map(|stage| {
+                    let pool = &self.fcf.pools[stage];
+                    let states = archive_ref.map_or(&[] as &[f64], |a| a.states_for_stage(stage));
+                    let start = Instant::now();
+                    let deact = strategy.select_for_stage(pool, states, iteration, stage as u32);
+                    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+                    (stage, deact, elapsed_ms)
+                })
+                .collect();
+
+            #[allow(clippy::cast_possible_truncation)]
+            for (stage, deact, stage_sel_time_ms) in deactivations {
+                let pool = &self.fcf.pools[stage];
+                let populated = pool.populated_count as u32;
+                let active_before = pool.active_count() as u32;
+                let n_deact = deact.updates.len() as u32;
+                let n_reactivated = deact.reactivations.len() as u32;
+                rows_deactivated += n_deact;
+
+                // Apply both deactivations AND reactivations from the
+                // unified kernel output. Earlier code only applied
+                // deactivations, silently dropping reactivation entries.
+                self.fcf.pools[stage].apply_updates(&deact);
+
+                let active_after = self.fcf.pools[stage].active_count() as u32;
+                let rows_in_lp = self.fcf.pools[stage].cuts_in_lp() as u32;
+                per_stage.push(StageRowSelectionRecord {
+                    stage: stage as u32,
+                    rows_populated: populated,
+                    rows_active_before: active_before,
+                    rows_deactivated: n_deact,
+                    rows_reactivated: n_reactivated,
+                    rows_active_after: active_after,
+                    selection_time_ms: stage_sel_time_ms,
+                    budget_evicted: None,
+                    active_after_budget: None,
+                    rows_in_lp,
+                });
+            }
+
+            // Trim the visited-states archive to the active strategy's
+            // sliding window now that selection has consumed the current
+            // contents. Done AFTER the per-stage application loop so the
+            // immutable borrow held by `deactivations` is fully released.
+            //
+            // Trim runs AFTER selection so the kernel evaluates against
+            // the full accumulated archive (up to `2 * check_frequency`
+            // iterations of states); we then shrink back to a
+            // steady-state bound of `check_frequency` iterations.
+            // Selection benefits from seeing more visited states than the
+            // post-trim window — better selection quality — at the cost
+            // of a temporary ~2x memory peak just before this trim runs.
+            // The bound documented on
+            // [`VisitedStatesArchive::trim_to_window`] is the
+            // post-trim (steady-state) size.
+            if let Some(ref mut archive) = self.visited_archive {
+                let check_freq = match strategy {
+                    crate::cut_selection::CutSelectionStrategy::Level1 {
+                        check_frequency, ..
+                    }
+                    | crate::cut_selection::CutSelectionStrategy::Lml1 {
+                        check_frequency, ..
+                    }
+                    | crate::cut_selection::CutSelectionStrategy::Dominated {
+                        check_frequency,
+                        ..
+                    } => *check_frequency,
+                };
+                archive.trim_to_window(check_freq);
+            }
+
+            #[allow(clippy::cast_possible_truncation)]
+            let selection_time_ms = sel_start.elapsed().as_millis() as u64;
+            #[allow(clippy::cast_possible_truncation)]
+            let stages_processed_sel = num_sel_stages as u32;
+
+            sel_state = Some((
+                per_stage,
+                rows_deactivated,
+                selection_time_ms,
+                stages_processed_sel,
+            ));
         }
 
         // Step 4b: Budget enforcement (every iteration when budget is set).
@@ -959,11 +955,11 @@ where
                 );
                 total_evicted += result.evicted_count;
                 // Annotate per-stage records with post-budget counts.
-                if let Some((ref mut per_stage, _, _, _)) = sel_state {
-                    if let Some(rec) = per_stage.get_mut(stage) {
-                        rec.budget_evicted = Some(result.evicted_count);
-                        rec.active_after_budget = Some(result.active_after);
-                    }
+                if let Some((ref mut per_stage, _, _, _)) = sel_state
+                    && let Some(rec) = per_stage.get_mut(stage)
+                {
+                    rec.budget_evicted = Some(result.evicted_count);
+                    rec.active_after_budget = Some(result.active_after);
                 }
             }
             #[allow(clippy::cast_possible_truncation)]

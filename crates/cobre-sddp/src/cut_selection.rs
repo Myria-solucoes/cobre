@@ -61,6 +61,66 @@ use rayon::prelude::*;
 /// regardless of the number of threads or chunk boundaries.
 const PARALLEL_THRESHOLD: usize = 256;
 
+/// Number of trial points evaluated per `crate::gemm::gemm_block` call.
+///
+/// Each rayon task computes one `K × M_BLOCK` GEMM panel, then
+/// applies the per-column selection rule. The initial value of 8 is a
+/// reasonable starting point for M = 192-384 (yields 24-48 tasks per
+/// stage — well above the rayon scheduling overhead floor, well below
+/// the load-imbalance threshold).
+// Consumed by ticket-008 select_for_stage m-block kernel.
+#[allow(dead_code)]
+pub(crate) const M_BLOCK: usize = 8;
+
+// ---------------------------------------------------------------------------
+// PerWorkerScratch
+// ---------------------------------------------------------------------------
+
+/// Per-worker scratch for the m-block fold/reduce kernel.
+///
+/// `v_block` holds one `K × M_BLOCK` GEMM output panel (row-major).
+/// `accum_bitmap` is the per-worker OR-accumulator over all m-blocks
+/// the worker processes; length is `K`.
+///
+/// Allocations live for the lifetime of the worker's participation
+/// in `select_for_stage`. With session-level ownership the allocation
+/// happens exactly once per worker per training run, not per
+/// `select_for_stage` call.
+// Consumed by ticket-008 select_for_stage m-block kernel.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub(crate) struct PerWorkerScratch {
+    /// `K × M_BLOCK` row-major. Capacity is set at construction;
+    /// `select_for_stage` may use any prefix `populated * m_len`.
+    pub(crate) v_block: Vec<f64>,
+
+    /// Per-worker OR-accumulator. Length is `K`.
+    pub(crate) accum_bitmap: Vec<bool>,
+}
+
+impl PerWorkerScratch {
+    /// Allocate a scratch sized for at most `populated` cuts and
+    /// `m_block` trial points per GEMM call.
+    // Consumed by ticket-008 select_for_stage m-block kernel.
+    #[allow(dead_code)]
+    pub(crate) fn new(populated: usize, m_block: usize) -> Self {
+        Self {
+            v_block: vec![0.0_f64; populated * m_block],
+            accum_bitmap: vec![false; populated],
+        }
+    }
+
+    /// Reset `accum_bitmap` to all-false. `v_block` is not reset
+    /// here — every dgemm call overwrites it with beta = 0.
+    // Consumed by ticket-008 select_for_stage m-block kernel.
+    #[allow(dead_code)]
+    pub(crate) fn reset_bitmap(&mut self) {
+        for slot in &mut self.accum_bitmap {
+            *slot = false;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CutMetadata
 // ---------------------------------------------------------------------------
@@ -281,7 +341,7 @@ impl CutSelectionStrategy {
                 check_frequency, ..
             } => *check_frequency,
         };
-        iteration > 0 && iteration % freq == 0
+        iteration > 0 && iteration.is_multiple_of(freq)
     }
 
     /// Scan the cut pool metadata for a single stage and identify cuts to
@@ -728,6 +788,26 @@ mod tests {
         pool.active[..n].clone_from_slice(active);
         pool.cached_active_count = active.iter().filter(|&&a| a).count();
         pool
+    }
+
+    #[test]
+    fn per_worker_scratch_allocates_expected_sizes() {
+        let scratch = super::PerWorkerScratch::new(100, super::M_BLOCK);
+        assert_eq!(scratch.v_block.len(), 100 * super::M_BLOCK);
+        assert_eq!(scratch.accum_bitmap.len(), 100);
+        assert!(scratch.accum_bitmap.iter().all(|&b| !b));
+    }
+
+    #[test]
+    fn per_worker_scratch_reset_clears_bitmap() {
+        let mut scratch = super::PerWorkerScratch::new(8, super::M_BLOCK);
+        for slot in &mut scratch.accum_bitmap {
+            *slot = true;
+        }
+        scratch.reset_bitmap();
+        assert!(scratch.accum_bitmap.iter().all(|&b| !b));
+        // v_block must NOT be touched by reset_bitmap.
+        assert_eq!(scratch.v_block.len(), 8 * super::M_BLOCK);
     }
 
     #[test]

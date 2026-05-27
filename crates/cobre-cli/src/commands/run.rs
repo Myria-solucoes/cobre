@@ -72,12 +72,11 @@ fn resolve_thread_count(cli_threads: Option<u32>) -> usize {
     if let Some(n) = cli_threads {
         return n as usize;
     }
-    if let Ok(val) = std::env::var("COBRE_THREADS") {
-        if let Ok(n) = val.parse::<usize>() {
-            if n > 0 {
-                return n;
-            }
-        }
+    if let Ok(val) = std::env::var("COBRE_THREADS")
+        && let Ok(n) = val.parse::<usize>()
+        && n > 0
+    {
+        return n;
     }
     1
 }
@@ -213,10 +212,10 @@ struct TrainingPhaseResult {
 pub fn execute(args: &RunArgs) -> Result<(), CliError> {
     let ctx = setup_communicator(args)?;
     let result = execute_inner(&ctx, args);
-    if let Err(ref e) = result {
-        if ctx.comm.size() > 1 {
-            ctx.comm.abort(e.exit_code());
-        }
+    if let Err(ref e) = result
+        && ctx.comm.size() > 1
+    {
+        ctx.comm.abort(e.exit_code());
     }
     result
 }
@@ -341,17 +340,17 @@ fn load_and_validate_checkpoint(
         }
     })?;
 
-    if let Some(config) = root_config {
-        if config.policy.validate_compatibility {
-            #[allow(clippy::cast_possible_truncation)]
-            let n_stages = system.stages().iter().filter(|s| s.id >= 0).count() as u32;
-            let state_dim =
-                u32::try_from(setup.fcf.state_dimension).map_err(|e| CliError::Internal {
-                    message: format!("state_dimension overflows u32: {e}"),
-                })?;
-            cobre_sddp::validate_policy_compatibility(&checkpoint.metadata, state_dim, n_stages)
-                .map_err(CliError::from)?;
-        }
+    if let Some(config) = root_config
+        && config.policy.validate_compatibility
+    {
+        #[allow(clippy::cast_possible_truncation)]
+        let n_stages = system.stages().iter().filter(|s| s.id >= 0).count() as u32;
+        let state_dim =
+            u32::try_from(setup.fcf.state_dimension).map_err(|e| CliError::Internal {
+                message: format!("state_dimension overflows u32: {e}"),
+            })?;
+        cobre_sddp::validate_policy_compatibility(&checkpoint.metadata, state_dim, n_stages)
+            .map_err(CliError::from)?;
     }
 
     Ok(checkpoint)
@@ -935,24 +934,24 @@ fn run_pre_training(
     }
 
     // Build and emit provenance report.
-    if ctx.is_root {
-        if let Some(path) = root_estimation_path {
-            let provenance = cobre_sddp::build_provenance_report(
-                path,
-                root_estimation_report,
-                setup.stochastic.provenance(),
-                system.hydros().len(),
-            );
-            if !ctx.quiet {
-                crate::summary::print_provenance_summary(&ctx.stderr, &provenance);
-            }
-            let provenance_path = ctx.output_dir.join("training/model_provenance.json");
-            cobre_io::write_provenance_report(&provenance_path, &provenance).map_err(|e| {
-                CliError::Internal {
-                    message: format!("failed to write provenance report: {e}"),
-                }
-            })?;
+    if ctx.is_root
+        && let Some(path) = root_estimation_path
+    {
+        let provenance = cobre_sddp::build_provenance_report(
+            path,
+            root_estimation_report,
+            setup.stochastic.provenance(),
+            system.hydros().len(),
+        );
+        if !ctx.quiet {
+            crate::summary::print_provenance_summary(&ctx.stderr, &provenance);
         }
+        let provenance_path = ctx.output_dir.join("training/model_provenance.json");
+        cobre_io::write_provenance_report(&provenance_path, &provenance).map_err(|e| {
+            CliError::Internal {
+                message: format!("failed to write provenance report: {e}"),
+            }
+        })?;
     }
 
     if ctx.is_root && root_config.is_some_and(|c| c.exports.stochastic) {

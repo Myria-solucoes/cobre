@@ -60,15 +60,15 @@ pub(crate) fn validate_dimensional_consistency(data: &ParsedData, ctx: &mut Vali
 
         for hydro in &data.hydros {
             for &stage_id in &study_stage_ids {
-                if let Some(entry) = hydro.entry_stage_id {
-                    if stage_id < entry {
-                        continue;
-                    }
+                if let Some(entry) = hydro.entry_stage_id
+                    && stage_id < entry
+                {
+                    continue;
                 }
-                if let Some(exit) = hydro.exit_stage_id {
-                    if stage_id >= exit {
-                        continue;
-                    }
+                if let Some(exit) = hydro.exit_stage_id
+                    && stage_id >= exit
+                {
+                    continue;
                 }
 
                 if !inflow_pairs.contains(&(hydro.id.0, stage_id)) {

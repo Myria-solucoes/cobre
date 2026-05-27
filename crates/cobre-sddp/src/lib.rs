@@ -45,6 +45,7 @@ pub mod estimation;
 pub mod forward;
 pub(crate) mod forward_pass_state;
 pub(crate) mod fpha_fitting;
+pub(crate) mod gemm;
 pub(crate) mod generic_constraints;
 pub mod horizon_mode;
 pub mod hydro_models;

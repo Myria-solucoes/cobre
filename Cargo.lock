@@ -609,6 +609,7 @@ dependencies = [
  "cobre-stochastic",
  "criterion",
  "dhat",
+ "matrixmultiply",
  "parquet",
  "postcard",
  "rand",

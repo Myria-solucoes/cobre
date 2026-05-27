@@ -8,7 +8,7 @@
 //! `unsafe_code = "forbid"` (set in the root `Cargo.toml` under
 //! `[workspace.lints.rust]`) blocks any `unsafe` block in crates that do not
 //! override the lint. `cobre-solver` overrides `unsafe_code = "allow"` because
-//! its HiGHS FFI bindings require it, so the audit example lives here.
+//! its `HiGHS` FFI bindings require it, so the audit example lives here.
 //!
 //! # Usage
 //!

@@ -303,7 +303,7 @@ pub fn deserialize_cuts_from_buffer(
 
     let record_size = cut_wire_size(n_state);
     assert!(
-        buf.len() % record_size == 0,
+        buf.len().is_multiple_of(record_size),
         "buffer length {} is not a multiple of record size {record_size}",
         buf.len()
     );
@@ -355,7 +355,7 @@ pub fn deserialize_cuts_from_buffer_into(
 
     let record_size = cut_wire_size(n_state);
     assert!(
-        buf.len() % record_size == 0,
+        buf.len().is_multiple_of(record_size),
         "buffer length {} is not a multiple of record size {record_size}",
         buf.len()
     );

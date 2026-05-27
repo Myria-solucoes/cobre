@@ -794,11 +794,10 @@ impl HighsSolver {
             let retryable = retry_status == ffi::HIGHS_MODEL_STATUS_UNBOUNDED
                 || retry_status == ffi::HIGHS_MODEL_STATUS_ITERATION_LIMIT
                 || budget_exceeded;
-            if !retryable {
-                if let Some(e) = self.interpret_terminal_status(retry_status, retry_time) {
-                    terminal_err = Some(e);
-                    break;
-                }
+            if !retryable && let Some(e) = self.interpret_terminal_status(retry_status, retry_time)
+            {
+                terminal_err = Some(e);
+                break;
             }
             // Still SOLVE_ERROR, UNKNOWN, UNBOUNDED, ITERATION_LIMIT, or
             // wall-clock exceeded -- continue to next level.
@@ -1086,12 +1085,12 @@ impl HighsSolver {
             || model_status == ffi::HIGHS_MODEL_STATUS_ITERATION_LIMIT
             || model_status == ffi::HIGHS_MODEL_STATUS_TIME_LIMIT
             || solve_time > 15.0;
-        if !initial_retryable {
-            if let Some(terminal_err) = self.interpret_terminal_status(model_status, solve_time) {
-                self.restore_iteration_limits();
-                self.stats.failure_count += 1;
-                return Err(terminal_err);
-            }
+        if !initial_retryable
+            && let Some(terminal_err) = self.interpret_terminal_status(model_status, solve_time)
+        {
+            self.restore_iteration_limits();
+            self.stats.failure_count += 1;
+            return Err(terminal_err);
         }
 
         // Delegate to the retry escalation method (restores limits internally).

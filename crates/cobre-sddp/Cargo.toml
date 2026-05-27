@@ -38,6 +38,7 @@ cobre-stochastic = { version = "0.7.1", path = "../cobre-stochastic" }
 cobre-io = { version = "0.7.1", path = "../cobre-io" }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 dhat = { version = "0.3", optional = true }
+matrixmultiply = { workspace = true }
 postcard = { version = "1", features = ["alloc"] }
 rayon = "1"
 serde = { version = "1", features = ["derive"] }
@@ -64,5 +65,19 @@ harness = false
 name = "cut_application_anticipated_state"
 harness = false
 
-[lints]
-workspace = true
+# Override unsafe_code to "allow" for this crate because the cut-selection
+# kernel calls `matrixmultiply::dgemm` (a `pub unsafe fn`) via the safe
+# wrapper in `src/gemm.rs`. All other workspace lints are manually
+# replicated here since Cargo does not permit combining
+# `lints.workspace = true` with per-lint overrides in the same crate manifest.
+[lints.rust]
+unsafe_code = "allow"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "warn"
+panic = "warn"
+too_many_arguments = "deny"

@@ -556,16 +556,16 @@ fn validate_risk_measure(
     stage_index: usize,
     path: &Path,
 ) -> Result<(), LoadError> {
-    if let RawRiskMeasure::Expectation(s) = risk {
-        if !s.eq_ignore_ascii_case("expectation") {
-            return Err(LoadError::SchemaError {
-                path: path.to_path_buf(),
-                field: format!("stages[{stage_index}].risk_measure"),
-                message: format!(
-                    "unrecognized risk measure string '{s}'; expected \"expectation\" or a CVaR object"
-                ),
-            });
-        }
+    if let RawRiskMeasure::Expectation(s) = risk
+        && !s.eq_ignore_ascii_case("expectation")
+    {
+        return Err(LoadError::SchemaError {
+            path: path.to_path_buf(),
+            field: format!("stages[{stage_index}].risk_measure"),
+            message: format!(
+                "unrecognized risk measure string '{s}'; expected \"expectation\" or a CVaR object"
+            ),
+        });
     }
     if let RawRiskMeasure::CVaR { cvar } = risk {
         if cvar.alpha <= 0.0 || cvar.alpha > 1.0 {

@@ -101,12 +101,12 @@ impl CascadeTopology {
             let current = EntityId(current_raw);
             topological_order.push(current);
 
-            if let Some(&ds_id) = downstream.get(&current) {
-                if let Some(deg) = in_degree.get_mut(&ds_id) {
-                    *deg -= 1;
-                    if *deg == 0 {
-                        ready.push(Reverse(ds_id.0));
-                    }
+            if let Some(&ds_id) = downstream.get(&current)
+                && let Some(deg) = in_degree.get_mut(&ds_id)
+            {
+                *deg -= 1;
+                if *deg == 0 {
+                    ready.push(Reverse(ds_id.0));
                 }
             }
         }

@@ -132,24 +132,25 @@ fn check_hydro_references(
         }
 
         // Rule 7: downstream hydro reference (optional).
-        if let Some(downstream_id) = hydro.downstream_id {
-            if !hydro_ids.contains(&downstream_id.0) {
-                ctx.add_error(
-                    ErrorKind::InvalidReference,
-                    "system/hydros.json",
-                    Some(&entity_str),
-                    format!(
-                        "{entity_str} references non-existent Hydro {} via field 'downstream_id'",
-                        downstream_id.0
-                    ),
-                );
-            }
+        if let Some(downstream_id) = hydro.downstream_id
+            && !hydro_ids.contains(&downstream_id.0)
+        {
+            ctx.add_error(
+                ErrorKind::InvalidReference,
+                "system/hydros.json",
+                Some(&entity_str),
+                format!(
+                    "{entity_str} references non-existent Hydro {} via field 'downstream_id'",
+                    downstream_id.0
+                ),
+            );
         }
 
         // Rule 8: diversion downstream hydro reference.
-        if let Some(ref diversion) = hydro.diversion {
-            if !hydro_ids.contains(&diversion.downstream_id.0) {
-                ctx.add_error(
+        if let Some(ref diversion) = hydro.diversion
+            && !hydro_ids.contains(&diversion.downstream_id.0)
+        {
+            ctx.add_error(
                     ErrorKind::InvalidReference,
                     "system/hydros.json",
                     Some(&entity_str),
@@ -158,7 +159,6 @@ fn check_hydro_references(
                         diversion.downstream_id.0
                     ),
                 );
-            }
         }
     }
 }
@@ -737,12 +737,13 @@ fn check_generic_constraint_bounds_validity(data: &ParsedData, ctx: &mut Validat
         .collect();
 
     for (i, row) in data.generic_constraint_bounds.iter().enumerate() {
-        if let Some(blk) = row.block_id {
-            if let Some(&n_blocks) = stage_block_counts.get(&row.stage_id) {
-                #[allow(clippy::cast_sign_loss)]
-                let blk_usize = blk as usize;
-                if blk < 0 || blk_usize >= n_blocks {
-                    ctx.add_error(
+        if let Some(blk) = row.block_id
+            && let Some(&n_blocks) = stage_block_counts.get(&row.stage_id)
+        {
+            #[allow(clippy::cast_sign_loss)]
+            let blk_usize = blk as usize;
+            if blk < 0 || blk_usize >= n_blocks {
+                ctx.add_error(
                         ErrorKind::InvalidValue,
                         "constraints/generic_constraint_bounds.parquet",
                         Some(format!("GenericConstraintBoundsRow[{i}]")),
@@ -751,7 +752,6 @@ fn check_generic_constraint_bounds_validity(data: &ParsedData, ctx: &mut Validat
                             row.stage_id
                         ),
                     );
-                }
             }
         }
     }

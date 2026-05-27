@@ -553,10 +553,8 @@ fn format_duration(ms: u64) -> String {
 }
 
 fn format_convergence_detail(converged: bool, converged_at: Option<u64>, reason: &str) -> String {
-    if converged {
-        if let Some(iter) = converged_at {
-            return format!("converged at iter {iter}");
-        }
+    if converged && let Some(iter) = converged_at {
+        return format!("converged at iter {iter}");
     }
     reason.to_string()
 }
