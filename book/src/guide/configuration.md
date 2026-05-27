@@ -286,9 +286,10 @@ of each stage, see
 | ------------------------ | ------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `enabled`                | boolean | `false` | Enable row pruning.                                                                                                                                                                                                                                                                                                                     |
 | `method`                 | string  | --      | Selection method: `"level1"`, `"lml1"`, or `"domination"`.                                                                                                                                                                                                                                                                              |
-| `threshold`              | integer | `0`     | Activity threshold for the `"level1"` method: deactivate rows with `active_count <= threshold`. Ignored by `"lml1"` and `"domination"`.                                                                                                                                                                                                 |
-| `memory_window`          | integer | --      | Sliding window for the `"lml1"` method: deactivate rows not active within this many iterations. **Required** when `method = "lml1"`.                                                                                                                                                                                                    |
+| `threshold`              | integer | --      | **Deprecated.** Silently ignored. Retained for backward compatibility with existing config files; previously the activity-count threshold for `"level1"`. Use `tie_tolerance` instead.                                                                                                                                                  |
+| `memory_window`          | integer | --      | **Deprecated.** Silently ignored. Retained for backward compatibility with existing config files; previously the temporal window for `"lml1"`. Use `tie_tolerance` instead.                                                                                                                                                             |
 | `domination_epsilon`     | float   | --      | Tolerance for domination comparisons. **Required** when `method = "domination"`.                                                                                                                                                                                                                                                        |
+| `tie_tolerance`          | float   | `1e-10` | Tie tolerance for `"level1"` and `"lml1"`: a cut survives at a state when its value is within `tie_tolerance` of the per-state max. Ignored by `"domination"`.                                                                                                                                                                          |
 | `check_frequency`        | integer | `1`     | Iterations between pruning checks (Stage 1).                                                                                                                                                                                                                                                                                            |
 | `cut_activity_tolerance` | float   | `1e-6`  | Minimum dual multiplier for a row to count as binding.                                                                                                                                                                                                                                                                                  |
 | `basis_activity_window`  | integer | `5`     | Sliding-window size (1-31 iterations) for tracking recent row binding activity. Controls the warm-start classifier: rows bound within the last `basis_activity_window` iterations are guessed tight on basis reconstruction. See [Performance Accelerators — Basis Reconstruction](./performance-accelerators.md#basis-reconstruction). |
@@ -296,15 +297,18 @@ of each stage, see
 
 **Methods:**
 
-- `"level1"` -- deactivates rows that have never been binding (cumulative
-  binding count at or below `threshold`). Least aggressive; preserves
+- `"level1"` -- evaluates all populated cuts at every visited state
+  and retains any cut whose value is within `tie_tolerance` of the
+  per-state maximum at some state. Least aggressive; preserves the
   convergence guarantee.
-- `"lml1"` -- deactivates rows that have not been binding within a sliding
-  window of `memory_window` iterations. `memory_window` is required.
-- `"domination"` -- deactivates rows that are dominated at every visited
-  forward-pass trial point. Most aggressive; requires the visited-states
-  archive (always collected during training). `domination_epsilon` is required
-  and controls the tolerance for domination comparisons.
+- `"lml1"` -- at each visited state, retains only the oldest eligible
+  cut within `tie_tolerance` of the per-state maximum. The final
+  selected set is the union of those per-state survivors. More
+  aggressive than `"level1"` because ties resolve to a single cut
+  per state.
+- `"domination"` -- same value-evaluation rule as `"level1"` but
+  uses the `threshold` field as the tolerance. Most aggressive
+  variant; `domination_epsilon` is required at config load time.
 
 Example with both pipeline stages:
 
@@ -314,7 +318,7 @@ Example with both pipeline stages:
     "cut_selection": {
       "enabled": true,
       "method": "level1",
-      "threshold": 0,
+      "tie_tolerance": 1e-10,
       "check_frequency": 5,
       "cut_activity_tolerance": 1e-6,
       "max_active_per_stage": 500
@@ -564,7 +568,7 @@ Controls which outputs are written to the results directory.
     "cut_selection": {
       "enabled": true,
       "method": "level1",
-      "threshold": 0,
+      "tie_tolerance": 1e-10,
       "check_frequency": 5,
       "cut_activity_tolerance": 1e-6,
       "max_active_per_stage": null

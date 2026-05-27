@@ -162,22 +162,28 @@ Stage 2: Budget enforcement        (every iteration)
 Three strategies are available, configured via
 [`cut_selection`](./configuration.md#cut_selection) in `config.json`:
 
-| Strategy     | Deactivation Condition                             | Aggressiveness |
-| ------------ | -------------------------------------------------- | -------------- |
-| `level1`     | `active_count <= threshold` (never-binding rows)   | Least          |
-| `lml1`       | `iteration - last_active_iter > memory_window`     | Medium         |
-| `domination` | Dominated at all visited forward-pass trial points | Most           |
+| Strategy     | Deactivation Condition                                                             | Aggressiveness |
+| ------------ | ---------------------------------------------------------------------------------- | -------------- |
+| `level1`     | Below `tie_tolerance` of the per-state max at every visited state                  | Least          |
+| `lml1`       | Not the oldest eligible cut at the per-state max at any visited state              | Medium         |
+| `domination` | Below `threshold` of the per-state max at every visited state (all populated cuts) | Most           |
 
 All strategies respect `check_frequency`: selection runs only at
 iterations that are multiples of `check_frequency`. Stage 0 is always
 exempt (its rows drive the lower bound and are never backward-pass
 successors). Selection runs in parallel across stages via `rayon`.
 
-**Dominated** selection performs `O(|active rows| x |visited states|)` work
-per stage per check. It deactivates rows that are pointwise dominated
-at every visited forward-pass state, using the visited-states archive
-that is always collected during training. The `domination_epsilon`
-parameter controls the tolerance for domination comparisons.
+All three strategies share a single value-evaluation kernel that
+performs `O(|populated cuts| x |visited states|)` work per stage per
+check. Every populated cut is evaluated at every visited
+forward-pass state (including cuts currently flagged inactive,
+which means a previously deactivated cut can be reactivated when it
+later achieves the maximum at some state). The visited-states
+archive is collected during training for every cut-selection
+variant. The `tie_tolerance` parameter (default `1e-10`) on
+`level1` and `lml1` controls how closely a cut must approach the
+per-state maximum to be retained; `domination` uses the
+`threshold` field for the same purpose.
 
 ### Stage 2: Budget Enforcement
 
@@ -198,7 +204,7 @@ by `check_frequency`).
     "cut_selection": {
       "enabled": true,
       "method": "level1",
-      "threshold": 0,
+      "tie_tolerance": 1e-10,
       "check_frequency": 5,
       "max_active_per_stage": 500
     }
