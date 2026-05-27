@@ -24,13 +24,14 @@
 // External crate imports
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
 
 use chrono::NaiveDate;
 use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::{
+    Bus, DeficitSegment, EntityId, TrainingEvent,
     scenario::{
         CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile, SamplingScheme,
     },
@@ -38,16 +39,16 @@ use cobre_core::{
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
         StageStateConfig,
     },
-    Bus, DeficitSegment, EntityId, TrainingEvent,
 };
 use cobre_solver::{
     Basis, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
 };
 use cobre_stochastic::{
-    build_stochastic_context, ClassSchemes, OpeningTreeInputs, StochasticContext,
+    ClassSchemes, OpeningTreeInputs, StochasticContext, build_stochastic_context,
 };
 
 use cobre_sddp::{
+    SddpError, StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
     config::{CutManagementConfig, EventConfig, LoopConfig},
     context::{StageContext, TrainingContext},
     cut::fcf::FutureCostFunction,
@@ -55,7 +56,7 @@ use cobre_sddp::{
     indexer::StageIndexer,
     inflow_method::InflowNonNegativityMethod,
     risk_measure::RiskMeasure,
-    train, SddpError, StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
+    train,
 };
 
 // ===========================================================================
@@ -352,9 +353,9 @@ impl SolverInterface for ExpandingMockSolver {
 /// Build a `StochasticContext` with `n_stages` stages, 1 hydro, and seed 42.
 #[allow(clippy::cast_possible_wrap, clippy::too_many_lines)]
 fn make_stochastic_context(n_stages: usize, n_openings: usize) -> StochasticContext {
+    use cobre_core::SystemBuilder;
     use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
     use cobre_core::scenario::InflowModel;
-    use cobre_core::SystemBuilder;
 
     let bus = Bus {
         id: EntityId(0),
@@ -1657,9 +1658,9 @@ fn test_forward_basis_reconstruct_bit_identical_d01() {
 
     use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
     use cobre_core::scenario::ScenarioSource;
-    use cobre_sddp::{hydro_models::prepare_hydro_models, setup::prepare_stochastic, StudySetup};
-    use cobre_solver::highs::HighsSolver;
+    use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic};
     use cobre_solver::SolverInterface;
+    use cobre_solver::highs::HighsSolver;
 
     struct LocalStubComm;
 

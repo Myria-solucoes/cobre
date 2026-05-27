@@ -10,9 +10,20 @@
 //! parameters are validated at load time, so runtime panics from zero
 //! `check_frequency` are impossible.
 //!
-//! The `Dominated` variant identifies cuts that are dominated at every visited
-//! forward-pass state: if a cut is always below the best active cut minus a
-//! tolerance, it contributes nothing and is deactivated.
+//! All three variants share a single value-evaluation kernel in `select_for_stage`.
+//! The kernel evaluates ALL populated cuts (active AND inactive) at each visited
+//! forward-pass state and applies the method-specific survival rule:
+//!
+//! - **Level1**: retain any cut within `tie_tolerance` of the per-state maximum
+//!   at any visited state (de Matos 2015).
+//! - **Lml1**: at each visited state, retain only the oldest eligible cut within
+//!   `tie_tolerance` of the maximum; the overall selected set is the union across
+//!   all visited states (Guigues & Bandarra 2019).
+//! - **Dominated**: same max-survival logic as Level1 using `threshold` as the
+//!   tolerance, applied across ALL populated cuts (including inactive ones).
+//!
+//! Inactive cuts that are selected by the kernel produce `Reactivate` entries in
+//! the output; active cuts that are not selected produce `Deactivate` entries.
 //!
 //! ## Usage
 //!
@@ -105,28 +116,36 @@ pub struct CutMetadata {
 // CutActivityUpdates
 // ---------------------------------------------------------------------------
 
-/// Set of cut deactivation updates at a single stage.
+/// Set of cut activity updates at a single stage.
 ///
-/// Returned by [`CutSelectionStrategy::select`]. Each entry in `updates` is a
-/// slot index to deactivate. The caller applies the deactivations to the
-/// activity bitmap via [`CutPool::deactivate`].
+/// Returned by [`CutSelectionStrategy::select`]. `updates` contains slot
+/// indices to deactivate; `reactivations` contains slot indices to reactivate.
+/// Either list may be empty.
 ///
-/// The list may be empty if no cuts meet the deactivation criterion.
+/// The caller applies changes to the activity bitmap via
+/// [`CutPool::deactivate`] and [`CutPool::set_active`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct CutActivityUpdates {
     /// Stage index (0-based) that this update set belongs to.
     pub stage_index: u32,
     /// Slot indices to deactivate.
     pub updates: Vec<u32>,
+    /// Slot indices to reactivate.
+    pub reactivations: Vec<u32>,
 }
 
 impl CutActivityUpdates {
-    /// Construct a deactivation update set from a list of slot indices.
+    /// Construct a deactivation-only update set from a list of slot indices.
+    ///
+    /// The `reactivations` list is left empty. Use this constructor when only
+    /// deactivations are known and reactivations will be added separately or
+    /// are not applicable.
     #[must_use]
     pub fn deactivations_only(stage_index: u32, indices: Vec<u32>) -> Self {
         Self {
             stage_index,
             updates: indices,
+            reactivations: vec![],
         }
     }
 
@@ -137,12 +156,9 @@ impl CutActivityUpdates {
     }
 
     /// Return the slots to reactivate.
-    ///
-    /// Always returns an empty vector: all current selection strategies
-    /// produce deactivation-only updates.
     #[must_use]
     pub fn reactivation_indices(&self) -> Vec<u32> {
-        vec![]
+        self.reactivations.clone()
     }
 }
 
@@ -168,10 +184,11 @@ pub enum CutSelectionStrategy {
     /// state (de Matos 2015).
     ///
     /// A cut is deactivated if, at every visited forward-pass state, its value
-    /// is more than `tie_tolerance` below the best active cut value. Cuts that
-    /// have never been within tolerance of the maximum are pruned. This is the
-    /// least aggressive value-based strategy and preserves the convergence
-    /// guarantee.
+    /// is more than `tie_tolerance` below the maximum cut value at that state.
+    /// The maximum is computed over ALL populated cuts (active and inactive).
+    /// Cuts that achieve within `tie_tolerance` of the maximum at any state are
+    /// kept. This is the least aggressive value-based strategy and preserves
+    /// the convergence guarantee.
     Level1 {
         /// Number of iterations between selection runs. Must be > 0.
         check_frequency: u64,
@@ -182,14 +199,14 @@ pub enum CutSelectionStrategy {
         tie_tolerance: f64,
     },
 
-    /// Limited Memory Level-1 (LML1): value-based selection with a recent
-    /// observation window (Guigues 2017/2019).
+    /// Limited Memory Level-1 (LML1): value-based selection retaining only the
+    /// oldest eligible near-optimal cut per visited state (Guigues & Bandarra 2019).
     ///
-    /// A cut is deactivated if it has not been near-optimal at any visited state
-    /// within the recent observation window. More aggressive than Level1 because
-    /// cuts that were active early but are now dominated by newer cuts will
-    /// eventually be removed. Uses the same value-based criterion as Level1 but
-    /// applied over the recent history tracked in `active_window`.
+    /// At each visited state, only the oldest eligible cut (smallest slot index
+    /// `>= warm_start_count`) whose value is within `tie_tolerance` of the
+    /// maximum survives. The selected set is the union of oldest-at-max cuts
+    /// across all visited states. More aggressive than Level1 because multiple
+    /// cuts tied at the same state compete and only the oldest wins.
     Lml1 {
         /// Number of iterations between selection runs. Must be > 0.
         check_frequency: u64,
@@ -202,14 +219,14 @@ pub enum CutSelectionStrategy {
 
     /// Dominated cut detection: remove cuts dominated at all visited states.
     ///
-    /// A cut is dominated if at every visited forward pass state, some other
-    /// active cut achieves a higher (or equal within threshold) value.
-    /// Computationally expensive: O(|active cuts| x |visited states|) per
-    /// stage per check. This is the only dominance-based variant of cut
-    /// selection in cobre-sddp; cuts are kept iff they contribute strictly
-    /// at some visited state.
+    /// A cut is dominated if at every visited forward pass state, the maximum
+    /// over ALL populated cuts (active and inactive) exceeds the cut's value
+    /// by more than `threshold`. Dominated cuts contribute nothing to the
+    /// policy and can safely be deactivated. Inactive cuts that achieve the
+    /// maximum are reactivated.
     Dominated {
-        /// Activity threshold epsilon. Ignored by the stub implementation.
+        /// Activity threshold epsilon. A cut survives if its value is within
+        /// `threshold` of the maximum at any visited state.
         threshold: f64,
 
         /// Number of iterations between selection runs. Must be > 0.
@@ -254,25 +271,24 @@ impl CutSelectionStrategy {
     /// Scan the cut pool metadata for a single stage and identify cuts to
     /// deactivate.
     ///
-    /// Returns a [`CutActivityUpdates`] whose entries are the zero-based slot
-    /// positions of cuts that should be deactivated. The caller is responsible for applying the
-    /// deactivation to the activity bitmap. This method does not modify the
-    /// metadata — it is a pure query.
+    /// Returns a [`CutActivityUpdates`] with deactivation and reactivation
+    /// entries. The caller is responsible for applying changes to the activity
+    /// bitmap. This method does not modify the pool — it is a pure query.
     ///
     /// `stage_index` identifies which stage this selection runs for (used to
     /// populate [`CutActivityUpdates::stage_index`]).
     ///
-    /// Only slots where `active[i]` is `true` are considered. Slots that are
-    /// already inactive (e.g. unpopulated slots below the high-water mark or
-    /// previously deactivated cuts) are unconditionally skipped.
-    ///
     /// # Variant behavior
     ///
-    /// - **Level1**: stub — returns empty updates (ticket-002 implements the
-    ///   value-based kernel from de Matos 2015).
-    /// - **Lml1**: stub — returns empty updates (ticket-002 implements the
-    ///   value-based kernel from Guigues 2017/2019).
-    /// - **Dominated**: deactivates cuts dominated at every visited state.
+    /// - **Level1**: evaluates all cuts at visited states; retains any cut
+    ///   within `tie_tolerance` of the per-state maximum at any state.
+    /// - **Lml1**: at each visited state, retains only the oldest eligible
+    ///   cut within `tie_tolerance` of the maximum; selected set is the union
+    ///   across all visited states.
+    /// - **Dominated**: same max-survival logic as Level1 using `threshold`.
+    ///
+    /// When `visited_states` is empty, Level1 and Lml1 return empty updates
+    /// (no evidence for value evaluation). Dominated also returns empty.
     ///
     /// # Examples
     ///
@@ -280,11 +296,11 @@ impl CutSelectionStrategy {
     /// use cobre_sddp::cut::{CutPool};
     /// use cobre_sddp::cut_selection::{CutMetadata, CutSelectionStrategy};
     ///
-    /// // Level1 stub: returns empty CutActivityUpdates (kernel implemented in ticket-002).
     /// let strategy = CutSelectionStrategy::Level1 { check_frequency: 5, tie_tolerance: 1e-10 };
     /// let mut pool = CutPool::new(2, 1, 1, 0);
     /// pool.add_cut(0, 0, 1.0, &[1.0]);
     /// pool.add_cut(1, 0, 2.0, &[2.0]);
+    /// // Empty visited_states returns empty updates.
     /// let deact = strategy.select(&pool, &[], 10);
     /// assert!(deact.deactivation_indices().is_empty());
     /// ```
@@ -298,15 +314,14 @@ impl CutSelectionStrategy {
         self.select_for_stage(pool, visited_states, current_iteration, 0)
     }
 
-    /// Scan the cut pool for a specific stage and identify cuts to deactivate.
+    /// Scan the cut pool for a specific stage and identify cuts to update.
     ///
-    /// Accepts the full [`CutPool`](crate::cut::CutPool) reference so that the
-    /// `Dominated` variant can access coefficients and intercepts. `Level1`
-    /// and `Lml1` read only `pool.metadata` and `pool.active`.
+    /// Accepts the full [`CutPool`](crate::cut::CutPool) reference so that all
+    /// variants can access coefficients and intercepts for value evaluation.
     ///
     /// `visited_states` is a flat `&[f64]` of visited forward-pass state
     /// vectors (row-major, one state per `pool.state_dimension` elements).
-    /// Pass `&[]` when using `Level1` or `Lml1`.
+    /// When empty, the function returns empty updates immediately.
     ///
     /// [`select`]: CutSelectionStrategy::select
     #[must_use]
@@ -318,85 +333,47 @@ impl CutSelectionStrategy {
         stage_index: u32,
     ) -> CutActivityUpdates {
         let populated = pool.populated_count;
-        let metadata = &pool.metadata[..populated];
-        let active = &pool.active[..populated];
+        let n_state = pool.state_dimension;
+        let warm_start = pool.warm_start_count as usize;
 
-        // STUB: Level1 and Lml1 return empty updates here.
-        // The value-based kernel (de Matos 2015 / Guigues 2017/2019) is
-        // implemented in ticket-002 and will replace these stubs.
-        // Dominated uses the existing geometrically-correct implementation.
-        #[allow(clippy::cast_possible_truncation)]
-        let indices = match self {
-            // TODO(ticket-002): replace stubs with value-based Level1 / Lml1 kernels.
-            Self::Level1 { .. } | Self::Lml1 { .. } => vec![],
+        // Edge cases: nothing to evaluate.
+        if populated == 0 || visited_states.is_empty() || n_state == 0 {
+            return CutActivityUpdates {
+                stage_index,
+                updates: vec![],
+                reactivations: vec![],
+            };
+        }
 
-            Self::Dominated { threshold, .. } => {
-                select_dominated(pool, visited_states, *threshold, current_iteration)
-            }
-        };
+        // Eligible predicate: not a warm-start slot AND not from the current iteration.
+        // Warm-start cuts always remain active (slots 0..warm_start excluded from changes).
+        // Current-iteration cuts are protected against activity changes.
+        let eligible: Vec<bool> = (0..populated)
+            .map(|k| k >= warm_start && pool.metadata[k].iteration_generated < current_iteration)
+            .collect();
+        let n_eligible = eligible.iter().filter(|&&e| e).count();
 
-        // Suppress unused-variable warnings on metadata/active/populated while
-        // Level1/Lml1 are stubs.
-        let _ = (metadata, active, populated, current_iteration);
+        // Need at least 2 eligible cuts for any to be deactivated.
+        if n_eligible < 2 {
+            return CutActivityUpdates {
+                stage_index,
+                updates: vec![],
+                reactivations: vec![],
+            };
+        }
 
-        CutActivityUpdates::deactivations_only(stage_index, indices)
-    }
-}
+        let mut is_selected = vec![false; populated];
+        // Pre-allocate scratch buffer outside the trial-point loop (no allocation on hot path).
+        let mut scratch = vec![0.0_f64; populated];
+        let mut n_unselected = n_eligible;
 
-// ---------------------------------------------------------------------------
-// Dominated selection algorithm
-// ---------------------------------------------------------------------------
-
-/// Identify cuts that are dominated at every visited forward-pass state.
-///
-/// A cut `k` is *dominated* if, for every state `x_hat` in `visited_states`,
-/// there exists another active cut whose value at `x_hat` exceeds (or matches
-/// within `threshold`) the value of cut `k`.  Dominated cuts contribute
-/// nothing to the policy and can safely be deactivated.
-///
-/// Returns the slot indices of dominated cuts as `Vec<u32>`.
-#[allow(clippy::cast_possible_truncation, clippy::needless_range_loop)]
-fn select_dominated(
-    pool: &crate::cut::CutPool,
-    visited_states: &[f64],
-    threshold: f64,
-    current_iteration: u64,
-) -> Vec<u32> {
-    let populated = pool.populated_count;
-    let n_state = pool.state_dimension;
-
-    // No states means no evidence of domination.
-    if visited_states.is_empty() || n_state == 0 {
-        return vec![];
-    }
-
-    // Need at least 2 active cuts for one to dominate another.
-    if pool.active_count() < 2 {
-        return vec![];
-    }
-
-    // is_candidate[k] = true means cut k is still a candidate for
-    // deactivation (it has been dominated at every state seen so far).
-    // Initialize to active && not from the current iteration.
-    let mut is_candidate: Vec<bool> = pool.active[..populated]
-        .iter()
-        .zip(pool.metadata[..populated].iter())
-        .map(|(&a, m)| a && m.iteration_generated < current_iteration)
-        .collect();
-
-    let mut n_candidates: usize = is_candidate.iter().filter(|&&c| c).count();
-    if n_candidates == 0 {
-        return vec![];
-    }
-
-    // Scratch buffer for cut values at the current state.
-    let mut scratch = vec![0.0_f64; populated];
-
-    for x_hat in visited_states.chunks_exact(n_state) {
-        // Step 1: compute values for all active cuts, find max.
-        let mut max_val = f64::NEG_INFINITY;
-        for k in 0..populated {
-            if pool.active[k] {
+        for x_hat in visited_states.chunks_exact(n_state) {
+            // Phase 1: evaluate ALL populated cuts (active AND inactive) to find max.
+            // This is the core correctness fix: inactive cuts participate in the max
+            // computation, ensuring the survival criterion is globally correct.
+            let mut max_val = f64::NEG_INFINITY;
+            #[allow(clippy::needless_range_loop)]
+            for k in 0..populated {
                 let coeff_start = k * n_state;
                 let val = pool.intercepts[k]
                     + pool.coefficients[coeff_start..coeff_start + n_state]
@@ -409,29 +386,74 @@ fn select_dominated(
                     max_val = val;
                 }
             }
-        }
 
-        // Step 2: any candidate that achieves (max - threshold) is NOT
-        // dominated at this state -- remove it from candidates.
-        let cutoff = max_val - threshold;
-        for k in 0..populated {
-            if is_candidate[k] && scratch[k] >= cutoff {
-                is_candidate[k] = false;
-                n_candidates -= 1;
+            // Phase 2: method-specific survival rule.
+            match self {
+                Self::Level1 { tie_tolerance, .. }
+                | Self::Dominated {
+                    threshold: tie_tolerance,
+                    ..
+                } => {
+                    // Level1 / Dominated: keep ALL eligible cuts within tolerance of max.
+                    let cutoff = max_val - tie_tolerance;
+                    for k in warm_start..populated {
+                        if eligible[k] && !is_selected[k] && scratch[k] >= cutoff {
+                            is_selected[k] = true;
+                            n_unselected -= 1;
+                        }
+                    }
+                }
+                Self::Lml1 { tie_tolerance, .. } => {
+                    // Lml1: at this trial point, only the OLDEST eligible cut at max survives.
+                    // Ascending slot order = oldest first (slots are assigned sequentially).
+                    let cutoff = max_val - tie_tolerance;
+                    for k in warm_start..populated {
+                        if eligible[k] && scratch[k] >= cutoff {
+                            if !is_selected[k] {
+                                is_selected[k] = true;
+                                n_unselected -= 1;
+                            }
+                            // Break after the oldest at-max: per trial point, only one survives.
+                            break;
+                        }
+                    }
+                    // Do NOT break the outer trial-point loop for Lml1.
+                    // Different trial points may select different oldest cuts,
+                    // so all trial points must be visited.
+                }
+            }
+
+            // Early exit (Level1 and Dominated only): stop when all eligible cuts
+            // have been selected. Lml1 must visit all trial points.
+            if n_unselected == 0 && !matches!(self, Self::Lml1 { .. }) {
+                break;
             }
         }
 
-        // Step 3: early exit when no candidates remain.
-        if n_candidates == 0 {
-            break;
+        // Collect activity changes.
+        // - Deactivate: eligible, not selected, currently active.
+        // - Reactivate: eligible, selected, currently inactive.
+        let mut deactivations: Vec<u32> = Vec::new();
+        let mut reactivations: Vec<u32> = Vec::new();
+        // Pool capacity is bounded to u32::MAX by construction; cast is safe.
+        #[allow(clippy::cast_possible_truncation)]
+        for k in warm_start..populated {
+            if eligible[k] {
+                let currently_active = pool.active[k];
+                if is_selected[k] && !currently_active {
+                    reactivations.push(k as u32);
+                } else if !is_selected[k] && currently_active {
+                    deactivations.push(k as u32);
+                }
+            }
+        }
+
+        CutActivityUpdates {
+            stage_index,
+            updates: deactivations,
+            reactivations,
         }
     }
-
-    // Remaining candidates are dominated at ALL visited states.
-    (0..populated)
-        .filter(|&k| is_candidate[k])
-        .map(|k| k as u32)
-        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -587,50 +609,92 @@ mod tests {
         assert!(s.should_run(10));
     }
 
+    // -----------------------------------------------------------------------
+    // Level1 value-based kernel tests
+    // -----------------------------------------------------------------------
+
+    /// AC1: pool with 3 cuts (intercepts [1,5,3], coeff all 0), state [0.0].
+    /// Level1 `tie_tolerance=0.0` → cut 1 (value 5) survives; cuts 0,2 deactivated.
     #[test]
-    #[ignore = "ticket-002"]
-    fn level1_deactivates_zero_activity_cuts() {
+    fn level1_deactivates_dominated_cuts_at_state() {
+        let strategy = CutSelectionStrategy::Level1 {
+            check_frequency: 5,
+            tie_tolerance: 0.0,
+        };
+        let mut pool = CutPool::new(3, 1, 1, 0);
+        pool.add_cut(0, 0, 1.0, &[0.0]);
+        pool.add_cut(1, 0, 5.0, &[0.0]);
+        pool.add_cut(2, 0, 3.0, &[0.0]);
+        // All from iteration 1, current_iteration=10 → all eligible.
+        let deact = strategy.select(&pool, &[0.0], 10);
+        let mut deact_idx = deact.deactivation_indices();
+        deact_idx.sort_unstable();
+        assert_eq!(deact_idx, vec![0, 2], "cuts 0 and 2 must be deactivated");
+        assert!(
+            deact.reactivation_indices().is_empty(),
+            "no reactivations expected"
+        );
+    }
+
+    /// AC2: pool with 3 cuts (intercepts [5,5,3]), state [0.0].
+    /// Level1 tie_tolerance=1e-10 → cuts 0 and 1 both survive (tie kept).
+    #[test]
+    fn level1_retains_tied_cuts() {
         let strategy = CutSelectionStrategy::Level1 {
             check_frequency: 5,
             tie_tolerance: 1e-10,
         };
-        let pool = make_pool(&[make_meta(0, 1), make_meta(1, 5)], &[true, true]);
-        let deact = strategy.select(&pool, &[], 10);
+        let mut pool = CutPool::new(3, 1, 1, 0);
+        pool.add_cut(0, 0, 5.0, &[0.0]);
+        pool.add_cut(1, 0, 5.0, &[0.0]);
+        pool.add_cut(2, 0, 3.0, &[0.0]);
+        let deact = strategy.select(&pool, &[0.0], 10);
         assert_eq!(
             deact.deactivation_indices(),
-            vec![0],
-            "only the inactive cut is deactivated"
+            vec![2],
+            "only cut 2 (value 3) is deactivated; ties 0 and 1 kept"
         );
+        assert!(deact.reactivation_indices().is_empty());
     }
 
+    /// Level1 retains all cuts when two have equal max values.
     #[test]
-    #[ignore = "ticket-002"]
     fn level1_retains_positive_activity_cuts() {
         let strategy = CutSelectionStrategy::Level1 {
             check_frequency: 5,
-            tie_tolerance: 1e-10,
+            tie_tolerance: 0.0,
         };
-        let pool = make_pool(&[make_meta(3, 1), make_meta(7, 5)], &[true, true]);
-        let deact = strategy.select(&pool, &[], 10);
+        // Two cuts with equal values at state [1.0]:
+        // cut0: 1.0 + 2.0*1.0 = 3.0, cut1: 3.0 + 0.0*1.0 = 3.0 → tied, both survive.
+        let mut pool = CutPool::new(2, 1, 1, 0);
+        pool.add_cut(0, 0, 1.0, &[2.0]);
+        pool.add_cut(1, 0, 3.0, &[0.0]);
+        let deact = strategy.select(&pool, &[1.0], 10);
         assert!(
             deact.deactivation_indices().is_empty(),
-            "no cuts should be deactivated when all have activity"
+            "no cuts deactivated when all tied at max"
         );
     }
 
+    /// Level1 with three cuts where two are clearly below max.
     #[test]
-    #[ignore = "ticket-002"]
     fn level1_threshold_1_deactivates_cuts_with_count_at_most_1() {
         let strategy = CutSelectionStrategy::Level1 {
             check_frequency: 5,
-            tie_tolerance: 1e-10,
+            tie_tolerance: 0.5,
         };
-        let pool = make_pool(
-            &[make_meta(0, 1), make_meta(1, 5), make_meta(2, 8)],
-            &[true, true, true],
-        );
-        let deact = strategy.select(&pool, &[], 10);
-        assert_eq!(deact.deactivation_indices(), vec![0, 1]);
+        // cut0: value=1, cut1: value=3, cut2: value=2 at state [0.0].
+        // max=3, cutoff=3-0.5=2.5; only cut1(3>=2.5) and cut2(2<2.5→no) wait:
+        // cut2=2 < 2.5 → not selected. cut0=1 < 2.5 → not selected. cut1=3 >= 2.5 → selected.
+        // Deactivate: cut0, cut2.
+        let mut pool = CutPool::new(3, 1, 1, 0);
+        pool.add_cut(0, 0, 1.0, &[0.0]);
+        pool.add_cut(1, 0, 3.0, &[0.0]);
+        pool.add_cut(2, 0, 2.0, &[0.0]);
+        let deact = strategy.select(&pool, &[0.0], 10);
+        let mut deact_idx = deact.deactivation_indices();
+        deact_idx.sort_unstable();
+        assert_eq!(deact_idx, vec![0, 2]);
     }
 
     #[test]
@@ -644,102 +708,198 @@ mod tests {
         assert!(deact.deactivation_indices().is_empty());
     }
 
+    /// AC6: empty `visited_states` returns empty for Level1.
     #[test]
-    #[ignore = "ticket-002"]
+    fn level1_empty_states_returns_empty() {
+        let strategy = CutSelectionStrategy::Level1 {
+            check_frequency: 5,
+            tie_tolerance: 1e-10,
+        };
+        let mut pool = CutPool::new(3, 1, 1, 0);
+        pool.add_cut(0, 0, 1.0, &[0.0]);
+        pool.add_cut(1, 0, 5.0, &[0.0]);
+        pool.add_cut(2, 0, 3.0, &[0.0]);
+        let deact = strategy.select(&pool, &[], 10);
+        assert!(deact.deactivation_indices().is_empty());
+        assert!(deact.reactivation_indices().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Lml1 value-based kernel tests
+    // -----------------------------------------------------------------------
+
+    /// AC3: same pool as AC2 (intercepts [5,5,3]), state [0.0].
+    /// Lml1 tie_tolerance=1e-10 → only cut 0 (the oldest by slot) survives.
+    #[test]
+    fn lml1_only_oldest_survives_at_each_state() {
+        let strategy = CutSelectionStrategy::Lml1 {
+            check_frequency: 5,
+            tie_tolerance: 1e-10,
+        };
+        let mut pool = CutPool::new(3, 1, 1, 0);
+        pool.add_cut(0, 0, 5.0, &[0.0]);
+        pool.add_cut(1, 0, 5.0, &[0.0]);
+        pool.add_cut(2, 0, 3.0, &[0.0]);
+        let deact = strategy.select(&pool, &[0.0], 10);
+        let mut deact_idx = deact.deactivation_indices();
+        deact_idx.sort_unstable();
+        assert_eq!(
+            deact_idx,
+            vec![1, 2],
+            "cuts 1 and 2 deactivated; only oldest (cut 0) at max survives"
+        );
+        assert!(deact.reactivation_indices().is_empty());
+    }
+
+    /// Lml1 with two trial points selecting different oldest cuts.
+    /// state [0.0]: cut0(val=2)>cut1(val=1) → oldest at max = cut0
+    /// state [1.0]: cut0=2+0=2, cut1=0+3=3 → cut1 is max, oldest at max = cut1
+    /// Union: both cut0 and cut1 selected → cut2 deactivated.
+    #[test]
+    fn lml1_union_across_trial_points() {
+        let strategy = CutSelectionStrategy::Lml1 {
+            check_frequency: 5,
+            tie_tolerance: 1e-10,
+        };
+        let mut pool = CutPool::new(3, 1, 1, 0);
+        pool.add_cut(0, 0, 2.0, &[0.0]); // constant 2
+        pool.add_cut(1, 0, 0.0, &[3.0]); // 3x
+        pool.add_cut(2, 0, 0.5, &[0.0]); // constant 0.5 (never at max)
+        let deact = strategy.select(&pool, &[0.0, 1.0], 10);
+        assert_eq!(
+            deact.deactivation_indices(),
+            vec![2],
+            "only cut 2 (never at max) deactivated"
+        );
+        assert!(deact.reactivation_indices().is_empty());
+    }
+
+    /// Lml1: single eligible cut → `n_eligible` < 2 → empty.
+    #[test]
     fn lml1_deactivates_cuts_outside_memory_window() {
         let strategy = CutSelectionStrategy::Lml1 {
             check_frequency: 5,
             tie_tolerance: 1e-10,
         };
+        // Only 1 eligible cut → n_eligible < 2 → returns empty.
         let pool = make_pool(&[make_meta(0, 5)], &[true]);
-        let deact = strategy.select(&pool, &[], 20);
-        assert_eq!(deact.deactivation_indices(), vec![0]);
+        let deact = strategy.select(&pool, &[0.0], 20);
+        assert!(deact.deactivation_indices().is_empty());
     }
 
+    /// Lml1 with two eligible cuts at the same value: oldest (slot 0) retained.
     #[test]
-    #[ignore = "ticket-002"]
     fn lml1_retains_cuts_within_memory_window() {
-        // With the stub implementation, all cuts are retained.
-        // ticket-002 will implement the value-based kernel.
         let strategy = CutSelectionStrategy::Lml1 {
             check_frequency: 5,
             tie_tolerance: 1e-10,
         };
-        let pool = make_pool(&[make_meta(0, 12)], &[true]);
-        let deact = strategy.select(&pool, &[], 20);
-        assert!(deact.deactivation_indices().is_empty());
+        let mut pool = CutPool::new(2, 1, 1, 0);
+        pool.add_cut(0, 0, 3.0, &[0.0]);
+        pool.add_cut(1, 0, 3.0, &[0.0]);
+        let deact = strategy.select(&pool, &[0.0], 10);
+        // Both tied → oldest (cut 0) selected → cut 1 deactivated.
+        assert_eq!(
+            deact.deactivation_indices(),
+            vec![1],
+            "cut 1 deactivated; cut 0 (oldest) retained"
+        );
     }
 
+    /// Lml1 with 3 cuts at state [0.0]: only oldest at max survives.
     #[test]
-    #[ignore = "ticket-002"]
     fn lml1_retains_cuts_exactly_at_boundary() {
         let strategy = CutSelectionStrategy::Lml1 {
             check_frequency: 5,
             tie_tolerance: 1e-10,
         };
-        let pool = make_pool(&[make_meta(0, 10)], &[true]);
-        let deact = strategy.select(&pool, &[], 20);
-        assert!(
-            deact.deactivation_indices().is_empty(),
-            "boundary case: exactly at window edge, retained"
+        // cut0=5, cut1=4, cut2=5 (tied). Oldest at max = cut0.
+        let mut pool = CutPool::new(3, 1, 1, 0);
+        pool.add_cut(0, 0, 5.0, &[0.0]);
+        pool.add_cut(1, 0, 4.0, &[0.0]);
+        pool.add_cut(2, 0, 5.0, &[0.0]);
+        let deact = strategy.select(&pool, &[0.0], 10);
+        let mut deact_idx = deact.deactivation_indices();
+        deact_idx.sort_unstable();
+        assert_eq!(
+            deact_idx,
+            vec![1, 2],
+            "cuts 1 and 2 deactivated; cut 0 (oldest at max) retained"
         );
     }
 
+    /// Lml1 with 3 cuts, 2 trial points, each selecting a different oldest cut.
     #[test]
-    #[ignore = "ticket-002"]
     fn lml1_mixed_cuts_deactivates_correct_indices() {
         let strategy = CutSelectionStrategy::Lml1 {
             check_frequency: 5,
             tie_tolerance: 1e-10,
         };
-        let pool = make_pool(
-            &[make_meta(0, 5), make_meta(0, 12), make_meta(0, 1)],
-            &[true, true, true],
+        // cut0: constant 1 (at max for state [0]: max=3→no)
+        // cut1: 2x (at state [1]: 2, state [2]: 4 → max at [2])
+        // cut2: constant 3 (at max for state [0]: max=3)
+        // state [0.0]: values=[1,0,3] → max=3, oldest at max = cut2 (cut0<3, cut1<3)
+        // state [2.0]: values=[1,4,3] → max=4, oldest at max = cut1
+        // Union: cut1 and cut2 selected → cut0 deactivated.
+        let mut pool = CutPool::new(3, 1, 1, 0);
+        pool.add_cut(0, 0, 1.0, &[0.0]);
+        pool.add_cut(1, 0, 0.0, &[2.0]);
+        pool.add_cut(2, 0, 3.0, &[0.0]);
+        let deact = strategy.select(&pool, &[0.0, 2.0], 10);
+        assert_eq!(
+            deact.deactivation_indices(),
+            vec![0],
+            "only cut 0 (never at max) deactivated"
         );
-        let deact = strategy.select(&pool, &[], 20);
-        assert_eq!(deact.deactivation_indices(), vec![0, 2]);
     }
 
+    /// AC6: empty `visited_states` returns empty for Lml1.
     #[test]
-    #[ignore = "ticket-002"]
-    fn ac_level1_threshold_0_deactivates_zero_activity_cut() {
-        let strategy = CutSelectionStrategy::Level1 {
+    fn lml1_empty_states_returns_empty() {
+        let strategy = CutSelectionStrategy::Lml1 {
             check_frequency: 5,
             tie_tolerance: 1e-10,
         };
-        let pool = make_pool(
-            &[CutMetadata {
-                iteration_generated: 1,
-                forward_pass_index: 0,
-                active_count: 0,
-                last_active_iter: 1,
-                active_window: 0,
-            }],
-            &[true],
-        );
+        let mut pool = CutPool::new(2, 1, 1, 0);
+        pool.add_cut(0, 0, 5.0, &[0.0]);
+        pool.add_cut(1, 0, 3.0, &[0.0]);
         let deact = strategy.select(&pool, &[], 10);
+        assert!(deact.deactivation_indices().is_empty());
+        assert!(deact.reactivation_indices().is_empty());
+    }
+
+    /// Previously: `ac_level1_threshold_0_deactivates_zero_activity_cut`.
+    /// New value-based version: a cut with lower value is deactivated.
+    #[test]
+    fn ac_level1_threshold_0_deactivates_zero_activity_cut() {
+        let strategy = CutSelectionStrategy::Level1 {
+            check_frequency: 5,
+            tie_tolerance: 0.0,
+        };
+        // cut0: value=1 at state [0]. cut1: value=3 at state [0].
+        // max=3, cutoff=3. cut0(1<3) not selected → deactivated.
+        let mut pool = CutPool::new(2, 1, 1, 0);
+        pool.add_cut(0, 0, 1.0, &[0.0]);
+        pool.add_cut(1, 0, 3.0, &[0.0]);
+        let deact = strategy.select(&pool, &[0.0], 10);
         assert!(deact.deactivation_indices().contains(&0));
     }
 
+    /// Previously: `ac_lml1_deactivates_cut_outside_memory_window`.
+    /// New value-based version: Lml1 deactivates a cut that is never oldest-at-max.
     #[test]
-    #[ignore = "ticket-002"]
     fn ac_lml1_deactivates_cut_outside_memory_window() {
         let strategy = CutSelectionStrategy::Lml1 {
             check_frequency: 5,
             tie_tolerance: 1e-10,
         };
-        let pool = make_pool(
-            &[CutMetadata {
-                iteration_generated: 1,
-                forward_pass_index: 0,
-                active_count: 0,
-                last_active_iter: 5,
-                active_window: 0,
-            }],
-            &[true],
-        );
-        let deact = strategy.select(&pool, &[], 20);
-        assert!(deact.deactivation_indices().contains(&0));
+        // cut0: value=5 at state [0]. cut1: value=3 at state [0].
+        // Oldest at max = cut0. cut1 deactivated.
+        let mut pool = CutPool::new(2, 1, 1, 0);
+        pool.add_cut(0, 0, 5.0, &[0.0]);
+        pool.add_cut(1, 0, 3.0, &[0.0]);
+        let deact = strategy.select(&pool, &[0.0], 20);
+        assert!(deact.deactivation_indices().contains(&1));
     }
 
     #[test]
@@ -779,6 +939,420 @@ mod tests {
         let cloned = meta.clone();
         assert_eq!(cloned.active_count, 5);
         assert!(!format!("{meta:?}").is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Current-iteration guard tests
+    // -----------------------------------------------------------------------
+
+    /// Cuts generated in the current iteration must never be deactivated by
+    /// Level1, even if they have lower values. They haven't been tested yet
+    /// and deactivating them would cause the lower bound to stagnate.
+    #[test]
+    fn level1_spares_cuts_from_current_iteration() {
+        let strategy = CutSelectionStrategy::Level1 {
+            check_frequency: 1,
+            tie_tolerance: 1e-10,
+        };
+        // cut0: iteration_generated=10 (current), value=1 at [0.0] → protected
+        // cut1: iteration_generated=5 (older), value=1 at [0.0] → eligible
+        // cut2: iteration_generated=5 (older), value=5 at [0.0] → eligible
+        // max=5 (from cut2, which is eligible), cutoff=5.
+        // cut1(1<5) not selected → deactivated. cut0 is not eligible → unchanged.
+        let mut pool = CutPool::new(3, 1, 1, 0);
+        pool.add_cut(0, 0, 1.0, &[0.0]);
+        pool.add_cut(1, 0, 1.0, &[0.0]);
+        pool.add_cut(2, 0, 5.0, &[0.0]);
+        pool.metadata[0].iteration_generated = 10; // current iteration
+        pool.metadata[1].iteration_generated = 5;
+        pool.metadata[2].iteration_generated = 5;
+        let deact = strategy.select(&pool, &[0.0], 10);
+        assert_eq!(
+            deact.deactivation_indices(),
+            vec![1],
+            "only the older cut (slot 1) should be deactivated; \
+             the current-iteration cut (slot 0) must be spared"
+        );
+    }
+
+    /// Lml1 also spares cuts from the current iteration via the
+    /// `iteration_generated` guard.
+    #[test]
+    fn lml1_spares_cuts_from_current_iteration() {
+        let strategy = CutSelectionStrategy::Lml1 {
+            check_frequency: 1,
+            tie_tolerance: 1e-10,
+        };
+        let pool = make_pool(
+            &[CutMetadata {
+                iteration_generated: 10,
+                forward_pass_index: 0,
+                active_count: 0,
+                last_active_iter: 10,
+                active_window: 0,
+            }],
+            &[true],
+        );
+        // Only 1 cut, from current iteration (not eligible) → n_eligible = 0 < 2 → empty.
+        let deact = strategy.select(&pool, &[0.0], 10);
+        assert!(
+            deact.deactivation_indices().is_empty(),
+            "current-iteration cut must not be deactivated"
+        );
+    }
+
+    /// Lml1 memory window boundary behavior: 5 cuts, 2 trial points.
+    /// Each trial point selects a different oldest cut; union determines survivors.
+    #[test]
+    fn lml1_memory_window_boundary_behavior() {
+        let strategy = CutSelectionStrategy::Lml1 {
+            check_frequency: 1,
+            tie_tolerance: 1e-10,
+        };
+        // 5 cuts with different values at 2 states:
+        // cut0: constant 1 (coeff=0, intercept=1)
+        // cut1: constant 2 (coeff=0, intercept=2)
+        // cut2: 2x (coeff=2, intercept=0)
+        // cut3: constant 3 (coeff=0, intercept=3)
+        // cut4: x+1 (coeff=1, intercept=1)
+        //
+        // state [0.0]: values=[1,2,0,3,1] → max=3 (cut3). Oldest at max: cut3.
+        // state [1.0]: values=[1,2,2,3,2] → max=3 (cut3). Oldest at max: cut3 again.
+        // Union: only cut3 selected → cuts 0,1,2,4 deactivated.
+        let mut pool = CutPool::new(5, 1, 1, 0);
+        pool.add_cut(0, 0, 1.0, &[0.0]);
+        pool.add_cut(1, 0, 2.0, &[0.0]);
+        pool.add_cut(2, 0, 0.0, &[2.0]);
+        pool.add_cut(3, 0, 3.0, &[0.0]);
+        pool.add_cut(4, 0, 1.0, &[1.0]);
+        let deact = strategy.select_for_stage(&pool, &[0.0, 1.0], 10, 0);
+        let mut deact_idx = deact.deactivation_indices();
+        deact_idx.sort_unstable();
+        assert_eq!(
+            deact_idx,
+            vec![0, 1, 2, 4],
+            "only cut 3 (oldest at max at both states) survives"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Reactivation tests
+    // -----------------------------------------------------------------------
+
+    /// AC4: inactive cut achieves max at a trial point → Reactivate entry emitted.
+    #[test]
+    fn level1_reactivates_inactive_cut_at_max() {
+        let strategy = CutSelectionStrategy::Level1 {
+            check_frequency: 1,
+            tie_tolerance: 1e-10,
+        };
+        // cut0: intercept=5, active=false (inactive but achieves max)
+        // cut1: intercept=3, active=true
+        // cut2: intercept=1, active=true
+        // max=5 (cut0). cut0 selected → reactivate. cut1,cut2 not selected → deactivate.
+        let mut pool = CutPool::new(3, 1, 1, 0);
+        pool.add_cut(0, 0, 5.0, &[0.0]);
+        pool.add_cut(1, 0, 3.0, &[0.0]);
+        pool.add_cut(2, 0, 1.0, &[0.0]);
+        // Manually deactivate cut 0.
+        pool.set_active(0, false);
+        assert_eq!(pool.active_count(), 2);
+
+        let result = strategy.select(&pool, &[0.0], 10);
+        assert_eq!(
+            result.reactivation_indices(),
+            vec![0],
+            "inactive cut 0 (at max) must be reactivated"
+        );
+        let mut deact_idx = result.deactivation_indices();
+        deact_idx.sort_unstable();
+        assert_eq!(
+            deact_idx,
+            vec![1, 2],
+            "active cuts 1 and 2 (below max) must be deactivated"
+        );
+    }
+
+    /// Lml1 also emits reactivation for an inactive cut that is oldest-at-max.
+    #[test]
+    fn lml1_reactivates_inactive_oldest_at_max() {
+        let strategy = CutSelectionStrategy::Lml1 {
+            check_frequency: 1,
+            tie_tolerance: 1e-10,
+        };
+        // cut0: intercept=5, inactive (oldest, at max)
+        // cut1: intercept=5, active (also at max, but younger than cut0)
+        // Oldest at max = cut0 (slot 0 < slot 1). cut1 not selected → deactivate.
+        let mut pool = CutPool::new(2, 1, 1, 0);
+        pool.add_cut(0, 0, 5.0, &[0.0]);
+        pool.add_cut(1, 0, 5.0, &[0.0]);
+        pool.set_active(0, false);
+
+        let result = strategy.select(&pool, &[0.0], 10);
+        assert_eq!(
+            result.reactivation_indices(),
+            vec![0],
+            "inactive cut 0 (oldest at max) must be reactivated"
+        );
+        assert_eq!(
+            result.deactivation_indices(),
+            vec![1],
+            "active cut 1 (younger at max) must be deactivated"
+        );
+    }
+
+    /// AC5: all populated cuts from current iteration → empty result.
+    #[test]
+    fn select_returns_empty_when_all_cuts_from_current_iteration() {
+        let strategy = CutSelectionStrategy::Level1 {
+            check_frequency: 1,
+            tie_tolerance: 1e-10,
+        };
+        let mut pool = CutPool::new(3, 1, 1, 0);
+        pool.add_cut(0, 0, 1.0, &[0.0]);
+        pool.add_cut(1, 0, 5.0, &[0.0]);
+        pool.add_cut(2, 0, 3.0, &[0.0]);
+        // All from current iteration.
+        pool.metadata[0].iteration_generated = 10;
+        pool.metadata[1].iteration_generated = 10;
+        pool.metadata[2].iteration_generated = 10;
+        let result = strategy.select(&pool, &[0.0], 10);
+        assert!(
+            result.deactivation_indices().is_empty(),
+            "no activity changes when all cuts from current iteration"
+        );
+        assert!(result.reactivation_indices().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Warm-start slot protection tests
+    // -----------------------------------------------------------------------
+
+    /// Warm-start cuts participate in max computation but are not candidates.
+    /// With `warm_start_count=1`: slot 0 is protected; only slots 1+ are eligible.
+    #[allow(clippy::cast_possible_truncation)]
+    #[test]
+    fn level1_warm_start_cuts_not_deactivated() {
+        let strategy = CutSelectionStrategy::Level1 {
+            check_frequency: 1,
+            tie_tolerance: 0.0,
+        };
+        // warm_start_count=1 → slot 0 is warm-start (protected).
+        // Populate the pool directly (warm-start slots are not inserted via add_cut).
+        // 3 slots total: slot 0 (warm-start, intercept=10), slot 1 (eligible, =1), slot 2 (eligible, =3).
+        // max=10 (slot 0). Cutoff=10. Eligible cuts 1,2 both below cutoff → deactivated.
+        // Slot 0 is not eligible (warm-start) → not deactivated.
+        let n = 3usize;
+        let mut pool = CutPool::new(n, 1, 1, 1); // warm_start_count=1
+        let intercepts = [10.0f64, 1.0, 3.0];
+        #[allow(clippy::needless_range_loop)]
+        for i in 0..n {
+            pool.intercepts[i] = intercepts[i];
+            pool.coefficients[i] = 0.0;
+            pool.active[i] = true;
+            pool.metadata[i] = CutMetadata {
+                iteration_generated: 1,
+                forward_pass_index: i as u32,
+                active_count: 0,
+                last_active_iter: 1,
+                active_window: 0,
+            };
+        }
+        pool.populated_count = n;
+        pool.cached_active_count = n;
+
+        let result = strategy.select(&pool, &[0.0], 10);
+        // Warm-start slot 0 must not appear in deactivations.
+        assert!(
+            !result.deactivation_indices().contains(&0),
+            "warm-start slot 0 must not be deactivated"
+        );
+        let mut deact_idx = result.deactivation_indices();
+        deact_idx.sort_unstable();
+        assert_eq!(deact_idx, vec![1, 2]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Skip already-inactive slot tests
+    // -----------------------------------------------------------------------
+
+    /// Previously: `select_skips_already_inactive_slots`.
+    /// An already-inactive cut that is not at max produces no change.
+    /// An already-inactive cut that IS at max is reactivated.
+    #[test]
+    fn select_skips_already_inactive_slots() {
+        let mut pool = CutPool::new(10, 1, 1, 0);
+        pool.add_cut(0, 0, 1.0, &[0.0]); // slot 0: value=1
+        pool.add_cut(1, 0, 5.0, &[0.0]); // slot 1: value=5 (max)
+        pool.add_cut(2, 0, 3.0, &[0.0]); // slot 2: value=3
+        assert_eq!(pool.active_count(), 3);
+
+        // Manually deactivate slot 0 before selection.
+        pool.set_active(0, false);
+        assert_eq!(pool.active_count(), 2);
+
+        // Level1 tie_tolerance=0: only slot 1 (value=5) is at max.
+        // slot 0: eligible, not selected, inactive → no change (not reactivated).
+        // slot 1: eligible, selected, active → no change.
+        // slot 2: eligible, not selected, active → deactivated.
+        let strategy = CutSelectionStrategy::Level1 {
+            check_frequency: 1,
+            tie_tolerance: 0.0,
+        };
+        let deact = strategy.select_for_stage(&pool, &[0.0], 5, 0);
+        assert_eq!(
+            deact.deactivation_indices(),
+            vec![2],
+            "only slot 2 (active, below max) deactivated"
+        );
+        assert!(
+            deact.reactivation_indices().is_empty(),
+            "slot 0 (inactive, below max) must not be reactivated"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // select_for_stage returns CutActivityUpdates with deactivations
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn select_for_stage_returns_cut_activity_updates_with_deactivations() {
+        let mut pool = CutPool::new(3, 1, 1, 0);
+        pool.add_cut(0, 0, 1.0, &[0.0]); // value=1
+        pool.add_cut(1, 0, 2.0, &[0.0]); // value=2 (max)
+
+        let strategy = CutSelectionStrategy::Level1 {
+            check_frequency: 1,
+            tie_tolerance: 0.0,
+        };
+        let result = strategy.select_for_stage(&pool, &[0.0], 10, 0);
+
+        // cut0 (value=1) not at max → deactivated. cut1 (value=2) at max → no change.
+        assert!(
+            !result.updates.is_empty(),
+            "deactivations must be non-empty"
+        );
+        assert!(
+            result.updates.contains(&0),
+            "slot 0 (below max) must be deactivated"
+        );
+        assert!(
+            !result.updates.contains(&1),
+            "slot 1 (at max) must not be deactivated"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Aggressiveness ordering
+    // -----------------------------------------------------------------------
+
+    /// Level1 and Lml1 with empty states return empty; Dominated with states
+    /// returns some. Ordering: |Level1| <= |Lml1| <= |Dominated|.
+    #[test]
+    fn aggressiveness_ordering_level1_leq_lml1_leq_dominated() {
+        // 5 cuts (1D):
+        // Cut 0: intercept=0, slope=0 (constant 0)
+        // Cut 1: intercept=0, slope=0.1
+        // Cut 2: intercept=1, slope=0
+        // Cut 3: intercept=0, slope=2
+        // Cut 4: intercept=5, slope=-1
+        let meta = [
+            CutMetadata {
+                iteration_generated: 1,
+                forward_pass_index: 0,
+                active_count: 0,
+                last_active_iter: 1,
+                active_window: 0,
+            },
+            CutMetadata {
+                iteration_generated: 1,
+                forward_pass_index: 1,
+                active_count: 0,
+                last_active_iter: 2,
+                active_window: 0,
+            },
+            CutMetadata {
+                iteration_generated: 1,
+                forward_pass_index: 2,
+                active_count: 3,
+                last_active_iter: 3,
+                active_window: 0,
+            },
+            CutMetadata {
+                iteration_generated: 1,
+                forward_pass_index: 3,
+                active_count: 5,
+                last_active_iter: 10,
+                active_window: 0,
+            },
+            CutMetadata {
+                iteration_generated: 1,
+                forward_pass_index: 4,
+                active_count: 5,
+                last_active_iter: 10,
+                active_window: 0,
+            },
+        ];
+        let pool = make_dominated_pool(
+            &[0.0, 0.0, 1.0, 0.0, 5.0],
+            &[vec![0.0], vec![0.1], vec![0.0], vec![2.0], vec![-1.0]],
+            &[true; 5],
+            &meta,
+        );
+        let states: Vec<f64> = vec![0.0, 1.0, 3.0, 5.0];
+
+        // Level1 and Lml1 use value-based evaluation with actual states.
+        let l1 = CutSelectionStrategy::Level1 {
+            check_frequency: 1,
+            tie_tolerance: 1e-10,
+        };
+        let deact_l1 = l1.select(&pool, &states, 11);
+
+        let lml1 = CutSelectionStrategy::Lml1 {
+            check_frequency: 1,
+            tie_tolerance: 1e-10,
+        };
+        let deact_lml1 = lml1.select(&pool, &states, 11);
+
+        // Dominated threshold=0
+        let dom = CutSelectionStrategy::Dominated {
+            threshold: 0.0,
+            check_frequency: 1,
+        };
+        let deact_dom = dom.select(&pool, &states, 11);
+
+        assert!(
+            deact_l1.deactivation_indices().len() <= deact_lml1.deactivation_indices().len(),
+            "Level1 ({}) should deactivate <= LML1 ({})",
+            deact_l1.deactivation_indices().len(),
+            deact_lml1.deactivation_indices().len()
+        );
+        assert!(
+            deact_lml1.deactivation_indices().len() <= deact_dom.deactivation_indices().len(),
+            "LML1 ({}) should deactivate <= Dominated ({})",
+            deact_lml1.deactivation_indices().len(),
+            deact_dom.deactivation_indices().len()
+        );
+    }
+
+    #[test]
+    fn cut_activity_updates_deactivations_only_constructor() {
+        let updates = CutActivityUpdates::deactivations_only(7, vec![0, 1, 2]);
+        assert_eq!(updates.stage_index, 7);
+        assert_eq!(updates.updates.len(), 3);
+        assert_eq!(updates.updates, vec![0, 1, 2]);
+        assert!(updates.reactivations.is_empty());
+    }
+
+    #[test]
+    fn cut_activity_updates_deactivation_indices_returns_updates() {
+        let updates = CutActivityUpdates {
+            stage_index: 0,
+            updates: vec![0, 2],
+            reactivations: vec![],
+        };
+        assert_eq!(updates.deactivation_indices(), vec![0, 2]);
+        assert!(updates.reactivation_indices().is_empty());
     }
 
     // -----------------------------------------------------------------------
@@ -1068,144 +1642,6 @@ mod tests {
         );
     }
 
-    /// Re-deactivation of already-inactive cut does not corrupt `cached_active_count`.
-    ///
-    /// When Level1 `select_for_stage` returns an index that is already
-    /// deactivated, `CutPool::deactivate` must skip the decrement. This test
-    /// verifies the safety invariant via the cut pool directly.
-    #[test]
-    #[ignore = "ticket-002"]
-    fn select_skips_already_inactive_slots() {
-        let mut pool = CutPool::new(10, 1, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[1.0]); // slot 0, active
-        pool.add_cut(1, 0, 2.0, &[2.0]); // slot 1, active
-        pool.add_cut(2, 0, 3.0, &[3.0]); // slot 2, active
-        assert_eq!(pool.active_count(), 3);
-
-        // Mark slots 1 and 2 as having binding activity so Level1 retains them.
-        pool.metadata[1].active_count = 5;
-        pool.metadata[2].active_count = 3;
-
-        // Deactivate slot 0 manually.
-        pool.deactivate(&[0]);
-        assert_eq!(pool.active_count(), 2);
-
-        // Level1 selection: slot 0 is already inactive and must be skipped.
-        // Slots 1 and 2 have active_count > 0 and are retained.
-        let strategy = CutSelectionStrategy::Level1 {
-            check_frequency: 1,
-            tie_tolerance: 1e-10,
-        };
-        let deact = strategy.select_for_stage(&pool, &[], 5, 0);
-        assert!(
-            deact.deactivation_indices().is_empty(),
-            "no cuts should be selected: slot 0 is already inactive, \
-             slots 1 and 2 have activity"
-        );
-    }
-
-    /// Lml1 `memory_window` boundary: cuts at exactly the window edge are
-    /// retained, cuts beyond are deactivated.
-    ///
-    /// With `memory_window: 3, current_iteration: 10`:
-    /// - `last_active_iter=1`: 10-1=9 > 3 → deactivated
-    /// - `last_active_iter=5`: 10-5=5 > 3 → deactivated
-    /// - `last_active_iter=7`: 10-7=3 not > 3 → retained (boundary)
-    /// - `last_active_iter=8`: 10-8=2 not > 3 → retained
-    /// - `last_active_iter=10`: 10-10=0 not > 3 → retained
-    #[test]
-    #[ignore = "ticket-002"]
-    fn lml1_memory_window_boundary_behavior() {
-        let strategy = CutSelectionStrategy::Lml1 {
-            check_frequency: 1,
-            tie_tolerance: 1e-10,
-        };
-        let pool = make_pool(
-            &[
-                make_meta(0, 1),  // last_active_iter = 1
-                make_meta(0, 5),  // last_active_iter = 5
-                make_meta(0, 7),  // last_active_iter = 7 (boundary)
-                make_meta(0, 8),  // last_active_iter = 8
-                make_meta(0, 10), // last_active_iter = 10
-            ],
-            &[true; 5],
-        );
-        let deact = strategy.select_for_stage(&pool, &[], 10, 0);
-
-        // Slots 0 and 1 deactivated, slots 2-4 retained.
-        assert_eq!(
-            deact.deactivation_indices(),
-            vec![0, 1],
-            "only cuts with last_active_iter 1 and 5 should be deactivated"
-        );
-    }
-
-    /// Cuts generated in the current iteration must never be deactivated by
-    /// Level1, even if their `active_count` is 0 (they haven't been tested
-    /// yet). This prevents the pathology where every new cut is immediately
-    /// killed, causing the lower bound to stagnate.
-    #[test]
-    #[ignore = "ticket-002"]
-    fn level1_spares_cuts_from_current_iteration() {
-        let strategy = CutSelectionStrategy::Level1 {
-            check_frequency: 1,
-            tie_tolerance: 1e-10,
-        };
-        let pool = make_pool(
-            &[
-                CutMetadata {
-                    iteration_generated: 10, // same as current_iteration
-                    forward_pass_index: 0,
-                    active_count: 0,
-                    last_active_iter: 10,
-                    active_window: 0,
-                },
-                CutMetadata {
-                    iteration_generated: 5, // older, zero activity
-                    forward_pass_index: 0,
-                    active_count: 0,
-                    last_active_iter: 5,
-                    active_window: 0,
-                },
-            ],
-            &[true, true],
-        );
-        let deact = strategy.select(&pool, &[], 10);
-        assert_eq!(
-            deact.deactivation_indices(),
-            vec![1],
-            "only the older cut (iter 5) should be deactivated; \
-             the current-iteration cut (iter 10) must be spared"
-        );
-    }
-
-    /// Lml1 also spares cuts from the current iteration via the
-    /// `iteration_generated` guard (defense-in-depth; `last_active_iter`
-    /// initialization already protects, but the guard is explicit).
-    #[test]
-    #[ignore = "ticket-002"]
-    fn lml1_spares_cuts_from_current_iteration() {
-        let strategy = CutSelectionStrategy::Lml1 {
-            check_frequency: 1,
-            tie_tolerance: 1e-10,
-        };
-        let pool = make_pool(
-            &[CutMetadata {
-                iteration_generated: 10,
-                forward_pass_index: 0,
-                active_count: 0,
-                last_active_iter: 10,
-                active_window: 0,
-            }],
-            &[true],
-        );
-        let deact = strategy.select(&pool, &[], 10);
-        assert!(
-            deact.deactivation_indices().is_empty(),
-            "current-iteration cut must not be deactivated even with memory_window=0"
-        );
-    }
-
     // -----------------------------------------------------------------------
     // Dominated algorithm tests (SS1.3 conformance + aggressiveness ordering)
     // -----------------------------------------------------------------------
@@ -1297,8 +1733,7 @@ mod tests {
         );
     }
 
-    /// SS1.3 test 3: 3 cuts, each achieves max at >= 1 state.
-    /// But cut 2 never achieves max alone (always below another).
+    /// SS1.3 test 3: cut 2 (constant 2) never achieves max → deactivated.
     #[test]
     fn dominated_select_none_dominated_when_all_achieve_max() {
         let strategy = CutSelectionStrategy::Dominated {
@@ -1308,10 +1743,6 @@ mod tests {
         // Cut 0: 5 - 2x (max at x=0: 5)
         // Cut 1: 0 + 3x (max at x=3: 9)
         // Cut 2: 2 + 0x (constant 2, never achieves max)
-        // At x=0: [5, 0, 2] -> max=5, cut 0 achieves max
-        // At x=1: [3, 3, 2] -> max=3, cuts 0,1 achieve max
-        // At x=3: [−1, 9, 2] -> max=9, cut 1 achieves max
-        // Dominated: cut 2 (never achieves max)
         let pool = make_dominated_pool(
             &[5.0, 0.0, 2.0],
             &[vec![-2.0], vec![3.0], vec![0.0]],
@@ -1347,7 +1778,13 @@ mod tests {
         );
     }
 
-    /// SS1.3 test 5: single active cut returns empty set.
+    /// SS1.3 test 5 (updated): with 1 active and 2 inactive cuts, the unified
+    /// kernel evaluates ALL cuts for max. The highest inactive cut (intercept=3)
+    /// is selected (reactivated), and the only active cut (intercept=1) is deactivated.
+    ///
+    /// The old test asserted empty deactivations when only 1 active cut existed,
+    /// reflecting the old active-only max computation. The new kernel includes
+    /// inactive cuts in the max, which is the core correctness fix.
     #[test]
     fn dominated_select_single_active_cut() {
         let strategy = CutSelectionStrategy::Dominated {
@@ -1362,9 +1799,19 @@ mod tests {
         );
         let states: Vec<f64> = vec![0.0, 1.0];
         let deact = strategy.select(&pool, &states, 10);
-        assert!(
-            deact.deactivation_indices().is_empty(),
-            "single active cut cannot be dominated"
+        // max=3 (cut2), cutoff=3. Only cut2 selected.
+        // cut0: active, not selected → deactivated.
+        // cut1: inactive, not selected → no change.
+        // cut2: inactive, selected → reactivated.
+        assert_eq!(
+            deact.deactivation_indices(),
+            vec![0],
+            "active cut 0 (below max) must be deactivated"
+        );
+        assert_eq!(
+            deact.reactivation_indices(),
+            vec![2],
+            "inactive cut 2 (at max) must be reactivated"
         );
     }
 
@@ -1389,139 +1836,5 @@ mod tests {
             deact.deactivation_indices().is_empty(),
             "cut from current iteration must not be deactivated even if dominated"
         );
-    }
-
-    /// Aggressiveness ordering: |Level1| <= |LML1| <= |Dominated|.
-    ///
-    /// Build a fixture where:
-    /// - Level1 (threshold=0) deactivates cuts with 0 activity count
-    /// - LML1 (window=3) deactivates those + cuts with old `last_active_iter`
-    /// - Dominated deactivates geometrically dominated cuts
-    #[test]
-    #[ignore = "ticket-002"]
-    fn aggressiveness_ordering_level1_leq_lml1_leq_dominated() {
-        // 5 cuts (1D):
-        // Cut 0: intercept=0, slope=0 (constant 0), activity=0, last_active=1
-        // Cut 1: intercept=0, slope=0.1, activity=0, last_active=2
-        // Cut 2: intercept=1, slope=0, activity=3, last_active=3
-        // Cut 3: intercept=0, slope=2, activity=5, last_active=10
-        // Cut 4: intercept=5, slope=-1, activity=5, last_active=10
-        let meta = [
-            CutMetadata {
-                iteration_generated: 1,
-                forward_pass_index: 0,
-                active_count: 0,
-                last_active_iter: 1,
-                active_window: 0,
-            },
-            CutMetadata {
-                iteration_generated: 1,
-                forward_pass_index: 1,
-                active_count: 0,
-                last_active_iter: 2,
-                active_window: 0,
-            },
-            CutMetadata {
-                iteration_generated: 1,
-                forward_pass_index: 2,
-                active_count: 3,
-                last_active_iter: 3,
-                active_window: 0,
-            },
-            CutMetadata {
-                iteration_generated: 1,
-                forward_pass_index: 3,
-                active_count: 5,
-                last_active_iter: 10,
-                active_window: 0,
-            },
-            CutMetadata {
-                iteration_generated: 1,
-                forward_pass_index: 4,
-                active_count: 5,
-                last_active_iter: 10,
-                active_window: 0,
-            },
-        ];
-        let pool = make_dominated_pool(
-            &[0.0, 0.0, 1.0, 0.0, 5.0],
-            &[vec![0.0], vec![0.1], vec![0.0], vec![2.0], vec![-1.0]],
-            &[true; 5],
-            &meta,
-        );
-        let states: Vec<f64> = vec![0.0, 1.0, 3.0, 5.0];
-
-        // Level1: value-based (stub returns empty; ticket-002 will implement).
-        let l1 = CutSelectionStrategy::Level1 {
-            check_frequency: 1,
-            tie_tolerance: 1e-10,
-        };
-        let deact_l1 = l1.select(&pool, &[], 11);
-
-        // LML1: value-based (stub returns empty; ticket-002 will implement).
-        let lml1 = CutSelectionStrategy::Lml1 {
-            check_frequency: 1,
-            tie_tolerance: 1e-10,
-        };
-        let deact_lml1 = lml1.select(&pool, &[], 11);
-
-        // Dominated threshold=0
-        let dom = CutSelectionStrategy::Dominated {
-            threshold: 0.0,
-            check_frequency: 1,
-        };
-        let deact_dom = dom.select(&pool, &states, 11);
-
-        assert!(
-            deact_l1.deactivation_indices().len() <= deact_lml1.deactivation_indices().len(),
-            "Level1 ({}) should deactivate <= LML1 ({})",
-            deact_l1.deactivation_indices().len(),
-            deact_lml1.deactivation_indices().len()
-        );
-        assert!(
-            deact_lml1.deactivation_indices().len() <= deact_dom.deactivation_indices().len(),
-            "LML1 ({}) should deactivate <= Dominated ({})",
-            deact_lml1.deactivation_indices().len(),
-            deact_dom.deactivation_indices().len()
-        );
-    }
-
-    #[test]
-    fn cut_activity_updates_deactivations_only_constructor() {
-        let updates = CutActivityUpdates::deactivations_only(7, vec![0, 1, 2]);
-        assert_eq!(updates.stage_index, 7);
-        assert_eq!(updates.updates.len(), 3);
-        assert_eq!(updates.updates, vec![0, 1, 2]);
-    }
-
-    #[test]
-    fn cut_activity_updates_deactivation_indices_returns_updates() {
-        let updates = CutActivityUpdates {
-            stage_index: 0,
-            updates: vec![0, 2],
-        };
-        assert_eq!(updates.deactivation_indices(), vec![0, 2]);
-        assert!(updates.reactivation_indices().is_empty());
-    }
-
-    #[test]
-    #[ignore = "ticket-002"]
-    fn select_for_stage_returns_cut_activity_updates_with_deactivations() {
-        let mut pool = CutPool::new(3, 1, 1, 0);
-        pool.add_cut(0, 0, 1.0, &[0.0]);
-        pool.add_cut(1, 0, 2.0, &[0.0]);
-        pool.metadata[0].active_count = 0;
-        pool.metadata[1].active_count = 0;
-
-        let strategy = CutSelectionStrategy::Level1 {
-            check_frequency: 1,
-            tie_tolerance: 1e-10,
-        };
-        let result = strategy.select_for_stage(&pool, &[], 10, 0);
-
-        assert!(!result.updates.is_empty());
-        // updates now contains raw slot indices (not (slot, change) pairs)
-        assert!(result.updates.contains(&0));
-        assert!(result.updates.contains(&1));
     }
 }
