@@ -476,6 +476,58 @@ impl CutPool {
         }
     }
 
+    /// Apply a batch of activity changes from a [`CutActivityUpdates`] result.
+    ///
+    /// Deactivates every slot in `updates.updates` and reactivates every slot
+    /// in `updates.reactivations` via [`set_active`]. This is the canonical
+    /// way to apply the output of [`CutSelectionStrategy::select_for_stage`]
+    /// to a pool — it folds both deactivations and reactivations into a single
+    /// call so the training loop never silently drops reactivation entries.
+    ///
+    /// Idempotency follows [`set_active`]: applying the same change twice (or
+    /// requesting a state that already holds) is a no-op. Out-of-bounds slot
+    /// indices are silently ignored in release builds; a debug assertion
+    /// fires in debug builds.
+    ///
+    /// [`set_active`]: CutPool::set_active
+    /// [`CutActivityUpdates`]: crate::cut_selection::CutActivityUpdates
+    /// [`CutSelectionStrategy::select_for_stage`]: crate::cut_selection::CutSelectionStrategy::select_for_stage
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use cobre_sddp::cut::pool::CutPool;
+    /// use cobre_sddp::cut_selection::CutActivityUpdates;
+    ///
+    /// let mut pool = CutPool::new(10, 1, 1, 0);
+    /// pool.add_cut(0, 0, 1.0, &[1.0]);
+    /// pool.add_cut(1, 0, 2.0, &[2.0]);
+    /// pool.add_cut(2, 0, 3.0, &[3.0]);
+    ///
+    /// // Deactivate slot 1, then reactivate it via apply_updates.
+    /// pool.deactivate(&[1]);
+    /// assert_eq!(pool.active_count(), 2);
+    ///
+    /// let updates = CutActivityUpdates {
+    ///     stage_index: 0,
+    ///     updates: vec![0],          // deactivate slot 0
+    ///     reactivations: vec![1],    // reactivate slot 1
+    /// };
+    /// pool.apply_updates(&updates);
+    /// assert!(!pool.active[0]);
+    /// assert!(pool.active[1]);
+    /// assert!(pool.active[2]);
+    /// assert_eq!(pool.active_count(), 2);
+    /// ```
+    pub fn apply_updates(&mut self, updates: &crate::cut_selection::CutActivityUpdates) {
+        for &slot in &updates.updates {
+            self.set_active(slot, false);
+        }
+        for &slot in &updates.reactivations {
+            self.set_active(slot, true);
+        }
+    }
+
     /// Toggle the activity flag for a single slot.
     ///
     /// Sets `active[slot] = active` and keeps `cached_active_count` consistent:
@@ -1687,5 +1739,147 @@ mod tests {
         // Deactivation must not change the populated count.
         assert_eq!(pool.cuts_in_lp(), 2);
         assert_eq!(pool.active_count(), 1);
+    }
+
+    // ── apply_updates tests ──────────────────────────────────────────────────
+
+    /// `apply_updates` deactivates every slot in `updates.updates` and
+    /// reactivates every slot in `updates.reactivations`. Mixed batches
+    /// must leave the pool in the expected state and the cached counter
+    /// must match the bitmap.
+    #[test]
+    fn apply_updates_applies_mixed_deactivate_and_reactivate() {
+        use crate::cut_selection::CutActivityUpdates;
+
+        let mut pool = CutPool::new(10, 1, 1, 0);
+        pool.add_cut(0, 0, 1.0, &[1.0]); // slot 0 active
+        pool.add_cut(1, 0, 2.0, &[2.0]); // slot 1 active
+        pool.add_cut(2, 0, 3.0, &[3.0]); // slot 2 active
+        pool.add_cut(3, 0, 4.0, &[4.0]); // slot 3 active
+
+        // Pre-deactivate slot 2 so the reactivation has something to flip.
+        pool.deactivate(&[2]);
+        assert_eq!(pool.active_count(), 3);
+        assert!(!pool.active[2]);
+
+        let updates = CutActivityUpdates {
+            stage_index: 0,
+            updates: vec![0, 3],    // deactivate slots 0 and 3
+            reactivations: vec![2], // reactivate slot 2
+        };
+        pool.apply_updates(&updates);
+
+        assert!(!pool.active[0], "slot 0 must be deactivated");
+        assert!(pool.active[1], "slot 1 must remain active");
+        assert!(pool.active[2], "slot 2 must be reactivated");
+        assert!(!pool.active[3], "slot 3 must be deactivated");
+        assert_eq!(pool.active_count(), 2);
+        // cuts_in_lp is unaffected by activity changes.
+        assert_eq!(pool.cuts_in_lp(), 4);
+    }
+
+    /// `apply_updates` must be idempotent: applying the same updates twice
+    /// must leave the pool in the same state as applying it once. This
+    /// follows from `set_active`'s "already-in-target-state is a no-op"
+    /// contract.
+    #[test]
+    fn apply_updates_is_idempotent() {
+        use crate::cut_selection::CutActivityUpdates;
+
+        let mut pool = CutPool::new(10, 1, 1, 0);
+        pool.add_cut(0, 0, 1.0, &[1.0]);
+        pool.add_cut(1, 0, 2.0, &[2.0]);
+        pool.add_cut(2, 0, 3.0, &[3.0]);
+
+        // Pre-deactivate slot 1 so the reactivation has something to flip.
+        pool.deactivate(&[1]);
+        assert_eq!(pool.active_count(), 2);
+
+        let updates = CutActivityUpdates {
+            stage_index: 0,
+            updates: vec![0],
+            reactivations: vec![1],
+        };
+
+        // First application flips slot 0 off and slot 1 on.
+        pool.apply_updates(&updates);
+        let active_snapshot = pool.active.clone();
+        let count_snapshot = pool.active_count();
+
+        // Second application: every requested state already holds → no-op.
+        pool.apply_updates(&updates);
+        assert_eq!(
+            pool.active, active_snapshot,
+            "active bitmap must not change"
+        );
+        assert_eq!(
+            pool.active_count(),
+            count_snapshot,
+            "active count must not change"
+        );
+        assert_eq!(pool.active_count(), 2);
+        assert!(!pool.active[0]);
+        assert!(pool.active[1]);
+        assert!(pool.active[2]);
+    }
+
+    /// `apply_updates` on an empty `CutActivityUpdates` must be a no-op.
+    #[test]
+    fn apply_updates_empty_is_noop() {
+        use crate::cut_selection::CutActivityUpdates;
+
+        let mut pool = CutPool::new(10, 1, 1, 0);
+        pool.add_cut(0, 0, 1.0, &[1.0]);
+        pool.add_cut(1, 0, 2.0, &[2.0]);
+        let active_before = pool.active.clone();
+        let count_before = pool.active_count();
+
+        let updates = CutActivityUpdates {
+            stage_index: 0,
+            updates: vec![],
+            reactivations: vec![],
+        };
+        pool.apply_updates(&updates);
+
+        assert_eq!(pool.active, active_before);
+        assert_eq!(pool.active_count(), count_before);
+    }
+
+    /// `apply_updates` must match the behavior of calling `set_active`
+    /// directly for each entry, regardless of which list (`updates` or
+    /// `reactivations`) drives the change.
+    #[test]
+    fn apply_updates_matches_manual_set_active_loop() {
+        use crate::cut_selection::CutActivityUpdates;
+
+        let build_pool = || {
+            let mut pool = CutPool::new(10, 1, 1, 0);
+            pool.add_cut(0, 0, 1.0, &[1.0]);
+            pool.add_cut(1, 0, 2.0, &[2.0]);
+            pool.add_cut(2, 0, 3.0, &[3.0]);
+            pool.add_cut(3, 0, 4.0, &[4.0]);
+            pool.deactivate(&[2]); // pre-deactivate so reactivation flips a bit
+            pool
+        };
+
+        let updates = CutActivityUpdates {
+            stage_index: 0,
+            updates: vec![0, 3],
+            reactivations: vec![2],
+        };
+
+        let mut pool_a = build_pool();
+        pool_a.apply_updates(&updates);
+
+        let mut pool_b = build_pool();
+        for &slot in &updates.updates {
+            pool_b.set_active(slot, false);
+        }
+        for &slot in &updates.reactivations {
+            pool_b.set_active(slot, true);
+        }
+
+        assert_eq!(pool_a.active, pool_b.active);
+        assert_eq!(pool_a.cached_active_count, pool_b.cached_active_count);
     }
 }

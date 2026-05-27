@@ -224,10 +224,12 @@ where
         );
 
         // ── Visited-states archive ────────────────────────────────────────
-        let needs_archive = matches!(
-            config.cut_management.cut_selection,
-            Some(crate::cut_selection::CutSelectionStrategy::Dominated { .. })
-        ) || config.events.export_states;
+        // All cut-selection strategies require the visited-states archive: the
+        // unified value-evaluation kernel evaluates every populated cut at the
+        // trial points stored here. Event export also needs the archive when
+        // `export_states` is enabled.
+        let needs_archive =
+            config.cut_management.cut_selection.is_some() || config.events.export_states;
         let visited_archive = if needs_archive {
             Some(crate::visited_states::VisitedStatesArchive::new(
                 ranks.num_stages,
@@ -857,12 +859,14 @@ where
                     let pool = &self.fcf.pools[stage];
                     let populated = pool.populated_count as u32;
                     let active_before = pool.active_count() as u32;
-                    let deact_indices = deact.deactivation_indices();
-                    let n_deact = deact_indices.len() as u32;
-                    let n_reactivated = deact.reactivation_indices().len() as u32;
+                    let n_deact = deact.updates.len() as u32;
+                    let n_reactivated = deact.reactivations.len() as u32;
                     rows_deactivated += n_deact;
 
-                    self.fcf.pools[stage].deactivate(&deact_indices);
+                    // Apply both deactivations AND reactivations from the
+                    // unified kernel output. Earlier code only applied
+                    // deactivations, silently dropping reactivation entries.
+                    self.fcf.pools[stage].apply_updates(&deact);
 
                     let active_after = self.fcf.pools[stage].active_count() as u32;
                     let rows_in_lp = self.fcf.pools[stage].cuts_in_lp() as u32;
@@ -878,6 +882,28 @@ where
                         active_after_budget: None,
                         rows_in_lp,
                     });
+                }
+
+                // Trim the visited-states archive to the active strategy's
+                // sliding window now that selection has consumed the current
+                // contents. Done AFTER the per-stage application loop so the
+                // immutable borrow held by `deactivations` is fully released.
+                if let Some(ref mut archive) = self.visited_archive {
+                    let check_freq = match strategy {
+                        crate::cut_selection::CutSelectionStrategy::Level1 {
+                            check_frequency,
+                            ..
+                        }
+                        | crate::cut_selection::CutSelectionStrategy::Lml1 {
+                            check_frequency,
+                            ..
+                        }
+                        | crate::cut_selection::CutSelectionStrategy::Dominated {
+                            check_frequency,
+                            ..
+                        } => *check_frequency,
+                    };
+                    archive.trim_to_window(check_freq);
                 }
 
                 #[allow(clippy::cast_possible_truncation)]
