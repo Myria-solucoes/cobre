@@ -5,7 +5,7 @@
 Cobre is a Rust ecosystem for power system optimization. The first solver
 vertical is SDDP-based hydrothermal dispatch.
 
-- **Language**: Rust 2024 edition, MSRV 1.86
+- **Language**: Rust 2024 edition, MSRV 1.88
 - **License**: Apache-2.0
 - **Workspace**: 14 crates (8 workspace + 6 excluded: `cobre-mcp` stub, `cobre-tui` stub, `cobre-flow` stub, `cobre-uc` stub, `cobre-emt` stub, `cobre-python`)
 - **Build**: `cargo build --workspace`
