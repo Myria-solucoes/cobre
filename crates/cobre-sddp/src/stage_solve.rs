@@ -3,8 +3,7 @@
 //! [`run_stage_solve`] encapsulates basis reconstruction, invariant enforcement,
 //! and the solver call so that `forward.rs`, `backward.rs`, and
 //! `simulation/pipeline.rs` can delegate to a single implementation instead of
-//! each maintaining their own copy. This
-//! module freezes the public API shape.
+//! each maintaining their own copy.
 
 use cobre_solver::{SolutionView, SolverInterface, StageTemplate};
 
@@ -394,7 +393,6 @@ mod tests {
         StageIndexer::new(1, 0)
     }
 
-    /// Build a baked `StageTemplate` with the given total row count.
     // -----------------------------------------------------------------------
     // Test 1: cold start — `stored_basis: None` returns default stats
     // -----------------------------------------------------------------------

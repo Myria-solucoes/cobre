@@ -125,14 +125,10 @@ pub struct RowSelectionConfig {
     /// the next. Retained for one release so existing config files continue
     /// to deserialise.
     ///
-    /// Previously controlled the sliding-window mask consumed by the
-    /// basis-reconstruction activity classifier. The classifier has been
-    /// removed; reconstruction now matches stored cut rows by slot identity
-    /// alone, which makes the window value unobservable.
-    ///
-    /// See `CHANGELOG.md` for the deprecation announcement and
-    /// `docs/design/basis-reconstruction-simplification.md` for the
-    /// underlying rationale.
+    /// Previously controlled a sliding-window mask used during basis
+    /// reconstruction. Reconstruction now matches stored cut rows by slot
+    /// identity alone, which makes the window value unobservable. See
+    /// `CHANGELOG.md` for the deprecation announcement.
     #[serde(default)]
     #[deprecated(
         since = "0.1.0",

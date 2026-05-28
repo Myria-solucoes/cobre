@@ -137,11 +137,10 @@ impl StudyParams {
 
         // Emit a one-shot deprecation warning when the user-supplied TOML carries
         // `training.cut_selection.basis_activity_window`. The field has no
-        // internal consumer after the basis-reconstruction classifier was
-        // removed; reading it here, ignoring the value, and warning preserves
-        // backward compatibility for one release. The field itself stays on
-        // `RowSelectionConfig` (with `#[deprecated]`) and is dropped from the
-        // schema in the next release.
+        // internal consumer; reading it here, ignoring the value, and warning
+        // preserves backward compatibility for one release. The field itself
+        // stays on `RowSelectionConfig` (with `#[deprecated]`) and is dropped
+        // from the schema in the next release.
         #[allow(deprecated)]
         if config
             .training

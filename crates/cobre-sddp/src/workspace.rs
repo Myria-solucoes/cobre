@@ -576,7 +576,8 @@ pub(crate) struct ScratchBuffers {
     /// `anticipated_state_out` columns (one column per anticipated plant per
     /// stage). Capacity is `n_anticipated`. Mirrors
     /// [`ScratchBuffers::ncs_col_indices_buf`].
-    // Pre-allocated here; read sites are wired in the next epic.
+    ///
+    /// Pre-allocated here; read sites are not yet wired.
     #[allow(dead_code)]
     pub(crate) anticipated_state_out_col_indices_buf: Vec<usize>,
 }
@@ -617,12 +618,14 @@ pub struct SolverWorkspace<S: SolverInterface> {
     pub current_state: Vec<f64>,
     /// Pre-allocated scratch buffers for noise transformation and simulation.
     pub(crate) scratch: ScratchBuffers,
-    /// Pre-allocated scratch basis for backward-pass padding (P03).
+    /// Pre-allocated destination basis for [`reconstruct_basis`].
     ///
-    /// Used to copy-then-pad a read-only basis from `BasisStore` before
-    /// passing it to `solve(Some(&basis))`. Sized after construction via
-    /// [`WorkspacePool::resize_scratch_bases`] to the maximum LP dimensions
-    /// so that `Basis::clone_from` never reallocates on the hot path.
+    /// Filled in-place from the read-only [`CapturedBasis`] in [`BasisStore`]
+    /// before being passed to `solve(Some(&basis))`. Sized after construction
+    /// via [`WorkspacePool::resize_scratch_bases`] to the maximum LP dimensions
+    /// so reconstruction never reallocates on the hot path.
+    ///
+    /// [`reconstruct_basis`]: crate::basis_reconstruct::reconstruct_basis
     pub(crate) scratch_basis: Basis,
     /// Pre-allocated accumulators for the backward pass trial-point loop.
     ///
@@ -663,7 +666,7 @@ impl<S: SolverInterface> SolverWorkspace<S> {
     /// simulation-only workspaces that do not participate in the backward pass.
     ///
     /// The `scratch_basis` starts empty. Call `WorkspacePool::resize_scratch_bases`
-    /// after construction to pre-allocate for backward-pass padding.
+    /// after construction to pre-allocate it for in-place basis reconstruction.
     #[must_use]
     pub fn new(
         rank: i32,
@@ -694,9 +697,9 @@ impl<S: SolverInterface> SolverWorkspace<S> {
 impl ScratchBuffers {
     /// Allocate scratch buffers sized for the given per-worker parameters.
     ///
-    /// Extracted from the three `SolverWorkspace` construction sites
+    /// Shared by all three `SolverWorkspace` construction sites
     /// (`SolverWorkspace::new`, `WorkspacePool::new`, `WorkspacePool::try_new`)
-    /// to keep them in sync (F1-008 fix).
+    /// to keep them in sync.
     pub(crate) fn new(s: WorkspaceSizing) -> Self {
         let WorkspaceSizing {
             hydro_count,
@@ -882,8 +885,7 @@ impl<S: SolverInterface> WorkspacePool<S> {
 
     /// Pre-allocate each workspace's `scratch_basis` to the given LP dimensions.
     ///
-    /// Call after construction when backward-pass basis padding is enabled.
-    /// The allocation happens once during setup; `Basis::clone_from` on the
+    /// The allocation happens once during setup; basis reconstruction on the
     /// hot path then reuses the existing capacity without reallocating.
     pub(crate) fn resize_scratch_bases(&mut self, max_cols: usize, max_rows: usize) {
         for ws in &mut self.workspaces {
