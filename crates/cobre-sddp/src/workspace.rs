@@ -548,8 +548,7 @@ pub(crate) struct ScratchBuffers {
     /// The hybrid reconstruction path does not consume this scratch buffer
     /// (new cuts default to BASIC, which preserves the basic-count invariant
     /// by construction and removes the need for Scheme 1 / Scheme 2 repair).
-    /// The field is retained so the legacy path remains compilable when
-    /// the hybrid feature is enabled in a sibling build.
+    /// The field is retained so the legacy path remains compilable.
     #[cfg_attr(feature = "basis-hybrid", allow(dead_code))]
     pub(crate) promotion_scratch: PromotionScratch,
 

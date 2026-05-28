@@ -703,48 +703,29 @@ fn apply_promotion_and_tail_fallback(
 
 /// Reconstruct a full [`Basis`] for the target LP using slot identity alone.
 ///
-/// The hybrid path keeps the highest-fidelity prediction component
-/// (slot-identity preservation of cut rows already present in the stored
-/// basis) and drops the activity-window classifier together with the
-/// Scheme 1 / Scheme 2 invariant-repair machinery. New cut rows — those
-/// whose pool slot is absent from `stored.cut_row_slots` — are assigned
-/// `HIGHS_BASIS_STATUS_BASIC` unconditionally.
+/// Preserves cut rows already present in the stored basis (copy their stored
+/// status verbatim) and assigns `HIGHS_BASIS_STATUS_BASIC` to every new cut
+/// row. The activity-window classifier and Scheme 1 / Scheme 2 invariant-repair
+/// machinery from [`reconstruct_basis`] are not used.
 ///
 /// ## Why new cuts default to BASIC
 ///
 /// `HiGHS` requires `col_basic + row_basic == num_row` for any warm-start
 /// basis. Assigning `BASIC` to every new cut row preserves the invariant by
-/// construction: a new cut adds exactly one row to the LP and exactly one
-/// `BASIC` count to `row_basic`, so the equality balances on both sides.
-/// Classifying a new cut as `LOWER` would break the equality (left side
-/// unchanged, right side increased by one) and force a compensating demotion
+/// construction: a new cut adds exactly one row and exactly one `BASIC` count
+/// to `row_basic`, so the equality balances on both sides. Classifying a new
+/// cut as `LOWER` would break the equality and force a compensating demotion
 /// elsewhere — the work that the legacy Scheme 1 / Scheme 2 machinery
 /// exists to perform.
 ///
 /// The forward path may still produce excess `BASIC` rows when cut selection
 /// drops cuts whose stored status was `BASIC`. That case is handled by the
-/// unconditional [`enforce_basic_count_invariant`] post-pass at the
-/// call site; it remains active in both paths.
+/// unconditional [`enforce_basic_count_invariant`] post-pass at the call
+/// site; it remains active in both paths.
 ///
-/// ## Parameters
-///
-/// - `stored` — read-only stored metadata from the previous iteration.
-/// - `target` — dimensions of the target LP that the basis is being built
-///   for.
-/// - `current_cut_rows` — iterator of `(slot, intercept, coefficients)` in
-///   target LP row order. The intercept and coefficient slices are
-///   accepted for signature parity with [`reconstruct_basis`] but are not
-///   consulted: classification depends solely on whether the slot was
-///   preserved.
-/// - `out` — destination basis (caller owns; cleared and refilled in place).
-/// - `slot_lookup` — scratch `Vec<Option<u32>>` pre-sized by the caller to
-///   at least `max_slot + 1`. Grown defensively on undersize.
-///
-/// ## Returns
-///
-/// [`ReconstructionStats`] with `preserved` and `new_slack` populated.
-/// `new_tight` is always zero on this path because no LOWER classification
-/// ever occurs.
+/// The `intercept` and `coefficients` items yielded by `current_cut_rows` are
+/// accepted for signature parity with [`reconstruct_basis`] but are not
+/// consulted: classification depends solely on slot identity.
 ///
 /// ## Allocation contract
 ///
@@ -773,24 +754,17 @@ where
         );
     }
 
-    // Phase (a): column statuses.
     reconstruct_col_statuses(stored, target, out);
-    // Phase (b): template row statuses.
     reconstruct_template_row_statuses(stored, target, out);
-    // Phase (c): slot → reconcilable-position lookup.
     build_slot_lookup(stored.cut_row_slots.as_slice(), slot_lookup);
 
-    // Phase (d, hybrid): preserved → copy stored status; new → BASIC.
     let mut stats = ReconstructionStats::default();
     for (target_slot, _intercept, _coefficients) in current_cut_rows {
         let row_status_byte = if let Some(pos) = slot_lookup.get(target_slot).and_then(|o| *o) {
-            // Slot present in the stored basis: copy its row status verbatim.
             let stored_row_idx = stored.base_row_count + pos as usize;
             stats.preserved += 1;
             stored.basis.row_status[stored_row_idx]
         } else {
-            // New slot: default to BASIC. This is the invariant-preserving
-            // choice (see the function-level rustdoc).
             stats.new_slack += 1;
             HIGHS_BASIS_STATUS_BASIC
         };
@@ -3753,15 +3727,13 @@ mod tests {
     // reconstruct_basis_hybrid — unit tests
     // -----------------------------------------------------------------------
 
-    /// Empty stored slot list + 3 new cut rows.  The hybrid path classifies
-    /// every new row as `BASIC` and reports `new_slack == 3`,
-    /// `preserved == 0`, `new_tight == 0`.
+    /// Empty stored slot list + 3 new cut rows. Every new row is classified
+    /// `BASIC` and `stats.new_slack == 3`.
     #[cfg(feature = "basis-hybrid")]
     #[test]
     fn hybrid_returns_basic_for_all_new_cuts() {
         use super::reconstruct_basis_hybrid;
 
-        // Stored carries no cut rows. Padding base_rows = 1, num_cols = 2.
         let stored = make_stored_basis(1, 2, &[], &[], &[1.0]);
         let cuts: Vec<(usize, f64, Vec<f64>)> = vec![
             (5, 0.0, vec![0.0, 0.0]),
@@ -3790,11 +3762,9 @@ mod tests {
                 new_tight: 0,
                 new_slack: 3,
             },
-            "all-new path must report 3 new_slack and zero everywhere else",
         );
         // 1 template row + 3 cut rows.
         assert_eq!(out.row_status.len(), 4);
-        // Cut rows must all be BASIC.
         assert_eq!(&out.row_status[1..], &[B, B, B]);
     }
 
@@ -3806,7 +3776,6 @@ mod tests {
     fn hybrid_copies_stored_status_for_preserved_slots() {
         use super::reconstruct_basis_hybrid;
 
-        // Stored holds slots [10, 20] with row statuses [B, L].
         let stored = make_stored_basis(1, 2, &[10, 20], &[B, L], &[1.0]);
         let cuts: Vec<(usize, f64, Vec<f64>)> =
             vec![(10, 0.0, vec![0.0, 0.0]), (20, 0.0, vec![0.0, 0.0])];
@@ -3832,31 +3801,22 @@ mod tests {
                 new_tight: 0,
                 new_slack: 0,
             },
-            "both slots preserved, no new cuts",
         );
         assert_eq!(out.row_status.len(), 3);
-        // Slot 10 was stored at position 0 → stored.row_status[1] = B.
         assert_eq!(out.row_status[1], B, "slot 10 → stored BASIC");
-        // Slot 20 was stored at position 1 → stored.row_status[2] = L.
         assert_eq!(out.row_status[2], L, "slot 20 → stored LOWER");
     }
 
-    /// The 5-row mixed case from the ticket acceptance criterion: stored
-    /// preserves slots `{10, 20, 30, 40}`; the target LP has 5 cut rows for
-    /// slots `{10, 25, 30, 45, 50}`.  Slots 10 and 30 are preserved (their
-    /// stored statuses are copied); slots 25, 45, and 50 are new and receive
-    /// `BASIC`.
+    /// Mixed case: stored preserves slots `{10, 20, 30, 40}` with statuses
+    /// `[L, B, L, B]`; the target LP has 5 cut rows for slots
+    /// `{10, 25, 30, 45, 50}`. Slots 10 and 30 are preserved (their stored
+    /// statuses copied); slots 25, 45, 50 are new and receive `BASIC`.
     #[cfg(feature = "basis-hybrid")]
     #[test]
     fn hybrid_mixed_case() {
         use super::reconstruct_basis_hybrid;
 
-        // Stored: 4 cut rows for slots [10, 20, 30, 40] with statuses
-        // [L, B, L, B] — so slot 10 was LOWER, slot 30 was LOWER.
         let stored = make_stored_basis(2, 3, &[10, 20, 30, 40], &[L, B, L, B], &[1.0, 2.0]);
-        // Target LP cut rows: [10, 25, 30, 45, 50].
-        // Expected stats: preserved=2 (slots 10, 30), new_slack=3 (slots 25, 45, 50).
-        // Expected statuses: [stored slot-10 = L, B, stored slot-30 = L, B, B].
         let cuts: Vec<(usize, f64, Vec<f64>)> = vec![
             (10, 0.0, vec![0.0, 0.0]),
             (25, 0.0, vec![0.0, 0.0]),

@@ -2,21 +2,13 @@
 //!
 //! Verifies that [`cobre_sddp::basis_reconstruct::reconstruct_basis_hybrid`]
 //! produces the expected statistics and output statuses on a mixed
-//! preserved-plus-new-slot fixture.  The test exercises the public hybrid
-//! function directly without invoking the full SDDP training loop, so it
-//! runs in milliseconds and remains stable across solver versions.
+//! preserved-plus-new-slot fixture. Exercises the public hybrid function
+//! directly without invoking the full SDDP training loop.
 //!
-//! ## Why a public-API integration test
-//!
-//! The hybrid path is selected at the `stage_solve` call site at compile
-//! time.  Because Cargo cannot link the same binary with two different
-//! feature flags, the cross-feature comparison (legacy vs hybrid) happens
-//! externally — this test file checks only the hybrid behaviour, gated
-//! behind `#[cfg(feature = "basis-hybrid")]`.
-//!
-//! The default `cargo test` run skips this file entirely (no tests are
-//! defined outside the feature gate).  Pass `--features basis-hybrid` to
-//! include the suite.
+//! The hybrid path is selected at compile time, so cross-feature comparison
+//! (legacy vs hybrid) cannot live in a single binary; this file checks only
+//! the hybrid behaviour and is gated behind `#[cfg(feature = "basis-hybrid")]`.
+//! Default `cargo test` skips it; pass `--features basis-hybrid` to include.
 
 #![allow(
     clippy::unwrap_used,

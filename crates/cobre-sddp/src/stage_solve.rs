@@ -223,33 +223,23 @@ pub fn run_stage_solve<'ws, S: SolverInterface>(
             &mut ws.scratch_basis,
             &mut ws.scratch.recon_slot_lookup,
         );
-        // The reconstruction helpers handle cut rows via slot identity (not
-        // positional truncation). `enforce_basic_count_invariant` is retained
-        // as an unconditional safety net for the forward-apply path: cut
-        // selection can drop a cut whose stored row status was BASIC, which
-        // leaves the freshly reconstructed basis with more BASIC entries
-        // than `num_row`. The post-pass demotes trailing BASIC cut rows to
-        // LOWER until `col_basic + row_basic == num_row` holds.
+        // `enforce_basic_count_invariant` is an unconditional safety net: when
+        // cut selection drops a cut whose stored row status was BASIC, the
+        // freshly reconstructed basis carries more BASIC entries than
+        // `num_row`. The post-pass demotes trailing BASIC cut rows to LOWER
+        // until `col_basic + row_basic == num_row` holds.
         //
-        // The pass is also a defensive guard against any future path that
-        // can transiently break the equality during reconstruction; running
-        // it on every solve costs a single linear scan and keeps the
-        // contract local to this call site.
+        // `num_row_for_invariant` uses the reconstructed basis length (not
+        // baked.num_rows) because the populated-cuts iterator may yield delta
+        // cuts (added during the current backward pass) that extend beyond
+        // the baked template row count. The two values agree when no delta
+        // cuts are present (forward path and first backward stage per
+        // iteration).
         //
-        // num_row_for_invariant uses the actual reconstructed basis length
-        // rather than baked.num_rows because the populated-cuts iterator may
-        // yield delta cuts (added during the current backward pass) that
-        // extend beyond the baked template row count. The two values agree
-        // when there are no delta cuts (forward path and first backward
-        // stage per iteration).
-        //
-        // base_row_for_invariant = 0 because the demotion loop only touches
-        // rows whose current status is BASIC, and equality rows (z_inflow,
-        // water_balance, FPHA, evaporation) are never BASIC by LP duality.
-        // Scanning from index 0 is therefore safe and matches the demotion
-        // semantics post-Phase 1 (state-fixing rows removed, all remaining
-        // non-cut rows are a mix of equalities and inequalities, the former
-        // automatically excluded by the BASIC check inside the loop).
+        // `base_row_for_invariant = 0` is safe because the demotion loop
+        // touches only rows whose current status is BASIC, and equality rows
+        // (z_inflow, water_balance, FPHA, evaporation) are never BASIC by LP
+        // duality.
         let num_row_for_invariant = ws.scratch_basis.row_status.len();
         let base_row_for_invariant = 0;
 
