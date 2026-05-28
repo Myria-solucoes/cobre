@@ -97,7 +97,7 @@ The pivot count itself drops under in-back mode (3,296M backward vs 3,398M basel
 
 ### 4.4 Pivot accounting
 
-A typical backward LP at the production benchmark takes ~281 pivots (baseline) or ~273 pivots (in-back). The first opening per scenario is the only opening where our basis is offered; opening 0 of a typical scenario likely takes more pivots than openings 1-19 (because openings 1-19 have a near-optimal HiGHS-internal warm-start). Without instrumented per-opening data, the opening-0 pivot count is a rough estimate in the ~300-600 range.
+A typical backward LP at the production benchmark takes ~281 pivots (baseline) or ~273 pivots (in-back). The first opening per scenario is the only opening where our basis is offered; opening 0 of a typical scenario likely takes more pivots than openings 1-19 (because openings 1-19 have a near-optimal HiGHS-internal warm-start). Per-opening pivot counts are already exported to `training/solver/iterations.parquet` (one row per `(iteration, phase, stage, opening, rank, worker_id)` tuple with `simplex_iterations` populated by the per-omega `SolverStatsDelta`). Filtering by `phase == "backward"` and grouping by `opening == 0` vs `opening > 0` yields the breakdown directly; the §10 experiment runs consume this artifact.
 
 The classifier's wall-time value depends on how many pivots it saves at opening 0 relative to a cold start. Plausible bands:
 
@@ -105,7 +105,7 @@ The classifier's wall-time value depends on how many pivots it saves at opening 
 - If classifier saves ~10% of opening-0 pivots: ~40M pivots saved ≈ **+80 s wall-equivalent**.
 - If classifier saves ~5%: ~20M pivots ≈ **+40 s wall-equivalent**.
 
-The classifier's actual position in this band cannot be determined without targeted instrumentation. The total run is 10,378 s; the classifier is plausibly worth somewhere between 0.4% and 2.5% of wall time.
+The total run is 10,378 s; the classifier is plausibly worth somewhere between 0.4% and 2.5% of wall time. The §10 experiment reads the per-opening breakdown from `training/solver/iterations.parquet` and tightens the band against the 4-config sweep.
 
 ---
 
@@ -468,7 +468,7 @@ If the basis simplification leaves the gap at +200 s or more, the ticket-019 wor
 
 ### 9.1 Empirical bounds on classifier value
 
-The strongest unknown is the actual per-opening-0 pivot count. Without instrumentation, we cannot directly measure how many pivots the classifier saves. The §7.2 estimate of ~20 extra pivots/solve is a heuristic upper bound derived from the openings count and the structure of the LP. The actual cost could be smaller (if the classifier is mostly picking wrong cuts anyway, as the §5 structural argument suggests) or larger (if there are second-order effects we haven't modelled).
+The strongest unknown is the actual per-opening-0 pivot count saved by the classifier vs a cold-start opening 0. Per-opening pivot counts are exported to `training/solver/iterations.parquet`, so direct measurement is possible from a single run. The §7.2 estimate of ~20 extra pivots/solve is a heuristic upper bound derived from the openings count and the structure of the LP. The actual cost could be smaller (if the classifier is mostly picking wrong cuts anyway, as the §5 structural argument suggests) or larger (if there are second-order effects we haven't modelled).
 
 ### 9.2 Forward-path interactions
 
@@ -529,15 +529,14 @@ The hybrid simplified `reconstruct_basis` is a ~half-day implementation behind a
 
 The MPI allreduce and `active_window` updates remain enabled under the feature (we don't tear out the data plane until the experiment validates the path). Once the experiment passes, a follow-up cleanup removes the unused infrastructure.
 
-### 10.3 Instrumentation to add
+### 10.3 Instrumentation available and optional additions
 
-To make the experiment more diagnostic, add (under the same feature flag):
+Per-opening pivot counts are already exported to `training/solver/iterations.parquet` (one row per `(iteration, phase, stage, opening, rank, worker_id)` with `simplex_iterations`, `solve_time_ms`, `basis_offered`, `basis_consistency_failures`, `basis_reconstructions` columns). The experiment reads this artifact directly — no new instrumentation is required to settle §4.4.
 
-- Per-opening pivot count export (currently aggregated across openings).
+Optional diagnostics that could be added under the same feature flag if the verdict is ambiguous:
+
 - Reconstruction-stats delta accumulator (preserved vs new for the hybrid path).
 - Classifier-accuracy probe: optionally, run _both_ classifiers on the same input and log the symmetric difference of their LOWER predictions. (Diagnostic only; not for performance comparison.)
-
-The per-opening pivot count alone would settle a lot of the §4.4 uncertainty.
 
 ### 10.4 Stretch experiment
 
@@ -566,7 +565,7 @@ Three distinct workstreams are recommended. They have independent merit but rein
 
 - The structural argument (§5) and empirical signature (§4.3) point toward the classifier being more expensive than it is worth in the SDDP setting.
 - The cost-benefit estimate (§7) is wide enough that the right call hinges on actual measurement.
-- The 4-config experiment costs ~half a day to implement (feature flag + per-opening instrumentation) and ~30 minutes to run on `cobre_set_24_sc2`.
+- The 4-config experiment costs ~half a day to implement (feature flag only — per-opening data already exported) and ~30 minutes to run on `cobre_set_24_sc2`.
 - Decision criteria are in §10.1. If Criterion 1 passes (simplification within 2% of current on baseline), proceed. If Criterion 2 also passes (in-back recovery ≥ 5%), the Epic 03 verdict math shifts materially.
 - Workstream-A blast radius: `basis_reconstruct.rs`, `workspace.rs` (CapturedBasis fields), `cut_selection.rs` (CutMetadata), `sync_stage_metadata` (drop BitwiseOr allreduce), config schema. Independent of in-backward; ships in baseline mode safely.
 
@@ -608,7 +607,7 @@ A neutral verdict at 50 iters is achievable with A+B; a clearly FAVORABLE verdic
 
 The recommended order is:
 
-1. **Implement Workstream A behind a feature flag.** Add per-opening pivot instrumentation. (~1 day total.)
+1. **Implement Workstream A behind a feature flag.** (~half a day; per-opening pivot data is already in `training/solver/iterations.parquet`.)
 2. **Run the §10 experiment** on `cobre_set_24_sc2`. (~30 min wall + decision time.)
 3. **If Workstream A passes**: strip the legacy classifier and supporting infrastructure. Commit as a single PR. (~1 day cleanup + test updates.)
 4. **Implement Workstream B** (ticket-019 cleanup). The Epic 03 plan already has this ticket refined; the planner can dispatch it. (~1 day.)
