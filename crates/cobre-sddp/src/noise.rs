@@ -715,7 +715,6 @@ mod tests {
             downstream_n_completed: 0,
             current_state_scratch: Vec::new(),
             recon_slot_lookup: Vec::new(),
-            promotion_scratch: crate::basis_reconstruct::PromotionScratch::default(),
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),

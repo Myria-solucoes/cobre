@@ -30,22 +30,6 @@ dhat-heap = ["dep:dhat"]
 ## to include them.
 slow-tests = []
 
-## Select the hybrid basis-reconstruction path.
-##
-## When enabled, [`stage_solve::run_stage_solve`] calls
-## [`basis_reconstruct::reconstruct_basis_hybrid`] instead of the legacy
-## [`basis_reconstruct::reconstruct_basis`]. The hybrid path keeps slot-identity
-## preservation of stored cut rows but drops the activity-window classifier and
-## the Scheme 1/2 invariant-repair scratch (new cuts default to BASIC, which
-## preserves `col_basic + row_basic == num_row` by construction). The
-## `enforce_basic_count_invariant` safety net remains unconditional.
-##
-## The flag selects the path at compile time only; there is no runtime
-## dispatch. Both implementations remain compilable so that a single
-## `cobre-sddp` checkout can be built into two binaries for non-destructive
-## A/B comparison.
-basis-hybrid = []
-
 [dependencies]
 cobre-core = { version = "0.7.1", path = "../cobre-core" }
 cobre-solver = { version = "0.7.1", path = "../cobre-solver" }

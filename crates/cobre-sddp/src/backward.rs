@@ -1043,7 +1043,6 @@ mod tests {
                 downstream_n_completed: 0,
                 current_state_scratch: Vec::new(),
                 recon_slot_lookup: Vec::new(),
-                promotion_scratch: crate::basis_reconstruct::PromotionScratch::default(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
@@ -1072,10 +1071,16 @@ mod tests {
         basis: Basis,
     ) -> BasisStore {
         let mut store = BasisStore::new(num_scenarios, num_stages);
-        // test shim: zero metadata is acceptable for tests exercising the length path
+        // Set `base_row_count` to the full row_status length and leave
+        // `cut_row_slots` empty so the CapturedBasis invariant
+        // (`row_status.len() == base_row_count + cut_row_slots.len()`) holds
+        // by construction. These tests exercise the warm-start propagation
+        // path; the reconstruction copies the template rows verbatim and
+        // emits an empty cut block.
+        let base_row_count = basis.row_status.len();
         *store.get_mut(scenario, stage) = Some(crate::workspace::CapturedBasis {
             basis,
-            base_row_count: 0,
+            base_row_count,
             cut_row_slots: Vec::new(),
             state_at_capture: Vec::new(),
         });
@@ -2883,7 +2888,6 @@ mod tests {
                 downstream_n_completed: 0,
                 current_state_scratch: Vec::new(),
                 recon_slot_lookup: Vec::new(),
-                promotion_scratch: crate::basis_reconstruct::PromotionScratch::default(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
@@ -2988,7 +2992,6 @@ mod tests {
                     downstream_n_completed: 0,
                     current_state_scratch: Vec::new(),
                     recon_slot_lookup: Vec::new(),
-                    promotion_scratch: crate::basis_reconstruct::PromotionScratch::default(),
                     trajectory_costs_buf: Vec::new(),
                     raw_noise_buf: Vec::new(),
                     perm_scratch: Vec::new(),
@@ -3347,7 +3350,6 @@ mod tests {
                 downstream_n_completed: 0,
                 current_state_scratch: Vec::new(),
                 recon_slot_lookup: Vec::new(),
-                promotion_scratch: crate::basis_reconstruct::PromotionScratch::default(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
@@ -3521,7 +3523,6 @@ mod tests {
                 downstream_n_completed: 0,
                 current_state_scratch: Vec::new(),
                 recon_slot_lookup: Vec::new(),
-                promotion_scratch: crate::basis_reconstruct::PromotionScratch::default(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
@@ -3690,7 +3691,6 @@ mod tests {
                 downstream_n_completed: 0,
                 current_state_scratch: Vec::new(),
                 recon_slot_lookup: Vec::new(),
-                promotion_scratch: crate::basis_reconstruct::PromotionScratch::default(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
@@ -4068,354 +4068,6 @@ mod tests {
         assert_eq!(fcf.pools[2].populated_count, 0);
     }
 
-    // -----------------------------------------------------------------------
-    // active_window unit tests
-    // -----------------------------------------------------------------------
-
-    /// Pre-allocated metadata rows must have `active_window == 0` before any
-    /// `add_cut` call.
-    ///
-    /// `CutPool::new` zero-initialises all metadata slots so that unused slots
-    /// do not spuriously register as tight to the classifier. The transient
-    /// seed (`active_window: 1`) is applied exclusively inside `add_cut`; it
-    /// must not bleed into pre-allocated but un-populated slots.
-    #[test]
-    fn active_window_pre_allocation_is_zero() {
-        use crate::cut::CutPool;
-
-        let n_state = 1;
-        let capacity = 8;
-        let pool = CutPool::new(capacity, n_state, 3, 0);
-        // A new pool has no populated slots; verify the pre-allocated metadata
-        // rows all start with active_window == 0.
-        for m in &pool.metadata {
-            assert_eq!(
-                m.active_window, 0,
-                "newly allocated CutMetadata must have active_window == 0 before add_cut"
-            );
-        }
-    }
-
-    /// `add_cut` must seed `active_window = SEED_BIT` (transient) so the
-    /// activity-guided classifier treats the generating event as a bind
-    /// signal within the current iteration.
-    ///
-    /// A cut generated at `x̂_t` is tight at `x̂_t` by construction. Seeding
-    /// `SEED_BIT` (bit 31, outside `RECENT_WINDOW_BITS`) ensures the classifier
-    /// returns LOWER for that cut on its first LP encounter within the same
-    /// iteration. The seed is cleared at end-of-iter before the shift so it does
-    /// not carry into iter i+1's classifier decisions (transient semantics).
-    #[test]
-    fn add_cut_seeds_active_window_with_seed_bit() {
-        use crate::basis_reconstruct::{DEFAULT_RECENT_WINDOW_BITS, SEED_BIT};
-        use crate::cut::CutPool;
-        // CutPool::new(capacity=8, state_dim=1, forward_passes=3, warm_start=0).
-        // add_cut(iteration=1, fp=0) → slot = 0 + 1*3 + 0 = 3.
-        let mut pool = CutPool::new(8, 1, 3, 0);
-        pool.add_cut(
-            /*iteration=*/ 1,
-            /*forward_pass_index=*/ 0,
-            /*intercept=*/ 0.5,
-            /*coefficients=*/ &[1.0_f64],
-        );
-        // slot = warm_start_count(0) + iteration(1) * forward_passes(3) + fp(0) = 3.
-        assert_eq!(
-            pool.metadata[3].active_window, SEED_BIT,
-            "add_cut must seed active_window = SEED_BIT \
-             so the classifier treats the generating event as a bind signal."
-        );
-        // The classifier predicate is `(aw & (DEFAULT_RECENT_WINDOW_BITS | SEED_BIT)) != 0`;
-        // SEED_BIT alone (with bits 0..4 clear) must satisfy it.
-        assert_ne!(
-            pool.metadata[3].active_window & (DEFAULT_RECENT_WINDOW_BITS | SEED_BIT),
-            0,
-            "the seed must fire the classifier's new-cut LOWER branch"
-        );
-        // SEED_BIT must live outside DEFAULT_RECENT_WINDOW_BITS so it is not counted by
-        // the Scheme 1 popcount sort key.
-        assert_eq!(
-            SEED_BIT & DEFAULT_RECENT_WINDOW_BITS,
-            0,
-            "SEED_BIT must not overlap DEFAULT_RECENT_WINDOW_BITS"
-        );
-    }
-
-    /// The G1 seed must be transient: after the end-of-iter cleanup
-    /// (`(aw & !SEED_BIT) << 1`), the seed must be gone and genuine binding
-    /// observations (bit 0) must survive as bit 1.
-    #[test]
-    fn seed_bit_cleared_by_end_of_iter_shift() {
-        use crate::basis_reconstruct::{DEFAULT_RECENT_WINDOW_BITS, SEED_BIT};
-
-        // Scenario A: freshly seeded cut with no binding observation.
-        let mut aw: u32 = SEED_BIT;
-        aw = (aw & !SEED_BIT) << 1;
-        assert_eq!(
-            aw, 0,
-            "pure seed with no binding observation must shift to 0"
-        );
-
-        // Scenario B: seeded cut that was also observed binding this iter.
-        let mut aw: u32 = SEED_BIT | 0b1;
-        aw = (aw & !SEED_BIT) << 1;
-        assert_eq!(
-            aw, 0b10,
-            "observed-binding bit 0 must survive and land at bit 1; \
-             seed bit must be cleared"
-        );
-        assert_ne!(
-            aw & DEFAULT_RECENT_WINDOW_BITS,
-            0,
-            "surviving bit 1 still fires the classifier in iter i+1 (real activity)"
-        );
-    }
-
-    /// After a full backward pass where cuts are non-binding, `active_window` stays 0.
-    /// After the end-of-iteration shift (`<<= 1`), bit 0 remains 0 (shift of 0 is 0).
-    #[test]
-    fn active_window_shift_clears_bit_zero() {
-        // Bit 0 set → after shift, bit 0 is 0 and bit 1 is 1.
-        let mut window: u32 = 1; // bit 0 set
-        window <<= 1;
-        assert_eq!(window & 1, 0, "shift must clear bit 0");
-        assert_eq!(window & 2, 2, "shift must move bit 0 to bit 1");
-
-        // After 32 shifts, a u32 with bit 0 set overflows to 0 (shift by width).
-        let mut w: u32 = 0xFFFF_FFFF;
-        for _ in 0..32 {
-            w <<= 1;
-        }
-        assert_eq!(w, 0, "32 left-shifts of u32 must overflow to 0");
-
-        // All-zeros stays zero.
-        let mut w2: u32 = 0;
-        w2 <<= 1;
-        assert_eq!(w2, 0, "shift of 0 must remain 0");
-    }
-
-    /// The `allreduce(BitwiseOr)` via `LocalBackend` must propagate bit 0 from
-    /// a worker's `metadata_sync_window_contribution` into `active_window` for
-    /// binding slots, and leave non-binding slots at 0.
-    #[test]
-    #[allow(clippy::too_many_lines)]
-    fn active_window_or_reduction_round_trip_local() {
-        use cobre_comm::LocalBackend;
-
-        // 3-stage system; 1 opening; 3 trial points.
-        // The backward loop visits t=1 (cuts into pool[1]) then t=0 (cuts into
-        // pool[0], binding checked against pool[1]). Mock solver returns positive
-        // duals → cuts in pool[1] appear binding at t=0. active_window bit 0
-        // must be set after the OR reduction.
-        let n_stages = 3_usize;
-        let n_openings = 1_usize;
-        let stochastic = make_stochastic_context(n_stages, n_openings);
-        let indexer = StageIndexer::new(1, 0);
-        let templates = vec![minimal_template_1_0(); n_stages];
-        let base_rows = vec![1_usize; n_stages];
-        let n_state = indexer.n_state;
-        let forward_passes = 1_u32;
-        let mut fcf =
-            FutureCostFunction::new(n_stages, n_state, forward_passes, 20, &vec![0; n_stages]);
-        let mut exchange = exchange_with_states(n_state, vec![vec![10.0], vec![20.0], vec![30.0]]);
-        let horizon = HorizonMode::Finite {
-            num_stages: n_stages,
-        };
-        let risk_measures = vec![RiskMeasure::Expectation; n_stages];
-        // Solver returns positive duals → cuts appear binding.
-        let solution = solution_1_0(100.0, -5.0);
-        let local_count = exchange.local_count();
-        let solver = MockSolver::always_ok_with_binding_cuts(solution);
-        let comm = LocalBackend;
-        let mut workspaces = single_workspace(solver, n_state);
-        let mut basis_store = empty_basis_store(local_count, n_stages);
-        // max_cuts_per_rank must match exchange.local_count(), not forward_passes,
-        // because the exchange has 3 trial points but forward_passes=1.
-        let mut csb = CutSyncBuffers::new(n_state, local_count, 1);
-
-        let _ = run_backward_pass(&mut crate::backward_pass_state::BackwardPassInputs {
-            workspaces: &mut workspaces,
-            basis_store: &mut basis_store,
-            ctx: &StageContext {
-                templates: &templates,
-                base_rows: &base_rows,
-                noise_scale: &[],
-                n_hydros: 0,
-                n_load_buses: 0,
-                load_balance_row_starts: &[],
-                load_bus_indices: &[],
-                block_counts_per_stage: &[],
-                ncs_max_gen: &[],
-                ncs_allow_curtailment: &[],
-                discount_factors: &[],
-                cumulative_discount_factors: &[],
-                stage_lag_transitions: &[],
-                noise_group_ids: &[],
-                downstream_par_order: 0,
-            },
-            baked: &mut templates.clone(),
-            fcf: &mut fcf,
-            cut_batches: &mut empty_cut_batches(templates.len()),
-            training_ctx: &TrainingContext {
-                horizon: &horizon,
-                indexer: &indexer,
-                inflow_method: &InflowNonNegativityMethod::None,
-                stochastic: &stochastic,
-                initial_state: &[],
-                inflow_scheme: SamplingScheme::InSample,
-                load_scheme: SamplingScheme::InSample,
-                ncs_scheme: SamplingScheme::InSample,
-                stages: &[],
-                historical_library: None,
-                external_inflow_library: None,
-                external_load_library: None,
-                external_ncs_library: None,
-                recent_accum_seed: &[],
-                recent_weight_seed: 0.0,
-            },
-            comm: &comm,
-            records: &[],
-            iteration: 1,
-            local_work: local_count,
-            fwd_offset: 0,
-            risk_measures: &risk_measures,
-            exchange: &mut exchange,
-            cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
-            cut_sync_bufs: &mut csb,
-            visited_archive: None,
-            cut_selection: None,
-            cut_selection_scratch: &mut [],
-            event_sender: None,
-        })
-        .unwrap();
-
-        // The cuts in pool[1] were generated at t=1, then evaluated as binding
-        // at t=0. Bit 0 of active_window must be set for every ACTIVE slot.
-        // This exercises the full OR reduction path: worker contribution →
-        // spec.metadata_sync_window_buf → allreduce(BitwiseOr) → active_window.
-        //
-        // Slot 0 is the warm-start sentinel (never populated); active cuts land
-        // at slots 1..4 (slot = 0 + iter*forward_passes + fpi = 1 + fpi).
-        let active_slots: Vec<usize> = fcf.pools[1]
-            .active_cuts()
-            .map(|(slot, _, _)| slot)
-            .collect();
-        assert!(
-            !active_slots.is_empty(),
-            "pool[1] must have at least one active cut"
-        );
-        for slot in active_slots {
-            let window = fcf.pools[1].metadata[slot].active_window;
-            assert_eq!(
-                window & 1,
-                1,
-                "slot {slot} active_window bit 0 must be set after a binding backward pass \
-                 (got {window:#010x})"
-            );
-        }
-    }
-
-    /// After `run_backward_pass` returns, all per-worker
-    /// `metadata_sync_window_contribution` buffers must be cleared to 0.
-    /// This guarantees the next iteration starts with a clean accumulator.
-    #[test]
-    fn active_window_cleared_at_iteration_start() {
-        use cobre_comm::LocalBackend;
-
-        // 3-stage system so the backward loop processes multiple stages and
-        // the window contribution buffers actually get populated.
-        let n_stages = 3_usize;
-        let n_openings = 1_usize;
-        let stochastic = make_stochastic_context(n_stages, n_openings);
-        let indexer = StageIndexer::new(1, 0);
-        let templates = vec![minimal_template_1_0(); n_stages];
-        let base_rows = vec![1_usize; n_stages];
-        let n_state = indexer.n_state;
-        let forward_passes = 1_u32;
-        let mut fcf =
-            FutureCostFunction::new(n_stages, n_state, forward_passes, 20, &vec![0; n_stages]);
-        let mut exchange = exchange_with_states(n_state, vec![vec![10.0], vec![20.0], vec![30.0]]);
-        let horizon = HorizonMode::Finite {
-            num_stages: n_stages,
-        };
-        let risk_measures = vec![RiskMeasure::Expectation; n_stages];
-        let solution = solution_1_0(100.0, -5.0);
-        let local_count = exchange.local_count();
-        let solver = MockSolver::always_ok_with_binding_cuts(solution);
-        let comm = LocalBackend;
-        let mut workspaces = single_workspace(solver, n_state);
-        let mut basis_store = empty_basis_store(local_count, n_stages);
-        let mut csb = CutSyncBuffers::new(n_state, local_count, 1);
-
-        let _ = run_backward_pass(&mut crate::backward_pass_state::BackwardPassInputs {
-            workspaces: &mut workspaces,
-            basis_store: &mut basis_store,
-            ctx: &StageContext {
-                templates: &templates,
-                base_rows: &base_rows,
-                noise_scale: &[],
-                n_hydros: 0,
-                n_load_buses: 0,
-                load_balance_row_starts: &[],
-                load_bus_indices: &[],
-                block_counts_per_stage: &[],
-                ncs_max_gen: &[],
-                ncs_allow_curtailment: &[],
-                discount_factors: &[],
-                cumulative_discount_factors: &[],
-                stage_lag_transitions: &[],
-                noise_group_ids: &[],
-                downstream_par_order: 0,
-            },
-            baked: &mut templates.clone(),
-            fcf: &mut fcf,
-            cut_batches: &mut empty_cut_batches(templates.len()),
-            training_ctx: &TrainingContext {
-                horizon: &horizon,
-                indexer: &indexer,
-                inflow_method: &InflowNonNegativityMethod::None,
-                stochastic: &stochastic,
-                initial_state: &[],
-                inflow_scheme: SamplingScheme::InSample,
-                load_scheme: SamplingScheme::InSample,
-                ncs_scheme: SamplingScheme::InSample,
-                stages: &[],
-                historical_library: None,
-                external_inflow_library: None,
-                external_load_library: None,
-                external_ncs_library: None,
-                recent_accum_seed: &[],
-                recent_weight_seed: 0.0,
-            },
-            comm: &comm,
-            records: &[],
-            iteration: 1,
-            local_work: local_count,
-            fwd_offset: 0,
-            risk_measures: &risk_measures,
-            exchange: &mut exchange,
-            cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
-            cut_sync_bufs: &mut csb,
-            visited_archive: None,
-            cut_selection: None,
-            cut_selection_scratch: &mut [],
-            event_sender: None,
-        })
-        .unwrap();
-
-        // After run_backward_pass returns, all per-worker window contribution
-        // buffers must be zeroed. This ensures the next iteration begins clean.
-        for ws in &workspaces {
-            for &v in &ws.backward_accum.metadata_sync_window_contribution {
-                assert_eq!(
-                    v, 0,
-                    "metadata_sync_window_contribution must be cleared after backward pass"
-                );
-            }
-        }
-    }
-
     /// Build N identical `SolverWorkspace<MockSolver>` instances and run a
     /// 2-stage backward pass with 6 trial points. Returns the resulting FCF.
     ///
@@ -4493,7 +4145,6 @@ mod tests {
                     downstream_n_completed: 0,
                     current_state_scratch: Vec::new(),
                     recon_slot_lookup: Vec::new(),
-                    promotion_scratch: crate::basis_reconstruct::PromotionScratch::default(),
                     trajectory_costs_buf: Vec::new(),
                     raw_noise_buf: Vec::new(),
                     perm_scratch: Vec::new(),
@@ -4859,7 +4510,6 @@ mod tests {
                     downstream_n_completed: 0,
                     current_state_scratch: Vec::new(),
                     recon_slot_lookup: Vec::new(),
-                    promotion_scratch: crate::basis_reconstruct::PromotionScratch::default(),
                     trajectory_costs_buf: Vec::new(),
                     raw_noise_buf: Vec::new(),
                     perm_scratch: Vec::new(),
@@ -5086,7 +4736,6 @@ mod tests {
                     downstream_n_completed: 0,
                     current_state_scratch: Vec::new(),
                     recon_slot_lookup: Vec::new(),
-                    promotion_scratch: crate::basis_reconstruct::PromotionScratch::default(),
                     trajectory_costs_buf: Vec::new(),
                     raw_noise_buf: Vec::new(),
                     perm_scratch: Vec::new(),
@@ -5420,10 +5069,13 @@ mod tests {
 
         use crate::workspace::{BasisStore, CapturedBasis};
 
-        // Pre-populate slot [0, 1] with a sentinel basis.
+        // Pre-populate slot [0, 1] with a sentinel basis. `state_at_capture =
+        // [42.0]` is the sentinel that the reuse-path overwrite must
+        // replace. The remaining fields satisfy the `CapturedBasis`
+        // invariant `row_status.len() == base_row_count + cut_row_slots.len()`.
         let pre_existing = CapturedBasis {
             basis: Basis::new(2, 2),
-            base_row_count: 99,
+            base_row_count: 2,
             cut_row_slots: Vec::new(),
             state_at_capture: vec![42.0],
         };
@@ -5432,8 +5084,8 @@ mod tests {
 
         // Verify sentinel is in place before the call.
         assert_eq!(
-            basis_store.get(0, 1).unwrap().base_row_count,
-            99,
+            basis_store.get(0, 1).unwrap().state_at_capture,
+            vec![42.0_f64],
             "sentinel must be in place before the infeasible solve"
         );
 
@@ -5522,7 +5174,6 @@ mod tests {
                     downstream_n_completed: 0,
                     current_state_scratch: Vec::new(),
                     recon_slot_lookup: Vec::new(),
-                    promotion_scratch: crate::basis_reconstruct::PromotionScratch::default(),
                     trajectory_costs_buf: Vec::new(),
                     raw_noise_buf: Vec::new(),
                     perm_scratch: Vec::new(),

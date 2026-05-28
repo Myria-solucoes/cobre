@@ -193,18 +193,9 @@ pub struct CutMetadata {
     /// iteration's bit 0 records fresh activity.
     ///
     /// Populated by the MPI `allreduce(BitwiseOr)` in the backward pass
-    /// (so any rank observing the cut binding sets bit 0 globally). Consumed
-    /// by the activity-guided basis classifier in `reconstruct_basis`.
-    ///
-    /// **Transient seed**: `add_cut` sets
-    /// [`crate::basis_reconstruct::SEED_BIT`] (bit 31, outside
-    /// `RECENT_WINDOW_BITS`) so the classifier fires LOWER on a freshly
-    /// generated cut during the same iteration's remaining backward stages —
-    /// the cut is tight at the x̂ it was derived from by construction. The
-    /// end-of-iteration logic clears `SEED_BIT` *before* the `<<= 1` shift so
-    /// the seed does **not** persist into the next iteration's basis
-    /// reconstruction. From iteration i+1 onward, only genuine binding
-    /// observations drive classification decisions.
+    /// (so any rank observing the cut binding sets bit 0 globally). The
+    /// field is not consumed by the slot-identity reconstruction path; it
+    /// remains as a wire-format placeholder pending its deprecation cycle.
     pub active_window: u32,
 }
 

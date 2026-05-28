@@ -7,7 +7,6 @@
 use cobre_solver::{Basis, ProfiledSolver, SolverInterface};
 
 use crate::backward::StagedCut;
-use crate::basis_reconstruct::PromotionScratch;
 
 // ---------------------------------------------------------------------------
 // CapturedBasis
@@ -533,24 +532,6 @@ pub(crate) struct ScratchBuffers {
     /// When `initial_pool_capacity == 0` (simulation-only workspaces), this
     /// vec starts empty and grows in-place if needed.
     pub(crate) recon_slot_lookup: Vec<Option<u32>>,
-    /// Scratch buffers for Scheme 1 symmetric promotion and Scheme 2 tail
-    /// fallback in `reconstruct_basis`.
-    ///
-    /// `promotion_scratch.candidates` accumulates `(out_row_index, popcount)`
-    /// pairs for preserved-LOWER rows during the reconstruction loop.
-    /// `promotion_scratch.new_lower_indices` tracks output row indices of new
-    /// cuts classified LOWER so the Scheme 2 fallback can override the
-    /// most-recently-classified ones back to BASIC when the preserved-LOWER
-    /// pool is exhausted.  Both vecs are cleared at the start of each
-    /// `reconstruct_basis` call.  Pre-allocated to `initial_pool_capacity`
-    /// so the hot path avoids reallocation.
-    ///
-    /// The hybrid reconstruction path does not consume this scratch buffer
-    /// (new cuts default to BASIC, which preserves the basic-count invariant
-    /// by construction and removes the need for Scheme 1 / Scheme 2 repair).
-    /// The field is retained so the legacy path remains compilable.
-    #[cfg_attr(feature = "basis-hybrid", allow(dead_code))]
-    pub(crate) promotion_scratch: PromotionScratch,
 
     /// Per-worker trajectory-cost accumulator for the forward pass.
     ///
@@ -771,7 +752,6 @@ impl ScratchBuffers {
             downstream_n_completed: 0,
             current_state_scratch: Vec::with_capacity(n_state),
             recon_slot_lookup: vec![None; initial_pool_capacity],
-            promotion_scratch: PromotionScratch::with_capacity(initial_pool_capacity),
             trajectory_costs_buf: Vec::with_capacity(max_local_fwd),
             raw_noise_buf: Vec::with_capacity(noise_dim),
             perm_scratch: Vec::with_capacity(total_forward_passes.max(1)),

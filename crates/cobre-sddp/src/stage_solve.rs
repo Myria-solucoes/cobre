@@ -8,12 +8,10 @@
 
 use cobre_solver::{SolutionView, SolverInterface, StageTemplate};
 
-#[cfg(feature = "basis-hybrid")]
-use crate::basis_reconstruct::reconstruct_basis_hybrid;
-#[cfg(not(feature = "basis-hybrid"))]
-use crate::basis_reconstruct::{PaddingContext, reconstruct_basis};
 use crate::{
-    basis_reconstruct::{ReconstructionStats, ReconstructionTarget, enforce_basic_count_invariant},
+    basis_reconstruct::{
+        ReconstructionStats, ReconstructionTarget, enforce_basic_count_invariant, reconstruct_basis,
+    },
     context::StageContext,
     cut::pool::CutPool,
     error::SddpError,
@@ -92,10 +90,11 @@ pub struct StageInputs<'a> {
     /// forward phase to populate `SddpError::Infeasible { iteration }` without
     /// the caller having to re-wrap the error.
     pub iteration: Option<u64>,
-    /// Activity-window size for the basis-reconstruction classifier (1..=31).
+    /// Reserved activity-window size carried verbatim from
+    /// [`crate::config::CutManagementConfig::basis_activity_window`].
     ///
-    /// Forwarded verbatim from [`crate::config::CutManagementConfig::basis_activity_window`]
-    /// and threaded into [`crate::basis_reconstruct::ReconstructionSource`].
+    /// Validated range 1..=31. Not consumed by [`run_stage_solve`]; retained
+    /// pending the deprecation cycle for the corresponding config knob.
     pub basis_activity_window: u32,
 }
 
@@ -175,48 +174,19 @@ pub fn run_stage_solve<'ws, S: SolverInterface>(
     // Select the basis path and solve.
     let (view, recon_stats) = if let Some(captured) = inputs.stored_basis {
         // All solves use the baked path: cuts are structural rows in the baked
-        // template. base_row_count is set to the non-baked template row count
-        // so the reconstruction helper handles cut rows via slot identity
-        // rather than positional copy from the stored basis.
+        // template. `base_row_count` is set to the non-baked template row
+        // count so the reconstruction helper handles cut rows via slot
+        // identity rather than positional copy from the stored basis.
         //
-        // The baked template carries one row per active cut in active_cuts()
-        // iteration order. The reconstruction helper iterates the same active
-        // cuts and matches stored slot ids to LP rows. Inactive cuts are not
-        // in the LP; active_mask is None.
+        // The baked template carries one row per active cut in
+        // `active_cuts()` iteration order. The reconstruction helper iterates
+        // the same active cuts and matches stored slot ids to LP rows.
         let target = ReconstructionTarget {
             base_row_count: inputs.stage_context.templates[inputs.stage_index].num_rows,
             num_cols: inputs.stage_context.templates[inputs.stage_index].num_cols,
         };
 
-        #[cfg(not(feature = "basis-hybrid"))]
-        let recon_stats = {
-            let theta_value = inputs
-                .pool
-                .evaluate_at_state(&inputs.current_state[..inputs.indexer.n_state]);
-            let padding = PaddingContext {
-                state: &inputs.current_state[..inputs.indexer.n_state],
-                theta: theta_value,
-                tolerance: 1e-7,
-            };
-            let source = crate::basis_reconstruct::ReconstructionSource {
-                target,
-                cut_metadata: &inputs.pool.metadata,
-                basis_activity_window: inputs.basis_activity_window,
-                active_mask: None,
-            };
-            reconstruct_basis(
-                captured,
-                source,
-                inputs.pool.active_cuts(),
-                padding,
-                &mut ws.scratch_basis,
-                &mut ws.scratch.recon_slot_lookup,
-                &mut ws.scratch.promotion_scratch,
-            )
-        };
-
-        #[cfg(feature = "basis-hybrid")]
-        let recon_stats = reconstruct_basis_hybrid(
+        let recon_stats = reconstruct_basis(
             captured,
             target,
             inputs.pool.active_cuts(),

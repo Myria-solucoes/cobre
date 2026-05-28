@@ -1025,8 +1025,6 @@ where
         // starts clear. Placed AFTER cut selection and BEFORE template baking.
         for pool in &mut self.fcf.pools {
             for m in pool.metadata.iter_mut().take(pool.populated_count) {
-                // Bit 31 (SEED_BIT) shifts off the top of u32 in the `<< 1` below;
-                // masking it first is redundant.
                 m.active_window <<= 1;
             }
         }
