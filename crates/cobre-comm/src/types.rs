@@ -42,8 +42,9 @@ pub enum ReduceOp {
     /// local fold, because ferrompi v0.3 does not yet expose `MPI_BOR`.
     /// In the local backend (single rank) the identity copy is correct.
     ///
-    /// Used for the per-row `active_window` sliding-window bitmap reduction
-    /// across ranks.
+    /// Useful for bitmap reductions where any participating rank that
+    /// observes a condition should set the corresponding bit in the global
+    /// result.
     BitwiseOr,
 }
 
