@@ -118,7 +118,7 @@ pub fn load_case(path: PathBuf) -> PyResult<PySystem> {
 ///      dimensional, semantic, cross-file resolution)
 /// 7. `config.json` parse
 /// 8. [`StudyParams::from_config`] — validates solver-level config fields
-///    (e.g. `basis_activity_window` range)
+///    and surfaces deprecation warnings for fields scheduled for removal
 /// 9. [`prepare_stochastic`] — PAR estimation, opening trees, stochastic context
 /// 10. [`prepare_hydro_models_from_artifacts`] — production/evaporation models
 ///
@@ -200,8 +200,9 @@ pub fn validate(py: Python<'_>, path: PathBuf) -> PyResult<Py<PyAny>> {
     };
 
     // Phase 8: StudyParams::from_config — validates solver-level fields such as
-    // `basis_activity_window` range (1..=31), stopping rules, and cut-selection
-    // parameters that are only checked at algorithm startup.
+    // stopping rules and cut-selection parameters that are only checked at
+    // algorithm startup, and emits deprecation warnings for fields scheduled
+    // for removal.
     let study_params = match StudyParams::from_config(&config) {
         Ok(p) => p,
         Err(ref err) => {

@@ -90,12 +90,6 @@ pub struct StageInputs<'a> {
     /// forward phase to populate `SddpError::Infeasible { iteration }` without
     /// the caller having to re-wrap the error.
     pub iteration: Option<u64>,
-    /// Reserved activity-window size carried verbatim from
-    /// [`crate::config::CutManagementConfig::basis_activity_window`].
-    ///
-    /// Validated range 1..=31. Not consumed by [`run_stage_solve`]; retained
-    /// pending the deprecation cycle for the corresponding config knob.
-    pub basis_activity_window: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -425,7 +419,6 @@ mod tests {
             scenario_index: 0,
             horizon_is_terminal: false,
             terminal_has_boundary_cuts: false,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             iteration: Some(1),
         };
 
@@ -494,7 +487,6 @@ mod tests {
             scenario_index: 0,
             horizon_is_terminal: false,
             terminal_has_boundary_cuts: false,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             iteration: None,
         };
 
@@ -541,7 +533,6 @@ mod tests {
             scenario_index: 7,
             horizon_is_terminal: false,
             terminal_has_boundary_cuts: false,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             iteration: Some(42),
         };
 
@@ -607,7 +598,6 @@ mod tests {
             scenario_index: 3,
             horizon_is_terminal: false,
             terminal_has_boundary_cuts: false,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             iteration: Some(5),
         };
 

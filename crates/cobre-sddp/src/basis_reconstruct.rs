@@ -74,21 +74,6 @@ use cobre_solver::Basis;
 use crate::workspace::CapturedBasis;
 
 // ---------------------------------------------------------------------------
-// Defaults
-// ---------------------------------------------------------------------------
-
-/// Default value for the `basis_activity_window` configuration field.
-///
-/// Configurable at runtime via `training.cut_selection.basis_activity_window`
-/// in the TOML config; validated range 1..=31. This is the fallback value
-/// used when the TOML field is absent.
-///
-/// The field is currently unused by [`reconstruct_basis`] (slot-identity
-/// matching makes the activity window unnecessary). It remains as a config
-/// surface and a wire-format placeholder pending its deprecation cycle.
-pub const DEFAULT_BASIS_ACTIVITY_WINDOW: u32 = 5;
-
-// ---------------------------------------------------------------------------
 // Target LP shape
 // ---------------------------------------------------------------------------
 

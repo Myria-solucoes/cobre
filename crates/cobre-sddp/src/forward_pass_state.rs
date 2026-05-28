@@ -63,8 +63,6 @@ pub(crate) struct ForwardPassInputs<'a, S: SolverInterface + Send> {
     pub fwd_offset: usize,
     /// Optional channel for emitting [`TrainingEvent::WorkerTiming`] events.
     pub event_sender: Option<&'a Sender<TrainingEvent>>,
-    /// Activity-window size for the basis-reconstruction classifier (1..=31).
-    pub basis_activity_window: u32,
 }
 
 impl<'a, S: SolverInterface + Send> ForwardPassInputs<'a, S> {
@@ -79,12 +77,12 @@ impl<'a, S: SolverInterface + Send> ForwardPassInputs<'a, S> {
     /// let fwd = &mut self.fwd_state;
     /// let mut inputs = ForwardPassInputs::from_session_fields(
     ///     &mut self.fwd_pool, &mut self.basis_store, self.stage_ctx,
-    ///     &mut self.scratch, self.fcf, self.training_ctx,
-    ///     &self.config.cut_management, &self.ranks, &self.runtime, iteration,
+    ///     &mut self.scratch, self.fcf, self.training_ctx, &self.ranks,
+    ///     &self.runtime, iteration,
     /// );
     /// let forward_result = fwd.run(&mut inputs)?;
     /// ```
-    // RATIONALE: 10 args are disjoint borrows of `TrainingSession` fields required because
+    // RATIONALE: 9 args are disjoint borrows of `TrainingSession` fields required because
     // Rust NLL cannot split a single `&mut TrainingSession` borrow when `fwd_state` is also
     // borrowed mutably. Each arg maps to a distinct session field; no grouping is possible
     // without adding indirection or invalidating the disjoint-borrow design.
@@ -96,7 +94,6 @@ impl<'a, S: SolverInterface + Send> ForwardPassInputs<'a, S> {
         scratch: &'a mut crate::training_session::iteration_scratch::IterationScratch,
         fcf: &'a FutureCostFunction,
         training_ctx: &'a TrainingContext<'a>,
-        cut_mgmt: &'a crate::config::CutManagementConfig,
         ranks: &crate::training_session::rank_distribution::RankDistribution,
         runtime: &'a crate::training_session::runtime::RuntimeHandles,
         iteration: u64,
@@ -115,7 +112,6 @@ impl<'a, S: SolverInterface + Send> ForwardPassInputs<'a, S> {
             iteration,
             fwd_offset: ranks.my_fwd_offset,
             event_sender: runtime.event_sender(),
-            basis_activity_window: cut_mgmt.basis_activity_window,
         }
     }
 }
@@ -143,8 +139,6 @@ pub(crate) struct ForwardWorkerParams<'a> {
     pub iteration: u64,
     /// Global index of this rank's first forward pass (for seed derivation).
     pub fwd_offset: usize,
-    /// Activity-window size for the basis-reconstruction classifier (1..=31).
-    pub basis_activity_window: u32,
     /// True when the last stage has warm-start (boundary) cuts.
     pub terminal_has_boundary_cuts: bool,
     /// Noise dimension for worker-local sampling buffers (`OutOfSample` path).
@@ -445,7 +439,6 @@ impl ForwardPassState {
             n_workers,
             iteration: inputs.iteration,
             fwd_offset: inputs.fwd_offset,
-            basis_activity_window: inputs.basis_activity_window,
             terminal_has_boundary_cuts,
             noise_dim,
             initial_state,
@@ -783,7 +776,6 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
                 terminal_has_boundary_cuts: params.terminal_has_boundary_cuts,
                 pool: &params.fcf.pools[t],
                 baked_template: &params.baked[t],
-                basis_activity_window: params.basis_activity_window,
             };
             // Snapshot solver statistics before the stage solve so the
             // per-stage delta can be accumulated without hot-path allocation.
@@ -1314,7 +1306,6 @@ mod tests {
             iteration: 1,
             fwd_offset: 0,
             event_sender: None,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
         };
 
         let result = state.run(&mut inputs).expect("forward pass must not error");
@@ -1393,7 +1384,6 @@ mod tests {
             n_workers: 1,
             iteration: 1,
             fwd_offset: 0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             terminal_has_boundary_cuts: false,
             noise_dim: fx.stochastic.dim(),
             initial_state: &fx.initial_state,
@@ -1500,7 +1490,6 @@ mod tests {
                 iteration: 1,
                 fwd_offset: 0,
                 event_sender: None,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             };
             let _ = state.run(&mut inputs).expect("first run must not error");
         }
@@ -1525,7 +1514,6 @@ mod tests {
                 iteration: 2,
                 fwd_offset: 0,
                 event_sender: None,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             };
             let _ = state.run(&mut inputs).expect("second run must not error");
         }
@@ -1618,7 +1606,6 @@ mod tests {
                 iteration: 1,
                 fwd_offset: 0,
                 event_sender: None,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             };
             state.run(&mut inputs).expect("run 1 must not error")
         };
@@ -1644,7 +1631,6 @@ mod tests {
                 iteration: 2,
                 fwd_offset: 0,
                 event_sender: None,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             };
             state.run(&mut inputs).expect("run 2 must not error")
         };

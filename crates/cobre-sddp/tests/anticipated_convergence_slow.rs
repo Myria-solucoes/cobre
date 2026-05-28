@@ -51,9 +51,8 @@ use cobre_core::{
     ThermalStageBounds,
 };
 use cobre_sddp::{
-    DEFAULT_BASIS_ACTIVITY_WINDOW, InflowNonNegativityMethod, StoppingMode, StoppingRule,
-    StoppingRuleSet, StudySetup, TrainingOutcome, hydro_models::PrepareHydroModelsResult,
-    setup::ConstructionConfig,
+    InflowNonNegativityMethod, StoppingMode, StoppingRule, StoppingRuleSet, StudySetup,
+    TrainingOutcome, hydro_models::PrepareHydroModelsResult, setup::ConstructionConfig,
 };
 use cobre_solver::highs::HighsSolver;
 use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
@@ -434,7 +433,6 @@ fn run_training(
         inflow_method,
         cut_selection: None,
         cut_activity_tolerance: 0.0,
-        basis_activity_window: DEFAULT_BASIS_ACTIVITY_WINDOW,
         budget: None,
         export_states: false,
         scalar_parameters: Vec::new(),

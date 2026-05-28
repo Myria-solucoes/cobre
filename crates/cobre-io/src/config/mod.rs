@@ -1099,7 +1099,12 @@ mod tests {
     }
 
     /// max_active_per_stage serde roundtrip: Some(100) serializes and deserializes correctly.
+    ///
+    /// The deprecated `basis_activity_window` field still round-trips because
+    /// the schema retains it for one release. `#[allow(deprecated)]` is needed
+    /// to read it without triggering the deprecation lint.
     #[test]
+    #[allow(deprecated)]
     fn max_active_per_stage_serde_roundtrip() {
         let original = RowSelectionConfig {
             enabled: Some(true),

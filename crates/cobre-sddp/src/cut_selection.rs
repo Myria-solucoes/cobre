@@ -743,6 +743,7 @@ pub fn parse_cut_selection_config(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::parse_cut_selection_config;
     use super::{CutActivityUpdates, CutMetadata, CutSelectionStrategy};
@@ -1610,8 +1611,8 @@ mod tests {
             max_active_per_stage: None,
             memory_window: None,
             domination_epsilon: None,
-            basis_activity_window: None,
             tie_tolerance: Some(1e-8),
+            ..RowSelectionConfig::default()
         };
         let result = parse_cut_selection_config(&cfg);
         assert!(result.is_ok());
@@ -1642,8 +1643,8 @@ mod tests {
             max_active_per_stage: None,
             memory_window: None,
             domination_epsilon: None,
-            basis_activity_window: None,
             tie_tolerance: None,
+            ..RowSelectionConfig::default()
         };
         let result = parse_cut_selection_config(&cfg);
         assert!(result.is_ok());
@@ -1674,8 +1675,8 @@ mod tests {
             max_active_per_stage: None,
             memory_window: Some(10), // deprecated; silently ignored
             domination_epsilon: None,
-            basis_activity_window: None,
             tie_tolerance: Some(1e-8),
+            ..RowSelectionConfig::default()
         };
         let result = parse_cut_selection_config(&cfg);
         assert!(result.is_ok());
@@ -1705,8 +1706,8 @@ mod tests {
             max_active_per_stage: None,
             memory_window: None,
             domination_epsilon: None,
-            basis_activity_window: None,
             tie_tolerance: None,
+            ..RowSelectionConfig::default()
         };
         let result = parse_cut_selection_config(&cfg);
         assert!(
@@ -1740,8 +1741,8 @@ mod tests {
             max_active_per_stage: None,
             memory_window: None,
             domination_epsilon: Some(1e-6),
-            basis_activity_window: None,
             tie_tolerance: None,
+            ..RowSelectionConfig::default()
         };
         let result = parse_cut_selection_config(&cfg);
         assert!(result.is_ok());
@@ -1771,8 +1772,8 @@ mod tests {
             max_active_per_stage: None,
             memory_window: None,
             domination_epsilon: None,
-            basis_activity_window: None,
             tie_tolerance: None,
+            ..RowSelectionConfig::default()
         };
         let result = parse_cut_selection_config(&cfg);
         assert!(
@@ -1797,8 +1798,8 @@ mod tests {
             max_active_per_stage: None,
             memory_window: None,
             domination_epsilon: None,
-            basis_activity_window: None,
             tie_tolerance: None,
+            ..RowSelectionConfig::default()
         };
         let result = parse_cut_selection_config(&cfg);
         assert!(result.is_err());
@@ -1820,8 +1821,8 @@ mod tests {
             max_active_per_stage: None,
             memory_window: None,
             domination_epsilon: None,
-            basis_activity_window: None,
             tie_tolerance: None,
+            ..RowSelectionConfig::default()
         };
         let result = parse_cut_selection_config(&cfg);
         assert!(result.is_err());
@@ -1838,8 +1839,8 @@ mod tests {
             max_active_per_stage: None,
             memory_window: None,
             domination_epsilon: None,
-            basis_activity_window: None,
             tie_tolerance: None,
+            ..RowSelectionConfig::default()
         };
         let result = parse_cut_selection_config(&cfg).unwrap();
         assert!(
@@ -1859,8 +1860,8 @@ mod tests {
             max_active_per_stage: None,
             memory_window: None,
             domination_epsilon: None,
-            basis_activity_window: None,
             tie_tolerance: None,
+            ..RowSelectionConfig::default()
         };
         let result = parse_cut_selection_config(&cfg);
         assert!(result.is_err());
@@ -2196,7 +2197,7 @@ mod tests {
         let mut pool = CutPool::new(2, 1, 1, 0);
         pool.add_cut(0, 0, 10.0, &[0.0]); // higher value
         pool.add_cut(1, 0, 1.0, &[0.0]); // lower value
-        // Slot 0 from current iteration → ineligible. Slot 1 eligible.
+                                         // Slot 0 from current iteration → ineligible. Slot 1 eligible.
         pool.metadata[0].iteration_generated = 10; // current_iteration
         pool.metadata[1].iteration_generated = 5;
         // n_eligible = 1 (only slot 1). Guard returns empty.

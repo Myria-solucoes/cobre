@@ -11,7 +11,8 @@
 //! phases exercised here are:
 //!
 //! 1. [`cobre_sddp::StudyParams::from_config`] — validates `config.json` fields
-//!    that are only checked at algorithm startup (e.g. `basis_activity_window`).
+//!    that are only checked at algorithm startup and surfaces deprecation
+//!    warnings for fields that are scheduled for removal.
 //! 2. [`cobre_sddp::prepare_stochastic`] — runs PAR estimation from inflow
 //!    history, loads user opening trees, and builds the stochastic context.
 //! 3. [`cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts`] — resolves
@@ -139,8 +140,8 @@ pub fn execute(args: ValidateArgs) -> Result<(), CliError> {
     let config_path = args.case_dir.join("config.json");
     let config = cobre_io::parse_config(&config_path).map_err(CliError::from)?;
 
-    // Phase 8: StudyParams::from_config — catches basis_activity_window range
-    // violations, unsupported stopping rules, and cut-selection config errors.
+    // Phase 8: StudyParams::from_config — catches unsupported stopping rules,
+    // cut-selection config errors, and emits warnings for deprecated fields.
     let study_params = match StudyParams::from_config(&config) {
         Ok(p) => p,
         Err(ref err) => {

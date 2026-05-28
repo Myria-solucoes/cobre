@@ -78,8 +78,6 @@ pub mod validate_phases;
 pub(crate) mod visited_states;
 pub mod workspace;
 
-// ── basis_reconstruct ─────────────────────────────────────────────────────────
-pub use basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW;
 // ── config ────────────────────────────────────────────────────────────────────
 pub use config::TrainingConfig;
 // ── convergence ───────────────────────────────────────────────────────────────

@@ -418,7 +418,8 @@
       "properties": {
         "basis_activity_window": {
           "default": null,
-          "description": "Width (in iterations) of the sliding observation window used to track\nwhich constraint rows have been recently active.\n\nA larger window retains activity information over a longer recent\nhistory, making row-selection decisions less sensitive to short-term\nfluctuations. A smaller window is more responsive to recent changes in\nthe active set.\n\nValidated range: 1..=31. Default when absent: 5.",
+          "deprecated": true,
+          "description": "DEPRECATED. Silently ignored as of this release; will be removed in\nthe next. Retained for one release so existing config files continue\nto deserialise.\n\nPreviously controlled the sliding-window mask consumed by the\nbasis-reconstruction activity classifier. The classifier has been\nremoved; reconstruction now matches stored cut rows by slot identity\nalone, which makes the window value unobservable.\n\nSee `CHANGELOG.md` for the deprecation announcement and\n`docs/design/basis-reconstruction-simplification.md` for the\nunderlying rationale.",
           "format": "uint32",
           "minimum": 0,
           "type": [

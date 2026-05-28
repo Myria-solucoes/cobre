@@ -126,9 +126,6 @@ pub struct BackwardPassInputs<'a, S: SolverInterface + Send, C: Communicator> {
     /// Minimum dual multiplier for a cut to count as binding.
     pub cut_activity_tolerance: f64,
 
-    /// Activity-window size for the basis-reconstruction classifier (1..=31).
-    pub basis_activity_window: u32,
-
     /// Current training iteration index (1-based), used for cut metadata.
     pub iteration: u64,
 
@@ -186,7 +183,6 @@ impl<'a, S: SolverInterface + Send, C: Communicator> BackwardPassInputs<'a, S, C
             event_sender: runtime.event_sender(),
             risk_measures: &cut_mgmt.risk_measures,
             cut_activity_tolerance: cut_mgmt.cut_activity_tolerance,
-            basis_activity_window: cut_mgmt.basis_activity_window,
             iteration,
             local_work: ranks.my_actual_fwd,
             fwd_offset: ranks.my_fwd_offset,
@@ -816,7 +812,6 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
         baked_template: baked_tmpl,
         successor_active_slots: &state.successor_active_slots_buf,
         cut_activity_tolerance: inputs.cut_activity_tolerance,
-        basis_activity_window: inputs.basis_activity_window,
         successor_populated_count: inputs.fcf.pools[successor].populated_count,
         successor_pool: &inputs.fcf.pools[successor],
     };
@@ -1644,7 +1639,6 @@ mod tests {
             event_sender: None,
             risk_measures: &risk_measures,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             iteration: 1,
             local_work: local_count,
             fwd_offset: 0,
@@ -1769,7 +1763,6 @@ mod tests {
             event_sender: None,
             risk_measures: &risk_measures,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             iteration: 1,
             local_work: local_count,
             fwd_offset: 0,
@@ -1897,7 +1890,6 @@ mod tests {
             event_sender: None,
             risk_measures: &risk_measures,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             iteration: 1,
             local_work: local_count,
             fwd_offset: 0,

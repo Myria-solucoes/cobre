@@ -66,7 +66,7 @@ pub enum PrepPhase {
 /// use cobre_sddp::validate_phases::{PrepPhase, prep_phase_metadata};
 /// use cobre_sddp::SddpError;
 ///
-/// let err = SddpError::Validation("basis_activity_window out of range".to_string());
+/// let err = SddpError::Validation("unsupported stopping rule".to_string());
 /// let (kind, file) = prep_phase_metadata(PrepPhase::Config, &err);
 /// assert_eq!(kind, "ConfigValidationError");
 /// assert_eq!(file, "config.json");

@@ -129,10 +129,9 @@ pub struct StudySetup {
 
     /// Two-stage cut management pipeline configuration.
     ///
-    /// Holds cut selection, budget cap, activity tolerance, basis window, and
-    /// per-stage risk measures. Replaces the five former flat fields
-    /// (`cut_selection`, `cut_activity_tolerance`, `budget`,
-    /// `basis_activity_window`, `risk_measures`).
+    /// Holds cut selection, budget cap, activity tolerance, and per-stage risk
+    /// measures. Replaces the former flat fields (`cut_selection`,
+    /// `cut_activity_tolerance`, `budget`, `risk_measures`).
     pub(crate) cut_management: CutManagementConfig,
 
     /// Pure-data event parameters (output-side flags).
@@ -284,7 +283,6 @@ impl StudySetup {
             inflow_method,
             cut_selection,
             cut_activity_tolerance,
-            basis_activity_window,
             budget,
             export_states,
             scalar_parameters,
@@ -759,14 +757,12 @@ impl StudySetup {
             simulation_config: crate::simulation::SimulationConfig {
                 n_scenarios,
                 io_channel_capacity,
-                basis_activity_window,
             },
             policy_path,
             cut_management: CutManagementConfig {
                 cut_selection,
                 budget,
                 cut_activity_tolerance,
-                basis_activity_window,
                 warm_start_cuts: 0,
                 risk_measures,
             },

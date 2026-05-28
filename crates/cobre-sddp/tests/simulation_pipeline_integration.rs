@@ -523,7 +523,6 @@ fn simulate_single_rank_4_scenarios_produces_4_results() {
     let config = SimulationConfig {
         n_scenarios: 4,
         io_channel_capacity: 16,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -637,7 +636,6 @@ fn simulate_infeasible_returns_lp_infeasible_error() {
     let config = SimulationConfig {
         n_scenarios: 4,
         io_channel_capacity: 16,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -742,7 +740,6 @@ fn simulate_infeasible_at_scenario2_stage3() {
     let config = SimulationConfig {
         n_scenarios: 4,
         io_channel_capacity: 16,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -844,7 +841,6 @@ fn simulate_channel_closed_returns_error() {
     let config = SimulationConfig {
         n_scenarios: 2,
         io_channel_capacity: 1,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -944,7 +940,6 @@ fn simulate_total_cost_equals_sum_of_stage_costs() {
     let config = SimulationConfig {
         n_scenarios: 2,
         io_channel_capacity: 16,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -1052,7 +1047,6 @@ fn simulate_cost_buffer_scenario_ids_match_assigned_range() {
     let config = SimulationConfig {
         n_scenarios: 6,
         io_channel_capacity: 16,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -1155,7 +1149,6 @@ fn simulate_channel_receives_results_in_scenario_order() {
     let config = SimulationConfig {
         n_scenarios: 3,
         io_channel_capacity: 16,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -1252,7 +1245,6 @@ fn test_simulation_parallel_cost_determinism() {
     let config = SimulationConfig {
         n_scenarios,
         io_channel_capacity: 64,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -1458,7 +1450,6 @@ fn simulate_emits_progress_events() {
     let config = SimulationConfig {
         n_scenarios: 10,
         io_channel_capacity: 32,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -1582,7 +1573,6 @@ fn simulate_no_events_when_sender_is_none() {
     let config = SimulationConfig {
         n_scenarios: 4,
         io_channel_capacity: 16,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -1689,7 +1679,6 @@ fn simulate_progress_events_received_before_return() {
     let config = SimulationConfig {
         n_scenarios,
         io_channel_capacity: 32,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -1805,7 +1794,6 @@ fn simulate_progress_scenario_cost_equals_total_cost() {
     let config = SimulationConfig {
         n_scenarios,
         io_channel_capacity: 32,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -1926,7 +1914,6 @@ fn simulate_emits_simulation_finished_as_last_event() {
     let config = SimulationConfig {
         n_scenarios,
         io_channel_capacity: 32,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -2058,7 +2045,6 @@ fn simulate_progress_scenario_cost_is_finite() {
     let config = SimulationConfig {
         n_scenarios: 5,
         io_channel_capacity: 16,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -2175,7 +2161,6 @@ fn simulate_baked_path_issues_zero_add_rows() {
     let config = SimulationConfig {
         n_scenarios,
         io_channel_capacity: 16,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -2293,7 +2278,6 @@ fn simulate_fallback_path_issues_expected_add_rows() {
     let config = SimulationConfig {
         n_scenarios,
         io_channel_capacity: 16,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -2400,7 +2384,6 @@ fn simulate_baked_length_mismatch_returns_error() {
     let config = SimulationConfig {
         n_scenarios: 2,
         io_channel_capacity: 8,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -2563,7 +2546,6 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
     let config = SimulationConfig {
         n_scenarios,
         io_channel_capacity: 8,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -2713,7 +2695,6 @@ fn simulate_with_empty_stage_bases_cold_starts() {
     let config = SimulationConfig {
         n_scenarios,
         io_channel_capacity: 16,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,

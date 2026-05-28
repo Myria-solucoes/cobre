@@ -121,16 +121,23 @@ pub struct RowSelectionConfig {
     #[serde(default)]
     pub cut_activity_tolerance: Option<f64>,
 
-    /// Width (in iterations) of the sliding observation window used to track
-    /// which constraint rows have been recently active.
+    /// DEPRECATED. Silently ignored as of this release; will be removed in
+    /// the next. Retained for one release so existing config files continue
+    /// to deserialise.
     ///
-    /// A larger window retains activity information over a longer recent
-    /// history, making row-selection decisions less sensitive to short-term
-    /// fluctuations. A smaller window is more responsive to recent changes in
-    /// the active set.
+    /// Previously controlled the sliding-window mask consumed by the
+    /// basis-reconstruction activity classifier. The classifier has been
+    /// removed; reconstruction now matches stored cut rows by slot identity
+    /// alone, which makes the window value unobservable.
     ///
-    /// Validated range: 1..=31. Default when absent: 5.
+    /// See `CHANGELOG.md` for the deprecation announcement and
+    /// `docs/design/basis-reconstruction-simplification.md` for the
+    /// underlying rationale.
     #[serde(default)]
+    #[deprecated(
+        since = "0.1.0",
+        note = "field is ignored; basis reconstruction now uses slot-identity matching. Will be removed next release."
+    )]
     pub basis_activity_window: Option<u32>,
 
     /// Row budget per stage: maximum number of constraint rows allowed to be

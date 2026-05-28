@@ -411,7 +411,6 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
         let load_spec = crate::simulation::pipeline::SimScenarioLoadSpec {
             baked_templates,
             stage_bases,
-            basis_activity_window: config.basis_activity_window,
         };
         // Split raw_noise_buf and perm_scratch out of ws.scratch so that the
         // immutable borrows of those slices in ScenarioIds do not conflict with

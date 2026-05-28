@@ -39,8 +39,6 @@ pub(crate) struct BroadcastConfig {
     pub(crate) inflow_method: InflowNonNegativityMethod,
     pub(crate) cut_selection: Option<CutSelectionStrategy>,
     pub(crate) cut_activity_tolerance: f64,
-    /// Activity-window size for the basis-reconstruction classifier (1..=31).
-    pub(crate) basis_activity_window: u32,
     /// Whether the training phase is enabled. When `false`, all ranks skip
     /// training and proceed directly to simulation (or exit).
     pub(crate) training_enabled: bool,
@@ -124,7 +122,6 @@ impl BroadcastConfig {
             inflow_method: params.inflow_method,
             cut_selection,
             cut_activity_tolerance: params.cut_activity_tolerance,
-            basis_activity_window: params.basis_activity_window,
             training_enabled: config.training.enabled,
             policy_mode: config.policy.mode,
             export_states: config.exports.states,

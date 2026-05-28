@@ -278,23 +278,21 @@ each row into one of two paths:
 
 - **Preserved** (slot present in the stored basis): the original status
   is copied verbatim.
-- **New** (slot not present — a row added since capture): the classifier
-  consults the row's sliding bitmap of recent binding observations. If
-  any bit within the `basis_activity_window` mask is set, or if the row
-  was generated in the current iteration, the row is assigned
-  `NONBASIC_LOWER` (tight guess); otherwise `BASIC` (slack guess).
+- **New** (slot not present — a row added since capture): the row is
+  unconditionally assigned `NONBASIC_LOWER` (tight guess).
 
 Each `NONBASIC_LOWER` classification on a new row requires a
 compensating demotion on a preserved row to keep HiGHS's
 column-basic + row-basic invariant. The stalest preserved-`LOWER`
-candidate is promoted, ranked lexicographically by recent-activity
-popcount, last-active iteration, and insertion order. When
-new-`LOWER` classifications outnumber preserved-`LOWER` candidates,
-a tail fallback flips the most recent new-`LOWER` rows back to
-`BASIC` until the invariant holds.
+candidate is promoted, ranked lexicographically by insertion order.
+When new-`LOWER` classifications outnumber preserved-`LOWER`
+candidates, a tail fallback flips the most recent new-`LOWER` rows
+back to `BASIC` until the invariant holds.
 
 Reconstruction is always active when a stored basis exists — there is
-no configuration flag.
+no configuration flag. The previous `basis_activity_window` config
+knob is deprecated and silently ignored; it will be removed from the
+schema in the next release.
 
 The `basis_reconstructions` counter in
 `training/solver/iterations.parquet` and

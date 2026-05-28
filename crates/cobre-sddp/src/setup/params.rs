@@ -47,9 +47,6 @@ pub struct StudyParams {
     pub cut_selection: Option<CutSelectionStrategy>,
     /// Minimum dual multiplier for a cut to count as binding (`0.0` if unset).
     pub cut_activity_tolerance: f64,
-    /// Activity-window size for the basis-reconstruction classifier.
-    /// Validated range 1..=31. Default: [`crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW`].
-    pub basis_activity_window: u32,
     /// Maximum number of active cuts per stage (hard cap on LP size).
     ///
     /// `None` means no cap is enforced. Derived from
@@ -138,15 +135,26 @@ impl StudyParams {
             .cut_activity_tolerance
             .unwrap_or(0.0);
 
-        let basis_activity_window = config
+        // Emit a one-shot deprecation warning when the user-supplied TOML carries
+        // `training.cut_selection.basis_activity_window`. The field has no
+        // internal consumer after the basis-reconstruction classifier was
+        // removed; reading it here, ignoring the value, and warning preserves
+        // backward compatibility for one release. The field itself stays on
+        // `RowSelectionConfig` (with `#[deprecated]`) and is dropped from the
+        // schema in the next release.
+        #[allow(deprecated)]
+        if config
             .training
             .cut_selection
             .basis_activity_window
-            .unwrap_or(crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW);
-        if !(1..=31).contains(&basis_activity_window) {
-            return Err(SddpError::Validation(format!(
-                "basis_activity_window must be in 1..=31, got {basis_activity_window}"
-            )));
+            .is_some()
+        {
+            tracing::warn!(
+                "training.cut_selection.basis_activity_window is deprecated and \
+                 will be removed in the next release; the value is ignored \
+                 because basis reconstruction now matches stored cut rows by \
+                 slot identity alone. Please remove the field from config.json."
+            );
         }
 
         let budget = config.training.cut_selection.max_active_per_stage;
@@ -177,7 +185,6 @@ impl StudyParams {
             inflow_method,
             cut_selection,
             cut_activity_tolerance,
-            basis_activity_window,
             budget,
         })
     }
@@ -198,7 +205,6 @@ impl StudyParams {
             inflow_method: self.inflow_method,
             cut_selection: self.cut_selection,
             cut_activity_tolerance: self.cut_activity_tolerance,
-            basis_activity_window: self.basis_activity_window,
             budget: self.budget,
             export_states: false,
             scalar_parameters: Vec::new(),
@@ -235,11 +241,6 @@ pub struct ConstructionConfig {
     pub cut_selection: Option<CutSelectionStrategy>,
     /// Minimum dual multiplier for a cut to count as binding (`0.0` if unset).
     pub cut_activity_tolerance: f64,
-    /// Activity-window size for the basis-reconstruction classifier.
-    ///
-    /// Validated range 1..=31. Default:
-    /// [`crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW`].
-    pub basis_activity_window: u32,
     /// Maximum number of active cuts per stage (hard cap on LP size).
     ///
     /// `None` means no cap is enforced. Derived from
@@ -340,7 +341,10 @@ mod tests {
     }
 
     /// Build a minimal `cobre_io::Config` with the given
-    /// `basis_activity_window` value in `training.cut_selection`.
+    /// `basis_activity_window` value in `training.cut_selection`. The field
+    /// is deprecated and its value is ignored by `StudyParams::from_config`;
+    /// the helper drives the deprecation-warning tests below.
+    #[allow(deprecated)]
     fn config_with_window(window: Option<u32>) -> Config {
         Config {
             schema: None,
@@ -371,48 +375,58 @@ mod tests {
         }
     }
 
+    /// `StudyParams::from_config` must emit a WARN-level tracing event
+    /// naming `basis_activity_window` whenever the user supplies the field,
+    /// regardless of the value (including formerly out-of-range values).
+    /// Construction must succeed because the value is ignored.
     #[test]
-    fn study_params_rejects_basis_activity_window_out_of_range() {
-        // Value 0 must be rejected.
-        let err = StudyParams::from_config(&config_with_window(Some(0)))
-            .expect_err("window=0 must be rejected");
-        let msg = err.to_string();
+    fn study_params_warns_on_deprecated_basis_activity_window() {
+        for window in [Some(0), Some(5), Some(31), Some(100)] {
+            let (subscriber, messages) = WarnRecorder::new();
+            tracing::subscriber::with_default(subscriber, || {
+                StudyParams::from_config(&config_with_window(window))
+                    .expect("any basis_activity_window value must succeed (field is ignored)");
+            });
+            let recorded = messages.lock().unwrap();
+            let relevant: Vec<&str> = recorded
+                .iter()
+                .map(std::string::String::as_str)
+                .filter(|msg| msg.contains("basis_activity_window"))
+                .collect();
+            assert!(
+                !relevant.is_empty(),
+                "expected a deprecation WARN mentioning 'basis_activity_window' for value {window:?}, got: {recorded:?}"
+            );
+            assert!(
+                relevant.iter().any(|msg| msg.contains("deprecated")),
+                "deprecation WARN must contain the word 'deprecated' for value {window:?}, got: {relevant:?}"
+            );
+            assert!(
+                relevant.iter().any(|msg| msg.contains("ignored")),
+                "deprecation WARN must say the value is 'ignored' for value {window:?}, got: {relevant:?}"
+            );
+        }
+    }
+
+    /// `StudyParams::from_config` must NOT emit a `basis_activity_window`
+    /// WARN when the field is absent from the user config.
+    #[test]
+    fn study_params_silent_when_basis_activity_window_absent() {
+        let (subscriber, messages) = WarnRecorder::new();
+        tracing::subscriber::with_default(subscriber, || {
+            StudyParams::from_config(&config_with_window(None))
+                .expect("absent basis_activity_window must succeed");
+        });
+        let recorded = messages.lock().unwrap();
+        let relevant: Vec<&str> = recorded
+            .iter()
+            .map(std::string::String::as_str)
+            .filter(|msg| msg.contains("basis_activity_window"))
+            .collect();
         assert!(
-            msg.contains("basis_activity_window"),
-            "error must mention field name; got: {msg}"
+            relevant.is_empty(),
+            "no deprecation WARN must fire when basis_activity_window is absent, got: {recorded:?}"
         );
-
-        // Value 32 must be rejected.
-        let err = StudyParams::from_config(&config_with_window(Some(32)))
-            .expect_err("window=32 must be rejected");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("basis_activity_window"),
-            "error must mention field name; got: {msg}"
-        );
-
-        // None defaults to 5.
-        let params =
-            StudyParams::from_config(&config_with_window(None)).expect("None must succeed");
-        assert_eq!(
-            params.basis_activity_window,
-            crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
-            "None must default to DEFAULT_BASIS_ACTIVITY_WINDOW"
-        );
-
-        // Explicit 5 must pass.
-        let params =
-            StudyParams::from_config(&config_with_window(Some(5))).expect("window=5 must succeed");
-        assert_eq!(params.basis_activity_window, 5);
-
-        // Boundary values 1 and 31 must pass.
-        let params =
-            StudyParams::from_config(&config_with_window(Some(1))).expect("window=1 must succeed");
-        assert_eq!(params.basis_activity_window, 1);
-
-        let params = StudyParams::from_config(&config_with_window(Some(31)))
-            .expect("window=31 must succeed");
-        assert_eq!(params.basis_activity_window, 31);
     }
 
     /// Build a minimal `cobre_io::Config` with `max_active_per_stage` and

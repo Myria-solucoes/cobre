@@ -127,8 +127,14 @@ def test_validate_missing_directory_returns_invalid() -> None:
 # ── Phase 8: StudyParams::from_config (ConfigValidationError) ─────────────────
 
 
-def test_validate_basis_activity_window_out_of_range() -> None:
-    """basis_activity_window > 31 triggers ConfigValidationError in Phase 8."""
+def test_validate_basis_activity_window_is_deprecated_not_rejected() -> None:
+    """basis_activity_window is deprecated (silently ignored); validate succeeds.
+
+    Previously this field was validated to be in 1..=31 and any out-of-range
+    value triggered a ConfigValidationError. After soft-deprecation the field
+    is read and discarded with a tracing warning, so validate must return
+    `valid=True` for any value (including formerly out-of-range values).
+    """
     import cobre.io  # noqa: PLC0415
 
     case_dir = copy_case_to_tempdir(VALID_CASE_1DTOY)
@@ -137,8 +143,8 @@ def test_validate_basis_activity_window_out_of_range() -> None:
         with config_path.open() as f:
             config = json.load(f)
 
-        # basis_activity_window lives at training.cut_selection.basis_activity_window
-        # and must be in 1..=31; 100 is out of range.
+        # A value that would have failed the old 1..=31 range check must
+        # now load successfully because the field is deprecated.
         config.setdefault("training", {}).setdefault("cut_selection", {})[
             "basis_activity_window"
         ] = 100
@@ -147,16 +153,9 @@ def test_validate_basis_activity_window_out_of_range() -> None:
             json.dump(config, f, indent=2)
 
         result = cobre.io.validate(str(case_dir))
-        assert result["valid"] is False, (
-            "expected valid=False for basis_activity_window=100"
-        )
-        assert len(result["errors"]) >= 1
-        err = result["errors"][0]
-        assert err["kind"] == "ConfigValidationError", (
-            f"expected ConfigValidationError, got {err['kind']!r}"
-        )
-        assert "basis_activity_window" in err["message"], (
-            f"expected 'basis_activity_window' in message, got: {err['message']!r}"
+        assert result["valid"] is True, (
+            "expected valid=True for deprecated basis_activity_window, "
+            f"got errors: {result.get('errors')!r}"
         )
     finally:
         shutil.rmtree(case_dir.parent, ignore_errors=True)
