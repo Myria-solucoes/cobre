@@ -177,7 +177,6 @@ impl CutPool {
             forward_pass_index: 0,
             active_count: 0,
             last_active_iter: 0,
-            active_window: 0,
         };
 
         Self {
@@ -276,11 +275,6 @@ impl CutPool {
             forward_pass_index,
             active_count: 0,
             last_active_iter: iteration,
-            // Vestigial activity bitmap. The slot-identity reconstruction path
-            // does not consult this field; it remains as a wire-format
-            // placeholder pending the deprecation cycle for the corresponding
-            // config knob.
-            active_window: 0,
         };
 
         if slot >= self.populated_count {
@@ -539,10 +533,6 @@ impl CutPool {
     ///   is set to `true` and `cached_active_count` is incremented by 1.
     /// - If the slot already has the requested state, the call is a no-op.
     ///
-    /// This method does **not** update `metadata[slot].active_window`; the
-    /// window bookkeeping is the responsibility of the cut-selection scoring
-    /// path, which mirrors the existing behavior of [`deactivate`].
-    ///
     /// [`deactivate`]: CutPool::deactivate
     ///
     /// # Panics (debug builds only)
@@ -749,7 +739,6 @@ impl CutPool {
                 forward_pass_index: record.forward_pass_index,
                 active_count: 0,
                 last_active_iter: u64::from(record.iteration),
-                active_window: 0,
             });
         }
 
@@ -812,7 +801,6 @@ impl CutPool {
             forward_pass_index: 0,
             active_count: 0,
             last_active_iter: 0,
-            active_window: 0,
         };
 
         let mut coefficients = vec![0.0_f64; capacity * state_dimension];
@@ -844,7 +832,6 @@ impl CutPool {
                 forward_pass_index: record.forward_pass_index,
                 active_count: 0,
                 last_active_iter: u64::from(record.iteration),
-                active_window: 0,
             };
         }
 

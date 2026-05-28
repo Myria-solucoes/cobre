@@ -183,20 +183,6 @@ pub struct CutMetadata {
     /// Initialised to `iteration_generated`; updated inline by the backward
     /// pass during the per-stage cut-binding sync.
     pub last_active_iter: u64,
-
-    /// Sliding-window binding-activity bitmap.
-    ///
-    /// Bit 0 = current iteration; bit `i` = iteration `current_iter - i`.
-    /// Updated to bit-0-set when the cut was binding (dual >
-    /// `cut_activity_tolerance`) during any backward solve of the current
-    /// iteration; shifted left by 1 at end-of-iteration so the next
-    /// iteration's bit 0 records fresh activity.
-    ///
-    /// Populated by the MPI `allreduce(BitwiseOr)` in the backward pass
-    /// (so any rank observing the cut binding sets bit 0 globally). The
-    /// field is not consumed by the slot-identity reconstruction path; it
-    /// remains as a wire-format placeholder pending its deprecation cycle.
-    pub active_window: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -769,7 +755,6 @@ mod tests {
             forward_pass_index: 0,
             active_count,
             last_active_iter,
-            active_window: 0,
         }
     }
 
@@ -1240,7 +1225,6 @@ mod tests {
                 forward_pass_index: 0,
                 active_count: 0,
                 last_active_iter: 10,
-                active_window: 0,
             }],
             &[true],
         );
@@ -1406,7 +1390,6 @@ mod tests {
                 forward_pass_index: i as u32,
                 active_count: 0,
                 last_active_iter: 1,
-                active_window: 0,
             };
         }
         pool.populated_count = n;
@@ -1513,35 +1496,30 @@ mod tests {
                 forward_pass_index: 0,
                 active_count: 0,
                 last_active_iter: 1,
-                active_window: 0,
             },
             CutMetadata {
                 iteration_generated: 1,
                 forward_pass_index: 1,
                 active_count: 0,
                 last_active_iter: 2,
-                active_window: 0,
             },
             CutMetadata {
                 iteration_generated: 1,
                 forward_pass_index: 2,
                 active_count: 3,
                 last_active_iter: 3,
-                active_window: 0,
             },
             CutMetadata {
                 iteration_generated: 1,
                 forward_pass_index: 3,
                 active_count: 5,
                 last_active_iter: 10,
-                active_window: 0,
             },
             CutMetadata {
                 iteration_generated: 1,
                 forward_pass_index: 4,
                 active_count: 5,
                 last_active_iter: 10,
-                active_window: 0,
             },
         ];
         let pool = make_dominated_pool(
@@ -1925,7 +1903,6 @@ mod tests {
             forward_pass_index: 0,
             active_count: 0,
             last_active_iter: iter,
-            active_window: 0,
         }
     }
 

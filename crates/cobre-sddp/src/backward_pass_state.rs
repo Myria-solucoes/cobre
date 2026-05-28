@@ -222,13 +222,6 @@ pub struct BackwardPassState {
     /// per-slot binding increments across MPI ranks.
     pub(crate) global_increments_buf: Vec<u64>,
 
-    /// Pre-allocated send buffer for the per-iteration `allreduce(BitwiseOr)`
-    /// that aggregates sliding-window binding-activity bitmaps across MPI ranks.
-    pub(crate) metadata_sync_window_buf: Vec<u32>,
-
-    /// Pre-allocated receive buffer for the per-iteration `allreduce(BitwiseOr)`.
-    pub(crate) global_window_increments_buf: Vec<u32>,
-
     /// Pre-allocated buffer for packing real (non-padded) gathered state
     /// vectors when archiving visited states for dominated cut selection.
     pub(crate) real_states_buf: Vec<f64>,
@@ -304,8 +297,6 @@ impl BackwardPassState {
             successor_active_slots_buf: Vec::new(),
             metadata_sync_buf: Vec::new(),
             global_increments_buf: Vec::new(),
-            metadata_sync_window_buf: Vec::new(),
-            global_window_increments_buf: Vec::new(),
             real_states_buf: Vec::with_capacity(real_states_capacity),
             stage_worker_stats_buf: StageWorkerStatsBuffer::new(n_workers_local, bwd_max_openings),
             bwd_stats_send_buf: vec![0.0; send_stride],
@@ -383,13 +374,10 @@ impl BackwardPassState {
             );
         }
 
-        // Reset per-worker timing and iteration-scoped window buffers.
+        // Reset per-worker timing buffers.
         for ws in inputs.workspaces.iter_mut() {
             ws.worker_timing_buf = WorkerPhaseTimings::default();
-            ws.backward_accum.metadata_sync_window_contribution.fill(0);
         }
-        self.metadata_sync_window_buf.fill(0);
-        self.global_window_increments_buf.fill(0);
 
         #[allow(clippy::cast_precision_loss)]
         let params = StageDerivedParams {
@@ -462,11 +450,6 @@ impl BackwardPassState {
         // ascending for downstream consumers.
         selection_records.sort_by_key(|r| r.stage);
 
-        // Clear iteration-scoped window buffers after all stages.
-        for ws in inputs.workspaces.iter_mut() {
-            ws.backward_accum.metadata_sync_window_contribution.fill(0);
-        }
-
         if let Some(sender) = inputs.event_sender {
             for ws in inputs.workspaces.iter() {
                 let _ = sender.send(TrainingEvent::WorkerTiming {
@@ -504,15 +487,9 @@ impl BackwardPassState {
 
     /// Synchronise per-slot cut binding metadata across MPI ranks for one stage.
     ///
-    /// Performs two `allreduce` operations:
-    /// 1. `Sum` over `metadata_sync_contribution` to accumulate `active_count` and
-    ///    `last_active_iter` across all ranks.
-    /// 2. `BitwiseOr` over `metadata_sync_window_contribution` to merge the
-    ///    iteration-level sliding-window activity bit.
-    ///
-    /// Clears the window accumulation buffers after the `allreduce` so they are
-    /// ready for the next stage.  Called once per backward stage after cut
-    /// insertion.
+    /// Performs one `allreduce(Sum)` over `metadata_sync_contribution` to
+    /// accumulate `active_count` and `last_active_iter` across all ranks.
+    /// Called once per backward stage after cut insertion.
     fn sync_stage_metadata<C: Communicator>(
         &mut self,
         successor: usize,
@@ -553,33 +530,6 @@ impl BackwardPassState {
                 fcf.pools[successor].metadata[slot].last_active_iter = iteration;
             }
         }
-        // BitwiseOr per-worker sliding-window bits into the global window buffer.
-        self.metadata_sync_window_buf.resize(pool_size, 0u32);
-        for ws in workspaces {
-            for (slot, &bit) in ws
-                .backward_accum
-                .metadata_sync_window_contribution
-                .iter()
-                .enumerate()
-                .take(pool_size)
-            {
-                self.metadata_sync_window_buf[slot] |= bit;
-            }
-        }
-        self.global_window_increments_buf.resize(pool_size, 0u32);
-        comm.allreduce(
-            &self.metadata_sync_window_buf,
-            &mut self.global_window_increments_buf,
-            ReduceOp::BitwiseOr,
-        )
-        .map_err(SddpError::from)?;
-        for (slot, &bits) in self.global_window_increments_buf.iter().enumerate() {
-            if bits & 1 != 0 {
-                fcf.pools[successor].metadata[slot].active_window |= 1u32;
-            }
-        }
-        self.metadata_sync_window_buf.fill(0);
-        self.global_window_increments_buf.fill(0);
         Ok(())
     }
 
@@ -1083,19 +1033,6 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
                     .resize(pop, 0u64);
             }
             ws.backward_accum.metadata_sync_contribution[..pop].fill(0);
-            // Per-stage clear: slot indices in the contribution buffer are
-            // per-pool. Slot N in pool[s] is a different cut than slot N in
-            // pool[s+1], but the buffer is shared across all stages within an
-            // iteration. Without this clear, bits set while processing stage
-            // s+1 (binding observations on pool[s+1] cuts) leak into stage
-            // s's sync (incorrectly setting active_window bit 0 on pool[s]
-            // cuts at the same slot index).
-            if ws.backward_accum.metadata_sync_window_contribution.len() < pop {
-                ws.backward_accum
-                    .metadata_sync_window_contribution
-                    .resize(pop, 0u32);
-            }
-            ws.backward_accum.metadata_sync_window_contribution[..pop].fill(0);
             ws.backward_accum
                 .per_opening_stats
                 .resize_with(n_openings, SolverStatsDelta::default);
@@ -1592,8 +1529,6 @@ mod tests {
         assert!(state.successor_active_slots_buf.is_empty());
         assert!(state.metadata_sync_buf.is_empty());
         assert!(state.global_increments_buf.is_empty());
-        assert!(state.metadata_sync_window_buf.is_empty());
-        assert!(state.global_window_increments_buf.is_empty());
 
         // Pre-sized:
         assert_eq!(state.bwd_stats_send_buf.len(), send_stride);

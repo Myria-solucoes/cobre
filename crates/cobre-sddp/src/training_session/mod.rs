@@ -1020,15 +1020,6 @@ where
             );
         }
 
-        // Shift the sliding-window binding bitmap left by 1 on every populated
-        // cut slot. This ages the activity record so the next iteration's bit 0
-        // starts clear. Placed AFTER cut selection and BEFORE template baking.
-        for pool in &mut self.fcf.pools {
-            for m in pool.metadata.iter_mut().take(pool.populated_count) {
-                m.active_window <<= 1;
-            }
-        }
-
         // Step 4c: Template baking.
         // Rebuild per-stage baked templates from the current active cut set.
         let bake_start = Instant::now();

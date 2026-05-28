@@ -697,8 +697,6 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
         let count = ws.backward_accum.slot_increments[slot];
         if count > 0 {
             ws.backward_accum.metadata_sync_contribution[slot] += count;
-            // Set bit 0 to record iteration-level activity for the sliding window.
-            ws.backward_accum.metadata_sync_window_contribution[slot] |= 1u32;
         }
     }
     Ok(StagedCut {
@@ -4041,25 +4039,6 @@ mod tests {
             assert_eq!(
                 fcf.pools[1].metadata[slot].last_active_iter, 1,
                 "slot {slot} last_active_iter should be 1 (current iteration)"
-            );
-        }
-
-        // active_window bit 0 must be set for binding slots.
-        // The BitwiseOr allreduce populates active_window |= 1 for any slot
-        // where at least one rank observed a binding event this iteration.
-        for slot in 3..6 {
-            assert_eq!(
-                fcf.pools[1].metadata[slot].active_window & 1,
-                1,
-                "slot {slot} active_window bit 0 should be set (cut was binding this iteration)"
-            );
-        }
-
-        // Non-binding slots (0..3 in pool[1]) should have active_window == 0.
-        for slot in 0..3 {
-            assert_eq!(
-                fcf.pools[1].metadata[slot].active_window, 0,
-                "slot {slot} active_window should be 0 (cut was not binding)"
             );
         }
 
