@@ -8,11 +8,12 @@
 
 use cobre_solver::{SolutionView, SolverInterface, StageTemplate};
 
+#[cfg(feature = "basis-hybrid")]
+use crate::basis_reconstruct::reconstruct_basis_hybrid;
+#[cfg(not(feature = "basis-hybrid"))]
+use crate::basis_reconstruct::{PaddingContext, reconstruct_basis};
 use crate::{
-    basis_reconstruct::{
-        PaddingContext, ReconstructionStats, ReconstructionTarget, enforce_basic_count_invariant,
-        reconstruct_basis,
-    },
+    basis_reconstruct::{ReconstructionStats, ReconstructionTarget, enforce_basic_count_invariant},
     context::StageContext,
     cut::pool::CutPool,
     error::SddpError,
@@ -173,50 +174,67 @@ pub fn run_stage_solve<'ws, S: SolverInterface>(
 
     // Select the basis path and solve.
     let (view, recon_stats) = if let Some(captured) = inputs.stored_basis {
-        let theta_value = inputs
-            .pool
-            .evaluate_at_state(&inputs.current_state[..inputs.indexer.n_state]);
-        let padding = PaddingContext {
-            state: &inputs.current_state[..inputs.indexer.n_state],
-            theta: theta_value,
-            tolerance: 1e-7,
-        };
-
         // All solves use the baked path: cuts are structural rows in the baked
         // template. base_row_count is set to the non-baked template row count
-        // so reconstruct_basis handles cut rows via slot identity rather than
-        // positional copy from the stored basis.
+        // so the reconstruction helper handles cut rows via slot identity
+        // rather than positional copy from the stored basis.
         //
         // The baked template carries one row per active cut in active_cuts()
-        // iteration order. reconstruct_basis iterates the same active cuts
-        // and matches stored slot ids to LP rows. Inactive cuts are not in
-        // the LP; active_mask is None.
-        let source = crate::basis_reconstruct::ReconstructionSource {
-            target: ReconstructionTarget {
-                base_row_count: inputs.stage_context.templates[inputs.stage_index].num_rows,
-                num_cols: inputs.stage_context.templates[inputs.stage_index].num_cols,
-            },
-            cut_metadata: &inputs.pool.metadata,
-            basis_activity_window: inputs.basis_activity_window,
-            active_mask: None,
+        // iteration order. The reconstruction helper iterates the same active
+        // cuts and matches stored slot ids to LP rows. Inactive cuts are not
+        // in the LP; active_mask is None.
+        let target = ReconstructionTarget {
+            base_row_count: inputs.stage_context.templates[inputs.stage_index].num_rows,
+            num_cols: inputs.stage_context.templates[inputs.stage_index].num_cols,
         };
-        let recon_stats = reconstruct_basis(
+
+        #[cfg(not(feature = "basis-hybrid"))]
+        let recon_stats = {
+            let theta_value = inputs
+                .pool
+                .evaluate_at_state(&inputs.current_state[..inputs.indexer.n_state]);
+            let padding = PaddingContext {
+                state: &inputs.current_state[..inputs.indexer.n_state],
+                theta: theta_value,
+                tolerance: 1e-7,
+            };
+            let source = crate::basis_reconstruct::ReconstructionSource {
+                target,
+                cut_metadata: &inputs.pool.metadata,
+                basis_activity_window: inputs.basis_activity_window,
+                active_mask: None,
+            };
+            reconstruct_basis(
+                captured,
+                source,
+                inputs.pool.active_cuts(),
+                padding,
+                &mut ws.scratch_basis,
+                &mut ws.scratch.recon_slot_lookup,
+                &mut ws.scratch.promotion_scratch,
+            )
+        };
+
+        #[cfg(feature = "basis-hybrid")]
+        let recon_stats = reconstruct_basis_hybrid(
             captured,
-            source,
+            target,
             inputs.pool.active_cuts(),
-            padding,
             &mut ws.scratch_basis,
             &mut ws.scratch.recon_slot_lookup,
-            &mut ws.scratch.promotion_scratch,
         );
-        // reconstruct_basis handles cut rows via slot identity (not positional
-        // truncation). Scheme 1 symmetric promotion keeps total_basic == num_row by
-        // construction on the happy path; enforce_basic_count_invariant is
-        // retained as a safety net for (a) the forward-apply path where cut
-        // selection drops BASIC cut rows whose stored status was LOWER (creates
-        // excess BASIC in the non-cut template rows), and (b) the Scheme 2
-        // fallback tail-override in reconstruct_basis where the activity-
-        // driven LOWER guesses exceed the preserved-LOWER promotion budget.
+        // The reconstruction helpers handle cut rows via slot identity (not
+        // positional truncation). `enforce_basic_count_invariant` is retained
+        // as an unconditional safety net for the forward-apply path: cut
+        // selection can drop a cut whose stored row status was BASIC, which
+        // leaves the freshly reconstructed basis with more BASIC entries
+        // than `num_row`. The post-pass demotes trailing BASIC cut rows to
+        // LOWER until `col_basic + row_basic == num_row` holds.
+        //
+        // The pass is also a defensive guard against any future path that
+        // can transiently break the equality during reconstruction; running
+        // it on every solve costs a single linear scan and keeps the
+        // contract local to this call site.
         //
         // num_row_for_invariant uses the actual reconstructed basis length
         // rather than baked.num_rows because the populated-cuts iterator may

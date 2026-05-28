@@ -544,6 +544,13 @@ pub(crate) struct ScratchBuffers {
     /// pool is exhausted.  Both vecs are cleared at the start of each
     /// `reconstruct_basis` call.  Pre-allocated to `initial_pool_capacity`
     /// so the hot path avoids reallocation.
+    ///
+    /// The hybrid reconstruction path does not consume this scratch buffer
+    /// (new cuts default to BASIC, which preserves the basic-count invariant
+    /// by construction and removes the need for Scheme 1 / Scheme 2 repair).
+    /// The field is retained so the legacy path remains compilable when
+    /// the hybrid feature is enabled in a sibling build.
+    #[cfg_attr(feature = "basis-hybrid", allow(dead_code))]
     pub(crate) promotion_scratch: PromotionScratch,
 
     /// Per-worker trajectory-cost accumulator for the forward pass.
