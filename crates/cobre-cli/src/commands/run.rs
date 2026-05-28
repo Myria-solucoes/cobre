@@ -70,9 +70,7 @@ pub struct RunArgs {
     /// Experimental: enable in-backward cut selection. When set, the runtime
     /// toggle that controls the per-stage selection hook inside the backward
     /// sweep is flipped on before training begins. Default behaviour (flag
-    /// absent) keeps the post-backward selection block. This flag is a
-    /// short-term gate for an A/B benchmark; a future release will replace
-    /// it with a config-file field on `cut_selection`.
+    /// absent) keeps the post-backward selection block.
     #[arg(long)]
     pub enable_inside_backward: bool,
 }
@@ -221,7 +219,6 @@ struct TrainingPhaseResult {
 pub fn execute(args: &RunArgs) -> Result<(), CliError> {
     // Flip the in-backward cut-selection toggle BEFORE any training thread is
     // spawned (rayon workers read this atomic on their first backward sweep).
-    // Future work replaces this flag with a config-file field.
     if args.enable_inside_backward {
         cobre_sddp::set_inside_backward_enabled(true);
     }

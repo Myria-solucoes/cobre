@@ -202,9 +202,6 @@ pub struct BackwardResult {
     /// [`crate::set_inside_backward_enabled`]) AND a cut-selection strategy
     /// is plumbed into the backward sweep AND the strategy's
     /// `should_run(iteration)` gate fires. Otherwise this `Vec` is empty.
-    /// Used downstream to re-route `PolicySelectionComplete` emission to
-    /// the in-backward records once the post-backward selection block is
-    /// removed (rerouting lands in a follow-up ticket).
     pub selection_records: Vec<StageRowSelectionRecord>,
 }
 

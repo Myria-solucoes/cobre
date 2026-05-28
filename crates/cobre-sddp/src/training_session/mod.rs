@@ -744,12 +744,10 @@ where
             iteration,
         );
         let backward_result = bwd.run(&mut inputs)?;
-        // Defensive invariant: `selection_records` length is bounded by
-        // `num_stages - 1` (one entry per stage where the in-backward
-        // hook ran). Reading the length here also keeps the field
-        // visible to the dead-code lint until the rerouting consumer
-        // (which forwards records to `PolicySelectionComplete`) lands
-        // in a follow-up ticket.
+        // `selection_records` length is bounded by `num_stages - 1` (one entry
+        // per stage where the in-backward hook ran). Reading the length here
+        // also keeps the field visible to the dead-code lint until the
+        // rerouting consumer lands.
         debug_assert!(
             backward_result.selection_records.len() <= self.ranks.num_stages.saturating_sub(1),
             "selection_records length must not exceed num_stages - 1"
