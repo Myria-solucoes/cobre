@@ -159,3 +159,36 @@ pub use state_exchange::ExchangeBuffers;
 pub use trajectory::TrajectoryRecord;
 // ── workspace ─────────────────────────────────────────────────────────────────
 pub use workspace::{BASIS_BROADCAST_WIRE_VERSION, CapturedBasis};
+
+/// Enable or disable the in-backward cut-selection hook.
+///
+/// Default is `false` at process start. The hook (installed inside the
+/// backward sweep) reads this toggle and skips execution unless enabled.
+/// Flip to `true` once at process startup before training begins; the
+/// expected usage pattern is a single flip, not a runtime mode switch.
+///
+/// A future cobre-cli flag will call this from `main` to enable the hook
+/// for a gating benchmark; a future config-driven field on
+/// `CutManagementConfig` will replace this runtime toggle entirely. Until
+/// then, this setter is the only way to enable the hook from outside
+/// the crate.
+///
+/// # Ordering
+///
+/// Uses `Ordering::Relaxed`. The expected usage pattern is a single flip
+/// at process startup before any backward sweep runs; no inter-thread
+/// ordering guarantees beyond visibility are needed.
+pub fn set_inside_backward_enabled(enabled: bool) {
+    crate::backward_pass_state::IN_BACKWARD_ENABLED
+        .store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Read the current value of the in-backward cut-selection hook toggle.
+///
+/// Test/diagnostic helper that mirrors [`set_inside_backward_enabled`]
+/// so callers outside this crate can confirm toggle state without
+/// reaching into `pub(crate)` internals.
+#[must_use]
+pub fn is_inside_backward_enabled() -> bool {
+    crate::backward_pass_state::IN_BACKWARD_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}

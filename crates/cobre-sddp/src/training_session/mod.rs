@@ -720,12 +720,18 @@ where
     ) -> Result<(crate::backward::BackwardResult, f64), SddpError> {
         // Borrow bwd_state independently so the remaining fields can be
         // passed to the factory without a whole-struct borrow conflict.
+        // `IterationScratch` is split into named sub-field borrows so the
+        // disjoint `cut_selection_scratch` slot can be co-borrowed mutably
+        // alongside `cut_batches` (each is a distinct field of `self.scratch`).
         let bwd = &mut self.bwd_state;
         let mut inputs = BackwardPassInputs::from_session_fields(
             &mut self.fwd_pool,
             &mut self.basis_store,
             self.stage_ctx,
-            &mut self.scratch,
+            &mut self.scratch.baked_templates,
+            &mut self.scratch.cut_batches,
+            &self.scratch.records,
+            &mut self.scratch.cut_selection_scratch,
             self.fcf,
             &mut self.exchange_bufs,
             &mut self.cut_sync_bufs,
@@ -738,6 +744,16 @@ where
             iteration,
         );
         let backward_result = bwd.run(&mut inputs)?;
+        // Defensive invariant: `selection_records` length is bounded by
+        // `num_stages - 1` (one entry per stage where the in-backward
+        // hook ran). Reading the length here also keeps the field
+        // visible to the dead-code lint until the rerouting consumer
+        // (which forwards records to `PolicySelectionComplete`) lands
+        // in a follow-up ticket.
+        debug_assert!(
+            backward_result.selection_records.len() <= self.ranks.num_stages.saturating_sub(1),
+            "selection_records length must not exceed num_stages - 1"
+        );
 
         let bwd_solve_time_ms = {
             let agg = SolverStatsDelta::aggregate(

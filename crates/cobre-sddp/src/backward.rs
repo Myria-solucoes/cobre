@@ -106,6 +106,7 @@
 
 #[cfg(test)]
 use cobre_comm::Communicator;
+use cobre_core::StageRowSelectionRecord;
 use cobre_solver::{RowBatch, SolutionView, SolverInterface, SolverStatistics};
 
 use crate::{
@@ -192,6 +193,19 @@ pub struct BackwardResult {
     /// Wall-clock time for per-stage cut synchronization (`allgatherv`)
     /// accumulated across all stages, in milliseconds.
     pub cut_sync_time_ms: u64,
+
+    /// Per-stage selection records collected when the in-backward selection
+    /// hook ran. Length is bounded by `num_stages - 1`; stages where the
+    /// hook did not run produce no entry. Sorted by stage index ascending.
+    ///
+    /// Populated only when `IN_BACKWARD_ENABLED` is true (set via
+    /// [`crate::set_inside_backward_enabled`]) AND a cut-selection strategy
+    /// is plumbed into the backward sweep AND the strategy's
+    /// `should_run(iteration)` gate fires. Otherwise this `Vec` is empty.
+    /// Used downstream to re-route `PolicySelectionComplete` emission to
+    /// the in-backward records once the post-backward selection block is
+    /// removed (rerouting lands in a follow-up ticket).
+    pub selection_records: Vec<StageRowSelectionRecord>,
 }
 
 /// Per-thread staging buffer for one aggregated cut produced at a single trial
@@ -1267,6 +1281,7 @@ mod tests {
             load_imbalance_ms: 0,
             scheduling_overhead_ms: 0,
             cut_sync_time_ms: 0,
+            selection_records: Vec::new(),
         };
         assert_eq!(r.cuts_generated, 6);
         assert_eq!(r.elapsed_ms, 42);
@@ -1277,6 +1292,7 @@ mod tests {
         assert_eq!(r.load_imbalance_ms, 0);
         assert_eq!(r.scheduling_overhead_ms, 0);
         assert_eq!(r.cut_sync_time_ms, 0);
+        assert!(r.selection_records.is_empty());
     }
 
     #[test]
@@ -1292,6 +1308,7 @@ mod tests {
             load_imbalance_ms: 0,
             scheduling_overhead_ms: 0,
             cut_sync_time_ms: 0,
+            selection_records: Vec::new(),
         };
         let c = r.clone();
         assert_eq!(c.cuts_generated, 3);
@@ -1377,7 +1394,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -1408,6 +1425,8 @@ mod tests {
             basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
+            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -1471,7 +1490,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -1502,6 +1521,8 @@ mod tests {
             basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
+            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -1565,7 +1586,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -1596,6 +1617,8 @@ mod tests {
             basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
+            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -1655,7 +1678,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -1686,6 +1709,8 @@ mod tests {
             basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
+            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -1745,7 +1770,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -1776,6 +1801,8 @@ mod tests {
             basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
+            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -1833,7 +1860,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -1864,6 +1891,8 @@ mod tests {
             basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
+            cut_selection_scratch: &mut [],
             event_sender: None,
         });
 
@@ -1966,7 +1995,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -1997,6 +2026,8 @@ mod tests {
             basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
+            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -2077,7 +2108,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -2108,6 +2139,8 @@ mod tests {
             basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
+            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -2193,7 +2226,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -2224,6 +2257,8 @@ mod tests {
             basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
+            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -2295,7 +2330,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -2326,6 +2361,8 @@ mod tests {
             basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
+            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -2407,7 +2444,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -2438,6 +2475,8 @@ mod tests {
             basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
+            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -2514,7 +2553,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -2545,6 +2584,8 @@ mod tests {
             basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
+            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -2614,7 +2655,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -2645,6 +2686,8 @@ mod tests {
             basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
+            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -2722,7 +2765,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -2753,6 +2796,8 @@ mod tests {
             basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
+            cut_selection_scratch: &mut [],
             event_sender: None,
         });
 
@@ -2875,7 +2920,7 @@ mod tests {
             workspaces: &mut workspaces_1,
             basis_store: &mut basis_store_1,
             ctx: &ctx,
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf_1,
             cut_batches: &mut empty_cut_batches(n_stages),
             training_ctx: &TrainingContext {
@@ -2906,6 +2951,8 @@ mod tests {
             basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
+            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -2962,7 +3009,7 @@ mod tests {
             workspaces: &mut workspaces_4,
             basis_store: &mut basis_store_4,
             ctx: &ctx,
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf_4,
             cut_batches: &mut empty_cut_batches(n_stages),
             training_ctx: &TrainingContext {
@@ -2993,6 +3040,8 @@ mod tests {
             basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
+            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -3343,7 +3392,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -3374,6 +3423,8 @@ mod tests {
             basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
+            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -3509,7 +3560,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -3540,6 +3591,8 @@ mod tests {
             basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
+            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -3680,7 +3733,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -3711,6 +3764,8 @@ mod tests {
             basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
+            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -3798,7 +3853,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -3829,6 +3884,8 @@ mod tests {
             basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
+            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -3925,7 +3982,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -3956,6 +4013,8 @@ mod tests {
             basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
+            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -4196,7 +4255,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -4227,6 +4286,8 @@ mod tests {
             basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
+            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -4309,7 +4370,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -4340,6 +4401,8 @@ mod tests {
             basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
+            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -4470,7 +4533,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -4501,6 +4564,8 @@ mod tests {
             basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
+            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -4835,7 +4900,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -4866,6 +4931,8 @@ mod tests {
             basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
+            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .expect("single-rank 2-worker backward must not error");
@@ -5060,7 +5127,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -5091,6 +5158,8 @@ mod tests {
             basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
+            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .expect("dual-rank stub backward must not error");
@@ -5493,7 +5562,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(n_stages),
             training_ctx: &TrainingContext {
@@ -5524,6 +5593,8 @@ mod tests {
             basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
+            cut_selection_scratch: &mut [],
             event_sender: None,
         });
 
@@ -5651,7 +5722,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(n_stages),
             training_ctx: &TrainingContext {
@@ -5682,6 +5753,8 @@ mod tests {
             basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
+            cut_selection_scratch: &mut [],
             event_sender: None,
         });
 

@@ -66,6 +66,15 @@ pub struct RunArgs {
     /// (3) default of 1.
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
     pub threads: Option<u32>,
+
+    /// Experimental: enable in-backward cut selection. When set, the runtime
+    /// toggle that controls the per-stage selection hook inside the backward
+    /// sweep is flipped on before training begins. Default behaviour (flag
+    /// absent) keeps the post-backward selection block. This flag is a
+    /// short-term gate for an A/B benchmark; a future release will replace
+    /// it with a config-file field on `cut_selection`.
+    #[arg(long)]
+    pub enable_inside_backward: bool,
 }
 
 fn resolve_thread_count(cli_threads: Option<u32>) -> usize {
@@ -210,6 +219,13 @@ struct TrainingPhaseResult {
 /// Returns [`CliError`] when loading, training, simulation, or I/O fails.
 /// The exit code indicates the category of failure.
 pub fn execute(args: &RunArgs) -> Result<(), CliError> {
+    // Flip the in-backward cut-selection toggle BEFORE any training thread is
+    // spawned (rayon workers read this atomic on their first backward sweep).
+    // Future work replaces this flag with a config-file field.
+    if args.enable_inside_backward {
+        cobre_sddp::set_inside_backward_enabled(true);
+    }
+
     let ctx = setup_communicator(args)?;
     let result = execute_inner(&ctx, args);
     if let Err(ref e) = result

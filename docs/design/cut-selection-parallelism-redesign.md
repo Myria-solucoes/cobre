@@ -2195,6 +2195,123 @@ they reach are inputs to the gate decisions described in §10 and §13.
      per-stage rebake wall, to harden the cost-quantification in
      question (d).
 
+### 14.5 Epic 03 gate decision
+
+(§14.3 and §14.4 placeholders pending — to be filled by the
+verification harnesses that gate Epic 02 → Epic 03 transition.)
+
+- **Date**: _TBD_
+- **Host**: _TBD_
+- **Rank count (production tier)**: _TBD_
+- **Verdict**: _TBD_
+
+#### Tier 1 — Local validation (4 runs: 2 modes × 2 rank counts)
+
+The Tier 1 harness drives FOUR `cobre run` invocations into a single
+work-dir so the analysis script can validate the same-mode cross-rank
+bit-determinism contract. Cross-mode LB drift is EXPECTED per §8.3
+(different selection timing produces different LP shapes → different
+cuts → different LB trajectories) and is NOT a Tier 1 check.
+
+Run via:
+
+```
+bash plans/.../scripts/run_ab_benchmark.sh <local-case-dir> --tier local --work-dir <work>
+# Produces <work>/{baseline_local_1rank,baseline_local_2rank,
+#                  inside_local_1rank,inside_local_2rank}/
+python3 plans/.../scripts/analyze_ab.py <work> --tier local
+```
+
+| run                  | total wall (s) | final_lb |
+| -------------------- | -------------- | -------- |
+| baseline_local_1rank | _TBD_          | _TBD_    |
+| baseline_local_2rank | _TBD_          | _TBD_    |
+| inside_local_1rank   | _TBD_          | _TBD_    |
+| inside_local_2rank   | _TBD_          | _TBD_    |
+
+| same-mode cross-rank pair | rel delta (1-rank vs 2-rank) | passed |
+| ------------------------- | ---------------------------- | ------ |
+| baseline                  | _TBD_                        | _TBD_  |
+| inside                    | _TBD_                        | _TBD_  |
+
+Tier 1 checks:
+
+- `crash`: every run produced a well-formed iteration log
+- `monotone_check`: per-iter LB non-decreasing within 1e-9 relative
+  downward tolerance in EACH run
+- `bit_determinism`: same-mode 1-rank vs 2-rank final LB matches
+  within 1e-15 relative FP tolerance in BOTH modes (rank-count
+  invariance contract)
+- `extreme_regression`: inside avg total wall (across rank counts)
+  does not exceed baseline avg total wall by more than 50%
+
+Verdict: _TIER1_SANITY_OK / TIER1_SANITY_FAIL_
+
+#### Tier 2 — Production gate (MPI, user-owned, 4 runs)
+
+The production tier mirrors the Tier 1 four-invocation set at
+convertido scale so that the cross-rank bit-determinism contract is
+validated at production scale alongside the cross-mode wall-time
+gate. A bit-determinism regression at production scale is even more
+concerning than at Tier 1.
+
+Run via:
+
+```
+bash plans/.../scripts/run_ab_benchmark.sh <prod-case-dir> --tier production <N>
+# (prints four cobre/mpirun command lines; run them manually under
+# the workload manager. Output dirs:
+# <work>/{baseline_production_1rank,baseline_production_2rank,
+#         inside_production_1rank,inside_production_2rank}/)
+python3 plans/.../scripts/analyze_ab.py <work> --tier production
+```
+
+Baseline wall-time breakdown:
+
+| component                            | wall (s) | notes |
+| ------------------------------------ | -------- | ----- |
+| forward sweep                        | _TBD_    |       |
+| backward sweep                       | _TBD_    |       |
+| post-backward cut selection          | _TBD_    |       |
+| per-stage cut sync                   | _TBD_    |       |
+| other (LB eval, allreduce, overhead) | _TBD_    |       |
+| total                                | _TBD_    |       |
+
+Inside-backward wall-time breakdown:
+
+| component                                           | wall (s) | notes |
+| --------------------------------------------------- | -------- | ----- |
+| forward sweep                                       | _TBD_    |       |
+| backward sweep (incl. per-stage selection + rebake) | _TBD_    |       |
+| per-stage cut sync (allgatherv)                     | _TBD_    |       |
+| other (LB eval, allreduce, overhead)                | _TBD_    |       |
+| total                                               | _TBD_    |       |
+
+Net wall-time saving: _TBD_ (target: inside-backward total < baseline total).
+
+#### Decision protocol
+
+Tier 1 (orchestrator-runnable, ~10–12 min for the local case) gates
+on four checks — `crash`, `monotone_check`, `bit_determinism`,
+`extreme_regression` — and emits `TIER1_SANITY_OK` /
+`TIER1_SANITY_FAIL(<reasons>)`. Cross-mode LB drift is EXPECTED per
+§8.3 and is NOT a Tier 1 check; per-iter LB monotonicity within each
+run and same-mode bit-determinism across rank counts ARE checks.
+
+Tier 2 (production, user-owned) runs the same four checks at
+convertido scale and adds the wall-delta gate:
+
+- **FAVORABLE**: all four Tier 1 checks pass AND inside-backward avg
+  total wall (across rank counts) is strictly less than baseline avg
+  total wall. Selection-inside-backward becomes the default; the
+  runtime toggle is replaced with a config-file field.
+- **UNFAVORABLE**: any Tier 1 check fails at production scale OR the
+  wall-delta gate is not met. The in-backward hook is left dormant
+  (toggle defaults to off); the post-backward selection block stays
+  in place; alternative mechanisms are explored. A `bit_determinism`
+  failure at production scale is a hard stop and re-opens
+  ticket-015's hook implementation regardless of wall-time outcome.
+
 ---
 
 ## Document changelog

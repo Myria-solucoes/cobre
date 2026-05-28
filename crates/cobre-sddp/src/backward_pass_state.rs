@@ -3,11 +3,12 @@
 //! [`BackwardPassState`] owns pre-allocated scratch buffers reused each iteration.
 //! [`BackwardPassInputs`] bundles per-call borrowed inputs (no allocation on hot path).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::time::Instant;
 
 use cobre_comm::{Communicator, ReduceOp};
-use cobre_core::{TrainingEvent, WorkerPhaseTimings, WorkerTimingPhase};
+use cobre_core::{StageRowSelectionRecord, TrainingEvent, WorkerPhaseTimings, WorkerTimingPhase};
 use cobre_solver::{RowBatch, SolverInterface, SolverStatistics, StageTemplate};
 use rayon::iter::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator,
@@ -21,9 +22,10 @@ use crate::{
     config::CutManagementConfig,
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
+    cut_selection::{CutSelectionStrategy, PerWorkerScratch},
     cut_sync::CutSyncBuffers,
     error::SddpError,
-    forward::{build_delta_cut_row_batch_into, partition},
+    forward::{build_cut_row_batch_into, build_delta_cut_row_batch_into, partition},
     risk_measure::RiskMeasure,
     solver_phase::{BACKWARD_PROFILE, Phase},
     solver_stats::{
@@ -31,20 +33,54 @@ use crate::{
         pack_worker_opening_stats, unpack_worker_opening_stats,
     },
     state_exchange::ExchangeBuffers,
-    training_session::{
-        iteration_scratch::IterationScratch, rank_distribution::RankDistribution,
-        runtime::RuntimeHandles,
-    },
+    training_session::{rank_distribution::RankDistribution, runtime::RuntimeHandles},
     trajectory::TrajectoryRecord,
     visited_states::VisitedStatesArchive,
     workspace::{BasisStore, BasisStoreSliceMut, SolverWorkspace, WorkspacePool},
 };
 
+/// Global runtime toggle for the in-backward cut-selection hook.
+///
+/// Default `false` at process start. When `true`, the hook installed inside
+/// [`run_one_backward_stage`] runs after the per-stage cut sync (when a
+/// strategy is plumbed in and its `should_run(iteration)` gate fires).
+///
+/// ## Rollout plan
+///
+/// - This module installs the hook gated on this toggle. The hook stays
+///   dead in production until the toggle flips.
+/// - A future `cobre-cli` flag will flip the toggle at process startup
+///   for a gating benchmark.
+/// - A future trajectory smoke check will exercise the toggle-on path.
+/// - A future ticket replaces the runtime toggle with a config-driven
+///   field on `CutManagementConfig`; until then, this `AtomicBool` is
+///   the only external switch.
+///
+/// ## Ordering
+///
+/// `Ordering::Relaxed` is sufficient because the toggle is flipped once
+/// at process startup (before the training loop begins) and is
+/// thereafter read-only across all rayon workers. No inter-thread
+/// ordering guarantees are required beyond visibility within the same
+/// address space.
+pub(crate) static IN_BACKWARD_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Stage index below which the per-stage selection hook never runs.
+///
+/// `1` preserves the existing post-backward block's `1..num_sel_stages`
+/// exclusion: stage 0's pool is never the successor in the backward
+/// pass, so its binding-activity metadata is never updated, leaving
+/// strategy decisions uninformed. A future ticket may flip this to `0`
+/// if stage-0 inclusion proves beneficial.
+const STAGE_0_EXCLUSION_GUARD: usize = 1;
+
 /// Per-iteration argument bundle for [`BackwardPassState::run`].
 ///
 /// Groups all borrowed inputs that vary between calls: exchange buffers,
-/// trajectory records, risk measures, cut-sync state, and the event sender.
-/// Owned scratch buffers live on [`BackwardPassState`] and are not repeated here.
+/// trajectory records, risk measures, cut-sync state, the event sender, the
+/// optional cut-selection strategy, and the per-rayon-worker scratch slice
+/// used by the cut-selection kernel. Owned scratch buffers live on
+/// [`BackwardPassState`] and are not repeated here.
 pub struct BackwardPassInputs<'a, S: SolverInterface + Send, C: Communicator> {
     /// Solver workspaces (one per rayon worker thread).
     pub workspaces: &'a mut [SolverWorkspace<S>],
@@ -53,7 +89,12 @@ pub struct BackwardPassInputs<'a, S: SolverInterface + Send, C: Communicator> {
     /// Stage-level LP context (templates, row counts, noise scales).
     pub ctx: &'a StageContext<'a>,
     /// Baked LP templates including pre-appended prior-iteration cuts.
-    pub baked: &'a [StageTemplate],
+    ///
+    /// Borrowed mutably so the per-stage in-backward selection hook can
+    /// re-bake `baked[t]` after applying selection updates. Only the
+    /// hook (gated by [`IN_BACKWARD_ENABLED`]) mutates this slice;
+    /// every other consumer reads it through an implicit `&*` reborrow.
+    pub baked: &'a mut [StageTemplate],
     /// Future-cost function — receives new cuts after each stage.
     pub fcf: &'a mut FutureCostFunction,
     /// Per-stage delta cut row batches (reused scratch, resized per stage).
@@ -82,6 +123,32 @@ pub struct BackwardPassInputs<'a, S: SolverInterface + Send, C: Communicator> {
     /// Optional visited-states archive for dominated cut selection.
     pub visited_archive: Option<&'a mut VisitedStatesArchive>,
 
+    /// Optional cut-selection strategy. When `Some`, the per-stage
+    /// selection hook in `run_one_backward_stage` runs after
+    /// per-stage cut sync; when `None`, no selection runs inside
+    /// the backward sweep.
+    ///
+    /// Borrowed as `Option<&'a CutSelectionStrategy>` (not
+    /// `&'a Option<CutSelectionStrategy>`) so the hook can early-exit
+    /// on `None` without touching the enclosing option pattern.
+    ///
+    /// Consumed by the per-stage selection hook inside
+    /// [`run_one_backward_stage`], guarded by the runtime toggle
+    /// [`IN_BACKWARD_ENABLED`].
+    pub cut_selection: Option<&'a CutSelectionStrategy>,
+
+    /// Per-rayon-worker scratch for the cut-selection kernel.
+    /// Borrowed from `IterationScratch::cut_selection_scratch`.
+    /// One entry per `rayon::current_num_threads()`. The kernel today
+    /// resets `accum_bitmap` per call but does not yet consume
+    /// `v_block` (fold-leaf allocations are used instead — see the
+    /// doc on [`PerWorkerScratch`]).
+    ///
+    /// Consumed by the per-stage selection hook inside
+    /// [`run_one_backward_stage`], guarded by the runtime toggle
+    /// [`IN_BACKWARD_ENABLED`].
+    pub cut_selection_scratch: &'a mut [PerWorkerScratch],
+
     /// Optional event channel for emitting [`TrainingEvent::WorkerTiming`] events.
     pub event_sender: Option<&'a Sender<TrainingEvent>>,
 
@@ -109,30 +176,41 @@ impl<'a, S: SolverInterface + Send, C: Communicator> BackwardPassInputs<'a, S, C
     ///
     /// The caller is responsible for taking `&mut session.bwd_state` separately
     /// (which the borrow checker treats as a disjoint field borrow), then passing
-    /// the remaining session fields here.  This collapses the 20-field struct
-    /// literal into a single compact call:
+    /// the remaining session fields here.  The `IterationScratch` is split into
+    /// named sub-field parameters (`baked_templates`, `cut_batches`, `records`,
+    /// `cut_selection_scratch`) so the caller can keep the four disjoint borrows
+    /// alive simultaneously across the call.
     ///
     /// ```text
     /// let bwd = &mut self.bwd_state;
     /// let mut inputs = BackwardPassInputs::from_session_fields(
     ///     &mut self.fwd_pool, &mut self.basis_store, self.stage_ctx,
-    ///     &mut self.scratch, self.fcf, &mut self.exchange_bufs,
+    ///     &mut self.scratch.baked_templates,
+    ///     &mut self.scratch.cut_batches,
+    ///     &self.scratch.records,
+    ///     &mut self.scratch.cut_selection_scratch,
+    ///     self.fcf, &mut self.exchange_bufs,
     ///     &mut self.cut_sync_bufs, &mut self.visited_archive,
     ///     self.training_ctx, self.comm,
     ///     &self.config.cut_management, &self.ranks, &self.runtime, iteration,
     /// );
     /// bwd.run(&mut inputs)?;
     /// ```
-    // RATIONALE: 14 args are disjoint borrows of `TrainingSession` fields required because
+    // RATIONALE: the args are disjoint borrows of `TrainingSession` fields required because
     // Rust NLL cannot split a single `&mut TrainingSession` borrow when `bwd_state` is also
-    // borrowed mutably. Grouping would either reintroduce the aliasing problem or add an
-    // extra indirection level that hides the borrow structure.
+    // borrowed mutably. The `IterationScratch` sub-field split (baked_templates, cut_batches,
+    // records, cut_selection_scratch) is required so the caller can co-borrow
+    // `self.scratch.cut_selection_scratch` mutably alongside the other scratch sub-borrows
+    // without taking a whole-struct `&mut self.scratch` that would overlap.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_session_fields(
         fwd_pool: &'a mut WorkspacePool<S>,
         basis_store: &'a mut BasisStore,
         ctx: &'a StageContext<'a>,
-        scratch: &'a mut IterationScratch,
+        baked_templates: &'a mut [StageTemplate],
+        cut_batches: &'a mut [RowBatch],
+        records: &'a [TrajectoryRecord],
+        cut_selection_scratch: &'a mut [PerWorkerScratch],
         fcf: &'a mut FutureCostFunction,
         exchange: &'a mut ExchangeBuffers,
         cut_sync_bufs: &'a mut CutSyncBuffers,
@@ -148,15 +226,17 @@ impl<'a, S: SolverInterface + Send, C: Communicator> BackwardPassInputs<'a, S, C
             workspaces: &mut fwd_pool.workspaces,
             basis_store,
             ctx,
-            baked: &scratch.baked_templates,
+            baked: baked_templates,
             fcf,
-            cut_batches: &mut scratch.cut_batches,
+            cut_batches,
             training_ctx,
             comm,
             exchange,
-            records: &scratch.records,
+            records,
             cut_sync_bufs,
             visited_archive: visited_archive.as_mut(),
+            cut_selection: cut_mgmt.cut_selection.as_ref(),
+            cut_selection_scratch,
             event_sender: runtime.event_sender(),
             risk_measures: &cut_mgmt.risk_measures,
             cut_activity_tolerance: cut_mgmt.cut_activity_tolerance,
@@ -413,6 +493,11 @@ impl BackwardPassState {
         let mut imbalance_ms: u64 = 0;
         let mut scheduling_ms: u64 = 0;
         let mut cut_sync_ms: u64 = 0;
+        // Per-stage selection records populated by the in-backward hook.
+        // Bounded by (num_stages - 1); only stages where the hook
+        // actually ran push an entry.
+        let mut selection_records: Vec<StageRowSelectionRecord> =
+            Vec::with_capacity(num_stages.saturating_sub(1));
 
         for t in (0..num_stages.saturating_sub(1)).rev() {
             let out = run_one_backward_stage(self, inputs, t, &params)?;
@@ -424,7 +509,15 @@ impl BackwardPassState {
             scheduling_ms += out.scheduling_ms;
             cut_sync_ms += out.cut_sync_ms;
             stage_stats.push((t + 1, out.stage_entries));
+            if let Some(rec) = out.selection_record {
+                selection_records.push(rec);
+            }
         }
+
+        // The backward sweep iterates stages high-to-low, so
+        // `selection_records` is collected in descending stage order.
+        // Sort ascending for downstream consumers.
+        selection_records.sort_by_key(|r| r.stage);
 
         // Clear iteration-scoped window buffers after all stages.
         for ws in inputs.workspaces.iter_mut() {
@@ -462,6 +555,7 @@ impl BackwardPassState {
             load_imbalance_ms: imbalance_ms,
             scheduling_overhead_ms: scheduling_ms,
             cut_sync_time_ms: cut_sync_ms,
+            selection_records,
         })
     }
 
@@ -730,16 +824,27 @@ struct StageOutput {
     scheduling_ms: u64,
     /// Time spent in per-stage cut-sync `allgatherv`, in milliseconds.
     cut_sync_ms: u64,
+    /// Optional per-stage selection record produced when the in-backward
+    /// selection hook ran. `None` when the hook was gated off (no strategy,
+    /// runtime toggle disabled, throttle false, or stage excluded).
+    selection_record: Option<StageRowSelectionRecord>,
 }
 
 /// Execute one backward stage (index `t`, solving at successor `t + 1`).
 ///
 /// Performs state exchange, builds the successor LP batch, runs the parallel
-/// trial-point loop, inserts cuts, syncs cuts across ranks, syncs cut metadata,
-/// and collects per-worker solver statistics.
+/// trial-point loop, inserts cuts, syncs cuts across ranks, runs the optional
+/// per-stage selection hook, syncs cut metadata, and collects per-worker
+/// solver statistics.
 ///
 /// Returns a [`StageOutput`] accumulating all timing components and the cut
 /// entries for this stage.
+// RATIONALE: this function sequences ~10 disjoint phases (state exchange,
+// archive, batch build, parallel solves, cut insert, cut sync, selection hook,
+// metadata sync, timing stats, stats gather). Each phase mutates state read by
+// the next; splitting into helpers would require threading every disjoint
+// sub-field as &mut, exploding the parameter count without gaining clarity.
+#[allow(clippy::too_many_lines)]
 fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
     state: &mut BackwardPassState,
     inputs: &mut BackwardPassInputs<'_, S, C>,
@@ -873,6 +978,94 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
     #[allow(clippy::cast_possible_truncation)]
     let cut_sync_ms = sync_start.elapsed().as_millis() as u64;
 
+    // Per-stage cut-selection hook.
+    //
+    // Runs after the per-stage cut sync (so the strategy sees the
+    // globally-consistent pool) and BEFORE the metadata sync (so
+    // `apply_updates` settles `pool.active` before the next iteration's
+    // metadata accumulation begins). Guarded by:
+    //
+    //   1. `IN_BACKWARD_ENABLED` runtime toggle (default `false`).
+    //   2. A plumbed-in `CutSelectionStrategy`.
+    //   3. The strategy's `should_run(iteration)` throttle.
+    //   4. `t >= STAGE_0_EXCLUSION_GUARD` (mirrors the existing
+    //      post-backward block's stage-0 exclusion).
+    //   5. `t < num_stages - 1` (terminal stage has no cuts to select).
+    //
+    // After selection, the hook re-bakes `baked_templates[t]` from the
+    // pruned active cut set so that stage `t-1`'s next
+    // `load_backward_lp` sees the leaner template (design §14.2:
+    // without rebake, intra-backward pruning only affects the
+    // within-iteration delta batch).
+    let mut selection_record: Option<StageRowSelectionRecord> = None;
+    if IN_BACKWARD_ENABLED.load(Ordering::Relaxed)
+        && let Some(strategy) = inputs.cut_selection
+        && strategy.should_run(inputs.iteration)
+        && t >= STAGE_0_EXCLUSION_GUARD
+        && t < num_stages.saturating_sub(1)
+    {
+        let visited = inputs
+            .visited_archive
+            .as_deref()
+            .map_or(&[] as &[f64], |a| a.states_for_stage(t));
+        let sel_start = Instant::now();
+        #[allow(clippy::cast_possible_truncation)]
+        let updates = strategy.select_for_stage_with_scratch(
+            &inputs.fcf.pools[t],
+            visited,
+            inputs.iteration,
+            t as u32,
+            inputs.cut_selection_scratch,
+        );
+        #[allow(clippy::cast_possible_truncation)]
+        let active_before = inputs.fcf.pools[t].active_count() as u32;
+        #[allow(clippy::cast_possible_truncation)]
+        let populated = inputs.fcf.pools[t].populated_count as u32;
+        #[allow(clippy::cast_possible_truncation)]
+        let n_deact = updates.updates.len() as u32;
+        #[allow(clippy::cast_possible_truncation)]
+        let n_reactivated = updates.reactivations.len() as u32;
+        inputs.fcf.pools[t].apply_updates(&updates);
+        #[allow(clippy::cast_possible_truncation)]
+        let active_after = inputs.fcf.pools[t].active_count() as u32;
+        #[allow(clippy::cast_possible_truncation)]
+        let rows_in_lp = inputs.fcf.pools[t].cuts_in_lp() as u32;
+        let sel_ms = sel_start.elapsed().as_secs_f64() * 1000.0;
+
+        // Rebake: refresh `baked_templates[t]` from the now-pruned
+        // active cut set so stage `t-1`'s next `load_backward_lp`
+        // sees the leaner template. Uses `build_cut_row_batch_into`
+        // (full active set, not the iteration delta) so the bake
+        // captures the post-selection state.
+        build_cut_row_batch_into(
+            &mut inputs.cut_batches[t],
+            inputs.fcf,
+            t,
+            indexer,
+            &inputs.ctx.templates[t].col_scale,
+        );
+        cobre_solver::bake_rows_into_template(
+            &inputs.ctx.templates[t],
+            &inputs.cut_batches[t],
+            &mut inputs.baked[t],
+        );
+
+        #[allow(clippy::cast_possible_truncation)]
+        let stage_u32 = t as u32;
+        selection_record = Some(StageRowSelectionRecord {
+            stage: stage_u32,
+            rows_populated: populated,
+            rows_active_before: active_before,
+            rows_deactivated: n_deact,
+            rows_reactivated: n_reactivated,
+            rows_active_after: active_after,
+            selection_time_ms: sel_ms,
+            budget_evicted: None,
+            active_after_budget: None,
+            rows_in_lp,
+        });
+    }
+
     state.sync_stage_metadata(
         successor,
         inputs.iteration,
@@ -902,6 +1095,7 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
         imbalance_ms,
         scheduling_ms,
         cut_sync_ms,
+        selection_record,
     })
 }
 
@@ -1043,6 +1237,16 @@ mod tests {
         Basis, LpSolution, ProfiledSolver, RowBatch, SolverError, SolverInterface,
         SolverStatistics, StageTemplate,
     };
+
+    /// Serialise tests that observe or mutate `IN_BACKWARD_ENABLED`.
+    ///
+    /// The toggle is a process-global `AtomicBool`; rust's test harness
+    /// runs tests in parallel by default, so two tests reading or
+    /// writing the toggle concurrently would race. Each toggle-touching
+    /// test acquires this mutex for its full body so observations
+    /// remain coherent. Tests holding the lock are responsible for
+    /// restoring the toggle to `false` before releasing.
+    static TOGGLE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     use crate::{
         context::{StageContext, TrainingContext},
@@ -1502,6 +1706,10 @@ mod tests {
         let stochastic = make_stochastic_context(n_stages, n_openings);
         let indexer = StageIndexer::new(1, 0);
         let templates = vec![minimal_template_1_0(); n_stages];
+        // Production carries a separate baked-template buffer alongside
+        // `ctx.templates`; mirror that here so `baked: &mut [..]` does
+        // not alias the immutable `&templates` borrow held by `ctx`.
+        let mut baked_templates = templates.clone();
         let base_rows = vec![1_usize; n_stages];
         let n_state = indexer.n_state;
         let forward_passes = 2_u32;
@@ -1565,7 +1773,7 @@ mod tests {
             workspaces: &mut workspaces,
             basis_store: &mut basis_store,
             ctx: &ctx,
-            baked: &templates,
+            baked: &mut baked_templates,
             fcf: &mut fcf,
             cut_batches: &mut cut_batches,
             training_ctx: &training_ctx,
@@ -1574,6 +1782,8 @@ mod tests {
             records: &[],
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
+            cut_selection_scratch: &mut [],
             event_sender: None,
             risk_measures: &risk_measures,
             cut_activity_tolerance: 0.0,
@@ -1626,6 +1836,7 @@ mod tests {
         let stochastic = make_stochastic_context(n_stages, n_openings);
         let indexer = StageIndexer::new(1, 0);
         let templates = vec![minimal_template_1_0(); n_stages];
+        let mut baked_templates = templates.clone();
         let base_rows = vec![1_usize; n_stages];
         let n_state = indexer.n_state;
         let forward_passes = 2_u32;
@@ -1687,7 +1898,7 @@ mod tests {
             workspaces: &mut workspaces,
             basis_store: &mut basis_store,
             ctx: &ctx,
-            baked: &templates,
+            baked: &mut baked_templates,
             fcf: &mut fcf,
             cut_batches: &mut cut_batches,
             training_ctx: &training_ctx,
@@ -1696,6 +1907,8 @@ mod tests {
             records: &[],
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
+            cut_selection_scratch: &mut [],
             event_sender: None,
             risk_measures: &risk_measures,
             cut_activity_tolerance: 0.0,
@@ -1716,6 +1929,174 @@ mod tests {
             inputs.workspaces[0].backward_accum.state_duals_buf.len(),
             n_state,
             "state_duals_buf must have length n_state after backward pass"
+        );
+    }
+
+    /// Pin the rollout invariant: with the runtime toggle defaulted to
+    /// `false`, the in-backward selection hook must not run even when a
+    /// strategy and matching scratch are plumbed in. The resulting
+    /// `BackwardResult.selection_records` must be empty.
+    ///
+    /// This guards against accidental "always-on" wiring of the hook —
+    /// the hook should remain dead in production until the toggle flips,
+    /// to keep the post-backward selection block the sole source of
+    /// `PolicySelectionComplete` events.
+    #[test]
+    fn in_backward_hook_skipped_when_toggle_false() {
+        use crate::cut_selection::{CutSelectionStrategy, PerWorkerScratch};
+
+        // Serialise toggle-touching tests so the global AtomicBool is
+        // not flipped by a sibling test mid-run.
+        let _toggle_lock = TOGGLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        // Construct the same fixture as
+        // `backward_pass_state_run_preserves_one_stage_scenario_result`,
+        // but plumb in a `Some(strategy)` with `check_frequency = 1` so
+        // the strategy's gate would fire on iteration 1 if the hook
+        // were to execute.
+        let n_stages = 2_usize;
+        let n_openings = 2_usize;
+        let stochastic = make_stochastic_context(n_stages, n_openings);
+        let indexer = StageIndexer::new(1, 0);
+        let templates = vec![minimal_template_1_0(); n_stages];
+        let mut baked_templates = templates.clone();
+        let base_rows = vec![1_usize; n_stages];
+        let n_state = indexer.n_state;
+        let forward_passes = 2_u32;
+
+        let mut fcf =
+            FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
+        let mut exchange = exchange_with_states(n_state, vec![vec![10.0], vec![20.0]]);
+        let horizon = HorizonMode::Finite {
+            num_stages: n_stages,
+        };
+        let risk_measures = vec![RiskMeasure::Expectation; n_stages];
+
+        let solution = solution_1_0(100.0, -5.0);
+        let comm = StubComm;
+        let mut workspaces = single_workspace(MockSolver::always_ok(solution), n_state);
+        let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
+        let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
+        let mut cut_batches = empty_cut_batches(n_stages);
+        let ctx = StageContext {
+            templates: &templates,
+            base_rows: &base_rows,
+            noise_scale: &[],
+            n_hydros: 0,
+            n_load_buses: 0,
+            load_balance_row_starts: &[],
+            load_bus_indices: &[],
+            block_counts_per_stage: &[],
+            ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
+            discount_factors: &[],
+            cumulative_discount_factors: &[],
+            stage_lag_transitions: &[],
+            noise_group_ids: &[],
+            downstream_par_order: 0,
+        };
+        let training_ctx = TrainingContext {
+            horizon: &horizon,
+            indexer: &indexer,
+            inflow_method: &InflowNonNegativityMethod::None,
+            stochastic: &stochastic,
+            initial_state: &[],
+            inflow_scheme: SamplingScheme::InSample,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
+            stages: &[],
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+            recent_accum_seed: &[],
+            recent_weight_seed: 0.0,
+        };
+
+        let bwd_max_openings = n_openings;
+        let mut state = BackwardPassState::new(1, 1, bwd_max_openings, n_state);
+        let local_count = exchange.local_count();
+
+        let strategy = CutSelectionStrategy::Level1 {
+            check_frequency: 1,
+            tie_tolerance: 1e-10,
+        };
+        let mut sel_scratch: Vec<PerWorkerScratch> = vec![PerWorkerScratch::new(1, 1)];
+
+        // Force the toggle to `false` and confirm the production
+        // default. The TOGGLE_TEST_LOCK held above guarantees no other
+        // toggle-touching test runs concurrently.
+        crate::set_inside_backward_enabled(false);
+        assert!(
+            !crate::is_inside_backward_enabled(),
+            "IN_BACKWARD_ENABLED must be false after set_inside_backward_enabled(false)"
+        );
+
+        let mut inputs = BackwardPassInputs {
+            workspaces: &mut workspaces,
+            basis_store: &mut basis_store,
+            ctx: &ctx,
+            baked: &mut baked_templates,
+            fcf: &mut fcf,
+            cut_batches: &mut cut_batches,
+            training_ctx: &training_ctx,
+            comm: &comm,
+            exchange: &mut exchange,
+            records: &[],
+            cut_sync_bufs: &mut csb,
+            visited_archive: None,
+            cut_selection: Some(&strategy),
+            cut_selection_scratch: &mut sel_scratch,
+            event_sender: None,
+            risk_measures: &risk_measures,
+            cut_activity_tolerance: 0.0,
+            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
+            iteration: 1,
+            local_work: local_count,
+            fwd_offset: 0,
+        };
+
+        let result = state
+            .run(&mut inputs)
+            .expect("backward pass must not error");
+
+        // Toggle is false: the hook must be skipped at every stage, so
+        // `selection_records` must be empty regardless of `should_run`.
+        assert!(
+            result.selection_records.is_empty(),
+            "selection_records must be empty when IN_BACKWARD_ENABLED is false; \
+             got {} entries",
+            result.selection_records.len(),
+        );
+    }
+
+    /// Pin the public setter/reader pair for the in-backward toggle.
+    /// `set_inside_backward_enabled` must transition the toggle visibly
+    /// via `is_inside_backward_enabled`. The test restores the toggle to
+    /// `false` at the end so subsequent tests observe the production
+    /// default — the toggle is process-global state.
+    #[test]
+    fn inside_backward_toggle_setter_round_trip() {
+        // Serialise with the other toggle-touching test so the global
+        // AtomicBool observations are coherent.
+        let _toggle_lock = TOGGLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        crate::set_inside_backward_enabled(true);
+        assert!(
+            crate::is_inside_backward_enabled(),
+            "is_inside_backward_enabled must report true after \
+             set_inside_backward_enabled(true)"
+        );
+
+        crate::set_inside_backward_enabled(false);
+        assert!(
+            !crate::is_inside_backward_enabled(),
+            "is_inside_backward_enabled must report false after \
+             set_inside_backward_enabled(false)"
         );
     }
 }

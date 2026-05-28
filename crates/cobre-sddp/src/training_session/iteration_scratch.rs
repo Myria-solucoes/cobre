@@ -512,7 +512,7 @@ mod tests {
         let n_state = 4;
         let fcf_pool_0_capacity = 10;
         let max_pool_capacity = 25; // higher than pool 0 to verify it
-                                    // is the sizing parameter
+        // is the sizing parameter
         let template_0_num_rows = 5;
         let hydro_count = 1;
         let max_par_order = 1;

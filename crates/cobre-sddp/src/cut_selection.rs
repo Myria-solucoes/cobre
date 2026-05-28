@@ -2228,7 +2228,7 @@ mod tests {
         let mut pool = CutPool::new(2, 1, 1, 0);
         pool.add_cut(0, 0, 10.0, &[0.0]); // higher value
         pool.add_cut(1, 0, 1.0, &[0.0]); // lower value
-                                         // Slot 0 from current iteration → ineligible. Slot 1 eligible.
+        // Slot 0 from current iteration → ineligible. Slot 1 eligible.
         pool.metadata[0].iteration_generated = 10; // current_iteration
         pool.metadata[1].iteration_generated = 5;
         // n_eligible = 1 (only slot 1). Guard returns empty.
