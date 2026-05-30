@@ -21,6 +21,12 @@
 //! the headline final objective bounds and the simulation expected cost so
 //! consumers can read `.bounds.final_lower_bound` and `.cost.mean_cost` without
 //! reaching through the nested `training`/`simulation` objects.
+//!
+//! `.training.solve_stats.total_lp_solves` and
+//! `.simulation.solve_stats.total_lp_solves` report the values persisted in
+//! metadata, whereas `cobre summary`'s displayed "LP solves:" line re-reads the
+//! convergence parquet directly; for a fresh run both are numerically identical
+//! because they reflect the same solves.
 
 use std::path::PathBuf;
 

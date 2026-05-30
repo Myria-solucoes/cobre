@@ -177,4 +177,21 @@ fn run_then_summary_and_report_preserve_the_deterministic_end_block() {
         nested,
         ".cost.mean_cost must equal .simulation.cost.mean_cost"
     );
+
+    // ── 6. Metadata LP-solve counts match the summary "LP solves" display ──
+    //
+    // `report` reads these from persisted metadata; `summary`'s "LP solves:"
+    // line re-reads the convergence parquet. For a fresh run both reflect the
+    // same solves, so the golden counts (5632 training, 400 simulation) lock
+    // the metadata-vs-display relationship.
+    assert_eq!(
+        value["training"]["solve_stats"]["total_lp_solves"].as_u64(),
+        Some(5632),
+        ".training.solve_stats.total_lp_solves must equal the summary display count"
+    );
+    assert_eq!(
+        value["simulation"]["solve_stats"]["total_lp_solves"].as_u64(),
+        Some(400),
+        ".simulation.solve_stats.total_lp_solves must equal the summary display count"
+    );
 }

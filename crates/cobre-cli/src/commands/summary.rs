@@ -183,7 +183,11 @@ fn build_training_summary(
         converged: metadata.convergence.achieved,
         converged_at: metadata.iterations.converged_at.map(u64::from),
         reason: metadata.convergence.termination_reason.clone(),
-        lower_bound: metadata.bounds.final_lower_bound,
+        lower_bound: if metadata.bounds.final_lower_bound.abs() > f64::EPSILON {
+            metadata.bounds.final_lower_bound
+        } else {
+            convergence.final_lower_bound
+        },
         upper_bound: metadata
             .bounds
             .final_upper_bound
@@ -512,7 +516,7 @@ mod tests {
     }
 
     #[test]
-    fn build_training_summary_bounds_fall_back_to_parquet_when_default() {
+    fn build_training_summary_bounds_fall_back_to_parquet_when_metadata_default() {
         let mut metadata = make_training_metadata();
         // Legacy/default bounds: lower=0.0, uppers=None.
         metadata.bounds = MetadataBounds {
@@ -521,6 +525,7 @@ mod tests {
             final_upper_bound_std: None,
         };
         let convergence = ConvergenceSummary {
+            final_lower_bound: 48_500.0,
             final_upper_bound_mean: 49_000.0,
             final_upper_bound_std: 250.0,
             ..make_convergence_summary()
@@ -528,8 +533,9 @@ mod tests {
 
         let summary = build_training_summary(&metadata, &convergence, None);
 
-        // Lower bound is always taken from metadata (matching the historical zero fallback).
-        assert!(summary.lower_bound.abs() < f64::EPSILON);
+        // Lower bound recovers the parquet value when metadata carries the default
+        // (zero), matching the upper-bound fallback so legacy dirs stay consistent.
+        assert!((summary.lower_bound - 48_500.0).abs() < f64::EPSILON);
         // Upper bounds recover the parquet values when metadata omits them.
         assert!((summary.upper_bound - 49_000.0).abs() < f64::EPSILON);
         assert!((summary.upper_bound_std - 250.0).abs() < f64::EPSILON);
