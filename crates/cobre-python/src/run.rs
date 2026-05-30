@@ -29,9 +29,9 @@ use cobre_comm::LocalBackend;
 use cobre_io::output::simulation_writer::{ScenarioWritePayload, SimulationParquetWriter};
 use cobre_io::{ParquetWriterConfig, SolverStatsRow};
 use cobre_sddp::{
-    build_hydro_model_summary, build_provenance_report, build_stochastic_summary,
-    prepare_stochastic, ArOrderSummary, HydroModelSummary, ModelProvenanceReport, SolverStatsDelta,
-    StochasticSource, StochasticSummary, StudyParams, StudySetup, DEFAULT_SEED,
+    ArOrderSummary, DEFAULT_SEED, HydroModelSummary, ModelProvenanceReport, SolverStatsDelta,
+    StochasticSource, StochasticSummary, StudyParams, StudySetup, build_hydro_model_summary,
+    build_provenance_report, build_stochastic_summary, prepare_stochastic,
 };
 use cobre_solver::HighsSolver;
 
@@ -114,6 +114,45 @@ fn delta_to_stats_row(
     }
 }
 
+/// Fold the per-phase training solver-stats log into category totals.
+///
+/// Returns `(first_try, retried, failed, forward_solve_seconds,
+/// backward_solve_seconds)`, mirroring the CLI's `aggregate_solver_stats`
+/// shape. The Python path is single-process, so every log entry is summed (no
+/// per-rank filter). Solve times are converted from milliseconds to seconds.
+///
+/// `total_lp_solves` is intentionally NOT derived here. The CLI sources it from
+/// the per-iteration convergence records (`IterationRecord.lp_solves`), not from
+/// this per-phase/per-stage stats log; the two sums can diverge for multi-stage
+/// cases. The caller computes it from the convergence records to stay
+/// bit-for-bit identical to the CLI.
+fn aggregate_training_solve_stats(
+    stats_log: &[(u64, &'static str, i32, i32, i32, i32, SolverStatsDelta)],
+) -> (u64, u64, u64, f64, f64) {
+    let mut first_try = 0u64;
+    let mut retried = 0u64;
+    let mut failed = 0u64;
+    let mut forward_solve_ms = 0.0_f64;
+    let mut backward_solve_ms = 0.0_f64;
+    for (_, phase, _, _, _, _, delta) in stats_log {
+        first_try += delta.first_try_successes;
+        retried += delta.lp_successes.saturating_sub(delta.first_try_successes);
+        failed += delta.lp_failures;
+        match *phase {
+            "forward" => forward_solve_ms += delta.solve_time_ms,
+            "backward" => backward_solve_ms += delta.solve_time_ms,
+            _ => {}
+        }
+    }
+    (
+        first_try,
+        retried,
+        failed,
+        forward_solve_ms / 1000.0,
+        backward_solve_ms / 1000.0,
+    )
+}
+
 /// Result of the training phase within `run_inner`.
 struct TrainingPhaseResult {
     result: cobre_sddp::TrainingResult,
@@ -143,7 +182,29 @@ fn run_training_phase_py(
     let training_result = training_outcome.result;
 
     let events: Vec<_> = event_rx.try_iter().collect();
-    let training_output = setup.build_training_output(&training_result, &events);
+    let mut training_output = setup.build_training_output(&training_result, &events);
+
+    // Populate the solve-stats carrier. `build_training_output` leaves it
+    // defaulted (and already set `final_upper_bound_std`, which must remain
+    // untouched). `total_lp_solves` is sourced from the per-iteration
+    // convergence records to mirror the CLI exactly; the phase-derived counts
+    // come from the per-phase stats-log fold.
+    let total_lp_solves: u64 = training_output
+        .convergence_records
+        .iter()
+        .map(|r| u64::from(r.lp_solves))
+        .sum();
+    let (first_try, retried, failed, forward_solve_seconds, backward_solve_seconds) =
+        aggregate_training_solve_stats(&training_result.solver_stats_log);
+    training_output.training_solve_stats = cobre_io::MetadataTrainingSolveStats {
+        total_lp_solves: Some(total_lp_solves),
+        first_try: Some(first_try),
+        retried: Some(retried),
+        failed: Some(failed),
+        forward_solve_seconds: Some(forward_solve_seconds),
+        backward_solve_seconds: Some(backward_solve_seconds),
+        parallelism: Some(u32::try_from(n_threads).unwrap_or(u32::MAX)),
+    };
 
     Ok(TrainingPhaseResult {
         result: training_result,
@@ -232,8 +293,11 @@ fn write_training_artifacts(
             mpi_standard: None,
             thread_level: None,
             slurm_job_id: None,
-            // Placeholder: populated from the execution topology once host wiring lands.
-            hosts: Vec::new(),
+            // Single-process LocalBackend: one host, rank 0.
+            hosts: vec![cobre_io::HostLayout {
+                hostname: cobre_io::get_hostname(),
+                ranks: vec![0],
+            }],
         },
     };
     cobre_io::write_training_results(output_dir, &training.output, system, config, &training_ctx)
@@ -293,6 +357,37 @@ fn run_simulation_phase_py(
     let mut sim_out = sim_writer.finalize(0);
     sim_out.failed = write_failures;
 
+    // Fold every per-scenario solver delta into one aggregate (single-process:
+    // no opening or per-worker dimension to filter on).
+    let mut agg = SolverStatsDelta::default();
+    for (_, _, delta) in &sim_run_result.solver_stats {
+        SolverStatsDelta::accumulate_into(&mut agg, delta);
+    }
+
+    // Aggregate per-scenario costs into the simulation cost summary.
+    let cost_summary = cobre_sddp::aggregate_simulation(
+        &sim_run_result.costs,
+        setup.simulation_config(),
+        &LocalBackend,
+    )
+    .map_err(|e| format!("simulation cost aggregation error: {e}"))?;
+
+    let parallelism = u32::try_from(n_threads).unwrap_or(u32::MAX);
+    sim_out.cost = Some(cobre_io::MetadataCost {
+        mean_cost: cost_summary.mean_cost,
+        std_cost: cost_summary.std_cost,
+        cvar: cost_summary.cvar,
+        cvar_alpha: cost_summary.cvar_alpha,
+    });
+    sim_out.solve_stats = cobre_io::MetadataSimulationSolveStats {
+        total_lp_solves: Some(agg.lp_solves),
+        first_try: Some(agg.first_try_successes),
+        retried: Some(agg.lp_successes.saturating_sub(agg.first_try_successes)),
+        failed: Some(agg.lp_failures),
+        solve_seconds: Some(agg.solve_time_ms / 1000.0),
+        parallelism: Some(parallelism),
+    };
+
     // Simulation has no opening dimension and no per-worker dimension yet;
     // opening, rank, and worker_id are all None.
     if !sim_run_result.solver_stats.is_empty() {
@@ -327,8 +422,11 @@ fn run_simulation_phase_py(
             mpi_standard: None,
             thread_level: None,
             slurm_job_id: None,
-            // Placeholder: populated from the execution topology once host wiring lands.
-            hosts: Vec::new(),
+            // Single-process LocalBackend: one host, rank 0.
+            hosts: vec![cobre_io::HostLayout {
+                hostname: cobre_io::get_hostname(),
+                ranks: vec![0],
+            }],
         },
     };
     cobre_io::write_simulation_results(output_dir, &sim_out, &sim_ctx)
@@ -799,6 +897,26 @@ fn provenance_to_dict<'py>(
         "white_noise_fallbacks",
         report.inflow.white_noise_fallbacks.clone(),
     )?;
+
+    let hp_dict = PyDict::new(py);
+    hp_dict.set_item(
+        "n_fpha_computed_from_geometry",
+        report.hydro_production.n_fpha_computed_from_geometry,
+    )?;
+    hp_dict.set_item(
+        "n_fpha_precomputed_hyperplanes",
+        report.hydro_production.n_fpha_precomputed_hyperplanes,
+    )?;
+    hp_dict.set_item(
+        "n_evaporation_ref_user_supplied",
+        report.hydro_production.n_evaporation_ref_user_supplied,
+    )?;
+    hp_dict.set_item(
+        "n_evaporation_ref_default_midpoint",
+        report.hydro_production.n_evaporation_ref_default_midpoint,
+    )?;
+    dict.set_item("hydro_production", hp_dict)?;
+
     Ok(dict)
 }
 
@@ -899,9 +1017,51 @@ pub fn run(
 mod tests {
     use std::path::Path;
 
+    use cobre_sddp::SolverStatsDelta;
     use cobre_sddp::setup::prepare_stochastic;
 
-    use super::init_rayon;
+    use super::{aggregate_training_solve_stats, init_rayon};
+
+    #[test]
+    fn aggregate_training_solve_stats_folds_and_splits_by_phase() {
+        let forward_delta = SolverStatsDelta {
+            lp_solves: 10,
+            first_try_successes: 7,
+            lp_successes: 9,
+            lp_failures: 1,
+            solve_time_ms: 2500.0,
+            ..SolverStatsDelta::default()
+        };
+
+        let backward_delta = SolverStatsDelta {
+            lp_solves: 4,
+            first_try_successes: 2,
+            lp_successes: 4,
+            lp_failures: 0,
+            solve_time_ms: 1500.0,
+            ..SolverStatsDelta::default()
+        };
+
+        let stats_log = vec![
+            (0u64, "forward", 0, -1, 0, -1, forward_delta),
+            (0u64, "backward", 0, 0, 0, 0, backward_delta),
+        ];
+
+        // The helper returns the 5 phase-derived counts only. `total_lp_solves`
+        // is NOT produced here — it is sourced at the call site from the
+        // per-iteration convergence records to mirror the CLI (the per-phase
+        // stat-log `lp_solves` sum can diverge for multi-stage cases).
+        let (first_try, retried, failed, forward_seconds, backward_seconds) =
+            aggregate_training_solve_stats(&stats_log);
+
+        // first_try = 7 + 2; retried = (9-7) + (4-2) = 4; failed = 1 + 0.
+        assert_eq!(first_try, 9);
+        assert_eq!(retried, 4);
+        assert_eq!(failed, 1);
+        // Phase split with /1000.0 ms→s conversion.
+        assert_eq!(forward_seconds, 2.5);
+        assert_eq!(backward_seconds, 1.5);
+    }
 
     #[test]
     fn prepare_stochastic_succeeds_for_d01_case_via_python_path() {
