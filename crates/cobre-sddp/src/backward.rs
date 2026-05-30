@@ -24,15 +24,19 @@
 //! For a solve at stage `t + 1` with trial point state `x_hat`:
 //!
 //! ```text
-//! pi[i]  = dual[i] * row_scale[i]           for i in 0..n_state
-//! alpha  = Q - sum_i(pi[i] * x_hat[i])      (intercept)
+//! pi[i]  = reduced_cost[col_i] / col_scale[col_i]   for i in 0..n_state
+//! alpha  = Q - sum_i(pi[i] * x_hat[i])              (intercept)
 //! ```
 //!
-//! where `Q` is the LP objective and `dual[0..n_state]` are the duals of the
-//! fixing constraints (storage-fixing, lag-fixing, and anticipated-state-fixing rows).
-//! For all three categories the convention is `coefficients = dual` (raw `HiGHS` dual,
-//! no sign flip at extraction). Negation is applied later when building the
-//! LP cut row in `build_cut_row_batch_into` (forward.rs):
+//! where `Q` is the LP objective, `col_i = state_to_lp_incoming_column(i)` is the
+//! bound-pinned incoming-state column, and `reduced_cost[col_i]` is its `HiGHS`
+//! reduced cost (the dual of the `lb == ub` pin — equal to the legacy
+//! fixing-row dual by KKT stationarity). State fixing moved from equality rows to
+//! column bounds in the state-fixing cutover; the gradient is now a reduced cost,
+//! unscaled by `col_scale` (not `row_scale`). The convention is
+//! `coefficients = reduced_cost` (raw, no sign flip at extraction). Negation is
+//! applied later when building the LP cut row in `build_cut_row_batch_into`
+//! (forward.rs):
 //! `-coeff * x + theta >= intercept`.
 //! The intercept formula covers all `n_state` indices uniformly; no special handling
 //! for the anticipated-state subrange.
@@ -411,8 +415,10 @@ fn resolve_backward_basis<'a>(
 ///
 /// `state_duals`: unscaled reduced costs at the LP columns pinned by
 /// `fill_col_state_patches`, one entry per state-vector index.
-/// Scaling: `rc_original[j] = col_scale[col] * rc_scaled[j]`;
-/// when `col_scale` is empty the raw reduced costs are used directly.
+/// Scaling: `rc_original[j] = rc_scaled[j] / col_scale[col]` (the pin sets
+/// `v_scaled = v_orig / col_scale`, so the subgradient w.r.t. the original
+/// state divides by `col_scale`); when `col_scale` is empty the raw reduced
+/// costs are used directly.
 ///
 /// `cut_duals`: raw duals for cut rows `[template_num_rows, template_num_rows + num_cuts)`.
 /// These always have implicit `row_scale = 1.0`.
@@ -428,6 +434,13 @@ fn extract_duals_from_view(
     let objective = view.objective;
 
     // Unscale state-fixing-column reduced costs from scaled to original units.
+    // The incoming-state column is pinned in scaled space as `v_scaled =
+    // v_orig / col_scale[col]` (see `fill_col_state_patches` and
+    // `apply_col_scale`, which divides col bounds by `col_scale`). The reduced
+    // cost HiGHS reports is `rc_scaled = dQ/dv_scaled`; the cut subgradient we
+    // need is `dQ/dv_orig = rc_scaled * dv_scaled/dv_orig = rc_scaled /
+    // col_scale[col]`. Dividing (not multiplying) keeps parity with the legacy
+    // fixing-row dual, whose single-entry row carried `row_scale = 1/col_scale`.
     // `state_duals` carries pre-warmed capacity; `clear` + `push` reuses it.
     state_duals.clear();
     for j in 0..n_state {
@@ -436,7 +449,7 @@ fn extract_duals_from_view(
         let unscaled = if col_scale.is_empty() {
             rc
         } else {
-            rc * col_scale[col]
+            rc / col_scale[col]
         };
         state_duals.push(unscaled);
     }

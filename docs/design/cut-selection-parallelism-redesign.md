@@ -2200,10 +2200,20 @@ they reach are inputs to the gate decisions described in §10 and §13.
 (§14.3 and §14.4 placeholders pending — to be filled by the
 verification harnesses that gate Epic 02 → Epic 03 transition.)
 
-- **Date**: _TBD_
-- **Host**: _TBD_
-- **Rank count (production tier)**: _TBD_
-- **Verdict**: _TBD_
+- **Date**: 2026-05-28 (convertido A/B) / 2026-05-29 (higher-forward
+  confirmation)
+- **Host**: AWS c7a-48xlarge (`decomp-c7a-48x`), 2 nodes, 96 threads/rank,
+  MPICH 4.2.3, HiGHS 1.13.1, cobre 0.7.1
+- **Rank count (production tier)**: 2 (the run used a 2-invocation set —
+  one per mode at `np=2` — rather than the 4-invocation template below)
+- **Verdict**: **UNFAVORABLE (final)**. At 192 forwards inside-backward was
+  +2.1% total wall; the crossover analysis predicted the gate would flip
+  favourable at higher forward counts, but the higher-forward confirmation
+  A/B (on `pmo-set-24-semGNL`, 2026-05-29) found post-backward selection
+  still faster — the predicted crossover did not materialise in practice.
+  The in-backward path stays in place but **default-off**; post-backward
+  selection remains the production path. See "Tier 2 — Production result"
+  and "Higher-forward confirmation result" below.
 
 #### Tier 1 — Local validation (4 runs: 2 modes × 2 rank counts)
 
@@ -2266,28 +2276,145 @@ bash plans/.../scripts/run_ab_benchmark.sh <prod-case-dir> --tier production <N>
 python3 plans/.../scripts/analyze_ab.py <work> --tier production
 ```
 
-Baseline wall-time breakdown:
+#### Tier 2 — Production result (convertido, 2026-05-28)
 
-| component                            | wall (s) | notes |
-| ------------------------------------ | -------- | ----- |
-| forward sweep                        | _TBD_    |       |
-| backward sweep                       | _TBD_    |       |
-| post-backward cut selection          | _TBD_    |       |
-| per-stage cut sync                   | _TBD_    |       |
-| other (LB eval, allreduce, overhead) | _TBD_    |       |
-| total                                | _TBD_    |       |
+Two production runs were executed (one per mode, both `np=2`, 96
+threads/rank, 50 iterations, 192 forwards, 64 stages). The two runs
+landed on different physical nodes (`-1` baseline, `-3` inside), so the
+forward sweep — whose code is identical in both modes — is used as a
+host-comparability control. `duration_seconds` and `sum(time_total_ms)`
+agree to < 1 s, so I/O overhead is negligible.
 
-Inside-backward wall-time breakdown:
+**View A — authoritative wall partition (convergence.parquet):**
 
-| component                                           | wall (s) | notes |
-| --------------------------------------------------- | -------- | ----- |
-| forward sweep                                       | _TBD_    |       |
-| backward sweep (incl. per-stage selection + rebake) | _TBD_    |       |
-| per-stage cut sync (allgatherv)                     | _TBD_    |       |
-| other (LB eval, allreduce, overhead)                | _TBD_    |       |
-| total                                               | _TBD_    |       |
+| phase                                                    | baseline (s) | inside (s)  | Δ                  |
+| -------------------------------------------------------- | ------------ | ----------- | ------------------ |
+| forward sweep                                            | 624.9        | 627.9       | +3.0 (+0.5%)       |
+| backward sweep                                           | 7,761.7      | 8,129.0     | +367.3 (+4.7%)     |
+| other (post-backward selection block, LB eval, overhead) | 701.6        | 521.0       | −180.6             |
+| **total**                                                | **9,088.2**  | **9,278.0** | **+189.8 (+2.1%)** |
 
-Net wall-time saving: _TBD_ (target: inside-backward total < baseline total).
+The forward control differs by only +0.5%, so the two hosts are
+comparable and the +2.1% total / +4.7% backward delta is a real
+algorithmic effect, not host variance. Inside is slower ⇒ the FAVORABLE
+wall-delta gate (inside < baseline) **fails at this scale**.
+
+**View B — where the time moved (rank-0 timing.parquet, sum over iters):**
+
+| serial phase             | baseline (s) | inside (s) | Δ      |
+| ------------------------ | ------------ | ---------- | ------ |
+| cut selection            | 243.7        | 71.2       | −172.5 |
+| cut sync                 | 171.5        | 160.8      | −10.7  |
+| rebake (cut_batch_build) | 6.2          | 3.1        | −3.1   |
+| lower-bound eval         | 405.2        | 400.5      | −4.8   |
+
+In-backward selection makes the **coordination phases cheaper** (inline
+per-stage selection beats the big post-backward block by 172 s; the
+Option B per-stage allgatherv is _not_ a net cost — comparable to
+baseline's end-of-backward sync). The loss is entirely in **LP-solve
+work**: max-worker backward wall +127.2 s, total backward solve CPU work
+across 96 workers +13,364 s (+2.3%). Solver retry histograms are empty in
+both modes, so the extra cost is more simplex work on a different cut
+geometry, not warm-start failures. The cross-mode cut-set difference is
+expected per §8.3 (cross-mode LB drift 1.26e-2).
+
+**Front-loaded penalty.** The +189.8 s is almost entirely in iterations
+1–25 (+186.6 s); iterations 26–50 are +3.2 s (steady state ≈ neutral,
+~+0.1 s/iter). Iteration 1 alone is +46.3 s (cold start).
+
+#### Crossover analysis — why the gate flips above a pool-size threshold
+
+Fitting per-iteration backward wall against active-pool size:
+
+- baseline: `backward_ms ≈ 72,122 + 3.506 · cuts_active` (R² 0.665)
+- inside: `backward_ms ≈ 89,092 + 3.039 · cuts_active` (R² 0.858)
+
+Inside carries a **higher fixed per-iteration cost** (+17 s intercept:
+per-stage sync + rebake + cold start) but a **lower marginal cost per
+active cut** (3.039 vs 3.506 ms/cut, −13%). The two lines **cross at
+≈ 36,300 active cuts**. The 192-forward run peaked at 30.6k (inside) /
+43.4k (baseline) active cuts — straddling the crossover — which is why
+inside came out marginally slower. Illustrative extrapolation of the fit:
+
+| pool (active cuts) | inside vs baseline                |
+| ------------------ | --------------------------------- |
+| 30k (≈192 fwd)     | +1.7% (slower) — matches observed |
+| 60k                | −3.9%                             |
+| 90k                | −6.5%                             |
+| 150k               | −8.9%                             |
+| 300k               | −11.0%                            |
+
+A second, more robust signal points the same way: inside **caps the
+within-iteration peak pool** (peak = final = 30,607) while baseline
+balloons to 43,374 before its end-of-iteration prune. At higher forward
+counts baseline's within-iteration balloon scales with cuts-added/iter,
+so (a) baseline's mid-sweep solves get progressively more expensive while
+inside's stay lean, and (b) baseline risks memory pressure that inside
+structurally avoids — at large scale inside may be the only feasible path,
+independent of wall time.
+
+**Caveats.** The baseline slope estimate is noisy (R² 0.665; the 34%
+selection-churn adds scatter), so the ≈ 36k crossover is suggestive, not
+proven — the robust facts are the peak-capping and the −13% marginal
+slope direction. The extrapolation assumes the 192-forward fit holds at
+10× larger pools; simplex LP time is often super-linear in row count
+(which would favour inside further), but cache/NUMA effects are
+unmodeled. The steady-state useful-cut set may be geometry-bounded and
+not scale linearly with forward count; what scales cleanly is the
+within-iteration peak and the per-iteration solve _count_.
+
+#### Higher-forward confirmation result (2026-05-29) — UNFAVORABLE confirmed
+
+The crossover hypothesis above (inside-backward should flip favourable
+once the active pool clears ≈ 36k cuts) was tested with a higher-forward
+A/B on the `pmo-set-24-v0.7.0-semGNL` case at `np=2` (96 threads/rank,
+2 nodes). **Result: post-backward selection was still faster** — the
+predicted crossover did not materialise in practice. The most likely
+reasons are the ones flagged as caveats above: the steady-state useful-cut
+set is geometry-bounded (so the pool may not have grown far past the
+crossover), and the in-backward cut-geometry penalty did not shrink at
+scale. The gate is therefore **UNFAVORABLE (final)** and post-backward
+selection remains the production path.
+
+##### Note — anomalously large backward times at high forward counts
+
+The higher-forward run surfaced a separate performance concern worth
+recording for follow-up (independent of the in-backward verdict). The
+backward sweep dominated wall time to an extreme degree and the run was
+cancelled by the scheduler at iteration 7 (~5.5 h, 10-iteration budget):
+
+| iter | fwd (ms) | bwd (ms)  |
+| ---- | -------- | --------- |
+| 1    | 9,154    | 1,317,001 |
+| 2    | 91,485   | 2,434,267 |
+| 3    | 134,769  | 3,290,933 |
+| 4    | 116,890  | 2,840,918 |
+| 5    | 122,601  | 2,912,049 |
+| 6    | 128,251  | 2,955,574 |
+| 7    | 137,409  | 2,992,595 |
+
+Observations: (a) backward is 20–140× the forward wall (22–55 min/iter);
+(b) forward jumps ~10× from iter 1 → 2 (cold cut pool → populated) then
+plateaus — expected SDDP behaviour amplified by the larger forward count;
+(c) backward grows iters 1–3 then plateaus as the pool fills.
+
+Two candidate causes were raised: a parallel work-distribution problem
+when the forward-series count exceeds the worker count, or simply that
+this case's sampling and LPs are hard. The convertido data bears on the
+first: per-worker backward imbalance there is ~6.8% (slowest vs mean
+worker) / ~22% by the recorded per-stage `bwd_load_imbalance_ms` metric,
+at 192 forwards = 2 trial points per worker. At higher forward counts
+(8–20 trial points/worker) that coarse-granularity imbalance should
+_average out_, not worsen — so the work-distribution-via-imbalance
+mechanism predicts improvement, not the observed blow-up. That points the
+large times more toward **LP hardness × ~10× more trial-point solves on a
+harder case**, possibly compounded by memory-bandwidth / NUMA saturation
+at 96 threads/rank. The proper investigation is a backward-sweep profile
+at high forward counts (per-stage load imbalance, memory-bandwidth via
+`perf stat`, NUMA cross-socket traffic) — exactly the scope of the
+disaggregated-validation profiling work (memory-bandwidth instrumentation
+and NUMA profiling). Tracked there; not a blocker for the in-backward
+verdict.
 
 #### Decision protocol
 
