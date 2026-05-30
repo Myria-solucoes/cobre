@@ -438,6 +438,16 @@ fn run_inner(
         build_stochastic_summary(&system, &setup.stochastic, estimation_report.as_ref(), seed);
     let hydro_models_summary = Some(build_hydro_model_summary(&setup.hydro_models, &system));
 
+    // Persist the structural hydro-model summary as a sidecar so `cobre summary`
+    // can render the Hydro-models section from a completed run. Built once above
+    // and reused here to avoid recomputing it for the write.
+    if let Some(summary) = hydro_models_summary.as_ref() {
+        let hydro_models_path = output_dir.join("training/hydro_models.json");
+        if let Err(e) = cobre_io::write_hydro_model_summary(&hydro_models_path, summary) {
+            eprintln!("cobre-python: hydro model summary output warning: {e}");
+        }
+    }
+
     let training_enabled = config.training.enabled;
 
     if training_enabled {

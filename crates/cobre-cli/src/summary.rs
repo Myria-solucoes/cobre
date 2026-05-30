@@ -57,25 +57,24 @@ fn format_rank_list(ranks: &[usize]) -> String {
     let mut start = ranks[0];
     let mut end = ranks[0];
 
+    let format_segment = |start: usize, end: usize| {
+        if end > start {
+            format!("{start}\u{2013}{end}")
+        } else {
+            format!("{start}")
+        }
+    };
+
     for &r in &ranks[1..] {
         if r == end + 1 {
             end = r;
         } else {
-            if end > start {
-                segments.push(format!("{start}\u{2013}{end}"));
-            } else {
-                segments.push(format!("{start}"));
-            }
+            segments.push(format_segment(start, end));
             start = r;
             end = r;
         }
     }
-    // Flush final segment.
-    if end > start {
-        segments.push(format!("{start}\u{2013}{end}"));
-    } else {
-        segments.push(format!("{start}"));
-    }
+    segments.push(format_segment(start, end));
     segments.join(", ")
 }
 
@@ -262,6 +261,34 @@ fn provenance_ar_detail(report: &ModelProvenanceReport) -> String {
     }
 }
 
+/// Build the two count lines of the hydro-production provenance sub-section.
+///
+/// Returns an empty `Vec` when all four counts are zero, so the entire
+/// sub-section (header included) is suppressed by the caller. Otherwise
+/// returns the FPHA-planes line followed by the evaporation-reference line.
+/// The header is added separately by the caller (styled for the live print,
+/// plain for the test mirror); these two count lines carry no styling.
+fn hydro_production_lines(report: &ModelProvenanceReport) -> Vec<String> {
+    let hp = &report.hydro_production;
+    if hp.n_fpha_computed_from_geometry == 0
+        && hp.n_fpha_precomputed_hyperplanes == 0
+        && hp.n_evaporation_ref_user_supplied == 0
+        && hp.n_evaporation_ref_default_midpoint == 0
+    {
+        return Vec::new();
+    }
+    vec![
+        format!(
+            "  FPHA planes:     {} computed from geometry, {} precomputed",
+            hp.n_fpha_computed_from_geometry, hp.n_fpha_precomputed_hyperplanes
+        ),
+        format!(
+            "  Evaporation ref: {} user-supplied, {} default midpoint",
+            hp.n_evaporation_ref_user_supplied, hp.n_evaporation_ref_default_midpoint
+        ),
+    ]
+}
+
 /// Print the model provenance summary to `stderr`.
 ///
 /// Renders a bold header followed by indented lines covering the estimation
@@ -294,6 +321,13 @@ pub fn print_provenance_summary(stderr: &Term, report: &ModelProvenanceReport) {
         "  Opening tree:    {}",
         report.inflow.opening_tree_source
     ));
+    let hydro_lines = hydro_production_lines(report);
+    if !hydro_lines.is_empty() {
+        let _ = stderr.write_line(&format!("{}", console::style("Hydro production").bold()));
+        for line in &hydro_lines {
+            let _ = stderr.write_line(line);
+        }
+    }
 }
 
 /// Render the model provenance summary as a plain-text `String`.
@@ -327,6 +361,11 @@ pub fn format_provenance_summary_string(report: &ModelProvenanceReport) -> Strin
         "  Opening tree:    {}",
         report.inflow.opening_tree_source
     ));
+    let hydro_lines = hydro_production_lines(report);
+    if !hydro_lines.is_empty() {
+        lines.push("Hydro production".to_string());
+        lines.extend(hydro_lines);
+    }
     lines.join("\n")
 }
 
@@ -1606,6 +1645,84 @@ mod tests {
             !s.contains("max order"),
             "output must NOT contain 'max order' when ar_method is None, got: {s}"
         );
+    }
+
+    fn make_provenance_report_with_hydro_production(
+        hydro_production: HydroProductionProvenance,
+    ) -> ModelProvenanceReport {
+        ModelProvenanceReport {
+            inflow: InflowProvenance {
+                estimation_path: "full_estimation".to_string(),
+                seasonal_stats_source: ProvenanceSource::Estimated,
+                ar_coefficients_source: ProvenanceSource::Estimated,
+                correlation_source: ProvenanceSource::Estimated,
+                opening_tree_source: ProvenanceSource::Estimated,
+                n_hydros: 3,
+                ar_method: Some("PACF".to_string()),
+                ar_max_order: Some(6),
+                white_noise_fallbacks: vec![],
+                historical_library_past_inflows_digest: None,
+            },
+            hydro_production,
+        }
+    }
+
+    /// AC: non-zero hydro-production counts render both exact count-line
+    /// substrings under a "Hydro production" sub-section.
+    #[test]
+    fn format_provenance_summary_renders_hydro_production_counts() {
+        let report = make_provenance_report_with_hydro_production(HydroProductionProvenance {
+            n_fpha_computed_from_geometry: 2,
+            n_fpha_precomputed_hyperplanes: 1,
+            n_evaporation_ref_user_supplied: 0,
+            n_evaporation_ref_default_midpoint: 3,
+        });
+        let s = format_provenance_summary_string(&report);
+        assert!(
+            s.contains("Hydro production"),
+            "output must contain 'Hydro production' sub-section header, got: {s}"
+        );
+        assert!(
+            s.contains("FPHA planes:     2 computed from geometry, 1 precomputed"),
+            "output must contain the exact FPHA-planes line, got: {s}"
+        );
+        assert!(
+            s.contains("Evaporation ref: 0 user-supplied, 3 default midpoint"),
+            "output must contain the exact evaporation-reference line, got: {s}"
+        );
+    }
+
+    /// AC: all-zero hydro-production counts suppress the entire sub-section.
+    #[test]
+    fn format_provenance_summary_suppresses_zero_hydro_production() {
+        let report =
+            make_provenance_report_with_hydro_production(HydroProductionProvenance::default());
+        let s = format_provenance_summary_string(&report);
+        assert!(
+            !s.contains("Hydro production"),
+            "all-zero counts must suppress the 'Hydro production' header, got: {s}"
+        );
+        assert!(
+            !s.contains("FPHA planes:"),
+            "all-zero counts must suppress the FPHA-planes line, got: {s}"
+        );
+        assert!(
+            !s.contains("Evaporation ref:"),
+            "all-zero counts must suppress the evaporation-reference line, got: {s}"
+        );
+    }
+
+    /// AC: `print_provenance_summary` with non-zero hydro-production counts
+    /// does not panic when writing to a buffered terminal.
+    #[test]
+    fn print_provenance_summary_with_hydro_production_does_not_panic() {
+        let report = make_provenance_report_with_hydro_production(HydroProductionProvenance {
+            n_fpha_computed_from_geometry: 5,
+            n_fpha_precomputed_hyperplanes: 2,
+            n_evaporation_ref_user_supplied: 4,
+            n_evaporation_ref_default_midpoint: 1,
+        });
+        print_provenance_summary(&Term::buffered_stderr(), &report);
     }
 
     // ── format_rank_list tests ────────────────────────────────────────────────

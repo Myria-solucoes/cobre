@@ -940,9 +940,20 @@ fn run_pre_training(
     root_estimation_report: Option<&EstimationReport>,
     root_estimation_path: Option<cobre_sddp::EstimationPath>,
 ) -> Result<(), CliError> {
-    if !ctx.quiet && ctx.is_root {
+    // Build the hydro-model summary once on the root rank, independent of
+    // `quiet`: it feeds both the optional on-screen print and the persisted
+    // `training/hydro_models.json` sidecar consumed by `cobre summary`.
+    if ctx.is_root {
         let hydro_summary = build_hydro_model_summary(&setup.hydro_models, system);
-        crate::summary::print_hydro_model_summary(&ctx.stderr, &hydro_summary);
+        if !ctx.quiet {
+            crate::summary::print_hydro_model_summary(&ctx.stderr, &hydro_summary);
+        }
+        let hydro_models_path = ctx.output_dir.join("training/hydro_models.json");
+        cobre_io::write_hydro_model_summary(&hydro_models_path, &hydro_summary).map_err(|e| {
+            CliError::Internal {
+                message: format!("failed to write hydro model summary: {e}"),
+            }
+        })?;
     }
 
     // Build and emit provenance report.
@@ -1054,7 +1065,7 @@ fn run_training_phase(
         (None, Some(rx)) => rx.try_iter().collect(),
         (None, None) => Vec::new(),
     };
-    let training_output = setup.build_training_output(&training_result, &events);
+    let mut training_output = setup.build_training_output(&training_result, &events);
 
     let local_lp_solves: u64 = training_output
         .convergence_records
@@ -1168,6 +1179,20 @@ fn run_training_phase(
     if !ctx.quiet && ctx.is_root {
         crate::summary::print_training_summary(&ctx.stderr, &training_summary);
     }
+
+    // Route the MPI-aggregated training solve totals into the output carrier so
+    // the cobre-io writer persists them in `training/metadata.json`. The carrier
+    // is constructed by cobre-sddp with these stats left at their defaults;
+    // `final_upper_bound_std` is already populated upstream and is left untouched.
+    training_output.training_solve_stats = cobre_io::MetadataTrainingSolveStats {
+        total_lp_solves: Some(global_lp_solves),
+        first_try: Some(total_first_try),
+        retried: Some(total_retried),
+        failed: Some(total_failed),
+        forward_solve_seconds: Some(total_forward_solve_s),
+        backward_solve_seconds: Some(total_backward_solve_s),
+        parallelism: Some(parallelism),
+    };
 
     Ok(TrainingPhaseResult {
         result: training_result,
@@ -1354,7 +1379,7 @@ fn run_simulation_phase(
     let mut local_sim_output = sim_writer.finalize(sim_time_ms);
     local_sim_output.failed = write_failures;
 
-    let merged_sim_output = merge_simulation_metadata(&ctx.comm, &local_sim_output)?;
+    let mut merged_sim_output = merge_simulation_metadata(&ctx.comm, &local_sim_output)?;
 
     ctx.comm.barrier().map_err(|e| CliError::Internal {
         message: format!("post-simulation barrier error: {e}"),
@@ -1373,9 +1398,33 @@ fn run_simulation_phase(
             },
         )?;
 
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let parallelism = (ctx.n_threads as u32).saturating_mul(ctx.comm.size() as u32);
+
+    // Route the aggregated simulation cost summary and solver totals into the
+    // output carrier so the cobre-io writer persists them in
+    // `simulation/metadata.json`. Both are populated on the value that is
+    // actually written below.
+    merged_sim_output.cost = Some(cobre_io::MetadataCost {
+        mean_cost: cost_summary.mean_cost,
+        std_cost: cost_summary.std_cost,
+        cvar: cost_summary.cvar,
+        cvar_alpha: cost_summary.cvar_alpha,
+    });
+    merged_sim_output.solve_stats = cobre_io::MetadataSimulationSolveStats {
+        total_lp_solves: Some(global_agg.lp_solves),
+        first_try: Some(global_agg.first_try_successes),
+        retried: Some(
+            global_agg
+                .lp_successes
+                .saturating_sub(global_agg.first_try_successes),
+        ),
+        failed: Some(global_agg.lp_failures),
+        solve_seconds: Some(global_agg.solve_time_ms / 1000.0),
+        parallelism: Some(parallelism),
+    };
+
     if !ctx.quiet && ctx.is_root {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let parallelism = (ctx.n_threads as u32).saturating_mul(ctx.comm.size() as u32);
         print_sim_summary(
             &ctx.stderr,
             n_scenarios,
@@ -1451,9 +1500,32 @@ fn build_distribution_info(
         mpi_standard: topology.mpi.as_ref().map(|m| m.standard_version.clone()),
         thread_level: topology.mpi.as_ref().map(|m| m.thread_level.clone()),
         slurm_job_id: topology.slurm.as_ref().map(|s| s.job_id.clone()),
-        // Placeholder: populated from `topology.hosts` once host wiring lands.
-        hosts: Vec::new(),
+        hosts: host_layouts(topology),
     }
+}
+
+/// Map the per-host rank assignments from the execution topology into the
+/// cobre-io [`cobre_io::HostLayout`] carrier.
+///
+/// Host ordering (already ordered by first rank in
+/// [`ExecutionTopology`](cobre_comm::ExecutionTopology)) is preserved. Each
+/// `usize` rank is narrowed to `u32` with the saturating-cast convention used
+/// throughout [`build_distribution_info`], so an out-of-range rank maps to
+/// `u32::MAX` rather than panicking. Local single-process runs yield a single
+/// `HostLayout` with `ranks == vec![0]`.
+fn host_layouts(topology: &ExecutionTopology) -> Vec<cobre_io::HostLayout> {
+    topology
+        .hosts
+        .iter()
+        .map(|h| cobre_io::HostLayout {
+            hostname: h.hostname.clone(),
+            ranks: h
+                .ranks
+                .iter()
+                .map(|&r| u32::try_from(r).unwrap_or(u32::MAX))
+                .collect(),
+        })
+        .collect()
 }
 
 /// Print the simulation summary from aggregated solver stats and cost statistics.
@@ -1877,8 +1949,52 @@ fn write_simulation_outputs(args: &WriteSimulationArgs<'_>) -> Result<(), CliErr
     clippy::panic
 )]
 mod tests {
-    use super::{check_stats_overflow, delta_to_stats_row, resolve_thread_count};
+    use super::{check_stats_overflow, delta_to_stats_row, host_layouts, resolve_thread_count};
+    use cobre_comm::{BackendKind, ExecutionTopology, HostInfo};
     use cobre_sddp::SolverStatsDelta;
+
+    fn topology_with_hosts(hosts: Vec<HostInfo>) -> ExecutionTopology {
+        let world_size = hosts.iter().map(|h| h.ranks.len()).sum();
+        ExecutionTopology {
+            backend: BackendKind::Local,
+            world_size,
+            hosts,
+            mpi: None,
+            slurm: None,
+        }
+    }
+
+    #[test]
+    fn test_host_layouts_two_hosts_preserve_order_and_u32_ranks() {
+        let topology = topology_with_hosts(vec![
+            HostInfo {
+                hostname: "node-a".to_string(),
+                ranks: vec![0, 1],
+            },
+            HostInfo {
+                hostname: "node-b".to_string(),
+                ranks: vec![2, 3],
+            },
+        ]);
+        let layouts = host_layouts(&topology);
+        assert_eq!(layouts.len(), 2);
+        assert_eq!(layouts[0].hostname, "node-a");
+        assert_eq!(layouts[0].ranks, vec![0u32, 1u32]);
+        assert_eq!(layouts[1].hostname, "node-b");
+        assert_eq!(layouts[1].ranks, vec![2u32, 3u32]);
+    }
+
+    #[test]
+    fn test_host_layouts_single_host_ranks_is_zero() {
+        let topology = topology_with_hosts(vec![HostInfo {
+            hostname: "localhost".to_string(),
+            ranks: vec![0],
+        }]);
+        let layouts = host_layouts(&topology);
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(layouts[0].hostname, "localhost");
+        assert_eq!(layouts[0].ranks, vec![0u32]);
+    }
 
     fn make_delta(lp_solves: u64) -> SolverStatsDelta {
         SolverStatsDelta {
