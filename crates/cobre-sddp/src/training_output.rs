@@ -398,6 +398,7 @@ pub fn build_training_output(
         final_lower_bound: result.final_lb,
         final_upper_bound: Some(result.final_ub),
         final_gap_percent,
+        final_upper_bound_std: Some(result.final_ub_std),
         iterations_completed,
         converged,
         termination_reason: result.reason.clone(),
@@ -405,6 +406,8 @@ pub fn build_training_output(
         cut_stats,
         cut_selection_records,
         worker_timing_records,
+        // Populated downstream (CLI/Python) from live solver statistics.
+        training_solve_stats: cobre_io::MetadataTrainingSolveStats::default(),
     }
 }
 

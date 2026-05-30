@@ -232,6 +232,8 @@ fn write_training_artifacts(
             mpi_standard: None,
             thread_level: None,
             slurm_job_id: None,
+            // Placeholder: populated from the execution topology once host wiring lands.
+            hosts: Vec::new(),
         },
     };
     cobre_io::write_training_results(output_dir, &training.output, system, config, &training_ctx)
@@ -325,6 +327,8 @@ fn run_simulation_phase_py(
             mpi_standard: None,
             thread_level: None,
             slurm_job_id: None,
+            // Placeholder: populated from the execution topology once host wiring lands.
+            hosts: Vec::new(),
         },
     };
     cobre_io::write_simulation_results(output_dir, &sim_out, &sim_ctx)

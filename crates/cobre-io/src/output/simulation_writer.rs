@@ -713,6 +713,8 @@ impl SimulationParquetWriter {
             failed: 0,
             total_time_ms,
             partitions_written: self.partitions_written,
+            cost: None,
+            solve_stats: crate::MetadataSimulationSolveStats::default(),
         }
     }
 }

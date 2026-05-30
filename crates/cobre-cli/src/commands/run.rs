@@ -1451,6 +1451,8 @@ fn build_distribution_info(
         mpi_standard: topology.mpi.as_ref().map(|m| m.standard_version.clone()),
         thread_level: topology.mpi.as_ref().map(|m| m.thread_level.clone()),
         slurm_job_id: topology.slurm.as_ref().map(|s| s.job_id.clone()),
+        // Placeholder: populated from `topology.hosts` once host wiring lands.
+        hosts: Vec::new(),
     }
 }
 
@@ -1570,6 +1572,9 @@ fn merge_simulation_metadata<C: Communicator>(
         failed: merged_counts[2],
         total_time_ms: merged_time[0],
         partitions_written: all_partitions,
+        // Populated by the simulation summary wiring; defaulted here.
+        cost: None,
+        solve_stats: cobre_io::MetadataSimulationSolveStats::default(),
     })
 }
 

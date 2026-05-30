@@ -189,8 +189,9 @@ mod tests {
     use std::path::PathBuf;
 
     use cobre_io::{
-        ConvergenceSummary, DistributionInfo, MetadataConfiguration, MetadataConvergence,
-        MetadataIterations, MetadataProblemDimensions, MetadataRowPool, TrainingMetadata,
+        ConvergenceSummary, DistributionInfo, MetadataBounds, MetadataConfiguration,
+        MetadataConvergence, MetadataIterations, MetadataProblemDimensions, MetadataRowPool,
+        MetadataTrainingSolveStats, TrainingMetadata,
     };
 
     use super::{SummaryArgs, build_training_summary, convergence_fallback};
@@ -234,6 +235,20 @@ mod tests {
                 peak_active: 1_100_000,
                 cuts_active: 980_000,
             },
+            bounds: MetadataBounds {
+                final_lower_bound: 48_500.0,
+                final_upper_bound: Some(49_000.0),
+                final_upper_bound_std: Some(250.0),
+            },
+            solve_stats: MetadataTrainingSolveStats {
+                total_lp_solves: Some(84_000),
+                first_try: Some(80_000),
+                retried: Some(3_800),
+                failed: Some(200),
+                forward_solve_seconds: Some(123.5),
+                backward_solve_seconds: Some(456.75),
+                parallelism: Some(8),
+            },
             distribution: DistributionInfo {
                 backend: "local".to_string(),
                 world_size: 1,
@@ -244,6 +259,7 @@ mod tests {
                 mpi_standard: None,
                 thread_level: None,
                 slurm_job_id: None,
+                hosts: Vec::new(),
             },
         }
     }

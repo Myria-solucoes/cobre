@@ -836,6 +836,8 @@ fn train_simulate_write_cycle() {
         failed: 0,
         total_time_ms: 0,
         partitions_written: vec![],
+        cost: None,
+        solve_stats: cobre_io::MetadataSimulationSolveStats::default(),
     };
 
     let system = make_system();
@@ -858,6 +860,7 @@ fn train_simulate_write_cycle() {
             mpi_standard: None,
             thread_level: None,
             slurm_job_id: None,
+            hosts: Vec::new(),
         },
     };
     write_results(

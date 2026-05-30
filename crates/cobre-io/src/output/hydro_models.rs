@@ -24,6 +24,7 @@
 //! All writes use atomic file creation: data is first written to a `.tmp`
 //! suffix, then renamed to the final path.
 
+use std::io::BufWriter;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -179,6 +180,62 @@ fn build_fpha_hyperplanes_batch(rows: &[FphaHyperplaneRow]) -> Result<RecordBatc
         ],
     )
     .map_err(|e| OutputError::serialization("fpha_hyperplanes", e.to_string()))
+}
+
+// ── Structural hydro-model summary (generic JSON sidecar) ───────────────────────
+
+/// Write a structural hydro-model summary as pretty-printed JSON.
+///
+/// Accepts any `Serialize`-implementing value to avoid cross-crate type
+/// dependencies (the summary struct is defined in the calling algorithm crate,
+/// keeping this crate algorithm-agnostic).
+///
+/// Uses atomic write: writes to a `.json.tmp` file first, then renames.
+///
+/// # Errors
+///
+/// Returns [`OutputError::IoError`] on filesystem failures, or
+/// [`OutputError::SerializationError`] if JSON serialization fails.
+pub fn write_hydro_model_summary(
+    path: &Path,
+    summary: &impl serde::Serialize,
+) -> Result<(), OutputError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| OutputError::io(parent, e))?;
+    }
+
+    let tmp_path = path.with_extension("json.tmp");
+    let file = std::fs::File::create(&tmp_path).map_err(|e| OutputError::io(&tmp_path, e))?;
+    let writer = BufWriter::new(file);
+    serde_json::to_writer_pretty(writer, summary).map_err(|e| {
+        OutputError::serialization("hydro_models", format!("JSON serialization: {e}"))
+    })?;
+    std::fs::rename(&tmp_path, path).map_err(|e| OutputError::io(path, e))?;
+    Ok(())
+}
+
+/// Read a structural hydro-model summary from a JSON file.
+///
+/// Generic over any `DeserializeOwned` target so the summary struct can stay
+/// defined in the calling algorithm crate (this crate is algorithm-agnostic).
+/// The caller supplies the concrete type at the call site, mirroring the
+/// `impl Serialize` genericity of [`write_hydro_model_summary`].
+///
+/// # Errors
+///
+/// Returns [`OutputError::IoError`] if the file cannot be read — a missing file
+/// surfaces as an `IoError` whose `source.kind()` is
+/// [`std::io::ErrorKind::NotFound`], so callers can treat the section as absent
+/// and degrade gracefully. Returns [`OutputError::ManifestError`] if the file
+/// contains malformed JSON.
+pub fn read_hydro_model_summary<T: serde::de::DeserializeOwned>(
+    path: &Path,
+) -> Result<T, OutputError> {
+    let content = std::fs::read_to_string(path).map_err(|e| OutputError::io(path, e))?;
+    serde_json::from_str(&content).map_err(|e| OutputError::ManifestError {
+        manifest_type: "hydro_models".to_string(),
+        message: e.to_string(),
+    })
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -501,5 +558,73 @@ mod tests {
             .expect("write must succeed even when parent dirs are missing");
 
         assert!(path.exists(), "file must exist after write");
+    }
+
+    // ── Structural hydro-model summary (generic JSON sidecar) ─────────────────
+
+    /// Local mock summary, defined here so the JSON sidecar tests never depend
+    /// on an algorithm crate (genericity rule).
+    #[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+    struct MockHydroModelSummary {
+        n_constant: usize,
+        n_fpha: usize,
+        total_planes: usize,
+    }
+
+    #[test]
+    fn write_and_read_hydro_model_summary_round_trips() {
+        let tmp = tempdir().expect("tempdir");
+        let path = tmp.path().join("training/hydro_models.json");
+
+        let summary = MockHydroModelSummary {
+            n_constant: 4,
+            n_fpha: 7,
+            total_planes: 35,
+        };
+
+        write_hydro_model_summary(&path, &summary).expect("write should succeed");
+
+        let decoded: MockHydroModelSummary =
+            read_hydro_model_summary(&path).expect("read should succeed");
+        assert_eq!(decoded, summary);
+    }
+
+    #[test]
+    fn hydro_model_summary_write_is_atomic_no_tmp_remains() {
+        let tmp = tempdir().expect("tempdir");
+        let path = tmp.path().join("hydro_models.json");
+
+        let summary = MockHydroModelSummary {
+            n_constant: 1,
+            n_fpha: 2,
+            total_planes: 6,
+        };
+
+        write_hydro_model_summary(&path, &summary).expect("write should succeed");
+
+        let tmp_path = path.with_extension("json.tmp");
+        assert!(
+            !tmp_path.exists(),
+            "tmp file should be removed after rename"
+        );
+        assert!(path.exists(), "final file should exist");
+    }
+
+    #[test]
+    fn read_hydro_model_summary_missing_file_is_not_found() {
+        let tmp = tempdir().expect("tempdir");
+        let path = tmp.path().join("does_not_exist.json");
+
+        let result = read_hydro_model_summary::<MockHydroModelSummary>(&path);
+
+        assert!(
+            matches!(
+                &result,
+                Err(OutputError::IoError { source, .. })
+                    if source.kind() == std::io::ErrorKind::NotFound
+            ),
+            "missing file must return IoError with NotFound kind so callers \
+             can degrade gracefully, got: {result:?}"
+        );
     }
 }

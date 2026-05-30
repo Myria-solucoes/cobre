@@ -35,6 +35,7 @@ use crate::output::schemas::{convergence_schema, iteration_timing_schema};
 ///
 /// ```no_run
 /// use cobre_io::{TrainingOutput, RowPoolStatistics, ParquetWriterConfig};
+/// use cobre_io::MetadataTrainingSolveStats;
 /// use cobre_io::output::training_writer::TrainingParquetWriter;
 /// use std::path::Path;
 ///
@@ -46,6 +47,7 @@ use crate::output::schemas::{convergence_schema, iteration_timing_schema};
 ///     final_lower_bound: 42.0,
 ///     final_upper_bound: None,
 ///     final_gap_percent: None,
+///     final_upper_bound_std: None,
 ///     iterations_completed: 0,
 ///     converged: false,
 ///     termination_reason: "iteration limit".to_string(),
@@ -58,6 +60,7 @@ use crate::output::schemas::{convergence_schema, iteration_timing_schema};
 ///     },
 ///     cut_selection_records: Vec::new(),
 ///     worker_timing_records: Vec::new(),
+///     training_solve_stats: MetadataTrainingSolveStats::default(),
 /// };
 /// writer.write(&training)?;
 /// # Ok(())
@@ -444,6 +447,7 @@ mod tests {
             final_lower_bound: 99.5,
             final_upper_bound: Some(101.0),
             final_gap_percent: Some(1.51),
+            final_upper_bound_std: Some(0.5),
             iterations_completed: 0,
             converged: true,
             termination_reason: "gap tolerance reached".to_string(),
@@ -456,6 +460,7 @@ mod tests {
             },
             cut_selection_records: vec![],
             worker_timing_records: vec![],
+            training_solve_stats: crate::MetadataTrainingSolveStats::default(),
         }
     }
 
