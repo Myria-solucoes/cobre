@@ -1020,7 +1020,7 @@ mod tests {
     use cobre_sddp::SolverStatsDelta;
     use cobre_sddp::setup::prepare_stochastic;
 
-    use super::{aggregate_training_solve_stats, init_rayon};
+    use super::{aggregate_training_solve_stats, init_rayon, run_inner};
 
     #[test]
     fn aggregate_training_solve_stats_folds_and_splits_by_phase() {
@@ -1088,6 +1088,116 @@ mod tests {
             "prepare_stochastic failed for D01 via Python path: {:?}",
             result.err()
         );
+    }
+
+    /// End-to-end parity check: the Python `run` path must persist the same
+    /// training/simulation metadata (bounds, cost, solve-stats, host layout) that
+    /// the CLI produces, so that `summary`/`report` render identically regardless
+    /// of which front-end wrote the run.
+    ///
+    /// The golden values are the CLI's actual output for `examples/1dtoy` (a
+    /// 4-stage case, which makes `total_lp_solves` a genuine multi-stage guard:
+    /// it is the convergence-record sum, not the stats-log sum). Equality is a
+    /// true cross-implementation regression guard, not a tautology — the Python
+    /// and CLI write paths are separate code that must each independently
+    /// populate the carriers.
+    #[test]
+    fn python_run_1dtoy_metadata_matches_cli_golden_values() {
+        let case_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("cobre-python parent")
+            .parent()
+            .expect("crates parent")
+            .join("examples/1dtoy");
+
+        let output_dir =
+            std::env::temp_dir().join(format!("cobre_py_parity_{}", std::process::id()));
+        std::fs::create_dir_all(&output_dir).expect("create output dir");
+
+        run_inner(&case_dir, output_dir.clone(), Some(1), false)
+            .expect("run_inner must succeed for 1dtoy via Python path");
+
+        let training = cobre_io::read_training_metadata(&output_dir.join("training/metadata.json"))
+            .expect("read training metadata");
+        let simulation =
+            cobre_io::read_simulation_metadata(&output_dir.join("simulation/metadata.json"))
+                .expect("read simulation metadata");
+
+        // Relative-tolerance float comparison (the test module relaxes float_cmp,
+        // but parity targets are floating-point so use a relative bound).
+        let close = |actual: f64, golden: f64| (actual - golden).abs() / golden < 1e-6;
+
+        // ── Training metadata ────────────────────────────────────────────────
+        assert_eq!(
+            training.problem_dimensions.num_stages, 4,
+            "1dtoy must be a 4-stage case so total_lp_solves is a multi-stage guard"
+        );
+
+        let golden_lower_bound = 15_595_518.381_798_638;
+        assert!(
+            close(training.bounds.final_lower_bound, golden_lower_bound),
+            "final_lower_bound {} not within 1e-6 of golden {golden_lower_bound}",
+            training.bounds.final_lower_bound
+        );
+
+        let golden_upper_bound = 579_592.198_622_440_7;
+        let upper_bound = training
+            .bounds
+            .final_upper_bound
+            .expect("training final_upper_bound must be Some");
+        assert!(
+            close(upper_bound, golden_upper_bound),
+            "final_upper_bound {upper_bound} not within 1e-6 of golden {golden_upper_bound}"
+        );
+
+        // Exact: the convergence-record sum (the regression target).
+        assert_eq!(
+            training.solve_stats.total_lp_solves,
+            Some(5632),
+            "training total_lp_solves must equal the convergence-record sum"
+        );
+
+        // ── Simulation metadata ──────────────────────────────────────────────
+        let cost = simulation
+            .cost
+            .as_ref()
+            .expect("simulation cost must be populated by the run path");
+        let golden_mean_cost = 14_532_064.352_935_942;
+        assert!(
+            close(cost.mean_cost, golden_mean_cost),
+            "mean_cost {} not within 1e-6 of golden {golden_mean_cost}",
+            cost.mean_cost
+        );
+
+        assert_eq!(
+            simulation.solve_stats.total_lp_solves,
+            Some(400),
+            "simulation total_lp_solves must equal golden"
+        );
+
+        assert_eq!(
+            simulation.scenarios.total, 100,
+            "scenarios.total must be 100"
+        );
+
+        // ── Host layout (single-host LocalBackend) ───────────────────────────
+        for (label, hosts) in [
+            ("training", &training.distribution.hosts),
+            ("simulation", &simulation.distribution.hosts),
+        ] {
+            assert_eq!(
+                hosts.len(),
+                1,
+                "{label} distribution.hosts must have one entry"
+            );
+            assert_eq!(hosts[0].ranks, vec![0], "{label} host ranks must be [0]");
+            assert!(
+                !hosts[0].hostname.is_empty(),
+                "{label} host hostname must be non-empty"
+            );
+        }
+
+        std::fs::remove_dir_all(&output_dir).ok();
     }
 
     /// Verify that `init_rayon` returns the actual thread count when the global
