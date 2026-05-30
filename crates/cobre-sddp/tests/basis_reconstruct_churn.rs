@@ -49,7 +49,7 @@ use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::scenario::ScenarioSource;
 use cobre_io::config::StoppingRuleConfig;
 use cobre_sddp::{
-    SolverStatsDelta, StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic,
+    hydro_models::prepare_hydro_models, setup::prepare_stochastic, SolverStatsDelta, StudySetup,
 };
 use cobre_solver::highs::HighsSolver;
 
@@ -434,15 +434,17 @@ fn test_basis_reconstruct_full_churn_no_rows_preserved() {
     let config_path = case_dir.join("config.json");
     let mut config = cobre_io::parse_config(&config_path).expect("config must parse");
 
-    // Phase 1: train for 1 iteration, basis padding enabled.
+    // Phase 1: train for 1 iteration.
     //
     // Two IterationLimit rules in "any" mode (the default):
-    //  - limit: 2 → sizes the FCF cut pool to (2+1) × forward_passes = 6 slots per stage
-    //              so that the transplanted FCF has room for phase-2 cuts at slots 2,3.
+    //  - limit: 2 → sizes the FCF cut pool to (2+1) × forward_passes = 6 slots
+    //              per stage (capacity headroom; with dense packing not all
+    //              slots are used).
     //  - limit: 1 → stops training after iteration 1 (fires first in "any" mode).
     //
-    // If we used only limit:1 here, FCF capacity = (1+1)×2 = 4, and iter-2's backward
-    // pass would panic at "cut slot 4 is out of bounds (capacity = 4)".
+    // With dense slot packing, phase-1's iteration-1 cuts occupy slots 0,1; in
+    // phase 2 those cuts are deactivated and iteration-2's cuts reuse slots 0,1,
+    // so the pool capacity is comfortably sufficient.
     config.training.forward_passes = Some(2);
     config.training.stopping_rules = Some(vec![
         StoppingRuleConfig::IterationLimit { limit: 2 }, // FCF capacity sizing

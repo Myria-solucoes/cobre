@@ -354,6 +354,18 @@ impl FutureCostFunction {
         self.pools.iter().map(|p| p.generated_count).sum()
     }
 
+    /// Set the iteration that maps to each pool's first training slot.
+    ///
+    /// Propagates to every pool (see [`CutPool::set_iteration_base`]). Call once
+    /// before training begins with `start_iteration + 1` so training cuts pack
+    /// densely from the warm-start region instead of leaving the slot block
+    /// `[warm_start_count, warm_start_count + forward_passes)` unused.
+    pub fn set_iteration_base(&mut self, iteration_base: u64) {
+        for pool in &mut self.pools {
+            pool.set_iteration_base(iteration_base);
+        }
+    }
+
     /// Return the intercept value for the cut at `(stage, slot)`.
     ///
     /// Reads directly from `pools[stage].intercepts[slot]`. The returned value
@@ -623,6 +635,21 @@ mod tests {
         assert_eq!(fcf.total_active_cuts(), 3);
         fcf.deactivate(0, &[0]);
         assert_eq!(fcf.total_active_cuts(), 2);
+    }
+
+    #[test]
+    fn set_iteration_base_propagates_and_packs_densely() {
+        let mut fcf = FutureCostFunction::new(3, 1, 2, 10, &[0; 3]);
+        fcf.set_iteration_base(1);
+        for pool in &fcf.pools {
+            assert_eq!(pool.iteration_base, 1);
+        }
+        // With base 1, iteration 1 maps to slot 0: no reserved leading block
+        // (base 0 would place these at slots 2,3 with populated_count 4).
+        fcf.add_cut(0, 1, 0, 1.0, &[1.0]);
+        fcf.add_cut(0, 1, 1, 2.0, &[1.0]);
+        assert_eq!(fcf.pools[0].populated_count, 2);
+        assert_eq!(fcf.pools[0].generated_count, 2);
     }
 
     #[test]

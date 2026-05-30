@@ -120,6 +120,17 @@ pub struct CutPool {
     /// base offset in the slot assignment formula. Fixed after construction.
     pub warm_start_count: u32,
 
+    /// Training-iteration number that maps to the first training slot
+    /// (`warm_start_count`). The slot formula subtracts it so that 1-based
+    /// iterations pack densely from `warm_start_count` with no reserved leading
+    /// block. Defaults to 0 (legacy layout, where slot grows with the raw
+    /// iteration and the block `[warm_start_count, +forward_passes)` is unused);
+    /// production sets it to `start_iteration + 1` via [`set_iteration_base`].
+    /// Both layouts are correct; dense is tighter.
+    ///
+    /// [`set_iteration_base`]: CutPool::set_iteration_base
+    pub iteration_base: u64,
+
     /// Cached count of active cuts, maintained incrementally by [`add_cut`]
     /// (increment) and [`deactivate`] (decrement). Makes [`active_count`]
     /// O(1) instead of O(`populated_count`).
@@ -199,6 +210,7 @@ impl CutPool {
             state_dimension,
             forward_passes,
             warm_start_count,
+            iteration_base: 0,
             cached_active_count: 0,
             generated_count: warm_start_count as usize,
             candidates_buf: Vec::new(),
@@ -209,19 +221,45 @@ impl CutPool {
     ///
     /// Formula:
     /// ```text
-    /// slot = warm_start_count + iteration * forward_passes + forward_pass_index
+    /// slot = warm_start_count
+    ///      + (iteration - iteration_base) * forward_passes
+    ///      + forward_pass_index
     /// ```
+    ///
+    /// `iteration_base` (default 0) lets 1-based iterations pack densely from
+    /// `warm_start_count`; see [`iteration_base`](CutPool::iteration_base).
     #[inline]
     fn slot_index(&self, iteration: u64, forward_pass_index: u32) -> usize {
+        debug_assert!(
+            iteration >= self.iteration_base,
+            "slot_index: iteration {iteration} < iteration_base {}",
+            self.iteration_base
+        );
         // Slot indices are bounded by `capacity` (a usize), so the result
         // always fits in usize. The intermediate cast of `iteration` to usize
         // cannot realistically truncate: any platform capable of running SDDP
         // at scale is 64-bit, and pool capacity is enforced to be < usize::MAX.
         #[allow(clippy::cast_possible_truncation)]
-        let iter_usize = iteration as usize;
+        let iter_usize = (iteration - self.iteration_base) as usize;
         self.warm_start_count as usize
             + iter_usize * self.forward_passes as usize
             + forward_pass_index as usize
+    }
+
+    /// Set the iteration that maps to the first training slot.
+    ///
+    /// Pass `start_iteration + 1` so the first training iteration's cuts land at
+    /// slot `warm_start_count` (dense packing). The default of 0 reproduces the
+    /// legacy layout where the slot block
+    /// `[warm_start_count, warm_start_count + forward_passes)` is left unused.
+    ///
+    /// Should be called before the first [`add_cut`](CutPool::add_cut) of a
+    /// training run: with a fresh or warm-started pool this gives dense slots.
+    /// Changing the base on a pool that still holds *active* training cuts is
+    /// caught downstream by `add_cut`'s no-overwrite guard; re-setting on a pool
+    /// whose cuts are all inactive (e.g. multi-phase tests) safely reuses slots.
+    pub fn set_iteration_base(&mut self, iteration_base: u64) {
+        self.iteration_base = iteration_base;
     }
 
     /// Insert a Benders cut into the pool at the deterministic slot.
@@ -765,6 +803,7 @@ impl CutPool {
             state_dimension,
             forward_passes: 0,
             warm_start_count: capacity as u32,
+            iteration_base: 0,
             cached_active_count,
             generated_count: capacity,
             candidates_buf: Vec::new(),
@@ -859,6 +898,7 @@ impl CutPool {
             state_dimension,
             forward_passes,
             warm_start_count: warm_start_count as u32,
+            iteration_base: 0,
             cached_active_count,
             generated_count: warm_start_count,
             candidates_buf: Vec::new(),
@@ -1105,6 +1145,24 @@ mod tests {
 
         pool.add_cut(0, 2, 3.0, &[3.0]); // slot 2 → no change (2 < 6)
         assert_eq!(pool.populated_count, 6);
+    }
+
+    #[test]
+    fn set_iteration_base_packs_training_cuts_densely() {
+        // base = 1 (start_iteration 0) maps iteration 1 to slot warm_start_count
+        // (0 here), so 1-based iterations leave no reserved leading block.
+        let mut pool = CutPool::new(30, 1, 3, 0);
+        pool.set_iteration_base(1);
+        pool.add_cut(1, 0, 1.0, &[1.0]); // slot 0
+        pool.add_cut(1, 1, 2.0, &[1.0]); // slot 1
+        pool.add_cut(1, 2, 3.0, &[1.0]); // slot 2
+        pool.add_cut(2, 0, 4.0, &[1.0]); // slot 3
+        assert!(pool.active[0] && pool.active[1] && pool.active[2] && pool.active[3]);
+        assert_eq!(pool.populated_count, 4, "dense packing leaves no gap");
+        assert_eq!(pool.generated_count, 4);
+        // metadata keeps the TRUE iteration, not the re-based slot iteration.
+        assert_eq!(pool.metadata[0].iteration_generated, 1);
+        assert_eq!(pool.metadata[3].iteration_generated, 2);
     }
 
     #[test]

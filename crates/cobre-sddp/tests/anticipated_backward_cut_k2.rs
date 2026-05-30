@@ -532,22 +532,26 @@ fn three_stage_k2_anticipated_cut_coefficient_propagates_correctly() {
          be 0; got {ant_state_start}",
     );
 
-    // ── AC-3 / AC-4: select the most-recent cut (largest forward_pass_index).
+    // ── AC-3 / AC-4: select the iteration-1 cut explicitly.
     // `active_cuts(stage)` yields `(slot, intercept, &[coeffs])` where `slot`
-    // encodes `warm_start_count + iteration * forward_passes + forward_pass_index`
-    // (per CutPool::slot_index). The analytical match is at the FIRST cut
-    // (slot=1, iteration 1): once iteration 1's cut is baked into stage 0's
-    // template, the iteration-2 forward trial point shifts to a regime where
-    // stage 2's subproblem is insensitive to the propagated state (the FCF
-    // tangent is exact at the visited point), so iterations 2-5 add zero-
-    // subgradient cuts with intercept c_ant*D_1/K = 0.5. The closed-form
-    // derivation in the module docstring applies to the iteration-1 cut.
-    // Select that cut explicitly rather than taking the most-recent one.
+    // encodes `warm_start_count + (iteration - iteration_base) * forward_passes
+    // + forward_pass_index` (per CutPool::slot_index). With dense packing
+    // (iteration_base = start_iteration + 1 = 1) and forward_passes = 1, the
+    // iteration-1 cut lands at slot 0. The analytical match is this FIRST cut:
+    // once iteration 1's cut is baked into stage 0's template, the iteration-2
+    // forward trial point shifts to a regime where stage 2's subproblem is
+    // insensitive to the propagated state (the FCF tangent is exact at the
+    // visited point), so iterations 2-5 add zero-subgradient cuts with intercept
+    // c_ant*D_1/K = 0.5. The closed-form derivation in the module docstring
+    // applies to the iteration-1 cut. Select it explicitly rather than taking
+    // the most-recent one.
     let analytical = setup
         .fcf
         .active_cuts(0)
-        .find(|(slot, _, _)| *slot == 1)
-        .expect("AC-3: cut at slot=1 (iteration-1) must be present in stage 0 pool");
+        .find(|(slot, _, _)| *slot == 0)
+        .expect(
+            "AC-3: iteration-1 cut (slot 0 under dense packing) must be present in stage 0 pool",
+        );
     let (slot, _intercept, coefficients) = analytical;
 
     assert_eq!(

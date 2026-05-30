@@ -157,6 +157,12 @@ where
         let total_forward_passes = config.loop_config.forward_passes as usize;
         let ranks = RankDistribution::new(comm, num_stages, total_forward_passes, indexer.n_state);
 
+        // ── Dense cut packing ─────────────────────────────────────────────
+        // Map the first training iteration (start_iteration + 1) to slot
+        // `warm_start_count` so training cuts pack densely with no reserved
+        // leading block. Runs before the first backward pass adds any cut.
+        fcf.set_iteration_base(config.loop_config.start_iteration + 1);
+
         // ── Workspace pool ────────────────────────────────────────────────
         let n_threads = config.loop_config.n_fwd_threads.max(1);
         let mut fwd_pool = WorkspacePool::try_new(

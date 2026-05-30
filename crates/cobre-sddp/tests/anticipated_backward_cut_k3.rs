@@ -496,18 +496,20 @@ fn four_stage_k3_anticipated_cut_coefficient_propagates_correctly() {
          be 0; got {ant_state_start}",
     );
 
-    // ── Select the iteration-1 cut (slot=1). ─────────────────────────────
+    // ── Select the iteration-1 cut (slot 0 under dense packing). ──────────
     // `active_cuts(stage)` yields `(slot, intercept, &[coeffs])` where `slot`
-    // encodes `warm_start_count + iteration * forward_passes + forward_pass_index`
-    // (per CutPool::slot_index). The analytical match is at the FIRST cut
-    // (slot=1, iteration 1): the three-stage propagation chain completes at
-    // the end of backward pass for t=0 in iteration 1. Later iterations add
-    // cuts at different trial points where the active basis differs.
+    // encodes `warm_start_count + (iteration - iteration_base) * forward_passes
+    // + forward_pass_index` (per CutPool::slot_index). With dense packing
+    // (iteration_base = start_iteration + 1 = 1) and forward_passes = 1, the
+    // iteration-1 cut lands at slot 0. The analytical match is this FIRST cut:
+    // the three-stage propagation chain completes at the end of backward pass
+    // for t=0 in iteration 1. Later iterations add cuts at different trial
+    // points where the active basis differs.
     let analytical = setup
         .fcf
         .active_cuts(0)
-        .find(|(slot, _, _)| *slot == 1)
-        .expect("cut at slot=1 (iteration-1) must be present in stage 0 pool");
+        .find(|(slot, _, _)| *slot == 0)
+        .expect("iteration-1 cut (slot 0 under dense packing) must be present in stage 0 pool");
     let (_slot, _intercept, coefficients) = analytical;
 
     assert_eq!(
