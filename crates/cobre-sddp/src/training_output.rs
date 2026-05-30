@@ -339,7 +339,7 @@ pub fn build_training_output(
         .collect();
 
     let cut_stats = RowPoolStatistics {
-        total_generated: fcf.pools.iter().map(|p| p.populated_count as u64).sum(),
+        total_generated: fcf.total_generated_cuts() as u64,
         total_active: fcf.total_active_cuts() as u64,
         peak_active,
         cuts_active: fcf.total_active_cuts() as u64,
@@ -621,11 +621,44 @@ mod tests {
 
         assert_eq!(
             output.cut_stats.total_generated, 5,
-            "total_generated must equal sum of populated_count across all pools"
+            "total_generated must equal the true number of cuts added (iteration 0 has no gap)"
         );
         assert_eq!(
             output.cut_stats.total_active, 5,
             "total_active must equal active cuts in all pools"
+        );
+    }
+
+    #[test]
+    fn total_generated_excludes_reserved_leading_slots() {
+        // With 1-based iterations and forward_passes > 1, the slot block
+        // [0, forward_passes) is never written, so populated_count over-counts
+        // by forward_passes per cut-receiving pool. total_generated must report
+        // the true number of cuts added, not the high-water mark.
+        let result = make_result("iteration_limit", 80.0, 100.0, 0.2, 1);
+        let events = vec![make_iteration_summary(1, 80.0, 100.0, 0.2)];
+
+        let mut fcf = FutureCostFunction::new(2, 1, 2, 10, &[0; 2]);
+        // iteration 1, forward_passes 2 -> slots 2,3 (block [0,2) stays empty).
+        fcf.add_cut(0, 1, 0, 1.0, &[1.0]);
+        fcf.add_cut(0, 1, 1, 2.0, &[1.0]);
+        // stage 1: one cut at iteration 1 -> slot 2.
+        fcf.add_cut(1, 1, 0, 3.0, &[1.0]);
+
+        let populated: u64 = fcf.pools.iter().map(|p| p.populated_count as u64).sum();
+        assert_eq!(
+            populated, 7,
+            "high-water mark includes the empty leading block"
+        );
+
+        let output = build_training_output(&result, &events, &fcf);
+        assert_eq!(
+            output.cut_stats.total_generated, 3,
+            "total_generated must count the 3 cuts actually added"
+        );
+        assert!(
+            output.cut_stats.total_generated < populated,
+            "total_generated must exclude reserved-but-empty leading slots"
         );
     }
 

@@ -129,6 +129,16 @@ pub struct CutPool {
     /// [`active_count`]: CutPool::active_count
     pub cached_active_count: usize,
 
+    /// Cumulative count of cuts ever generated (written via [`add_cut`]),
+    /// including warm-start cuts loaded at construction. Unlike
+    /// [`populated_count`] — a slot high-water mark that includes any reserved
+    /// but unwritten leading slots — this counts only real cut insertions, so
+    /// it is the true number of policy rows generated over the run.
+    ///
+    /// [`add_cut`]: CutPool::add_cut
+    /// [`populated_count`]: CutPool::populated_count
+    pub generated_count: usize,
+
     /// Scratch buffer for [`enforce_budget`] candidate collection.
     ///
     /// Reused across calls to avoid per-call `Vec<u32>` allocation. Cleared
@@ -190,6 +200,7 @@ impl CutPool {
             forward_passes,
             warm_start_count,
             cached_active_count: 0,
+            generated_count: warm_start_count as usize,
             candidates_buf: Vec::new(),
         }
     }
@@ -280,6 +291,7 @@ impl CutPool {
         if slot >= self.populated_count {
             self.populated_count = slot + 1;
         }
+        self.generated_count += 1;
     }
 
     /// Iterate over active cuts in the populated range.
@@ -754,6 +766,7 @@ impl CutPool {
             forward_passes: 0,
             warm_start_count: capacity as u32,
             cached_active_count,
+            generated_count: capacity,
             candidates_buf: Vec::new(),
         }
     }
@@ -847,6 +860,7 @@ impl CutPool {
             forward_passes,
             warm_start_count: warm_start_count as u32,
             cached_active_count,
+            generated_count: warm_start_count,
             candidates_buf: Vec::new(),
         }
     }

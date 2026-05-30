@@ -344,6 +344,16 @@ impl FutureCostFunction {
         self.pools.iter().map(CutPool::active_count).sum()
     }
 
+    /// Return the total number of cuts ever generated across all stages,
+    /// including warm-start cuts. Sums `generated_count` over every pool.
+    ///
+    /// Unlike summing `populated_count`, this excludes reserved-but-unwritten
+    /// slots, so it reflects the true number of policy rows generated.
+    #[must_use]
+    pub fn total_generated_cuts(&self) -> usize {
+        self.pools.iter().map(|p| p.generated_count).sum()
+    }
+
     /// Return the intercept value for the cut at `(stage, slot)`.
     ///
     /// Reads directly from `pools[stage].intercepts[slot]`. The returned value
