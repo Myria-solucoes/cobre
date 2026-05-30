@@ -126,8 +126,8 @@ pub struct RowSelectionConfig {
     /// to deserialise.
     ///
     /// Previously controlled a sliding-window mask used during basis
-    /// reconstruction. Reconstruction now matches stored cut rows by slot
-    /// identity alone, which makes the window value unobservable. See
+    /// reconstruction. Reconstruction now matches stored constraint rows by
+    /// slot identity alone, which makes the window value unobservable. See
     /// `CHANGELOG.md` for the deprecation announcement.
     #[serde(default)]
     #[deprecated(

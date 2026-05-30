@@ -11,7 +11,10 @@
 //! results at the right point in the execution flow.
 
 #[allow(unused_imports)]
-pub use cobre_sddp::{HydroModelSummary, ModelProvenanceReport, ProvenanceSource};
+pub use cobre_sddp::{
+    HydroModelSummary, HydroProductionProvenance, InflowProvenance, ModelProvenanceReport,
+    ProvenanceSource,
+};
 use console::Term;
 
 /// Print the hydro model preprocessing summary to `stderr`.
@@ -20,8 +23,7 @@ use console::Term;
 /// - `Production:` — counts of constant and FPHA hydros with plane totals.
 /// - `Evaporation:` — counts of linearized and un-modelled hydro plants.
 ///
-/// The singular/plural form `"hydro"` vs `"hydros"` is applied to the
-/// evaporation counts. Write errors are silently ignored (fire-and-forget).
+/// Write errors are silently ignored (fire-and-forget).
 pub fn print_hydro_model_summary(stderr: &Term, summary: &HydroModelSummary) {
     let _ = stderr.write_line(&format!("{}", console::style("Hydro models").bold()));
     let _ = stderr.write_line(&format!(
@@ -196,111 +198,35 @@ pub fn print_execution_topology(
     }
 }
 
-/// Classify how FPHA planes were obtained for display purposes.
-enum FphaSourceLabel {
-    /// All FPHA hydros loaded from `fpha_hyperplanes.parquet`.
-    AllPrecomputed,
-    /// All FPHA hydros computed from reservoir geometry.
-    AllComputed,
-    /// A mix: `n_precomputed` from Parquet and `n_computed` from geometry.
-    Mixed {
-        n_precomputed: usize,
-        n_computed: usize,
-    },
-}
-
-/// Determine the [`FphaSourceLabel`] for the FPHA hydros in a summary.
-fn fpha_source_label(summary: &HydroModelSummary) -> FphaSourceLabel {
-    use cobre_sddp::ProductionModelSource;
-
-    let n_precomputed = summary
-        .fpha_details
-        .iter()
-        .filter(|d| d.source == ProductionModelSource::PrecomputedHyperplanes)
-        .count();
-    let n_computed = summary
-        .fpha_details
-        .iter()
-        .filter(|d| d.source == ProductionModelSource::ComputedFromGeometry)
-        .count();
-
-    match (n_precomputed, n_computed) {
-        (_, 0) => FphaSourceLabel::AllPrecomputed,
-        (0, _) => FphaSourceLabel::AllComputed,
-        _ => FphaSourceLabel::Mixed {
-            n_precomputed,
-            n_computed,
-        },
-    }
-}
-
 /// Format the production detail line for a [`HydroModelSummary`].
+///
+/// Shows counts only: the number of FPHA hydros with their total plane count
+/// and the number of constant hydros. The plane-source qualifiers
+/// (precomputed vs. computed from geometry) are not rendered here — they are
+/// owned by the model provenance section.
 fn format_production_line(summary: &HydroModelSummary) -> String {
     match (summary.n_constant, summary.n_fpha) {
         (0, 0) => "0 hydros".to_string(),
         (n_const, 0) => format!("{n_const} constant"),
-        (0, n_fpha) => {
-            let source_detail = match fpha_source_label(summary) {
-                FphaSourceLabel::AllPrecomputed => {
-                    "loaded from fpha_hyperplanes.parquet".to_string()
-                }
-                FphaSourceLabel::AllComputed => "computed from geometry".to_string(),
-                FphaSourceLabel::Mixed {
-                    n_precomputed,
-                    n_computed,
-                } => format!("{n_precomputed} precomputed, {n_computed} computed from geometry"),
-            };
-            format!(
-                "{n_fpha} FPHA ({} planes, {source_detail})",
-                summary.total_planes
-            )
-        }
-        (n_const, n_fpha) => {
-            let source_detail = match fpha_source_label(summary) {
-                FphaSourceLabel::AllPrecomputed => "loaded".to_string(),
-                FphaSourceLabel::AllComputed => "computed from geometry".to_string(),
-                FphaSourceLabel::Mixed {
-                    n_precomputed,
-                    n_computed,
-                } => format!("{n_precomputed} precomputed, {n_computed} computed from geometry"),
-            };
-            format!(
-                "{n_const} constant, {n_fpha} FPHA ({} planes, {source_detail})",
-                summary.total_planes
-            )
-        }
+        (0, n_fpha) => format!("{n_fpha} FPHA ({} planes)", summary.total_planes),
+        (n_const, n_fpha) => format!(
+            "{n_fpha} FPHA ({} planes), {n_const} constant",
+            summary.total_planes
+        ),
     }
-}
-
-/// Pluralize "hydro" or "hydros" based on count.
-fn hydro_plural(count: usize) -> &'static str {
-    if count == 1 { "hydro" } else { "hydros" }
 }
 
 /// Format the evaporation detail line for a [`HydroModelSummary`].
 ///
-/// When there are no evaporating hydros the line has no reference source detail.
-/// When all evaporating hydros share a single source the label is unqualified;
-/// when they are split between sources the counts are shown explicitly.
+/// Shows counts only: the number of hydros with a linearized evaporation model
+/// and the number without. No pluralized noun is inserted between the count and
+/// the `linearized`/`without` keywords. The reference-volume source qualifiers
+/// (user-supplied vs. midpoint) are not rendered here — they are owned by the
+/// model provenance section.
 fn format_evaporation_line(summary: &HydroModelSummary) -> String {
-    if summary.n_evaporation == 0 {
-        return format!(
-            "0 hydros linearized, {} {} without",
-            summary.n_no_evaporation,
-            hydro_plural(summary.n_no_evaporation),
-        );
-    }
-    let ref_detail = match (summary.n_user_supplied_ref, summary.n_default_midpoint_ref) {
-        (0, _) => "midpoint v_ref".to_string(),
-        (_, 0) => "user v_ref".to_string(),
-        (u, m) => format!("{u} user v_ref, {m} midpoint v_ref"),
-    };
     format!(
-        "{} {} linearized (from geometry, {ref_detail}), {} {} without",
-        summary.n_evaporation,
-        hydro_plural(summary.n_evaporation),
-        summary.n_no_evaporation,
-        hydro_plural(summary.n_no_evaporation),
+        "{} linearized, {} without",
+        summary.n_evaporation, summary.n_no_evaporation,
     )
 }
 
@@ -330,7 +256,7 @@ pub fn format_hydro_model_summary_string(summary: &HydroModelSummary) -> String 
 /// Returns `" (method, max order N)"` when AR method is known, or an empty
 /// string when AR is `NotApplicable` (no parenthetical shown).
 fn provenance_ar_detail(report: &ModelProvenanceReport) -> String {
-    match (&report.ar_method, report.ar_max_order) {
+    match (&report.inflow.ar_method, report.inflow.ar_max_order) {
         (Some(method), Some(max_order)) => format!(" ({method}, max order {max_order})"),
         _ => String::new(),
     }
@@ -347,20 +273,26 @@ fn provenance_ar_detail(report: &ModelProvenanceReport) -> String {
 /// Write errors are silently ignored (fire-and-forget).
 pub fn print_provenance_summary(stderr: &Term, report: &ModelProvenanceReport) {
     let _ = stderr.write_line(&format!("{}", console::style("Model provenance").bold()));
-    let _ = stderr.write_line(&format!("  Estimation path: {}", report.estimation_path));
+    let _ = stderr.write_line(&format!(
+        "  Estimation path: {}",
+        report.inflow.estimation_path
+    ));
     let _ = stderr.write_line(&format!(
         "  Seasonal stats:  {}",
-        report.seasonal_stats_source
+        report.inflow.seasonal_stats_source
     ));
     let ar_detail = provenance_ar_detail(report);
     let _ = stderr.write_line(&format!(
         "  AR coefficients: {}{}",
-        report.ar_coefficients_source, ar_detail
+        report.inflow.ar_coefficients_source, ar_detail
     ));
-    let _ = stderr.write_line(&format!("  Correlation:     {}", report.correlation_source));
+    let _ = stderr.write_line(&format!(
+        "  Correlation:     {}",
+        report.inflow.correlation_source
+    ));
     let _ = stderr.write_line(&format!(
         "  Opening tree:    {}",
-        report.opening_tree_source
+        report.inflow.opening_tree_source
     ));
 }
 
@@ -374,18 +306,27 @@ pub fn print_provenance_summary(stderr: &Term, report: &ModelProvenanceReport) {
 pub fn format_provenance_summary_string(report: &ModelProvenanceReport) -> String {
     let mut lines: Vec<String> = Vec::new();
     lines.push("Model provenance".to_string());
-    lines.push(format!("  Estimation path: {}", report.estimation_path));
+    lines.push(format!(
+        "  Estimation path: {}",
+        report.inflow.estimation_path
+    ));
     lines.push(format!(
         "  Seasonal stats:  {}",
-        report.seasonal_stats_source
+        report.inflow.seasonal_stats_source
     ));
     let ar_detail = provenance_ar_detail(report);
     lines.push(format!(
         "  AR coefficients: {}{}",
-        report.ar_coefficients_source, ar_detail
+        report.inflow.ar_coefficients_source, ar_detail
     ));
-    lines.push(format!("  Correlation:     {}", report.correlation_source));
-    lines.push(format!("  Opening tree:    {}", report.opening_tree_source));
+    lines.push(format!(
+        "  Correlation:     {}",
+        report.inflow.correlation_source
+    ));
+    lines.push(format!(
+        "  Opening tree:    {}",
+        report.inflow.opening_tree_source
+    ));
     lines.join("\n")
 }
 
@@ -1189,7 +1130,8 @@ mod tests {
         }
     }
 
-    /// Acceptance criterion: 2 FPHA hydros → output contains "2 FPHA" and "planes" and "loaded".
+    /// Acceptance criterion: 2 FPHA hydros → output contains "2 FPHA" and "planes"
+    /// and does NOT contain the relocated source qualifiers.
     #[test]
     fn format_hydro_model_summary_with_fpha_contains_key_terms() {
         let summary = make_hydro_model_summary_mixed();
@@ -1204,8 +1146,16 @@ mod tests {
             "mixed summary must contain 'planes', got: {s}"
         );
         assert!(
-            s.contains("loaded"),
-            "mixed summary must contain 'loaded', got: {s}"
+            !s.contains("loaded"),
+            "production source qualifier 'loaded' must be relocated out of the display, got: {s}"
+        );
+        assert!(
+            !s.contains("precomputed"),
+            "production source qualifier 'precomputed' must be relocated out of the display, got: {s}"
+        );
+        assert!(
+            !s.contains("computed from geometry"),
+            "production source qualifier 'computed from geometry' must be relocated out of the display, got: {s}"
         );
     }
 
@@ -1222,6 +1172,58 @@ mod tests {
         assert!(
             !s.contains("FPHA"),
             "all-constant summary must NOT contain 'FPHA', got: {s}"
+        );
+    }
+
+    /// AC: pure-FPHA (`n_constant = 0`) — output contains "2 FPHA" and "7 planes"
+    /// and does NOT contain any relocated production-source qualifier.
+    #[test]
+    fn format_hydro_model_summary_pure_fpha_counts_only() {
+        let summary = HydroModelSummary {
+            n_constant: 0,
+            n_fpha: 2,
+            total_planes: 7,
+            fpha_details: vec![
+                FphaHydroDetail {
+                    hydro_id: EntityId(1),
+                    name: "Hydro1".to_string(),
+                    source: cobre_sddp::ProductionModelSource::PrecomputedHyperplanes,
+                    n_planes: 4,
+                },
+                FphaHydroDetail {
+                    hydro_id: EntityId(2),
+                    name: "Hydro2".to_string(),
+                    source: cobre_sddp::ProductionModelSource::ComputedFromGeometry,
+                    n_planes: 3,
+                },
+            ],
+            n_evaporation: 0,
+            n_no_evaporation: 2,
+            n_user_supplied_ref: 0,
+            n_default_midpoint_ref: 0,
+            kappa_warnings: Vec::new(),
+        };
+        let s = format_hydro_model_summary_string(&summary);
+
+        assert!(
+            s.contains("2 FPHA"),
+            "pure-fpha summary must contain '2 FPHA', got: {s}"
+        );
+        assert!(
+            s.contains("7 planes"),
+            "pure-fpha summary must contain '7 planes', got: {s}"
+        );
+        assert!(
+            !s.contains("loaded"),
+            "production source qualifier 'loaded' must be absent, got: {s}"
+        );
+        assert!(
+            !s.contains("precomputed"),
+            "production source qualifier 'precomputed' must be absent, got: {s}"
+        );
+        assert!(
+            !s.contains("computed from geometry"),
+            "production source qualifier 'computed from geometry' must be absent, got: {s}"
         );
     }
 
@@ -1253,9 +1255,9 @@ mod tests {
         );
     }
 
-    /// All-FPHA large system: production line includes filename.
+    /// All-FPHA large system: production line shows counts only, no source filename.
     #[test]
-    fn format_hydro_model_summary_all_fpha_shows_filename() {
+    fn format_hydro_model_summary_all_fpha_counts_only() {
         let summary = make_hydro_model_summary_all_fpha();
         let s = format_hydro_model_summary_string(&summary);
 
@@ -1268,30 +1270,48 @@ mod tests {
             "all-fpha summary must contain '825' (plane count), got: {s}"
         );
         assert!(
-            s.contains("fpha_hyperplanes.parquet"),
-            "all-fpha summary must contain the filename, got: {s}"
+            !s.contains("fpha_hyperplanes.parquet"),
+            "production source filename must be relocated out of the display, got: {s}"
+        );
+        assert!(
+            !s.contains("loaded"),
+            "production source qualifier 'loaded' must be relocated out of the display, got: {s}"
         );
     }
 
-    /// Singular/plural: "1 hydro" vs "3 hydros" in evaporation line.
+    /// AC (C2): `n_evaporation=1, n_no_evaporation=1, n_user_supplied_ref=1` →
+    /// output contains the literal `"1 linearized"` (count-only, no noun) and
+    /// none of the relocated reference-source qualifiers.
     #[test]
-    fn format_hydro_model_summary_singular_evaporation() {
+    fn format_hydro_model_summary_evaporation_count_only_singular() {
         let summary = HydroModelSummary {
-            n_constant: 3,
+            n_constant: 0,
             n_fpha: 0,
             total_planes: 0,
             fpha_details: vec![],
             n_evaporation: 1,
-            n_no_evaporation: 2,
-            n_user_supplied_ref: 0,
-            n_default_midpoint_ref: 1,
+            n_no_evaporation: 1,
+            n_user_supplied_ref: 1,
+            n_default_midpoint_ref: 0,
             kappa_warnings: Vec::new(),
         };
         let s = format_hydro_model_summary_string(&summary);
 
         assert!(
-            s.contains("1 hydro linearized"),
-            "singular evaporation must use 'hydro' not 'hydros', got: {s}"
+            s.contains("1 linearized"),
+            "evaporation line must contain the literal '1 linearized', got: {s}"
+        );
+        assert!(
+            !s.contains("v_ref"),
+            "evaporation reference qualifier 'v_ref' must be absent, got: {s}"
+        );
+        assert!(
+            !s.contains("user"),
+            "evaporation reference qualifier 'user' must be absent, got: {s}"
+        );
+        assert!(
+            !s.contains("midpoint"),
+            "evaporation reference qualifier 'midpoint' must be absent, got: {s}"
         );
     }
 
@@ -1301,8 +1321,8 @@ mod tests {
         let s = format_hydro_model_summary_string(&summary);
 
         assert!(
-            s.contains("3 hydros linearized"),
-            "plural evaporation must use 'hydros', got: {s}"
+            s.contains("3 linearized"),
+            "evaporation line must contain '3 linearized' (count-only), got: {s}"
         );
     }
 
@@ -1325,9 +1345,14 @@ mod tests {
         print_hydro_model_summary(&Term::buffered_stderr(), &summary);
     }
 
-    // ── format_evaporation_line reference-source variant tests ───────────────
+    // ── format_evaporation_line count-only tests ─────────────────────────────
+    //
+    // The reference-volume source qualifiers (user-supplied vs. midpoint
+    // `v_ref`) have been relocated to the model provenance section; the
+    // structural-summary display shows counts only. These tests assert the
+    // count wording and the absence of every relocated source string.
 
-    /// AC: all-midpoint — line contains "midpoint `v_ref`" and does NOT contain "user `v_ref`".
+    /// AC: all-midpoint refs — line shows counts only, no `v_ref` qualifier.
     #[test]
     fn test_evaporation_line_all_midpoint() {
         let summary = HydroModelSummary {
@@ -1343,16 +1368,20 @@ mod tests {
         };
         let s = format_hydro_model_summary_string(&summary);
         assert!(
-            s.contains("midpoint v_ref"),
-            "all-midpoint must contain 'midpoint v_ref', got: {s}"
+            s.contains("2 linearized"),
+            "all-midpoint must contain '2 linearized', got: {s}"
         );
         assert!(
-            !s.contains("user v_ref"),
-            "all-midpoint must NOT contain 'user v_ref', got: {s}"
+            !s.contains("v_ref"),
+            "evaporation reference qualifier 'v_ref' must be relocated out of the display, got: {s}"
+        );
+        assert!(
+            !s.contains("midpoint"),
+            "evaporation reference qualifier 'midpoint' must be relocated out of the display, got: {s}"
         );
     }
 
-    /// AC: all-user-supplied — line contains "user `v_ref`" and does NOT contain "midpoint `v_ref`".
+    /// AC: all-user-supplied refs — line shows counts only, no `v_ref` qualifier.
     #[test]
     fn test_evaporation_line_all_user_supplied() {
         let summary = HydroModelSummary {
@@ -1368,24 +1397,24 @@ mod tests {
         };
         let s = format_hydro_model_summary_string(&summary);
         assert!(
-            s.contains("user v_ref"),
-            "all-user-supplied must contain 'user v_ref', got: {s}"
+            !s.contains("v_ref"),
+            "evaporation reference qualifier 'v_ref' must be relocated out of the display, got: {s}"
         );
         assert!(
-            !s.contains("midpoint v_ref"),
-            "all-user-supplied must NOT contain 'midpoint v_ref', got: {s}"
+            !s.contains("user"),
+            "evaporation reference qualifier 'user' must be relocated out of the display, got: {s}"
         );
         assert!(
-            s.contains("3 hydros linearized"),
-            "all-user-supplied must contain '3 hydros linearized', got: {s}"
+            s.contains("3 linearized"),
+            "all-user-supplied must contain '3 linearized', got: {s}"
         );
         assert!(
-            s.contains("1 hydro without"),
-            "all-user-supplied must contain '1 hydro without', got: {s}"
+            s.contains("1 without"),
+            "all-user-supplied must contain '1 without', got: {s}"
         );
     }
 
-    /// AC: mixed — line contains "2 user `v_ref`" and "1 midpoint `v_ref`".
+    /// AC: mixed refs — line shows counts only, no `v_ref` qualifiers.
     #[test]
     fn test_evaporation_line_mixed() {
         let summary = HydroModelSummary {
@@ -1401,16 +1430,20 @@ mod tests {
         };
         let s = format_hydro_model_summary_string(&summary);
         assert!(
-            s.contains("2 user v_ref"),
-            "mixed must contain '2 user v_ref', got: {s}"
+            !s.contains("v_ref"),
+            "evaporation reference qualifier 'v_ref' must be relocated out of the display, got: {s}"
         );
         assert!(
-            s.contains("1 midpoint v_ref"),
-            "mixed must contain '1 midpoint v_ref', got: {s}"
+            !s.contains("user"),
+            "evaporation reference qualifier 'user' must be relocated out of the display, got: {s}"
         );
         assert!(
-            s.contains("3 hydros linearized"),
-            "mixed must contain '3 hydros linearized', got: {s}"
+            !s.contains("midpoint"),
+            "evaporation reference qualifier 'midpoint' must be relocated out of the display, got: {s}"
+        );
+        assert!(
+            s.contains("3 linearized"),
+            "mixed must contain '3 linearized', got: {s}"
         );
     }
 
@@ -1424,45 +1457,51 @@ mod tests {
             "zero-evaporation must NOT contain 'v_ref', got: {s}"
         );
         assert!(
-            s.contains("0 hydros linearized"),
-            "zero-evaporation must contain '0 hydros linearized', got: {s}"
+            s.contains("0 linearized"),
+            "zero-evaporation must contain '0 linearized', got: {s}"
         );
     }
 
     // ── ModelProvenanceReport tests ───────────────────────────────────────────
 
     use super::{
-        ModelProvenanceReport, ProvenanceSource, format_provenance_summary_string,
-        print_provenance_summary,
+        HydroProductionProvenance, InflowProvenance, ModelProvenanceReport, ProvenanceSource,
+        format_provenance_summary_string, print_provenance_summary,
     };
 
     fn make_provenance_report_full_estimation() -> ModelProvenanceReport {
         ModelProvenanceReport {
-            estimation_path: "full_estimation".to_string(),
-            seasonal_stats_source: ProvenanceSource::Estimated,
-            ar_coefficients_source: ProvenanceSource::Estimated,
-            correlation_source: ProvenanceSource::Estimated,
-            opening_tree_source: ProvenanceSource::Estimated,
-            n_hydros: 3,
-            ar_method: Some("PACF".to_string()),
-            ar_max_order: Some(6),
-            white_noise_fallbacks: vec![],
-            historical_library_past_inflows_digest: None,
+            inflow: InflowProvenance {
+                estimation_path: "full_estimation".to_string(),
+                seasonal_stats_source: ProvenanceSource::Estimated,
+                ar_coefficients_source: ProvenanceSource::Estimated,
+                correlation_source: ProvenanceSource::Estimated,
+                opening_tree_source: ProvenanceSource::Estimated,
+                n_hydros: 3,
+                ar_method: Some("PACF".to_string()),
+                ar_max_order: Some(6),
+                white_noise_fallbacks: vec![],
+                historical_library_past_inflows_digest: None,
+            },
+            hydro_production: HydroProductionProvenance::default(),
         }
     }
 
     fn make_provenance_report_deterministic() -> ModelProvenanceReport {
         ModelProvenanceReport {
-            estimation_path: "deterministic".to_string(),
-            seasonal_stats_source: ProvenanceSource::NotApplicable,
-            ar_coefficients_source: ProvenanceSource::NotApplicable,
-            correlation_source: ProvenanceSource::NotApplicable,
-            opening_tree_source: ProvenanceSource::NotApplicable,
-            n_hydros: 0,
-            ar_method: None,
-            ar_max_order: None,
-            white_noise_fallbacks: vec![],
-            historical_library_past_inflows_digest: None,
+            inflow: InflowProvenance {
+                estimation_path: "deterministic".to_string(),
+                seasonal_stats_source: ProvenanceSource::NotApplicable,
+                ar_coefficients_source: ProvenanceSource::NotApplicable,
+                correlation_source: ProvenanceSource::NotApplicable,
+                opening_tree_source: ProvenanceSource::NotApplicable,
+                n_hydros: 0,
+                ar_method: None,
+                ar_max_order: None,
+                white_noise_fallbacks: vec![],
+                historical_library_past_inflows_digest: None,
+            },
+            hydro_production: HydroProductionProvenance::default(),
         }
     }
 
@@ -1544,16 +1583,19 @@ mod tests {
     #[test]
     fn format_provenance_summary_user_file_source() {
         let report = ModelProvenanceReport {
-            estimation_path: "user_provided_no_history".to_string(),
-            seasonal_stats_source: ProvenanceSource::UserFile,
-            ar_coefficients_source: ProvenanceSource::UserFile,
-            correlation_source: ProvenanceSource::Estimated,
-            opening_tree_source: ProvenanceSource::Estimated,
-            n_hydros: 2,
-            ar_method: None,
-            ar_max_order: None,
-            white_noise_fallbacks: vec![],
-            historical_library_past_inflows_digest: None,
+            inflow: InflowProvenance {
+                estimation_path: "user_provided_no_history".to_string(),
+                seasonal_stats_source: ProvenanceSource::UserFile,
+                ar_coefficients_source: ProvenanceSource::UserFile,
+                correlation_source: ProvenanceSource::Estimated,
+                opening_tree_source: ProvenanceSource::Estimated,
+                n_hydros: 2,
+                ar_method: None,
+                ar_max_order: None,
+                white_noise_fallbacks: vec![],
+                historical_library_past_inflows_digest: None,
+            },
+            hydro_production: HydroProductionProvenance::default(),
         };
         let s = format_provenance_summary_string(&report);
         assert!(

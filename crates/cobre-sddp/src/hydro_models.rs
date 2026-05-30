@@ -24,6 +24,7 @@ use cobre_core::{EntityId, System, entities::hydro::HydroGenerationModel};
 use cobre_io::extensions::{
     FphaColumnLayout, FphaHyperplaneRow, HydroGeometryRow, ProductionModelConfig, SelectionMode,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::SddpError;
 use crate::fpha_fitting::{FphaFitResult, fit_fpha_planes};
@@ -267,7 +268,8 @@ impl EvaporationModelSet {
 // ── Provenance types ──────────────────────────────────────────────────────────
 
 /// Source of the production model used for a given hydro plant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProductionModelSource {
     /// Constant productivity from the entity definition; no geometric data.
     DefaultConstant,
@@ -320,7 +322,7 @@ pub struct HydroModelProvenance {
 ///
 /// Included in [`HydroModelSummary`] for display and auditing. Contains the
 /// entity identity, source, and the number of linearisation planes.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FphaHydroDetail {
     /// Entity identifier of the hydro plant.
     pub hydro_id: EntityId,
@@ -337,7 +339,7 @@ pub struct FphaHydroDetail {
 /// Produced by the summary builder in the hydro models module and consumed by
 /// `cobre-cli` for display. Contains counts for both production and evaporation
 /// models.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HydroModelSummary {
     /// Number of hydro plants using [`ResolvedProductionModel::ConstantProductivity`].
     pub n_constant: usize,
@@ -4848,5 +4850,116 @@ mod tests {
             result_rank0.fpha_export_rows, result_rank1.fpha_export_rows,
             "fpha_export_rows must be bit-identical across ranks (deterministic preprocessing)"
         );
+    }
+
+    // ── Serde round-trip tests ─────────────────────────────────────────────────
+
+    fn sample_hydro_model_summary() -> HydroModelSummary {
+        HydroModelSummary {
+            n_constant: 3,
+            n_fpha: 2,
+            total_planes: 7,
+            fpha_details: vec![
+                FphaHydroDetail {
+                    hydro_id: EntityId(11),
+                    name: "Reservoir A".to_string(),
+                    source: ProductionModelSource::PrecomputedHyperplanes,
+                    n_planes: 4,
+                },
+                FphaHydroDetail {
+                    hydro_id: EntityId(12),
+                    name: "Reservoir B".to_string(),
+                    source: ProductionModelSource::ComputedFromGeometry,
+                    n_planes: 3,
+                },
+            ],
+            n_evaporation: 1,
+            n_no_evaporation: 4,
+            n_user_supplied_ref: 1,
+            n_default_midpoint_ref: 0,
+            kappa_warnings: vec![("Reservoir B".to_string(), 0.91)],
+        }
+    }
+
+    #[test]
+    fn production_model_source_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&ProductionModelSource::DefaultConstant).unwrap(),
+            "\"default_constant\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ProductionModelSource::PrecomputedHyperplanes).unwrap(),
+            "\"precomputed_hyperplanes\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ProductionModelSource::ComputedFromGeometry).unwrap(),
+            "\"computed_from_geometry\""
+        );
+
+        for source in [
+            ProductionModelSource::DefaultConstant,
+            ProductionModelSource::PrecomputedHyperplanes,
+            ProductionModelSource::ComputedFromGeometry,
+        ] {
+            let json = serde_json::to_string(&source).unwrap();
+            let back: ProductionModelSource = serde_json::from_str(&json).unwrap();
+            assert_eq!(source, back);
+        }
+    }
+
+    #[test]
+    fn entity_id_serializes_as_bare_integer() {
+        // EntityId is a transparent newtype: its wire form is a bare integer,
+        // exercised here via the FphaHydroDetail field that embeds it.
+        let detail = FphaHydroDetail {
+            hydro_id: EntityId(42),
+            name: "Plant".to_string(),
+            source: ProductionModelSource::DefaultConstant,
+            n_planes: 1,
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&detail).unwrap()).unwrap();
+        assert_eq!(value["hydro_id"], serde_json::json!(42));
+    }
+
+    #[test]
+    fn hydro_model_summary_round_trips_through_json() {
+        let summary = sample_hydro_model_summary();
+
+        let json = serde_json::to_string(&summary).unwrap();
+
+        // Structural counts and the relocated source qualifier are present.
+        assert!(json.contains("\"n_fpha\":2"));
+        assert!(json.contains("\"source\":\"precomputed_hyperplanes\""));
+
+        let back: HydroModelSummary = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(back.n_constant, summary.n_constant);
+        assert_eq!(back.n_fpha, summary.n_fpha);
+        assert_eq!(back.total_planes, summary.total_planes);
+        assert_eq!(back.n_evaporation, summary.n_evaporation);
+        assert_eq!(back.n_no_evaporation, summary.n_no_evaporation);
+        assert_eq!(back.n_user_supplied_ref, summary.n_user_supplied_ref);
+        assert_eq!(back.n_default_midpoint_ref, summary.n_default_midpoint_ref);
+        assert_eq!(back.fpha_details.len(), summary.fpha_details.len());
+        for (got, want) in back.fpha_details.iter().zip(&summary.fpha_details) {
+            assert_eq!(got.hydro_id, want.hydro_id);
+            assert_eq!(got.name, want.name);
+            assert_eq!(got.source, want.source);
+            assert_eq!(got.n_planes, want.n_planes);
+        }
+        assert_eq!(back.kappa_warnings, summary.kappa_warnings);
+        assert_eq!(
+            back.fpha_details[0].source,
+            ProductionModelSource::PrecomputedHyperplanes
+        );
+    }
+
+    #[test]
+    fn hydro_model_summary_serialization_is_deterministic() {
+        let summary = sample_hydro_model_summary();
+        let first = serde_json::to_string(&summary).unwrap();
+        let second = serde_json::to_string(&summary).unwrap();
+        assert_eq!(first, second);
     }
 }

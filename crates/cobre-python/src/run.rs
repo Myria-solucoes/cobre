@@ -395,12 +395,15 @@ fn run_inner(
         estimation_report.as_ref(),
         setup.stochastic.provenance(),
         system.hydros().len(),
+        &setup.hydro_models.provenance,
     );
     // Fingerprint past_inflows when the historical scheme is active so stale-library
     // detection can compare against a fresh digest on later runs. The training-side
     // library is the canonical one; simulation-side is None when it borrows from
     // training (identical past_inflows by construction).
-    provenance_report.historical_library_past_inflows_digest =
+    provenance_report
+        .inflow
+        .historical_library_past_inflows_digest =
         setup.scenario_libraries.training.historical.as_ref().map(
             cobre_stochastic::sampling::historical::HistoricalScenarioLibrary::past_inflows_digest,
         );
@@ -758,26 +761,29 @@ fn provenance_to_dict<'py>(
     report: &ModelProvenanceReport,
 ) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new(py);
-    dict.set_item("estimation_path", &report.estimation_path)?;
+    dict.set_item("estimation_path", &report.inflow.estimation_path)?;
     dict.set_item(
         "seasonal_stats_source",
-        report.seasonal_stats_source.to_string(),
+        report.inflow.seasonal_stats_source.to_string(),
     )?;
     dict.set_item(
         "ar_coefficients_source",
-        report.ar_coefficients_source.to_string(),
+        report.inflow.ar_coefficients_source.to_string(),
     )?;
-    dict.set_item("correlation_source", report.correlation_source.to_string())?;
+    dict.set_item(
+        "correlation_source",
+        report.inflow.correlation_source.to_string(),
+    )?;
     dict.set_item(
         "opening_tree_source",
-        report.opening_tree_source.to_string(),
+        report.inflow.opening_tree_source.to_string(),
     )?;
-    dict.set_item("n_hydros", report.n_hydros)?;
-    dict.set_item("ar_method", report.ar_method.as_deref())?;
-    dict.set_item("ar_max_order", report.ar_max_order)?;
+    dict.set_item("n_hydros", report.inflow.n_hydros)?;
+    dict.set_item("ar_method", report.inflow.ar_method.as_deref())?;
+    dict.set_item("ar_max_order", report.inflow.ar_max_order)?;
     dict.set_item(
         "white_noise_fallbacks",
-        report.white_noise_fallbacks.clone(),
+        report.inflow.white_noise_fallbacks.clone(),
     )?;
     Ok(dict)
 }

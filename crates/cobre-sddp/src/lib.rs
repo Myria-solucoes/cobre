@@ -114,7 +114,10 @@ pub use policy_load::{
     validate_policy_compatibility,
 };
 // ── provenance ────────────────────────────────────────────────────────────────
-pub use provenance::{ModelProvenanceReport, ProvenanceSource, build_provenance_report};
+pub use provenance::{
+    HydroProductionProvenance, InflowProvenance, ModelProvenanceReport, ProvenanceSource,
+    build_provenance_report,
+};
 // ── risk_measure ──────────────────────────────────────────────────────────────
 pub use risk_measure::{BackwardOutcome, RiskMeasure};
 // ── setup ─────────────────────────────────────────────────────────────────────

@@ -954,6 +954,7 @@ fn run_pre_training(
             root_estimation_report,
             setup.stochastic.provenance(),
             system.hydros().len(),
+            &setup.hydro_models.provenance,
         );
         if !ctx.quiet {
             crate::summary::print_provenance_summary(&ctx.stderr, &provenance);
