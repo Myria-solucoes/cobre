@@ -23,7 +23,10 @@ use std::collections::{BTreeMap, HashMap};
 
 use cobre_core::{CorrelationModel, EntityId};
 
-use crate::{StochasticError, correlation::spectral::SpectralFactor};
+use crate::{
+    StochasticError,
+    correlation::spectral::{NEGLIGIBLE_NEGATIVE_EIGENVALUE, SpectralFactor},
+};
 
 /// Maximum group dimension for stack-allocated buffers in `apply_correlation`.
 /// Groups with more entities than this threshold use heap-allocated buffers.
@@ -156,6 +159,14 @@ impl DecomposedCorrelation {
 
         // Decompose each profile.
         let mut factors: BTreeMap<String, Vec<GroupFactor>> = BTreeMap::new();
+
+        // Accumulate negative-eigenvalue clipping across every decomposed matrix
+        // so the whole build emits one summary instead of one line per matrix.
+        let mut clip_matrices_total = 0_usize;
+        let mut clip_matrices_affected = 0_usize;
+        let mut clip_eigenvalues_total = 0_usize;
+        let mut clip_largest_magnitude = 0.0_f64;
+
         for (profile_name, profile) in &model.profiles {
             // Validate same-type constraint: all entities in a group must share one entity_type.
             for group in &profile.groups {
@@ -200,15 +211,22 @@ impl DecomposedCorrelation {
 
             let mut group_factors: Vec<GroupFactor> = Vec::with_capacity(profile.groups.len());
             for group in &profile.groups {
-                let factor = SpectralFactor::decompose(&group.matrix).map_err(|e| match e {
-                    StochasticError::InvalidCorrelation { reason, .. } => {
-                        StochasticError::InvalidCorrelation {
-                            profile_name: profile_name.clone(),
-                            reason,
+                let (factor, clip) = SpectralFactor::decompose_with_diagnostics(&group.matrix)
+                    .map_err(|e| match e {
+                        StochasticError::InvalidCorrelation { reason, .. } => {
+                            StochasticError::InvalidCorrelation {
+                                profile_name: profile_name.clone(),
+                                reason,
+                            }
                         }
-                    }
-                    other => other,
-                })?;
+                        other => other,
+                    })?;
+                clip_matrices_total += 1;
+                if clip.clipped_count > 0 {
+                    clip_matrices_affected += 1;
+                    clip_eigenvalues_total += clip.clipped_count;
+                    clip_largest_magnitude = clip_largest_magnitude.max(clip.largest_magnitude);
+                }
 
                 let entity_ids: Vec<EntityId> = group.entities.iter().map(|e| e.id).collect();
                 let entity_type = group
@@ -230,6 +248,34 @@ impl DecomposedCorrelation {
                 });
             }
             factors.insert(profile_name.clone(), group_factors);
+        }
+
+        // Single aggregated diagnostic for negative-eigenvalue clipping. Round-off-
+        // scale clipping (rank-deficient but effectively PSD inputs) is reported at
+        // debug; clipping large enough to indicate a genuinely indefinite matrix is
+        // escalated to warn.
+        if clip_matrices_affected > 0 {
+            if clip_largest_magnitude > NEGLIGIBLE_NEGATIVE_EIGENVALUE {
+                tracing::warn!(
+                    matrices_affected = clip_matrices_affected,
+                    matrices_total = clip_matrices_total,
+                    clipped_eigenvalues = clip_eigenvalues_total,
+                    largest_negative_magnitude = clip_largest_magnitude,
+                    "spectral decomposition clipped significant negative eigenvalues; \
+                     one or more correlation matrices may be indefinite rather than \
+                     merely rank-deficient — verify the correlation inputs"
+                );
+            } else {
+                tracing::debug!(
+                    matrices_affected = clip_matrices_affected,
+                    matrices_total = clip_matrices_total,
+                    clipped_eigenvalues = clip_eigenvalues_total,
+                    largest_negative_magnitude = clip_largest_magnitude,
+                    "spectral decomposition clipped near-zero negative eigenvalues to 0.0 \
+                     (nearest PSD approximation); correlation matrices are rank-deficient \
+                     but the projection is numerically negligible"
+                );
+            }
         }
 
         // Build the stage-to-profile schedule.

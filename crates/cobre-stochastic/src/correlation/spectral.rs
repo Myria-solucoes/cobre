@@ -16,6 +16,32 @@ use crate::StochasticError;
 /// Symmetry tolerance for input matrix validation.
 const SYMMETRY_TOL: f64 = 1e-10;
 
+/// Threshold separating round-off-scale negative eigenvalues from genuinely
+/// indefinite ones.
+///
+/// A correlation matrix that is mathematically positive-semidefinite but
+/// rank-deficient (e.g. estimated from a sample with collinear or constant
+/// series) yields eigenvalues that straddle zero by a few multiples of machine
+/// epsilon (~2.2e-16). Clipping those to 0.0 is exact PSD projection at no cost.
+/// A magnitude above this threshold instead signals an input that is meaningfully
+/// indefinite (e.g. inconsistent user-specified correlations), which is worth a
+/// warning. `1e-9` sits comfortably between the two regimes.
+pub(crate) const NEGLIGIBLE_NEGATIVE_EIGENVALUE: f64 = 1e-9;
+
+/// Diagnostics from a single spectral decomposition describing how much
+/// negative-eigenvalue clipping (positive-semidefinite projection) was applied.
+///
+/// Returned by [`SpectralFactor::decompose_with_diagnostics`] so a caller that
+/// decomposes many matrices can aggregate clipping into one report instead of
+/// logging once per matrix.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ClipDiagnostics {
+    /// Number of negative eigenvalues clipped to zero.
+    pub clipped_count: usize,
+    /// Largest absolute magnitude among the clipped negative eigenvalues.
+    pub largest_magnitude: f64,
+}
+
 /// Symmetric matrix square root of a correlation matrix (spectral factor).
 ///
 /// Stores `D` such that `Sigma ≈ D * Dᵀ`, where `D = V * diag(√λ) * Vᵀ` is
@@ -42,8 +68,9 @@ impl SpectralFactor {
     /// eigendecomposition.
     ///
     /// Eigendecomposes the input as `C = V * diag(λ) * Vᵀ`, clips negative
-    /// eigenvalues to 0.0 (logging a warning if any are clipped), and returns
-    /// `D = V * diag(√λ) * Vᵀ` such that `D * Dᵀ ≈ C`.
+    /// eigenvalues to 0.0, and returns `D = V * diag(√λ) * Vᵀ` such that
+    /// `D * Dᵀ ≈ C`. To observe how much clipping occurred, use
+    /// [`Self::decompose_with_diagnostics`].
     ///
     /// Unlike Cholesky decomposition, this method succeeds for non-positive-
     /// definite and rank-deficient matrices.
@@ -66,6 +93,24 @@ impl SpectralFactor {
     /// assert!((out[1] - 5.0).abs() < 1e-10);
     /// ```
     pub fn decompose(matrix: &[Vec<f64>]) -> Result<Self, StochasticError> {
+        Self::decompose_with_diagnostics(matrix).map(|(factor, _)| factor)
+    }
+
+    /// Computes the spectral factor of `matrix`, additionally returning
+    /// [`ClipDiagnostics`] describing how many negative eigenvalues were clipped
+    /// to zero and the largest magnitude clipped.
+    ///
+    /// Unlike [`Self::decompose`], this performs no logging: callers that
+    /// decompose many matrices aggregate the diagnostics and emit a single
+    /// report instead of one log line per matrix.
+    ///
+    /// # Errors
+    ///
+    /// - [`StochasticError::InvalidCorrelation`] if the matrix is not square or
+    ///   not symmetric within tolerance 1e-10.
+    pub(crate) fn decompose_with_diagnostics(
+        matrix: &[Vec<f64>],
+    ) -> Result<(Self, ClipDiagnostics), StochasticError> {
         let n = matrix.len();
 
         for (i, row) in matrix.iter().enumerate() {
@@ -116,17 +161,6 @@ impl SpectralFactor {
                 *lambda = 0.0;
             }
         }
-        if clipped_count > 0 {
-            tracing::warn!(
-                clipped_eigenvalues = clipped_count,
-                largest_negative_magnitude = largest_magnitude,
-                dim = n,
-                "spectral decomposition clipped negative eigenvalues to 0.0; \
-                 correlation matrix was not positive-semidefinite \
-                 (D*D^T is the nearest PSD approximation)"
-            );
-        }
-
         let sqrt_lambdas: Vec<f64> = lambdas.iter().map(|&l| l.sqrt()).collect();
         let mut d = vec![0.0_f64; n * n];
         for i in 0..n {
@@ -139,10 +173,16 @@ impl SpectralFactor {
             }
         }
 
-        Ok(Self {
-            data: d.into_boxed_slice(),
-            dim: n,
-        })
+        Ok((
+            Self {
+                data: d.into_boxed_slice(),
+                dim: n,
+            },
+            ClipDiagnostics {
+                clipped_count,
+                largest_magnitude,
+            },
+        ))
     }
 
     /// Applies the spectral factor to transform independent noise into correlated noise.
@@ -484,6 +524,21 @@ mod tests {
         // D * D^T should equal the input (nearest PSD = the input itself since
         // the input is already PSD with eigenvalues >= 0).
         assert_gram_equals(&factor, &matrix, 1e-10);
+    }
+
+    #[test]
+    fn decompose_with_diagnostics_reports_clipping() {
+        // PSD identity: nothing clipped.
+        let identity = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
+        let (_factor, diag) = SpectralFactor::decompose_with_diagnostics(&identity).unwrap();
+        assert_eq!(diag.clipped_count, 0);
+        assert!(diag.largest_magnitude.abs() < 1e-12);
+
+        // [[1, 2], [2, 1]] has eigenvalues 3 and -1: exactly one clipped, magnitude ~1.
+        let indefinite = vec![vec![1.0, 2.0], vec![2.0, 1.0]];
+        let (_f, diag) = SpectralFactor::decompose_with_diagnostics(&indefinite).unwrap();
+        assert_eq!(diag.clipped_count, 1);
+        assert!((diag.largest_magnitude - 1.0).abs() < 1e-9);
     }
 
     #[test]

@@ -618,7 +618,6 @@ mod tests {
             entries,
             method: "AIC".to_string(),
             white_noise_fallbacks: Vec::new(),
-            lag_scale_warnings: Vec::new(),
             std_ratio_warnings: Vec::new(),
         };
         let fitting = estimation_report_to_fitting_report(&report);
@@ -778,7 +777,6 @@ mod tests {
             entries,
             method: "AIC".to_string(),
             white_noise_fallbacks: Vec::new(),
-            lag_scale_warnings: Vec::new(),
             std_ratio_warnings: Vec::new(),
         };
 
@@ -970,7 +968,6 @@ mod tests {
             entries,
             method: "AIC".to_string(),
             white_noise_fallbacks: Vec::new(),
-            lag_scale_warnings: Vec::new(),
             std_ratio_warnings: Vec::new(),
         };
 
@@ -1210,7 +1207,6 @@ mod tests {
             entries,
             method: "PACF".to_string(),
             white_noise_fallbacks: Vec::new(),
-            lag_scale_warnings: Vec::new(),
             std_ratio_warnings: Vec::new(),
         };
 
