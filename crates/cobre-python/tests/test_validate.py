@@ -72,23 +72,64 @@ def test_validate_clean_case_returns_valid_true() -> None:
     assert result["errors"] == []
 
 
-def test_validate_clean_case_warnings_populated() -> None:
-    """validate(examples/1dtoy) populates warnings (not always empty).
+def test_validate_emits_penalty_ordering_warning() -> None:
+    """validate() surfaces a penalty-ordering warning end-to-end.
 
-    The 1dtoy case emits at least one penalty-ordering warning from the
-    semantic validation layer. This test catches regressions where warnings
-    are silently discarded.
+    Rather than relying on a shipped example happening to violate the penalty
+    hierarchy (which is curated to be well-formed), this constructs a case that
+    deliberately re-inverts the ordering: the bus deficit-segment cost is set
+    BELOW the maximum hydro constraint-violation cost (``evaporation_violation_cost``
+    stays at 5000). That trips semantic "Check 8"
+    (``max(deficit_segment_costs) <= max(constraint_violation_costs)``), which
+    emits a ``ModelQuality`` penalty-ordering warning.
+
+    This pins the warnings plumbing (semantic layer → ReportEntry → Python dict)
+    end-to-end and is robust to future curation of the shipped example. A
+    warning must NOT invalidate the case, so ``valid`` stays ``True``.
     """
     import cobre.io  # noqa: PLC0415
 
-    result = cobre.io.validate(VALID_CASE_1DTOY)
-    # 1dtoy is known to emit at least one warning; if this breaks it means
-    # the case was updated and the test should be relaxed to >= 0.
-    assert isinstance(result["warnings"], list)
-    assert len(result["warnings"]) >= 1, (
-        "expected at least one warning from 1dtoy (penalty-ordering notice), "
-        "got zero — either the case changed or warnings are being dropped"
-    )
+    case_dir = copy_case_to_tempdir(VALID_CASE_1DTOY)
+    try:
+        # Re-invert the penalty hierarchy: drive the bus deficit-segment cost
+        # below the max constraint-violation cost (evaporation_violation_cost =
+        # 5000 in penalties.json). 1dtoy carries an entity-level deficit segment
+        # on its single bus, so system/buses.json is the resolved cost source.
+        buses_path = case_dir / "system" / "buses.json"
+        with buses_path.open() as f:
+            buses = json.load(f)
+        for bus in buses["buses"]:
+            for segment in bus["deficit_segments"]:
+                segment["cost"] = 1000.0
+        with buses_path.open("w") as f:
+            json.dump(buses, f, indent=2)
+
+        result = cobre.io.validate(str(case_dir))
+
+        # Warnings never invalidate a case.
+        assert result["valid"] is True, (
+            f"warnings must not invalidate; got errors: {result['errors']}"
+        )
+        assert isinstance(result["warnings"], list)
+        assert len(result["warnings"]) >= 1, (
+            "expected at least one warning after re-inverting the penalty "
+            "hierarchy, got zero — warnings are being dropped"
+        )
+
+        penalty_warnings = [
+            w
+            for w in result["warnings"]
+            if w["kind"] == "ModelQuality"
+            and (
+                "penalty" in w["message"].lower() or "ordering" in w["message"].lower()
+            )
+        ]
+        assert penalty_warnings, (
+            "expected a ModelQuality penalty-ordering warning, got: "
+            f"{result['warnings']}"
+        )
+    finally:
+        shutil.rmtree(case_dir.parent, ignore_errors=True)
 
 
 def test_validate_clean_case_accepts_pathlib_path() -> None:
