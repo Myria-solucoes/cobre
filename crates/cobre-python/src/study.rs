@@ -17,7 +17,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use pyo3::exceptions::PyOSError;
+use pyo3::exceptions::{PyIndexError, PyOSError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
@@ -141,6 +141,101 @@ impl Policy {
     #[getter]
     fn final_upper_bound(&self) -> f64 {
         self.training_result.final_ub
+    }
+
+    /// Evaluate the future-cost function at `state` for the given 0-based `stage`.
+    ///
+    /// Returns `max_k(intercept_k + coeffs_k · state)` over the stage's active
+    /// Benders cuts — the FCF lower-bound value at that state. The coefficients
+    /// are the stored cut gradients (the raw `HiGHS` duals; see [`Policy::cut_matrix`]),
+    /// so the cut is read as `θ ≥ intercept + coeffs · state`. A stage with no
+    /// active cuts returns `float('-inf')` (NOT an error).
+    ///
+    /// `stage` uses the FCF's 0-based stage indexing (stage `t - 1` for the
+    /// 1-based SDDP stage `t`).
+    ///
+    /// # Errors
+    ///
+    /// - `IndexError` if `stage` is out of range.
+    /// - `ValueError` if `state` does not have the policy's state dimension.
+    // `state: Vec<f64>` is required so PyO3 can extract from an arbitrary Python
+    // sequence; only `&state` is read, hence the `needless_pass_by_value` allow.
+    // `stage`/`state` are the natural API names, hence the `similar_names` allow.
+    #[allow(clippy::needless_pass_by_value, clippy::similar_names)]
+    fn evaluate(&self, stage: usize, state: Vec<f64>) -> PyResult<f64> {
+        let n_stages = self.fcf.pools.len();
+        if stage >= n_stages {
+            return Err(PyIndexError::new_err(format!(
+                "stage {stage} out of range (policy has {n_stages} stages)"
+            )));
+        }
+        let dim = self.fcf.state_dimension;
+        if state.len() != dim {
+            return Err(PyValueError::new_err(format!(
+                "state has length {}, expected {dim} (policy state dimension)",
+                state.len()
+            )));
+        }
+        Ok(self.fcf.evaluate_at_state(stage, &state))
+    }
+
+    /// Return the stage's active Benders cuts as two `NumPy` arrays.
+    ///
+    /// The result is the 2-tuple `(intercepts, coeffs)` where `intercepts` has
+    /// shape `(n_cuts,)` and `coeffs` has shape `(n_cuts, dim)`, both `float64`.
+    /// Row `k` of `coeffs` is the gradient of cut `k`, and `intercepts[k]` its
+    /// constant term; the active cuts are emitted in the FCF's native ascending
+    /// slot order (the deterministic pool order). `dim` is the policy state
+    /// dimension and is the column count even when `n_cuts == 0` (shapes `(0,)`
+    /// and `(0, dim)`).
+    ///
+    /// `stage` uses the FCF's 0-based stage indexing (stage `t - 1` for the
+    /// 1-based SDDP stage `t`).
+    ///
+    /// ## Sign convention
+    ///
+    /// Coefficients are returned **exactly as stored** — the raw `HiGHS` dual of
+    /// the state-fixing rows, used directly as the FCF gradient. They are **NOT**
+    /// negated. A downstream consumer reconstructs each cut as
+    /// `θ ≥ intercept + coeffs · state`, consistent with [`Policy::evaluate`].
+    /// (The LP-assembly negation in `build_cut_row_batch` is an internal detail
+    /// of solving and does not affect the values surfaced here.)
+    ///
+    /// # Errors
+    ///
+    /// - `IndexError` if `stage` is out of range.
+    /// - `ImportError` if `NumPy` is not installed (propagated verbatim from the
+    ///   lazy `import numpy`; `NumPy` is a soft, lazily imported dependency).
+    fn cut_matrix(&self, py: Python<'_>, stage: usize) -> PyResult<Py<PyAny>> {
+        let n_stages = self.fcf.pools.len();
+        if stage >= n_stages {
+            return Err(PyIndexError::new_err(format!(
+                "stage {stage} out of range (policy has {n_stages} stages)"
+            )));
+        }
+        let dim = self.fcf.state_dimension;
+
+        let mut intercepts: Vec<f64> = Vec::new();
+        let mut coeffs_flat: Vec<f64> = Vec::new();
+        for (_slot, intercept, coeffs) in self.fcf.active_cuts(stage) {
+            intercepts.push(intercept);
+            coeffs_flat.extend_from_slice(coeffs);
+        }
+        let n_cuts = intercepts.len();
+
+        // Lazy soft import; ImportError propagates verbatim if NumPy is absent.
+        let np = py.import("numpy")?;
+        let intercepts_arr = np.call_method1("asarray", (intercepts,))?;
+        // Build the (n_cuts, dim) coefficient matrix from the flat C-order
+        // buffer by reshaping the 1-D array. `dim` fixes the column count even
+        // when `n_cuts == 0`, giving shape `(0, dim)`.
+        let coeffs_1d = np.call_method1("asarray", (coeffs_flat,))?;
+        let coeffs_arr = coeffs_1d.call_method1("reshape", ((n_cuts, dim),))?;
+
+        Ok((intercepts_arr, coeffs_arr)
+            .into_pyobject(py)?
+            .into_any()
+            .unbind())
     }
 }
 

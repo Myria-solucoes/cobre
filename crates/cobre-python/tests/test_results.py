@@ -236,6 +236,38 @@ def test_convergence_path_is_readable(run_output: pathlib.Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# load_policy tests
+# ---------------------------------------------------------------------------
+
+
+def test_load_policy_reads_real_run_output(run_output: pathlib.Path) -> None:
+    """load_policy() reads the policy checkpoint a standard run writes.
+
+    A run writes the checkpoint to <output_dir>/policy (the default policy_path
+    "./policy"), so the default policy_subdir="policy" must resolve it. The
+    returned dict must carry per-stage cut pools with non-empty stage-0 cuts.
+    """
+    import cobre.results  # noqa: PLC0415
+
+    policy = cobre.results.load_policy(str(run_output))
+
+    assert isinstance(policy, dict), "load_policy must return a dict"
+    assert "stage_cuts" in policy, "policy dict must have a 'stage_cuts' key"
+    assert len(policy["stage_cuts"]) > 0, "a trained policy must have stage cuts"
+    assert len(policy["stage_cuts"][0]["cuts"]) > 0, (
+        "stage 0 must carry at least one cut after a real run"
+    )
+
+
+def test_load_policy_missing_dir_raises(tmp_path: pathlib.Path) -> None:
+    """load_policy() raises FileNotFoundError when the policy dir is absent."""
+    import cobre.results  # noqa: PLC0415
+
+    with pytest.raises(FileNotFoundError):
+        cobre.results.load_policy(str(tmp_path))
+
+
+# ---------------------------------------------------------------------------
 # report / summary tests
 # ---------------------------------------------------------------------------
 
@@ -341,3 +373,98 @@ def test_summary_missing_dir_raises() -> None:
 
     with pytest.raises(FileNotFoundError):
         cobre.results.summary("/tmp/nonexistent_cobre_output_xzy123")
+
+
+# ---------------------------------------------------------------------------
+# load_stochastic tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def stochastic_output(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Path:
+    """Train the 1dtoy case with ``exports.stochastic`` enabled, once.
+
+    The default 1dtoy config does NOT export stochastic artifacts, so the
+    override is required to produce ``stochastic/inflow_ar_coefficients.parquet``
+    and ``stochastic/noise_openings.parquet``. Module-scoped so the solver runs
+    only once per session.
+    """
+    import cobre  # noqa: PLC0415
+
+    output_dir = tmp_path_factory.mktemp("stochastic_output")
+    cobre.Study(
+        VALID_CASE,
+        output_dir=str(output_dir),
+        config_overrides={"exports.stochastic": True},
+    ).train()
+    return output_dir
+
+
+def test_load_stochastic_par_coefficients_shape(
+    stochastic_output: pathlib.Path,
+) -> None:
+    """par_coefficients() returns a 2-D (n_rows, 5) float64 array."""
+    numpy = pytest.importorskip("numpy")
+    import cobre.results  # noqa: PLC0415
+
+    arr = cobre.results.load_stochastic(str(stochastic_output)).par_coefficients()
+
+    assert arr.ndim == 2, "par_coefficients must be 2-D"
+    assert arr.shape[1] == 5, "par_coefficients must have 5 columns"
+    assert arr.dtype == numpy.float64, "par_coefficients must be float64"
+
+
+def test_load_stochastic_opening_tree_shape(
+    stochastic_output: pathlib.Path,
+) -> None:
+    """opening_tree(0) returns a 2-D float64 array; shape[1] == stage-0 noise dim."""
+    numpy = pytest.importorskip("numpy")
+    import cobre.results  # noqa: PLC0415
+
+    stoch = cobre.results.load_stochastic(str(stochastic_output))
+    arr = stoch.opening_tree(0)
+
+    assert arr.ndim == 2, "opening_tree must be 2-D"
+    assert arr.dtype == numpy.float64, "opening_tree must be float64"
+    # shape[1] is the number of distinct entity_index values at stage 0, i.e.
+    # the noise dimension (1 hydro for the 1dtoy single-reservoir case).
+    assert arr.shape[1] >= 1, "noise dimension must be at least 1"
+    assert arr.shape[0] >= 1, "stage 0 must have at least one opening"
+
+
+def test_load_stochastic_missing_artifacts_raises(tmp_path: pathlib.Path) -> None:
+    """load_stochastic() raises FileNotFoundError on a default (no-exports) run.
+
+    The 1dtoy default config does not set ``exports.stochastic``, so the
+    ``stochastic/`` artifacts are absent and the error message must point the
+    caller at the required export flag.
+    """
+    import cobre  # noqa: PLC0415
+    import cobre.results  # noqa: PLC0415
+
+    cobre.Study(VALID_CASE, output_dir=str(tmp_path)).train()
+
+    with pytest.raises(FileNotFoundError, match="exports.stochastic"):
+        cobre.results.load_stochastic(str(tmp_path))
+
+
+def test_load_stochastic_opening_tree_bad_stage_raises(
+    stochastic_output: pathlib.Path,
+) -> None:
+    """opening_tree(999) raises IndexError for an absent stage."""
+    pytest.importorskip("numpy")
+    import cobre.results  # noqa: PLC0415
+
+    stoch = cobre.results.load_stochastic(str(stochastic_output))
+
+    with pytest.raises(IndexError):
+        stoch.opening_tree(999)
+
+
+def test_load_stochastic_reexport_identity() -> None:
+    """load_stochastic is in __all__ and is the compiled function (identity)."""
+    import cobre._native.results  # noqa: PLC0415
+    import cobre.results  # noqa: PLC0415
+
+    assert "load_stochastic" in cobre.results.__all__
+    assert cobre.results.load_stochastic is cobre._native.results.load_stochastic

@@ -15,21 +15,23 @@
 //!   `simulation/{entity_type}/scenario_id=NNNN/data.parquet` with dynamic
 //!   schema discovery and returns rows as Python dicts.
 //! - [`load_policy`] reads a `FlatBuffers` policy checkpoint from
-//!   `training/policy/` via `cobre_io::read_policy_checkpoint` and returns
-//!   a nested Python dict.
+//!   `<output_dir>/<policy_subdir>` (default `policy`) via
+//!   `cobre_io::read_policy_checkpoint` and returns a nested Python dict.
 
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
-use arrow::array::{Array, BooleanArray, Float64Array, Int8Array, Int32Array, Int64Array};
+use arrow::array::{
+    Array, BooleanArray, Float64Array, Int8Array, Int32Array, Int64Array, UInt32Array,
+};
 use arrow::compute::concat_batches;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use pyo3::BoundObject;
-use pyo3::exceptions::{PyFileNotFoundError, PyOSError, PyValueError};
+use pyo3::exceptions::{PyFileNotFoundError, PyIndexError, PyOSError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyList, PyString};
 
@@ -425,6 +427,364 @@ pub fn load_convergence_arrow(py: Python<'_>, output_dir: PathBuf) -> PyResult<P
     let table = reader.call_method0("read_all")?;
 
     Ok(table.unbind())
+}
+
+// ── Stochastic-model introspection (`cobre.results.load_stochastic`) ───────────
+
+/// Number of columns in the flat `par_coefficients()` table:
+/// `[hydro_id, stage_id, lag, coefficient, residual_std_ratio]`.
+const PAR_COEFFICIENT_COLUMNS: usize = 5;
+
+/// Parsed rows of `stochastic/inflow_ar_coefficients.parquet`.
+///
+/// Stored as five parallel owned vectors (one per column), in the file's
+/// on-disk row order (`(hydro_id, stage_id, lag)` ascending). All vectors share
+/// the same length (`n_rows`).
+struct ParRows {
+    hydro_id: Vec<i32>,
+    stage_id: Vec<i32>,
+    lag: Vec<i32>,
+    coefficient: Vec<f64>,
+    residual_std_ratio: Vec<f64>,
+}
+
+/// Parsed rows of `stochastic/noise_openings.parquet`.
+///
+/// Stored as four parallel owned vectors (one per column), in the file's
+/// on-disk row order (`(stage_id, opening_index, entity_index)` ascending). All
+/// vectors share the same length (`n_rows`).
+struct OpeningRows {
+    stage_id: Vec<i32>,
+    opening_index: Vec<u32>,
+    entity_index: Vec<u32>,
+    value: Vec<f64>,
+}
+
+/// Open a Parquet file, mapping a missing file to a `FileNotFoundError` that
+/// names the path and notes the `exports.stochastic` requirement.
+///
+/// Other open failures (permissions, etc.) map to `OSError`, mirroring
+/// [`load_convergence_arrow`].
+fn open_stochastic_parquet(path: &Path) -> PyResult<fs::File> {
+    fs::File::open(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            PyFileNotFoundError::new_err(format!(
+                "{} not found — stochastic artifacts are written only when \
+                 exports.stochastic is enabled in config.json",
+                path.display()
+            ))
+        } else {
+            PyOSError::new_err(format!("failed to open {}: {e}", path.display()))
+        }
+    })
+}
+
+/// Extract a typed column from `batch` by name, mapping a missing column or a
+/// type mismatch to `OSError` (a parquet-decode failure, per the ticket).
+fn stochastic_column<'a, T: Array + 'static>(
+    batch: &'a RecordBatch,
+    file: &str,
+    name: &str,
+) -> PyResult<&'a T> {
+    batch
+        .column_by_name(name)
+        .ok_or_else(|| PyOSError::new_err(format!("{file} missing '{name}' column")))?
+        .as_any()
+        .downcast_ref::<T>()
+        .ok_or_else(|| PyOSError::new_err(format!("{file}: '{name}' column has unexpected type")))
+}
+
+/// Read every record batch of a stochastic Parquet file into a flat owned
+/// representation, with the GIL already released by the caller.
+///
+/// `extract` pulls the per-row values out of one decoded [`RecordBatch`] and
+/// appends them to the accumulator. A missing file raises `FileNotFoundError`;
+/// any decode failure raises `OSError`.
+fn read_stochastic_parquet<A>(
+    path: &Path,
+    mut acc: A,
+    mut extract: impl FnMut(&RecordBatch, &mut A) -> PyResult<()>,
+) -> PyResult<A> {
+    let file = open_stochastic_parquet(path)?;
+    let display = path.display().to_string();
+
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| PyOSError::new_err(format!("failed to open {display}: {e}")))?
+        .build()
+        .map_err(|e| PyOSError::new_err(format!("failed to build reader for {display}: {e}")))?;
+
+    for batch_result in reader {
+        let batch = batch_result
+            .map_err(|e| PyOSError::new_err(format!("error reading {display}: {e}")))?;
+        extract(&batch, &mut acc)?;
+    }
+
+    Ok(acc)
+}
+
+/// Read `stochastic/inflow_ar_coefficients.parquet` into [`ParRows`].
+///
+/// GIL-free: takes a `&Path` and returns owned vectors, raising `PyErr` only on
+/// the not-found / decode paths. Columns are read by name so the read is robust
+/// to schema column reordering; rows are appended in on-disk order.
+fn read_par_rows(path: &Path) -> PyResult<ParRows> {
+    let file = "inflow_ar_coefficients.parquet";
+    read_stochastic_parquet(
+        path,
+        ParRows {
+            hydro_id: Vec::new(),
+            stage_id: Vec::new(),
+            lag: Vec::new(),
+            coefficient: Vec::new(),
+            residual_std_ratio: Vec::new(),
+        },
+        |batch, rows| {
+            let hydro_id = stochastic_column::<Int32Array>(batch, file, "hydro_id")?;
+            let stage_id = stochastic_column::<Int32Array>(batch, file, "stage_id")?;
+            let lag = stochastic_column::<Int32Array>(batch, file, "lag")?;
+            let coefficient = stochastic_column::<Float64Array>(batch, file, "coefficient")?;
+            let residual_std_ratio =
+                stochastic_column::<Float64Array>(batch, file, "residual_std_ratio")?;
+
+            rows.hydro_id.extend(hydro_id.values().iter().copied());
+            rows.stage_id.extend(stage_id.values().iter().copied());
+            rows.lag.extend(lag.values().iter().copied());
+            rows.coefficient
+                .extend(coefficient.values().iter().copied());
+            rows.residual_std_ratio
+                .extend(residual_std_ratio.values().iter().copied());
+            Ok(())
+        },
+    )
+}
+
+/// Read `stochastic/noise_openings.parquet` into [`OpeningRows`].
+///
+/// GIL-free: takes a `&Path` and returns owned vectors, raising `PyErr` only on
+/// the not-found / decode paths. The writer emits rows in
+/// `(stage_id, opening_index, entity_index)` order; this is asserted in debug
+/// builds so `opening_tree`'s reshape cannot silently scramble.
+fn read_opening_rows(path: &Path) -> PyResult<OpeningRows> {
+    let file = "noise_openings.parquet";
+    let rows = read_stochastic_parquet(
+        path,
+        OpeningRows {
+            stage_id: Vec::new(),
+            opening_index: Vec::new(),
+            entity_index: Vec::new(),
+            value: Vec::new(),
+        },
+        |batch, rows| {
+            let stage_id = stochastic_column::<Int32Array>(batch, file, "stage_id")?;
+            let opening_index = stochastic_column::<UInt32Array>(batch, file, "opening_index")?;
+            let entity_index = stochastic_column::<UInt32Array>(batch, file, "entity_index")?;
+            let value = stochastic_column::<Float64Array>(batch, file, "value")?;
+
+            rows.stage_id.extend(stage_id.values().iter().copied());
+            rows.opening_index
+                .extend(opening_index.values().iter().copied());
+            rows.entity_index
+                .extend(entity_index.values().iter().copied());
+            rows.value.extend(value.values().iter().copied());
+            Ok(())
+        },
+    )?;
+
+    // `opening_tree` slices each stage's contiguous block and reshapes it, so the
+    // reshape is only correct when rows are sorted by (stage_id, opening_index,
+    // entity_index). The standard writer always emits this order, but enforce it at
+    // load time (once) so a corrupted or third-party parquet fails loudly here rather
+    // than silently returning a scrambled array in a release build.
+    if !is_opening_order_sorted(&rows) {
+        return Err(PyOSError::new_err(
+            "noise_openings.parquet rows are not sorted by \
+             (stage_id, opening_index, entity_index); cannot reshape the opening tree",
+        ));
+    }
+
+    Ok(rows)
+}
+
+/// True when `rows` are sorted ascending by `(stage_id, opening_index, entity_index)`,
+/// the order `opening_tree` relies on for its reshape.
+fn is_opening_order_sorted(rows: &OpeningRows) -> bool {
+    rows.stage_id
+        .iter()
+        .zip(&rows.opening_index)
+        .zip(&rows.entity_index)
+        .map(|((s, o), e)| (*s, *o, *e))
+        .is_sorted()
+}
+
+/// Read-only view of a run's fitted stochastic model, projected from the
+/// on-disk artifacts under `{output_dir}/stochastic/`.
+///
+/// Construct with [`load_stochastic`]; the two accessor methods lazily import
+/// `numpy` and return `float64` arrays. Constructing the handle does **not**
+/// require `numpy`.
+#[pyclass(name = "Stochastic", frozen, module = "cobre.results")]
+pub struct Stochastic {
+    par_rows: ParRows,
+    opening_rows: OpeningRows,
+}
+
+#[pymethods]
+impl Stochastic {
+    /// Return the fitted PAR(p) coefficients as a `(n_rows, 5)` `float64` array.
+    ///
+    /// Columns, in fixed order, are
+    /// `[hydro_id, stage_id, lag, coefficient, residual_std_ratio]` — a lossless
+    /// projection of `stochastic/inflow_ar_coefficients.parquet` in its on-disk
+    /// row order (`(hydro_id, stage_id, lag)` ascending). The three integer
+    /// columns are cast to `float64`. `lag` is 1-based (ψ₁ = lag 1).
+    ///
+    /// Lazily imports `numpy`; an `ImportError` propagates if it is absent.
+    fn par_coefficients(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let n_rows = self.par_rows.hydro_id.len();
+        let mut flat = Vec::with_capacity(n_rows * PAR_COEFFICIENT_COLUMNS);
+        for i in 0..n_rows {
+            flat.push(f64::from(self.par_rows.hydro_id[i]));
+            flat.push(f64::from(self.par_rows.stage_id[i]));
+            flat.push(f64::from(self.par_rows.lag[i]));
+            flat.push(self.par_rows.coefficient[i]);
+            flat.push(self.par_rows.residual_std_ratio[i]);
+        }
+
+        reshape_f64(py, flat, (n_rows, PAR_COEFFICIENT_COLUMNS))
+    }
+
+    /// Return the opening tree at 0-based `stage` as a `(n_openings, dim)`
+    /// `float64` array.
+    ///
+    /// Row `k` is the noise vector of opening `k` at `stage`, with `dim` the
+    /// number of distinct `entity_index` values within the stage. Values are
+    /// taken from `stochastic/noise_openings.parquet`, which is stored in
+    /// `(opening_index, entity_index)` order within each stage, so the flat
+    /// slice reshapes directly.
+    ///
+    /// Raises `IndexError` if `stage` is not present in the file, and lazily
+    /// imports `numpy` (`ImportError` propagates if absent).
+    fn opening_tree(&self, py: Python<'_>, stage: usize) -> PyResult<Py<PyAny>> {
+        let stage_i32 = i32::try_from(stage).map_err(|_| {
+            PyIndexError::new_err(format!(
+                "stage {stage} is out of range for the opening tree"
+            ))
+        })?;
+
+        let rows = &self.opening_rows;
+        let mut start = None;
+        let mut end = 0usize;
+        for (i, &s) in rows.stage_id.iter().enumerate() {
+            if s == stage_i32 {
+                if start.is_none() {
+                    start = Some(i);
+                }
+                end = i + 1;
+            }
+        }
+
+        let Some(start) = start else {
+            let valid = stage_range_message(rows);
+            return Err(PyIndexError::new_err(format!(
+                "stage {stage} not present in the opening tree ({valid})"
+            )));
+        };
+
+        // Rows are sorted by (stage_id, opening_index, entity_index), so the
+        // matching rows form a contiguous block; dim/n_openings derive from the
+        // maxima within that block (every opening in a stage shares `dim`).
+        let opening_slice = &rows.opening_index[start..end];
+        let entity_slice = &rows.entity_index[start..end];
+        let value_slice = &rows.value[start..end];
+
+        let n_openings = opening_slice
+            .iter()
+            .copied()
+            .max()
+            .map_or(0usize, |m| m as usize + 1);
+        let dim = entity_slice
+            .iter()
+            .copied()
+            .max()
+            .map_or(0usize, |m| m as usize + 1);
+
+        let expected = n_openings.checked_mul(dim).ok_or_else(|| {
+            PyOSError::new_err("noise_openings.parquet: opening-tree dimensions overflow usize")
+        })?;
+        if value_slice.len() != expected {
+            return Err(PyOSError::new_err(format!(
+                "noise_openings.parquet: stage {stage} has {} values, expected {expected} \
+                 (n_openings={n_openings} × dim={dim}) — the opening tree is ragged",
+                value_slice.len()
+            )));
+        }
+
+        reshape_f64(py, value_slice.to_vec(), (n_openings, dim))
+    }
+}
+
+/// Lazily import `numpy` and return `np.asarray(flat).reshape(shape)`.
+///
+/// `flat` must already be in row-major order for `shape`. An `ImportError`
+/// propagates verbatim if `numpy` is absent.
+fn reshape_f64(py: Python<'_>, flat: Vec<f64>, shape: (usize, usize)) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let array = numpy.call_method1("asarray", (flat,))?;
+    let reshaped = array.call_method1("reshape", (shape,))?;
+    Ok(reshaped.unbind())
+}
+
+/// Human-readable description of the stage values present in `rows`, for the
+/// `IndexError` raised by [`Stochastic::opening_tree`] on an absent stage.
+fn stage_range_message(rows: &OpeningRows) -> String {
+    match (rows.stage_id.iter().min(), rows.stage_id.iter().max()) {
+        (Some(&lo), Some(&hi)) => format!("valid stages are {lo}..={hi}"),
+        _ => "the opening tree is empty".to_string(),
+    }
+}
+
+/// Load a run's fitted stochastic model for read-only introspection.
+///
+/// Reads `{output_dir}/stochastic/inflow_ar_coefficients.parquet` and
+/// `{output_dir}/stochastic/noise_openings.parquet` (written only when
+/// `exports.stochastic` is enabled) and returns a [`Stochastic`] handle. The
+/// parquet reads run with the GIL released; constructing the handle requires no
+/// `numpy`.
+///
+/// # Errors
+///
+/// - `FileNotFoundError` — `output_dir` does not exist, or either required
+///   parquet (or the `stochastic/` directory) is missing. The message names the
+///   missing path and notes it requires `exports.stochastic`.
+/// - `OSError` — a parquet file fails to decode.
+///
+/// # Examples (Python)
+///
+/// ```python
+/// import cobre.results
+///
+/// stoch = cobre.results.load_stochastic("output/")
+/// par = stoch.par_coefficients()        # (n_rows, 5) float64
+/// tree = stoch.opening_tree(0)          # (n_openings, dim) float64 at stage 0
+/// ```
+#[pyfunction]
+#[allow(clippy::needless_pass_by_value)]
+pub fn load_stochastic(py: Python<'_>, output_dir: PathBuf) -> PyResult<Stochastic> {
+    let output_dir = canonicalize_dir(&output_dir)?;
+    let stochastic_dir = output_dir.join("stochastic");
+    let par_path = stochastic_dir.join("inflow_ar_coefficients.parquet");
+    let openings_path = stochastic_dir.join("noise_openings.parquet");
+
+    let (par_rows, opening_rows) = py.detach(|| -> PyResult<(ParRows, OpeningRows)> {
+        let par_rows = read_par_rows(&par_path)?;
+        let opening_rows = read_opening_rows(&openings_path)?;
+        Ok((par_rows, opening_rows))
+    })?;
+
+    Ok(Stochastic {
+        par_rows,
+        opening_rows,
+    })
 }
 
 /// Extract a column from a batch and downcast to its expected type, or return an error.
@@ -1188,11 +1548,16 @@ pub fn load_simulation_arrow(
     }
 }
 
-/// Load a `FlatBuffers` policy checkpoint from `training/policy/`.
+/// Load a `FlatBuffers` policy checkpoint from `<output_dir>/<policy_subdir>`.
 ///
 /// Reads the policy metadata, per-stage cut pools, and per-stage solver bases
 /// written by `cobre-io`'s policy checkpoint writer and returns them as a
 /// nested Python dict.
+///
+/// `policy_subdir` selects the checkpoint sub-directory under `output_dir` and
+/// defaults to `"policy"` — the location the standard solve lifecycle writes
+/// (matching the default `policy_path` of `"./policy"`). A study configured
+/// with a non-default `policy_path` passes that sub-directory explicitly.
 ///
 /// ## Returns
 ///
@@ -1241,7 +1606,8 @@ pub fn load_simulation_arrow(
 ///
 /// ## Errors
 ///
-/// - `FileNotFoundError` if `output_dir` or `training/policy/` does not exist.
+/// - `FileNotFoundError` if `output_dir` or `<output_dir>/<policy_subdir>` does
+///   not exist.
 /// - `OSError` for corrupt `FlatBuffers` files or other I/O failures.
 ///
 /// ## Examples (Python)
@@ -1252,13 +1618,21 @@ pub fn load_simulation_arrow(
 /// policy = cobre.results.load_policy("output/")
 /// print(policy["metadata"]["completed_iterations"])
 /// first_stage_cuts = policy["stage_cuts"][0]["cuts"]
+///
+/// # Non-default policy_path: pass the sub-directory explicitly.
+/// policy = cobre.results.load_policy("output/", policy_subdir="my_policy")
 /// ```
 #[pyfunction]
+#[pyo3(signature = (output_dir, policy_subdir = "policy"))]
 #[allow(clippy::needless_pass_by_value)]
-pub fn load_policy(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAny>> {
+pub fn load_policy(
+    py: Python<'_>,
+    output_dir: PathBuf,
+    policy_subdir: &str,
+) -> PyResult<Py<PyAny>> {
     let output_dir = canonicalize_dir(&output_dir)?;
 
-    let policy_dir = output_dir.join("training").join("policy");
+    let policy_dir = output_dir.join(policy_subdir);
 
     if !policy_dir.exists() {
         return Err(PyFileNotFoundError::new_err(format!(

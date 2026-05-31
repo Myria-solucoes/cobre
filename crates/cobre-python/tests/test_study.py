@@ -364,3 +364,87 @@ def test_load_policy_then_simulate_matches_run(tmp_path: pathlib.Path) -> None:
 
     sim = study.simulate(policy)
     assert sim == {"n_scenarios": 100, "completed": 100}
+
+
+def test_policy_evaluate_matches_cut_matrix_max(tmp_path: pathlib.Path) -> None:
+    """policy.evaluate(stage, state) == max(intercept + coeffs @ state) exactly.
+
+    The FCF value at a state is the upper envelope of its active Benders cuts.
+    Both evaluate() and cut_matrix() read the same stored cut data, so the
+    equality is exact f64 (no tolerance).
+    """
+    np = pytest.importorskip("numpy")
+    import cobre  # noqa: PLC0415
+
+    study = cobre.Study(VALID_CASE, output_dir=str(tmp_path))
+    policy = study.train()
+
+    intercepts, coeffs = policy.cut_matrix(0)
+    n_cuts, dim = coeffs.shape
+    assert n_cuts > 0, "a trained 1dtoy policy must have active cuts at stage 0"
+
+    # Derive a state of the policy's dimension from the coefficient column count.
+    state = np.linspace(0.5, 1.5, dim)
+
+    expected = float(np.max(intercepts + coeffs @ state))
+    got = policy.evaluate(0, list(state))
+
+    assert got == expected, (
+        f"evaluate {got} must equal max(intercept + coeffs @ state) {expected} exactly"
+    )
+
+
+def test_policy_cut_matrix_shapes_and_dtype(tmp_path: pathlib.Path) -> None:
+    """cut_matrix(0) returns (n,)/(n, dim) float64 arrays; n == active-cut count."""
+    np = pytest.importorskip("numpy")
+    import cobre  # noqa: PLC0415
+
+    study = cobre.Study(VALID_CASE, output_dir=str(tmp_path))
+    policy = study.train()
+
+    intercepts, coeffs = policy.cut_matrix(0)
+    n_cuts, dim = coeffs.shape
+
+    assert intercepts.shape == (n_cuts,), "intercepts must have shape (n_cuts,)"
+    assert coeffs.shape == (n_cuts, dim), "coeffs must have shape (n_cuts, dim)"
+    assert intercepts.dtype == np.float64, "intercepts dtype must be float64"
+    assert coeffs.dtype == np.float64, "coeffs dtype must be float64"
+
+    # n_cuts must equal the active-cut count for stage 0 from the on-disk policy.
+    loaded = cobre.results.load_policy(str(tmp_path))
+    active = [c for c in loaded["stage_cuts"][0]["cuts"] if c["is_active"]]
+    assert n_cuts == len(active), (
+        f"cut_matrix active-cut count {n_cuts} must equal the load_policy "
+        f"active-cut count {len(active)}"
+    )
+
+
+def test_policy_evaluate_stage_out_of_range_raises_indexerror(
+    tmp_path: pathlib.Path,
+) -> None:
+    """evaluate() with a stage index past the horizon raises IndexError."""
+    pytest.importorskip("numpy")
+    import cobre  # noqa: PLC0415
+
+    study = cobre.Study(VALID_CASE, output_dir=str(tmp_path))
+    policy = study.train()
+
+    _, coeffs = policy.cut_matrix(0)
+    dim = coeffs.shape[1]
+
+    with pytest.raises(IndexError, match="out of range"):
+        policy.evaluate(99, [0.0] * dim)
+
+
+def test_policy_evaluate_bad_state_length_raises_valueerror(
+    tmp_path: pathlib.Path,
+) -> None:
+    """evaluate() with a state of the wrong length raises ValueError."""
+    pytest.importorskip("numpy")
+    import cobre  # noqa: PLC0415
+
+    study = cobre.Study(VALID_CASE, output_dir=str(tmp_path))
+    policy = study.train()
+
+    with pytest.raises(ValueError, match="expected"):
+        policy.evaluate(0, [])

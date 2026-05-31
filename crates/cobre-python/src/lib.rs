@@ -94,7 +94,9 @@ fn results_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(results::load_simulation, m)?)?;
     m.add_function(wrap_pyfunction!(results::load_simulation_arrow, m)?)?;
     m.add_function(wrap_pyfunction!(results::load_policy, m)?)?;
+    m.add_function(wrap_pyfunction!(results::load_stochastic, m)?)?;
     m.add_function(wrap_pyfunction!(results::report, m)?)?;
+    m.add_class::<results::Stochastic>()?;
     Ok(())
 }
 

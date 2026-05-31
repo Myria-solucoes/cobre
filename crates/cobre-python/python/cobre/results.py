@@ -22,22 +22,26 @@ from typing import Any
 # drop-in replacement for the bare `_native.results` module. No public name may
 # regress: every function the compiled module exposed must be visible here.
 from cobre._native.results import (
+    Stochastic as Stochastic,
     load_convergence as load_convergence,
     load_convergence_arrow as load_convergence_arrow,
     load_policy as load_policy,
     load_results as load_results,
     load_simulation as load_simulation,
     load_simulation_arrow as load_simulation_arrow,
+    load_stochastic as load_stochastic,
     report as report,
 )
 
 __all__ = [
+    "Stochastic",
     "load_results",
     "load_convergence",
     "load_convergence_arrow",
     "load_simulation",
     "load_simulation_arrow",
     "load_policy",
+    "load_stochastic",
     "report",
     "summary",
 ]
