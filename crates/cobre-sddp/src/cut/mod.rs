@@ -12,9 +12,8 @@
 //!   [`CutPool::cuts_in_lp`] returns the LP-row-count metric (populated count).
 //! - [`fcf`] — [`FutureCostFunction`]: all-stages container wrapping one
 //!   [`CutPool`] per stage; provides the high-level API for the training loop,
-//!   including [`FutureCostFunction::set_active`],
-//!   [`FutureCostFunction::cuts_in_lp`], and
-//!   [`FutureCostFunction::cuts_in_lp_total`].
+//!   including [`FutureCostFunction::set_active`] and
+//!   [`FutureCostFunction::cuts_in_lp`].
 //! - [`wire`] — [`CutWireHeader`] and serialization functions for the MPI
 //!   cut-exchange wire format (24-byte header + variable coefficient tail).
 //!

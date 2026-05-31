@@ -14,7 +14,6 @@
 //!   activity flag and keep the cached count consistent.
 //! - [`cuts_in_lp`] — LP-row-count metric for a single stage (populated
 //!   count, independent of activity state).
-//! - [`cuts_in_lp_total`] — aggregate LP-row count across all stages.
 //!
 //! ## Stage indexing
 //!
@@ -36,7 +35,6 @@
 //! [`deactivate`]: FutureCostFunction::deactivate
 //! [`set_active`]: FutureCostFunction::set_active
 //! [`cuts_in_lp`]: FutureCostFunction::cuts_in_lp
-//! [`cuts_in_lp_total`]: FutureCostFunction::cuts_in_lp_total
 //!
 //! ## Example
 //!
@@ -53,7 +51,6 @@
 //! assert_eq!(cuts.len(), 1);
 //! assert_eq!(fcf.total_active_cuts(), 1);
 //! assert_eq!(fcf.cuts_in_lp(1), 1);
-//! assert_eq!(fcf.cuts_in_lp_total(), 1);
 //! ```
 
 use super::pool::CutPool;
@@ -366,31 +363,6 @@ impl FutureCostFunction {
         }
     }
 
-    /// Return the intercept value for the cut at `(stage, slot)`.
-    ///
-    /// Reads directly from `pools[stage].intercepts[slot]`. The returned value
-    /// is independent of the slot's activity flag; an inactive slot still has
-    /// a stored intercept that may be required when reactivating its LP row.
-    ///
-    /// # Panics (debug builds only)
-    ///
-    /// Panics if `stage >= pools.len()` or if `slot >= pools[stage].intercepts.len()`.
-    ///
-    /// # Parameters
-    ///
-    /// - `stage`: 0-based stage index.
-    /// - `slot`: 0-based slot index within the stage pool.
-    #[must_use]
-    #[inline]
-    pub fn intercept_for_slot(&self, stage: usize, slot: u32) -> f64 {
-        debug_assert!(
-            stage < self.pools.len(),
-            "stage index {stage} is out of bounds (num_stages = {})",
-            self.pools.len()
-        );
-        self.pools[stage].intercepts[slot as usize]
-    }
-
     /// Deactivate the cuts at the given slot indices for the specified stage.
     ///
     /// Delegates to `pools[stage].deactivate(indices)`.
@@ -459,16 +431,6 @@ impl FutureCostFunction {
             self.pools.len()
         );
         self.pools[stage].cuts_in_lp()
-    }
-
-    /// Return the total LP-row count across all stages.
-    ///
-    /// Sums [`cuts_in_lp`] over every pool in the FCF.
-    ///
-    /// [`cuts_in_lp`]: FutureCostFunction::cuts_in_lp
-    #[must_use]
-    pub fn cuts_in_lp_total(&self) -> usize {
-        self.pools.iter().map(CutPool::cuts_in_lp).sum()
     }
 
     /// Compute sparsity reports for all stages.
@@ -922,7 +884,7 @@ mod tests {
         assert_eq!(fcf.total_active_cuts(), 1); // only the active one
     }
 
-    // ── set_active / cuts_in_lp / cuts_in_lp_total tests ────────────────────
+    // ── set_active tests ────────────────────────────────────────────────────
 
     #[test]
     fn fcf_set_active_delegates_to_pool() {
@@ -937,38 +899,5 @@ mod tests {
 
         assert!(!fcf.pools[1].active[0]);
         assert_eq!(fcf.total_active_cuts(), prior - 1);
-    }
-
-    #[test]
-    fn intercept_for_slot_returns_pool_intercept() {
-        let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
-        // Stage 1: three cuts with distinct intercepts at slots 0, 1, 2.
-        fcf.add_cut(1, 0, 0, 11.0, &[1.0]);
-        fcf.add_cut(1, 1, 0, 22.0, &[2.0]);
-        fcf.add_cut(1, 2, 0, 33.0, &[3.0]);
-        // Deactivate the middle slot; intercept lookup must still return its value.
-        fcf.set_active(1, 1, false);
-
-        assert_eq!(fcf.intercept_for_slot(1, 0), 11.0);
-        assert_eq!(fcf.intercept_for_slot(1, 1), 22.0);
-        assert_eq!(fcf.intercept_for_slot(1, 2), 33.0);
-    }
-
-    #[test]
-    fn fcf_cuts_in_lp_total_aggregates_across_stages() {
-        let mut fcf = FutureCostFunction::new(3, 1, 1, 10, &[0; 3]);
-        // 2 cuts at stage 0
-        fcf.add_cut(0, 0, 0, 1.0, &[1.0]);
-        fcf.add_cut(0, 1, 0, 2.0, &[2.0]);
-        // 3 cuts at stage 1
-        fcf.add_cut(1, 0, 0, 3.0, &[3.0]);
-        fcf.add_cut(1, 1, 0, 4.0, &[4.0]);
-        fcf.add_cut(1, 2, 0, 5.0, &[5.0]);
-        // 0 cuts at stage 2
-
-        assert_eq!(fcf.cuts_in_lp_total(), 5);
-        assert_eq!(fcf.cuts_in_lp(0), 2);
-        assert_eq!(fcf.cuts_in_lp(1), 3);
-        assert_eq!(fcf.cuts_in_lp(2), 0);
     }
 }
