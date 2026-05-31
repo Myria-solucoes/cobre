@@ -283,13 +283,11 @@ where
         let results = TrainingResults::new(config.loop_config.start_iteration);
 
         // ── Iteration scratch (reused buffers for forward/backward/cut/lb) ──
-        let max_pool_capacity = fcf.pools.iter().map(|p| p.capacity).max().unwrap_or(0);
         let scratch = IterationScratch::new(
             ranks.max_local_fwd,
             ranks.num_stages,
             ranks.n_state,
             fcf.pools[0].capacity,
-            max_pool_capacity,
             stage_ctx.templates[0].num_rows,
             indexer.hydro_count,
             indexer.max_par_order,
@@ -726,8 +724,8 @@ where
         // Borrow bwd_state independently so the remaining fields can be
         // passed to the factory without a whole-struct borrow conflict.
         // `IterationScratch` is split into named sub-field borrows so the
-        // disjoint `cut_selection_scratch` slot can be co-borrowed mutably
-        // alongside `cut_batches` (each is a distinct field of `self.scratch`).
+        // disjoint scratch slots can be co-borrowed mutably (each is a
+        // distinct field of `self.scratch`).
         let bwd = &mut self.bwd_state;
         let mut inputs = BackwardPassInputs::from_session_fields(
             &mut self.fwd_pool,
@@ -736,7 +734,6 @@ where
             &mut self.scratch.baked_templates,
             &mut self.scratch.cut_batches,
             &self.scratch.records,
-            &mut self.scratch.cut_selection_scratch,
             self.fcf,
             &mut self.exchange_bufs,
             &mut self.cut_sync_bufs,
@@ -872,27 +869,18 @@ where
             // backward pass produces no cuts at stage T-1, so the pool is
             // empty and selection would be a no-op.
             //
-            // The outer loop is sequential (not `into_par_iter`) because
-            // the new m-block kernel uses fold-local v_block allocations
-            // and shares the same `worker_scratch` slice across all stages;
-            // concurrent stages would race for the same scratch slots.
-            // Design §4.2 confirms the 24-48 m-block tasks per stage
-            // saturate a 96-core machine via the inner parallelism alone.
+            // The outer loop is sequential (not `into_par_iter`) because the
+            // m-block kernel saturates the available cores via its inner
+            // parallelism; Design §4.2 confirms the 24-48 m-block tasks per
+            // stage saturate a 96-core machine on their own.
             let pools = &self.fcf.pools;
-            let worker_scratch = self.scratch.cut_selection_scratch_mut();
             #[allow(clippy::cast_possible_truncation)]
             let deactivations: Vec<(usize, CutActivityUpdates, f64)> = (1..num_sel_stages)
                 .map(|stage| {
                     let pool = &pools[stage];
                     let states = archive_ref.map_or(&[] as &[f64], |a| a.states_for_stage(stage));
                     let start = Instant::now();
-                    let deact = strategy.select_for_stage_with_scratch(
-                        pool,
-                        states,
-                        iteration,
-                        stage as u32,
-                        worker_scratch,
-                    );
+                    let deact = strategy.select_for_stage(pool, states, iteration, stage as u32);
                     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
                     (stage, deact, elapsed_ms)
                 })

@@ -12,8 +12,6 @@
 //! `V = coef · stateᵀ`, applies the per-column survival rule into a local
 //! accumulator bitmap, and returns. The final reduce ORs all per-task bitmaps.
 //!
-//! Per-worker scratch ([`PerWorkerScratch`]) is pre-allocated at
-//! training-session level (see `crate::training_session::iteration_scratch`).
 //! The hot path never allocates beyond the bounded fold-leaf scratch.
 //!
 //! Determinism is preserved by two properties: `matrixmultiply`'s micro-kernel
@@ -27,7 +25,7 @@
 //! # Algorithm semantics (unchanged from value-evaluation kernel)
 //!
 //! All three variants share a single value-evaluation kernel in
-//! [`CutSelectionStrategy::select_for_stage_with_scratch`]. It evaluates ALL
+//! [`CutSelectionStrategy::select_for_stage`]. It evaluates ALL
 //! populated cuts (active AND inactive) at each visited forward-pass state and
 //! applies the method-specific survival rule:
 //!
@@ -75,71 +73,6 @@ use crate::gemm::gemm_block;
 /// stage — well above the rayon scheduling overhead floor, well below
 /// the load-imbalance threshold).
 pub(crate) const M_BLOCK: usize = 8;
-
-// ---------------------------------------------------------------------------
-// PerWorkerScratch
-// ---------------------------------------------------------------------------
-
-/// Per-worker scratch for the m-block fold/reduce kernel.
-///
-/// **Status: forward-compatible stub, not consumed by the current kernel.**
-/// The current `select_for_stage_with_scratch` allocates fresh fold-leaf
-/// `v_block` and bitmap buffers per call. This struct's fields are
-/// pre-allocated at session level and `reset_bitmap` is called per stage,
-/// but neither field is read by the kernel today. The shape is kept so a
-/// future selection-inside-backward transition can drop in
-/// `worker_scratch[i].v_block` / `accum_bitmap` slices in place of the
-/// fold-leaf allocations without re-plumbing the call sites.
-///
-/// `v_block` holds one `K × M_BLOCK` GEMM output panel (row-major).
-/// `accum_bitmap` is the per-worker OR-accumulator over all m-blocks
-/// the worker processes; length is `K`.
-///
-/// Allocations live for the lifetime of the worker's participation
-/// in `select_for_stage`. With session-level ownership the allocation
-/// happens exactly once per worker per training run, not per
-/// `select_for_stage` call.
-#[derive(Debug)]
-pub(crate) struct PerWorkerScratch {
-    /// `K × M_BLOCK` row-major. Capacity is set at construction;
-    /// `select_for_stage` may use any prefix `populated * m_len`.
-    ///
-    /// The current m-block kernel uses fold-leaf `v_block` buffers
-    /// rather than reading from this field; the field is kept so a
-    /// future selection-inside-backward transition can reuse the
-    /// existing scratch layout without re-allocating. See the doc
-    /// comment on `select_for_stage_with_scratch` for details.
-    #[allow(dead_code)]
-    pub(crate) v_block: Vec<f64>,
-
-    /// Per-worker OR-accumulator. Length is `K`.
-    ///
-    /// Reset to all-false by [`PerWorkerScratch::reset_bitmap`] at the
-    /// top of every `select_for_stage_with_scratch` call. Not currently
-    /// read by the m-block kernel (fold-leaf bitmaps drive the reduce)
-    /// but kept for a future selection-inside-backward transition.
-    #[allow(dead_code)]
-    pub(crate) accum_bitmap: Vec<bool>,
-}
-
-impl PerWorkerScratch {
-    /// Allocate a scratch sized for at most `populated` cuts and
-    /// `m_block` trial points per GEMM call.
-    pub(crate) fn new(populated: usize, m_block: usize) -> Self {
-        Self {
-            v_block: vec![0.0_f64; populated * m_block],
-            accum_bitmap: vec![false; populated],
-        }
-    }
-
-    /// Reset `accum_bitmap` to all-false. `v_block` is not reset
-    /// here — every dgemm call overwrites it with beta = 0.
-    pub(crate) fn reset_bitmap(&mut self) {
-        for slot in &mut self.accum_bitmap {
-            *slot = false;
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // CutMetadata
@@ -387,48 +320,7 @@ impl CutSelectionStrategy {
         self.select_for_stage(pool, visited_states, current_iteration, 0)
     }
 
-    /// Thin allocating wrapper around [`select_for_stage_with_scratch`].
-    ///
-    /// Allocates per-worker scratch sized for the current pool on every call
-    /// and forwards to the new m-block fold/reduce kernel. Useful for tests
-    /// and ad-hoc callers that do not own session-level scratch.
-    ///
-    /// Production call sites (the training loop) should call
-    /// [`select_for_stage_with_scratch`] directly with session-owned
-    /// `PerWorkerScratch` slices to avoid per-iteration allocation. See
-    /// `crate::training_session::IterationScratch::cut_selection_scratch`.
-    ///
-    /// `visited_states` is a flat `&[f64]` of visited forward-pass state
-    /// vectors (row-major, one state per `pool.state_dimension` elements).
-    /// When empty, the function returns empty updates immediately.
-    ///
-    /// `stage_index` populates [`CutActivityUpdates::stage_index`].
-    ///
-    /// [`select_for_stage_with_scratch`]: CutSelectionStrategy::select_for_stage_with_scratch
-    /// [`select`]: CutSelectionStrategy::select
-    #[must_use]
-    pub fn select_for_stage(
-        &self,
-        pool: &crate::cut::CutPool,
-        visited_states: &[f64],
-        current_iteration: u64,
-        stage_index: u32,
-    ) -> CutActivityUpdates {
-        let n_workers = rayon::current_num_threads().max(1);
-        let mut local_scratch: Vec<PerWorkerScratch> = (0..n_workers)
-            .map(|_| PerWorkerScratch::new(pool.populated_count.max(1), M_BLOCK))
-            .collect();
-        self.select_for_stage_with_scratch(
-            pool,
-            visited_states,
-            current_iteration,
-            stage_index,
-            &mut local_scratch,
-        )
-    }
-
-    /// Scan the cut pool for a specific stage using caller-owned per-worker
-    /// scratch.
+    /// Scan the cut pool for a specific stage.
     ///
     /// Accepts the full [`CutPool`](crate::cut::CutPool) reference so that
     /// all variants can access coefficients and intercepts for value
@@ -437,6 +329,8 @@ impl CutSelectionStrategy {
     /// `visited_states` is a flat `&[f64]` of visited forward-pass state
     /// vectors (row-major, one state per `pool.state_dimension` elements).
     /// When empty, the function returns empty updates immediately.
+    ///
+    /// `stage_index` populates [`CutActivityUpdates::stage_index`].
     ///
     /// # Parallelism (m-block fold/reduce)
     ///
@@ -449,36 +343,19 @@ impl CutSelectionStrategy {
     /// regardless of the number of threads or block boundaries — including
     /// for Lml1, where the per-block "oldest at max" is taken over disjoint
     /// trial-point subsets and the union across subsets equals the global
-    /// oldest-at-max union.
-    ///
-    /// # The `worker_scratch` parameter
-    ///
-    /// `worker_scratch` is reserved for a future selection-inside-backward
-    /// transition, where the scratch passing scheme may evolve to share
-    /// buffers across backward-sweep stages. In the current implementation
-    /// the parameter is reset (`reset_bitmap` on every slot before the fold
-    /// begins) but the `v_block` and `accum_bitmap` consumed by the fold
-    /// itself are sourced from fold-leaf allocations rather than from
-    /// `worker_scratch`. Fold-leaf allocation is bounded by
-    /// `min(n_blocks, num_workers)` per call, which stays well within the
-    /// "never allocate on hot paths" rule in spirit — allocations are
-    /// bounded and amortised, not unbounded.
-    ///
-    /// Preserving the `&mut [PerWorkerScratch]` parameter shape keeps the
-    /// call site stable across that future transition.
+    /// oldest-at-max union. The fold-leaf `v_block` and `accum_bitmap`
+    /// buffers are bounded by `min(n_blocks, num_workers)` per call, which
+    /// stays within the "never allocate on hot paths" rule in spirit —
+    /// allocations are bounded and amortised, not unbounded.
     ///
     /// [`select`]: CutSelectionStrategy::select
-    // `PerWorkerScratch` is `pub(crate)` while the method is `pub`; the
-    // visibility mismatch is intentional (callers are in-crate only).
-    #[allow(private_interfaces)]
     #[must_use]
-    pub fn select_for_stage_with_scratch(
+    pub fn select_for_stage(
         &self,
         pool: &crate::cut::CutPool,
         visited_states: &[f64],
         current_iteration: u64,
         stage_index: u32,
-        worker_scratch: &mut [PerWorkerScratch],
     ) -> CutActivityUpdates {
         let populated = pool.populated_count;
         let n_state = pool.state_dimension;
@@ -505,13 +382,6 @@ impl CutSelectionStrategy {
         }
 
         let n_states = visited_states.len() / n_state;
-
-        // Reset every worker's accum_bitmap. See the `worker_scratch`
-        // section of the method doc-comment for why this slice is held
-        // across calls even though the kernel uses fold-leaf buffers.
-        for ws in worker_scratch.iter_mut() {
-            ws.reset_bitmap();
-        }
 
         // Partition trial points into m-blocks. Ceiling-divide so the
         // last block may be shorter than M_BLOCK.
@@ -772,26 +642,6 @@ mod tests {
         pool.active[..n].clone_from_slice(active);
         pool.cached_active_count = active.iter().filter(|&&a| a).count();
         pool
-    }
-
-    #[test]
-    fn per_worker_scratch_allocates_expected_sizes() {
-        let scratch = super::PerWorkerScratch::new(100, super::M_BLOCK);
-        assert_eq!(scratch.v_block.len(), 100 * super::M_BLOCK);
-        assert_eq!(scratch.accum_bitmap.len(), 100);
-        assert!(scratch.accum_bitmap.iter().all(|&b| !b));
-    }
-
-    #[test]
-    fn per_worker_scratch_reset_clears_bitmap() {
-        let mut scratch = super::PerWorkerScratch::new(8, super::M_BLOCK);
-        for slot in &mut scratch.accum_bitmap {
-            *slot = true;
-        }
-        scratch.reset_bitmap();
-        assert!(scratch.accum_bitmap.iter().all(|&b| !b));
-        // v_block must NOT be touched by reset_bitmap.
-        assert_eq!(scratch.v_block.len(), 8 * super::M_BLOCK);
     }
 
     #[test]
@@ -2369,7 +2219,7 @@ mod tests {
     /// New kernel: bit-identical output across thread counts at a
     /// moderate scale that exercises multiple m-blocks per stage.
     #[test]
-    fn select_for_stage_with_scratch_deterministic_across_thread_counts() {
+    fn select_for_stage_deterministic_across_thread_counts() {
         let pool = make_determinism_pool();
         let states = make_determinism_states(64); // 64 trial points >> M_BLOCK
         let strategy = CutSelectionStrategy::Lml1 {
@@ -2377,41 +2227,25 @@ mod tests {
             tie_tolerance: 1e-10,
         };
 
-        // Pre-allocate scratch sized for the populated pool.
-        let n_workers_1 = 1;
-        let n_workers_8 = 8;
-        let make_scratch = |n: usize| -> Vec<super::PerWorkerScratch> {
-            (0..n)
-                .map(|_| super::PerWorkerScratch::new(pool.populated_count, super::M_BLOCK))
-                .collect()
-        };
-
         let r1 = {
-            let mut scratch = make_scratch(n_workers_1);
             let rp = rayon::ThreadPoolBuilder::new()
-                .num_threads(n_workers_1)
+                .num_threads(1)
                 .build()
                 .expect("rayon pool");
-            rp.install(|| {
-                strategy.select_for_stage_with_scratch(&pool, &states, 10, 0, &mut scratch)
-            })
+            rp.install(|| strategy.select_for_stage(&pool, &states, 10, 0))
         };
 
         let r8 = {
-            let mut scratch = make_scratch(n_workers_8);
             let rp = rayon::ThreadPoolBuilder::new()
-                .num_threads(n_workers_8)
+                .num_threads(8)
                 .build()
                 .expect("rayon pool");
-            rp.install(|| {
-                strategy.select_for_stage_with_scratch(&pool, &states, 10, 0, &mut scratch)
-            })
+            rp.install(|| strategy.select_for_stage(&pool, &states, 10, 0))
         };
 
         assert_eq!(
             r1, r8,
-            "select_for_stage_with_scratch must be byte-identical \
-             across thread counts"
+            "select_for_stage must be byte-identical across thread counts"
         );
     }
 }

@@ -1435,7 +1435,6 @@ mod tests {
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             cut_selection: None,
-            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -1530,7 +1529,6 @@ mod tests {
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             cut_selection: None,
-            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -1625,7 +1623,6 @@ mod tests {
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             cut_selection: None,
-            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -1716,7 +1713,6 @@ mod tests {
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             cut_selection: None,
-            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -1807,7 +1803,6 @@ mod tests {
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             cut_selection: None,
-            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -1896,7 +1891,6 @@ mod tests {
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             cut_selection: None,
-            cut_selection_scratch: &mut [],
             event_sender: None,
         });
 
@@ -2030,7 +2024,6 @@ mod tests {
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             cut_selection: None,
-            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -2142,7 +2135,6 @@ mod tests {
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             cut_selection: None,
-            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -2259,7 +2251,6 @@ mod tests {
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             cut_selection: None,
-            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -2362,7 +2353,6 @@ mod tests {
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             cut_selection: None,
-            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -2475,7 +2465,6 @@ mod tests {
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             cut_selection: None,
-            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -2583,7 +2572,6 @@ mod tests {
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             cut_selection: None,
-            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -2684,7 +2672,6 @@ mod tests {
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             cut_selection: None,
-            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -2793,7 +2780,6 @@ mod tests {
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             cut_selection: None,
-            cut_selection_scratch: &mut [],
             event_sender: None,
         });
 
@@ -2946,7 +2932,6 @@ mod tests {
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             cut_selection: None,
-            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -3033,7 +3018,6 @@ mod tests {
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             cut_selection: None,
-            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -3414,7 +3398,6 @@ mod tests {
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             cut_selection: None,
-            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -3580,7 +3563,6 @@ mod tests {
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             cut_selection: None,
-            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -3751,7 +3733,6 @@ mod tests {
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             cut_selection: None,
-            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -3870,7 +3851,6 @@ mod tests {
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             cut_selection: None,
-            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -3998,7 +3978,6 @@ mod tests {
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             cut_selection: None,
-            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -4180,7 +4159,6 @@ mod tests {
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             cut_selection: None,
-            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .unwrap();
@@ -4545,7 +4523,6 @@ mod tests {
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             cut_selection: None,
-            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .expect("single-rank 2-worker backward must not error");
@@ -4770,7 +4747,6 @@ mod tests {
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             cut_selection: None,
-            cut_selection_scratch: &mut [],
             event_sender: None,
         })
         .expect("dual-rank stub backward must not error");
@@ -5205,7 +5181,6 @@ mod tests {
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             cut_selection: None,
-            cut_selection_scratch: &mut [],
             event_sender: None,
         });
 
@@ -5364,7 +5339,6 @@ mod tests {
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             cut_selection: None,
-            cut_selection_scratch: &mut [],
             event_sender: None,
         });
 

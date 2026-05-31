@@ -50,23 +50,6 @@ pub(crate) struct IterationScratch {
     pub lb_cut_row_map: CutRowMap,
     /// Per-evaluation scratch buffers for lower-bound evaluation (reused across iterations).
     pub lb_scratch: LbEvalScratch,
-    /// Per-rayon-worker scratch for the cut-selection kernel.
-    ///
-    /// **Status: forward-compatible stub.** The current m-block kernel
-    /// allocates fold-leaf `v_block` / bitmap buffers per call rather
-    /// than reading from these entries; `reset_bitmap` is called per
-    /// stage but no field is consumed by the kernel today. See the
-    /// doc on [`crate::cut_selection::PerWorkerScratch`] for the
-    /// rationale (forward-compat with the selection-inside-backward
-    /// transition tracked separately).
-    ///
-    /// One entry per rayon worker, each sized for the maximum
-    /// `pool.capacity` across all stages and `cut_selection::M_BLOCK`
-    /// trial points per GEMM call. Pre-allocated at session init so
-    /// nested rayon dispatch of `select_for_stage` never triggers a
-    /// per-call allocation (design §6.1, "never allocate on hot paths"
-    /// hard rule).
-    pub cut_selection_scratch: Vec<crate::cut_selection::PerWorkerScratch>,
 }
 
 impl IterationScratch {
@@ -84,9 +67,6 @@ impl IterationScratch {
     /// * `num_stages` — number of study stages.
     /// * `n_state` — state-vector dimension (used to size `records[i].state`).
     /// * `fcf_pool_0_capacity` — capacity of the stage-0 FCF pool (for `CutRowMap`).
-    /// * `max_pool_capacity` — maximum `pool.capacity` across all
-    ///   stages, used to size `cut_selection_scratch` so no
-    ///   re-allocation ever occurs during selection.
     /// * `template_0_num_rows` — number of rows in the stage-0 template (for `CutRowMap`).
     /// * `hydro_count` — number of hydro plants (for `PatchBuffer`).
     /// * `max_par_order` — maximum PAR model order (for `PatchBuffer`).
@@ -99,7 +79,6 @@ impl IterationScratch {
         num_stages: usize,
         n_state: usize,
         fcf_pool_0_capacity: usize,
-        max_pool_capacity: usize,
         template_0_num_rows: usize,
         hydro_count: usize,
         max_par_order: usize,
@@ -185,23 +164,6 @@ impl IterationScratch {
         // and reused (without reallocation) on every subsequent iteration.
         let lb_scratch = LbEvalScratch::new();
 
-        // ── Per-worker scratch for cut-selection kernel (design §6.1) ──
-        // Allocate one `PerWorkerScratch` per rayon worker, sized for the
-        // upper-bound pool capacity across all stages. This ensures the
-        // nested rayon dispatch in `select_for_stage` never re-allocates
-        // its `v_block` / `accum_bitmap` buffers per call. `.max(1)` is a
-        // defensive guard against rayon reporting 0 workers (which it
-        // does not in normal operation).
-        let num_workers = rayon::current_num_threads().max(1);
-        let cut_selection_scratch: Vec<crate::cut_selection::PerWorkerScratch> = (0..num_workers)
-            .map(|_| {
-                crate::cut_selection::PerWorkerScratch::new(
-                    max_pool_capacity,
-                    crate::cut_selection::M_BLOCK,
-                )
-            })
-            .collect();
-
         Self {
             patch_buf,
             records,
@@ -211,14 +173,7 @@ impl IterationScratch {
             bake_row_batches,
             lb_cut_row_map,
             lb_scratch,
-            cut_selection_scratch,
         }
-    }
-
-    /// Borrow the per-worker cut-selection scratch slice mutably
-    /// for the duration of a `select_for_stage_with_scratch` call.
-    pub fn cut_selection_scratch_mut(&mut self) -> &mut [crate::cut_selection::PerWorkerScratch] {
-        &mut self.cut_selection_scratch
     }
 }
 
@@ -294,7 +249,6 @@ mod tests {
         let num_stages = 3;
         let n_state = 4;
         let fcf_pool_0_capacity = 10;
-        let max_pool_capacity = 10;
         let template_0_num_rows = 5;
         let hydro_count = 1;
         let max_par_order = 1;
@@ -307,7 +261,6 @@ mod tests {
             num_stages,
             n_state,
             fcf_pool_0_capacity,
-            max_pool_capacity,
             template_0_num_rows,
             hydro_count,
             max_par_order,
@@ -352,7 +305,6 @@ mod tests {
         let num_stages = 3;
         let n_state = 4;
         let fcf_pool_0_capacity = 10;
-        let max_pool_capacity = 10;
         let template_0_num_rows = 5;
         let hydro_count = 1;
         let max_par_order = 1;
@@ -365,7 +317,6 @@ mod tests {
             num_stages,
             n_state,
             fcf_pool_0_capacity,
-            max_pool_capacity,
             template_0_num_rows,
             hydro_count,
             max_par_order,
@@ -405,7 +356,6 @@ mod tests {
         let num_stages = 2;
         let n_state = 4;
         let fcf_pool_0_capacity = 4;
-        let max_pool_capacity = 4;
         let template_0_num_rows = 4;
         let hydro_count = 2;
         let max_par_order = 1;
@@ -420,7 +370,6 @@ mod tests {
             num_stages,
             n_state,
             fcf_pool_0_capacity,
-            max_pool_capacity,
             template_0_num_rows,
             hydro_count,
             max_par_order,
@@ -470,7 +419,6 @@ mod tests {
         let num_stages = 2;
         let n_state = 2;
         let fcf_pool_0_capacity = 4;
-        let max_pool_capacity = 4;
         let template_0_num_rows = 4;
         let hydro_count = 2;
         let max_par_order = 1;
@@ -483,7 +431,6 @@ mod tests {
             num_stages,
             n_state,
             fcf_pool_0_capacity,
-            max_pool_capacity,
             template_0_num_rows,
             hydro_count,
             max_par_order,
@@ -499,62 +446,5 @@ mod tests {
             expected_capacity,
             "zero-anticipated patch_buf must match the pre-anticipated layout",
         );
-    }
-
-    /// Verify the new per-worker cut-selection scratch is sized to
-    /// `current_num_threads()` entries, each holding a `v_block` of
-    /// `max_pool_capacity * M_BLOCK` and an `accum_bitmap` of
-    /// `max_pool_capacity`.
-    #[test]
-    fn iteration_scratch_new_sizes_cut_selection_scratch() {
-        let max_local_fwd = 2;
-        let num_stages = 3;
-        let n_state = 4;
-        let fcf_pool_0_capacity = 10;
-        let max_pool_capacity = 25; // higher than pool 0 to verify it
-        // is the sizing parameter
-        let template_0_num_rows = 5;
-        let hydro_count = 1;
-        let max_par_order = 1;
-
-        let templates = vec![minimal_template(); num_stages];
-        let stage_ctx = make_stage_ctx(&templates);
-
-        let scratch = IterationScratch::new(
-            max_local_fwd,
-            num_stages,
-            n_state,
-            fcf_pool_0_capacity,
-            max_pool_capacity,
-            template_0_num_rows,
-            hydro_count,
-            max_par_order,
-            0,
-            0,
-            &stage_ctx,
-        );
-
-        let expected_workers = rayon::current_num_threads().max(1);
-        assert_eq!(
-            scratch.cut_selection_scratch.len(),
-            expected_workers,
-            "one PerWorkerScratch per rayon worker"
-        );
-        for ws in &scratch.cut_selection_scratch {
-            assert_eq!(
-                ws.v_block.len(),
-                max_pool_capacity * crate::cut_selection::M_BLOCK,
-                "v_block sized for max_pool_capacity * M_BLOCK"
-            );
-            assert_eq!(
-                ws.accum_bitmap.len(),
-                max_pool_capacity,
-                "accum_bitmap sized for max_pool_capacity"
-            );
-            assert!(
-                ws.accum_bitmap.iter().all(|&b| !b),
-                "accum_bitmap starts all-false"
-            );
-        }
     }
 }

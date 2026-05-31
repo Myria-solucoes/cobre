@@ -22,7 +22,7 @@ use crate::{
     config::CutManagementConfig,
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
-    cut_selection::{CutSelectionStrategy, PerWorkerScratch},
+    cut_selection::CutSelectionStrategy,
     cut_sync::CutSyncBuffers,
     error::SddpError,
     forward::{build_cut_row_batch_into, build_delta_cut_row_batch_into, partition},
@@ -112,11 +112,6 @@ pub struct BackwardPassInputs<'a, S: SolverInterface + Send, C: Communicator> {
     /// the backward sweep. Guarded by [`IN_BACKWARD_ENABLED`].
     pub cut_selection: Option<&'a CutSelectionStrategy>,
 
-    /// Per-rayon-worker scratch for the cut-selection kernel.
-    /// Borrowed from `IterationScratch::cut_selection_scratch`; one entry
-    /// per `rayon::current_num_threads()`. Guarded by [`IN_BACKWARD_ENABLED`].
-    pub cut_selection_scratch: &'a mut [PerWorkerScratch],
-
     /// Optional event channel for emitting [`TrainingEvent::WorkerTiming`] events.
     pub event_sender: Option<&'a Sender<TrainingEvent>>,
 
@@ -153,7 +148,6 @@ impl<'a, S: SolverInterface + Send, C: Communicator> BackwardPassInputs<'a, S, C
         baked_templates: &'a mut [StageTemplate],
         cut_batches: &'a mut [RowBatch],
         records: &'a [TrajectoryRecord],
-        cut_selection_scratch: &'a mut [PerWorkerScratch],
         fcf: &'a mut FutureCostFunction,
         exchange: &'a mut ExchangeBuffers,
         cut_sync_bufs: &'a mut CutSyncBuffers,
@@ -179,7 +173,6 @@ impl<'a, S: SolverInterface + Send, C: Communicator> BackwardPassInputs<'a, S, C
             cut_sync_bufs,
             visited_archive: visited_archive.as_mut(),
             cut_selection: cut_mgmt.cut_selection.as_ref(),
-            cut_selection_scratch,
             event_sender: runtime.event_sender(),
             risk_measures: &cut_mgmt.risk_measures,
             cut_activity_tolerance: cut_mgmt.cut_activity_tolerance,
@@ -886,13 +879,8 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
             .map_or(&[] as &[f64], |a| a.states_for_stage(t));
         let sel_start = Instant::now();
         #[allow(clippy::cast_possible_truncation)]
-        let updates = strategy.select_for_stage_with_scratch(
-            &inputs.fcf.pools[t],
-            visited,
-            inputs.iteration,
-            t as u32,
-            inputs.cut_selection_scratch,
-        );
+        let updates =
+            strategy.select_for_stage(&inputs.fcf.pools[t], visited, inputs.iteration, t as u32);
         #[allow(clippy::cast_possible_truncation)]
         let active_before = inputs.fcf.pools[t].active_count() as u32;
         #[allow(clippy::cast_possible_truncation)]
@@ -1635,7 +1623,6 @@ mod tests {
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             cut_selection: None,
-            cut_selection_scratch: &mut [],
             event_sender: None,
             risk_measures: &risk_measures,
             cut_activity_tolerance: 0.0,
@@ -1759,7 +1746,6 @@ mod tests {
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             cut_selection: None,
-            cut_selection_scratch: &mut [],
             event_sender: None,
             risk_measures: &risk_measures,
             cut_activity_tolerance: 0.0,
@@ -1788,7 +1774,7 @@ mod tests {
     /// `BackwardResult.selection_records` must be empty.
     #[test]
     fn in_backward_hook_skipped_when_toggle_false() {
-        use crate::cut_selection::{CutSelectionStrategy, PerWorkerScratch};
+        use crate::cut_selection::CutSelectionStrategy;
 
         let _toggle_lock = TOGGLE_TEST_LOCK
             .lock()
@@ -1863,7 +1849,6 @@ mod tests {
             check_frequency: 1,
             tie_tolerance: 1e-10,
         };
-        let mut sel_scratch: Vec<PerWorkerScratch> = vec![PerWorkerScratch::new(1, 1)];
 
         // Force the toggle to `false` and confirm the production default.
         crate::set_inside_backward_enabled(false);
@@ -1886,7 +1871,6 @@ mod tests {
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             cut_selection: Some(&strategy),
-            cut_selection_scratch: &mut sel_scratch,
             event_sender: None,
             risk_measures: &risk_measures,
             cut_activity_tolerance: 0.0,
