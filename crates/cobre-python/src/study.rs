@@ -352,17 +352,10 @@ impl Study {
         let dict = PyDict::new(py);
         dict.set_item("valid", true)?;
         dict.set_item("errors", PyList::empty(py))?;
-
-        let warnings_list = PyList::empty(py);
-        for entry in &self.warnings {
-            let w = PyDict::new(py);
-            w.set_item("kind", &entry.kind)?;
-            w.set_item("message", &entry.message)?;
-            w.set_item("file", &entry.file)?;
-            w.set_item("entity", entry.entity.as_deref())?;
-            warnings_list.append(w)?;
-        }
-        dict.set_item("warnings", warnings_list)?;
+        dict.set_item(
+            "warnings",
+            crate::io::build_warnings_list(py, &self.warnings)?,
+        )?;
 
         Ok(dict)
     }

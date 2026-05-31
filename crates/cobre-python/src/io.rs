@@ -85,6 +85,29 @@ fn convert_load_error(err: &LoadError) -> PyErr {
     crate::errors::convert_error(crate::errors::ErrorSource::Load(err))
 }
 
+/// Build the `"warnings"` list (`list[dict]`) shared by the two validate
+/// surfaces: [`validate`] and `Study::validate`.
+///
+/// Each `cobre-io` [`cobre_io::ReportEntry`] becomes a dict with the stable
+/// `{"kind", "message", "file", "entity"}` shape (the `cobre.io.validate` data
+/// contract). Extracted so both validate paths emit the identical warning shape
+/// from a single place.
+pub(crate) fn build_warnings_list<'py>(
+    py: Python<'py>,
+    warnings: &[cobre_io::ReportEntry],
+) -> PyResult<Bound<'py, PyList>> {
+    let warnings_list = PyList::empty(py);
+    for entry in warnings {
+        let w = PyDict::new(py);
+        w.set_item("kind", &entry.kind)?;
+        w.set_item("message", &entry.message)?;
+        w.set_item("file", &entry.file)?;
+        w.set_item("entity", entry.entity.as_deref())?;
+        warnings_list.append(w)?;
+    }
+    Ok(warnings_list)
+}
+
 // ── load_case ────────────────────────────────────────────────────────────────
 
 /// Load a Cobre case directory and return a validated `System`.
@@ -282,17 +305,7 @@ pub fn validate(
     // All phases passed — populate warnings from the cobre-io pipeline report.
     dict.set_item("valid", true)?;
     dict.set_item("errors", PyList::empty(py))?;
-
-    let warnings_list = PyList::empty(py);
-    for entry in &report.warnings {
-        let w = PyDict::new(py);
-        w.set_item("kind", &entry.kind)?;
-        w.set_item("message", &entry.message)?;
-        w.set_item("file", &entry.file)?;
-        w.set_item("entity", entry.entity.as_deref())?;
-        warnings_list.append(w)?;
-    }
-    dict.set_item("warnings", warnings_list)?;
+    dict.set_item("warnings", build_warnings_list(py, &report.warnings)?)?;
 
     Ok(dict.into())
 }

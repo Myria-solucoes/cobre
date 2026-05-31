@@ -897,21 +897,6 @@ fn output_error_to_py(err: &cobre_io::OutputError) -> PyErr {
     crate::errors::convert_error(crate::errors::ErrorSource::Output(err))
 }
 
-/// Convert a [`cobre_io::OutputError`] from a metadata read into a Python
-/// exception.
-///
-/// Identical to [`output_error_to_py`] now that the malformed-JSON
-/// ([`cobre_io::OutputError::ManifestError`]) → `ValueError` distinction lives
-/// inside the single [`crate::errors::convert_error`] mapping site:
-///
-/// - missing file ([`cobre_io::OutputError::IoError`] with `NotFound`) → `FileNotFoundError`
-/// - malformed JSON ([`cobre_io::OutputError::ManifestError`]) →
-///   `cobre.errors.ValidationError` (`ValueError`)
-/// - any other I/O error → `cobre.errors.CaseIoError` (`OSError`)
-fn metadata_error_to_py(err: &cobre_io::OutputError) -> PyErr {
-    crate::errors::convert_error(crate::errors::ErrorSource::Output(err))
-}
-
 /// Read an optional simulation-metadata file, treating file-not-found as `None`.
 ///
 /// Mirrors the CLI's `read_optional_metadata` (`cobre-cli`'s `report.rs`):
@@ -956,7 +941,7 @@ fn build_report_value(output_dir: &Path) -> PyResult<serde_json::Value> {
     // training/metadata.json is required; absence is a FileNotFoundError.
     let training_metadata_path = output_dir.join("training/metadata.json");
     let training = cobre_io::read_training_metadata(&training_metadata_path)
-        .map_err(|e| metadata_error_to_py(&e))?;
+        .map_err(|e| output_error_to_py(&e))?;
 
     // simulation/metadata.json is optional (absent when simulation was skipped).
     let simulation_metadata_path = output_dir.join("simulation/metadata.json");

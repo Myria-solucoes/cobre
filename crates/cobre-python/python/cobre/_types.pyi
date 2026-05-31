@@ -72,9 +72,14 @@ class ProvenanceReport(TypedDict, total=False):
     """
 
     estimation_path: str
+    seasonal_stats_source: str
+    ar_coefficients_source: str
+    correlation_source: str
+    opening_tree_source: str
     n_hydros: int
     ar_method: Optional[str]
     ar_max_order: Optional[int]
+    white_noise_fallbacks: list[int]
     hydro_production: Any
 
 class RunResult(TypedDict):

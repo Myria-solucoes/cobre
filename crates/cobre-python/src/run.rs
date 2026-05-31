@@ -905,9 +905,8 @@ pub(crate) fn build_study_setup(
         .map_err(|e| format!("output write error: failed to write scaling report: {e}"))?;
 
     let provenance_path = output_dir.join("training/model_provenance.json");
-    if let Err(e) = cobre_io::write_provenance_report(&provenance_path, &provenance_report) {
-        eprintln!("cobre-python: provenance output warning: {e}");
-    }
+    cobre_io::write_provenance_report(&provenance_path, &provenance_report)
+        .map_err(|e| format!("output write error: failed to write model provenance: {e}"))?;
 
     let stochastic_summary =
         build_stochastic_summary(&system, &setup.stochastic, estimation_report.as_ref(), seed);
@@ -917,9 +916,8 @@ pub(crate) fn build_study_setup(
     // can render the Hydro-models section from a completed run. Built once above
     // and reused here to avoid recomputing it for the write.
     let hydro_models_path = output_dir.join("training/hydro_models.json");
-    if let Err(e) = cobre_io::write_hydro_model_summary(&hydro_models_path, &hydro_models_summary) {
-        eprintln!("cobre-python: hydro model summary output warning: {e}");
-    }
+    cobre_io::write_hydro_model_summary(&hydro_models_path, &hydro_models_summary)
+        .map_err(|e| format!("output write error: failed to write hydro model summary: {e}"))?;
 
     Ok(LoadedStudy {
         setup,

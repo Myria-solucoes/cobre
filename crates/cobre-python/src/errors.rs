@@ -261,7 +261,7 @@ fn convert_error_with(py: Python<'_>, source: ErrorSource<'_>) -> PyErr {
             OutputError::SerializationError { .. } | OutputError::SchemaError { .. } => {
                 new_leaf_err(py, &OUTPUT_ERROR, &err.to_string())
             }
-            // Preserve today's `metadata_error_to_py` -> ValueError behavior.
+            // Malformed manifest/metadata JSON -> ValueError.
             OutputError::ManifestError { .. } => validation_error(py, &err.to_string()),
         },
         ErrorSource::Sddp { error, message } => match error {
