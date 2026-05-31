@@ -175,9 +175,6 @@ pub use patch::{PatchBuffer, ar_dynamics_row_offset};
 pub use template::{StageTemplates, build_stage_templates};
 
 // --- Crate-internal re-exports ---
-// PRESCALING-DISABLED TEST: helpers retained behind `#[allow(dead_code)]`
-// in `scaling.rs` while we evaluate HiGHS's internal equilibration scaler.
-#[allow(unused_imports)]
 pub(crate) use scaling::{apply_col_scale, apply_row_scale, compute_col_scale, compute_row_scale};
 
 // ---------------------------------------------------------------------------

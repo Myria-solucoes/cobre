@@ -71,7 +71,7 @@ impl Default for HighsProfile {
             simplex_iteration_limit: DEFAULT_PROFILE_HEURISTIC_SENTINEL,
             ipm_iteration_limit: 10_000,
             simplex_dual_edge_weight_strategy: 1,
-            simplex_scale_strategy: 4,
+            simplex_scale_strategy: 0,
             simplex_price_strategy: 1,
         }
     }
@@ -134,11 +134,12 @@ impl DefaultOption {
 /// retry escalation. The values are tuned for master LPs dominated by many
 /// slack rows that are warm-started across consecutive solves.
 ///
-/// `simplex_scale_strategy` is set to 4 (Equilibration). Callers may supply
-/// per-column / per-row prescaling factors via `StageTemplate.col_scale` /
-/// `row_scale`; when those slices are empty the template arrives unscaled
-/// and `HiGHS`'s internal equilibration is responsible for all numerical
-/// conditioning. Retry escalation levels 5+ keep this strategy.
+/// `simplex_scale_strategy` is set to 0 (Off): cobre's offline prescaler
+/// (`lp_builder/scaling.rs`, applied in `setup/template_postprocess`) conditions
+/// every stage template via the per-column / per-row geometric-mean factors
+/// stored in `StageTemplate.col_scale` / `row_scale`, so `HiGHS`'s internal
+/// scaler is disabled to avoid double-scaling. Retry escalation levels 5+ keep
+/// this strategy.
 ///
 /// The last four entries diverge from `HiGHS` defaults to suit warm-started
 /// solves on master LPs with tens of thousands of mostly-slack rows: Devex
@@ -163,7 +164,7 @@ fn default_options() -> [DefaultOption; 13] {
         },
         DefaultOption {
             name: c"simplex_scale_strategy",
-            value: OptionValue::Int(4), // Equilibration — cobre's offline prescaler is not currently wired (see lp_builder/scaling.rs)
+            value: OptionValue::Int(0), // Off
         },
         DefaultOption {
             name: c"presolve",
@@ -944,8 +945,8 @@ impl HighsSolver {
             ffi::cobre_highs_set_string_option(self.handle, c"presolve".as_ptr(), c"on".as_ptr());
         }
         match level {
-            // L5/L6: scaler override removed for the prescaling-disabled test —
-            // every level inherits the default equilibration scaler.
+            // L5/L6: no scaler override — every level inherits the default
+            // scaler (Off; cobre's offline prescaler conditions the matrix).
             5 => {}
             6 => unsafe {
                 ffi::cobre_highs_set_int_option(self.handle, c"simplex_strategy".as_ptr(), 1);

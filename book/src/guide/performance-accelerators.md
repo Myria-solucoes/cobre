@@ -132,8 +132,9 @@ coefficients to reduce typical monetary values from ~1e11 to ~1e8,
 improving simplex numerical stability.
 
 Because the prescaler normalizes matrix entries toward 1.0, HiGHS's
-internal scaling (`simplex_scale_strategy`) is disabled by default
-(set to 0). Retry levels 5+ re-enable it as a fallback.
+internal scaling (`simplex_scale_strategy`) is disabled (set to 0) in
+every solver profile — including the retry-escalation levels — to avoid
+double-scaling the already-conditioned matrix.
 
 The scaling diagnostics are written to `training/scaling_report.json`
 after template construction, documenting the coefficient range before

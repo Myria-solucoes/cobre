@@ -1,8 +1,6 @@
-// PRESCALING-DISABLED TEST: the four prescale helpers below are kept in the
-// codebase but not invoked from `setup/template_postprocess.rs` while we
-// evaluate HiGHS's internal equilibration scaler. Allowing dead_code here
-// keeps the helpers ready to re-wire without resurrecting them from history.
-#![allow(dead_code)]
+//! Offline LP prescaling: geometric-mean column/row scale factors applied to
+//! stage templates for numerical conditioning (`D_r * A * D_c` form), plus the
+//! noise pre-scaling helper. Invoked from `setup/template_postprocess::postprocess_templates`.
 
 use cobre_core::Stage;
 use cobre_solver::StageTemplate;
