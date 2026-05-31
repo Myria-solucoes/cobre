@@ -16,7 +16,7 @@ vertical is SDDP-based hydrothermal dispatch.
 
 These are non-negotiable. Violations must be fixed before committing.
 
-- `unsafe_code = "forbid"` workspace default — `cobre-solver`, `cobre-comm`, and `cobre-python` override to `allow` for FFI/MPI/PyO3
+- `unsafe_code = "forbid"` workspace default — `cobre-solver`, `cobre-comm`, and `cobre-python` override to `allow` for FFI/MPI/PyO3; `cobre-sddp` overrides for the `matrixmultiply::dgemm` call its cut-selection kernel needs (isolated in `src/gemm.rs`)
 - `unwrap_used = "deny"` — no `.unwrap()` in library code (ok in tests)
 - `clippy::all` and `clippy::pedantic` at `warn` level, zero warnings in CI
 - **Never use `Box<dyn Trait>`** — enum dispatch for closed variant sets

@@ -247,8 +247,8 @@ applies seven performance-tuned default options before returning:
 | Option                         | Value       | Rationale                                                       |
 | ------------------------------ | ----------- | --------------------------------------------------------------- |
 | `solver`                       | `"simplex"` | Simplex is faster than IPM for warm-started LPs                 |
-| `simplex_strategy`             | `4`         | Dual simplex; performs well on LP sequences                     |
-| `presolve`                     | `"off"`     | Avoid presolve overhead on repeated small LPs                   |
+| `simplex_strategy`             | `1`         | Dual simplex; performs well on LP sequences                     |
+| `presolve`                     | `"on"`      | Simplify the LP before simplex; faster production solves        |
 | `parallel`                     | `"off"`     | Each thread owns one solver; no internal threads                |
 | `output_flag`                  | `false`     | Suppress HiGHS console output                                   |
 | `primal_feasibility_tolerance` | `1e-9`      | Tighter than the HiGHS default (`1e-7`) for numerical precision |

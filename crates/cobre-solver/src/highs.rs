@@ -14,7 +14,7 @@
 //! # Configuration
 //!
 //! The constructor applies performance-tuned defaults (`HiGHS` Implementation
-//! SS4.1): dual simplex, no presolve, no parallelism, suppressed output, and
+//! SS4.1): dual simplex, presolve enabled, no parallelism, suppressed output, and
 //! tight feasibility tolerances. These defaults are optimised for repeated
 //! solves of small-to-medium LPs. Per-run parameters (time limit, iteration
 //! limit) are not set here -- those are applied by the caller before each solve.
@@ -311,7 +311,7 @@ impl HighsSolver {
     /// | `solver`                                    | `"simplex"` | string |
     /// | `simplex_strategy`                          | `1`         | int    |
     /// | `simplex_scale_strategy`                    | `0`         | int    |
-    /// | `presolve`                                  | `"off"`     | string |
+    /// | `presolve`                                  | `"on"`      | string |
     /// | `parallel`                                  | `"off"`     | string |
     /// | `output_flag`                               | `0`         | bool   |
     /// | `primal_feasibility_tolerance`              | `1e-9`      | double |
@@ -448,7 +448,7 @@ impl HighsSolver {
     /// Called immediately after `restore_default_settings()` in the retry-escalation
     /// finalization path so that `HiGHS` state and `current_profile` remain in sync.
     /// `restore_default_settings` resets the tolerances to the hardcoded table values
-    /// (`1e-6`); this helper layers the caller's profile values on top.
+    /// (`1e-9`); this helper layers the caller's profile values on top.
     ///
     /// The iteration limits are not re-applied here because `restore_iteration_limits`
     /// always follows immediately and sets them to `i32::MAX` (unconstrained for the
