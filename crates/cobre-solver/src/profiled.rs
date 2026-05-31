@@ -88,16 +88,6 @@ impl<S: SolverInterface> ProfiledSolver<S> {
         &self.current_profile
     }
 
-    /// Re-apply the current profile to the inner solver unconditionally.
-    ///
-    /// Unlike [`set_profile`], which skips FFI calls when the profile is
-    /// unchanged, this method always delegates to `inner.apply_profile`.
-    /// It is used internally before each solve to survive any solver-internal
-    /// option reset that may occur between solves.
-    fn reapply_profile(&mut self) {
-        self.inner.apply_profile(&self.current_profile);
-    }
-
     /// Shared reference to the wrapped inner solver.
     ///
     /// Intended for test code and rare adapter sites that need to inspect
@@ -141,8 +131,13 @@ impl<S: SolverInterface> SolverInterface for ProfiledSolver<S> {
     }
 
     fn solve(&mut self, basis: Option<&Basis>) -> Result<SolutionView<'_>, SolverError> {
-        // Re-apply profile before solve to survive any solver-internal option reset.
-        self.reapply_profile();
+        // Direct forward: the profile is installed at phase boundaries via
+        // `set_profile`, and the retry-escalation path re-applies the full
+        // profile (tolerances + strategies) after `restore_default_settings`,
+        // so the inner solver's options already equal `current_profile` on
+        // entry to every solve. Verified result-neutral against the D01-D15
+        // parity hashes (identical actual hashes with and without the former
+        // per-solve re-application).
         self.inner.solve(basis)
     }
 
@@ -531,8 +526,9 @@ mod tests {
 
     /// AC-7: `ProfiledSolver<S>` forwards `load_model`, `add_rows`,
     /// `set_row_bounds`, `set_col_bounds`, and `solve` transparently to the
-    /// inner solver. `solve` also triggers an `ApplyProfile` call via
-    /// `reapply_profile()` before delegating to the inner solver.
+    /// inner solver. `solve` delegates directly without re-applying the
+    /// profile — the profile is installed at phase boundaries via
+    /// `set_profile`, not per solve.
     #[test]
     fn solver_interface_methods_forward_to_inner() {
         let mock = RecordingMockSolver::new();
@@ -568,13 +564,13 @@ mod tests {
             calls.contains(&RecordedCall::Solve),
             "expected Solve in call log, got: {calls:?}"
         );
-        // `solve()` calls `reapply_profile()` before delegating — verify the
-        // ApplyProfile call appears in the log.
+        // `solve()` forwards directly to the inner solver and does NOT
+        // re-apply the profile (that happens at phase boundaries via
+        // `set_profile`), so no ApplyProfile call originates from solve().
         let profile_calls = filter_profile_calls(&calls);
-        assert_eq!(
-            profile_calls.len(),
-            1,
-            "expected exactly one ApplyProfile call from solve(), got: {calls:?}"
+        assert!(
+            profile_calls.is_empty(),
+            "solve() must not trigger an ApplyProfile call, got: {calls:?}"
         );
     }
 }
