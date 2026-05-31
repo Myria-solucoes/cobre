@@ -125,6 +125,10 @@ pub struct LbEvalScratch {
     /// `lb_aggregate_and_broadcast`; capacity is reused across iterations to
     /// avoid the per-iteration allocation flagged by the architecture audit.
     pub uniform_prob_buf: Vec<f64>,
+    /// Per-opening objective values collected by `lb_evaluate_stage_0` and
+    /// consumed by `lb_aggregate_and_broadcast`. Cleared and refilled per call;
+    /// capacity is reused across iterations to avoid a per-iteration allocation.
+    pub objectives_buf: Vec<f64>,
 }
 
 impl LbEvalScratch {
@@ -146,6 +150,7 @@ impl LbEvalScratch {
             effective_eta_buf: Vec::new(),
             zero_targets_buf: Vec::new(),
             uniform_prob_buf: Vec::new(),
+            objectives_buf: Vec::new(),
         }
     }
 }
@@ -290,7 +295,7 @@ fn lb_init_rank0<S: SolverInterface>(
 /// computes effective eta, patches row bounds, patches NCS column bounds
 /// (correctness-critical per-opening step), solves, and records the objective.
 ///
-/// Returns the vector of per-opening objectives.
+/// Writes the per-opening objectives into `scratch.objectives_buf`.
 ///
 /// # Errors
 ///
@@ -306,7 +311,7 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
     initial_state: &[f64],
     indexer: &StageIndexer,
     scratch: &mut LbEvalScratch,
-) -> Result<Vec<f64>, SddpError> {
+) -> Result<(), SddpError> {
     let n_openings = spec.opening_tree.n_openings(0);
     let n_hydros = spec.n_hydros;
     let base_row = spec.base_row;
@@ -353,7 +358,7 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
         );
     }
 
-    let mut objectives = Vec::with_capacity(n_openings);
+    scratch.objectives_buf.clear();
 
     for opening_idx in 0..n_openings {
         let raw_noise = spec.opening_tree.opening(0, opening_idx);
@@ -470,10 +475,10 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
             },
             other => SddpError::Solver(other),
         })?;
-        objectives.push(view.objective);
+        scratch.objectives_buf.push(view.objective);
     }
 
-    Ok(objectives)
+    Ok(())
 }
 
 /// Phase 3 — risk-measure aggregation and MPI broadcast.
@@ -482,8 +487,8 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
 /// probabilities, scales by [`COST_SCALE_FACTOR`], then broadcasts the scalar
 /// lower bound from rank 0 to all other ranks.
 ///
-/// `scratch.uniform_prob_buf` is resized and refilled in-place every call so
-/// the per-iteration allocation pattern (`vec![1/n; n]`) is amortized to a
+/// `uniform_prob_buf` is resized and refilled in-place every call so the
+/// per-iteration allocation pattern (`vec![1/n; n]`) is amortized to a
 /// capacity-only growth on the first call.
 ///
 /// # Errors
@@ -492,17 +497,15 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
 fn lb_aggregate_and_broadcast<C: Communicator>(
     objectives: &[f64],
     risk_measure: &RiskMeasure,
-    scratch: &mut LbEvalScratch,
+    uniform_prob_buf: &mut Vec<f64>,
     comm: &C,
 ) -> Result<f64, SddpError> {
     #[allow(clippy::cast_precision_loss)]
     let uniform_prob = 1.0_f64 / objectives.len() as f64;
-    scratch.uniform_prob_buf.clear();
-    scratch
-        .uniform_prob_buf
-        .resize(objectives.len(), uniform_prob);
+    uniform_prob_buf.clear();
+    uniform_prob_buf.resize(objectives.len(), uniform_prob);
     let mut lb =
-        risk_measure.evaluate_risk(objectives, &scratch.uniform_prob_buf) * COST_SCALE_FACTOR;
+        risk_measure.evaluate_risk(objectives, uniform_prob_buf.as_slice()) * COST_SCALE_FACTOR;
     comm.broadcast(std::slice::from_mut(&mut lb), 0)
         .map_err(SddpError::from)?;
     Ok(lb)
@@ -569,7 +572,7 @@ pub fn evaluate_lower_bound<S: SolverInterface, C: Communicator>(
         );
 
         // Truncation precompute + per-opening loop.
-        let objectives = lb_evaluate_stage_0(
+        lb_evaluate_stage_0(
             solver,
             spec,
             scratch.patch_buf,
@@ -578,8 +581,15 @@ pub fn evaluate_lower_bound<S: SolverInterface, C: Communicator>(
             scratch.lb_scratch,
         )?;
 
-        // Phase 3: risk-measure aggregation + broadcast.
-        lb = lb_aggregate_and_broadcast(&objectives, spec.risk_measure, scratch.lb_scratch, comm)?;
+        // Phase 3: risk-measure aggregation + broadcast. `objectives_buf` and
+        // `uniform_prob_buf` are disjoint fields of `lb_scratch`, borrowed
+        // immutably and mutably respectively.
+        lb = lb_aggregate_and_broadcast(
+            &scratch.lb_scratch.objectives_buf,
+            spec.risk_measure,
+            &mut scratch.lb_scratch.uniform_prob_buf,
+            comm,
+        )?;
         return Ok(lb);
     }
 
