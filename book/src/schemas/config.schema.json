@@ -419,7 +419,7 @@
         "basis_activity_window": {
           "default": null,
           "deprecated": true,
-          "description": "DEPRECATED. Silently ignored as of this release; will be removed in\nthe next. Retained for one release so existing config files continue\nto deserialise.\n\nPreviously controlled the sliding-window mask consumed by the\nbasis-reconstruction activity classifier. The classifier has been\nremoved; reconstruction now matches stored cut rows by slot identity\nalone, which makes the window value unobservable.\n\nSee `CHANGELOG.md` for the deprecation announcement and\n`docs/design/basis-reconstruction-simplification.md` for the\nunderlying rationale.",
+          "description": "DEPRECATED. Silently ignored as of this release; will be removed in\nthe next. Retained for one release so existing config files continue\nto deserialise.\n\nPreviously controlled a sliding-window mask used during basis\nreconstruction. Reconstruction now matches stored constraint rows by\nslot identity alone, which makes the window value unobservable. See\n`CHANGELOG.md` for the deprecation announcement.",
           "format": "uint32",
           "minimum": 0,
           "type": [
