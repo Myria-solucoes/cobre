@@ -2,6 +2,9 @@
 
 **Status**: Investigation report. No code changes recommended in this
 document; the hypotheses below are candidates for follow-up experiments.
+Source line references in this report are a snapshot from the original
+investigation and may have drifted; treat them as approximate anchors, not
+exact locations.
 
 ## 1. Context
 

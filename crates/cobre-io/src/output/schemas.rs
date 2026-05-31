@@ -5,7 +5,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 
 /// Schema for `simulation/costs/` — stage and block-level cost breakdown.
 ///
-/// 20 fields. `block_id` is nullable. See output-schemas.md SS5.1.
+/// 26 fields. `block_id` is nullable. See output-schemas.md SS5.1.
 pub(crate) fn costs_schema() -> Schema {
     Schema::new(vec![
         Field::new("stage_id", DataType::Int32, false),
@@ -254,7 +254,7 @@ pub(crate) fn convergence_schema() -> Schema {
 /// rank-only sequential values (`worker_id = NULL`), and one row per
 /// `(iteration, rank, worker_id)` for per-worker parallel-region values.
 /// `SUM(col) GROUP BY iteration` recovers the single-row-per-iteration
-/// value for each of the 16 timing columns.
+/// value for each of the 15 timing columns.
 ///
 /// Top-level non-overlapping phases: `forward_wall_ms`,
 /// `backward_wall_ms`, `cut_selection_ms`, `mpi_allreduce_ms`,

@@ -79,8 +79,8 @@ impl Default for HighsProfile {
 
 // ─── Default HiGHS configuration ─────────────────────────────────────────────
 //
-// The eight performance-tuned options applied at construction and restored after
-// each retry escalation. Keeping them in a single array eliminates per-option
+// The thirteen performance-tuned options applied at construction and restored
+// after each retry escalation. Keeping them in a single array eliminates per-option
 // error branches that are structurally impossible to trigger in tests (HiGHS
 // never rejects valid static option names).
 
@@ -733,8 +733,8 @@ impl HighsSolver {
         //   type. These address LPs with extreme coefficient ranges that the
         //   core sequence cannot resolve.
         //
-        // Wall-clock per-level budgets: 15s (Phase 1), 30s (Phase 2), 60s
-        // (Phase 2 extended). Overall 120s wall-clock budget caps the total.
+        // Wall-clock per-level budgets: 15s (Phase 1, levels 0-4), 30s (Phase 2,
+        // levels 5-11). Overall 120s wall-clock budget caps the total.
         //
         // HiGHS `time_limit` is NOT used because HiGHS tracks elapsed time
         // cumulatively from instance creation — neither `clear_solver()` nor
