@@ -133,3 +133,36 @@ def test_run_config_overrides_unsupported_value_raises_value_error(
             output_dir=str(tmp_path),
             config_overrides={"training.tree_seed": {1, 2, 3}},
         )
+
+
+def test_run_dict_keys_stable(tmp_path: pathlib.Path) -> None:
+    """run() returns exactly the public 11-key dict with the full simulation block.
+
+    Guards the single-execution-path reimplementation: the public surface of
+    cobre.run.run (its return-dict key set and the simulation sub-dict) must be
+    byte-for-byte the same as before the collapse onto the Study lifecycle.
+    """
+    import cobre.run  # noqa: PLC0415
+
+    result = cobre.run.run(VALID_CASE, output_dir=str(tmp_path))
+
+    expected_keys = {
+        "converged",
+        "iterations",
+        "lower_bound",
+        "upper_bound",
+        "gap_percent",
+        "total_time_ms",
+        "output_dir",
+        "simulation",
+        "stochastic",
+        "hydro_models",
+        "provenance",
+    }
+    assert set(result.keys()) == expected_keys, (
+        f"run() dict key set must be exactly {expected_keys}, got {set(result.keys())}"
+    )
+
+    assert result["simulation"] == {"n_scenarios": 100, "completed": 100}, (
+        "simulation block must report all 100 scenarios completed"
+    )

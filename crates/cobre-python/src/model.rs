@@ -560,4 +560,12 @@ impl PySystem {
             inner: Arc::new(system),
         }
     }
+
+    /// Wrap an already-shared [`cobre_core::System`] without copying it.
+    ///
+    /// Used by [`crate::study::Study`]'s `system` getter to hand out a
+    /// `cobre.model.System` view via a refcount bump rather than a full clone.
+    pub(crate) fn from_arc(inner: Arc<cobre_core::System>) -> Self {
+        Self { inner }
+    }
 }

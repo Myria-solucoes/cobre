@@ -39,7 +39,7 @@ use cobre_sddp::{
 };
 use cobre_solver::HighsSolver;
 
-/// Error returned by [`run_inner`].
+/// Error returned by [`run_via_study`].
 ///
 /// Most failures carry a descriptive `String` (mapped to the appropriate Python
 /// exception type by the caller). A user `on_iteration` callback that raises — or
@@ -47,7 +47,7 @@ use cobre_solver::HighsSolver;
 /// [`PyErr`] verbatim so its type and message reach Python unchanged, after the
 /// run's partial artifacts have already been written.
 #[derive(Debug)]
-enum RunError {
+pub(crate) enum RunError {
     /// A descriptive message mapped to a Python exception type by the caller.
     Message(String),
     /// A `PyErr` captured from the streaming callback (or `check_signals`),
@@ -61,8 +61,8 @@ impl From<String> for RunError {
     }
 }
 
-/// Summary returned by [`run_inner`] on success.
-struct RunSummary {
+/// Summary returned by [`run_via_study`] on success.
+pub(crate) struct RunSummary {
     converged: bool,
     iterations: u64,
     lower_bound: f64,
@@ -76,9 +76,9 @@ struct RunSummary {
     provenance: Option<ModelProvenanceReport>,
 }
 
-struct SimSummary {
-    n_scenarios: u32,
-    completed: u32,
+pub(crate) struct SimSummary {
+    pub(crate) n_scenarios: u32,
+    pub(crate) completed: u32,
 }
 
 /// Build a scoped rayon thread pool for the requested thread count and run the
@@ -93,7 +93,7 @@ struct SimSummary {
 /// passed into the closure so callers can record the effective thread count in
 /// metadata. On pool-construction failure, returns a descriptive `Err(String)`
 /// rather than silently falling back to an implicit pool.
-fn run_in_scoped_pool<T>(
+pub(crate) fn run_in_scoped_pool<T>(
     threads: Option<u32>,
     f: impl FnOnce(usize) -> T + Send,
 ) -> Result<T, String>
@@ -188,12 +188,12 @@ fn aggregate_training_solve_stats(
     )
 }
 
-/// Result of the training phase within `run_inner`.
-struct TrainingPhaseResult {
-    result: cobre_sddp::TrainingResult,
-    output: cobre_io::TrainingOutput,
-    error: Option<cobre_sddp::SddpError>,
-    started_at: String,
+/// Result of the training phase within `run_via_study`.
+pub(crate) struct TrainingPhaseResult {
+    pub result: cobre_sddp::TrainingResult,
+    pub output: cobre_io::TrainingOutput,
+    pub error: Option<cobre_sddp::SddpError>,
+    pub started_at: String,
 }
 
 /// Assemble a [`TrainingPhaseResult`] from a finished training run and its
@@ -254,7 +254,7 @@ fn build_training_phase_result(
 /// no-callback golden parity test stays bit-identical. The streaming variant
 /// ([`run_training_phase_py_streaming`]) is used only when an `on_iteration`
 /// callback is provided.
-fn run_training_phase_py(
+pub(crate) fn run_training_phase_py(
     setup: &mut StudySetup,
     n_threads: usize,
 ) -> Result<TrainingPhaseResult, String> {
@@ -289,7 +289,7 @@ fn run_training_phase_py(
 /// # Design
 ///
 /// `train` runs on this thread with the GIL released (the caller invokes
-/// `run_inner` inside `py.detach`). A dedicated drain thread owns the receiver,
+/// `run_via_study` inside `py.detach`). A dedicated drain thread owns the receiver,
 /// a clone of the cooperative `shutdown_flag`, and the `Py<PyAny>` callback. For
 /// every event it receives the drain thread:
 ///
@@ -316,7 +316,7 @@ fn run_training_phase_py(
 /// thread panic. A captured callback `PyErr` (or `KeyboardInterrupt`) is NOT an
 /// error here — it is returned alongside the phase result so the caller can
 /// propagate it *after* writing artifacts.
-fn run_training_phase_py_streaming(
+pub(crate) fn run_training_phase_py_streaming(
     setup: &mut StudySetup,
     n_threads: usize,
     on_iteration: Py<PyAny>,
@@ -439,7 +439,7 @@ fn drain_training_events(
 
 /// Write all training artifacts: policy checkpoint, training results, solver stats,
 /// and cut selection records.
-fn write_training_artifacts(
+pub(crate) fn write_training_artifacts(
     output_dir: &std::path::Path,
     system: &cobre_core::System,
     config: &cobre_io::Config,
@@ -488,7 +488,7 @@ fn write_training_artifacts(
             })
             .collect();
         cobre_io::write_solver_stats(output_dir, &rows)
-            .map_err(|e| format!("solver stats output: {e}"))?;
+            .map_err(|e| format!("output write error: solver stats output: {e}"))?;
     }
 
     if !training.output.cut_selection_records.is_empty() {
@@ -497,7 +497,7 @@ fn write_training_artifacts(
             &training.output.cut_selection_records,
             &ParquetWriterConfig::default(),
         )
-        .map_err(|e| format!("cut selection output: {e}"))?;
+        .map_err(|e| format!("output write error: cut selection output: {e}"))?;
     }
 
     let training_ctx = cobre_io::OutputContext {
@@ -524,13 +524,33 @@ fn write_training_artifacts(
         },
     };
     cobre_io::write_training_results(output_dir, &training.output, system, config, &training_ctx)
-        .map_err(|e| format!("training results output: {e}"))?;
+        .map_err(|e| format!("output write error: training results output: {e}"))?;
 
     Ok(())
 }
 
+/// Write the trained FPHA hyperplanes sidecar, when the model produced any.
+///
+/// This file represents the trained model and is only meaningful once training
+/// has completed; simulation-only runs do not write it. Extracted so both
+/// [`run_via_study`] and `Study::train` emit it identically (bit-for-bit) after the
+/// rest of the training artifacts.
+pub(crate) fn write_fpha_hyperplanes_if_any(
+    output_dir: &std::path::Path,
+    setup: &StudySetup,
+) -> Result<(), String> {
+    if !setup.hydro_models.fpha_export_rows.is_empty() {
+        let fpha_path = output_dir
+            .join("hydro_models")
+            .join("fpha_hyperplanes.parquet");
+        cobre_io::output::write_fpha_hyperplanes(&fpha_path, &setup.hydro_models.fpha_export_rows)
+            .map_err(|e| format!("output write error: failed to write fpha_hyperplanes: {e}"))?;
+    }
+    Ok(())
+}
+
 /// Run the simulation phase: workspace pool, Parquet writing, and output.
-fn run_simulation_phase_py(
+pub(crate) fn run_simulation_phase_py(
     setup: &mut StudySetup,
     output_dir: &std::path::Path,
     system: &cobre_core::System,
@@ -684,39 +704,76 @@ fn load_effective_config(
     }
 }
 
-/// Run the full solve lifecycle without MPI or progress bars (GIL released for computation).
+/// Everything the front half of the solve lifecycle produces: the live
+/// [`StudySetup`] plus the adjacent immutable state that `run_via_study` and the
+/// `Study` pyclass both consume.
 ///
-/// `overrides` is the already-converted `config_overrides` map (built under the
-/// GIL by the caller, before `py.detach`). When `Some` and non-empty, the
-/// effective config is the deep-merge of `config.json` and the overrides via
-/// [`cobre_io::Config::with_overrides`], so the persisted metadata reflects what
-/// actually ran. `None` and an empty map both reproduce the no-override path.
-// `overrides` is owned because it is moved across the `py.detach` /
-// scoped-pool boundary into this call; it is borrowed (not consumed) for the
-// merge, but owning it here is the correct lifecycle boundary.
-#[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
-fn run_inner(
+/// This is the single load path. [`build_study_setup`] is the sole producer;
+/// `run_via_study` destructures it and continues with training/simulation, while
+/// `Study::__new__` stores the fields for later `train`/`simulate` calls. The
+/// `warnings` carrier holds the `cobre-io` validation-pipeline warnings captured
+/// during load (via [`cobre_io::validate_case_with_artifacts`]) so
+/// `Study::validate` can replay them without re-reading disk.
+pub(crate) struct LoadedStudy {
+    /// The live, fully prepared study setup (cuts pool, templates, stochastic
+    /// context, hydro models, scenario libraries).
+    pub setup: StudySetup,
+    /// The system after stochastic preprocessing (inflow non-negativity, etc.).
+    pub system: cobre_core::System,
+    /// The effective (post-override) configuration.
+    pub config: cobre_io::Config,
+    /// The resolved tree seed.
+    pub seed: u64,
+    /// The model-provenance report, including the past-inflows digest.
+    pub provenance: ModelProvenanceReport,
+    /// The structural stochastic summary.
+    pub stochastic_summary: StochasticSummary,
+    /// The structural hydro-model summary.
+    pub hydro_models_summary: HydroModelSummary,
+    /// Validation-pipeline warnings captured during the case load.
+    pub warnings: Vec<cobre_io::ReportEntry>,
+}
+
+/// Run the front half of the solve lifecycle: load the case, resolve the
+/// effective config, run stochastic preprocessing and hydro-model preparation,
+/// build the [`StudySetup`], build the provenance/summary carriers, and write
+/// the front-half sidecar artifacts (stochastic exports when enabled,
+/// `training/scaling_report.json`, `training/model_provenance.json`,
+/// `training/hydro_models.json`).
+///
+/// This is Python-free (no `PyO3` types in its signature) so its happy path can
+/// be exercised from a plain Rust `#[cfg(test)]` test without a GIL token. It is
+/// the ONLY place the front half runs: both [`run_via_study`] and the `Study`
+/// pyclass call it, so there is a single load path with no divergence.
+///
+/// `overrides` is the already-converted (under the GIL, by the caller) dotted-key
+/// override map; `None` and an empty map both reproduce the no-override path.
+///
+/// # Errors
+///
+/// Returns a descriptive `Err(String)` on any load, config, preprocessing,
+/// construction, or sidecar-write failure. The caller maps the message to a
+/// Python exception type via [`message_to_pyerr`].
+pub(crate) fn build_study_setup(
     case_dir: &std::path::Path,
-    output_dir: PathBuf,
-    n_threads: usize,
-    skip_simulation: bool,
-    overrides: Option<serde_json::Map<String, serde_json::Value>>,
-    on_iteration: Option<Py<PyAny>>,
-) -> Result<RunSummary, RunError> {
-    // Single-source case load: pick up the System and the auxiliary
-    // parquet/JSON rows in one validated pass so downstream stages
-    // (hydro models, scalar parameters) reuse the parsed data instead of
-    // re-opening the same files.
-    let cobre_io::LoadedCase { system, artifacts } =
-        cobre_io::load_case_with_artifacts(case_dir).map_err(|e| e.to_string())?;
-    let config = load_effective_config(&case_dir.join("config.json"), overrides.as_ref())?;
+    output_dir: &std::path::Path,
+    overrides: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Result<LoadedStudy, String> {
+    // Single-source case load: pick up the System, the auxiliary parquet/JSON
+    // rows, and the validation-pipeline warnings in one validated pass. Using
+    // the `validate_*` variant (rather than `load_case_with_artifacts`) captures
+    // the warnings so `Study::validate` can replay them without re-reading disk.
+    let (loaded, report) =
+        cobre_io::validate_case_with_artifacts(case_dir).map_err(|e| e.to_string())?;
+    let cobre_io::LoadedCase { system, artifacts } = loaded;
+    let warnings = report.warnings;
+
+    let config = load_effective_config(&case_dir.join("config.json"), overrides)?;
 
     let seed = config
         .training
         .tree_seed
         .map_or(DEFAULT_SEED, i64::unsigned_abs);
-    let should_simulate =
-        !skip_simulation && config.simulation.enabled && config.simulation.num_scenarios > 0;
 
     let training_source = config
         .training_scenario_source(&case_dir.join("config.json"))
@@ -772,7 +829,7 @@ fn run_inner(
             eprintln!("cobre-python: stochastic export warning: {msg}");
         };
         cobre_sddp::orchestration::export_stochastic_artifacts(
-            &output_dir,
+            output_dir,
             &setup.stochastic,
             &system,
             estimation_report.as_ref(),
@@ -782,7 +839,7 @@ fn run_inner(
 
     let scaling_path = output_dir.join("training/scaling_report.json");
     cobre_io::write_scaling_report(&scaling_path, &setup.stage_data.scaling_report)
-        .map_err(|e| format!("failed to write scaling report: {e}"))?;
+        .map_err(|e| format!("output write error: failed to write scaling report: {e}"))?;
 
     let provenance_path = output_dir.join("training/model_provenance.json");
     if let Err(e) = cobre_io::write_provenance_report(&provenance_path, &provenance_report) {
@@ -791,107 +848,316 @@ fn run_inner(
 
     let stochastic_summary =
         build_stochastic_summary(&system, &setup.stochastic, estimation_report.as_ref(), seed);
-    let hydro_models_summary = Some(build_hydro_model_summary(&setup.hydro_models, &system));
+    let hydro_models_summary = build_hydro_model_summary(&setup.hydro_models, &system);
 
     // Persist the structural hydro-model summary as a sidecar so `cobre summary`
     // can render the Hydro-models section from a completed run. Built once above
     // and reused here to avoid recomputing it for the write.
-    if let Some(summary) = hydro_models_summary.as_ref() {
-        let hydro_models_path = output_dir.join("training/hydro_models.json");
-        if let Err(e) = cobre_io::write_hydro_model_summary(&hydro_models_path, summary) {
-            eprintln!("cobre-python: hydro model summary output warning: {e}");
-        }
+    let hydro_models_path = output_dir.join("training/hydro_models.json");
+    if let Err(e) = cobre_io::write_hydro_model_summary(&hydro_models_path, &hydro_models_summary) {
+        eprintln!("cobre-python: hydro model summary output warning: {e}");
     }
+
+    Ok(LoadedStudy {
+        setup,
+        system,
+        config,
+        seed,
+        provenance: provenance_report,
+        stochastic_summary,
+        hydro_models_summary,
+        warnings,
+    })
+}
+
+/// Map a descriptive `build_study_setup`/run error message to the appropriate
+/// Python exception type.
+///
+/// The mapping is prefix-based and shared by [`run`] and `Study::__new__` so the
+/// dispatch is defined once: `output write error` / `policy checkpoint error`
+/// → [`PyOSError`]; `config override error` / `config parse error` /
+/// `config read error` → [`PyValueError`]; everything else → [`PyRuntimeError`].
+pub(crate) fn message_to_pyerr(msg: String) -> PyErr {
+    let err_fn: fn(String) -> PyErr =
+        if msg.starts_with("output write error") || msg.starts_with("policy checkpoint error") {
+            PyOSError::new_err
+        } else if msg.starts_with("config override error")
+            || msg.starts_with("config parse error")
+            || msg.starts_with("config read error")
+        {
+            // Override-originated and config-load failures (schema typos,
+            // out-of-range values) are caller errors → ValueError.
+            PyValueError::new_err
+        } else {
+            PyRuntimeError::new_err
+        };
+    err_fn(msg)
+}
+
+/// Apply the configured policy mode to `setup` BEFORE training.
+///
+/// This performs the warm-start / resume / boundary-cut future-cost-function
+/// replacement exactly as the training branch of [`run_via_study`] does, so the
+/// monolithic `run` path and the `Study::train` method share a single
+/// implementation (no divergence). It is Python-free (no `PyO3` types in its
+/// signature) so it can be exercised from a plain Rust `#[cfg(test)]` test
+/// without a GIL token, and so `Study::train` can call it inside `py.detach`.
+///
+/// Semantics:
+/// - `PolicyMode::WarmStart` → read the prior checkpoint, build a warm-start
+///   FCF (reserving one extra slot for the final iteration's cuts), and replace
+///   `setup.fcf`.
+/// - `PolicyMode::Resume` → as warm-start, plus restore the completed-iteration
+///   count via `setup.set_start_iteration`.
+/// - `config.policy.boundary` (orthogonal to the mode) → load the boundary cuts
+///   and inject them into the terminal pool, AFTER any warm-start/resume
+///   replacement so the two compose correctly.
+/// - default mode with no boundary cuts → a no-op; `setup` is unchanged.
+///
+/// # Errors
+///
+/// Returns a descriptive `Err(String)` when a `WarmStart`/`Resume` mode finds no
+/// prior policy directory, when the checkpoint cannot be read, when policy
+/// validation fails, when warm-start/resume FCF construction fails, or when the
+/// boundary cuts cannot be loaded. The caller maps the message to a Python
+/// exception type via [`message_to_pyerr`].
+pub(crate) fn apply_training_policy_mode(
+    setup: &mut StudySetup,
+    system: &cobre_core::System,
+    config: &cobre_io::Config,
+    output_dir: &std::path::Path,
+) -> Result<(), String> {
+    // Warm-start: load prior policy and inject cuts before training.
+    if config.policy.mode == cobre_io::PolicyMode::WarmStart {
+        let policy_dir = output_dir.join(&setup.policy_path);
+        if !policy_dir.exists() {
+            return Err(format!(
+                "Policy directory not found: {}. Cannot warm-start \
+                 without a prior policy.",
+                policy_dir.display()
+            ));
+        }
+
+        let checkpoint = cobre_io::output::policy::read_policy_checkpoint(&policy_dir)
+            .map_err(|e| format!("failed to read policy checkpoint: {e}"))?;
+
+        if config.policy.validate_compatibility {
+            #[allow(clippy::cast_possible_truncation)]
+            let n_stages = system.stages().iter().filter(|s| s.id >= 0).count() as u32;
+            #[allow(clippy::cast_possible_truncation)]
+            let state_dim = setup.fcf.state_dimension as u32;
+            cobre_sddp::validate_policy_compatibility(&checkpoint.metadata, state_dim, n_stages)
+                .map_err(|e| format!("policy validation error: {e}"))?;
+        }
+
+        // Reserve one extra slot for cuts added in the final iteration.
+        let warm_fcf = cobre_sddp::FutureCostFunction::new_with_warm_start(
+            &checkpoint.stage_cuts,
+            setup.loop_params.forward_passes,
+            setup.loop_params.max_iterations.saturating_add(1),
+        )
+        .map_err(|e| format!("warm-start FCF construction error: {e}"))?;
+        setup.replace_fcf(warm_fcf);
+    } else if config.policy.mode == cobre_io::PolicyMode::Resume {
+        let policy_dir = output_dir.join(&setup.policy_path);
+        if !policy_dir.exists() {
+            return Err(format!(
+                "Policy directory not found: {}. Cannot resume \
+                 without a prior checkpoint.",
+                policy_dir.display()
+            ));
+        }
+
+        let checkpoint = cobre_io::output::policy::read_policy_checkpoint(&policy_dir)
+            .map_err(|e| format!("failed to read policy checkpoint: {e}"))?;
+
+        if config.policy.validate_compatibility {
+            #[allow(clippy::cast_possible_truncation)]
+            let n_stages = system.stages().iter().filter(|s| s.id >= 0).count() as u32;
+            #[allow(clippy::cast_possible_truncation)]
+            let state_dim = setup.fcf.state_dimension as u32;
+            cobre_sddp::validate_policy_compatibility(&checkpoint.metadata, state_dim, n_stages)
+                .map_err(|e| format!("policy validation error: {e}"))?;
+        }
+
+        let completed = u64::from(checkpoint.metadata.completed_iterations);
+
+        // Reserve one extra slot for cuts added in the final iteration.
+        let warm_fcf = cobre_sddp::FutureCostFunction::new_with_warm_start(
+            &checkpoint.stage_cuts,
+            setup.loop_params.forward_passes,
+            setup.loop_params.max_iterations.saturating_add(1),
+        )
+        .map_err(|e| format!("resume FCF construction error: {e}"))?;
+        setup.replace_fcf(warm_fcf);
+        setup.set_start_iteration(completed);
+    }
+
+    // Boundary cuts — orthogonal to policy mode. Runs after warm-start/resume
+    // so that both compose correctly: warm-start replaces the entire FCF first,
+    // then boundary cuts overwrite only the terminal pool.
+    if let Some(ref bp) = config.policy.boundary {
+        let boundary_path = output_dir.join(&bp.path);
+        #[allow(clippy::cast_possible_truncation)]
+        let state_dim = setup.fcf.state_dimension as u32;
+        let boundary_records =
+            cobre_sddp::load_boundary_cuts(&boundary_path, bp.source_stage, state_dim)
+                .map_err(|e| format!("boundary cut error: {e}"))?;
+        cobre_sddp::inject_boundary_cuts(setup, &boundary_records);
+    }
+
+    Ok(())
+}
+
+/// Reconstruct an on-disk policy checkpoint into a `(FutureCostFunction,
+/// TrainingResult)` pair for simulation-only / `Study.load_policy`.
+///
+/// This is the single on-disk reconstruction path shared by the simulation-only
+/// branch of [`run_via_study`] and `Study::load_policy`. It performs, in order:
+/// existence check on `policy_dir` → [`read_policy_checkpoint`] → optional
+/// [`validate_policy_compatibility`] (when `config.policy.validate_compatibility`)
+/// → [`FutureCostFunction::from_deserialized`] →
+/// [`build_basis_cache_from_checkpoint`] (sized to
+/// `setup.stage_data.stage_templates.templates.len()`) → a synthetic
+/// [`TrainingResult::new`] with `baked_templates = None` and the
+/// `"loaded from checkpoint"` label — exactly as the CLI's
+/// `load_policy_for_simulation` builds it.
+///
+/// It deliberately does NOT call [`StudySetup::replace_fcf`]: the caller decides
+/// whether to mutate the study (the simulation-only branch and `Study::simulate`
+/// both `replace_fcf` the returned FCF before simulating, so a trained `Policy`
+/// and a loaded one feed the identical simulate path).
+///
+/// This is Python-free (no `PyO3` types in its signature) so it can be exercised
+/// from a plain Rust `#[cfg(test)]` test without a GIL token.
+///
+/// [`read_policy_checkpoint`]: cobre_io::output::policy::read_policy_checkpoint
+/// [`validate_policy_compatibility`]: cobre_sddp::validate_policy_compatibility
+/// [`FutureCostFunction::from_deserialized`]: cobre_sddp::FutureCostFunction::from_deserialized
+/// [`build_basis_cache_from_checkpoint`]: cobre_sddp::build_basis_cache_from_checkpoint
+/// [`TrainingResult::new`]: cobre_sddp::TrainingResult::new
+/// [`StudySetup::replace_fcf`]: cobre_sddp::StudySetup::replace_fcf
+///
+/// # Errors
+///
+/// Returns a descriptive `Err(String)` when `policy_dir` does not exist (the
+/// `"Policy directory not found: ..."` message), when the checkpoint cannot be
+/// read, when policy validation fails, or when FCF reconstruction fails. The
+/// caller maps the message to a Python exception type via [`message_to_pyerr`].
+pub(crate) fn reconstruct_policy_from_checkpoint(
+    setup: &StudySetup,
+    system: &cobre_core::System,
+    config: &cobre_io::Config,
+    policy_dir: &std::path::Path,
+) -> Result<(cobre_sddp::FutureCostFunction, cobre_sddp::TrainingResult), String> {
+    if !policy_dir.exists() {
+        return Err(format!(
+            "Policy directory not found: {}. Cannot run simulation-only \
+             mode without a trained policy.",
+            policy_dir.display()
+        ));
+    }
+
+    let checkpoint = cobre_io::output::policy::read_policy_checkpoint(policy_dir)
+        .map_err(|e| format!("failed to read policy checkpoint: {e}"))?;
+
+    // Validate compatibility if configured.
+    if config.policy.validate_compatibility {
+        #[allow(clippy::cast_possible_truncation)]
+        let n_stages = system.stages().iter().filter(|s| s.id >= 0).count() as u32;
+        #[allow(clippy::cast_possible_truncation)]
+        let state_dim = setup.fcf.state_dimension as u32;
+        cobre_sddp::validate_policy_compatibility(&checkpoint.metadata, state_dim, n_stages)
+            .map_err(|e| format!("policy validation error: {e}"))?;
+    }
+
+    // Reconstruct the FCF from the serialized stage cuts.
+    let loaded_fcf = cobre_sddp::FutureCostFunction::from_deserialized(&checkpoint.stage_cuts)
+        .map_err(|e| format!("FCF reconstruction error: {e}"))?;
+
+    // Build basis cache from loaded checkpoint.
+    let basis_cache = cobre_sddp::build_basis_cache_from_checkpoint(
+        setup.stage_data.stage_templates.templates.len(),
+        &checkpoint.stage_bases,
+    );
+
+    // Create a minimal TrainingResult for simulation warm-start.
+    let training_result = cobre_sddp::TrainingResult::new(
+        checkpoint.metadata.final_lower_bound,
+        checkpoint
+            .metadata
+            .best_upper_bound
+            .unwrap_or(f64::INFINITY),
+        0.0,
+        0.0,
+        checkpoint.metadata.completed_iterations.into(),
+        "loaded from checkpoint".to_string(),
+        0,
+        basis_cache,
+        Vec::new(),
+        None,
+        // Baked templates are not stored in policy checkpoints. simulate() re-bakes all
+        // stage templates at startup from the FCF cut pool when baked_templates is None.
+        None,
+    );
+
+    Ok((loaded_fcf, training_result))
+}
+
+/// Run the full solve lifecycle without MPI or progress bars (GIL released for computation).
+///
+/// This is the SINGLE execution path: it sequences the exact same shared helpers
+/// the `Study` pyclass methods call (`build_study_setup`,
+/// `apply_training_policy_mode`, `run_training_phase_py` /
+/// `run_training_phase_py_streaming`, `write_training_artifacts`,
+/// `write_fpha_hyperplanes_if_any`, `reconstruct_policy_from_checkpoint`,
+/// `run_simulation_phase_py`) into the load → train → simulate lifecycle, and
+/// returns the [`RunSummary`] the [`run`] shim renders into the public dict. It
+/// performs no `PyO3` dict assembly itself.
+///
+/// `overrides` is the already-converted `config_overrides` map (built under the
+/// GIL by the caller, before `py.detach`). When `Some` and non-empty, the
+/// effective config is the deep-merge of `config.json` and the overrides via
+/// [`cobre_io::Config::with_overrides`], so the persisted metadata reflects what
+/// actually ran. `None` and an empty map both reproduce the no-override path.
+// `overrides` is owned because it is moved across the `py.detach` /
+// scoped-pool boundary into this call; it is borrowed (not consumed) for the
+// merge, but owning it here is the correct lifecycle boundary.
+#[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
+pub(crate) fn run_via_study(
+    case_dir: &std::path::Path,
+    output_dir: PathBuf,
+    n_threads: usize,
+    skip_simulation: bool,
+    overrides: Option<serde_json::Map<String, serde_json::Value>>,
+    on_iteration: Option<Py<PyAny>>,
+) -> Result<RunSummary, RunError> {
+    // Front half: the single load path. `build_study_setup` loads the case,
+    // resolves the effective config, runs stochastic/hydro preprocessing, builds
+    // the `StudySetup`, and writes the front-half sidecars. `run_via_study` and
+    // the `Study` pyclass both call it, so there is no divergence (the golden
+    // parity test guards this).
+    let LoadedStudy {
+        mut setup,
+        system,
+        config,
+        seed,
+        provenance: provenance_report,
+        stochastic_summary,
+        hydro_models_summary,
+        warnings: _,
+    } = build_study_setup(case_dir, &output_dir, overrides.as_ref())?;
+
+    let should_simulate =
+        !skip_simulation && config.simulation.enabled && config.simulation.num_scenarios > 0;
+    let hydro_models_summary = Some(hydro_models_summary);
 
     let training_enabled = config.training.enabled;
 
     if training_enabled {
-        // Warm-start: load prior policy and inject cuts before training.
-        if config.policy.mode == cobre_io::PolicyMode::WarmStart {
-            let policy_dir = output_dir.join(&setup.policy_path);
-            if !policy_dir.exists() {
-                return Err(RunError::Message(format!(
-                    "Policy directory not found: {}. Cannot warm-start \
-                     without a prior policy.",
-                    policy_dir.display()
-                )));
-            }
-
-            let checkpoint = cobre_io::output::policy::read_policy_checkpoint(&policy_dir)
-                .map_err(|e| format!("failed to read policy checkpoint: {e}"))?;
-
-            if config.policy.validate_compatibility {
-                #[allow(clippy::cast_possible_truncation)]
-                let n_stages = system.stages().iter().filter(|s| s.id >= 0).count() as u32;
-                #[allow(clippy::cast_possible_truncation)]
-                let state_dim = setup.fcf.state_dimension as u32;
-                cobre_sddp::validate_policy_compatibility(
-                    &checkpoint.metadata,
-                    state_dim,
-                    n_stages,
-                )
-                .map_err(|e| format!("policy validation error: {e}"))?;
-            }
-
-            // Reserve one extra slot for cuts added in the final iteration.
-            let warm_fcf = cobre_sddp::FutureCostFunction::new_with_warm_start(
-                &checkpoint.stage_cuts,
-                setup.loop_params.forward_passes,
-                setup.loop_params.max_iterations.saturating_add(1),
-            )
-            .map_err(|e| format!("warm-start FCF construction error: {e}"))?;
-            setup.replace_fcf(warm_fcf);
-        } else if config.policy.mode == cobre_io::PolicyMode::Resume {
-            let policy_dir = output_dir.join(&setup.policy_path);
-            if !policy_dir.exists() {
-                return Err(RunError::Message(format!(
-                    "Policy directory not found: {}. Cannot resume \
-                     without a prior checkpoint.",
-                    policy_dir.display()
-                )));
-            }
-
-            let checkpoint = cobre_io::output::policy::read_policy_checkpoint(&policy_dir)
-                .map_err(|e| format!("failed to read policy checkpoint: {e}"))?;
-
-            if config.policy.validate_compatibility {
-                #[allow(clippy::cast_possible_truncation)]
-                let n_stages = system.stages().iter().filter(|s| s.id >= 0).count() as u32;
-                #[allow(clippy::cast_possible_truncation)]
-                let state_dim = setup.fcf.state_dimension as u32;
-                cobre_sddp::validate_policy_compatibility(
-                    &checkpoint.metadata,
-                    state_dim,
-                    n_stages,
-                )
-                .map_err(|e| format!("policy validation error: {e}"))?;
-            }
-
-            let completed = u64::from(checkpoint.metadata.completed_iterations);
-
-            // Reserve one extra slot for cuts added in the final iteration.
-            let warm_fcf = cobre_sddp::FutureCostFunction::new_with_warm_start(
-                &checkpoint.stage_cuts,
-                setup.loop_params.forward_passes,
-                setup.loop_params.max_iterations.saturating_add(1),
-            )
-            .map_err(|e| format!("resume FCF construction error: {e}"))?;
-            setup.replace_fcf(warm_fcf);
-            setup.set_start_iteration(completed);
-        }
-
-        // Boundary cuts — orthogonal to policy mode. Runs after warm-start/resume
-        // so that both compose correctly: warm-start replaces the entire FCF first,
-        // then boundary cuts overwrite only the terminal pool.
-        if let Some(ref bp) = config.policy.boundary {
-            let boundary_path = output_dir.join(&bp.path);
-            #[allow(clippy::cast_possible_truncation)]
-            let state_dim = setup.fcf.state_dimension as u32;
-            let boundary_records =
-                cobre_sddp::load_boundary_cuts(&boundary_path, bp.source_stage, state_dim)
-                    .map_err(|e| format!("boundary cut error: {e}"))?;
-            cobre_sddp::inject_boundary_cuts(&mut setup, &boundary_records);
-        }
+        // Warm-start / resume / boundary-cut FCF replacement, shared with
+        // `Study::train` via the single Python-free helper.
+        apply_training_policy_mode(&mut setup, &system, &config, &output_dir)?;
 
         // When a callback is provided, use the streaming drain thread; otherwise
         // keep the historical "collect after return" path bit-identical so the
@@ -913,19 +1179,8 @@ fn run_inner(
             n_threads,
         )?;
 
-        // Write FPHA hyperplanes after training. This file represents the
-        // trained model and is only meaningful once training has completed;
-        // simulation-only runs do not write it.
-        if !setup.hydro_models.fpha_export_rows.is_empty() {
-            let fpha_path = output_dir
-                .join("hydro_models")
-                .join("fpha_hyperplanes.parquet");
-            cobre_io::output::write_fpha_hyperplanes(
-                &fpha_path,
-                &setup.hydro_models.fpha_export_rows,
-            )
-            .map_err(|e| format!("failed to write fpha_hyperplanes: {e}"))?;
-        }
+        // Write FPHA hyperplanes after training (shared with `Study::train`).
+        write_fpha_hyperplanes_if_any(&output_dir, &setup)?;
 
         // Propagate a captured callback exception (or KeyboardInterrupt) only
         // now that all training artifacts have been written, so a raising or
@@ -969,64 +1224,17 @@ fn run_inner(
     } else {
         // Training disabled: check if simulation is requested.
         if should_simulate {
-            // Simulation-only mode: load policy and run simulation.
+            // Simulation-only mode: load policy and run simulation. The on-disk
+            // reconstruction is shared verbatim with `Study::load_policy` via the
+            // single Python-free helper, so the loaded and trained policies feed
+            // the identical simulate path (P3).
             let policy_dir = output_dir.join(&setup.policy_path);
-            if !policy_dir.exists() {
-                return Err(RunError::Message(format!(
-                    "Policy directory not found: {}. Cannot run simulation-only \
-                     mode without a trained policy.",
-                    policy_dir.display()
-                )));
-            }
+            let (loaded_fcf, training_result) =
+                reconstruct_policy_from_checkpoint(&setup, &system, &config, &policy_dir)?;
 
-            let checkpoint = cobre_io::output::policy::read_policy_checkpoint(&policy_dir)
-                .map_err(|e| format!("failed to read policy checkpoint: {e}"))?;
-
-            // Validate compatibility if configured.
-            if config.policy.validate_compatibility {
-                #[allow(clippy::cast_possible_truncation)]
-                let n_stages = system.stages().iter().filter(|s| s.id >= 0).count() as u32;
-                #[allow(clippy::cast_possible_truncation)]
-                let state_dim = setup.fcf.state_dimension as u32;
-                cobre_sddp::validate_policy_compatibility(
-                    &checkpoint.metadata,
-                    state_dim,
-                    n_stages,
-                )
-                .map_err(|e| format!("policy validation error: {e}"))?;
-            }
-
-            // Replace the empty FCF with the loaded one.
-            let loaded_fcf =
-                cobre_sddp::FutureCostFunction::from_deserialized(&checkpoint.stage_cuts)
-                    .map_err(|e| format!("FCF reconstruction error: {e}"))?;
+            // The caller mutates the study: replace the empty FCF with the loaded
+            // one before simulating, exactly as `Study::simulate` does.
             setup.replace_fcf(loaded_fcf);
-
-            // Build basis cache from loaded checkpoint.
-            let basis_cache = cobre_sddp::build_basis_cache_from_checkpoint(
-                setup.stage_data.stage_templates.templates.len(),
-                &checkpoint.stage_bases,
-            );
-
-            // Create a minimal TrainingResult for simulation warm-start.
-            let training_result = cobre_sddp::TrainingResult::new(
-                checkpoint.metadata.final_lower_bound,
-                checkpoint
-                    .metadata
-                    .best_upper_bound
-                    .unwrap_or(f64::INFINITY),
-                0.0,
-                0.0,
-                checkpoint.metadata.completed_iterations.into(),
-                "loaded from checkpoint".to_string(),
-                0,
-                basis_cache,
-                Vec::new(),
-                None,
-                // Baked templates are not stored in policy checkpoints. simulate() re-bakes all
-                // stage templates at startup from the FCF cut pool when baked_templates is None.
-                None,
-            );
 
             let simulation = Some(run_simulation_phase_py(
                 &mut setup,
@@ -1039,8 +1247,12 @@ fn run_inner(
             return Ok(RunSummary {
                 converged: false,
                 iterations: 0,
-                lower_bound: checkpoint.metadata.final_lower_bound,
-                upper_bound: checkpoint.metadata.best_upper_bound,
+                lower_bound: training_result.final_lb,
+                upper_bound: if training_result.final_ub.is_finite() {
+                    Some(training_result.final_ub)
+                } else {
+                    None
+                },
                 gap_percent: None,
                 total_time_ms: 0,
                 output_dir,
@@ -1295,7 +1507,7 @@ pub fn run(
     // re-bound under `Python::attach`.
     let result: Result<RunSummary, RunError> = py.detach(move || {
         run_in_scoped_pool(threads, |n| {
-            run_inner(&case_dir, resolved_output, n, skip, overrides, on_iteration)
+            run_via_study(&case_dir, resolved_output, n, skip, overrides, on_iteration)
         })
         .map_err(RunError::Message)?
     });
@@ -1349,23 +1561,7 @@ pub fn run(
         // A captured callback exception (or KeyboardInterrupt) is returned
         // verbatim so its original type and message reach Python unchanged.
         Err(RunError::Callback(err)) => Err(err),
-        Err(RunError::Message(msg)) => {
-            let err_fn: fn(String) -> PyErr = if msg.as_str().starts_with("output write error")
-                || msg.as_str().starts_with("policy checkpoint error")
-            {
-                PyOSError::new_err
-            } else if msg.as_str().starts_with("config override error")
-                || msg.as_str().starts_with("config parse error")
-                || msg.as_str().starts_with("config read error")
-            {
-                // Override-originated and config-load failures (schema typos,
-                // out-of-range values) are caller errors → ValueError.
-                PyValueError::new_err
-            } else {
-                PyRuntimeError::new_err
-            };
-            Err(err_fn(msg))
-        }
+        Err(RunError::Message(msg)) => Err(message_to_pyerr(msg)),
     }
 }
 
@@ -1388,8 +1584,98 @@ mod tests {
     use pyo3::types::PyDict;
 
     use super::{
-        aggregate_training_solve_stats, iteration_summary_to_dict, run_in_scoped_pool, run_inner,
+        aggregate_training_solve_stats, apply_training_policy_mode, build_study_setup,
+        iteration_summary_to_dict, reconstruct_policy_from_checkpoint, run_in_scoped_pool,
+        run_via_study,
     };
+
+    /// `build_study_setup` is Python-free, so its happy path can be exercised
+    /// without a GIL token. It must load `examples/1dtoy`, resolve the effective
+    /// config, build a fully prepared `StudySetup`, and return populated
+    /// summaries — the single load path both `run_via_study` and `Study::__new__`
+    /// rely on.
+    #[test]
+    fn build_study_setup_succeeds_for_1dtoy() {
+        let case_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("cobre-python parent")
+            .parent()
+            .expect("crates parent")
+            .join("examples/1dtoy");
+
+        let output_dir =
+            std::env::temp_dir().join(format!("cobre_py_build_study_{}", std::process::id()));
+        std::fs::create_dir_all(&output_dir).expect("create output dir");
+
+        let loaded = build_study_setup(&case_dir, &output_dir, None)
+            .expect("build_study_setup must succeed for 1dtoy");
+
+        // 1dtoy uses the default tree seed.
+        assert_eq!(
+            loaded.seed,
+            cobre_sddp::DEFAULT_SEED,
+            "1dtoy must resolve to the default tree seed"
+        );
+        // 1dtoy trains, so training is enabled in the effective config.
+        assert!(
+            loaded.config.training.enabled,
+            "1dtoy config.training.enabled must be true"
+        );
+        // The stochastic summary must describe at least one hydro.
+        assert!(
+            loaded.stochastic_summary.n_hydros > 0,
+            "stochastic summary must report a non-zero hydro count"
+        );
+
+        std::fs::remove_dir_all(&output_dir).ok();
+    }
+
+    /// `apply_training_policy_mode` is Python-free: under the default
+    /// `PolicyMode` (no warm-start/resume) and no boundary cuts, it must be a
+    /// no-op that returns `Ok(())` and leaves the freshly built FCF untouched.
+    /// No GIL token is required (no `Python::initialize()`).
+    #[test]
+    fn apply_training_policy_mode_default_mode_is_noop() {
+        let case_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("cobre-python parent")
+            .parent()
+            .expect("crates parent")
+            .join("examples/1dtoy");
+
+        let output_dir =
+            std::env::temp_dir().join(format!("cobre_py_policy_mode_noop_{}", std::process::id()));
+        std::fs::create_dir_all(&output_dir).expect("create output dir");
+
+        let mut loaded = build_study_setup(&case_dir, &output_dir, None)
+            .expect("build_study_setup must succeed for 1dtoy");
+
+        // 1dtoy uses the default policy mode (cut-from-scratch) and no boundary
+        // cuts, so the freshly built FCF has no cuts and must stay that way.
+        let before_active = loaded.setup.fcf.total_active_cuts();
+        let before_generated = loaded.setup.fcf.total_generated_cuts();
+
+        apply_training_policy_mode(
+            &mut loaded.setup,
+            &loaded.system,
+            &loaded.config,
+            &output_dir,
+        )
+        .expect("default-mode policy application must be a no-op");
+
+        assert_eq!(
+            loaded.setup.fcf.total_active_cuts(),
+            before_active,
+            "default-mode apply_training_policy_mode must not change the active cut count"
+        );
+        assert_eq!(
+            loaded.setup.fcf.total_generated_cuts(),
+            before_generated,
+            "default-mode apply_training_policy_mode must not change the generated cut count"
+        );
+
+        std::fs::remove_dir_all(&output_dir).ok();
+    }
 
     #[test]
     fn iteration_summary_to_dict_maps_fields() {
@@ -1583,8 +1869,8 @@ mod tests {
             std::env::temp_dir().join(format!("cobre_py_parity_{}", std::process::id()));
         std::fs::create_dir_all(&output_dir).expect("create output dir");
 
-        run_inner(&case_dir, output_dir.clone(), 1, false, None, None)
-            .expect("run_inner must succeed for 1dtoy via Python path");
+        run_via_study(&case_dir, output_dir.clone(), 1, false, None, None)
+            .expect("run_via_study must succeed for 1dtoy via Python path");
 
         let training = cobre_io::read_training_metadata(&output_dir.join("training/metadata.json"))
             .expect("read training metadata");
@@ -1748,14 +2034,14 @@ mod tests {
         .expect("write edited config.json");
 
         std::fs::create_dir_all(&edited_out).expect("create edited out dir");
-        run_inner(&edited_case, edited_out.clone(), 1, false, None, None)
+        run_via_study(&edited_case, edited_out.clone(), 1, false, None, None)
             .expect("edited-config run must succeed");
 
         // (b) Override path: run the unedited case with the equivalent override.
         let mut overrides = serde_json::Map::new();
         overrides.insert("training.tree_seed".to_string(), serde_json::json!(7));
         std::fs::create_dir_all(&override_out).expect("create override out dir");
-        run_inner(
+        run_via_study(
             &case_dir,
             override_out.clone(),
             1,
@@ -1794,5 +2080,160 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// `reconstruct_policy_from_checkpoint` is Python-free: after a full
+    /// train+simulate run writes a checkpoint, building a study via
+    /// `build_study_setup` and calling the helper must reconstruct a
+    /// `(FutureCostFunction, TrainingResult)` whose iteration count equals the
+    /// checkpoint's `completed_iterations` and whose FCF state dimension matches
+    /// the study's freshly built FCF. No GIL token (no `Python::initialize()`).
+    #[test]
+    fn reconstruct_policy_from_checkpoint_roundtrips_for_1dtoy() {
+        let case_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("cobre-python parent")
+            .parent()
+            .expect("crates parent")
+            .join("examples/1dtoy");
+
+        let output_dir =
+            std::env::temp_dir().join(format!("cobre_py_reconstruct_{}", std::process::id()));
+        std::fs::create_dir_all(&output_dir).expect("create output dir");
+
+        // Produce a checkpoint by running the full lifecycle once.
+        run_via_study(&case_dir, output_dir.clone(), 1, false, None, None)
+            .expect("run_via_study must succeed for 1dtoy");
+
+        // Build a fresh study and reconstruct the policy from the checkpoint. The
+        // policy directory is `<output_dir>/<policy_path>` (the configured
+        // checkpoint location), so derive it from the live setup rather than
+        // hardcoding a path.
+        let loaded = build_study_setup(&case_dir, &output_dir, None)
+            .expect("build_study_setup must succeed for 1dtoy");
+        let fresh_state_dim = loaded.setup.fcf.state_dimension;
+        let policy_dir = output_dir.join(&loaded.setup.policy_path);
+
+        // The completed-iteration count recorded in the on-disk checkpoint.
+        let checkpoint = cobre_io::output::policy::read_policy_checkpoint(&policy_dir)
+            .expect("read policy checkpoint");
+        let expected_iterations: u64 = checkpoint.metadata.completed_iterations.into();
+
+        let (fcf, training_result) = reconstruct_policy_from_checkpoint(
+            &loaded.setup,
+            &loaded.system,
+            &loaded.config,
+            &policy_dir,
+        )
+        .expect("reconstruct_policy_from_checkpoint must succeed");
+
+        assert_eq!(
+            training_result.iterations, expected_iterations,
+            "reconstructed TrainingResult.iterations must equal the checkpoint's \
+             completed_iterations"
+        );
+        assert_eq!(
+            fcf.state_dimension, fresh_state_dim,
+            "reconstructed FCF state dimension must match the freshly built study's FCF"
+        );
+        // The synthetic result must carry no baked templates; simulate re-bakes
+        // from the FCF (monolithic behavior).
+        assert!(
+            training_result.baked_templates.is_none(),
+            "loaded-from-checkpoint TrainingResult must carry baked_templates = None"
+        );
+
+        std::fs::remove_dir_all(&output_dir).ok();
+    }
+
+    /// P3 (Rust side): a simulation-only run that reconstructs the checkpoint via
+    /// the extracted helper must produce simulation metadata bit-identical to the
+    /// train-then-simulate run that wrote the checkpoint.
+    ///
+    /// Train+simulate into dir A, then run `run_via_study` with
+    /// `training.enabled = false` against dir A (reusing the checkpoint). The
+    /// simulation-only branch reconstructs the policy via
+    /// `reconstruct_policy_from_checkpoint` and feeds the unchanged
+    /// `run_simulation_phase_py`, so `cost.mean_cost` and
+    /// `solve_stats.total_lp_solves` must match exactly.
+    ///
+    /// IGNORED (pre-existing blocker, not a regression of this change): the
+    /// checkpoint basis-reconstruction path trips a `debug_assert!` in
+    /// `cobre_sddp::basis_reconstruct::reconstruct_basis`
+    /// (`row_status.len() != base_row_count + cut_row_slots.len()`) in debug
+    /// builds. `build_basis_cache_from_checkpoint` rebuilds a `CapturedBasis`
+    /// with `base_row_count = 0` and empty `cut_row_slots` but a non-empty
+    /// `row_status`, which violates that invariant. The identical panic occurs in
+    /// the unchanged monolithic `cobre.run.run` simulation-only path
+    /// (`config.training.enabled = false`) — this is faithfully preserved here,
+    /// not introduced. In release builds the `debug_assert!` is a no-op and the
+    /// path succeeds. Re-enable once the upstream `CapturedBasis`
+    /// reconstruction-from-checkpoint defect is fixed.
+    #[test]
+    #[ignore = "pre-existing debug_assert in reconstruct_basis on the checkpoint \
+                basis path; also panics in monolithic run.run simulation-only \
+                (debug). Re-enable after the upstream CapturedBasis fix."]
+    fn python_simulation_only_metadata_matches_train_then_simulate() {
+        let case_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("cobre-python parent")
+            .parent()
+            .expect("crates parent")
+            .join("examples/1dtoy");
+
+        let output_dir =
+            std::env::temp_dir().join(format!("cobre_py_simonly_parity_{}", std::process::id()));
+        std::fs::create_dir_all(&output_dir).expect("create output dir");
+
+        // (a) Train + simulate into dir A; this writes the checkpoint and the
+        // train-then-simulate simulation metadata.
+        run_via_study(&case_dir, output_dir.clone(), 1, false, None, None)
+            .expect("train-then-simulate run_via_study must succeed");
+
+        let train_then_sim =
+            cobre_io::read_simulation_metadata(&output_dir.join("simulation/metadata.json"))
+                .expect("read train-then-simulate simulation metadata");
+        let golden_mean = train_then_sim
+            .cost
+            .as_ref()
+            .expect("train-then-simulate cost must be populated")
+            .mean_cost;
+        let golden_lp_solves = train_then_sim.solve_stats.total_lp_solves;
+
+        // (b) Simulation-only run against the SAME dir, reusing the checkpoint,
+        // with training disabled via an override. This overwrites simulation/.
+        let mut overrides = serde_json::Map::new();
+        overrides.insert("training.enabled".to_string(), serde_json::json!(false));
+        run_via_study(
+            &case_dir,
+            output_dir.clone(),
+            1,
+            false,
+            Some(overrides),
+            None,
+        )
+        .expect("simulation-only run_via_study must succeed");
+
+        let sim_only =
+            cobre_io::read_simulation_metadata(&output_dir.join("simulation/metadata.json"))
+                .expect("read simulation-only simulation metadata");
+        let sim_only_cost = sim_only
+            .cost
+            .as_ref()
+            .expect("simulation-only cost must be populated");
+
+        let rel = (sim_only_cost.mean_cost - golden_mean).abs() / golden_mean.abs();
+        assert!(
+            rel < 1e-6,
+            "simulation-only mean_cost {} not within 1e-6 of train-then-simulate \
+             mean_cost {golden_mean} (rel = {rel})",
+            sim_only_cost.mean_cost
+        );
+        assert_eq!(
+            sim_only.solve_stats.total_lp_solves, golden_lp_solves,
+            "simulation-only total_lp_solves must exactly equal train-then-simulate"
+        );
+
+        std::fs::remove_dir_all(&output_dir).ok();
     }
 }

@@ -35,6 +35,7 @@ mod model;
 mod results;
 mod run;
 mod schema;
+mod study;
 mod version;
 
 /// Sub-module containing data model types for the Cobre power systems solver.
@@ -145,6 +146,11 @@ fn cobre(m: &Bound<'_, PyModule>) -> PyResult<()> {
     register_submodule(m, pyo3::wrap_pymodule!(schema_module)(py).bind(py), "cobre")?;
 
     m.add_function(wrap_pyfunction!(version::version_info, m)?)?;
+
+    // `Study` and `Policy` are top-level classes (`cobre.Study`,
+    // `cobre.Policy`), not submodule members.
+    m.add_class::<study::Study>()?;
+    m.add_class::<study::Policy>()?;
 
     Ok(())
 }
