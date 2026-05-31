@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Union
 
+from . import errors as errors
 from . import io as io
 from . import model as model
 from . import results as results

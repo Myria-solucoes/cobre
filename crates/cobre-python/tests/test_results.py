@@ -311,10 +311,33 @@ def test_report_missing_training_raises(tmp_path: pathlib.Path) -> None:
         cobre.results.report(str(tmp_path))
 
 
-def test_summary_equals_report(run_output: pathlib.Path) -> None:
-    """summary() returns the same dict as report() (rendering deferred to Python)."""
+def test_summary_returns_string(run_output: pathlib.Path) -> None:
+    """summary() returns a non-empty str containing a recognizable bounds label."""
     import cobre.results  # noqa: PLC0415
 
-    assert cobre.results.summary(str(run_output)) == cobre.results.report(
-        str(run_output)
-    ), "summary must return the same structured dict as report"
+    text = cobre.results.summary(str(run_output))
+
+    assert isinstance(text, str), "summary must return a str"
+    assert len(text) > 0, "summary string must be non-empty"
+    assert "lower bound" in text.lower(), (
+        "summary must include the training bounds section"
+    )
+
+
+def test_report_still_returns_dict(run_output: pathlib.Path) -> None:
+    """report() still returns the structured dict with bounds + training keys."""
+    import cobre.results  # noqa: PLC0415
+
+    report = cobre.results.report(str(run_output))
+
+    assert isinstance(report, dict), "report must still return a dict"
+    assert "bounds" in report, "report must contain 'bounds'"
+    assert "training" in report, "report must contain 'training'"
+
+
+def test_summary_missing_dir_raises() -> None:
+    """summary() raises FileNotFoundError, delegated from report()."""
+    import cobre.results  # noqa: PLC0415
+
+    with pytest.raises(FileNotFoundError):
+        cobre.results.summary("/tmp/nonexistent_cobre_output_xzy123")

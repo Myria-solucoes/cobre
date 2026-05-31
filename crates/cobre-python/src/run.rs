@@ -23,11 +23,13 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 
-use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::PyOSError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use cobre_core::TrainingEvent;
+
+use crate::errors::{ErrorSource, convert_error};
 
 use cobre_comm::LocalBackend;
 use cobre_io::output::simulation_writer::{ScenarioWritePayload, SimulationParquetWriter};
@@ -53,11 +55,57 @@ pub(crate) enum RunError {
     /// A `PyErr` captured from the streaming callback (or `check_signals`),
     /// propagated after artifacts are written.
     Callback(PyErr),
+    /// A typed SDDP failure from a training/simulation phase helper, carried
+    /// verbatim with its descriptive message so the mapping site can attach
+    /// structured fields (e.g. `Infeasible`'s stage/iteration/scenario) without
+    /// losing the message text.
+    Sddp {
+        /// The typed SDDP error (`Send + Sync + 'static`, safe across `py.detach`).
+        error: cobre_sddp::SddpError,
+        /// The verbatim descriptive message (preserved so `match=` assertions pass).
+        message: String,
+    },
 }
 
 impl From<String> for RunError {
     fn from(msg: String) -> Self {
         RunError::Message(msg)
+    }
+}
+
+impl From<PhaseError> for RunError {
+    fn from(err: PhaseError) -> Self {
+        match err {
+            PhaseError::Message(msg) => RunError::Message(msg),
+            PhaseError::Sddp { error, message } => RunError::Sddp { error, message },
+        }
+    }
+}
+
+/// Error returned by the training/simulation phase helpers.
+///
+/// Mirrors [`RunError`] minus the callback variant: most phase failures carry a
+/// descriptive `String` (`HiGHS` init, drain-thread panic, writer init, cost
+/// aggregation, stats writes), while a hard `train`/`simulate` failure carries
+/// the typed [`cobre_sddp::SddpError`] alongside the message it would have
+/// stringified to. The `From<String>` impl keeps every existing `?` site
+/// unchanged — only the three stringify sites build the typed `Sddp` arm.
+#[derive(Debug)]
+pub(crate) enum PhaseError {
+    /// A descriptive message (`HiGHS` init, drain panic, writer init, etc.).
+    Message(String),
+    /// A typed SDDP failure carried verbatim with its descriptive message.
+    Sddp {
+        /// The typed SDDP error.
+        error: cobre_sddp::SddpError,
+        /// The verbatim descriptive message.
+        message: String,
+    },
+}
+
+impl From<String> for PhaseError {
+    fn from(msg: String) -> Self {
+        PhaseError::Message(msg)
     }
 }
 
@@ -257,7 +305,7 @@ fn build_training_phase_result(
 pub(crate) fn run_training_phase_py(
     setup: &mut StudySetup,
     n_threads: usize,
-) -> Result<TrainingPhaseResult, String> {
+) -> Result<TrainingPhaseResult, PhaseError> {
     let started_at = cobre_io::now_iso8601();
     let mut solver = HighsSolver::new().map_err(|e| format!("HiGHS initialisation failed: {e}"))?;
     let (event_tx, event_rx) = mpsc::channel();
@@ -270,7 +318,10 @@ pub(crate) fn run_training_phase_py(
             Some(event_tx),
             None,
         )
-        .map_err(|e| format!("training error: {e}"))?;
+        .map_err(|e| PhaseError::Sddp {
+            message: format!("training error: {e}"),
+            error: e,
+        })?;
 
     let events: Vec<_> = event_rx.try_iter().collect();
     Ok(build_training_phase_result(
@@ -320,7 +371,7 @@ pub(crate) fn run_training_phase_py_streaming(
     setup: &mut StudySetup,
     n_threads: usize,
     on_iteration: Py<PyAny>,
-) -> Result<(TrainingPhaseResult, Option<PyErr>), String> {
+) -> Result<(TrainingPhaseResult, Option<PyErr>), PhaseError> {
     let started_at = cobre_io::now_iso8601();
     let mut solver = HighsSolver::new().map_err(|e| format!("HiGHS initialisation failed: {e}"))?;
     let (event_tx, event_rx) = mpsc::channel::<TrainingEvent>();
@@ -347,7 +398,10 @@ pub(crate) fn run_training_phase_py_streaming(
     // bookkeeping failure); a drain panic only wins when training itself
     // succeeded.
     let drain_result = drain_handle.join();
-    let training_outcome = training_outcome.map_err(|e| format!("training error: {e}"))?;
+    let training_outcome = training_outcome.map_err(|e| PhaseError::Sddp {
+        message: format!("training error: {e}"),
+        error: e,
+    })?;
     let (events, captured_pyerr) = drain_result.map_err(|_| "drain thread panicked".to_string())?;
 
     let phase = build_training_phase_result(
@@ -556,7 +610,7 @@ pub(crate) fn run_simulation_phase_py(
     system: &cobre_core::System,
     training_result: &cobre_sddp::TrainingResult,
     n_threads: usize,
-) -> Result<SimSummary, String> {
+) -> Result<SimSummary, PhaseError> {
     let sim_started_at = cobre_io::now_iso8601();
     let io_capacity = setup.simulation_config().io_channel_capacity;
     let mut sim_pool = setup
@@ -589,7 +643,16 @@ pub(crate) fn run_simulation_phase_py(
             training_result.baked_templates.as_deref(),
             &training_result.basis_cache,
         )
-        .map_err(|e| format!("simulation error: {e}"));
+        .map_err(|e| {
+            // Build the verbatim message from the original `SimulationError`
+            // first (so the text is byte-identical to the old string path), then
+            // wrap it in `SddpError::Simulation` as the structured carrier.
+            let message = format!("simulation error: {e}");
+            PhaseError::Sddp {
+                message,
+                error: cobre_sddp::SddpError::from(e),
+            }
+        });
     drop(result_tx);
 
     let (sim_writer, write_failures) = drain_handle
@@ -753,7 +816,7 @@ pub(crate) struct LoadedStudy {
 ///
 /// Returns a descriptive `Err(String)` on any load, config, preprocessing,
 /// construction, or sidecar-write failure. The caller maps the message to a
-/// Python exception type via [`message_to_pyerr`].
+/// Python exception type via [`crate::errors::convert_error`].
 pub(crate) fn build_study_setup(
     case_dir: &std::path::Path,
     output_dir: &std::path::Path,
@@ -870,30 +933,6 @@ pub(crate) fn build_study_setup(
     })
 }
 
-/// Map a descriptive `build_study_setup`/run error message to the appropriate
-/// Python exception type.
-///
-/// The mapping is prefix-based and shared by [`run`] and `Study::__new__` so the
-/// dispatch is defined once: `output write error` / `policy checkpoint error`
-/// → [`PyOSError`]; `config override error` / `config parse error` /
-/// `config read error` → [`PyValueError`]; everything else → [`PyRuntimeError`].
-pub(crate) fn message_to_pyerr(msg: String) -> PyErr {
-    let err_fn: fn(String) -> PyErr =
-        if msg.starts_with("output write error") || msg.starts_with("policy checkpoint error") {
-            PyOSError::new_err
-        } else if msg.starts_with("config override error")
-            || msg.starts_with("config parse error")
-            || msg.starts_with("config read error")
-        {
-            // Override-originated and config-load failures (schema typos,
-            // out-of-range values) are caller errors → ValueError.
-            PyValueError::new_err
-        } else {
-            PyRuntimeError::new_err
-        };
-    err_fn(msg)
-}
-
 /// Apply the configured policy mode to `setup` BEFORE training.
 ///
 /// This performs the warm-start / resume / boundary-cut future-cost-function
@@ -920,7 +959,7 @@ pub(crate) fn message_to_pyerr(msg: String) -> PyErr {
 /// prior policy directory, when the checkpoint cannot be read, when policy
 /// validation fails, when warm-start/resume FCF construction fails, or when the
 /// boundary cuts cannot be loaded. The caller maps the message to a Python
-/// exception type via [`message_to_pyerr`].
+/// exception type via [`crate::errors::convert_error`].
 pub(crate) fn apply_training_policy_mode(
     setup: &mut StudySetup,
     system: &cobre_core::System,
@@ -1043,7 +1082,8 @@ pub(crate) fn apply_training_policy_mode(
 /// Returns a descriptive `Err(String)` when `policy_dir` does not exist (the
 /// `"Policy directory not found: ..."` message), when the checkpoint cannot be
 /// read, when policy validation fails, or when FCF reconstruction fails. The
-/// caller maps the message to a Python exception type via [`message_to_pyerr`].
+/// caller maps the message to a Python exception type via
+/// [`crate::errors::convert_error`].
 pub(crate) fn reconstruct_policy_from_checkpoint(
     setup: &StudySetup,
     system: &cobre_core::System,
@@ -1164,7 +1204,7 @@ pub(crate) fn run_via_study(
         // no-callback golden parity test is preserved (P5). A captured callback
         // error (or KeyboardInterrupt) is propagated only AFTER artifacts are
         // written, so a stopped/raising run still persists what it completed.
-        let (training, callback_error) = match on_iteration {
+        let (mut training, callback_error) = match on_iteration {
             Some(callback) => run_training_phase_py_streaming(&mut setup, n_threads, callback)?,
             None => (run_training_phase_py(&mut setup, n_threads)?, None),
         };
@@ -1189,11 +1229,15 @@ pub(crate) fn run_via_study(
             return Err(RunError::Callback(err));
         }
 
-        if let Some(ref e) = training.error {
-            return Err(RunError::Message(format!(
-                "training failed after {} iterations: {e}",
-                training.result.iterations
-            )));
+        // Move the typed error out of the carrier so the structured fields (e.g.
+        // `Infeasible`) survive to the mapping site, preserving the exact message
+        // text alongside it.
+        if let Some(error) = training.error.take() {
+            let iterations = training.result.iterations;
+            return Err(RunError::Sddp {
+                message: format!("training failed after {iterations} iterations: {error}"),
+                error,
+            });
         }
 
         let simulation = if should_simulate {
@@ -1559,9 +1603,18 @@ pub fn run(
             Ok(dict.into())
         }
         // A captured callback exception (or KeyboardInterrupt) is returned
-        // verbatim so its original type and message reach Python unchanged.
+        // verbatim so its original type and message reach Python unchanged. It is
+        // NOT routed through `convert_error` — that would clobber the original
+        // traceback/type.
         Err(RunError::Callback(err)) => Err(err),
-        Err(RunError::Message(msg)) => Err(message_to_pyerr(msg)),
+        // A typed SDDP failure: route the error and its verbatim message through
+        // the single mapping site so structured fields (e.g. `Infeasible`) reach
+        // Python as `SolverError` attributes.
+        Err(RunError::Sddp { error, message }) => Err(convert_error(ErrorSource::Sddp {
+            error: &error,
+            message,
+        })),
+        Err(RunError::Message(msg)) => Err(convert_error(ErrorSource::Message(msg))),
     }
 }
 

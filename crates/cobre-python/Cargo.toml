@@ -13,7 +13,7 @@ keywords = ["python", "bindings", "pyo3", "power-systems", "energy"]
 categories = ["science", "api-bindings"]
 
 [lib]
-name = "cobre"
+name = "_native"
 crate-type = ["cdylib"]
 doc = false
 

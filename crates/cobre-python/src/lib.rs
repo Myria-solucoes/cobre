@@ -30,6 +30,7 @@
 use pyo3::prelude::*;
 
 mod convert;
+mod errors;
 mod io;
 mod model;
 mod results;
@@ -94,8 +95,14 @@ fn results_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(results::load_simulation_arrow, m)?)?;
     m.add_function(wrap_pyfunction!(results::load_policy, m)?)?;
     m.add_function(wrap_pyfunction!(results::report, m)?)?;
-    m.add_function(wrap_pyfunction!(results::summary, m)?)?;
     Ok(())
+}
+
+/// Sub-module containing the structured `cobre.errors` exception hierarchy.
+#[pymodule]
+#[pyo3(name = "errors")]
+fn errors_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    errors::register_errors(m)
 }
 
 /// Sub-module containing JSON Schema export helpers.
@@ -130,20 +137,46 @@ fn register_submodule<'py>(
 }
 
 /// Python bindings for the Cobre power systems solver. Single-process only -- for distributed execution, launch `mpiexec cobre` as a subprocess.
+///
+/// This is the compiled extension module, imported privately as `cobre._native`.
+/// The public `cobre` package (pure-Python `__init__.py`) re-exports everything
+/// from here under the documented `cobre.*` names.
 #[pymodule]
-fn cobre(m: &Bound<'_, PyModule>) -> PyResult<()> {
+#[pyo3(name = "_native")]
+fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
 
-    register_submodule(m, pyo3::wrap_pymodule!(model_module)(py).bind(py), "cobre")?;
-    register_submodule(m, pyo3::wrap_pymodule!(io_module)(py).bind(py), "cobre")?;
-    register_submodule(m, pyo3::wrap_pymodule!(run_module)(py).bind(py), "cobre")?;
+    register_submodule(
+        m,
+        pyo3::wrap_pymodule!(model_module)(py).bind(py),
+        "cobre._native",
+    )?;
+    register_submodule(
+        m,
+        pyo3::wrap_pymodule!(io_module)(py).bind(py),
+        "cobre._native",
+    )?;
+    register_submodule(
+        m,
+        pyo3::wrap_pymodule!(run_module)(py).bind(py),
+        "cobre._native",
+    )?;
     register_submodule(
         m,
         pyo3::wrap_pymodule!(results_module)(py).bind(py),
-        "cobre",
+        "cobre._native",
     )?;
-    register_submodule(m, pyo3::wrap_pymodule!(schema_module)(py).bind(py), "cobre")?;
+    register_submodule(
+        m,
+        pyo3::wrap_pymodule!(errors_module)(py).bind(py),
+        "cobre._native",
+    )?;
+    register_submodule(
+        m,
+        pyo3::wrap_pymodule!(schema_module)(py).bind(py),
+        "cobre._native",
+    )?;
 
     m.add_function(wrap_pyfunction!(version::version_info, m)?)?;
 

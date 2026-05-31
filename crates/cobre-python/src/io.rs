@@ -6,23 +6,27 @@
 //!
 //! ## Error mapping
 //!
-//! [`cobre_io::LoadError`] variants are converted to Python exceptions as follows:
+//! [`cobre_io::LoadError`] variants are routed through the single
+//! [`crate::errors::convert_error`] mapping site to the `cobre.errors` hierarchy
+//! (each leaf subclasses the matching builtin, so `except OSError` /
+//! `except ValueError` keeps catching):
 //!
-//! | Rust variant                        | Python exception |
-//! |-------------------------------------|-----------------|
-//! | `LoadError::IoError`                | `OSError`       |
-//! | `LoadError::ParseError`             | `ValueError`    |
-//! | `LoadError::SchemaError`            | `ValueError`    |
-//! | `LoadError::CrossReferenceError`    | `ValueError`    |
-//! | `LoadError::ConstraintError`        | `ValueError`    |
-//! | `LoadError::PolicyIncompatible`     | `ValueError`    |
+//! | Rust variant                        | Python exception (subclass of) |
+//! |-------------------------------------|--------------------------------|
+//! | `LoadError::IoError`                | `CaseIoError` (`OSError`)       |
+//! | `LoadError::ParseError`             | `ValidationError` (`ValueError`) |
+//! | `LoadError::SchemaError`            | `ValidationError` (`ValueError`) |
+//! | `LoadError::CrossReferenceError`    | `ValidationError` (`ValueError`) |
+//! | `LoadError::ConstraintError`        | `ValidationError` (`ValueError`) |
+//! | `LoadError::PolicyIncompatible`     | `PolicyIncompatibleError` (`ValueError`) |
 //!
 //! The [`validate`] function never raises — errors are returned as data in a
-//! Python dict so that callers see all problems at once.
+//! Python dict (with a stable `kind` string, decoupled from these class names)
+//! so that callers see all problems at once.
 
 use std::path::PathBuf;
 
-use pyo3::exceptions::{PyOSError, PyValueError};
+use pyo3::exceptions::PyOSError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
@@ -73,17 +77,12 @@ fn load_validate_config(
 
 /// Convert a [`LoadError`] to the appropriate Python exception.
 ///
-/// The mapping preserves as much context as possible in the exception message
-/// without exposing Rust-internal type names in the Python API.
+/// A thin shim over the single [`crate::errors::convert_error`] mapping site:
+/// `IoError` → `cobre.errors.CaseIoError` (subclasses `OSError`); every other
+/// variant → `cobre.errors.ValidationError` / `PolicyIncompatibleError`
+/// (subclasses `ValueError`). The exception message is preserved verbatim.
 fn convert_load_error(err: &LoadError) -> PyErr {
-    match err {
-        LoadError::IoError { .. } => PyOSError::new_err(err.to_string()),
-        LoadError::ParseError { .. }
-        | LoadError::SchemaError { .. }
-        | LoadError::CrossReferenceError { .. }
-        | LoadError::ConstraintError { .. }
-        | LoadError::PolicyIncompatible { .. } => PyValueError::new_err(err.to_string()),
-    }
+    crate::errors::convert_error(crate::errors::ErrorSource::Load(err))
 }
 
 // ── load_case ────────────────────────────────────────────────────────────────

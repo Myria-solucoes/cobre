@@ -17,7 +17,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use pyo3::exceptions::{PyOSError, PyRuntimeError};
+use pyo3::exceptions::PyOSError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
@@ -26,13 +26,31 @@ use cobre_sddp::{
     TrainingResult,
 };
 
+use crate::errors::{ErrorSource, convert_error};
 use crate::model::PySystem;
 use crate::run::{
-    LoadedStudy, SimSummary, apply_training_policy_mode, build_study_setup, message_to_pyerr,
+    LoadedStudy, PhaseError, SimSummary, apply_training_policy_mode, build_study_setup,
     reconstruct_policy_from_checkpoint, run_in_scoped_pool, run_simulation_phase_py,
     run_training_phase_py, run_training_phase_py_streaming, write_fpha_hyperplanes_if_any,
     write_training_artifacts,
 };
+
+/// Map a [`PhaseError`] to a Python exception through the single
+/// [`convert_error`] mapping site.
+///
+/// A typed `Sddp` arm routes through [`ErrorSource::Sddp`] so structured fields
+/// (e.g. `Infeasible`'s stage/iteration/scenario) reach Python as `SolverError`
+/// attributes; a `Message` arm routes through [`ErrorSource::Message`]. Both
+/// front ends (`run_via_study` and the `Study` methods) thus map identically.
+fn phase_error_to_pyerr(err: PhaseError) -> PyErr {
+    match err {
+        PhaseError::Message(msg) => convert_error(ErrorSource::Message(msg)),
+        PhaseError::Sddp { error, message } => convert_error(ErrorSource::Sddp {
+            error: &error,
+            message,
+        }),
+    }
+}
 
 /// A loaded study: the live [`StudySetup`] plus the immutable state produced by
 /// the front half of the solve lifecycle.
@@ -194,7 +212,7 @@ impl Study {
             stochastic_summary,
             hydro_models_summary,
             warnings,
-        } = loaded.map_err(message_to_pyerr)?;
+        } = loaded.map_err(|msg| convert_error(ErrorSource::Message(msg)))?;
 
         Ok(Study {
             setup,
@@ -341,12 +359,19 @@ impl Study {
         // thread and be re-bound under `Python::attach`. `Py<PyAny>` and
         // `PyErr` are `Send`, so returning `(TrainingPhaseResult, Option<PyErr>)`
         // from the scoped-pool closure is sound.
-        let phase_result: Result<(crate::run::TrainingPhaseResult, Option<PyErr>), String> = py
+        // The closure unifies on `PhaseError`: the two training-phase helpers
+        // yield it directly (carrying a typed `SddpError` for a hard `train`
+        // failure), while the `String`-returning helpers (policy-mode,
+        // artifact/FPHA writes, pool construction) convert via `From<String>`.
+        // The error is mapped through the single `convert_error` site below, so
+        // both front ends (`run_via_study` and this method) map identically.
+        let phase_result: Result<(crate::run::TrainingPhaseResult, Option<PyErr>), PhaseError> = py
             .detach(|| {
                 // `run_in_scoped_pool` returns `Result<closure_output, String>`,
-                // where `closure_output` is itself a `Result<_, String>`; the
-                // outer `?` surfaces pool-construction failure, the inner result
-                // is the training/artifact outcome.
+                // where `closure_output` is itself a `Result<_, PhaseError>`; the
+                // outer `?` surfaces pool-construction failure (a `String`, lifted
+                // to `PhaseError::Message`), the inner result is the
+                // training/artifact outcome.
                 run_in_scoped_pool(threads, |n| {
                     // Warm-start / resume / boundary-cut FCF replacement BEFORE
                     // training — shared verbatim with `run_via_study`.
@@ -376,11 +401,11 @@ impl Study {
                     )?;
                     write_fpha_hyperplanes_if_any(&output_dir, setup)?;
 
-                    Ok((training, callback_error))
+                    Ok::<_, PhaseError>((training, callback_error))
                 })?
             });
 
-        let (training, callback_error) = phase_result.map_err(message_to_pyerr)?;
+        let (mut training, callback_error) = phase_result.map_err(phase_error_to_pyerr)?;
 
         // Propagate a captured callback exception (or KeyboardInterrupt) only
         // now that all training artifacts have been written.
@@ -388,13 +413,17 @@ impl Study {
             return Err(err);
         }
 
-        // A genuine training failure becomes a RuntimeError, mirroring
-        // `run_via_study`'s post-artifacts error mapping.
-        if let Some(ref e) = training.error {
-            return Err(message_to_pyerr(format!(
-                "training failed after {} iterations: {e}",
-                training.result.iterations
-            )));
+        // A genuine training failure becomes a `SolverError` (a `RuntimeError`
+        // subclass), mirroring `run_via_study`'s post-artifacts mapping. The
+        // typed error is moved out of the carrier so its structured fields (e.g.
+        // `Infeasible`) survive to `convert_error`, with the message preserved.
+        if let Some(error) = training.error.take() {
+            let iterations = training.result.iterations;
+            let message = format!("training failed after {iterations} iterations: {error}");
+            return Err(convert_error(ErrorSource::Sddp {
+                error: &error,
+                message,
+            }));
         }
 
         // Build the policy handle: clone the trained FCF and move the training
@@ -456,7 +485,8 @@ impl Study {
         let reconstructed: Result<(FutureCostFunction, TrainingResult), String> =
             py.detach(|| reconstruct_policy_from_checkpoint(setup, system, &config, &policy_dir));
 
-        let (fcf, training_result) = reconstructed.map_err(message_to_pyerr)?;
+        let (fcf, training_result) =
+            reconstructed.map_err(|msg| convert_error(ErrorSource::Message(msg)))?;
         Ok(Policy {
             training_result,
             fcf,
@@ -518,10 +548,15 @@ impl Study {
         // `Study.train() -> Study.simulate()` misuse (and any other zero-cut
         // policy) explicitly.
         if policy.fcf.total_active_cuts() == 0 {
-            return Err(PyRuntimeError::new_err(
+            // Routed through the single mapping site: the message has no
+            // recognized prefix, so it falls through to `SolverError` (a
+            // `RuntimeError` subclass), so `except RuntimeError` still catches and
+            // the message is preserved verbatim.
+            return Err(convert_error(ErrorSource::Message(
                 "Policy has no cuts to simulate; when training is disabled, call \
-                 Study.load_policy() to load a trained policy before simulate()",
-            ));
+                 Study.load_policy() to load a trained policy before simulate()"
+                    .to_string(),
+            )));
         }
 
         // Install the policy's FCF into the study so `StudySetup::simulate`
@@ -537,17 +572,18 @@ impl Study {
         // The simulation runs the full scenario sweep; release the GIL for the
         // entire Rust computation. The scoped rayon pool is built per call so two
         // sequential `simulate` invocations each honor their own thread count.
-        let summary: Result<SimSummary, String> = py.detach(|| {
+        let summary: Result<SimSummary, PhaseError> = py.detach(|| {
             // `run_in_scoped_pool` returns `Result<closure_output, String>`,
-            // where `closure_output` is itself `Result<SimSummary, String>`; the
-            // outer `?` surfaces pool-construction failure, the inner result is
-            // the simulation outcome.
+            // where `closure_output` is itself `Result<SimSummary, PhaseError>`;
+            // the outer `?` surfaces pool-construction failure (a `String`, lifted
+            // to `PhaseError::Message`), the inner result is the simulation
+            // outcome (a typed `Sddp` arm on a hard `simulate` failure).
             run_in_scoped_pool(threads, |n| {
                 run_simulation_phase_py(setup, &out_dir, system, training_result, n)
             })?
         });
 
-        let summary = summary.map_err(message_to_pyerr)?;
+        let summary = summary.map_err(phase_error_to_pyerr)?;
 
         let dict = PyDict::new(py);
         dict.set_item("n_scenarios", summary.n_scenarios)?;

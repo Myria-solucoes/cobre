@@ -525,39 +525,31 @@ where
 
 /// Convert a [`cobre_io::OutputError`] to an appropriate Python exception.
 ///
+/// A thin shim over the single [`crate::errors::convert_error`] mapping site,
+/// which folds in the read-path `NotFound` branch:
+///
 /// - [`cobre_io::OutputError::IoError`] with `NotFound` kind → `FileNotFoundError`
-/// - All other variants → `OSError`
+/// - [`cobre_io::OutputError::IoError`] (other) → `cobre.errors.CaseIoError` (`OSError`)
+/// - [`cobre_io::OutputError::SerializationError`] / `SchemaError` →
+///   `cobre.errors.OutputError` (`OSError`)
+/// - [`cobre_io::OutputError::ManifestError`] → `cobre.errors.ValidationError` (`ValueError`)
 fn output_error_to_py(err: &cobre_io::OutputError) -> PyErr {
-    match err {
-        cobre_io::OutputError::IoError { source, .. }
-            if source.kind() == std::io::ErrorKind::NotFound =>
-        {
-            PyFileNotFoundError::new_err(err.to_string())
-        }
-        _ => PyOSError::new_err(err.to_string()),
-    }
+    crate::errors::convert_error(crate::errors::ErrorSource::Output(err))
 }
 
 /// Convert a [`cobre_io::OutputError`] from a metadata read into a Python
-/// exception, distinguishing malformed JSON from I/O failures.
+/// exception.
 ///
-/// Unlike [`output_error_to_py`], this maps a [`cobre_io::OutputError::ManifestError`]
-/// (malformed JSON) to `ValueError` rather than `OSError`, matching the
-/// `report`/`summary` error contract:
+/// Identical to [`output_error_to_py`] now that the malformed-JSON
+/// ([`cobre_io::OutputError::ManifestError`]) → `ValueError` distinction lives
+/// inside the single [`crate::errors::convert_error`] mapping site:
 ///
 /// - missing file ([`cobre_io::OutputError::IoError`] with `NotFound`) → `FileNotFoundError`
-/// - malformed JSON ([`cobre_io::OutputError::ManifestError`]) → `ValueError`
-/// - any other I/O error → `OSError`
+/// - malformed JSON ([`cobre_io::OutputError::ManifestError`]) →
+///   `cobre.errors.ValidationError` (`ValueError`)
+/// - any other I/O error → `cobre.errors.CaseIoError` (`OSError`)
 fn metadata_error_to_py(err: &cobre_io::OutputError) -> PyErr {
-    match err {
-        cobre_io::OutputError::IoError { source, .. }
-            if source.kind() == std::io::ErrorKind::NotFound =>
-        {
-            PyFileNotFoundError::new_err(err.to_string())
-        }
-        cobre_io::OutputError::ManifestError { .. } => PyValueError::new_err(err.to_string()),
-        _ => PyOSError::new_err(err.to_string()),
-    }
+    crate::errors::convert_error(crate::errors::ErrorSource::Output(err))
 }
 
 /// Read an optional simulation-metadata file, treating file-not-found as `None`.
@@ -677,38 +669,6 @@ fn build_report_value(output_dir: &Path) -> PyResult<serde_json::Value> {
 #[pyfunction]
 #[allow(clippy::needless_pass_by_value)]
 pub fn report(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAny>> {
-    let value = build_report_value(&output_dir)?;
-    json_value_to_py(py, &value)
-}
-
-/// Return the structured `cobre report` summary for a run output directory.
-///
-/// Currently returns the SAME dict as [`report`]. The human-readable text
-/// rendering (`summary(dir) -> str`) is implemented in the Python layer; this
-/// Rust binding deliberately returns structured data only and performs no
-/// `console`-style formatting.
-///
-/// ## Returns
-///
-/// The same dict as [`report`] — see its documentation for the key layout.
-///
-/// ## Errors
-///
-/// - `FileNotFoundError` if `training/metadata.json` is absent.
-/// - `ValueError` if a metadata file contains malformed JSON.
-/// - `OSError` for other I/O failures.
-///
-/// ## Examples (Python)
-///
-/// ```python
-/// import cobre.results
-///
-/// data = cobre.results.summary("output/")
-/// assert data == cobre.results.report("output/")
-/// ```
-#[pyfunction]
-#[allow(clippy::needless_pass_by_value)]
-pub fn summary(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAny>> {
     let value = build_report_value(&output_dir)?;
     json_value_to_py(py, &value)
 }
@@ -861,9 +821,11 @@ const ENTITY_TYPES: &[&str] = &[
 ///
 /// - `output_dir` — root output directory (same as passed to `cobre.run.run()`).
 /// - `entity_type` — optional entity type name (`"costs"`, `"buses"`, `"hydros"`,
-///   `"thermals"`, or `"inflow_lags"`). When provided, only that entity type is
-///   loaded and a flat list of dicts is returned. When `None`, all available
-///   entity types are loaded and a dict of lists is returned.
+///   `"thermals"`, `"exchanges"`, `"pumping_stations"`, `"contracts"`,
+///   `"non_controllables"`, `"inflow_lags"`, or `"violations/generic"`). When
+///   provided, only that entity type is loaded and a flat list of dicts is
+///   returned. When `None`, all available entity types are loaded and a dict of
+///   lists is returned.
 ///
 /// ## Returns
 ///
@@ -1116,9 +1078,11 @@ fn ipc_bytes_to_py_table<'py>(
 ///
 /// - `output_dir` — root output directory (same as passed to `cobre.run.run()`).
 /// - `entity_type` — optional entity type name (`"costs"`, `"buses"`, `"hydros"`,
-///   `"thermals"`, or `"inflow_lags"`). When provided, only that entity type is
-///   loaded and a single `pyarrow.Table` is returned. When `None`, all available
-///   entity types are loaded and a `dict[str, pyarrow.Table]` is returned.
+///   `"thermals"`, `"exchanges"`, `"pumping_stations"`, `"contracts"`,
+///   `"non_controllables"`, `"inflow_lags"`, or `"violations/generic"`). When
+///   provided, only that entity type is loaded and a single `pyarrow.Table` is
+///   returned. When `None`, all available entity types are loaded and a
+///   `dict[str, pyarrow.Table]` is returned.
 ///
 /// ## Returns
 ///
@@ -1380,6 +1344,7 @@ pub fn load_policy(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAny>> {
 mod tests {
     use std::fs;
 
+    use pyo3::Python;
     use tempfile::TempDir;
 
     use super::build_report_value;
@@ -1572,6 +1537,11 @@ mod tests {
 
     #[test]
     fn build_report_value_missing_training_is_err() {
+        // The error path now routes through `crate::errors::convert_error`, which
+        // attaches the GIL (`Python::attach`) to build the typed exception, so the
+        // interpreter must be initialized first (mirrors the GIL-bound test
+        // scaffolding elsewhere in this crate).
+        Python::initialize();
         let dir = TempDir::new().unwrap();
         // No training/metadata.json written.
 
