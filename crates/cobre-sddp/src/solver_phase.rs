@@ -36,11 +36,11 @@ pub enum Phase {
 
 /// Solver profile applied during the SDDP forward pass.
 ///
-/// All fields equal [`HighsProfile::default()`], preserving the historical
-/// hardcoded behaviour bit-for-bit.
+/// All fields equal [`HighsProfile::default()`], which uses the tightened
+/// `1e-9` primal/dual feasibility tolerances.
 pub const FORWARD_PROFILE: HighsProfile = HighsProfile {
-    primal_feasibility_tolerance: 1e-6,
-    dual_feasibility_tolerance: 1e-6,
+    primal_feasibility_tolerance: 1e-9,
+    dual_feasibility_tolerance: 1e-9,
     simplex_iteration_limit: DEFAULT_PROFILE_HEURISTIC_SENTINEL,
     ipm_iteration_limit: 10_000,
     simplex_dual_edge_weight_strategy: 1, // Devex (default)
@@ -59,8 +59,8 @@ pub const FORWARD_PROFILE: HighsProfile = HighsProfile {
 /// See `docs/design/highs-backward-pass-tuning.md` for the empirical
 /// sweep that selected this minimal override.
 pub const BACKWARD_PROFILE: HighsProfile = HighsProfile {
-    primal_feasibility_tolerance: 1e-6,
-    dual_feasibility_tolerance: 1e-6,
+    primal_feasibility_tolerance: 1e-9,
+    dual_feasibility_tolerance: 1e-9,
     simplex_iteration_limit: DEFAULT_PROFILE_HEURISTIC_SENTINEL,
     ipm_iteration_limit: 10_000,
     simplex_dual_edge_weight_strategy: 1, // Devex (matches default)
@@ -70,11 +70,11 @@ pub const BACKWARD_PROFILE: HighsProfile = HighsProfile {
 
 /// Solver profile applied during policy simulation.
 ///
-/// All fields equal [`HighsProfile::default()`], preserving the historical
-/// hardcoded behaviour bit-for-bit.
+/// All fields equal [`HighsProfile::default()`], which uses the tightened
+/// `1e-9` primal/dual feasibility tolerances.
 pub const SIMULATION_PROFILE: HighsProfile = HighsProfile {
-    primal_feasibility_tolerance: 1e-6,
-    dual_feasibility_tolerance: 1e-6,
+    primal_feasibility_tolerance: 1e-9,
+    dual_feasibility_tolerance: 1e-9,
     simplex_iteration_limit: DEFAULT_PROFILE_HEURISTIC_SENTINEL,
     ipm_iteration_limit: 10_000,
     simplex_dual_edge_weight_strategy: 1, // Devex (default)
@@ -107,8 +107,8 @@ impl Phase {
 
 const _: () = {
     // FORWARD_PROFILE — all fields equal HighsProfile::default()
-    assert!(FORWARD_PROFILE.primal_feasibility_tolerance == 1e-6);
-    assert!(FORWARD_PROFILE.dual_feasibility_tolerance == 1e-6);
+    assert!(FORWARD_PROFILE.primal_feasibility_tolerance == 1e-9);
+    assert!(FORWARD_PROFILE.dual_feasibility_tolerance == 1e-9);
     assert!(FORWARD_PROFILE.simplex_iteration_limit == DEFAULT_PROFILE_HEURISTIC_SENTINEL);
     assert!(FORWARD_PROFILE.ipm_iteration_limit == 10_000);
     assert!(FORWARD_PROFILE.simplex_dual_edge_weight_strategy == 1);
@@ -116,8 +116,8 @@ const _: () = {
     assert!(FORWARD_PROFILE.simplex_price_strategy == 1);
 
     // BACKWARD_PROFILE — price=2 (RowHyperSparse), other fields equal default
-    assert!(BACKWARD_PROFILE.primal_feasibility_tolerance == 1e-6);
-    assert!(BACKWARD_PROFILE.dual_feasibility_tolerance == 1e-6);
+    assert!(BACKWARD_PROFILE.primal_feasibility_tolerance == 1e-9);
+    assert!(BACKWARD_PROFILE.dual_feasibility_tolerance == 1e-9);
     assert!(BACKWARD_PROFILE.simplex_iteration_limit == DEFAULT_PROFILE_HEURISTIC_SENTINEL);
     assert!(BACKWARD_PROFILE.ipm_iteration_limit == 10_000);
     assert!(BACKWARD_PROFILE.simplex_dual_edge_weight_strategy == 1);
@@ -125,8 +125,8 @@ const _: () = {
     assert!(BACKWARD_PROFILE.simplex_price_strategy == 2);
 
     // SIMULATION_PROFILE — all fields equal HighsProfile::default()
-    assert!(SIMULATION_PROFILE.primal_feasibility_tolerance == 1e-6);
-    assert!(SIMULATION_PROFILE.dual_feasibility_tolerance == 1e-6);
+    assert!(SIMULATION_PROFILE.primal_feasibility_tolerance == 1e-9);
+    assert!(SIMULATION_PROFILE.dual_feasibility_tolerance == 1e-9);
     assert!(SIMULATION_PROFILE.simplex_iteration_limit == DEFAULT_PROFILE_HEURISTIC_SENTINEL);
     assert!(SIMULATION_PROFILE.ipm_iteration_limit == 10_000);
     assert!(SIMULATION_PROFILE.simplex_dual_edge_weight_strategy == 1);

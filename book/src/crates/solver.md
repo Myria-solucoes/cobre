@@ -244,15 +244,15 @@ pub fn new() -> Result<Self, SolverError>
 `HighsSolver::new()` allocates a HiGHS handle via `cobre_highs_create()` and
 applies seven performance-tuned default options before returning:
 
-| Option                         | Value       | Rationale                                          |
-| ------------------------------ | ----------- | -------------------------------------------------- |
-| `solver`                       | `"simplex"` | Simplex is faster than IPM for warm-started LPs    |
-| `simplex_strategy`             | `4`         | Dual simplex; performs well on LP sequences        |
-| `presolve`                     | `"off"`     | Avoid presolve overhead on repeated small LPs      |
-| `parallel`                     | `"off"`     | Each thread owns one solver; no internal threads   |
-| `output_flag`                  | `false`     | Suppress HiGHS console output                      |
-| `primal_feasibility_tolerance` | `1e-7`      | Tighter than HiGHS default for numerical stability |
-| `dual_feasibility_tolerance`   | `1e-7`      | Same                                               |
+| Option                         | Value       | Rationale                                                       |
+| ------------------------------ | ----------- | --------------------------------------------------------------- |
+| `solver`                       | `"simplex"` | Simplex is faster than IPM for warm-started LPs                 |
+| `simplex_strategy`             | `4`         | Dual simplex; performs well on LP sequences                     |
+| `presolve`                     | `"off"`     | Avoid presolve overhead on repeated small LPs                   |
+| `parallel`                     | `"off"`     | Each thread owns one solver; no internal threads                |
+| `output_flag`                  | `false`     | Suppress HiGHS console output                                   |
+| `primal_feasibility_tolerance` | `1e-9`      | Tighter than the HiGHS default (`1e-7`) for numerical precision |
+| `dual_feasibility_tolerance`   | `1e-9`      | Same                                                            |
 
 If HiGHS handle creation or any option call fails, the handle is destroyed
 before returning `Err(SolverError::InternalError { .. })`.
@@ -420,12 +420,12 @@ overriding the profile.
 
 ### `SolveProfile` fields
 
-| Field                          | Type  | Units / meaning |
-|--------------------------------|-------|-----------------|
-| `primal_feasibility_tolerance` | `f64` | Absolute primal feasibility tolerance. Smaller values are stricter. |
-| `dual_feasibility_tolerance`   | `f64` | Absolute dual feasibility tolerance. Same strictness convention. |
+| Field                          | Type  | Units / meaning                                                                                                                                                                                                                                            |
+| ------------------------------ | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `primal_feasibility_tolerance` | `f64` | Absolute primal feasibility tolerance. Smaller values are stricter.                                                                                                                                                                                        |
+| `dual_feasibility_tolerance`   | `f64` | Absolute dual feasibility tolerance. Same strictness convention.                                                                                                                                                                                           |
 | `simplex_iteration_limit`      | `u32` | Per-attempt simplex iteration cap. The sentinel value `DEFAULT_PROFILE_HEURISTIC_SENTINEL` (`0`) signals the solver to use its historical per-call heuristic (`num_cols * 50`, capped at `100_000`). Any non-zero value is applied verbatim as a flat cap. |
-| `ipm_iteration_limit`          | `u32` | Per-attempt IPM iteration cap. The sentinel value `DEFAULT_PROFILE_IPM_UNBOUNDED_SENTINEL` (`0`) means no cap. Any positive value is applied verbatim. |
+| `ipm_iteration_limit`          | `u32` | Per-attempt IPM iteration cap. The sentinel value `DEFAULT_PROFILE_IPM_UNBOUNDED_SENTINEL` (`0`) means no cap. Any positive value is applied verbatim.                                                                                                     |
 
 `SolveProfile` is `Copy` and `PartialEq`, enabling the wrapper to compare
 the requested profile against the currently-applied profile and skip FFI
@@ -437,12 +437,12 @@ option-setter calls when nothing has changed.
 configuration bit-for-bit, so callers that never configure profiles see no
 behavioral change:
 
-| Field                          | Default value |
-|--------------------------------|---------------|
-| `primal_feasibility_tolerance` | `1e-9`        |
-| `dual_feasibility_tolerance`   | `1e-9`        |
+| Field                          | Default value                                                  |
+| ------------------------------ | -------------------------------------------------------------- |
+| `primal_feasibility_tolerance` | `1e-9`                                                         |
+| `dual_feasibility_tolerance`   | `1e-9`                                                         |
 | `simplex_iteration_limit`      | `0` (use heuristic — see `DEFAULT_PROFILE_HEURISTIC_SENTINEL`) |
-| `ipm_iteration_limit`          | `10_000`      |
+| `ipm_iteration_limit`          | `10_000`                                                       |
 
 ### `ProfiledSolver<S>` wrapper
 

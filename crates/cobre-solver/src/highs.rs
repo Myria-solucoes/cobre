@@ -66,8 +66,8 @@ pub struct HighsProfile {
 impl Default for HighsProfile {
     fn default() -> Self {
         Self {
-            primal_feasibility_tolerance: 1e-6,
-            dual_feasibility_tolerance: 1e-6,
+            primal_feasibility_tolerance: 1e-9,
+            dual_feasibility_tolerance: 1e-9,
             simplex_iteration_limit: DEFAULT_PROFILE_HEURISTIC_SENTINEL,
             ipm_iteration_limit: 10_000,
             simplex_dual_edge_weight_strategy: 1,
@@ -179,11 +179,11 @@ fn default_options() -> [DefaultOption; 13] {
         },
         DefaultOption {
             name: c"primal_feasibility_tolerance",
-            value: OptionValue::Double(1e-6),
+            value: OptionValue::Double(1e-9),
         },
         DefaultOption {
             name: c"dual_feasibility_tolerance",
-            value: OptionValue::Double(1e-6),
+            value: OptionValue::Double(1e-9),
         },
         DefaultOption {
             name: c"simplex_dual_edge_weight_strategy",
@@ -313,8 +313,8 @@ impl HighsSolver {
     /// | `presolve`                                  | `"off"`     | string |
     /// | `parallel`                                  | `"off"`     | string |
     /// | `output_flag`                               | `0`         | bool   |
-    /// | `primal_feasibility_tolerance`              | `1e-7`      | double |
-    /// | `dual_feasibility_tolerance`                | `1e-7`      | double |
+    /// | `primal_feasibility_tolerance`              | `1e-9`      | double |
+    /// | `dual_feasibility_tolerance`                | `1e-9`      | double |
     /// | `simplex_dual_edge_weight_strategy`         | `1`         | int    |
     /// | `dual_simplex_cost_perturbation_multiplier` | `0.0`       | double |
     /// | `simplex_initial_condition_check`           | `0`         | bool   |
