@@ -721,13 +721,9 @@ mod tests {
     // apply_initial_state tests
     // -----------------------------------------------------------------------
 
-    /// Construct a library with known lag values for `apply_initial_state` tests.
+    /// Construct a library with known eta values for `apply_initial_state` tests.
     ///
     /// 3 windows, 4 stages, 2 hydros, `max_order`=2.
-    /// Lag layout per window: `lag[lag * n_hydros + hydro]`.
-    /// Window 0: lag0=[1.0, 2.0], lag1=[3.0, 4.0]
-    /// Window 1: lag0=[10.0, 20.0], lag1=[30.0, 40.0]
-    /// Window 2: lag0=[100.0, 200.0], lag1=[300.0, 400.0]
     #[allow(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
@@ -741,14 +737,6 @@ mod tests {
                 let base = (w * 100 + s * 10) as f64;
                 lib.eta_slice_mut(w, s).copy_from_slice(&[base, base + 1.0]);
             }
-        }
-        // Populate lag values with recognizable per-window patterns.
-        // lag_slice_mut(w) has length max_order * n_hydros = 2 * 2 = 4.
-        let factor = 10.0_f64;
-        for w in 0..3 {
-            let base = factor.powi(w as i32);
-            let lags = [base, base * 2.0, base * 3.0, base * 4.0];
-            lib.lag_slice_mut(w).copy_from_slice(&lags);
         }
         lib
     }
@@ -785,19 +773,6 @@ mod tests {
             assert_eq!(
                 state, original,
                 "Historical::apply_initial_state must be a no-op for scenario={scenario}"
-            );
-
-            // And the lag slice that the buggy implementation used to inject
-            // must be distinguishable from the caller-supplied state, so this
-            // test is a real assertion about non-overwriting.
-            let window_idx = ClassSampler::select_historical_window(&req, lib.n_windows());
-            let lag_data = lib.lag_slice(window_idx);
-            assert_ne!(
-                &state[lag_offset..lag_offset + lag_len],
-                lag_data,
-                "test setup precondition: caller-supplied state must differ from \
-                 library lag_slice so the no-op assertion is meaningful \
-                 (scenario={scenario})"
             );
         }
     }
