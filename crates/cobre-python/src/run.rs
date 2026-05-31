@@ -19,21 +19,47 @@
 //! subprocess.
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 
 use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
+use cobre_core::TrainingEvent;
+
 use cobre_comm::LocalBackend;
 use cobre_io::output::simulation_writer::{ScenarioWritePayload, SimulationParquetWriter};
 use cobre_io::{ParquetWriterConfig, SolverStatsRow};
 use cobre_sddp::{
-    build_hydro_model_summary, build_provenance_report, build_stochastic_summary,
-    prepare_stochastic, ArOrderSummary, HydroModelSummary, ModelProvenanceReport, SolverStatsDelta,
-    StochasticSource, StochasticSummary, StudyParams, StudySetup, DEFAULT_SEED,
+    ArOrderSummary, DEFAULT_SEED, HydroModelSummary, ModelProvenanceReport, SolverStatsDelta,
+    StochasticSource, StochasticSummary, StudyParams, StudySetup, build_hydro_model_summary,
+    build_provenance_report, build_stochastic_summary, prepare_stochastic,
 };
 use cobre_solver::HighsSolver;
+
+/// Error returned by [`run_inner`].
+///
+/// Most failures carry a descriptive `String` (mapped to the appropriate Python
+/// exception type by the caller). A user `on_iteration` callback that raises — or
+/// a `KeyboardInterrupt` surfaced by `py.check_signals()` — carries the original
+/// [`PyErr`] verbatim so its type and message reach Python unchanged, after the
+/// run's partial artifacts have already been written.
+#[derive(Debug)]
+enum RunError {
+    /// A descriptive message mapped to a Python exception type by the caller.
+    Message(String),
+    /// A `PyErr` captured from the streaming callback (or `check_signals`),
+    /// propagated after artifacts are written.
+    Callback(PyErr),
+}
+
+impl From<String> for RunError {
+    fn from(msg: String) -> Self {
+        RunError::Message(msg)
+    }
+}
 
 /// Summary returned by [`run_inner`] on success.
 struct RunSummary {
@@ -170,28 +196,26 @@ struct TrainingPhaseResult {
     started_at: String,
 }
 
-/// Run the training phase: solver init, train, write outputs.
-fn run_training_phase_py(
-    setup: &mut StudySetup,
+/// Assemble a [`TrainingPhaseResult`] from a finished training run and its
+/// full event stream.
+///
+/// Shared by both the non-streaming path ([`run_training_phase_py`]) and the
+/// streaming path ([`run_training_phase_py_streaming`]) so the
+/// `convergence_records` and solve-stats carrier are built identically
+/// regardless of how the events were collected. `events` must be the complete
+/// set of [`TrainingEvent`]s emitted during the run (the streaming drain thread
+/// collects every event in addition to forwarding boundary summaries to the
+/// callback), so `build_training_output` sees exactly what the non-streaming
+/// path sees.
+fn build_training_phase_result(
+    setup: &StudySetup,
+    training_result: cobre_sddp::TrainingResult,
+    events: &[TrainingEvent],
+    error: Option<cobre_sddp::SddpError>,
+    started_at: String,
     n_threads: usize,
-) -> Result<TrainingPhaseResult, String> {
-    let started_at = cobre_io::now_iso8601();
-    let mut solver = HighsSolver::new().map_err(|e| format!("HiGHS initialisation failed: {e}"))?;
-    let (event_tx, event_rx) = mpsc::channel();
-    let training_outcome = setup
-        .train(
-            &mut solver,
-            &LocalBackend,
-            n_threads,
-            HighsSolver::new,
-            Some(event_tx),
-            None,
-        )
-        .map_err(|e| format!("training error: {e}"))?;
-    let training_result = training_outcome.result;
-
-    let events: Vec<_> = event_rx.try_iter().collect();
-    let mut training_output = setup.build_training_output(&training_result, &events);
+) -> TrainingPhaseResult {
+    let mut training_output = setup.build_training_output(&training_result, events);
 
     // Populate the solve-stats carrier. `build_training_output` leaves it
     // defaulted (and already set `final_upper_bound_std`, which must remain
@@ -215,12 +239,202 @@ fn run_training_phase_py(
         parallelism: Some(u32::try_from(n_threads).unwrap_or(u32::MAX)),
     };
 
-    Ok(TrainingPhaseResult {
+    TrainingPhaseResult {
         result: training_result,
         output: training_output,
-        error: training_outcome.error,
+        error,
         started_at,
-    })
+    }
+}
+
+/// Run the training phase: solver init, train, write outputs.
+///
+/// This is the no-callback path. Events are collected with `event_rx.try_iter()`
+/// AFTER `train` returns, exactly as the historical implementation did, so the
+/// no-callback golden parity test stays bit-identical. The streaming variant
+/// ([`run_training_phase_py_streaming`]) is used only when an `on_iteration`
+/// callback is provided.
+fn run_training_phase_py(
+    setup: &mut StudySetup,
+    n_threads: usize,
+) -> Result<TrainingPhaseResult, String> {
+    let started_at = cobre_io::now_iso8601();
+    let mut solver = HighsSolver::new().map_err(|e| format!("HiGHS initialisation failed: {e}"))?;
+    let (event_tx, event_rx) = mpsc::channel();
+    let training_outcome = setup
+        .train(
+            &mut solver,
+            &LocalBackend,
+            n_threads,
+            HighsSolver::new,
+            Some(event_tx),
+            None,
+        )
+        .map_err(|e| format!("training error: {e}"))?;
+
+    let events: Vec<_> = event_rx.try_iter().collect();
+    Ok(build_training_phase_result(
+        setup,
+        training_outcome.result,
+        &events,
+        training_outcome.error,
+        started_at,
+        n_threads,
+    ))
+}
+
+/// Run the training phase with a Python `on_iteration` callback, streaming
+/// boundary events to Python as they are produced.
+///
+/// # Design
+///
+/// `train` runs on this thread with the GIL released (the caller invokes
+/// `run_inner` inside `py.detach`). A dedicated drain thread owns the receiver,
+/// a clone of the cooperative `shutdown_flag`, and the `Py<PyAny>` callback. For
+/// every event it receives the drain thread:
+///
+/// 1. pushes the event into a local `Vec<TrainingEvent>` so the full event set
+///    is recovered on join (`build_training_output` needs every event for
+///    `convergence.parquet` parity — identical to the non-streaming path);
+/// 2. reacquires the GIL via [`Python::attach`] to (a) poll `py.check_signals()`
+///    — an `Err` (e.g. `KeyboardInterrupt`) sets the shutdown flag and is
+///    remembered for propagation; (b) convert boundary `IterationSummary`
+///    events via [`iteration_summary_to_dict`] and, on `Some(dict)`, invoke the
+///    callback. A truthy callback return sets the shutdown flag (cooperative
+///    stop); a callback that raises captures the `PyErr` and sets the shutdown
+///    flag (it is propagated as the run's error after artifacts are written —
+///    the drain thread never panics).
+///
+/// The callback runs ONLY inside `Python::attach` in this drain thread, at
+/// iteration boundaries — never in the solver's hot LP loop (P2). The solver
+/// loop polls `shutdown_flag` at iteration boundaries and exits gracefully,
+/// writing whatever partial artifacts it completed (P3).
+///
+/// # Errors
+///
+/// Returns `Err(String)` on `HiGHS` init failure, a `train` error, or a drain
+/// thread panic. A captured callback `PyErr` (or `KeyboardInterrupt`) is NOT an
+/// error here — it is returned alongside the phase result so the caller can
+/// propagate it *after* writing artifacts.
+fn run_training_phase_py_streaming(
+    setup: &mut StudySetup,
+    n_threads: usize,
+    on_iteration: Py<PyAny>,
+) -> Result<(TrainingPhaseResult, Option<PyErr>), String> {
+    let started_at = cobre_io::now_iso8601();
+    let mut solver = HighsSolver::new().map_err(|e| format!("HiGHS initialisation failed: {e}"))?;
+    let (event_tx, event_rx) = mpsc::channel::<TrainingEvent>();
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
+
+    let drain_flag = Arc::clone(&shutdown_flag);
+    let drain_handle =
+        std::thread::spawn(move || drain_training_events(&event_rx, &drain_flag, &on_iteration));
+
+    let training_outcome = setup.train(
+        &mut solver,
+        &LocalBackend,
+        n_threads,
+        HighsSolver::new,
+        Some(event_tx),
+        Some(&shutdown_flag),
+    );
+
+    // The channel is already closed here: `event_tx` was moved into
+    // `setup.train`, whose `TrainingSession` owns the only remaining sender and
+    // drops it in its destructor before `train` returns — so the drain thread's
+    // `recv()` loop has already terminated. Join, then surface a training error
+    // FIRST if there is one (it is more diagnostic than a drain-thread
+    // bookkeeping failure); a drain panic only wins when training itself
+    // succeeded.
+    let drain_result = drain_handle.join();
+    let training_outcome = training_outcome.map_err(|e| format!("training error: {e}"))?;
+    let (events, captured_pyerr) = drain_result.map_err(|_| "drain thread panicked".to_string())?;
+
+    let phase = build_training_phase_result(
+        setup,
+        training_outcome.result,
+        &events,
+        training_outcome.error,
+        started_at,
+        n_threads,
+    );
+
+    Ok((phase, captured_pyerr))
+}
+
+/// Drain-thread body: collect every event, forward boundary summaries to the
+/// Python callback under the GIL, and honor early-stop / Ctrl-C / raising-callback
+/// requests via the shared `shutdown_flag`.
+///
+/// Returns the complete event collection (for `build_training_output` parity)
+/// and the first captured `PyErr` (a `KeyboardInterrupt` from `check_signals`
+/// or an exception raised by the callback), if any. Never panics: a raising
+/// callback is captured, not unwound.
+fn drain_training_events(
+    event_rx: &mpsc::Receiver<TrainingEvent>,
+    shutdown_flag: &Arc<AtomicBool>,
+    on_iteration: &Py<PyAny>,
+) -> (Vec<TrainingEvent>, Option<PyErr>) {
+    use std::sync::atomic::Ordering;
+
+    let mut collected: Vec<TrainingEvent> = Vec::new();
+    let mut captured_pyerr: Option<PyErr> = None;
+
+    while let Ok(event) = event_rx.recv() {
+        // Dispatch BEFORE pushing so the callback borrows `event` directly; the
+        // event is then moved into the collection for `build_training_output`
+        // parity (every event must reach it). Skip GIL reacquisition entirely
+        // once a stop has been requested (truthy callback, Ctrl-C, or a raising
+        // callback) — keep draining only to recover remaining events.
+        //
+        // `Relaxed` suffices for `shutdown_flag`: it is a one-way latch (only
+        // ever flipped `false` -> `true`). The solver observes it at a later
+        // iteration boundary; both outcomes (stop now, or one extra iteration
+        // before the store is seen) are correct under the cooperative contract,
+        // so no acquire/release synchronization is needed.
+        if !shutdown_flag.load(Ordering::Relaxed) {
+            Python::attach(|py| {
+                // A stop request sets the flag and records the first PyErr (if
+                // any) so it can be propagated after artifacts are written.
+                let mut request_stop = |err: Option<PyErr>| {
+                    shutdown_flag.store(true, Ordering::Relaxed);
+                    if let Some(err) = err {
+                        if captured_pyerr.is_none() {
+                            captured_pyerr = Some(err);
+                        }
+                    }
+                };
+
+                // (1) Cooperative Ctrl-C: a pending signal surfaces here as Err.
+                if let Err(err) = py.check_signals() {
+                    request_stop(Some(err));
+                    return;
+                }
+
+                // (2) Boundary summary → callback. Non-boundary events convert
+                // to None and are skipped (they are still collected below).
+                match iteration_summary_to_dict(py, &event) {
+                    Ok(Some(dict)) => match on_iteration.bind(py).call1((dict,)) {
+                        Ok(ret) => match ret.is_truthy() {
+                            Ok(true) => request_stop(None),
+                            Ok(false) => {}
+                            Err(err) => request_stop(Some(err)),
+                        },
+                        Err(err) => request_stop(Some(err)),
+                    },
+                    Ok(None) => {}
+                    // Conversion failure is unexpected; treat it like a callback
+                    // error so it surfaces rather than being silently dropped.
+                    Err(err) => request_stop(Some(err)),
+                }
+            });
+        }
+
+        // Parity: every event must reach `build_training_output`.
+        collected.push(event);
+    }
+
+    (collected, captured_pyerr)
 }
 
 /// Write all training artifacts: policy checkpoint, training results, solver stats,
@@ -487,7 +701,8 @@ fn run_inner(
     n_threads: usize,
     skip_simulation: bool,
     overrides: Option<serde_json::Map<String, serde_json::Value>>,
-) -> Result<RunSummary, String> {
+    on_iteration: Option<Py<PyAny>>,
+) -> Result<RunSummary, RunError> {
     // Single-source case load: pick up the System and the auxiliary
     // parquet/JSON rows in one validated pass so downstream stages
     // (hydro models, scalar parameters) reuse the parsed data instead of
@@ -595,11 +810,11 @@ fn run_inner(
         if config.policy.mode == cobre_io::PolicyMode::WarmStart {
             let policy_dir = output_dir.join(&setup.policy_path);
             if !policy_dir.exists() {
-                return Err(format!(
+                return Err(RunError::Message(format!(
                     "Policy directory not found: {}. Cannot warm-start \
                      without a prior policy.",
                     policy_dir.display()
-                ));
+                )));
             }
 
             let checkpoint = cobre_io::output::policy::read_policy_checkpoint(&policy_dir)
@@ -629,11 +844,11 @@ fn run_inner(
         } else if config.policy.mode == cobre_io::PolicyMode::Resume {
             let policy_dir = output_dir.join(&setup.policy_path);
             if !policy_dir.exists() {
-                return Err(format!(
+                return Err(RunError::Message(format!(
                     "Policy directory not found: {}. Cannot resume \
                      without a prior checkpoint.",
                     policy_dir.display()
-                ));
+                )));
             }
 
             let checkpoint = cobre_io::output::policy::read_policy_checkpoint(&policy_dir)
@@ -678,7 +893,15 @@ fn run_inner(
             cobre_sddp::inject_boundary_cuts(&mut setup, &boundary_records);
         }
 
-        let training = run_training_phase_py(&mut setup, n_threads)?;
+        // When a callback is provided, use the streaming drain thread; otherwise
+        // keep the historical "collect after return" path bit-identical so the
+        // no-callback golden parity test is preserved (P5). A captured callback
+        // error (or KeyboardInterrupt) is propagated only AFTER artifacts are
+        // written, so a stopped/raising run still persists what it completed.
+        let (training, callback_error) = match on_iteration {
+            Some(callback) => run_training_phase_py_streaming(&mut setup, n_threads, callback)?,
+            None => (run_training_phase_py(&mut setup, n_threads)?, None),
+        };
 
         write_training_artifacts(
             &output_dir,
@@ -704,11 +927,18 @@ fn run_inner(
             .map_err(|e| format!("failed to write fpha_hyperplanes: {e}"))?;
         }
 
+        // Propagate a captured callback exception (or KeyboardInterrupt) only
+        // now that all training artifacts have been written, so a raising or
+        // Ctrl-C-stopped run still persists its partial metadata/parquets (P3).
+        if let Some(err) = callback_error {
+            return Err(RunError::Callback(err));
+        }
+
         if let Some(ref e) = training.error {
-            return Err(format!(
+            return Err(RunError::Message(format!(
                 "training failed after {} iterations: {e}",
                 training.result.iterations
-            ));
+            )));
         }
 
         let simulation = if should_simulate {
@@ -742,11 +972,11 @@ fn run_inner(
             // Simulation-only mode: load policy and run simulation.
             let policy_dir = output_dir.join(&setup.policy_path);
             if !policy_dir.exists() {
-                return Err(format!(
+                return Err(RunError::Message(format!(
                     "Policy directory not found: {}. Cannot run simulation-only \
                      mode without a trained policy.",
                     policy_dir.display()
-                ));
+                )));
             }
 
             let checkpoint = cobre_io::output::policy::read_policy_checkpoint(&policy_dir)
@@ -962,6 +1192,56 @@ fn provenance_to_dict<'py>(
     Ok(dict)
 }
 
+/// Convert a boundary [`TrainingEvent::IterationSummary`] into a Python dict.
+///
+/// Only the end-of-iteration [`TrainingEvent::IterationSummary`] event crosses
+/// into Python; every other variant returns `Ok(None)` and is filtered out by
+/// the caller. This keeps GIL reacquisition rare (only the per-iteration
+/// boundary summary is forwarded, never the high-frequency intra-iteration or
+/// per-worker events).
+///
+/// On a match, returns `Ok(Some(dict))` with keys:
+/// - `"kind"` = `"iteration"`
+/// - `"iteration"` (`u64`)
+/// - `"lower_bound"` (`f64`)
+/// - `"upper_bound"` (`f64`)
+/// - `"gap"` (`f64`)
+/// - `"wall_time_ms"` (`u64`)
+///
+/// ## Unit of `gap`
+///
+/// `gap` is the **raw relative** optimality gap exactly as stored on the event
+/// (`(upper_bound - lower_bound) / |upper_bound|`), **not** multiplied by 100.
+/// This is intentionally distinct from the monolithic `run.run()` summary,
+/// which exposes `gap_percent = gap * 100`. The per-iteration callback mirrors
+/// the raw event field; the Python side must scale to a percentage itself if a
+/// percentage is desired.
+fn iteration_summary_to_dict<'py>(
+    py: Python<'py>,
+    event: &cobre_core::TrainingEvent,
+) -> PyResult<Option<Bound<'py, PyDict>>> {
+    match event {
+        cobre_core::TrainingEvent::IterationSummary {
+            iteration,
+            lower_bound,
+            upper_bound,
+            gap,
+            wall_time_ms,
+            ..
+        } => {
+            let dict = PyDict::new(py);
+            dict.set_item("kind", "iteration")?;
+            dict.set_item("iteration", *iteration)?;
+            dict.set_item("lower_bound", *lower_bound)?;
+            dict.set_item("upper_bound", *upper_bound)?;
+            dict.set_item("gap", *gap)?;
+            dict.set_item("wall_time_ms", *wall_time_ms)?;
+            Ok(Some(dict))
+        }
+        _ => Ok(None),
+    }
+}
+
 /// Load a case, train an SDDP policy, optionally simulate, and write results.
 /// GIL is released for the entire Rust computation.
 /// Returns a dict with keys: `"converged"`, `"iterations"`, `"lower_bound"`, `"upper_bound"`,
@@ -973,9 +1253,18 @@ fn provenance_to_dict<'py>(
 /// run; the effective (post-override) config is what every output reflects. The
 /// dict is converted to a `serde_json::Map` here under the GIL, before
 /// `py.detach`. `None` and an empty map both reproduce the no-override behavior.
+///
+/// `on_iteration` is an optional Python callable invoked once per training
+/// iteration boundary with a `dict` describing the iteration (`"iteration"`,
+/// `"lower_bound"`, `"upper_bound"`, `"gap"`, `"wall_time_ms"`). A truthy return
+/// requests a cooperative stop at the next iteration boundary; the run still
+/// writes its (partial) artifacts. A callback that raises propagates as the
+/// run's exception after artifacts are written. The callback runs in a dedicated
+/// drain thread under the GIL — never in the solver's hot loop. When `None`
+/// (the default), the run is bit-identical to the no-callback path.
 #[allow(clippy::needless_pass_by_value)]
 #[pyfunction]
-#[pyo3(signature = (case_dir, output_dir=None, threads=None, skip_simulation=None, config_overrides=None))]
+#[pyo3(signature = (case_dir, output_dir=None, threads=None, skip_simulation=None, config_overrides=None, on_iteration=None))]
 pub fn run(
     py: Python<'_>,
     case_dir: PathBuf,
@@ -983,6 +1272,7 @@ pub fn run(
     threads: Option<u32>,
     skip_simulation: Option<bool>,
     config_overrides: Option<Bound<'_, PyDict>>,
+    on_iteration: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     if !case_dir.exists() {
         return Err(PyOSError::new_err(format!(
@@ -1000,10 +1290,14 @@ pub fn run(
         .map(|dict| crate::convert::pydict_to_json_map(&dict))
         .transpose()?;
 
-    let result: Result<RunSummary, String> = py.detach(move || {
+    // `on_iteration` is already a `Py<PyAny>` (a GIL-independent owned handle),
+    // so it can cross the `py.detach` boundary into the drain thread and be
+    // re-bound under `Python::attach`.
+    let result: Result<RunSummary, RunError> = py.detach(move || {
         run_in_scoped_pool(threads, |n| {
-            run_inner(&case_dir, resolved_output, n, skip, overrides)
-        })?
+            run_inner(&case_dir, resolved_output, n, skip, overrides, on_iteration)
+        })
+        .map_err(RunError::Message)?
     });
 
     match result {
@@ -1052,7 +1346,10 @@ pub fn run(
 
             Ok(dict.into())
         }
-        Err(msg) => {
+        // A captured callback exception (or KeyboardInterrupt) is returned
+        // verbatim so its original type and message reach Python unchanged.
+        Err(RunError::Callback(err)) => Err(err),
+        Err(RunError::Message(msg)) => {
             let err_fn: fn(String) -> PyErr = if msg.as_str().starts_with("output write error")
                 || msg.as_str().starts_with("policy checkpoint error")
             {
@@ -1082,10 +1379,117 @@ pub fn run(
 mod tests {
     use std::path::Path;
 
-    use cobre_sddp::setup::prepare_stochastic;
     use cobre_sddp::SolverStatsDelta;
+    use cobre_sddp::setup::prepare_stochastic;
 
-    use super::{aggregate_training_solve_stats, run_in_scoped_pool, run_inner};
+    use cobre_core::TrainingEvent;
+    use cobre_core::training_event::{WorkerPhaseTimings, WorkerTimingPhase};
+    use pyo3::prelude::*;
+    use pyo3::types::PyDict;
+
+    use super::{
+        aggregate_training_solve_stats, iteration_summary_to_dict, run_in_scoped_pool, run_inner,
+    };
+
+    #[test]
+    fn iteration_summary_to_dict_maps_fields() {
+        // Initialize the interpreter in the standalone test binary: under the
+        // `extension-module` feature, auto-initialize is ignored, so we must
+        // prepare it explicitly before attaching.
+        Python::initialize();
+
+        let event = TrainingEvent::IterationSummary {
+            iteration: 12,
+            lower_bound: 100.0,
+            upper_bound: 110.0,
+            gap: 0.0909,
+            wall_time_ms: 1000,
+            iteration_time_ms: 200,
+            forward_ms: 80,
+            backward_ms: 100,
+            lp_solves: 240,
+            solve_time_ms: 45.2,
+            lower_bound_eval_ms: 10,
+            fwd_setup_time_ms: 2,
+            fwd_load_imbalance_ms: 2,
+            fwd_scheduling_overhead_ms: 1,
+        };
+
+        Python::attach(|py| {
+            let dict = iteration_summary_to_dict(py, &event)
+                .expect("conversion must not error")
+                .expect("IterationSummary must yield Some(dict)");
+
+            let kind: String = extract_item(&dict, "kind");
+            assert_eq!(kind, "iteration");
+
+            let iteration: u64 = extract_item(&dict, "iteration");
+            assert_eq!(iteration, 12);
+
+            let lower_bound: f64 = extract_item(&dict, "lower_bound");
+            assert_eq!(lower_bound, 100.0);
+
+            let upper_bound: f64 = extract_item(&dict, "upper_bound");
+            assert_eq!(upper_bound, 110.0);
+
+            let gap: f64 = extract_item(&dict, "gap");
+            // Raw relative gap, NOT scaled by 100.
+            assert!((gap - 0.0909).abs() < 1e-9);
+
+            let wall_time_ms: u64 = extract_item(&dict, "wall_time_ms");
+            assert_eq!(wall_time_ms, 1000);
+        });
+    }
+
+    #[test]
+    fn iteration_summary_to_dict_filters_other_variants() {
+        Python::initialize();
+
+        let convergence = TrainingEvent::ConvergenceUpdate {
+            iteration: 1,
+            lower_bound: 100.0,
+            upper_bound: 110.0,
+            upper_bound_std: 5.0,
+            gap: 0.0909,
+            rules_evaluated: vec![],
+        };
+        let worker_timing = TrainingEvent::WorkerTiming {
+            rank: 0,
+            worker_id: 2,
+            iteration: 1,
+            phase: WorkerTimingPhase::Backward,
+            timings: WorkerPhaseTimings::default(),
+        };
+
+        Python::attach(|py| {
+            assert!(
+                iteration_summary_to_dict(py, &convergence)
+                    .expect("conversion must not error")
+                    .is_none(),
+                "ConvergenceUpdate must be filtered"
+            );
+            assert!(
+                iteration_summary_to_dict(py, &worker_timing)
+                    .expect("conversion must not error")
+                    .is_none(),
+                "WorkerTiming must be filtered"
+            );
+        });
+    }
+
+    /// Extract a typed value for `key` from a `PyDict`, panicking on absence or
+    /// type mismatch (test-only helper).
+    fn extract_item<'py, T>(dict: &Bound<'py, PyDict>, key: &str) -> T
+    where
+        T: for<'a> pyo3::FromPyObject<'a, 'py>,
+        for<'a> <T as pyo3::FromPyObject<'a, 'py>>::Error: std::fmt::Debug,
+    {
+        dict.get_item(key)
+            .expect("dict lookup must not error")
+            .unwrap_or_else(|| panic!("missing key: {key}"))
+            .extract()
+            .expect("value must extract to requested type")
+    }
 
     #[test]
     fn aggregate_training_solve_stats_folds_and_splits_by_phase() {
@@ -1179,7 +1583,7 @@ mod tests {
             std::env::temp_dir().join(format!("cobre_py_parity_{}", std::process::id()));
         std::fs::create_dir_all(&output_dir).expect("create output dir");
 
-        run_inner(&case_dir, output_dir.clone(), 1, false, None)
+        run_inner(&case_dir, output_dir.clone(), 1, false, None, None)
             .expect("run_inner must succeed for 1dtoy via Python path");
 
         let training = cobre_io::read_training_metadata(&output_dir.join("training/metadata.json"))
@@ -1344,15 +1748,22 @@ mod tests {
         .expect("write edited config.json");
 
         std::fs::create_dir_all(&edited_out).expect("create edited out dir");
-        run_inner(&edited_case, edited_out.clone(), 1, false, None)
+        run_inner(&edited_case, edited_out.clone(), 1, false, None, None)
             .expect("edited-config run must succeed");
 
         // (b) Override path: run the unedited case with the equivalent override.
         let mut overrides = serde_json::Map::new();
         overrides.insert("training.tree_seed".to_string(), serde_json::json!(7));
         std::fs::create_dir_all(&override_out).expect("create override out dir");
-        run_inner(&case_dir, override_out.clone(), 1, false, Some(overrides))
-            .expect("override run must succeed");
+        run_inner(
+            &case_dir,
+            override_out.clone(),
+            1,
+            false,
+            Some(overrides),
+            None,
+        )
+        .expect("override run must succeed");
 
         let edited_meta =
             cobre_io::read_training_metadata(&edited_out.join("training/metadata.json"))

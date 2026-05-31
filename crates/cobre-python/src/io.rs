@@ -28,8 +28,8 @@ use pyo3::types::{PyDict, PyList};
 
 use cobre_io::LoadError;
 use cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts;
-use cobre_sddp::validate_phases::{prep_phase_metadata, PrepPhase};
-use cobre_sddp::{prepare_stochastic, StudyParams};
+use cobre_sddp::validate_phases::{PrepPhase, prep_phase_metadata};
+use cobre_sddp::{StudyParams, prepare_stochastic};
 
 use crate::model::PySystem;
 

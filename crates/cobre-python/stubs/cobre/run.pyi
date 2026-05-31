@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Any, Mapping, Optional, Union
+from typing import Any, Callable, Mapping, Optional, Union
 
 def run(
     case_dir: Union[str, Path],
@@ -7,4 +7,5 @@ def run(
     threads: Optional[int] = None,
     skip_simulation: Optional[bool] = None,
     config_overrides: Optional[Mapping[str, Any]] = None,
+    on_iteration: Optional[Callable[[dict[str, Any]], Optional[bool]]] = None,
 ) -> dict[str, Any]: ...
