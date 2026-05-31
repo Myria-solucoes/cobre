@@ -675,7 +675,7 @@ pub(crate) fn run_simulation_phase_py(
         setup.simulation_config(),
         &LocalBackend,
     )
-    .map_err(|e| format!("simulation cost aggregation error: {e}"))?;
+    .map_err(|e| format!("simulation error: cost aggregation: {e}"))?;
 
     let parallelism = u32::try_from(n_threads).unwrap_or(u32::MAX);
     sim_out.cost = Some(cobre_io::MetadataCost {
@@ -704,7 +704,7 @@ pub(crate) fn run_simulation_phase_py(
             })
             .collect();
         cobre_io::write_simulation_solver_stats(output_dir, &rows)
-            .map_err(|e| format!("simulation solver stats output: {e}"))?;
+            .map_err(|e| format!("output write error: simulation solver stats output: {e}"))?;
     }
 
     let sim_summary = SimSummary {
@@ -735,7 +735,7 @@ pub(crate) fn run_simulation_phase_py(
         },
     };
     cobre_io::write_simulation_results(output_dir, &sim_out, &sim_ctx)
-        .map_err(|e| format!("simulation results output: {e}"))?;
+        .map_err(|e| format!("output write error: simulation results output: {e}"))?;
 
     Ok(sim_summary)
 }
