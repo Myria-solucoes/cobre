@@ -307,7 +307,7 @@ of each stage, see
   aggressive than `"level1"` because ties resolve to a single cut
   per state.
 - `"domination"` -- same value-evaluation rule as `"level1"` but
-  uses the `threshold` field as the tolerance. Most aggressive
+  uses `domination_epsilon` as the tolerance. Most aggressive
   variant; `domination_epsilon` is required at config load time.
 
 Example with both pipeline stages:

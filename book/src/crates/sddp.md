@@ -506,7 +506,7 @@ println!(
 
 ## Per-phase configuration
 
-`cobre-sddp` defines three algorithmic phases and associates a `SolveProfile`
+`cobre-sddp` defines three algorithmic phases and associates a `HighsProfile`
 with each one. This lets the LP solver be tuned differently for training and
 simulation without modifying call sites.
 
@@ -527,7 +527,7 @@ pub enum Phase {
 | `Simulation` | Policy simulation: evaluating the trained policy on out-of-sample scenarios. |
 
 `Phase` is `Copy + Eq`, so it can be used in `match` patterns and stored
-cheaply by value. `Phase::profile()` returns the `SolveProfile` that should be
+cheaply by value. `Phase::profile()` returns the `HighsProfile` that should be
 applied when entering that phase.
 
 ### Named profile constants
@@ -540,13 +540,15 @@ Three `pub const` values define the per-phase solver configurations:
 | `BACKWARD_PROFILE`   | `Phase::Backward` entry   |
 | `SIMULATION_PROFILE` | `Phase::Simulation` entry |
 
-In the current release all three constants equal `SolveProfile::default()`
-field-for-field, preserving bit-for-bit behavioral parity with the historical
-hard-coded solver tolerances. Compile-time assertions in `solver_phase.rs`
-catch any future drift between the constants and their documented values.
+In the current release `FORWARD_PROFILE` and `SIMULATION_PROFILE` equal
+`HighsProfile::default()` field-for-field, while `BACKWARD_PROFILE` overrides
+`simplex_price_strategy` to `2` (`RowHyperSparse`) to exploit sparsity on the
+backward LPs; all other backward fields match the default. Compile-time
+assertions in `solver_phase.rs` catch any future drift between the constants
+and their documented values.
 
-Future tuning — particularly of `BACKWARD_PROFILE` to reduce backward-pass
-load imbalance — will update these constants without changing the call sites
+Further tuning — particularly of `BACKWARD_PROFILE` to reduce backward-pass
+load imbalance — would update these constants without changing the call sites
 or the `Phase` API.
 
 ### Orchestrator call sites

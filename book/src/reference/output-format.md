@@ -292,8 +292,12 @@ Per-iteration convergence log. One row per training iteration. 13 columns.
 
 ### `training/timing/iterations.parquet`
 
-Per-iteration wall-clock timing breakdown by phase. One row per training
-iteration. 16 columns. All columns are non-nullable.
+Per-iteration wall-clock timing breakdown by phase. 18 columns. Emitted as one
+row per `(iteration, rank)` for rank-only sequential values (`worker_id` is
+NULL) and one row per `(iteration, rank, worker_id)` for per-worker
+parallel-region values; `SUM(col) GROUP BY iteration` recovers the
+per-iteration total for each timing column. `rank` and `worker_id` are nullable
+Int32; the 15 timing columns are non-nullable.
 
 The top-level non-overlapping phases are: `forward_wall_ms`,
 `backward_wall_ms`, `cut_selection_ms`, `mpi_allreduce_ms`, and
@@ -309,6 +313,8 @@ attributed to any phase is `overhead_ms`.
 | Column                       | Type  | Nullable | Description                                                                                                                                                                                 |
 | ---------------------------- | ----- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `iteration`                  | Int32 | No       | Training iteration number (1-based).                                                                                                                                                        |
+| `rank`                       | Int32 | Yes      | MPI rank that produced this row. NULL for rank-aggregated rows.                                                                                                                             |
+| `worker_id`                  | Int32 | Yes      | Rayon worker index within the rank's pool. NULL for rank-only sequential rows.                                                                                                              |
 | `forward_wall_ms`            | Int64 | No       | Wall-clock time for the forward pass (all stages and scenarios).                                                                                                                            |
 | `backward_wall_ms`           | Int64 | No       | Wall-clock time for the backward pass (all stages and trial points).                                                                                                                        |
 | `cut_selection_ms`           | Int64 | No       | Time spent running the cut selection pipeline (all three stages).                                                                                                                           |
@@ -351,7 +357,7 @@ Per-iteration, per-phase, per-stage, per-opening, per-worker LP solver
 statistics for diagnosing conditioning issues and retry behavior. One row per
 `(iteration, phase, stage, opening, rank, worker_id)` tuple on the backward
 phase (per-opening, per-worker); one row per `(iteration, phase, stage)` tuple
-on the forward, `lower_bound`, and `simulation` phases. 19 columns. Columns
+on the forward, `lower_bound`, and `simulation` phases. 18 columns. Columns
 `opening`, `rank`, and `worker_id` are nullable Int32; all other columns are
 non-nullable.
 

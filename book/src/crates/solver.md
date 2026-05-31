@@ -413,36 +413,42 @@ fn main() -> Result<(), SolverError> {
 
 ## Solver profiles
 
-`SolveProfile` is a set of LP-solver tuning values that callers swap in at
+`HighsProfile` is a set of LP-solver tuning values that callers swap in at
 phase boundaries. It defines how the solver is configured for the default solve
 attempt — the retry ladder layers additional behavior on top, without
 overriding the profile.
 
-### `SolveProfile` fields
+### `HighsProfile` fields
 
-| Field                          | Type  | Units / meaning                                                                                                                                                                                                                                            |
-| ------------------------------ | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `primal_feasibility_tolerance` | `f64` | Absolute primal feasibility tolerance. Smaller values are stricter.                                                                                                                                                                                        |
-| `dual_feasibility_tolerance`   | `f64` | Absolute dual feasibility tolerance. Same strictness convention.                                                                                                                                                                                           |
-| `simplex_iteration_limit`      | `u32` | Per-attempt simplex iteration cap. The sentinel value `DEFAULT_PROFILE_HEURISTIC_SENTINEL` (`0`) signals the solver to use its historical per-call heuristic (`num_cols * 50`, capped at `100_000`). Any non-zero value is applied verbatim as a flat cap. |
-| `ipm_iteration_limit`          | `u32` | Per-attempt IPM iteration cap. The sentinel value `DEFAULT_PROFILE_IPM_UNBOUNDED_SENTINEL` (`0`) means no cap. Any positive value is applied verbatim.                                                                                                     |
+| Field                               | Type  | Units / meaning                                                                                                                                                                                                                                            |
+| ----------------------------------- | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `primal_feasibility_tolerance`      | `f64` | Absolute primal feasibility tolerance. Smaller values are stricter.                                                                                                                                                                                        |
+| `dual_feasibility_tolerance`        | `f64` | Absolute dual feasibility tolerance. Same strictness convention.                                                                                                                                                                                           |
+| `simplex_iteration_limit`           | `u32` | Per-attempt simplex iteration cap. The sentinel value `DEFAULT_PROFILE_HEURISTIC_SENTINEL` (`0`) signals the solver to use its historical per-call heuristic (`num_cols * 50`, capped at `100_000`). Any non-zero value is applied verbatim as a flat cap. |
+| `ipm_iteration_limit`               | `u32` | Per-attempt IPM iteration cap. The sentinel value `DEFAULT_PROFILE_IPM_UNBOUNDED_SENTINEL` (`0`) means no cap. Any positive value is applied verbatim.                                                                                                     |
+| `simplex_dual_edge_weight_strategy` | `i32` | HiGHS dual edge-weight strategy: `-1`=Choose, `0`=Dantzig, `1`=Devex, `2`=SteepestEdge.                                                                                                                                                                    |
+| `simplex_scale_strategy`            | `i32` | HiGHS scaling strategy: `0`=Off, `1`=Choose, `2`=Curtis–Reid, `4`=Equilibration. The cobre prescaler already normalizes matrix entries, so the default is `0` (off).                                                                                       |
+| `simplex_price_strategy`            | `i32` | HiGHS pricing strategy: `0`=Col, `1`=Row, `2`=RowHyperSparse, `3`=RowSparse. `BACKWARD_PROFILE` overrides this to `2`.                                                                                                                                     |
 
-`SolveProfile` is `Copy` and `PartialEq`, enabling the wrapper to compare
+`HighsProfile` is `Copy` and `PartialEq`, enabling the wrapper to compare
 the requested profile against the currently-applied profile and skip FFI
 option-setter calls when nothing has changed.
 
 ### Default profile
 
-`SolveProfile::default()` returns values that match the historical hard-coded
+`HighsProfile::default()` returns values that match the historical hard-coded
 configuration bit-for-bit, so callers that never configure profiles see no
 behavioral change:
 
-| Field                          | Default value                                                  |
-| ------------------------------ | -------------------------------------------------------------- |
-| `primal_feasibility_tolerance` | `1e-9`                                                         |
-| `dual_feasibility_tolerance`   | `1e-9`                                                         |
-| `simplex_iteration_limit`      | `0` (use heuristic — see `DEFAULT_PROFILE_HEURISTIC_SENTINEL`) |
-| `ipm_iteration_limit`          | `10_000`                                                       |
+| Field                               | Default value                                                  |
+| ----------------------------------- | -------------------------------------------------------------- |
+| `primal_feasibility_tolerance`      | `1e-9`                                                         |
+| `dual_feasibility_tolerance`        | `1e-9`                                                         |
+| `simplex_iteration_limit`           | `0` (use heuristic — see `DEFAULT_PROFILE_HEURISTIC_SENTINEL`) |
+| `ipm_iteration_limit`               | `10_000`                                                       |
+| `simplex_dual_edge_weight_strategy` | `1` (Devex)                                                    |
+| `simplex_scale_strategy`            | `0` (off)                                                      |
+| `simplex_price_strategy`            | `1` (Row)                                                      |
 
 ### `ProfiledSolver<S>` wrapper
 
@@ -453,16 +459,15 @@ wrapping carries no virtual-dispatch overhead on the hot path.
 Key methods:
 
 - **`ProfiledSolver::new(inner)`** — wraps the inner solver, assuming its
-  current state is consistent with `SolveProfile::default()`. Issues no FFI
+  current state is consistent with `HighsProfile::default()`. Issues no FFI
   calls on construction.
-- **`set_profile(&mut self, profile: &SolveProfile)`** — applies a new
-  profile. Only fields that differ from the currently-applied profile trigger
-  setter calls on the inner solver. The dispatch order is fixed: primal
-  feasibility → dual feasibility → simplex cap → IPM cap. If the new profile
-  equals the current profile, the call returns immediately with zero inner
-  method calls.
-- **`current_profile(&self) -> &SolveProfile`** — returns the last
-  successfully applied profile, or `SolveProfile::default()` if no profile
+- **`set_profile(&mut self, profile: &HighsProfile)`** — applies a new
+  profile. The requested profile is compared against the currently-applied one
+  with a single whole-struct `PartialEq` check; if they are equal the call
+  returns immediately with zero inner method calls. Otherwise the whole profile
+  is applied in one `apply_profile` call — there is no per-field delta dispatch.
+- **`current_profile(&self) -> &HighsProfile`** — returns the last
+  successfully applied profile, or `HighsProfile::default()` if no profile
   has been applied since construction.
 - **`inner(&self) -> &S`** / **`inner_mut(&mut self) -> &mut S`** — shared
   and exclusive references to the wrapped solver, intended for test adapters

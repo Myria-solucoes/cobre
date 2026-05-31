@@ -334,14 +334,15 @@ identical results regardless of thread count or completion order.
 ### Per-Phase Solver Profiles
 
 Each algorithmic phase — forward sweep, backward sweep, and simulation — can
-be configured with a distinct `SolveProfile` that sets the LP solver's
+be configured with a distinct `HighsProfile` that sets the LP solver's
 feasibility tolerances and per-attempt iteration caps. Tuning `BACKWARD_PROFILE`
 to tighter tolerances or stricter iteration caps can reduce backward-pass
 solve time variance, which in turn improves load balance across worker threads
-and shortens wall-clock training time. The current release ships all three
-profiles equal to `SolveProfile::default()`, preserving the historical
-behavior; a future tuning effort will set measured values for
-`BACKWARD_PROFILE`.
+and shortens wall-clock training time. `FORWARD_PROFILE` and
+`SIMULATION_PROFILE` ship equal to `HighsProfile::default()`, while
+`BACKWARD_PROFILE` already overrides `simplex_price_strategy` to `2`
+(`RowHyperSparse`) to exploit sparsity on the backward LPs; all other backward
+fields match the default.
 
 ### Forward Pass and Simulation
 
@@ -350,11 +351,13 @@ Scenarios are statically partitioned across solver workspace instances
 assignment deterministic. Within each scenario, the LP is loaded once
 per stage and only row bounds are patched per scenario.
 
-### Lower Bound Parallel Evaluation
+### Lower Bound Evaluation
 
-The lower bound evaluation (solving stage-0 LPs for every opening in the
-tree) is parallelized across the rayon thread pool using the same atomic
-work-stealing pattern as the backward pass.
+The lower bound evaluation (solving a stage-0 LP for every opening in the
+tree) runs as a single-threaded serial loop on rank 0. Each opening patches
+correctness-critical per-opening state (e.g. NCS column bounds) on a shared
+solver, so the openings cannot be split across workers without fragmenting
+those sequential steps; the step is therefore not parallelized.
 
 ### Communication-Free Seed Derivation
 
@@ -370,8 +373,11 @@ and shared read-only.
 
 ### Pre-Allocation Discipline
 
-The training loop makes no heap allocations on the hot path inside the
-iteration loop. All workspace buffers are allocated once before the loop:
+The forward, backward, and simulation per-solve hot paths make no heap
+allocations inside the iteration loop; all workspace buffers are allocated
+once before the loop. (The periodic cut-selection pass is the one documented
+exception — its rayon fold/reduce kernel allocates per-leaf scratch.) The
+pre-allocated buffers are:
 
 | Buffer                                 | Size                                                        |
 | -------------------------------------- | ----------------------------------------------------------- |
