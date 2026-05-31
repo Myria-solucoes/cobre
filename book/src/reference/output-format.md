@@ -375,19 +375,11 @@ non-nullable.
 | `load_model_time_ms`         | Float64 | No       | Cumulative time spent in `load_model` calls, in milliseconds.                                                        |
 | `set_bounds_time_ms`         | Float64 | No       | Cumulative time spent in `set_row_bounds` / `set_col_bounds` calls, in milliseconds.                                 |
 | `basis_set_time_ms`          | Float64 | No       | Cumulative time spent installing bases for warm-start, in milliseconds.                                              |
-| `basis_reconstructions`      | UInt64  | No       | Number of `reconstruct_basis` invocations with a non-empty stored basis (slot-tracked warm-start applications).      |
 
 ### `simulation/solver/iterations.parquet`
 
 Identical schema to [`training/solver/iterations.parquet`](#trainingsolveriterationsparquet).
 One row per `(scenario, phase, stage)` triple where `phase == "simulation"`.
-
-The `basis_reconstructions` column on simulation rows is a direct indicator
-that baked-template simulation is using the stored warm-start basis for every
-solve. A near-zero value on a multi-rank run suggests that `CapturedBasis`
-metadata was not delivered to non-root ranks; see
-`CapturedBasis::to_broadcast_payload` in
-`crates/cobre-sddp/src/workspace.rs` for the 4-broadcast wire format
 
 ### `training/solver/retry_histogram.parquet`
 
@@ -706,7 +698,7 @@ Stage and block-level cost breakdown. One row per (stage, block) pair. 26 column
 | `inflow_penalty_cost`          | Float64 | No       | Cost of inflow non-negativity slack (numerical penalty).                       |
 | `generic_violation_cost`       | Float64 | No       | Cost of generic constraint violations.                                         |
 | `spillage_cost`                | Float64 | No       | Cost of reservoir spillage.                                                    |
-| `turbined_cost`           | Float64 | No       | Turbined flow penalty from the future-production hydro approximation.          |
+| `turbined_cost`                | Float64 | No       | Turbined flow penalty from the future-production hydro approximation.          |
 | `curtailment_cost`             | Float64 | No       | Cost of non-controllable source curtailment.                                   |
 | `exchange_cost`                | Float64 | No       | Transmission exchange cost component.                                          |
 | `pumping_cost`                 | Float64 | No       | Pumping station energy cost component.                                         |
@@ -765,18 +757,18 @@ five energy columns (`equivalent_productivity_mw_per_m3s` through
 
 Thermal unit dispatch results. One row per (stage, block, thermal) triplet. 10 columns.
 
-| Column                 | Type    | Nullable | Description                                                                   |
-| ---------------------- | ------- | -------- | ----------------------------------------------------------------------------- |
-| `stage_id`             | Int32   | No       | Stage index (0-based).                                                        |
-| `block_id`             | Int32   | Yes      | Load block index. `null` for stage-level records.                             |
-| `thermal_id`           | Int32   | No       | Thermal unit ID.                                                              |
-| `generation_mw`        | Float64 | No       | Average power generation over the block in MW.                                |
-| `generation_mwh`       | Float64 | No       | Total energy generated over the block in MWh.                                 |
-| `generation_cost`      | Float64 | No       | Monetary generation cost for this block.                                      |
-| `is_anticipated`            | Boolean | No       | `true` if this unit is configured for anticipated dispatch.                         |
-| `anticipated_committed_mw`  | Float64 | Yes      | Committed capacity under anticipated dispatch in MW. `null` for non-anticipated units. |
-| `anticipated_decision_mw`   | Float64 | Yes      | Dispatch decision under anticipated dispatch in MW. `null` for non-anticipated units.  |
-| `operative_state_code` | Int8    | No       | Operative state code (see `codes.json` `operative_state` mapping).            |
+| Column                     | Type    | Nullable | Description                                                                            |
+| -------------------------- | ------- | -------- | -------------------------------------------------------------------------------------- |
+| `stage_id`                 | Int32   | No       | Stage index (0-based).                                                                 |
+| `block_id`                 | Int32   | Yes      | Load block index. `null` for stage-level records.                                      |
+| `thermal_id`               | Int32   | No       | Thermal unit ID.                                                                       |
+| `generation_mw`            | Float64 | No       | Average power generation over the block in MW.                                         |
+| `generation_mwh`           | Float64 | No       | Total energy generated over the block in MWh.                                          |
+| `generation_cost`          | Float64 | No       | Monetary generation cost for this block.                                               |
+| `is_anticipated`           | Boolean | No       | `true` if this unit is configured for anticipated dispatch.                            |
+| `anticipated_committed_mw` | Float64 | Yes      | Committed capacity under anticipated dispatch in MW. `null` for non-anticipated units. |
+| `anticipated_decision_mw`  | Float64 | Yes      | Dispatch decision under anticipated dispatch in MW. `null` for non-anticipated units.  |
+| `operative_state_code`     | Int8    | No       | Operative state code (see `codes.json` `operative_state` mapping).                     |
 
 ---
 

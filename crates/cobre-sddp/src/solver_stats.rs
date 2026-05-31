@@ -51,11 +51,6 @@ pub struct SolverStatsDelta {
     /// Cumulative wall-clock time spent in `set_basis` FFI calls, in milliseconds.
     pub basis_set_time_ms: f64,
 
-    /// Number of `reconstruct_basis` invocations with a non-empty stored basis.
-    /// Application-level counter: not included in MPI packing or allreduce.
-    /// A non-zero value indicates basis reconstruction is active.
-    pub basis_reconstructions: u64,
-
     /// Per-level retry success histogram delta. Length depends on the solver
     /// backend (e.g. 12 for `HiGHS`).
     pub retry_level_histogram: Vec<u64>,
@@ -97,9 +92,6 @@ impl SolverStatsDelta {
             basis_set_time_ms: (after.total_basis_set_time_seconds
                 - before.total_basis_set_time_seconds)
                 * 1000.0,
-            basis_reconstructions: after
-                .basis_reconstructions
-                .saturating_sub(before.basis_reconstructions),
             retry_level_histogram: after
                 .retry_level_histogram
                 .iter()
@@ -128,7 +120,6 @@ impl SolverStatsDelta {
         dst.load_model_time_ms += rhs.load_model_time_ms;
         dst.set_bounds_time_ms += rhs.set_bounds_time_ms;
         dst.basis_set_time_ms += rhs.basis_set_time_ms;
-        dst.basis_reconstructions += rhs.basis_reconstructions;
         ensure_histogram_capacity(&mut dst.retry_level_histogram, &rhs.retry_level_histogram);
         for (d, s) in dst
             .retry_level_histogram
@@ -142,7 +133,7 @@ impl SolverStatsDelta {
     /// Copy all fields from `self` into `dst`, reusing the destination's
     /// existing `retry_level_histogram` allocation.
     ///
-    /// All 14 scalar fields are copied by value. The destination's histogram
+    /// All 13 scalar fields are copied by value. The destination's histogram
     /// `Vec<u64>` is resized (via `resize`) to match `self`, then overwritten
     /// with `copy_from_slice`. When `dst` already has a histogram of the same
     /// length (the common case on iteration ≥ 2), no heap allocation occurs.
@@ -163,7 +154,6 @@ impl SolverStatsDelta {
         dst.load_model_time_ms = self.load_model_time_ms;
         dst.set_bounds_time_ms = self.set_bounds_time_ms;
         dst.basis_set_time_ms = self.basis_set_time_ms;
-        dst.basis_reconstructions = self.basis_reconstructions;
         let n = self.retry_level_histogram.len();
         dst.retry_level_histogram.resize(n, 0);
         dst.retry_level_histogram
@@ -189,7 +179,6 @@ impl SolverStatsDelta {
         self.load_model_time_ms = 0.0;
         self.set_bounds_time_ms = 0.0;
         self.basis_set_time_ms = 0.0;
-        self.basis_reconstructions = 0;
         self.retry_level_histogram.clear();
     }
 
@@ -213,7 +202,6 @@ impl SolverStatsDelta {
             result.load_model_time_ms += d.load_model_time_ms;
             result.set_bounds_time_ms += d.set_bounds_time_ms;
             result.basis_set_time_ms += d.basis_set_time_ms;
-            result.basis_reconstructions += d.basis_reconstructions;
             ensure_histogram_capacity(&mut result.retry_level_histogram, &d.retry_level_histogram);
             for (dst, src) in result
                 .retry_level_histogram
@@ -353,7 +341,7 @@ pub fn pack_delta_scalars(delta: &SolverStatsDelta) -> [f64; SOLVER_STATS_DELTA_
 }
 
 /// Unpack a fixed-size `f64` array (from [`pack_delta_scalars`]) back into a [`SolverStatsDelta`].
-/// The `retry_level_histogram` and `basis_reconstructions` are excluded from MPI packing and reset to defaults.
+/// The `retry_level_histogram` is excluded from MPI packing and reset to its default.
 #[must_use]
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn unpack_delta_scalars(buf: &[f64; SOLVER_STATS_DELTA_SCALAR_FIELDS]) -> SolverStatsDelta {
@@ -371,7 +359,6 @@ pub fn unpack_delta_scalars(buf: &[f64; SOLVER_STATS_DELTA_SCALAR_FIELDS]) -> So
         load_model_time_ms: buf[10],
         set_bounds_time_ms: buf[11],
         basis_set_time_ms: buf[12],
-        basis_reconstructions: 0,
         retry_level_histogram: Vec::new(),
     }
 }
@@ -729,7 +716,6 @@ mod tests {
             load_model_time_ms: 10.0,
             set_bounds_time_ms: 2.0,
             basis_set_time_ms: 1.0,
-            basis_reconstructions: 3,
             retry_level_histogram: vec![0; 12],
         };
         let d2 = SolverStatsDelta {
@@ -746,7 +732,6 @@ mod tests {
             load_model_time_ms: 20.0,
             set_bounds_time_ms: 4.0,
             basis_set_time_ms: 2.0,
-            basis_reconstructions: 5,
             retry_level_histogram: vec![0; 12],
         };
 
@@ -764,7 +749,6 @@ mod tests {
         assert!((agg.load_model_time_ms - 30.0).abs() < 1e-6);
         assert!((agg.set_bounds_time_ms - 6.0).abs() < 1e-6);
         assert!((agg.basis_set_time_ms - 3.0).abs() < 1e-6);
-        assert_eq!(agg.basis_reconstructions, 8);
     }
 
     #[test]
@@ -839,7 +823,6 @@ mod tests {
             load_model_time_ms: 1.5,
             set_bounds_time_ms: 0.25,
             basis_set_time_ms: 0.125,
-            basis_reconstructions: 0,
             retry_level_histogram: vec![0; 12],
         }
     }
@@ -930,23 +913,6 @@ mod tests {
         );
         assert_eq!(packed.len(), SOLVER_STATS_DELTA_SCALAR_FIELDS);
         assert_eq!(SOLVER_STATS_DELTA_SCALAR_FIELDS, 13);
-    }
-
-    #[test]
-    fn test_solver_stats_delta_includes_reconstruction_fields() {
-        // Acceptance criterion: from_snapshots correctly computes the delta for
-        // basis_reconstructions.
-        let before = SolverStatistics {
-            basis_reconstructions: 10,
-            ..SolverStatistics::default()
-        };
-        let after = SolverStatistics {
-            basis_reconstructions: 25,
-            ..SolverStatistics::default()
-        };
-
-        let delta = SolverStatsDelta::from_snapshots(&before, &after);
-        assert_eq!(delta.basis_reconstructions, 15);
     }
 
     #[test]
@@ -1239,8 +1205,7 @@ mod tests {
             load_model_time_ms: 11.25,
             set_bounds_time_ms: 12.125,
             basis_set_time_ms: 13.0625,
-            basis_reconstructions: 42, // application-level; not in wire
-            retry_level_histogram: vec![1, 2, 3],
+            retry_level_histogram: vec![1, 2, 3], // application-level; not in wire
         };
 
         let packed = pack_delta_scalars(&delta);
@@ -1270,8 +1235,7 @@ mod tests {
         assert!((unpacked.set_bounds_time_ms - 12.125).abs() < 1e-10);
         assert!((unpacked.basis_set_time_ms - 13.0625).abs() < 1e-10);
 
-        // Application-level fields are NOT in the wire — unpack zeros them.
-        assert_eq!(unpacked.basis_reconstructions, 0);
+        // The histogram is NOT in the wire — unpack leaves it empty.
         assert!(unpacked.retry_level_histogram.is_empty());
     }
 
@@ -1310,7 +1274,6 @@ mod tests {
             load_model_time_ms: 7.25,
             set_bounds_time_ms: 1.5,
             basis_set_time_ms: 0.75,
-            basis_reconstructions: 4,
             retry_level_histogram: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
         };
 
@@ -1336,7 +1299,6 @@ mod tests {
         assert!((dst.load_model_time_ms - 7.25).abs() < 1e-10);
         assert!((dst.set_bounds_time_ms - 1.5).abs() < 1e-10);
         assert!((dst.basis_set_time_ms - 0.75).abs() < 1e-10);
-        assert_eq!(dst.basis_reconstructions, 4);
         assert_eq!(
             dst.retry_level_histogram,
             vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
@@ -1372,7 +1334,6 @@ mod tests {
             load_model_time_ms: 3.0,
             set_bounds_time_ms: 1.0,
             basis_set_time_ms: 0.5,
-            basis_reconstructions: 2,
             retry_level_histogram: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
         };
 
@@ -1391,7 +1352,6 @@ mod tests {
         assert_eq!(d.load_model_time_ms, 0.0);
         assert_eq!(d.set_bounds_time_ms, 0.0);
         assert_eq!(d.basis_set_time_ms, 0.0);
-        assert_eq!(d.basis_reconstructions, 0);
         assert!(d.retry_level_histogram.is_empty());
     }
 }

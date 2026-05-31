@@ -710,11 +710,6 @@ fn description_for(file: &str, column: &str) -> &'static str {
         ("solver_iterations", "load_model_time_ms") => "Cumulative load_model call time",
         ("solver_iterations", "set_bounds_time_ms") => "Cumulative set_bounds call time",
         ("solver_iterations", "basis_set_time_ms") => "Cumulative set_basis call time",
-        ("solver_iterations", "basis_reconstructions") => {
-            "Number of reconstruct_basis invocations: incremented once per \
-             warm-start solve that applied a stored basis via slot reconciliation. \
-             A non-zero value indicates basis reconstruction is active."
-        }
         ("solver_iterations", "opening") => {
             "Opening (noise realization) index within the stage, for backward-pass \
              rows. NULL for forward, lower_bound, and simulation rows — these phases \
@@ -1511,8 +1506,8 @@ mod tests {
 
         let row_count = rdr.records().count();
         assert_eq!(
-            row_count, 207,
-            "variables.csv must have exactly 207 data rows (one per column across all schemas)"
+            row_count, 206,
+            "variables.csv must have exactly 206 data rows (one per column across all schemas)"
         );
     }
 

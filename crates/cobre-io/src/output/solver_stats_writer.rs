@@ -57,10 +57,6 @@ pub struct SolverStatsRow {
     pub set_bounds_time_ms: f64,
     /// Cumulative time in `set_basis` FFI calls, in milliseconds.
     pub basis_set_time_ms: f64,
-    /// Number of `reconstruct_basis` invocations with a non-empty stored basis
-    /// during this phase (once per warm-start solve that applied a stored basis
-    /// via slot reconciliation).
-    pub basis_reconstructions: u64,
     /// Per-level retry success counts. Length depends on the solver backend
     /// (e.g. 12 for `HiGHS`).
     pub retry_level_histogram: Vec<u64>,
@@ -144,11 +140,6 @@ fn build_iterations_columns(rows: &[SolverStatsRow]) -> Vec<Arc<dyn arrow::array
     );
     let basis_set_time_arr =
         Float64Array::from(rows.iter().map(|r| r.basis_set_time_ms).collect::<Vec<_>>());
-    let basis_reconstructions_arr = UInt64Array::from(
-        rows.iter()
-            .map(|r| r.basis_reconstructions)
-            .collect::<Vec<_>>(),
-    );
 
     vec![
         Arc::new(iteration_arr),
@@ -169,7 +160,6 @@ fn build_iterations_columns(rows: &[SolverStatsRow]) -> Vec<Arc<dyn arrow::array
         Arc::new(load_model_time_arr),
         Arc::new(set_bounds_time_arr),
         Arc::new(basis_set_time_arr),
-        Arc::new(basis_reconstructions_arr),
     ]
 }
 
@@ -290,7 +280,6 @@ mod tests {
                 load_model_time_ms: 0.0,
                 set_bounds_time_ms: 0.0,
                 basis_set_time_ms: 0.0,
-                basis_reconstructions: 0,
                 retry_level_histogram: vec![0; 12],
             },
             SolverStatsRow {
@@ -312,7 +301,6 @@ mod tests {
                 load_model_time_ms: 0.0,
                 set_bounds_time_ms: 0.0,
                 basis_set_time_ms: 0.0,
-                basis_reconstructions: 0,
                 retry_level_histogram: vec![0; 12],
             },
         ]
@@ -338,7 +326,7 @@ mod tests {
         let batch = read_parquet(&iter_path);
 
         assert_eq!(batch.num_rows(), 2);
-        assert_eq!(batch.num_columns(), 19);
+        assert_eq!(batch.num_columns(), 18);
 
         let iteration_col = batch
             .column(0)
@@ -351,7 +339,7 @@ mod tests {
         // Column indices:
         // 0 = iteration, 1 = phase, 2 = stage, 3 = opening, 4 = rank, 5 = worker_id,
         // 6 = lp_solves, ..., 12 = basis_consistency_failures,
-        // 13 = simplex_iterations, 14 = solve_time_ms, ..., 18 = basis_reconstructions
+        // 13 = simplex_iterations, 14 = solve_time_ms, ..., 17 = basis_set_time_ms
         let solve_time_col = batch
             .column(14)
             .as_any()
@@ -391,7 +379,7 @@ mod tests {
         assert!(iter_path.exists());
         let file = std::fs::File::open(&iter_path).unwrap();
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-        assert_eq!(builder.schema().fields().len(), 19);
+        assert_eq!(builder.schema().fields().len(), 18);
 
         let hist_path = dir.path().join("training/solver/retry_histogram.parquet");
         assert!(hist_path.exists());
@@ -423,7 +411,6 @@ mod tests {
                 load_model_time_ms: 0.0,
                 set_bounds_time_ms: 0.0,
                 basis_set_time_ms: 0.0,
-                basis_reconstructions: 0,
                 // Level 0: 5 recoveries, level 2: 1 recovery
                 retry_level_histogram: vec![5, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             },
@@ -446,7 +433,6 @@ mod tests {
                 load_model_time_ms: 0.0,
                 set_bounds_time_ms: 0.0,
                 basis_set_time_ms: 0.0,
-                basis_reconstructions: 0,
                 retry_level_histogram: vec![0; 12],
             },
         ];
@@ -500,7 +486,6 @@ mod tests {
             load_model_time_ms: 0.0,
             set_bounds_time_ms: 0.0,
             basis_set_time_ms: 0.0,
-            basis_reconstructions: 0,
             retry_level_histogram: vec![0; 12],
         }];
 
@@ -544,7 +529,6 @@ mod tests {
             load_model_time_ms: 0.0,
             set_bounds_time_ms: 0.0,
             basis_set_time_ms: 0.0,
-            basis_reconstructions: 0,
             retry_level_histogram: vec![0; 12],
         }];
 
@@ -553,8 +537,8 @@ mod tests {
         let iter_path = dir.path().join("training/solver/iterations.parquet");
         let batch = read_parquet(&iter_path);
 
-        // Schema must have exactly 19 columns.
-        assert_eq!(batch.num_columns(), 19);
+        // Schema must have exactly 18 columns.
+        assert_eq!(batch.num_columns(), 18);
 
         // rank column is at index 4, must be NULL.
         let rank_col = batch.column_by_name("rank").unwrap();
@@ -613,7 +597,6 @@ mod tests {
                 load_model_time_ms: 0.0,
                 set_bounds_time_ms: 0.0,
                 basis_set_time_ms: 0.0,
-                basis_reconstructions: 0,
                 retry_level_histogram: vec![0; 12],
             },
             // Backward rows (opening=Some(0..2)): 10, 20, 30 lp_solves → sum=60
@@ -636,7 +619,6 @@ mod tests {
                 load_model_time_ms: 0.0,
                 set_bounds_time_ms: 0.0,
                 basis_set_time_ms: 0.0,
-                basis_reconstructions: 0,
                 retry_level_histogram: vec![0; 12],
             },
             SolverStatsRow {
@@ -658,7 +640,6 @@ mod tests {
                 load_model_time_ms: 0.0,
                 set_bounds_time_ms: 0.0,
                 basis_set_time_ms: 0.0,
-                basis_reconstructions: 0,
                 retry_level_histogram: vec![0; 12],
             },
             SolverStatsRow {
@@ -680,7 +661,6 @@ mod tests {
                 load_model_time_ms: 0.0,
                 set_bounds_time_ms: 0.0,
                 basis_set_time_ms: 0.0,
-                basis_reconstructions: 0,
                 retry_level_histogram: vec![0; 12],
             },
         ];
@@ -761,7 +741,6 @@ mod tests {
                 load_model_time_ms: 0.0,
                 set_bounds_time_ms: 0.0,
                 basis_set_time_ms: 0.0,
-                basis_reconstructions: 0,
                 retry_level_histogram: vec![0; 12],
             }
         }

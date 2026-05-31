@@ -1259,8 +1259,8 @@ fn aggregate_solver_stats(
 ///
 /// The four `f64` timing fields (`solve_time_ms`, `load_model_time_ms`,
 /// `set_bounds_time_ms`, `basis_set_time_ms`) are native `f64` and excluded from
-/// this check. `basis_reconstructions` and `retry_level_histogram` are not packed
-/// by `pack_delta_scalars` and are also excluded.
+/// this check. `retry_level_histogram` is not packed by `pack_delta_scalars` and
+/// is also excluded.
 fn check_stats_overflow(delta: &cobre_sddp::SolverStatsDelta) -> Result<(), CliError> {
     const F64_INTEGER_LIMIT: u64 = 1u64 << 53;
     for (label, value) in [
@@ -1780,7 +1780,6 @@ fn delta_to_stats_row(
         load_model_time_ms: delta.load_model_time_ms,
         set_bounds_time_ms: delta.set_bounds_time_ms,
         basis_set_time_ms: delta.basis_set_time_ms,
-        basis_reconstructions: delta.basis_reconstructions,
         retry_level_histogram: delta.retry_level_histogram.clone(),
     }
 }

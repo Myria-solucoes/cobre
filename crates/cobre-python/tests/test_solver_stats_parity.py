@@ -38,17 +38,17 @@ import pytest
 D01_CASE = "examples/deterministic/d01-thermal-dispatch"
 
 # Columns that record wall-clock time and will legitimately differ between runs.
-TIMING_COLS = frozenset({
-    "solve_time_ms",
-    "load_model_time_ms",
-    "set_bounds_time_ms",
-    "basis_set_time_ms",
-})
+TIMING_COLS = frozenset(
+    {
+        "solve_time_ms",
+        "load_model_time_ms",
+        "set_bounds_time_ms",
+        "basis_set_time_ms",
+    }
+)
 
 # Expected schema for training/solver/iterations.parquet.
-# rank and worker_id are present; add_rows_time_ms was removed;
-# 4 basis_preserved/new_tight/new_slack/demotions columns were consolidated
-# to a single basis_reconstructions column.
+# rank and worker_id are present; add_rows_time_ms was removed.
 EXPECTED_COLUMNS = [
     "iteration",
     "phase",
@@ -68,7 +68,6 @@ EXPECTED_COLUMNS = [
     "load_model_time_ms",
     "set_bounds_time_ms",
     "basis_set_time_ms",
-    "basis_reconstructions",
 ]
 
 
@@ -134,9 +133,7 @@ def d01_python_output(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Path:
 
 def test_python_writes_opening_column(d01_python_output: pathlib.Path) -> None:
     """Python run produces iterations.parquet with the `opening` column (Int32, nullable)."""
-    parquet_path = (
-        d01_python_output / "training" / "solver" / "iterations.parquet"
-    )
+    parquet_path = d01_python_output / "training" / "solver" / "iterations.parquet"
     assert parquet_path.exists(), (
         "training/solver/iterations.parquet must exist after Python run"
     )
@@ -250,15 +247,14 @@ def test_python_matches_cli_nontiming_columns(
             )
 
     assert not mismatches, (
-        "Non-timing column mismatch between CLI and Python:\n"
-        + "\n".join(mismatches)
+        "Non-timing column mismatch between CLI and Python:\n" + "\n".join(mismatches)
     )
 
 
 def test_python_schema_matches_expected_columns(
     d01_python_output: pathlib.Path,
 ) -> None:
-    """Python output has exactly the expected 19-column schema."""
+    """Python output has exactly the expected 18-column schema."""
     schema = pq.read_schema(
         d01_python_output / "training" / "solver" / "iterations.parquet"
     )
@@ -266,35 +262,4 @@ def test_python_schema_matches_expected_columns(
         f"Column names mismatch:\n"
         f"  expected: {EXPECTED_COLUMNS}\n"
         f"  got:      {schema.names}"
-    )
-
-
-def test_python_basis_reconstructions_column_shape(
-    d01_python_output: pathlib.Path,
-) -> None:
-    """basis_reconstructions column is UInt64 non-nullable."""
-    parquet_path = (
-        d01_python_output / "training" / "solver" / "iterations.parquet"
-    )
-    schema = pq.read_schema(parquet_path)
-    field = schema.field("basis_reconstructions")
-    assert pa.types.is_uint64(field.type), (
-        f"basis_reconstructions must be UInt64, got {field.type}"
-    )
-    assert not field.nullable, "basis_reconstructions must be non-nullable"
-
-    # Verify the counter is non-zero somewhere in the forward phase: warm-start
-    # solves after iteration 1 must invoke reconstruct_basis, so at least one row
-    # should have basis_reconstructions > 0. (`>= 0` would be vacuously true for
-    # UInt64.)
-    table = pq.read_table(parquet_path)
-    phases = table.column("phase").to_pylist()
-    values = table.column("basis_reconstructions").to_pylist()
-    forward_max = max(
-        (v for p, v in zip(phases, values) if p == "forward"),
-        default=0,
-    )
-    assert forward_max > 0, (
-        f"forward phase must invoke basis reconstruction at least once after iteration 1, "
-        f"got max basis_reconstructions={forward_max}"
     )

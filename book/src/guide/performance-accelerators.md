@@ -294,10 +294,8 @@ no configuration flag. The previous `basis_activity_window` config
 knob is deprecated and silently ignored; it will be removed from the
 schema in the next release.
 
-The `basis_reconstructions` counter in
-`training/solver/iterations.parquet` and
-`simulation/solver/iterations.parquet` tracks how often
-`reconstruct_basis` was invoked with a non-empty stored basis.
+The in-memory `SolverStatistics::basis_reconstructions` counter tracks how
+often `reconstruct_basis` was invoked with a non-empty stored basis.
 
 ### Backward-Pass Basis Cache
 

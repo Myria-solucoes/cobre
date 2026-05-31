@@ -305,12 +305,11 @@ pub(crate) fn rank_timing_schema() -> Schema {
 /// Schema for `training/solver/iterations.parquet` -- per-iteration, per-phase
 /// solver statistics for diagnosing LP conditioning and retry behavior.
 ///
-/// 19 columns. One row per (iteration, phase, stage, opening) tuple for
+/// 18 columns. One row per (iteration, phase, stage, opening) tuple for
 /// backward rows; forward, `lower_bound`, and simulation rows carry
 /// `opening = NULL`. The `rank` and `worker_id` columns (positions 5 and 6,
 /// 0-indexed) are `Int32 nullable`; they are `NULL` for rank-aggregated rows
-/// and carry the producing rank's index and worker index respectively. Includes
-/// one basis reconstruction column: `basis_reconstructions`.
+/// and carry the producing rank's index and worker index respectively.
 pub(crate) fn solver_iterations_schema() -> Schema {
     Schema::new(vec![
         Field::new("iteration", DataType::UInt32, false),
@@ -331,7 +330,6 @@ pub(crate) fn solver_iterations_schema() -> Schema {
         Field::new("load_model_time_ms", DataType::Float64, false),
         Field::new("set_bounds_time_ms", DataType::Float64, false),
         Field::new("basis_set_time_ms", DataType::Float64, false),
-        Field::new("basis_reconstructions", DataType::UInt64, false),
     ])
 }
 
@@ -871,8 +869,8 @@ mod tests {
         let schema = solver_iterations_schema();
         assert_eq!(
             schema.fields().len(),
-            19,
-            "solver_iterations schema must have 19 fields"
+            18,
+            "solver_iterations schema must have 18 fields"
         );
         let expected: &[(&str, DataType, bool)] = &[
             ("iteration", DataType::UInt32, false),
@@ -893,7 +891,6 @@ mod tests {
             ("load_model_time_ms", DataType::Float64, false),
             ("set_bounds_time_ms", DataType::Float64, false),
             ("basis_set_time_ms", DataType::Float64, false),
-            ("basis_reconstructions", DataType::UInt64, false),
         ];
         for (i, (name, dtype, nullable)) in expected.iter().enumerate() {
             let field = &schema.fields()[i];
@@ -982,7 +979,7 @@ mod tests {
             ("iteration_timing", 18),
             ("rank_timing", 8),
             ("cut_selection", 10),
-            ("solver_iterations", 19),
+            ("solver_iterations", 18),
             ("retry_histogram", 5),
         ];
         for ((name, actual), (_, exp)) in counts.iter().zip(expected.iter()) {

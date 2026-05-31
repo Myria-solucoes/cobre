@@ -629,9 +629,9 @@ where
         // emits one row per stage with global totals so the parquet's
         // `lp_solves` column matches the true global LP count.
         //
-        // `retry_level_histogram` and `basis_reconstructions` are not packed by
-        // `pack_delta_scalars`; they are absent from the aggregated forward
-        // rows. Backward retains the histogram via its per-worker rows.
+        // `retry_level_histogram` is not packed by `pack_delta_scalars`; it is
+        // absent from the aggregated forward rows. Backward retains the histogram
+        // via its per-worker rows.
         let num_stages = forward_result.stage_stats.len();
         let global_forward_stage_stats = if num_stages == 0 {
             Vec::new()
