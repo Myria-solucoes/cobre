@@ -29,10 +29,13 @@
 
 use pyo3::prelude::*;
 
+mod convert;
 mod io;
 mod model;
 mod results;
 mod run;
+mod schema;
+mod version;
 
 /// Sub-module containing data model types for the Cobre power systems solver.
 #[pymodule]
@@ -89,6 +92,20 @@ fn results_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(results::load_simulation, m)?)?;
     m.add_function(wrap_pyfunction!(results::load_simulation_arrow, m)?)?;
     m.add_function(wrap_pyfunction!(results::load_policy, m)?)?;
+    m.add_function(wrap_pyfunction!(results::report, m)?)?;
+    m.add_function(wrap_pyfunction!(results::summary, m)?)?;
+    Ok(())
+}
+
+/// Sub-module containing JSON Schema export helpers.
+#[pymodule]
+#[pyo3(name = "schema")]
+fn schema_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add(
+        "__doc__",
+        "JSON Schema export helpers for Cobre case directory input types.",
+    )?;
+    m.add_function(wrap_pyfunction!(schema::export, m)?)?;
     Ok(())
 }
 
@@ -125,6 +142,9 @@ fn cobre(m: &Bound<'_, PyModule>) -> PyResult<()> {
         pyo3::wrap_pymodule!(results_module)(py).bind(py),
         "cobre",
     )?;
+    register_submodule(m, pyo3::wrap_pymodule!(schema_module)(py).bind(py), "cobre")?;
+
+    m.add_function(wrap_pyfunction!(version::version_info, m)?)?;
 
     Ok(())
 }

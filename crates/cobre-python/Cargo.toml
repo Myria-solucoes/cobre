@@ -20,7 +20,7 @@ doc = false
 [dependencies]
 pyo3 = { version = "0.28.2", features = ["extension-module", "abi3-py312"] }
 cobre-core = { version = "0.7.1", path = "../cobre-core" }
-cobre-io = { version = "0.7.1", path = "../cobre-io" }
+cobre-io = { version = "0.7.1", path = "../cobre-io", features = ["schema"] }
 cobre-sddp = { version = "0.7.1", path = "../cobre-sddp" }
 cobre-stochastic = { version = "0.7.1", path = "../cobre-stochastic" }
 cobre-solver = { version = "0.7.1", path = "../cobre-solver" }
@@ -29,6 +29,9 @@ rayon = "1"
 arrow = { version = "58", default-features = false, features = ["ipc"] }
 parquet = { version = "58", default-features = false, features = ["arrow"] }
 serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
 
 # PyO3 proc macros generate unsafe code internally. The workspace forbids unsafe_code,
 # but this crate must override that lint to allow it, because the #[pymodule] and

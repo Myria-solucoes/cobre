@@ -21,7 +21,7 @@
 use std::path::PathBuf;
 use std::sync::mpsc;
 
-use pyo3::exceptions::{PyOSError, PyRuntimeError};
+use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -29,9 +29,9 @@ use cobre_comm::LocalBackend;
 use cobre_io::output::simulation_writer::{ScenarioWritePayload, SimulationParquetWriter};
 use cobre_io::{ParquetWriterConfig, SolverStatsRow};
 use cobre_sddp::{
-    ArOrderSummary, DEFAULT_SEED, HydroModelSummary, ModelProvenanceReport, SolverStatsDelta,
-    StochasticSource, StochasticSummary, StudyParams, StudySetup, build_hydro_model_summary,
-    build_provenance_report, build_stochastic_summary, prepare_stochastic,
+    build_hydro_model_summary, build_provenance_report, build_stochastic_summary,
+    prepare_stochastic, ArOrderSummary, HydroModelSummary, ModelProvenanceReport, SolverStatsDelta,
+    StochasticSource, StochasticSummary, StudyParams, StudySetup, DEFAULT_SEED,
 };
 use cobre_solver::HighsSolver;
 
@@ -55,22 +55,31 @@ struct SimSummary {
     completed: u32,
 }
 
-fn init_rayon(threads: Option<u32>) -> usize {
-    let configured = threads.map_or(1, |t| t as usize);
-    match rayon::ThreadPoolBuilder::new()
-        .num_threads(configured)
-        .build_global()
-    {
-        Ok(()) => configured,
-        Err(err) => {
-            let actual = rayon::current_num_threads();
-            eprintln!(
-                "cobre-python: rayon init warning: configured={configured}, \
-                 actual={actual}, error={err}"
-            );
-            actual
-        }
-    }
+/// Build a scoped rayon thread pool for the requested thread count and run the
+/// closure inside `pool.install(...)`, so the whole call's rayon work is
+/// confined to this pool and the pool is dropped when the call returns.
+///
+/// Unlike a process-global rayon pool — which can only be configured once per
+/// process — this creates a fresh pool per call, so two sequential `run`
+/// invocations with different thread counts each honor their own value.
+///
+/// `threads` maps to `n = threads.map_or(1, |t| t as usize).max(1)`, which is
+/// passed into the closure so callers can record the effective thread count in
+/// metadata. On pool-construction failure, returns a descriptive `Err(String)`
+/// rather than silently falling back to an implicit pool.
+fn run_in_scoped_pool<T>(
+    threads: Option<u32>,
+    f: impl FnOnce(usize) -> T + Send,
+) -> Result<T, String>
+where
+    T: Send,
+{
+    let n = threads.map_or(1, |t| t as usize).max(1);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(n)
+        .build()
+        .map_err(|e| format!("rayon pool construction failed: {e}"))?;
+    Ok(pool.install(|| f(n)))
 }
 
 /// Convert a [`SolverStatsDelta`] into a [`SolverStatsRow`] for Parquet output.
@@ -435,24 +444,57 @@ fn run_simulation_phase_py(
     Ok(sim_summary)
 }
 
+/// Load the effective [`cobre_io::Config`] for a run.
+///
+/// When `overrides` is `None` or empty, this is exactly today's behavior:
+/// [`cobre_io::parse_config`] reads and validates `config.json`. When overrides
+/// are present, the file is read to a `serde_json::Value` and deep-merged with
+/// the overrides via [`cobre_io::Config::with_overrides`], which re-deserializes
+/// and runs the same validation `parse_config` performs. The merged config feeds
+/// the rest of the lifecycle unchanged, so the persisted metadata reflects the
+/// effective (post-override) config.
+fn load_effective_config(
+    config_path: &std::path::Path,
+    overrides: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Result<cobre_io::Config, String> {
+    match overrides {
+        Some(map) if !map.is_empty() => {
+            let raw = std::fs::read_to_string(config_path)
+                .map_err(|e| format!("config read error: {e}"))?;
+            let base: serde_json::Value =
+                serde_json::from_str(&raw).map_err(|e| format!("config parse error: {e}"))?;
+            cobre_io::Config::with_overrides(&base, map)
+                .map_err(|e| format!("config override error: {e}"))
+        }
+        _ => cobre_io::parse_config(config_path).map_err(|e| format!("config parse error: {e}")),
+    }
+}
+
 /// Run the full solve lifecycle without MPI or progress bars (GIL released for computation).
-#[allow(clippy::too_many_lines)]
+///
+/// `overrides` is the already-converted `config_overrides` map (built under the
+/// GIL by the caller, before `py.detach`). When `Some` and non-empty, the
+/// effective config is the deep-merge of `config.json` and the overrides via
+/// [`cobre_io::Config::with_overrides`], so the persisted metadata reflects what
+/// actually ran. `None` and an empty map both reproduce the no-override path.
+// `overrides` is owned because it is moved across the `py.detach` /
+// scoped-pool boundary into this call; it is borrowed (not consumed) for the
+// merge, but owning it here is the correct lifecycle boundary.
+#[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
 fn run_inner(
     case_dir: &std::path::Path,
     output_dir: PathBuf,
-    threads: Option<u32>,
+    n_threads: usize,
     skip_simulation: bool,
+    overrides: Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<RunSummary, String> {
-    let n_threads = init_rayon(threads);
-
     // Single-source case load: pick up the System and the auxiliary
     // parquet/JSON rows in one validated pass so downstream stages
     // (hydro models, scalar parameters) reuse the parsed data instead of
     // re-opening the same files.
     let cobre_io::LoadedCase { system, artifacts } =
         cobre_io::load_case_with_artifacts(case_dir).map_err(|e| e.to_string())?;
-    let config = cobre_io::parse_config(&case_dir.join("config.json"))
-        .map_err(|e| format!("config parse error: {e}"))?;
+    let config = load_effective_config(&case_dir.join("config.json"), overrides.as_ref())?;
 
     let seed = config
         .training
@@ -925,15 +967,22 @@ fn provenance_to_dict<'py>(
 /// Returns a dict with keys: `"converged"`, `"iterations"`, `"lower_bound"`, `"upper_bound"`,
 /// `"gap_percent"`, `"total_time_ms"`, `"output_dir"`, `"simulation"`, `"stochastic"`,
 /// `"hydro_models"`, `"provenance"`.
+///
+/// `config_overrides` is an optional flat dotted-key mapping (e.g.
+/// `{"training.tree_seed": 7}`) that is deep-merged into `config.json` before the
+/// run; the effective (post-override) config is what every output reflects. The
+/// dict is converted to a `serde_json::Map` here under the GIL, before
+/// `py.detach`. `None` and an empty map both reproduce the no-override behavior.
 #[allow(clippy::needless_pass_by_value)]
 #[pyfunction]
-#[pyo3(signature = (case_dir, output_dir=None, threads=None, skip_simulation=None))]
+#[pyo3(signature = (case_dir, output_dir=None, threads=None, skip_simulation=None, config_overrides=None))]
 pub fn run(
     py: Python<'_>,
     case_dir: PathBuf,
     output_dir: Option<PathBuf>,
     threads: Option<u32>,
     skip_simulation: Option<bool>,
+    config_overrides: Option<Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     if !case_dir.exists() {
         return Err(PyOSError::new_err(format!(
@@ -945,8 +994,17 @@ pub fn run(
     let resolved_output = output_dir.unwrap_or_else(|| case_dir.join("output"));
     let skip = skip_simulation.unwrap_or(false);
 
-    let result: Result<RunSummary, String> =
-        py.detach(move || run_inner(&case_dir, resolved_output, threads, skip));
+    // Convert the override dict UNDER THE GIL, before py.detach releases it.
+    // An unsupported value type or non-str key raises PyValueError here.
+    let overrides = config_overrides
+        .map(|dict| crate::convert::pydict_to_json_map(&dict))
+        .transpose()?;
+
+    let result: Result<RunSummary, String> = py.detach(move || {
+        run_in_scoped_pool(threads, |n| {
+            run_inner(&case_dir, resolved_output, n, skip, overrides)
+        })?
+    });
 
     match result {
         Ok(summary) => {
@@ -995,10 +1053,17 @@ pub fn run(
             Ok(dict.into())
         }
         Err(msg) => {
-            let err_fn = if msg.as_str().starts_with("output write error")
+            let err_fn: fn(String) -> PyErr = if msg.as_str().starts_with("output write error")
                 || msg.as_str().starts_with("policy checkpoint error")
             {
                 PyOSError::new_err
+            } else if msg.as_str().starts_with("config override error")
+                || msg.as_str().starts_with("config parse error")
+                || msg.as_str().starts_with("config read error")
+            {
+                // Override-originated and config-load failures (schema typos,
+                // out-of-range values) are caller errors → ValueError.
+                PyValueError::new_err
             } else {
                 PyRuntimeError::new_err
             };
@@ -1017,10 +1082,10 @@ pub fn run(
 mod tests {
     use std::path::Path;
 
-    use cobre_sddp::SolverStatsDelta;
     use cobre_sddp::setup::prepare_stochastic;
+    use cobre_sddp::SolverStatsDelta;
 
-    use super::{aggregate_training_solve_stats, init_rayon, run_inner};
+    use super::{aggregate_training_solve_stats, run_in_scoped_pool, run_inner};
 
     #[test]
     fn aggregate_training_solve_stats_folds_and_splits_by_phase() {
@@ -1114,7 +1179,7 @@ mod tests {
             std::env::temp_dir().join(format!("cobre_py_parity_{}", std::process::id()));
         std::fs::create_dir_all(&output_dir).expect("create output dir");
 
-        run_inner(&case_dir, output_dir.clone(), Some(1), false)
+        run_inner(&case_dir, output_dir.clone(), 1, false, None)
             .expect("run_inner must succeed for 1dtoy via Python path");
 
         let training = cobre_io::read_training_metadata(&output_dir.join("training/metadata.json"))
@@ -1200,37 +1265,123 @@ mod tests {
         std::fs::remove_dir_all(&output_dir).ok();
     }
 
-    /// Verify that `init_rayon` returns the actual thread count when the global
-    /// pool is already initialized (i.e. it falls back to `rayon::current_num_threads()`
-    /// rather than returning the configured count).
+    /// Verify that each scoped pool honors its own per-call thread count: two
+    /// sequential calls in the same process with different thread counts each
+    /// receive the value they were configured with.
     ///
-    /// Nextest runs each test in an isolated process, so rayon global state does
-    /// not bleed across tests.  Under `cargo test` (single-process) the pre-init
-    /// step may silently fail if another test already initialized the pool; the
-    /// assertion `result == rayon::current_num_threads()` is still valid in that
-    /// case because `init_rayon` must always return the true active count.
+    /// This is the per-call replacement for the old process-global pool, whose
+    /// configuration only took effect on the first call per process. The closure
+    /// receives `n = threads.map_or(1, |t| t as usize).max(1)`, so distinct
+    /// requests yield distinct values regardless of call order.
     #[test]
-    fn init_rayon_falls_back_to_actual_count() {
-        // Attempt to pre-initialize the global pool with 2 threads.
-        // Silently ignored if the pool is already initialized (ok() discards the error).
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(2)
-            .build_global()
-            .ok();
+    fn scoped_pool_honors_per_call_thread_count() {
+        let first = run_in_scoped_pool(Some(2), |n| n);
+        let second = run_in_scoped_pool(Some(3), |n| n);
 
-        // Now try to reinitialize with 99 threads — must fail and fall back.
-        let result = init_rayon(Some(99));
-
-        // The result must match the true active count, not the requested 99.
-        let actual = rayon::current_num_threads();
         assert_eq!(
-            result, actual,
-            "init_rayon must return the active thread count on fallback, \
-             got {result} but rayon reports {actual} active threads"
+            first,
+            Ok(2),
+            "first scoped pool must honor its configured thread count (2)"
         );
-        assert_ne!(
-            result, 99,
-            "init_rayon must not return the configured count (99) on fallback"
+        assert_eq!(
+            second,
+            Ok(3),
+            "second scoped pool must honor its configured thread count (3)"
         );
+    }
+
+    /// Recursively copy a directory tree (the case fixtures are flat enough that
+    /// a simple recursive walk suffices for the parity test).
+    fn copy_dir_all(src: &Path, dst: &Path) {
+        std::fs::create_dir_all(dst).expect("create dst dir");
+        for entry in std::fs::read_dir(src).expect("read src dir") {
+            let entry = entry.expect("dir entry");
+            let file_type = entry.file_type().expect("file type");
+            let target = dst.join(entry.file_name());
+            if file_type.is_dir() {
+                copy_dir_all(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), &target).expect("copy file");
+            }
+        }
+    }
+
+    /// The fifth acceptance criterion: the override path and the edited-config
+    /// path are equivalent. Running the unedited 1dtoy case with
+    /// `config_overrides={"training.tree_seed": 7}` must produce the same
+    /// `final_lower_bound` as physically editing `config.json` to set
+    /// `tree_seed = 7` and running it. This proves overrides flow through the
+    /// entire lifecycle (not just metadata) — the seed changes the sampled
+    /// scenario tree, so a divergent path would diverge in the bound.
+    ///
+    /// Left un-gated to match `python_run_1dtoy_metadata_matches_cli_golden_values`,
+    /// whose runtime this mirrors (one 1dtoy train+simulate per path).
+    #[test]
+    fn override_path_equals_edited_config_for_1dtoy() {
+        let case_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("cobre-python parent")
+            .parent()
+            .expect("crates parent")
+            .join("examples/1dtoy");
+
+        let base =
+            std::env::temp_dir().join(format!("cobre_py_override_parity_{}", std::process::id()));
+        let edited_case = base.join("edited_case");
+        let edited_out = base.join("edited_out");
+        let override_out = base.join("override_out");
+
+        // (a) Edited-config path: copy the case, set tree_seed = 7 on disk, run.
+        copy_dir_all(&case_dir, &edited_case);
+        let config_path = edited_case.join("config.json");
+        let raw = std::fs::read_to_string(&config_path).expect("read config.json");
+        let mut json: serde_json::Value = serde_json::from_str(&raw).expect("parse config.json");
+        json["training"]["tree_seed"] = serde_json::json!(7);
+        std::fs::write(
+            &config_path,
+            serde_json::to_string_pretty(&json).expect("serialize config"),
+        )
+        .expect("write edited config.json");
+
+        std::fs::create_dir_all(&edited_out).expect("create edited out dir");
+        run_inner(&edited_case, edited_out.clone(), 1, false, None)
+            .expect("edited-config run must succeed");
+
+        // (b) Override path: run the unedited case with the equivalent override.
+        let mut overrides = serde_json::Map::new();
+        overrides.insert("training.tree_seed".to_string(), serde_json::json!(7));
+        std::fs::create_dir_all(&override_out).expect("create override out dir");
+        run_inner(&case_dir, override_out.clone(), 1, false, Some(overrides))
+            .expect("override run must succeed");
+
+        let edited_meta =
+            cobre_io::read_training_metadata(&edited_out.join("training/metadata.json"))
+                .expect("read edited training metadata");
+        let override_meta =
+            cobre_io::read_training_metadata(&override_out.join("training/metadata.json"))
+                .expect("read override training metadata");
+
+        // The persisted effective seed must be 7 on both paths.
+        assert_eq!(
+            override_meta.configuration.seed,
+            Some(7),
+            "override path must persist the effective seed (7) to metadata"
+        );
+        assert_eq!(
+            edited_meta.configuration.seed,
+            Some(7),
+            "edited-config path must persist seed 7 to metadata"
+        );
+
+        let edited_lb = edited_meta.bounds.final_lower_bound;
+        let override_lb = override_meta.bounds.final_lower_bound;
+        let rel = (edited_lb - override_lb).abs() / edited_lb.abs();
+        assert!(
+            rel < 1e-6,
+            "override-path final_lower_bound {override_lb} not within 1e-6 of \
+             edited-config final_lower_bound {edited_lb} (rel = {rel})"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
     }
 }

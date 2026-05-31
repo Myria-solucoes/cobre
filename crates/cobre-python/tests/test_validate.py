@@ -199,3 +199,63 @@ def test_validate_never_raises_for_valid_case() -> None:
 
     result = cobre.io.validate(VALID_CASE_1DTOY)
     assert isinstance(result, dict)
+
+
+# ── config_overrides ──────────────────────────────────────────────────────────
+
+
+def test_validate_config_overrides_none_is_valid() -> None:
+    """config_overrides=None reproduces the default valid result."""
+    import cobre.io  # noqa: PLC0415
+
+    result = cobre.io.validate(VALID_CASE_1DTOY, config_overrides=None)
+    assert result["valid"] is True, f"errors: {result['errors']}"
+
+
+def test_validate_config_overrides_invalid_value_surfaces_schema_error() -> None:
+    """An out-of-range override surfaces in the dict as a SchemaError, not a raise.
+
+    reference_volume_fraction must be in (0.0, 1.0]; 0.0 violates validate_config,
+    which `Config::with_overrides` runs identically to an edited config.json.
+    """
+    import cobre.io  # noqa: PLC0415
+
+    result = cobre.io.validate(
+        VALID_CASE_1DTOY,
+        config_overrides={"energy.reference_volume_fraction": 0.0},
+    )
+    assert result["valid"] is False, "an invalid override must mark the case invalid"
+    assert len(result["errors"]) >= 1
+    err = result["errors"][0]
+    assert err["kind"] == "SchemaError", f"expected SchemaError, got {err['kind']!r}"
+    assert "energy.reference_volume_fraction" in err["message"], (
+        f"error message must name the offending field, got: {err['message']!r}"
+    )
+
+
+def test_validate_config_overrides_typo_surfaces_schema_error() -> None:
+    """A typo override key is rejected via deny_unknown_fields as a SchemaError."""
+    import cobre.io  # noqa: PLC0415
+
+    result = cobre.io.validate(
+        VALID_CASE_1DTOY,
+        config_overrides={"trainning.tree_seed": 7},
+    )
+    assert result["valid"] is False
+    assert len(result["errors"]) >= 1
+    assert result["errors"][0]["kind"] == "SchemaError"
+
+
+def test_validate_config_overrides_unsupported_value_raises_value_error() -> None:
+    """A malformed override value (no JSON form) raises ValueError before merging.
+
+    Unlike case-validation failures (returned as data), a malformed call payload
+    is a programming error and is raised under the GIL before py.detach.
+    """
+    import cobre.io  # noqa: PLC0415
+
+    with pytest.raises(ValueError):
+        cobre.io.validate(
+            VALID_CASE_1DTOY,
+            config_overrides={"energy.reference_volume_fraction": {1, 2}},
+        )

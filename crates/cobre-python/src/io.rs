@@ -47,6 +47,30 @@ fn load_error_kind(err: &LoadError) -> &'static str {
     }
 }
 
+/// Load and validate the effective config for [`validate`]'s phase 7.
+///
+/// When `overrides` is `None` or empty this is exactly [`cobre_io::parse_config`].
+/// Otherwise the file is read to a `serde_json::Value` and deep-merged with the
+/// overrides via [`cobre_io::Config::with_overrides`], which re-deserializes and
+/// runs the same `validate_config` checks. Both branches yield a [`LoadError`] on
+/// failure, so the caller's [`load_error_kind`] mapping applies uniformly —
+/// overrides are validated identically to an edited `config.json`.
+fn load_validate_config(
+    config_path: &std::path::Path,
+    overrides: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Result<cobre_io::Config, LoadError> {
+    match overrides {
+        Some(map) if !map.is_empty() => {
+            let raw =
+                std::fs::read_to_string(config_path).map_err(|e| LoadError::io(config_path, e))?;
+            let base: serde_json::Value = serde_json::from_str(&raw)
+                .map_err(|e| LoadError::parse(config_path, e.to_string()))?;
+            cobre_io::Config::with_overrides(&base, map)
+        }
+        _ => cobre_io::parse_config(config_path),
+    }
+}
+
 /// Convert a [`LoadError`] to the appropriate Python exception.
 ///
 /// The mapping preserves as much context as possible in the exception message
@@ -150,7 +174,20 @@ pub fn load_case(path: PathBuf) -> PyResult<PySystem> {
 /// ```
 #[allow(clippy::needless_pass_by_value)]
 #[pyfunction]
-pub fn validate(py: Python<'_>, path: PathBuf) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (path, config_overrides=None))]
+pub fn validate(
+    py: Python<'_>,
+    path: PathBuf,
+    config_overrides: Option<Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    // Convert the override dict under the GIL up front so overrides are validated
+    // identically wherever they enter (matching the design doc). An unsupported
+    // value type or non-str key raises PyValueError here — this is a malformed
+    // call, not a case-validation failure, so it is the one path that may raise.
+    let overrides = config_overrides
+        .map(|d| crate::convert::pydict_to_json_map(&d))
+        .transpose()?;
+
     let dict = PyDict::new(py);
 
     /// Short-circuit helper: populate the result dict with a single error entry
@@ -190,9 +227,14 @@ pub fn validate(py: Python<'_>, path: PathBuf) -> PyResult<Py<PyAny>> {
     let system = loaded.system;
     let artifacts = loaded.artifacts;
 
-    // Phase 7: parse config.json.
+    // Phase 7: parse config.json (override-aware). When overrides are present
+    // the file is read and deep-merged via `Config::with_overrides`, which
+    // re-deserializes and runs the same validation `parse_config` performs, so a
+    // typo or out-of-range override surfaces here as a SchemaError. Both error
+    // sources share the `load_error_kind` mapping, so overrides are validated
+    // identically wherever they enter.
     let config_path = path.join("config.json");
-    let config = match cobre_io::parse_config(&config_path) {
+    let config = match load_validate_config(&config_path, overrides.as_ref()) {
         Ok(c) => c,
         Err(ref err) => {
             return_error!(load_error_kind(err), err.to_string());

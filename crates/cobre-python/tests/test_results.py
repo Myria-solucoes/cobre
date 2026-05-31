@@ -233,3 +233,88 @@ def test_convergence_path_is_readable(run_output: pathlib.Path) -> None:
 
     assert path.exists(), "convergence_path must exist"
     assert path.stat().st_size > 0, "convergence.parquet must not be empty"
+
+
+# ---------------------------------------------------------------------------
+# report / summary tests
+# ---------------------------------------------------------------------------
+
+
+def test_report_top_level_keys(run_output: pathlib.Path) -> None:
+    """report() returns a dict with the six expected top-level keys."""
+    import cobre.results  # noqa: PLC0415
+
+    report = cobre.results.report(str(run_output))
+
+    assert isinstance(report, dict), "report must return a dict"
+    expected_keys = {
+        "output_directory",
+        "status",
+        "bounds",
+        "training",
+        "cost",
+        "simulation",
+    }
+    missing = expected_keys - report.keys()
+    assert not missing, f"report is missing top-level keys: {missing}"
+
+
+def test_report_bounds_hoist_is_consistent(run_output: pathlib.Path) -> None:
+    """report()['bounds'] mirrors report()['training']['bounds']."""
+    import cobre.results  # noqa: PLC0415
+
+    report = cobre.results.report(str(run_output))
+
+    assert (
+        report["bounds"]["final_lower_bound"]
+        == (report["training"]["bounds"]["final_lower_bound"])
+    ), "top-level bounds must match nested training.bounds"
+
+
+def test_report_cost_hoist_is_consistent(run_output: pathlib.Path) -> None:
+    """report()['cost'] mirrors report()['simulation']['cost'] when simulation ran."""
+    import cobre.results  # noqa: PLC0415
+
+    report = cobre.results.report(str(run_output))
+
+    assert report["simulation"] is not None, "1dtoy runs simulation"
+    assert report["cost"] is not None, "cost must be present when simulation ran"
+    assert report["cost"]["mean_cost"] == (report["simulation"]["cost"]["mean_cost"]), (
+        "top-level cost must match nested simulation.cost"
+    )
+
+
+def test_report_simulation_none_when_absent(run_output: pathlib.Path) -> None:
+    """report() returns None for cost/simulation when simulation metadata is absent."""
+    import shutil
+
+    import cobre.results  # noqa: PLC0415
+
+    # Copy the run output and strip the simulation directory.
+    stripped = run_output.parent / "report_no_simulation"
+    if stripped.exists():
+        shutil.rmtree(stripped)
+    shutil.copytree(run_output, stripped)
+    shutil.rmtree(stripped / "simulation", ignore_errors=True)
+
+    report = cobre.results.report(str(stripped))
+
+    assert report["simulation"] is None, "simulation must be None when metadata absent"
+    assert report["cost"] is None, "cost must be None when simulation metadata absent"
+
+
+def test_report_missing_training_raises(tmp_path: pathlib.Path) -> None:
+    """report() raises FileNotFoundError when training/metadata.json is absent."""
+    import cobre.results  # noqa: PLC0415
+
+    with pytest.raises(FileNotFoundError):
+        cobre.results.report(str(tmp_path))
+
+
+def test_summary_equals_report(run_output: pathlib.Path) -> None:
+    """summary() returns the same dict as report() (rendering deferred to Python)."""
+    import cobre.results  # noqa: PLC0415
+
+    assert cobre.results.summary(str(run_output)) == cobre.results.report(
+        str(run_output)
+    ), "summary must return the same structured dict as report"
