@@ -16,13 +16,13 @@
 //! ## Why these profiles are `HighsProfile`-concrete
 //!
 //! The per-phase profiles are authored here as concrete [`HighsProfile`] values,
-//! which couples this module to the HiGHS backend. This is deliberate, not an
+//! which couples this module to the `HiGHS` backend. This is deliberate, not an
 //! oversight: the *mapping* "which phase wants which solver behaviour" (e.g. the
 //! backward pass exploits sparse cut-subgradient rows) is algorithm knowledge
 //! that must live in the algorithm crate, while `cobre-solver` is kept strictly
 //! backend-agnostic and so cannot know about SDDP phases. With a single backend,
 //! holding the concrete profile here is the correct equilibrium and preserves
-//! full control over every HiGHS option.
+//! full control over every `HiGHS` option.
 //!
 //! To make `SolverInterface::Profile` genuinely backend-independent (so a second
 //! backend can be selected without editing this module), introduce a
