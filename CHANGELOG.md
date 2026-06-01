@@ -9,8 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.8.0] - 2026-06-01
-
 ### Deprecated
 
 - `training.cut_selection.basis_activity_window` is now ignored at
@@ -88,6 +86,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   training and simulation solve-stat summaries, and the expected-cost
   statistics (mean, std, CVaR), so `cobre summary` can reproduce the
   complete live run end-block from a finished output directory.
+- Warm-start and resume training reuse the prior policy's stored LP bases:
+  the first training iteration warm-starts its solves from the checkpoint
+  basis instead of cold-starting. The same checkpoint basis reconstruction
+  (which recovers per-cut slot identity from the stored basis) also speeds
+  up simulation-only / `cobre simulate` runs.
 
 ### Added
 
@@ -235,6 +238,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `FPHA planes: 0 computed, 0 precomputed` line for studies with no
   FPHA hydros. The source breakdown remains in `model_provenance.json`
   and is accessible via `cobre report` and the Python bindings.
+- Warm-start and resume training now apply the loaded policy's cuts on the
+  first iteration. Previously the first post-resume iteration solved a
+  cut-less, myopic policy — producing a spuriously high upper-bound estimate
+  (the lower bound was already correct) and a wasted iteration — before
+  self-correcting on the next iteration.
+- Loading a policy for simulation-only mode (training disabled) no longer
+  trips a basis-reconstruction assertion in debug builds. Release builds were
+  unaffected (the assertion compiles out), but debug builds — e.g. the Python
+  bindings under `maturin develop` — previously panicked when reconstructing
+  the LP basis from a checkpoint.
 
 ### Note
 
@@ -1932,8 +1945,7 @@ disappears from `cobre.results.load_policy` per-cut dicts.
 
 <!-- next-url -->
 
-[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.8.0...HEAD
-[0.8.0]: https://github.com/cobre-rs/cobre/compare/v0.7.0...v0.8.0
+[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.7.0...HEAD
 [0.7.0]: https://github.com/cobre-rs/cobre/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/cobre-rs/cobre/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/cobre-rs/cobre/compare/v0.6.0...v0.6.1
