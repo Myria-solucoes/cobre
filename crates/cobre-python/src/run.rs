@@ -2220,9 +2220,6 @@ mod tests {
     /// path succeeds. Re-enable once the upstream `CapturedBasis`
     /// reconstruction-from-checkpoint defect is fixed.
     #[test]
-    #[ignore = "pre-existing debug_assert in reconstruct_basis on the checkpoint \
-                basis path; also panics in monolithic run.run simulation-only \
-                (debug). Re-enable after the upstream CapturedBasis fix."]
     fn python_simulation_only_metadata_matches_train_then_simulate() {
         let case_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()

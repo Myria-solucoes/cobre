@@ -326,20 +326,6 @@ def test_simulate_zero_cut_policy_raises(tmp_path: pathlib.Path) -> None:
         study.simulate(policy)
 
 
-@pytest.mark.skip(
-    reason=(
-        "Pre-existing blocker: the checkpoint basis-reconstruction path trips a "
-        "debug_assert! in cobre_sddp::basis_reconstruct::reconstruct_basis "
-        "(row_status.len() != base_row_count + cut_row_slots.len()) in debug "
-        "builds (maturin develop default). build_basis_cache_from_checkpoint "
-        "rebuilds a CapturedBasis with base_row_count=0 and empty cut_row_slots "
-        "but non-empty row_status. The identical panic occurs in the unchanged "
-        "monolithic cobre.run.run simulation-only path "
-        "(config_overrides={'training.enabled': False}), so it is NOT introduced "
-        "by Study.load_policy. In a release build the assert is a no-op and the "
-        "path succeeds. Re-enable after the upstream CapturedBasis fix."
-    )
-)
 def test_load_policy_then_simulate_matches_run(tmp_path: pathlib.Path) -> None:
     """A loaded policy feeds the IDENTICAL simulate path as a trained one.
 

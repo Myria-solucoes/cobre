@@ -86,10 +86,14 @@ pub fn validate_policy_compatibility(
 /// a matching record get `Some(CapturedBasis)` (with `u8` status codes widened
 /// to `i32`); stages without a record get `None`.
 ///
-/// The returned `CapturedBasis` entries have empty metadata (`cut_row_slots`,
-/// `state_at_capture`, `base_row_count = 0`). Checkpoint files do not store
-/// slot-tracking metadata; on the simulation warm-start path, `reconstruct_basis`
-/// degrades gracefully when `cut_row_slots` is empty (all rows treated as new).
+/// The returned `CapturedBasis` entries carry the stored column and row
+/// statuses but no cut-slot metadata (`cut_row_slots` and `state_at_capture`
+/// empty). Checkpoint files do not store slot-tracking metadata, so all stored
+/// row statuses are treated as template rows (`base_row_count = row_status.len()`),
+/// which keeps the `CapturedBasis` invariant intact. On the simulation
+/// warm-start path, `reconstruct_basis` then copies the first
+/// `target.base_row_count` template statuses positionally and reconstructs every
+/// current cut row as BASIC (non-binding).
 #[must_use]
 pub fn build_basis_cache_from_checkpoint(
     num_stages: usize,
@@ -101,12 +105,24 @@ pub fn build_basis_cache_from_checkpoint(
         if stage < num_stages {
             let col_status: Vec<i32> = record.column_status.iter().map(|&c| i32::from(c)).collect();
             let row_status: Vec<i32> = record.row_status.iter().map(|&r| i32::from(r)).collect();
+            // Checkpoint files carry no cut-slot metadata, so stored cut rows
+            // cannot be mapped to current slots: `cut_row_slots` stays empty and
+            // every current cut row reconstructs as BASIC. The stored row
+            // statuses are therefore all treated as template rows, which means
+            // `base_row_count` must equal `row_status.len()` to satisfy the
+            // `CapturedBasis` invariant `row_status.len() == base_row_count +
+            // cut_row_slots.len()` (the `debug_assert!` in `reconstruct_basis`).
+            // `stored.base_row_count` is only read by that assert and by the
+            // slot-found branch, which never executes while `cut_row_slots` is
+            // empty — so this is exactly the value the release path already
+            // assumed, with no change to the reconstructed basis.
+            let base_row_count = row_status.len();
             cache[stage] = Some(CapturedBasis {
                 basis: Basis {
                     col_status,
                     row_status,
                 },
-                base_row_count: 0,
+                base_row_count,
                 cut_row_slots: Vec::new(),
                 state_at_capture: Vec::new(),
             });
