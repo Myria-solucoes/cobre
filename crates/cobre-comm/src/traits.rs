@@ -29,7 +29,7 @@
 //! `SharedWindow<T>` is `!Send + !Sync` (ferrompi v0.4.x), whereas
 //! `LocalCommunicator` and `SharedRegion` require `Send + Sync`. Resolving this
 //! requires either a wrapper type that enforces single-threaded access, or a
-//! ferrompi API change. No cobre-sddp consumer exists yet, so this is deferred.
+//! ferrompi API change. No downstream consumer exists yet, so this is deferred.
 
 /// Marker trait for types that can be transmitted through collective operations.
 ///
