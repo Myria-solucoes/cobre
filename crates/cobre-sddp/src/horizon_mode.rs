@@ -25,7 +25,6 @@
 //! use cobre_sddp::horizon_mode::HorizonMode;
 //!
 //! let horizon = HorizonMode::Finite { num_stages: 5 };
-//! assert_eq!(horizon.successors(3), vec![4]);
 //! assert!(horizon.is_terminal(5));
 //! assert!(!horizon.is_terminal(4));
 //! assert!(horizon.validate().is_ok());
@@ -56,9 +55,8 @@ use crate::SddpError;
 /// use cobre_sddp::horizon_mode::HorizonMode;
 ///
 /// let h = HorizonMode::Finite { num_stages: 12 };
-/// assert_eq!(h.successors(1), vec![2]);
-/// assert!(h.successors(12).is_empty());
 /// assert!(h.is_terminal(12));
+/// assert!(!h.is_terminal(11));
 /// assert!(h.validate().is_ok());
 /// ```
 #[derive(Debug, Clone)]
@@ -75,47 +73,10 @@ pub enum HorizonMode {
 }
 
 impl HorizonMode {
-    /// Return successor stage indices reachable from `stage`.
-    ///
-    /// For `Finite` horizon:
-    /// - Non-terminal stages return `vec![stage + 1]`.
-    /// - The terminal stage (`stage == num_stages`) returns an empty `Vec`.
-    ///
-    /// Stage indices are **1-based**. The returned vec is always sorted
-    /// (deterministic order across MPI ranks).
-    ///
-    /// This method is infallible — all stage IDs are validated at
-    /// configuration load time.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use cobre_sddp::horizon_mode::HorizonMode;
-    ///
-    /// let h = HorizonMode::Finite { num_stages: 5 };
-    /// assert_eq!(h.successors(3), vec![4]);
-    /// assert!(h.successors(5).is_empty());
-    /// ```
-    #[must_use]
-    pub fn successors(&self, stage: usize) -> Vec<usize> {
-        match self {
-            HorizonMode::Finite { num_stages } => {
-                if stage >= *num_stages {
-                    vec![]
-                } else {
-                    vec![stage + 1]
-                }
-            }
-        }
-    }
-
     /// Return whether `stage` has no successors.
     ///
     /// For `Finite` horizon, exactly the last stage (`stage == num_stages`)
     /// is terminal.
-    ///
-    /// Consistent with [`HorizonMode::successors`]: `is_terminal(s)` is
-    /// `true` if and only if `successors(s).is_empty()`.
     ///
     /// # Examples
     ///
@@ -136,8 +97,9 @@ impl HorizonMode {
 
     /// Validate the horizon mode configuration.
     ///
-    /// Called once during initialization. Returns `Ok(())` when the
-    /// configuration is valid; returns `Err(SddpError::Validation(_))`
+    /// Called once during study setup (`StudySetup::from_broadcast_params`)
+    /// immediately after the `HorizonMode` is constructed. Returns `Ok(())`
+    /// when the configuration is valid; returns `Err(SddpError::Validation(_))`
     /// describing the violated rule when invalid.
     ///
     /// ## Validation rules
@@ -196,56 +158,6 @@ impl HorizonMode {
 mod tests {
     use super::HorizonMode;
     use crate::SddpError;
-
-    // ── successors ────────────────────────────────────────────────────────────
-
-    #[test]
-    fn successors_mid_stage_returns_next() {
-        // Acceptance criterion: successors(3) returns [4] for num_stages=5
-        let h = HorizonMode::Finite { num_stages: 5 };
-        assert_eq!(h.successors(3), vec![4]);
-    }
-
-    #[test]
-    fn successors_first_stage_returns_second() {
-        let h = HorizonMode::Finite { num_stages: 5 };
-        assert_eq!(h.successors(1), vec![2]);
-    }
-
-    #[test]
-    fn successors_terminal_stage_returns_empty() {
-        let h = HorizonMode::Finite { num_stages: 5 };
-        assert_eq!(h.successors(5), Vec::<usize>::new());
-    }
-
-    #[test]
-    fn successors_beyond_terminal_returns_empty() {
-        // Stages beyond num_stages are also treated as terminal.
-        let h = HorizonMode::Finite { num_stages: 5 };
-        assert_eq!(h.successors(6), Vec::<usize>::new());
-    }
-
-    #[test]
-    fn successors_all_non_terminal_stages() {
-        let h = HorizonMode::Finite { num_stages: 4 };
-        for stage in 1..=3 {
-            let succ = h.successors(stage);
-            assert_eq!(succ, vec![stage + 1], "stage {stage}");
-        }
-    }
-
-    #[test]
-    fn successors_consistent_with_is_terminal() {
-        // Postcondition: is_terminal(s) iff successors(s).is_empty()
-        let h = HorizonMode::Finite { num_stages: 6 };
-        for stage in 1..=7 {
-            assert_eq!(
-                h.is_terminal(stage),
-                h.successors(stage).is_empty(),
-                "stage {stage}: is_terminal and successors must be consistent"
-            );
-        }
-    }
 
     // ── is_terminal ───────────────────────────────────────────────────────────
 
