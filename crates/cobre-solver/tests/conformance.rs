@@ -19,6 +19,9 @@ use cobre_solver::{
     Basis, HighsSolver, RowBatch, SolutionView, SolverError, SolverInterface, StageTemplate,
 };
 
+#[cfg(feature = "clp")]
+use cobre_solver::ClpSolver;
+
 #[cfg(feature = "test-support")]
 use cobre_solver::test_support;
 
@@ -1497,5 +1500,150 @@ fn test_basis_roundtrip() {
         warm_view.iterations <= 1,
         "warm-start from exact basis must complete in at most 1 iteration, got {}",
         warm_view.iterations
+    );
+}
+
+// ─── CLP-gated conformance tests (mirror HiGHS) ──────────────────────────────
+//
+// These mirror the core HiGHS conformance tests against the CLP backend,
+// proving the two solvers agree apples-to-apples on the shared SS1 fixtures.
+// They are compiled only when the `clp` feature is enabled (CI `--all-features`)
+// and are absent from the binary under the default `cargo test`. The dual sign
+// convention is the canonical HiGHS sign — `normalize_row_dual` in `clp.rs` is
+// the identity function — so the expected values are reused verbatim.
+
+/// Mirrors `test_solver_highs_load_model_and_solve`: assert objective `100.0`
+/// and primals `(6.0, 0.0, 2.0)`.
+#[cfg(feature = "clp")]
+#[test]
+fn test_solver_clp_load_model_and_solve() {
+    let mut solver = ClpSolver::new().expect("ClpSolver::new() must succeed");
+    let template = make_fixture_stage_template();
+
+    solver.load_model(&template);
+    let solution = solver
+        .solve(None)
+        .expect("solve() must succeed on feasible LP");
+
+    let obj = solution.objective;
+    assert!(
+        (obj - 100.0).abs() < 1e-8,
+        "expected objective = 100.0, got {obj}"
+    );
+
+    let primals = &solution.primal;
+    assert!(
+        (primals[0] - 6.0).abs() < 1e-8,
+        "expected x0 = 6.0, got {}",
+        primals[0]
+    );
+    assert!(
+        (primals[1] - 0.0).abs() < 1e-8,
+        "expected x1 = 0.0, got {}",
+        primals[1]
+    );
+    assert!(
+        (primals[2] - 2.0).abs() < 1e-8,
+        "expected x2 = 2.0, got {}",
+        primals[2]
+    );
+}
+
+/// Mirrors `test_solver_highs_solve_dual_values`: assert `dual.len() == 2` and
+/// `dual[0] == -100.0` (the canonical sign, asserted directly).
+#[cfg(feature = "clp")]
+#[test]
+fn test_solver_clp_solve_dual_values() {
+    let mut solver = ClpSolver::new().expect("ClpSolver::new() must succeed");
+    let template = make_fixture_stage_template();
+
+    solver.load_model(&template);
+    let solution = solver
+        .solve(None)
+        .expect("solve() must succeed on feasible LP");
+
+    assert_eq!(
+        solution.dual.len(),
+        2,
+        "expected dual.len() = 2, got {}",
+        solution.dual.len()
+    );
+
+    let pi_0 = solution.dual[0];
+    assert!(
+        (pi_0 - (-100.0)).abs() < 1e-6,
+        "expected dual[0] = -100.0, got {pi_0}"
+    );
+
+    let pi_1 = solution.dual[1];
+    assert!(
+        (pi_1 - 50.0).abs() < 1e-6,
+        "expected dual[1] = 50.0, got {pi_1}"
+    );
+}
+
+/// Mirrors `test_solver_highs_add_rows_tightens`: load SS1.1, `add_rows(SS1.2)`,
+/// `solve(None)`, assert objective `162.0` and primals `(6.0, 62.0, 2.0)`.
+/// This is the end-to-end CSR→CSC merge cross-validation.
+#[cfg(feature = "clp")]
+#[test]
+fn test_solver_clp_add_rows_then_solve() {
+    let mut solver = ClpSolver::new().expect("ClpSolver::new() must succeed");
+    let template = make_fixture_stage_template();
+    let cuts = make_fixture_row_batch();
+
+    solver.load_model(&template);
+    solver.add_rows(&cuts);
+    let solution = solver
+        .solve(None)
+        .expect("solve() must succeed after adding both cuts");
+
+    assert!(
+        (solution.objective - 162.0).abs() < 1e-8,
+        "expected objective = 162.0, got {}",
+        solution.objective
+    );
+    let primals = &solution.primal;
+    assert_eq!(primals.len(), 3);
+    assert!(
+        (primals[0] - 6.0).abs() < 1e-8
+            && (primals[1] - 62.0).abs() < 1e-8
+            && (primals[2] - 2.0).abs() < 1e-8,
+        "expected [6.0, 62.0, 2.0], got [{}, {}, {}]",
+        primals[0],
+        primals[1],
+        primals[2]
+    );
+}
+
+/// Mirrors `test_basis_roundtrip`: cold solve SS1.1, `get_basis`, reload SS1.1,
+/// warm-start via `solve(Some(&basis))`, assert objective `100.0`.
+///
+/// No iteration-count bound is asserted: CLP discards the basis on bounds
+/// reload and its iteration semantics differ from `HiGHS`.
+#[cfg(feature = "clp")]
+#[test]
+fn test_solver_clp_warm_start_roundtrip() {
+    let mut solver = ClpSolver::new().expect("ClpSolver::new() must succeed");
+    let template = make_fixture_stage_template();
+
+    // Cold-start solve to obtain the optimal basis.
+    solver.load_model(&template);
+    solver.solve(None).expect("cold solve must succeed");
+
+    // Extract the basis into a buffer; `get_basis` resizes it.
+    let mut basis = Basis::new(0, 0);
+    solver.get_basis(&mut basis);
+
+    // Reload the model to reset CLP internal state, then warm-start.
+    solver.load_model(&template);
+    let warm_view = solver
+        .solve(Some(&basis))
+        .expect("warm-start solve must succeed");
+
+    assert!(
+        (warm_view.objective - 100.0).abs() < 1e-8,
+        "warm-start objective must equal 100.0, got {}",
+        warm_view.objective
     );
 }
