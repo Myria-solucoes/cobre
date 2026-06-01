@@ -1016,6 +1016,30 @@ where
         // Step 4c: Template baking.
         // Rebuild per-stage baked templates from the current active cut set.
         let bake_start = Instant::now();
+        let total_rows_baked = self.bake_active_cuts_into_templates();
+        #[allow(clippy::cast_possible_truncation)]
+        let bake_time_ms = bake_start.elapsed().as_millis() as u64;
+        emit(
+            self.runtime.event_sender(),
+            #[allow(clippy::cast_possible_truncation)]
+            TrainingEvent::PolicyTemplateBakeComplete {
+                iteration,
+                stages_processed: self.ranks.num_stages as u32,
+                total_rows_baked,
+                bake_time_ms,
+            },
+        );
+    }
+
+    /// Rebuild every stage's baked template from the current active cut set,
+    /// returning the total number of cut rows baked.
+    ///
+    /// Each `baked_templates[t]` becomes the base template plus one structural
+    /// row per active cut in `fcf.pools[t]` (`active_cuts()` order). With no
+    /// active cuts (a fresh start) every batch is empty and the bake is a
+    /// structural copy of the base template — identical to the pre-bake done in
+    /// `IterationScratch::new`.
+    fn bake_active_cuts_into_templates(&mut self) -> u64 {
         let mut total_rows_baked: u64 = 0;
         let indexer = self.training_ctx.indexer;
         for t in 0..self.ranks.num_stages {
@@ -1036,18 +1060,27 @@ where
                 &mut self.scratch.baked_templates[t],
             );
         }
-        #[allow(clippy::cast_possible_truncation)]
-        let bake_time_ms = bake_start.elapsed().as_millis() as u64;
-        emit(
-            self.runtime.event_sender(),
-            #[allow(clippy::cast_possible_truncation)]
-            TrainingEvent::PolicyTemplateBakeComplete {
-                iteration,
-                stages_processed: self.ranks.num_stages as u32,
-                total_rows_baked,
-                bake_time_ms,
-            },
-        );
+        total_rows_baked
+    }
+
+    /// Bake the warm-start / resume pre-loaded cuts into the stage templates
+    /// before the first training iteration runs.
+    ///
+    /// `IterationScratch::new` pre-bakes every template with an *empty* cut
+    /// batch — correct for a fresh start, but it leaves a warm-start/resume
+    /// FCF's loaded cuts out of the templates that iteration 1's forward and
+    /// backward passes solve (those passes use `scratch.baked_templates`
+    /// exclusively; the per-iteration rebake in `run_cut_management` only runs
+    /// *after* them). Without this, the first post-resume iteration would solve
+    /// a cut-less, myopic policy — yielding a spuriously high upper-bound
+    /// estimate and a wasted iteration — until the end-of-iteration rebake.
+    ///
+    /// No-op for a fresh start (no active cuts), so fresh-mode behavior and the
+    /// deterministic regression baselines are unchanged.
+    pub(crate) fn prime_baked_templates(&mut self) {
+        if self.fcf.total_active_cuts() > 0 {
+            let _ = self.bake_active_cuts_into_templates();
+        }
     }
 
     /// Evaluate the lower bound and push the solver stats entry.

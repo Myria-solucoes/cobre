@@ -409,6 +409,10 @@ where
         comm,
         solver_factory,
     )?;
+    // Bake any warm-start / resume cuts into the stage templates before the
+    // first iteration so iteration 1's forward pass solves the loaded policy
+    // rather than a cut-less, myopic one. No-op for a fresh start.
+    session.prime_baked_templates();
     for iteration in session.iteration_range() {
         match session.run_iteration(iteration) {
             Ok(IterationOutcome::Continue) => {}
