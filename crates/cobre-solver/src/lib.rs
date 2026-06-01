@@ -53,9 +53,13 @@ pub use profiled::ProfiledSolver;
 pub mod baking;
 pub use baking::bake_rows_into_template;
 
+#[cfg(feature = "highs")]
 pub mod highs;
+#[cfg(feature = "highs")]
 pub use highs::HighsProfile;
+#[cfg(feature = "highs")]
 pub use highs::HighsSolver;
+#[cfg(feature = "highs")]
 pub use highs::highs_version;
 
 #[cfg(feature = "test-support")]

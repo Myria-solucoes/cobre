@@ -39,6 +39,12 @@ assessment*.md
 
 # Stale vendor directory (real HiGHS submodule is at crates/cobre-solver/vendor/)
 vendor/
+# Track our authored COIN-OR superbuild glue (config headers + CMakeLists) under
+# crates/cobre-solver/vendor/coin-build/. Submodule contents (HiGHS/Clp/CoinUtils)
+# stay ignored — they are gitlinks tracked separately, not regular files.
+!crates/cobre-solver/vendor/
+crates/cobre-solver/vendor/*
+!crates/cobre-solver/vendor/coin-build/
 
 # Python virtual environments (test infrastructure)
 .venv-mpi-smoke/

@@ -13,7 +13,15 @@ keywords = ["linear-programming", "optimization", "solver", "highs", "lp"]
 categories = ["science", "mathematics"]
 
 [features]
-default = []
+default = ["highs"]
+# Gates the HiGHS backend (build, FFI, and `HighsSolver`/`HighsProfile` exports).
+# On by default. `highs` and `clp` may currently be enabled together (additive);
+# a later phase makes backend selection mutually exclusive once the rest of the
+# workspace no longer hard-references HiGHS.
+highs = []
+# Gates the optional CLP/CoinUtils solver backend. Inert until the FFI bindings
+# and `ClpSolver` land in later tickets.
+clp = []
 # Exposes FFI option-setting helpers for integration tests.
 # Must NOT be enabled in production builds.
 test-support = []
