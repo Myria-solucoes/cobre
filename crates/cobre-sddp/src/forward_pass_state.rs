@@ -681,8 +681,7 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
     ws.scratch.trajectory_costs_buf.resize(n_local, 0.0_f64);
 
     // Sampling scratch: taken out of ws to avoid borrow conflicts when
-    // run_forward_stage borrows ws while raw_noise is still live.  The same
-    // mem::take pattern is used for current_state_scratch in forward.rs.
+    // run_forward_stage borrows ws while raw_noise is still live.
     let mut raw_noise_buf = std::mem::take(&mut ws.scratch.raw_noise_buf);
     raw_noise_buf.resize(params.noise_dim, 0.0_f64);
     let mut perm_scratch = std::mem::take(&mut ws.scratch.perm_scratch);
@@ -775,7 +774,6 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
                 basis_row_capacity: params.baked[t].num_rows,
                 terminal_has_boundary_cuts: params.terminal_has_boundary_cuts,
                 pool: &params.fcf.pools[t],
-                baked_template: &params.baked[t],
             };
             // Snapshot solver statistics before the stage solve so the
             // per-stage delta can be accumulated without hot-path allocation.
@@ -988,7 +986,6 @@ mod tests {
                 downstream_weight_accum: 0.0,
                 downstream_completed_lags: Vec::new(),
                 downstream_n_completed: 0,
-                current_state_scratch: Vec::new(),
                 recon_slot_lookup: Vec::new(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),

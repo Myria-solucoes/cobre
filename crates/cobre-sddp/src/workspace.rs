@@ -504,17 +504,6 @@ pub(crate) struct ScratchBuffers {
     // Slot 0 = oldest completed quarter, slot n-1 = most recent.
     pub(crate) downstream_completed_lags: Vec<f64>,
     pub(crate) downstream_n_completed: usize,
-    /// Scratch buffer for the current-state slice copied before each LP solve.
-    ///
-    /// Eliminates the per-scenario `Vec<f64>` allocation that previously
-    /// occurred in `run_forward_stage` and `solve_simulation_stage`.  The
-    /// buffer is filled via `clear()` + `extend_from_slice()` immediately
-    /// before constructing `StageInputs`, then borrowed immutably into
-    /// `StageInputs::current_state`.  Sized to `n_state` at construction so
-    /// the hot path never reallocates.
-    ///
-    /// Scratch buffer reused from `ws.scratch.current_state_scratch`.
-    pub(crate) current_state_scratch: Vec<f64>,
     /// Scratch lookup table for basis reconstruction.
     ///
     /// Maps each cut pool slot to its position in the stored
@@ -708,13 +697,13 @@ impl ScratchBuffers {
             max_blocks,
             downstream_par_order,
             initial_pool_capacity,
-            n_state,
             max_local_fwd,
             total_forward_passes,
             noise_dim,
             n_anticipated,
             k_max,
-            // max_openings used by BackwardAccumulators only
+            // `n_state` (state_at_capture sizing) and `max_openings` are used by
+            // CapturedBasis / BackwardAccumulators only.
             ..
         } = s;
         Self {
@@ -747,7 +736,6 @@ impl ScratchBuffers {
                 Vec::new()
             },
             downstream_n_completed: 0,
-            current_state_scratch: Vec::with_capacity(n_state),
             recon_slot_lookup: vec![None; initial_pool_capacity],
             trajectory_costs_buf: Vec::with_capacity(max_local_fwd),
             raw_noise_buf: Vec::with_capacity(noise_dim),

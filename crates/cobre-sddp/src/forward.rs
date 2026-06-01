@@ -84,7 +84,7 @@ pub struct ForwardResult {
     /// scenarios this rank processed. Length equals the number of
     /// stages in the study. Element `t` is the rank-local sum over
     /// `(scenario × this_rank)` of the per-stage `SolverStatsDelta`
-    /// produced by `run_stage_solve(Phase::Forward, ...)` for stage `t`.
+    /// produced by `run_stage_solve` for stage `t`.
     pub stage_stats: Vec<SolverStatsDelta>,
 }
 
@@ -758,12 +758,6 @@ pub(crate) struct StageKey<'a> {
     /// `write_capture_metadata` to record slot identities for the next
     /// iteration's warm-start, and forwarded into `StageInputs`.
     pub(crate) pool: &'a CutPool,
-    /// Baked stage template for stage `t`.
-    ///
-    /// Always populated on the always-baked forward path. The baked template
-    /// contains all active cuts as structural rows; `run_stage_solve` uses the
-    /// empty-iterator reconstruction path.
-    pub(crate) baked_template: &'a StageTemplate,
 }
 
 /// Populate `CapturedBasis` metadata after a stage solve.
@@ -837,7 +831,6 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         basis_row_capacity,
         terminal_has_boundary_cuts,
         pool,
-        baked_template,
     } = *key;
     let n_hydros = ctx.n_hydros;
     let n_load_buses = ctx.n_load_buses;
@@ -948,46 +941,23 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         ws.solver.set_col_bounds(&[indexer.theta], &[0.0], &[0.0]);
     }
 
-    // Take the scratch buffer out of ws so that the immutable borrow of the
-    // local vec does not conflict with the `&mut ws` taken by run_stage_solve.
-    // Scratch buffer reused from `ws.scratch.current_state_scratch` via
-    // `std::mem::take` (capacity retained).
-    let mut current_state_local: Vec<f64> = std::mem::take(&mut ws.scratch.current_state_scratch);
-    current_state_local.clear();
-    current_state_local.extend_from_slice(&ws.current_state[..indexer.n_state]);
-
     let inputs = crate::stage_solve::StageInputs {
         stage_context: ctx,
-        indexer,
         pool,
-        current_state: &current_state_local,
         stored_basis: basis_slice.get_mut(m, t).as_ref(),
-        baked_template,
         stage_index: t,
         scenario_index: m,
         iteration: Some(iteration),
-        horizon_is_terminal: horizon.is_terminal(t + 1),
-        terminal_has_boundary_cuts,
     };
 
-    let outcome =
-        crate::stage_solve::run_stage_solve(ws, crate::stage_solve::Phase::Forward, &inputs)
-            .map_err(|e| {
-                // Preserve today's behavior: invalidate the stored basis on
-                // Infeasible so the next warm-start attempt cold-solves.
-                if matches!(e, SddpError::Infeasible { .. }) {
-                    *basis_slice.get_mut(m, t) = None;
-                }
-                e
-            })?;
-
-    let crate::stage_solve::StageOutcome::Forward {
-        view,
-        recon_stats: _,
-    } = outcome
-    else {
-        unreachable!("run_stage_solve(Phase::Forward, ...) returns Forward variant")
-    };
+    let view = crate::stage_solve::run_stage_solve(ws, &inputs).map_err(|e| {
+        // Preserve today's behavior: invalidate the stored basis on
+        // Infeasible so the next warm-start attempt cold-solves.
+        if matches!(e, SddpError::Infeasible { .. }) {
+            *basis_slice.get_mut(m, t) = None;
+        }
+        e
+    })?;
 
     // Unscale primal values and capture the objective before the ws borrow
     // held by `view` ends its overlap with subsequent ws.scratch accesses.
@@ -1007,13 +977,8 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
     };
 
     // `view` is Copy, so use `let _ =` to end its borrow of ws for 'ws before
-    // the restore assignment below takes a mutable borrow of ws.scratch.
-    // `inputs` and its borrow of current_state_local ended at the `?` above
-    // (NLL sees no further use of inputs after that point).
-    // Restore scratch capacity back into the workspace slot so the next call
-    // reuses the warmed allocation without reallocating.
+    // the subsequent mutable borrows of ws.scratch below.
     let _ = view;
-    ws.scratch.current_state_scratch = current_state_local;
 
     let d_t = ctx.discount_factors.get(t).copied().unwrap_or(1.0);
     let stage_cost = (view_objective - d_t * unscaled_primal[indexer.theta]) * COST_SCALE_FACTOR;
@@ -1951,7 +1916,6 @@ mod tests {
                 downstream_weight_accum: 0.0,
                 downstream_completed_lags: Vec::new(),
                 downstream_n_completed: 0,
-                current_state_scratch: Vec::new(),
                 recon_slot_lookup: Vec::new(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
@@ -3944,7 +3908,6 @@ mod tests {
                 downstream_weight_accum: 0.0,
                 downstream_completed_lags: Vec::new(),
                 downstream_n_completed: 0,
-                current_state_scratch: Vec::new(),
                 recon_slot_lookup: Vec::new(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
@@ -4090,7 +4053,6 @@ mod tests {
                 downstream_weight_accum: 0.0,
                 downstream_completed_lags: Vec::new(),
                 downstream_n_completed: 0,
-                current_state_scratch: Vec::new(),
                 recon_slot_lookup: Vec::new(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),

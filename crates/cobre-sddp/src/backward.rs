@@ -627,28 +627,14 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
         };
         let inputs = crate::stage_solve::StageInputs {
             stage_context: ctx,
-            indexer,
             pool: succ.successor_pool,
-            current_state: x_hat,
             stored_basis,
-            baked_template: succ.baked_template,
             stage_index: s,
             scenario_index: scenario,
             iteration: Some(iteration),
-            horizon_is_terminal: false,
-            terminal_has_boundary_cuts: false,
         };
 
-        let outcome =
-            crate::stage_solve::run_stage_solve(ws, crate::stage_solve::Phase::Backward, &inputs)?;
-
-        let crate::stage_solve::StageOutcome::Backward {
-            view,
-            recon_stats: _,
-        } = outcome
-        else {
-            unreachable!("run_stage_solve(Phase::Backward) returns Backward variant")
-        };
+        let view = crate::stage_solve::run_stage_solve(ws, &inputs)?;
 
         // Extract duals from view (which borrows ws for 'ws).
         // Statistics must be captured after view is dropped.
@@ -1049,7 +1035,6 @@ mod tests {
                 downstream_weight_accum: 0.0,
                 downstream_completed_lags: Vec::new(),
                 downstream_n_completed: 0,
-                current_state_scratch: Vec::new(),
                 recon_slot_lookup: Vec::new(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
@@ -2866,7 +2851,6 @@ mod tests {
                 downstream_weight_accum: 0.0,
                 downstream_completed_lags: Vec::new(),
                 downstream_n_completed: 0,
-                current_state_scratch: Vec::new(),
                 recon_slot_lookup: Vec::new(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
@@ -2968,7 +2952,6 @@ mod tests {
                     downstream_weight_accum: 0.0,
                     downstream_completed_lags: Vec::new(),
                     downstream_n_completed: 0,
-                    current_state_scratch: Vec::new(),
                     recon_slot_lookup: Vec::new(),
                     trajectory_costs_buf: Vec::new(),
                     raw_noise_buf: Vec::new(),
@@ -3324,7 +3307,6 @@ mod tests {
                 downstream_weight_accum: 0.0,
                 downstream_completed_lags: Vec::new(),
                 downstream_n_completed: 0,
-                current_state_scratch: Vec::new(),
                 recon_slot_lookup: Vec::new(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
@@ -3495,7 +3477,6 @@ mod tests {
                 downstream_weight_accum: 0.0,
                 downstream_completed_lags: Vec::new(),
                 downstream_n_completed: 0,
-                current_state_scratch: Vec::new(),
                 recon_slot_lookup: Vec::new(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
@@ -3661,7 +3642,6 @@ mod tests {
                 downstream_weight_accum: 0.0,
                 downstream_completed_lags: Vec::new(),
                 downstream_n_completed: 0,
-                current_state_scratch: Vec::new(),
                 recon_slot_lookup: Vec::new(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
@@ -4090,7 +4070,6 @@ mod tests {
                     downstream_weight_accum: 0.0,
                     downstream_completed_lags: Vec::new(),
                     downstream_n_completed: 0,
-                    current_state_scratch: Vec::new(),
                     recon_slot_lookup: Vec::new(),
                     trajectory_costs_buf: Vec::new(),
                     raw_noise_buf: Vec::new(),
@@ -4453,7 +4432,6 @@ mod tests {
                     downstream_weight_accum: 0.0,
                     downstream_completed_lags: Vec::new(),
                     downstream_n_completed: 0,
-                    current_state_scratch: Vec::new(),
                     recon_slot_lookup: Vec::new(),
                     trajectory_costs_buf: Vec::new(),
                     raw_noise_buf: Vec::new(),
@@ -4677,7 +4655,6 @@ mod tests {
                     downstream_weight_accum: 0.0,
                     downstream_completed_lags: Vec::new(),
                     downstream_n_completed: 0,
-                    current_state_scratch: Vec::new(),
                     recon_slot_lookup: Vec::new(),
                     trajectory_costs_buf: Vec::new(),
                     raw_noise_buf: Vec::new(),
@@ -5112,7 +5089,6 @@ mod tests {
                     downstream_weight_accum: 0.0,
                     downstream_completed_lags: Vec::new(),
                     downstream_n_completed: 0,
-                    current_state_scratch: Vec::new(),
                     recon_slot_lookup: Vec::new(),
                     trajectory_costs_buf: Vec::new(),
                     raw_noise_buf: Vec::new(),

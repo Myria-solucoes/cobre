@@ -1286,7 +1286,6 @@ mod tests {
                 downstream_weight_accum: 0.0,
                 downstream_completed_lags: Vec::new(),
                 downstream_n_completed: 0,
-                current_state_scratch: Vec::new(),
                 recon_slot_lookup: Vec::new(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),

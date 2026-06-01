@@ -423,66 +423,46 @@ fn solve_simulation_stage<S: SolverInterface>(
 
     // Take scratch buffers out of ws before run_stage_solve borrows ws.
     // The `mem::take` pattern (capacity retained, empty vec left in field) allows
-    // us to pass borrowed slices while `&mut ws` is also live, and to fill
-    // unscaled_primal/unscaled_dual from `view` slices that are still tied to 'ws.
-    // All three are restored to ws.scratch at function end so the next stage reuses
-    // the warmed allocations.
-    let mut current_state_local: Vec<f64> = std::mem::take(&mut ws.scratch.current_state_scratch);
+    // us to fill unscaled_primal/unscaled_dual from `view` slices that are still
+    // tied to 'ws while `&mut ws` is also live. Both are restored to ws.scratch
+    // at function end so the next stage reuses the warmed allocations.
     let mut unscaled_primal: Vec<f64> = std::mem::take(&mut ws.scratch.unscaled_primal);
     let mut unscaled_dual: Vec<f64> = std::mem::take(&mut ws.scratch.unscaled_dual);
 
-    current_state_local.clear();
-    current_state_local.extend_from_slice(&ws.current_state[..indexer.n_state]);
-
     let inputs = crate::stage_solve::StageInputs {
         stage_context: ctx,
-        indexer,
         pool: &fcf.pools[t],
-        current_state: &current_state_local,
         stored_basis: load_spec.warm_basis,
-        baked_template: load_spec.baked_template,
         stage_index: t,
         scenario_index: ids.scenario_id as usize,
-        iteration: None,            // simulation has no iteration counter
-        horizon_is_terminal: false, // simulation stage-sweep semantics
-        terminal_has_boundary_cuts: false,
+        iteration: None, // simulation has no iteration counter
     };
 
-    let outcome =
-        crate::stage_solve::run_stage_solve(ws, crate::stage_solve::Phase::Simulation, &inputs)
-            .map_err(|e| match e {
-                crate::error::SddpError::Infeasible {
-                    stage, scenario, ..
-                } => {
-                    #[allow(clippy::cast_possible_truncation)]
-                    let scenario_id = scenario as u32;
-                    #[allow(clippy::cast_possible_truncation)]
-                    let stage_id = stage as u32;
-                    SimulationError::LpInfeasible {
-                        scenario_id,
-                        stage_id,
-                        solver_message: "LP infeasible".to_string(),
-                    }
-                }
-                crate::error::SddpError::Solver(other) => SimulationError::SolverError {
-                    scenario_id: ids.scenario_id,
-                    stage_id: ids.stage_id_u32,
-                    solver_message: other.to_string(),
-                },
-                other => SimulationError::SolverError {
-                    scenario_id: ids.scenario_id,
-                    stage_id: ids.stage_id_u32,
-                    solver_message: format!("{other}"),
-                },
-            })?;
-
-    let crate::stage_solve::StageOutcome::Simulation {
-        view,
-        recon_stats: _,
-    } = outcome
-    else {
-        unreachable!("run_stage_solve(Phase::Simulation) returns Simulation variant")
-    };
+    let view = crate::stage_solve::run_stage_solve(ws, &inputs).map_err(|e| match e {
+        crate::error::SddpError::Infeasible {
+            stage, scenario, ..
+        } => {
+            #[allow(clippy::cast_possible_truncation)]
+            let scenario_id = scenario as u32;
+            #[allow(clippy::cast_possible_truncation)]
+            let stage_id = stage as u32;
+            SimulationError::LpInfeasible {
+                scenario_id,
+                stage_id,
+                solver_message: "LP infeasible".to_string(),
+            }
+        }
+        crate::error::SddpError::Solver(other) => SimulationError::SolverError {
+            scenario_id: ids.scenario_id,
+            stage_id: ids.stage_id_u32,
+            solver_message: other.to_string(),
+        },
+        other => SimulationError::SolverError {
+            scenario_id: ids.scenario_id,
+            stage_id: ids.stage_id_u32,
+            solver_message: format!("{other}"),
+        },
+    })?;
 
     // Extract scaling slices and objective scalar before filling unscaled buffers.
     // `view` borrows from `ws` (via run_stage_solve), so we must finish all reads
@@ -524,11 +504,8 @@ fn solve_simulation_stage<S: SolverInterface>(
 
     // End the `view` borrow of `ws` before mutating ws further.
     // `SolutionView` is Copy so `drop(view)` would be a no-op; `let _` is idiomatic.
-    // `inputs` and its borrow of current_state_local ended at the `?` above
-    // (NLL sees no further use of inputs after that point).
     // Restore scratch buffers so the next stage reuses the warmed allocations.
     let _ = view;
-    ws.scratch.current_state_scratch = current_state_local;
     ws.scratch.unscaled_primal = unscaled_primal;
     ws.scratch.unscaled_dual = unscaled_dual;
 
@@ -1556,7 +1533,6 @@ mod tests {
                 downstream_weight_accum: 0.0,
                 downstream_completed_lags: Vec::new(),
                 downstream_n_completed: 0,
-                current_state_scratch: Vec::new(),
                 recon_slot_lookup: Vec::new(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
@@ -1800,7 +1776,6 @@ mod tests {
                 downstream_weight_accum: 0.0,
                 downstream_completed_lags: Vec::new(),
                 downstream_n_completed: 0,
-                current_state_scratch: Vec::new(),
                 recon_slot_lookup: Vec::new(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
@@ -2127,7 +2102,6 @@ mod tests {
                 downstream_weight_accum: 0.0,
                 downstream_completed_lags: Vec::new(),
                 downstream_n_completed: 0,
-                current_state_scratch: Vec::new(),
                 recon_slot_lookup: Vec::new(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
@@ -2442,7 +2416,6 @@ mod tests {
                 downstream_weight_accum: 0.0,
                 downstream_completed_lags: Vec::new(),
                 downstream_n_completed: 0,
-                current_state_scratch: Vec::new(),
                 recon_slot_lookup: Vec::new(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
