@@ -7,4 +7,9 @@ https://github.com/cobre-rs
 This product includes or depends on the following third-party software:
 
 - HiGHS (https://highs.dev) — MIT License
+- Clp (https://github.com/coin-or/Clp) — Eclipse Public License 2.0 (EPL-2.0)
+- CoinUtils (https://github.com/coin-or/CoinUtils) — Eclipse Public License 2.0 (EPL-2.0)
 - MPICH (https://www.mpich.org) — MPICH License (permissive)
+
+See THIRD_PARTY_NOTICES.md for the complete record of vendored C++ solver
+dependencies, their submodule paths, pinned tags, and link conditions.

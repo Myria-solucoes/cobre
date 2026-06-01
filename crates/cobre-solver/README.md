@@ -10,9 +10,9 @@ well-suited to the iterative LP workloads of power system optimization. The
 crate includes a 12-level retry escalation strategy for numerically difficult
 LPs: when HiGHS returns an infeasible or numerically unstable status, the
 solver retries with progressively more aggressive scaling, presolve, and
-simplex strategy options before propagating failure. Additional backends (Clp,
-CPLEX, Gurobi) can be added behind feature flags without changing algorithm
-crates.
+simplex strategy options before propagating failure. An optional CLP backend
+exists behind the `clp` feature (off by default); it implements the same
+`SolverInterface` and is conformance-validated as a drop-in for HiGHS.
 
 ## When to Use
 
@@ -22,12 +22,47 @@ backend-portability without coupling to HiGHS internals. If you only need to
 run the full SDDP pipeline, depend on `cobre-sddp` instead, which manages the
 solver lifecycle for you.
 
+## Features
+
+| Feature        | Default | Description                                                                                                                             |
+| -------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `highs`        | on      | Gates `HighsSolver` and `HighsProfile`. On by default.                                                                                  |
+| `clp`          | off     | Gates `ClpSolver`, `ClpProfile`, and `clp_version`. Additive — `highs` and `clp` may be enabled together. See build requirements below. |
+| `test-support` | off     | Exposes FFI option-setting helpers for integration tests. Must not be enabled in production builds.                                     |
+
+### `clp` build requirements
+
+The `clp` feature builds CLP and CoinUtils from vendored source. Before
+enabling it, initialize the submodules:
+
+```
+git submodule update --init --recursive
+```
+
+This fetches the Clp (`releases/1.17.11`) and CoinUtils (`releases/2.11.13`)
+sources into `crates/cobre-solver/vendor/`.
+
+The first build with `--features clp` runs a CoinUtils + Clp cmake superbuild
+(approximately 150 C++ translation units), which takes several minutes. The
+cmake output directory is cached across rebuilds, so subsequent builds are
+fast.
+
+### CI behavior
+
+CI jobs (`check`, `test`, `clippy`, `docs`, `coverage`) all run with
+`--all-features` and check out submodules recursively, so the CLP backend is
+built and its test suite is exercised in every CI run. Expect the first CI
+build after a cache miss to be slower than a HiGHS-only build due to the C++
+superbuild.
+
 ## Key Types
 
 - **`SolverInterface`** — the core trait every backend must implement; defines
   problem construction, solve, and dual/basis extraction methods
 - **`HighsSolver`** — the default HiGHS backend; feature-gated behind `highs`
   (enabled by default)
+- **`ClpSolver`** — the optional CLP/CoinUtils backend; feature-gated behind
+  `clp` (off by default)
 - **`Basis`** — LP basis snapshot for warm-starting a subsequent solve on a
   structurally related problem
 - **`LpSolution`** — solved LP result carrying primal values, duals, and

@@ -274,7 +274,7 @@ impl ClpSolver {
     /// CLP-owned memory that is valid only until the next solve. The primal
     /// solution lands in `col_value` (length `num_cols`), the reduced costs in
     /// `col_dual` (length `num_cols`), and the row prices — normalized via
-    /// [`normalize_row_dual`] — in `row_dual` (length `num_rows`).
+    /// `normalize_row_dual` — in `row_dual` (length `num_rows`).
     ///
     /// Each copy is guarded with `if len > 0` because passing a null or
     /// dangling pointer to `std::slice::from_raw_parts` is undefined behavior
@@ -418,7 +418,7 @@ impl SolverInterface for ClpSolver {
     /// `102` to disable CLP's auto-perturbation — CLP's own default `100` is
     /// NOT SDDP-safe), `cobre_clp_scaling`, `cobre_clp_set_primal_tolerance`,
     /// `cobre_clp_set_dual_tolerance`, and the iteration cap resolved by
-    /// [`Self::resolve_simplex_cap`] via `cobre_clp_set_maximum_iterations`.
+    /// `resolve_simplex_cap` via `cobre_clp_set_maximum_iterations`.
     ///
     /// Mirrors `HighsSolver::apply_profile`: configure all fields, then assign
     /// `self.current_profile`.
@@ -559,7 +559,7 @@ impl SolverInterface for ClpSolver {
     /// `rows` is in CSR (row-major) form; the retained model is CSC
     /// (column-major). The merge transposes each batch row's `(col, value)`
     /// pairs into the per-column lists of the retained CSC, then re-issues a
-    /// full `cobre_clp_load_problem` via [`Self::reload`] (CLP has no
+    /// full `cobre_clp_load_problem` via `reload` (CLP has no
     /// incremental row-append). The retained `row_lower`/`row_upper` are
     /// extended, `num_rows`/`num_nz` are bumped, and `row_dual` is resized.
     ///
@@ -680,7 +680,7 @@ impl SolverInterface for ClpSolver {
     /// `indices`, `lower`, and `upper` must have equal length. An empty
     /// `indices` slice is a no-op (no reload). Each retained `row_lower`/
     /// `row_upper` entry at the given index is overwritten, then the model is
-    /// rebuilt via [`Self::reload`]. Bounds are forwarded verbatim.
+    /// rebuilt via `reload`. Bounds are forwarded verbatim.
     ///
     /// # Panics
     ///
@@ -756,13 +756,13 @@ impl SolverInterface for ClpSolver {
     /// `CLP_STATUS_OPTIMAL` the three CLP-owned solution pointers are copied
     /// **immediately** into `col_value`/`col_dual`/`row_dual` (they are valid
     /// only until the next solve), the row duals are normalized via
-    /// [`normalize_row_dual`], and a `SolutionView` borrowing those buffers is
+    /// `normalize_row_dual`, and a `SolutionView` borrowing those buffers is
     /// returned. Non-optimal statuses map to a [`SolverError`].
     ///
     /// # Warm-start basis
     ///
     /// When `basis = Some(b)`, `b` is reinstalled into the CLP model
-    /// element-by-element via [`Self::install_basis`] before the solve; both
+    /// element-by-element via `install_basis` before the solve; both
     /// `None` and `Some(&b)` then run the same cold `cobre_clp_dual` path (CLP
     /// retains its internal basis across consecutive solves). Unlike the `HiGHS`
     /// backend, CLP's per-element status setters do not validate global basis
@@ -868,7 +868,7 @@ impl SolverInterface for ClpSolver {
     /// `cobre_clp_get_row_status`. CLP reports basis status one element at a time
     /// (no bulk array in the wrapper), so this is a pair of per-element loops; the
     /// raw `CLP_BASIS_*` `i32` codes are stored verbatim for a later round-trip
-    /// into [`Self::install_basis`].
+    /// into `install_basis`.
     ///
     /// # Panics
     ///
@@ -952,7 +952,7 @@ impl SolverInterface for ClpSolver {
     /// Caches the per-attempt simplex iteration cap in `current_profile`.
     ///
     /// No FFI call is issued here. The actual cap is applied by
-    /// [`Self::apply_profile`] via [`Self::resolve_simplex_cap`]: a value of
+    /// [`Self::apply_profile`] via `resolve_simplex_cap`: a value of
     /// [`DEFAULT_PROFILE_HEURISTIC_SENTINEL`] (`0`) selects the heuristic
     /// `max(100_000, num_cols * 50)`; any non-zero value is applied verbatim.
     fn set_simplex_iteration_limit_profile(&mut self, value: u32) {

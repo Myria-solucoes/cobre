@@ -7,13 +7,16 @@
 //!
 //! - **Solver trait**: unified API for LP and MIP problem construction, solving,
 //!   and dual/basis extraction.
-//! - **`HiGHS` backend**: production-grade open-source solver, well-suited for
-//!   iterative LP solving in power system optimization.
+//! - **`HiGHS` backend** (`highs` feature, on by default): production-grade
+//!   open-source solver, well-suited for iterative LP solving in power system
+//!   optimization; exposed as [`HighsSolver`] and [`HighsProfile`].
+//! - **`CLP` backend** (`clp` feature, off by default): optional CLP/`CoinUtils`
+//!   backend exposed as [`ClpSolver`] and [`ClpProfile`]; conformance-validated
+//!   as a drop-in implementing the same [`SolverInterface`]. Requires the Clp
+//!   and `CoinUtils` submodules to be initialized (`git submodule update --init
+//!   --recursive`) before the first build with `--features clp`.
 //! - **Basis management**: warm-starting support for iterative algorithms
 //!   that solve sequences of related LPs.
-//!
-//! Additional solver backends (e.g., Clp, CPLEX, Gurobi) can be added
-//! behind feature flags.
 //!
 //! ## Status
 //!
