@@ -108,6 +108,12 @@ impl StudySetup {
             recent_weight_seed: self.recent_observation_seed.weight_seed,
         };
 
+        // Hand the warm-start basis cache (if any) to the training session so
+        // iteration 1's cut-loaded LPs warm-start from the checkpoint's stored
+        // bases. `take` leaves `None` behind — fresh starts pass `None` and are
+        // untouched.
+        let warm_start_basis_cache = self.warm_start_basis_cache.take();
+
         crate::train(
             solver,
             training_config,
@@ -116,6 +122,7 @@ impl StudySetup {
             &training_ctx,
             comm,
             solver_factory,
+            warm_start_basis_cache,
         )
     }
 

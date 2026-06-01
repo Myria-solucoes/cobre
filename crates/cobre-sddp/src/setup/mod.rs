@@ -68,6 +68,7 @@ use crate::{
     risk_measure::RiskMeasure,
     simulation::EntityCounts,
     stopping_rule::{StoppingRule, StoppingRuleSet},
+    workspace::CapturedBasis,
 };
 
 // ---------------------------------------------------------------------------
@@ -180,6 +181,20 @@ pub struct StudySetup {
     /// Pre-computed once at setup time and threaded into the simulation
     /// pipeline for stored-energy calculations.
     pub(crate) hydro_min_storage_hm3: Vec<f64>,
+
+    /// Per-stage warm-start basis cache for warm-start / resume training.
+    ///
+    /// Populated by the CLI / Python warm-start and resume paths via
+    /// [`StudySetup::set_warm_start_basis_cache`] from the checkpoint's stored
+    /// solver bases (see
+    /// [`build_basis_cache_from_checkpoint`](crate::build_basis_cache_from_checkpoint)).
+    /// [`StudySetup::train`] takes this out of `self` and seeds the
+    /// [`TrainingSession`](crate::TrainingSession)'s
+    /// [`BasisStore`](crate::workspace::BasisStore) so iteration 1's
+    /// (cut-loaded) LPs warm-start instead of cold-start.
+    ///
+    /// `None` for a fresh start, leaving fresh-mode behavior untouched.
+    pub(crate) warm_start_basis_cache: Option<Vec<Option<CapturedBasis>>>,
 }
 
 impl StudySetup {
@@ -419,6 +434,7 @@ impl StudySetup {
             downstream_par_order,
             energy_conversion,
             hydro_min_storage_hm3,
+            warm_start_basis_cache: None,
         })
     }
 }

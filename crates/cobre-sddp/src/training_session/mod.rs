@@ -1063,6 +1063,36 @@ where
         total_rows_baked
     }
 
+    /// Seed the per-scenario basis store from a checkpoint's stored bases
+    /// before the first training iteration runs.
+    ///
+    /// `cache` carries one [`CapturedBasis`](crate::workspace::CapturedBasis)
+    /// per stage (as built by
+    /// [`build_basis_cache_from_checkpoint`](crate::build_basis_cache_from_checkpoint)).
+    /// The checkpoint stores a single basis per stage, but the forward pass
+    /// keeps one basis per `(forward-pass worker, stage)` cell. This method
+    /// therefore replicates each stage's basis across every forward-pass worker
+    /// (`0..max_local_fwd`) so that on iteration 1 every worker warm-starts its
+    /// cut-loaded LP from the checkpoint basis instead of cold-starting.
+    /// `reconstruct_basis` reconciles the stored cut rows against the current
+    /// LP's active cut set via slot identity, so the seeded basis stays correct
+    /// even if cut selection diverges from the checkpoint.
+    ///
+    /// Stages whose `cache[t]` is `None` are left untouched (no basis). Entries
+    /// beyond the store's stage count are ignored. No-op for a fresh start
+    /// (the caller passes no cache), so fresh-mode behavior and the
+    /// deterministic regression baselines are unchanged.
+    pub(crate) fn seed_basis_store(&mut self, cache: &[Option<crate::workspace::CapturedBasis>]) {
+        let max_local_fwd = self.ranks.max_local_fwd;
+        let num_stages = self.ranks.num_stages;
+        for (t, slot) in cache.iter().enumerate().take(num_stages) {
+            let Some(captured) = slot else { continue };
+            for scenario in 0..max_local_fwd {
+                *self.basis_store.get_mut(scenario, t) = Some(captured.clone());
+            }
+        }
+    }
+
     /// Bake the warm-start / resume pre-loaded cuts into the stage templates
     /// before the first training iteration runs.
     ///

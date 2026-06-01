@@ -196,7 +196,11 @@ fn simulation_only_fcf_round_trip() {
     }
 
     // Verify basis cache round-trip.
-    let loaded_basis_cache = build_basis_cache_from_checkpoint(n_stages, &checkpoint.stage_bases);
+    let loaded_basis_cache = build_basis_cache_from_checkpoint(
+        n_stages,
+        &checkpoint.stage_bases,
+        &checkpoint.stage_cuts,
+    );
     assert_eq!(
         loaded_basis_cache.len(),
         n_stages,

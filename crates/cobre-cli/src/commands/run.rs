@@ -403,6 +403,19 @@ fn apply_training_policy(
             )
             .map_err(CliError::from)?;
             setup.replace_fcf(warm_fcf);
+            // Seed the warm-start basis store from the checkpoint's stored
+            // bases so iteration 1's cut-loaded LPs warm-start. Skip when the
+            // checkpoint carries no bases (written without `store_basis`):
+            // the store stays empty and iteration 1 cold-starts, matching the
+            // prior behavior.
+            if !checkpoint.stage_bases.is_empty() {
+                let basis_cache = cobre_sddp::build_basis_cache_from_checkpoint(
+                    setup.stage_data.stage_templates.templates.len(),
+                    &checkpoint.stage_bases,
+                    &checkpoint.stage_cuts,
+                );
+                setup.set_warm_start_basis_cache(basis_cache);
+            }
             if ctx.is_root && !ctx.quiet {
                 let warm_count = setup.fcf.pools[0].warm_start_count;
                 let _ = ctx.stderr.write_line(&format!(
@@ -444,6 +457,19 @@ fn apply_training_policy(
             .map_err(CliError::from)?;
             setup.replace_fcf(warm_fcf);
             setup.set_start_iteration(completed);
+            // Seed the warm-start basis store from the checkpoint's stored
+            // bases so iteration 1's cut-loaded LPs warm-start. Skip when the
+            // checkpoint carries no bases (written without `store_basis`):
+            // the store stays empty and iteration 1 cold-starts, matching the
+            // prior behavior.
+            if !checkpoint.stage_bases.is_empty() {
+                let basis_cache = cobre_sddp::build_basis_cache_from_checkpoint(
+                    setup.stage_data.stage_templates.templates.len(),
+                    &checkpoint.stage_bases,
+                    &checkpoint.stage_cuts,
+                );
+                setup.set_warm_start_basis_cache(basis_cache);
+            }
             if ctx.is_root && !ctx.quiet {
                 let warm_count = setup.fcf.pools[0].warm_start_count;
                 let _ = ctx.stderr.write_line(&format!(
@@ -512,6 +538,7 @@ fn load_policy_for_simulation(
     let basis_cache = cobre_sddp::build_basis_cache_from_checkpoint(
         setup.stage_data.stage_templates.templates.len(),
         &checkpoint.stage_bases,
+        &checkpoint.stage_cuts,
     );
 
     Ok(cobre_sddp::TrainingResult::new(

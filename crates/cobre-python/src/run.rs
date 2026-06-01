@@ -994,6 +994,18 @@ pub(crate) fn apply_training_policy_mode(
         )
         .map_err(|e| format!("warm-start FCF construction error: {e}"))?;
         setup.replace_fcf(warm_fcf);
+        // Seed the warm-start basis store from the checkpoint's stored bases so
+        // iteration 1's cut-loaded LPs warm-start. Skip when the checkpoint
+        // carries no bases (written without `store_basis`): the store stays
+        // empty and iteration 1 cold-starts, matching the prior behavior.
+        if !checkpoint.stage_bases.is_empty() {
+            let basis_cache = cobre_sddp::build_basis_cache_from_checkpoint(
+                setup.stage_data.stage_templates.templates.len(),
+                &checkpoint.stage_bases,
+                &checkpoint.stage_cuts,
+            );
+            setup.set_warm_start_basis_cache(basis_cache);
+        }
     } else if config.policy.mode == cobre_io::PolicyMode::Resume {
         let policy_dir = output_dir.join(&setup.policy_path);
         if !policy_dir.exists() {
@@ -1027,6 +1039,18 @@ pub(crate) fn apply_training_policy_mode(
         .map_err(|e| format!("resume FCF construction error: {e}"))?;
         setup.replace_fcf(warm_fcf);
         setup.set_start_iteration(completed);
+        // Seed the warm-start basis store from the checkpoint's stored bases so
+        // iteration 1's cut-loaded LPs warm-start. Skip when the checkpoint
+        // carries no bases (written without `store_basis`): the store stays
+        // empty and iteration 1 cold-starts, matching the prior behavior.
+        if !checkpoint.stage_bases.is_empty() {
+            let basis_cache = cobre_sddp::build_basis_cache_from_checkpoint(
+                setup.stage_data.stage_templates.templates.len(),
+                &checkpoint.stage_bases,
+                &checkpoint.stage_cuts,
+            );
+            setup.set_warm_start_basis_cache(basis_cache);
+        }
     }
 
     // Boundary cuts — orthogonal to policy mode. Runs after warm-start/resume
@@ -1116,6 +1140,7 @@ pub(crate) fn reconstruct_policy_from_checkpoint(
     let basis_cache = cobre_sddp::build_basis_cache_from_checkpoint(
         setup.stage_data.stage_templates.templates.len(),
         &checkpoint.stage_bases,
+        &checkpoint.stage_cuts,
     );
 
     // Create a minimal TrainingResult for simulation warm-start.

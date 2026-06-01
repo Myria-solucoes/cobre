@@ -580,6 +580,7 @@ fn run_training(
                 },
                 &comm,
                 || Ok(MockSolver3H::new(100.0)),
+                None,
             )
         })
         .unwrap();

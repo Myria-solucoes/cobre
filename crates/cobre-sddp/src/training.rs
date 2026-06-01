@@ -396,6 +396,7 @@ pub fn train<S, C: Communicator>(
     training_ctx: &TrainingContext<'_>,
     comm: &C,
     solver_factory: impl Fn() -> Result<S, cobre_solver::SolverError>,
+    warm_start_basis_cache: Option<Vec<Option<crate::workspace::CapturedBasis>>>,
 ) -> Result<TrainingOutcome, SddpError>
 where
     S: SolverInterface<Profile = cobre_solver::HighsProfile> + Send,
@@ -409,6 +410,13 @@ where
         comm,
         solver_factory,
     )?;
+    // Seed the per-scenario basis store from the checkpoint's stored bases
+    // (warm-start / resume only) so iteration 1's cut-loaded LPs warm-start
+    // instead of cold-start. Must run before `prime_baked_templates` bakes the
+    // loaded cuts into the templates. No-op for a fresh start (`None`).
+    if let Some(cache) = warm_start_basis_cache {
+        session.seed_basis_store(&cache);
+    }
     // Bake any warm-start / resume cuts into the stage templates before the
     // first iteration so iteration 1's forward pass solves the loaded policy
     // rather than a cut-less, myopic one. No-op for a fresh start.
@@ -948,6 +956,7 @@ mod tests {
             },
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            None,
         )
         .unwrap();
 
@@ -1044,6 +1053,7 @@ mod tests {
             },
             &comm,
             || Ok(MockSolver::infeasible()),
+            None,
         );
 
         let outcome = result.unwrap();
@@ -1159,6 +1169,7 @@ mod tests {
             },
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            None,
         )
         .unwrap();
 
@@ -1357,6 +1368,7 @@ mod tests {
             },
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            None,
         )
         .unwrap();
 
@@ -1524,6 +1536,7 @@ mod tests {
             },
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            None,
         )
         .unwrap();
 
@@ -1618,6 +1631,7 @@ mod tests {
             },
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            None,
         );
 
         assert!(result.is_ok(), "train with no event_sender must not panic");
@@ -1709,6 +1723,7 @@ mod tests {
             },
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            None,
         )
         .unwrap();
 
@@ -1808,6 +1823,7 @@ mod tests {
             },
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            None,
         )
         .unwrap();
 
@@ -1917,6 +1933,7 @@ mod tests {
             },
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            None,
         )
         .unwrap();
 
@@ -2036,6 +2053,7 @@ mod tests {
             },
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            None,
         )
         .unwrap();
 
@@ -2166,6 +2184,7 @@ mod tests {
             },
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            None,
         )
         .unwrap();
 
@@ -2270,6 +2289,7 @@ mod tests {
             },
             &comm,
             || Ok(MockSolver::infeasible()),
+            None,
         )
         .unwrap();
 
@@ -2383,6 +2403,7 @@ mod tests {
             },
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            None,
         )
         .unwrap();
 
@@ -2477,6 +2498,7 @@ mod tests {
             },
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            None,
         )
         .unwrap();
 
@@ -3202,6 +3224,7 @@ mod tests {
             },
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            None,
         )
         .unwrap();
 

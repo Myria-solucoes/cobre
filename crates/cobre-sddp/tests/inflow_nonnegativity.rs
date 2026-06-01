@@ -587,6 +587,7 @@ fn train_fixture(
         },
         &comm,
         HighsSolver::new,
+        None,
     )
 }
 

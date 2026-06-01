@@ -8,6 +8,7 @@ use crate::{
     energy_conversion::EnergyConversionSet,
     indexer::StageIndexer,
     simulation::SimulationConfig,
+    workspace::CapturedBasis,
 };
 
 use super::StudySetup;
@@ -25,6 +26,20 @@ impl StudySetup {
     /// Set the starting iteration for resumed training.
     pub fn set_start_iteration(&mut self, iteration: u64) {
         self.loop_params.start_iteration = iteration;
+    }
+
+    /// Seed the per-stage warm-start basis cache for warm-start / resume
+    /// training.
+    ///
+    /// `cache` carries one entry per stage (as built by
+    /// [`build_basis_cache_from_checkpoint`](crate::build_basis_cache_from_checkpoint)
+    /// from the checkpoint's stored solver bases). [`StudySetup::train`] takes
+    /// this out of `self` and replicates each stage's basis across every
+    /// forward-pass worker so iteration 1's cut-loaded LPs warm-start.
+    ///
+    /// Leave unset (the default `None`) for a fresh start.
+    pub fn set_warm_start_basis_cache(&mut self, cache: Vec<Option<CapturedBasis>>) {
+        self.warm_start_basis_cache = Some(cache);
     }
 
     /// Enable state archiving for export.
