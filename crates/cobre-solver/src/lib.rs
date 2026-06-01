@@ -65,6 +65,15 @@ pub use highs::HighsSolver;
 #[cfg(feature = "highs")]
 pub use highs::highs_version;
 
+#[cfg(feature = "clp")]
+pub mod clp;
+#[cfg(feature = "clp")]
+pub use clp::ClpProfile;
+#[cfg(feature = "clp")]
+pub use clp::ClpSolver;
+#[cfg(feature = "clp")]
+pub use clp::clp_version;
+
 #[cfg(feature = "test-support")]
 pub mod test_support {
     //! Test-only utilities for configuring solver options from integration tests.

@@ -6,13 +6,21 @@
 //! 3. Compiles the thin C wrapper (`csrc/highs_wrapper.c`) via `cc`
 //! 4. Links the built `HiGHS` static library and the C++ standard library
 //! 5. When the `clp` feature is enabled, builds the vendored COIN-OR
-//!    superbuild (CoinUtils + Clp) as static libraries via the `cmake` crate,
-//!    links them in dependency order (Clp before CoinUtils), and compiles the
+//!    superbuild (`CoinUtils` + `Clp`) as static libraries via the `cmake` crate,
+//!    links them in dependency order (`Clp` before `CoinUtils`), and compiles the
 //!    thin C wrapper (`csrc/clp_wrapper.c`) via `cc`
 
 // Build scripts routinely use expect/panic for unrecoverable configuration
 // errors. Allow these lints here since there is no caller to propagate errors to.
-#![allow(clippy::expect_used, clippy::panic, clippy::manual_assert)]
+// `too_many_lines` is allowed because `main` now drives two optional vendored
+// solver builds (HiGHS + CLP) sequentially; splitting it would scatter the
+// shared target-env setup without improving clarity.
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::manual_assert,
+    clippy::too_many_lines
+)]
 
 use std::env;
 use std::path::PathBuf;
