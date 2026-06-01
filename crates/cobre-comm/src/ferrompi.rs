@@ -68,10 +68,11 @@ pub struct FerrompiBackend {
 
     /// Optional intra-node communicator obtained from `MPI_Comm_split_type`.
     ///
-    /// `Some` when this is the top-level backend created by [`FerrompiBackend::new`].
-    /// `None` is reserved for sub-communicator instances returned by a future
-    /// `split_local` implementation, which represent intra-node
-    /// ranks and do not own a shared split.
+    /// Present only with the `shared-memory` feature. Used by
+    /// `SharedMemoryProvider::is_leader` to determine the intra-node leader rank.
+    /// When `shared-memory` is disabled this field is absent and the split is
+    /// never performed during initialization.
+    #[cfg(feature = "shared-memory")]
     shared: Option<ferrompi::Communicator>,
 
     /// Cached world rank (0-based).
@@ -115,19 +116,22 @@ unsafe impl Sync for FerrompiBackend {}
 impl FerrompiBackend {
     /// Initialize MPI and construct a `FerrompiBackend`.
     ///
-    /// Follows the four-step initialization sequence:
+    /// Initialization sequence:
     ///
     /// 1. Initialize MPI with `ThreadLevel::Funneled` via `Mpi::init_thread`.
     /// 2. Obtain the world communicator and cache rank and size.
-    /// 3. Create the intra-node shared communicator via `world.split_shared()`.
-    /// 4. Gather and cache the execution topology via the collective `world.topology(&mpi)`.
+    /// 3. Gather and cache the execution topology via the collective `world.topology(&mpi)`.
+    ///
+    /// When the `shared-memory` feature is enabled, an additional step occurs
+    /// between 2 and 3: create the intra-node shared communicator via
+    /// `world.split_shared()`.
     ///
     /// # Errors
     ///
     /// Returns [`BackendError::InitializationFailed`] if:
     /// - `Mpi::init_thread` fails (e.g., MPI runtime not installed, already initialized).
-    /// - `world.split_shared()` fails (e.g., MPI communicator split error).
     /// - `world.topology()` fails (e.g., allgather or broadcast error).
+    /// - (`shared-memory` feature only) `world.split_shared()` fails.
     pub fn new() -> Result<Self, BackendError> {
         let mpi = ferrompi::Mpi::init_thread(ferrompi::ThreadLevel::Funneled).map_err(|e| {
             BackendError::InitializationFailed {
@@ -142,6 +146,7 @@ impl FerrompiBackend {
         #[allow(clippy::cast_sign_loss)]
         let size = world.size() as usize;
 
+        #[cfg(feature = "shared-memory")]
         let shared = world
             .split_shared()
             .map_err(|e| BackendError::InitializationFailed {
@@ -182,6 +187,7 @@ impl FerrompiBackend {
         Ok(Self {
             mpi,
             world,
+            #[cfg(feature = "shared-memory")]
             shared: Some(shared),
             rank,
             size,
@@ -250,22 +256,24 @@ impl crate::TopologyProvider for FerrompiBackend {
 /// Intra-node communicator wrapping a ferrompi shared communicator.
 ///
 /// Implements [`crate::LocalCommunicator`] only (not full [`crate::Communicator`]).
-/// Returned by [`FerrompiBackend::split_local`] as `Box<dyn LocalCommunicator>`.
+/// Returned by [`FerrompiBackend::split_local`] as the `Ferrompi` variant of
+/// [`crate::traits::LocalCommKind`].
 ///
-/// The concrete type is not re-exported — it is an implementation detail of
-/// `FerrompiBackend`. Callers receive a `Box<dyn LocalCommunicator>` and are
-/// not aware of the underlying type.
+/// Held by value inside the [`crate::traits::LocalCommKind::Ferrompi`] variant.
+/// Callers always interact with the enum, never with this type directly.
+///
+/// Only available with the `shared-memory` Cargo feature.
 ///
 /// # Thread safety
 ///
 /// `FerrompiLocalComm` is `Send + Sync` because `ferrompi::Communicator` is
 /// already `Send + Sync` (it wraps an integer handle into a C-side table).
 /// No unsafe impl is needed.
-#[cfg(feature = "mpi")]
-struct FerrompiLocalComm(ferrompi::Communicator);
+#[cfg(feature = "shared-memory")]
+pub struct FerrompiLocalComm(ferrompi::Communicator);
 
-#[cfg(feature = "mpi")]
-impl crate::LocalCommunicator for FerrompiLocalComm {
+#[cfg(feature = "shared-memory")]
+impl crate::traits::LocalCommunicator for FerrompiLocalComm {
     fn rank(&self) -> usize {
         #[allow(clippy::cast_sign_loss)]
         {
@@ -293,7 +301,7 @@ impl crate::LocalCommunicator for FerrompiLocalComm {
     }
 }
 
-#[cfg(feature = "mpi")]
+#[cfg(feature = "shared-memory")]
 impl crate::SharedMemoryProvider for FerrompiBackend {
     /// Heap-fallback region type.
     ///
@@ -319,8 +327,7 @@ impl crate::SharedMemoryProvider for FerrompiBackend {
     ///
     /// Calls `self.world.split_shared()` to obtain a communicator containing
     /// only the ranks that share the same physical node as the calling rank,
-    /// then wraps it in `FerrompiLocalComm` and returns it as
-    /// `Box<dyn LocalCommunicator>`.
+    /// then wraps it in the `Ferrompi` variant of [`crate::traits::LocalCommKind`].
     ///
     /// Each call to `split_local` issues a new `MPI_Comm_split_type` collective.
     /// Callers should call this once during startup and cache the result.
@@ -328,10 +335,10 @@ impl crate::SharedMemoryProvider for FerrompiBackend {
     /// # Errors
     ///
     /// Returns [`crate::CommError::CollectiveFailed`] if `split_shared()` fails.
-    fn split_local(&self) -> Result<Box<dyn crate::LocalCommunicator>, crate::CommError> {
+    fn split_local(&self) -> Result<crate::traits::LocalCommKind, crate::CommError> {
         self.world
             .split_shared()
-            .map(|c| Box::new(FerrompiLocalComm(c)) as Box<dyn crate::LocalCommunicator>)
+            .map(|c| crate::traits::LocalCommKind::Ferrompi(FerrompiLocalComm(c)))
             .map_err(|e| map_ferrompi_error(&e, "split_local"))
     }
 
@@ -610,18 +617,11 @@ mod tests {
         assert_eq!(super::sanitize_library_version(""), "");
     }
 
-    #[cfg(feature = "mpi")]
+    #[cfg(feature = "shared-memory")]
     #[test]
     fn test_ferrompi_local_comm_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<super::FerrompiLocalComm>();
-    }
-
-    #[cfg(feature = "mpi")]
-    #[test]
-    fn test_ferrompi_local_comm_is_object_safe() {
-        fn assert_object_safe(_comm: &dyn crate::LocalCommunicator) {}
-        let _ = assert_object_safe as fn(&dyn crate::LocalCommunicator);
     }
 
     #[cfg(feature = "mpi")]

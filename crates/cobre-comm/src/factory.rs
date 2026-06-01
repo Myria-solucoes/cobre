@@ -176,7 +176,7 @@ impl crate::Communicator for CommBackend {
     }
 }
 
-#[cfg(feature = "mpi")]
+#[cfg(all(feature = "mpi", feature = "shared-memory"))]
 impl crate::SharedMemoryProvider for CommBackend {
     /// Both `LocalBackend` and `FerrompiBackend` use `HeapRegion<T>` as their
     /// `Region<T>` type (`HeapFallback` semantics per spec SS4.7). Using
@@ -190,15 +190,13 @@ impl crate::SharedMemoryProvider for CommBackend {
         count: usize,
     ) -> Result<Self::Region<T>, crate::CommError> {
         match self {
-            #[cfg(feature = "mpi")]
             Self::Mpi(backend) => backend.create_shared_region(count),
             Self::Local(backend) => backend.create_shared_region(count),
         }
     }
 
-    fn split_local(&self) -> Result<Box<dyn crate::LocalCommunicator>, crate::CommError> {
+    fn split_local(&self) -> Result<crate::traits::LocalCommKind, crate::CommError> {
         match self {
-            #[cfg(feature = "mpi")]
             Self::Mpi(backend) => backend.split_local(),
             Self::Local(backend) => backend.split_local(),
         }
@@ -206,7 +204,6 @@ impl crate::SharedMemoryProvider for CommBackend {
 
     fn is_leader(&self) -> bool {
         match self {
-            #[cfg(feature = "mpi")]
             Self::Mpi(backend) => backend.is_leader(),
             Self::Local(backend) => backend.is_leader(),
         }
@@ -576,7 +573,10 @@ mod tests {
     #[allow(clippy::float_cmp)]
     mod comm_backend {
         use super::super::CommBackend;
-        use crate::{Communicator, LocalBackend, ReduceOp, SharedMemoryProvider, SharedRegion};
+        use crate::{Communicator, LocalBackend, ReduceOp};
+
+        #[cfg(feature = "shared-memory")]
+        use crate::{LocalCommunicator, SharedMemoryProvider, SharedRegion};
 
         /// Compile-time assertion that `CommBackend: Send + Sync`.
         #[test]
@@ -632,6 +632,7 @@ mod tests {
         /// `CommBackend::Local` delegates `SharedMemoryProvider` methods correctly.
         ///
         /// Covers: `create_shared_region`, `split_local`, `is_leader`.
+        #[cfg(feature = "shared-memory")]
         #[test]
         fn test_comm_backend_local_shared_memory() {
             let backend = CommBackend::Local(LocalBackend);

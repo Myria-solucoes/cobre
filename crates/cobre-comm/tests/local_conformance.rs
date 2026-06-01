@@ -26,9 +26,10 @@
 // Allow expect/unwrap in test code — these guard test setup paths that must not fail.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use cobre_comm::{
-    CommError, Communicator, LocalBackend, ReduceOp, SharedMemoryProvider, SharedRegion,
-};
+use cobre_comm::{CommError, Communicator, LocalBackend, ReduceOp};
+
+#[cfg(feature = "shared-memory")]
+use cobre_comm::{LocalCommunicator, SharedMemoryProvider, SharedRegion};
 
 // ── SS1.1 allgatherv ─────────────────────────────────────────────────────────
 
@@ -181,6 +182,7 @@ fn test_local_collective_sequence() {
 // ── SS1.7 SharedMemoryProvider lifecycle ──────────────────────────────────────
 
 /// SS1.7: Full lifecycle — allocate -> write -> fence -> read.
+#[cfg(feature = "shared-memory")]
 #[test]
 fn test_local_shared_region_lifecycle() {
     let backend = LocalBackend;
@@ -204,6 +206,7 @@ fn test_local_shared_region_lifecycle() {
 }
 
 /// SS1.7: `is_leader()` returns `true` for `LocalBackend`.
+#[cfg(feature = "shared-memory")]
 #[test]
 fn test_local_shared_region_is_leader() {
     let backend = LocalBackend;
@@ -211,6 +214,7 @@ fn test_local_shared_region_is_leader() {
 }
 
 /// SS1.7: `split_local()` returns a communicator with `rank() == 0` and `size() == 1`.
+#[cfg(feature = "shared-memory")]
 #[test]
 fn test_local_split_local_rank_size() {
     let backend = LocalBackend;

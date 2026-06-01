@@ -235,7 +235,7 @@ mod compile_time_checks {
 
     /// `FerrompiBackend: SharedMemoryProvider` compiles.
     #[test]
-    #[cfg(feature = "mpi")]
+    #[cfg(all(feature = "mpi", feature = "shared-memory"))]
     fn test_ferrompi_backend_shared_memory_provider() {
         fn assert_shared_memory_provider<T: cobre_comm::SharedMemoryProvider>() {}
         assert_shared_memory_provider::<cobre_comm::FerrompiBackend>();
