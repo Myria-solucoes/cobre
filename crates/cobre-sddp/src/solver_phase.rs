@@ -12,6 +12,26 @@
 //!
 //! Compile-time assertions at the bottom of this module catch any future drift
 //! between the named constants and the documented field values.
+//!
+//! ## Why these profiles are `HighsProfile`-concrete
+//!
+//! The per-phase profiles are authored here as concrete [`HighsProfile`] values,
+//! which couples this module to the HiGHS backend. This is deliberate, not an
+//! oversight: the *mapping* "which phase wants which solver behaviour" (e.g. the
+//! backward pass exploits sparse cut-subgradient rows) is algorithm knowledge
+//! that must live in the algorithm crate, while `cobre-solver` is kept strictly
+//! backend-agnostic and so cannot know about SDDP phases. With a single backend,
+//! holding the concrete profile here is the correct equilibrium and preserves
+//! full control over every HiGHS option.
+//!
+//! To make `SolverInterface::Profile` genuinely backend-independent (so a second
+//! backend can be selected without editing this module), introduce a
+//! backend-agnostic tuning vocabulary in `cobre-solver` — a small hint enum such
+//! as `ExploitSparseRows` that each backend maps to its own options — and have
+//! this module emit hints per phase instead of concrete `HighsProfile` literals.
+//! That step is best taken alongside the first additional backend, when the
+//! second profile's real parameter surface is known and the minimal hint set can
+//! be derived from it rather than guessed.
 
 use cobre_solver::{DEFAULT_PROFILE_HEURISTIC_SENTINEL, HighsProfile};
 

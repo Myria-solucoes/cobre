@@ -66,6 +66,14 @@ pub trait SolverInterface: Send {
     ///
     /// For `HighsSolver`, this is [`HighsProfile`].
     /// For mock solvers in tests, this is typically [`HighsProfile`] (no-op impl).
+    ///
+    /// The associated-type form is deliberate: it gives each backend its **full**
+    /// parameter surface with zero lowest-common-denominator loss — a backend's
+    /// `Profile` is whatever rich struct that backend needs, not a shared subset.
+    /// Consumers that are generic over a backend should treat `Profile` as opaque
+    /// (construct via `Default`, pass through `apply_profile`) and avoid naming a
+    /// concrete profile type; cross-backend tuning intent belongs in a
+    /// backend-agnostic hint, not in a hardcoded concrete profile.
     type Profile: Copy + PartialEq + Default + Send;
 
     /// Apply all profile options to the underlying solver.
