@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-06-01
+
 ### Deprecated
 
 - `training.cut_selection.basis_activity_window` is now ignored at
@@ -55,9 +57,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `training/convergence.parquet` row-selection schema carries
   10 columns. The `cuts_in_lp` column from the sentinel-bake model is
   removed; `cuts_active` stays.
+- `ModelProvenanceReport` is restructured into nested `inflow` and
+  `hydro_production` sub-sections, aggregating FPHA-plane and
+  evaporation-reference source counts from `HydroModelProvenance` via
+  order-invariant tallies. The report and `HydroModelSummary` are now
+  `Serialize + Deserialize` so they can be persisted and read back by
+  `cobre summary`.
+- Cobre's offline geometric-mean column/row prescaler is restored and
+  HiGHS's internal simplex scaler is disabled (`simplex_scale_strategy:
+0`) across all phase profiles. The prescaler conditions the LP matrix
+  before the first solve; HiGHS therefore operates on an already-scaled
+  system and no double-scaling occurs. The retry escalation ladder
+  inherits the `Off` strategy throughout.
+- HiGHS primal and dual feasibility tolerances are tightened to `1e-9`
+  for all three phase profiles (forward, backward, simulation). Prior
+  releases used the HiGHS default of `1e-7`.
+- The `cobre-comm` shared-memory subsystem (`SharedMemoryProvider`,
+  `SharedRegion`, `LocalCommunicator`, `HeapRegion`) is now gated
+  behind an off-by-default `shared-memory` Cargo feature. Downstream
+  crates that previously compiled against these types unconditionally
+  must add `features = ["shared-memory"]` to their dependency
+  declaration, or remove the usage.
+- `SharedMemoryProvider::split_local` now returns `LocalCommKind` (a
+  concrete enum: `Local(LocalBackend)` or, under `mpi + shared-memory`,
+  `Ferrompi(FerrompiLocalComm)`) instead of `Box<dyn LocalCommunicator>`.
+  This is a breaking change for crates that stored or forwarded the
+  return value as a trait object.
+- `training/metadata.json` and `simulation/metadata.json` now persist
+  the full execution topology (per-host rank layout via `DistributionInfo.hosts`),
+  training and simulation solve-stat summaries, and the expected-cost
+  statistics (mean, std, CVaR), so `cobre summary` can reproduce the
+  complete live run end-block from a finished output directory.
 
 ### Added
 
+- **Python bindings** (`cobre-python` crate, `import cobre`). A PyO3
+  extension module exposing the full solver lifecycle to Python 3.12+,
+  built with maturin's mixed layout. The public surface includes:
+  - `cobre.Study` — load a case directory once; call `.train()` and
+    `.simulate(policy)` without re-reading disk between calls; accepts
+    `config_overrides` (dotted-key flat dict), `output_dir`, and
+    `threads`.
+  - `cobre.Policy` — in-memory trained-policy handle returned by
+    `Study.train()`; exposes `.iterations`, `.final_lower_bound`,
+    `.final_upper_bound`, `.evaluate(stage, state)`, and
+    `.cut_matrix(stage)` for stochastic introspection. Load from disk
+    via `Study.load_policy()`.
+  - `cobre.run.run` — single-call equivalent of `cobre run` (load →
+    train → simulate), GIL released for all Rust computation, same
+    output artifacts as the CLI.
+  - `cobre.io.load_case`, `cobre.io.validate` — case loading and
+    validation with the same structured report as the CLI.
+  - `cobre.results.*` — `load_results`, `load_convergence`,
+    `load_convergence_arrow`, `load_simulation`, `load_simulation_arrow`,
+    `load_policy`, `load_stochastic`, `report`; `Stochastic` read-only
+    introspection class.
+  - `cobre.model.*` — `System`, `Bus`, `Line`, `Thermal`, `Hydro`,
+    `EnergyContract`, `PumpingStation`, `NonControllableSource`
+    read-only model view classes.
+  - `cobre.errors.*` — structured exception hierarchy rooted at
+    `CobreError(Exception)`: `ValidationError(ValueError)`,
+    `PolicyIncompatibleError(ValueError)`, `CaseIoError(OSError)`,
+    `OutputError(OSError)`, `SolverError(RuntimeError)`,
+    `SimulationError(RuntimeError)`. Every leaf also subclasses the
+    matching Python builtin so existing `except OSError` handlers
+    continue to work.
+  - `cobre.schema.export` — JSON schema export.
+  - `Study.train(on_iteration=...)` accepts an optional Python callable
+    invoked at each training-iteration boundary (dict with `kind`,
+    `iteration`, `lower_bound`, `upper_bound`, `gap`, `wall_time_ms`);
+    a truthy return requests a cooperative stop; a raising callback or
+    `KeyboardInterrupt` is propagated after training artifacts are
+    written. The GIL is reacquired only at iteration boundaries — never
+    in the LP hot loop.
+  - A per-call scoped rayon thread pool is created for each `run`,
+    `train`, and `simulate` invocation so sequential calls with
+    different `threads` values each honour their own count.
+  - Output parity with the CLI: every file written by `cobre run` is
+    also written by the Python bindings on the same code path, and
+    vice-versa.
 - Per-phase LP solve profile mechanism. The LP solver is wrapped by
   `ProfiledSolver<S>`, which carries a solver-specific profile type
   (`S::Profile`) and applies it to the inner solver at phase boundaries.
@@ -69,13 +147,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   strategy, scale strategy, and price strategy. The profile is
   re-applied automatically before every solve to survive solver-internal
   option resets.
-- Backward-phase LP solver tuning. The new `BACKWARD_PROFILE` overrides
-  two `HiGHS` options against the default:
-  `simplex_dual_edge_weight_strategy` switches from Devex (1) to
-  Dantzig (0) for lower per-pivot edge-weight maintenance cost, and
-  `simplex_price_strategy` switches from Row (1) to Row Hyper-Sparse
-  (2) for sparser cut rows in the backward LPs. Forward and simulation
-  phases retain the default profile.
+- Backward-phase LP solver tuning. `BACKWARD_PROFILE` overrides one
+  `HiGHS` option relative to the forward/simulation default:
+  `simplex_price_strategy` switches from Row (`1`) to Row Hyper-Sparse
+  (`2`), exploiting the sparsity of cut-subgradient rows that dominate
+  the backward LP row count. The dual edge-weight strategy remains Devex
+  on all three phases; empirical sweeps showed Dantzig and Steepest-Edge
+  alternatives net worse on wall time and tail latency respectively.
+- Cut-selection kernel rebuilt around an m-block GEMM
+  (`matrixmultiply::dgemm`). The kernel evaluates all populated cuts
+  (active and inactive) at every visited forward-pass trial point, and
+  applies the configured survival rule (Level1, LML1, Dominated). All
+  three variants share one implementation that treats reactivation and
+  deactivation symmetrically. Intra-stage work is distributed across
+  the rayon thread pool via 8-trial-point blocks; the OR-merge across
+  tasks is commutative so determinism is preserved regardless of thread
+  count. The hot path allocates nothing beyond the bounded fold-leaf
+  scratch.
+- `tie_tolerance` field on `CutSelectionStrategy` variants controls
+  the per-state max-survival tolerance used by the value-evaluation
+  kernel.
+- Trial-point sliding window on `VisitedStatesArchive`: the archive
+  retains the most recent `window_size` forward-pass trial points and
+  evicts older entries, bounding memory growth on long runs while
+  keeping recent states visible to cut selection.
+- Cut reactivation wired into the training loop: cuts deactivated in
+  a prior iteration that the kernel selects for survival are reactivated
+  before the next backward pass.
+- `cobre report` now surfaces final bounds (`final_lower_bound`,
+  `final_upper_bound`) and expected cost (`mean_cost`, `std_cost`,
+  `cvar`) as top-level convenience keys in the JSON output, alongside
+  the full nested metadata. Legacy output directories degrade gracefully
+  to default values.
+- `cobre summary` reproduces the complete live run end-block (execution
+  topology, hydro models, model provenance, training, simulation) from
+  a finished output directory without re-running the solver. Reads the
+  persisted metadata sidecars and degrades gracefully when a sidecar is
+  absent.
+- Legacy lower bound recovery: `cobre summary` and `cobre report` can
+  reconstruct the final lower bound from `training/convergence.parquet`
+  when `training/metadata.json` predates the bounds field, preserving
+  read-back for output directories from prior releases.
+- `cobre-io` exposes generic parquet readers and JSON sidecar
+  read/write helpers (`read_provenance_report`, `write_hydro_model_summary`,
+  etc.) so the CLI and Python bindings can share one load path for
+  structured output artifacts.
+
+### Removed
+
+- `basis_reconstructions` column from `training/solver/iterations.parquet`.
+  The column was always zero for every row and phase (the field was
+  never packed into the MPI solver-stats wire format) and carried no
+  diagnostic value. Consumers reading this column by name must remove
+  the reference; the column is absent from the schema going forward.
+
+### Fixed
+
+- Forward-pass solver statistics are now aggregated across all MPI
+  ranks before being written to `training/solver/iterations.parquet`.
+  Previously only rank 0's contribution reached the parquet writer,
+  so `lp_solves`, `simplex_iterations`, and timing fields for forward
+  rows were understated by a factor of `world_size` on multi-rank runs.
+- `cobre report` and `cobre summary` now report the true generated cut
+  count (cuts actually added by `add_cut`) rather than the slot
+  high-water mark, which over-counted by `forward_passes × stages` due
+  to the 1-based iteration indexing leaving the warm-start reservation
+  block permanently empty.
+- Algorithmic strategy options (`simplex_dual_edge_weight_strategy`,
+  `simplex_scale_strategy`, `simplex_price_strategy`) are now fully
+  re-applied after a retry-level restore alongside the feasibility
+  tolerances. Previously only the tolerance fields were re-applied,
+  silently reverting the backward-phase price strategy to the HiGHS
+  default on the post-retry attempt.
+- Simulation-phase output-write errors (simulation results, solver
+  stats) are now routed to `CaseIoError(OSError)` and
+  `SimulationError(RuntimeError)` respectively in the Python bindings,
+  matching the exception types raised by the equivalent training-phase
+  failures. Previously these errors fell through to `SolverError`.
+- `cobre init` / `1dtoy` quickstart template corrected: the bus deficit
+  cost is raised so load shedding dominates operational constraint
+  penalties, and `initial_conditions.json` gains the `$schema` URL
+  present on all other template files. The scaffolded case now passes
+  `cobre validate` with zero errors and zero warnings.
+- The redundant Hydro-production sub-section is removed from the
+  `cobre summary` and live run end-block output. It duplicated the
+  Hydro-models section and always printed a misleading
+  `FPHA planes: 0 computed, 0 precomputed` line for studies with no
+  FPHA hydros. The source breakdown remains in `model_provenance.json`
+  and is accessible via `cobre report` and the Python bindings.
 
 ### Note
 
@@ -1773,7 +1932,13 @@ disappears from `cobre.results.load_policy` per-cut dicts.
 
 <!-- next-url -->
 
-[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/cobre-rs/cobre/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/cobre-rs/cobre/compare/v0.6.2...v0.7.0
+[0.6.2]: https://github.com/cobre-rs/cobre/compare/v0.6.1...v0.6.2
+[0.6.1]: https://github.com/cobre-rs/cobre/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/cobre-rs/cobre/compare/v0.5.1...v0.6.0
+[0.5.1]: https://github.com/cobre-rs/cobre/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/cobre-rs/cobre/compare/v0.4.4...v0.5.0
 [0.4.4]: https://github.com/cobre-rs/cobre/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/cobre-rs/cobre/compare/v0.4.2...v0.4.3
