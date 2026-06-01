@@ -36,6 +36,9 @@
 
 pub mod ffi;
 
+#[cfg(feature = "clp")]
+pub mod clp_ffi;
+
 pub mod trait_def;
 pub use trait_def::SolverInterface;
 

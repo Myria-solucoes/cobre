@@ -7,8 +7,8 @@
 //! 4. Links the built `HiGHS` static library and the C++ standard library
 //! 5. When the `clp` feature is enabled, builds the vendored COIN-OR
 //!    superbuild (CoinUtils + Clp) as static libraries via the `cmake` crate,
-//!    links them in dependency order (Clp before CoinUtils), and compiles a
-//!    placeholder C translation unit to validate the link
+//!    links them in dependency order (Clp before CoinUtils), and compiles the
+//!    thin C wrapper (`csrc/clp_wrapper.c`) via `cc`
 
 // Build scripts routinely use expect/panic for unrecoverable configuration
 // errors. Allow these lints here since there is no caller to propagate errors to.
@@ -193,11 +193,12 @@ fn main() {
     // skipped — and the default build artifact stays byte-identical — unless
     // `--features clp` is active. It mirrors the HiGHS block above: build the
     // vendored COIN-OR superbuild (CoinUtils + Clp) as static libraries in
-    // Release via the cmake crate, then compile a placeholder C TU that forces
-    // the linker to resolve a CLP symbol.
+    // Release via the cmake crate, then compile the thin C wrapper
+    // (csrc/clp_wrapper.c) via cc, mirroring the HiGHS wrapper.
     // ---------------------------------------------------------------------
     if env::var("CARGO_FEATURE_CLP").is_ok() {
-        println!("cargo:rerun-if-changed=csrc/clp_wrapper_placeholder.c");
+        println!("cargo:rerun-if-changed=csrc/clp_wrapper.c");
+        println!("cargo:rerun-if-changed=csrc/clp_wrapper.h");
         println!("cargo:rerun-if-changed=vendor/coin-build/CMakeLists.txt");
         // The vendored config headers drive the superbuild's compilation; edits
         // to them must retrigger cmake or the build tree goes stale.
@@ -280,27 +281,37 @@ fn main() {
             }
         }
 
-        // Compile a placeholder C TU that calls a CLP symbol. Its only job is
-        // to force the linker to resolve the static archives produced above;
-        // the real C wrapper (csrc/clp_wrapper.c) replaces it once the CLP FFI
-        // layer lands.
+        // Compile the thin C wrapper (csrc/clp_wrapper.c). It includes
+        // <Clp_C_Interface.h>, which in turn includes "Coin_C_defines.h".
+        // The cmake superbuild installs only Clp_C_Interface.h into the
+        // out-dir include/, so the transitive Coin_C_defines.h is NOT present
+        // there. Point the compiler at the two nested COIN-OR source roots
+        // (where both headers live) so the include resolves. The out-dir
+        // include/ is added as well for completeness.
         let clp_include = clp_dst.join("include");
+        let clp_src_include = manifest_dir.join("vendor/Clp/Clp/src");
+        let coinutils_src_include = manifest_dir.join("vendor/CoinUtils/CoinUtils/src");
 
         eprintln!(
-            "cobre-solver: compiling CLP placeholder with include path: {}",
+            "cobre-solver: compiling CLP wrapper with include paths: {}, {}, {}",
+            clp_src_include.display(),
+            coinutils_src_include.display(),
             clp_include.display()
         );
 
         let mut clp_build = cc::Build::new();
         clp_build
-            .file("csrc/clp_wrapper_placeholder.c")
+            .file("csrc/clp_wrapper.c")
             .include("csrc")
             .warnings(true)
             .extra_warnings(true);
 
-        // Treat the installed CLP headers as system includes (same rationale
-        // as the HiGHS wrappers). The placeholder itself needs no header, but
-        // adding the include dir matches the wrapper's eventual layout.
+        // Treat the COIN-OR headers as system includes (same rationale as the
+        // HiGHS wrappers): suppress third-party header warnings while keeping
+        // full warning coverage on our own wrapper. The nested source dirs
+        // supply Clp_C_Interface.h and its transitive Coin_C_defines.h.
+        add_system_or_include(&mut clp_build, target_env == "msvc", &clp_src_include);
+        add_system_or_include(&mut clp_build, target_env == "msvc", &coinutils_src_include);
         add_system_or_include(&mut clp_build, target_env == "msvc", &clp_include);
 
         // MSVC: link against the static CRT (`/MT`) to match the static-CRT
@@ -309,7 +320,7 @@ fn main() {
             clp_build.static_crt(true);
         }
 
-        clp_build.compile("clp_wrapper_placeholder");
+        clp_build.compile("clp_wrapper");
     }
 }
 
