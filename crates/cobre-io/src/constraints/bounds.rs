@@ -309,14 +309,14 @@ fn validate_optional_finite(
     column: &str,
     path: &Path,
 ) -> Result<(), LoadError> {
-    if let Some(v) = value {
-        if !v.is_finite() {
-            return Err(LoadError::SchemaError {
-                path: path.to_path_buf(),
-                field: format!("{file_label}[{row_idx}].{column}"),
-                message: format!("value must be finite, got {v}"),
-            });
-        }
+    if let Some(v) = value
+        && !v.is_finite()
+    {
+        return Err(LoadError::SchemaError {
+            path: path.to_path_buf(),
+            field: format!("{file_label}[{row_idx}].{column}"),
+            message: format!("value must be finite, got {v}"),
+        });
     }
     Ok(())
 }
@@ -414,14 +414,14 @@ pub fn parse_thermal_bounds(path: &Path) -> Result<Vec<ThermalBoundsRow>, LoadEr
                 "cost_per_mwh",
                 path,
             )?;
-            if let Some(v) = cost_per_mwh {
-                if v < 0.0 {
-                    return Err(LoadError::SchemaError {
-                        path: path.to_path_buf(),
-                        field: format!("thermal_bounds[{row_idx}].cost_per_mwh"),
-                        message: format!("value must be >= 0.0, got {v}"),
-                    });
-                }
+            if let Some(v) = cost_per_mwh
+                && v < 0.0
+            {
+                return Err(LoadError::SchemaError {
+                    path: path.to_path_buf(),
+                    field: format!("thermal_bounds[{row_idx}].cost_per_mwh"),
+                    message: format!("value must be >= 0.0, got {v}"),
+                });
             }
 
             rows.push(ThermalBoundsRow {

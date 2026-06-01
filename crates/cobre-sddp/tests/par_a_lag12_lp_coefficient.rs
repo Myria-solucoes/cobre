@@ -660,10 +660,9 @@ fn lag_11_lp_coefficient_equals_psi_hat_over_twelve() {
     //   lag-11, hydro 0 → 2 + 11 * 2 = 24
     let col_lag11_h0: usize = 2 + 11 * 2;
 
-    // Row index:
-    //   z_inflow_row_start = N * (1 + L) = 2 * 13 = 26
-    //   z-inflow row for hydro 0 → 26
-    let row_z_h0: usize = 2 * (1 + 12);
+    // Row index (Phase 1): z_inflow rows start at row 0.
+    //   z-inflow row for hydro 0 → 0
+    let row_z_h0: usize = 0;
 
     // AC#2: the CSC entry at (lag-11 col, z-inflow row) must equal −ψ̂/12.
     let psi_hat = PSI * SIGMA_M / SIGMA_A; // 0.1 * 200 / 250 = 0.08
@@ -695,8 +694,8 @@ fn lag_11_lp_coefficient_equals_psi_hat_over_twelve() {
 /// Column indices (N=2, L=12):
 ///   lag-0, hydro 0 → `2 + 0 * 2 + 0 = 2`
 ///
-/// Row index:
-///   z-inflow row for hydro 0 → `2 * (1 + 12) + 0 = 26`
+/// Row index (Phase 1): z_inflow rows start at row 0.
+///   z-inflow row for hydro 0 → `0`
 #[test]
 fn lag_0_lp_coefficient_combines_ar_and_annual() {
     let (system, par_lp) = build_par_a_fixture();
@@ -717,8 +716,8 @@ fn lag_0_lp_coefficient_combines_ar_and_annual() {
 
     // Column for lag-0, hydro 0: inflow_lags.start + 0 * N_H + 0 = 2.
     let col_lag0_h0: usize = N_H; // = 2
-    // Z-inflow row for hydro 0: N_H * (1 + max_par_order) = 2 * 13 = 26.
-    let row_z_h0: usize = 2 * (1 + 12);
+    // Z-inflow row for hydro 0 (Phase 1): z_inflow rows start at 0.
+    let row_z_h0: usize = 0;
 
     // φ̂_1 = φ_1 * (σ_m / σ_{m-1}); fixture uses uniform σ_m so the ratio is 1.0.
     let phi_hat_1 = PHI_1 * (SIGMA_M / SIGMA_M); // 0.5

@@ -556,7 +556,6 @@ fn train_fixture(
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: fx.risk_measures.clone(),
             },
@@ -588,6 +587,7 @@ fn train_fixture(
         },
         &comm,
         HighsSolver::new,
+        None,
     )
 }
 
@@ -681,7 +681,6 @@ fn simulate_fixture(
         &SimulationConfig {
             n_scenarios: 20,
             io_channel_capacity: 32,
-            basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
         },
         SimulationOutputSpec {
             result_tx: &result_tx,
@@ -968,8 +967,8 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
     let h1_obj = tmpl0.objective[h1_col];
     let h2_obj = tmpl0.objective[h2_col];
 
-    // LP builder divides by COST_SCALE_FACTOR (1000.0) for conditioning.
-    let cost_scale = 1000.0_f64;
+    // LP builder divides by COST_SCALE_FACTOR (1_000_000.0) for conditioning.
+    let cost_scale = 1_000_000.0_f64;
     let expected_h1 = 100.0 * block_hours / cost_scale;
     let expected_h2 = 5000.0 * block_hours / cost_scale;
 

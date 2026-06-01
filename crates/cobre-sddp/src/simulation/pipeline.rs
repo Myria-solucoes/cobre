@@ -237,9 +237,6 @@ struct SimStageLoadSpec<'a> {
     baked_template: &'a StageTemplate,
     /// Warm-start basis captured during training at this stage, if any.
     warm_basis: Option<&'a CapturedBasis>,
-    /// Runtime window for the basis-activity classifier.
-    /// Derived from `SimulationConfig::basis_activity_window`.
-    basis_activity_window: u32,
 }
 
 /// Per-stage batched form of [`SimStageLoadSpec`] consumed by
@@ -247,9 +244,6 @@ struct SimStageLoadSpec<'a> {
 pub(crate) struct SimScenarioLoadSpec<'a> {
     pub(crate) baked_templates: &'a [StageTemplate],
     pub(crate) stage_bases: &'a [Option<CapturedBasis>],
-    /// Runtime window for the basis-activity classifier.
-    /// Propagated into each per-stage [`SimStageLoadSpec`] via [`Self::stage`].
-    pub(crate) basis_activity_window: u32,
 }
 
 impl<'a> SimScenarioLoadSpec<'a> {
@@ -258,7 +252,6 @@ impl<'a> SimScenarioLoadSpec<'a> {
         SimStageLoadSpec {
             baked_template: &self.baked_templates[t],
             warm_basis: self.stage_bases.get(t).and_then(Option::as_ref),
-            basis_activity_window: self.basis_activity_window,
         }
     }
 }
@@ -380,6 +373,8 @@ fn solve_simulation_stage<S: SolverInterface>(
     // at `incoming - decision` at the optimum) would leak into the next
     // stage's incoming state, and fishing constraints at delivery stages
     // would read stale slot 0 values.
+    ws.patch_buf
+        .fill_col_state_patches(indexer, &ws.current_state, &ctx.templates[t].col_scale);
     ws.patch_buf.fill_forward_patches(
         indexer,
         &ws.current_state,
@@ -400,6 +395,12 @@ fn solve_simulation_stage<S: SolverInterface>(
         indexer.z_inflow_row_start,
         &ws.scratch.z_inflow_rhs_buf,
         &ctx.templates[t].row_scale,
+    );
+    let cp = ws.patch_buf.state_col_patch_count();
+    ws.solver.set_col_bounds(
+        &ws.patch_buf.col_indices[..cp],
+        &ws.patch_buf.col_lower[..cp],
+        &ws.patch_buf.col_upper[..cp],
     );
     let pc = ws.patch_buf.forward_patch_count();
     ws.solver.set_row_bounds(
@@ -422,67 +423,46 @@ fn solve_simulation_stage<S: SolverInterface>(
 
     // Take scratch buffers out of ws before run_stage_solve borrows ws.
     // The `mem::take` pattern (capacity retained, empty vec left in field) allows
-    // us to pass borrowed slices while `&mut ws` is also live, and to fill
-    // unscaled_primal/unscaled_dual from `view` slices that are still tied to 'ws.
-    // All three are restored to ws.scratch at function end so the next stage reuses
-    // the warmed allocations.
-    let mut current_state_local: Vec<f64> = std::mem::take(&mut ws.scratch.current_state_scratch);
+    // us to fill unscaled_primal/unscaled_dual from `view` slices that are still
+    // tied to 'ws while `&mut ws` is also live. Both are restored to ws.scratch
+    // at function end so the next stage reuses the warmed allocations.
     let mut unscaled_primal: Vec<f64> = std::mem::take(&mut ws.scratch.unscaled_primal);
     let mut unscaled_dual: Vec<f64> = std::mem::take(&mut ws.scratch.unscaled_dual);
 
-    current_state_local.clear();
-    current_state_local.extend_from_slice(&ws.current_state[..indexer.n_state]);
-
     let inputs = crate::stage_solve::StageInputs {
         stage_context: ctx,
-        indexer,
         pool: &fcf.pools[t],
-        current_state: &current_state_local,
         stored_basis: load_spec.warm_basis,
-        baked_template: load_spec.baked_template,
         stage_index: t,
         scenario_index: ids.scenario_id as usize,
-        iteration: None,            // simulation has no iteration counter
-        horizon_is_terminal: false, // simulation stage-sweep semantics
-        terminal_has_boundary_cuts: false,
-        basis_activity_window: load_spec.basis_activity_window,
+        iteration: None, // simulation has no iteration counter
     };
 
-    let outcome =
-        crate::stage_solve::run_stage_solve(ws, crate::stage_solve::Phase::Simulation, &inputs)
-            .map_err(|e| match e {
-                crate::error::SddpError::Infeasible {
-                    stage, scenario, ..
-                } => {
-                    #[allow(clippy::cast_possible_truncation)]
-                    let scenario_id = scenario as u32;
-                    #[allow(clippy::cast_possible_truncation)]
-                    let stage_id = stage as u32;
-                    SimulationError::LpInfeasible {
-                        scenario_id,
-                        stage_id,
-                        solver_message: "LP infeasible".to_string(),
-                    }
-                }
-                crate::error::SddpError::Solver(other) => SimulationError::SolverError {
-                    scenario_id: ids.scenario_id,
-                    stage_id: ids.stage_id_u32,
-                    solver_message: other.to_string(),
-                },
-                other => SimulationError::SolverError {
-                    scenario_id: ids.scenario_id,
-                    stage_id: ids.stage_id_u32,
-                    solver_message: format!("{other}"),
-                },
-            })?;
-
-    let crate::stage_solve::StageOutcome::Simulation {
-        view,
-        recon_stats: _,
-    } = outcome
-    else {
-        unreachable!("run_stage_solve(Phase::Simulation) returns Simulation variant")
-    };
+    let view = crate::stage_solve::run_stage_solve(ws, &inputs).map_err(|e| match e {
+        crate::error::SddpError::Infeasible {
+            stage, scenario, ..
+        } => {
+            #[allow(clippy::cast_possible_truncation)]
+            let scenario_id = scenario as u32;
+            #[allow(clippy::cast_possible_truncation)]
+            let stage_id = stage as u32;
+            SimulationError::LpInfeasible {
+                scenario_id,
+                stage_id,
+                solver_message: "LP infeasible".to_string(),
+            }
+        }
+        crate::error::SddpError::Solver(other) => SimulationError::SolverError {
+            scenario_id: ids.scenario_id,
+            stage_id: ids.stage_id_u32,
+            solver_message: other.to_string(),
+        },
+        other => SimulationError::SolverError {
+            scenario_id: ids.scenario_id,
+            stage_id: ids.stage_id_u32,
+            solver_message: format!("{other}"),
+        },
+    })?;
 
     // Extract scaling slices and objective scalar before filling unscaled buffers.
     // `view` borrows from `ws` (via run_stage_solve), so we must finish all reads
@@ -524,11 +504,8 @@ fn solve_simulation_stage<S: SolverInterface>(
 
     // End the `view` borrow of `ws` before mutating ws further.
     // `SolutionView` is Copy so `drop(view)` would be a no-op; `let _` is idiomatic.
-    // `inputs` and its borrow of current_state_local ended at the `?` above
-    // (NLL sees no further use of inputs after that point).
     // Restore scratch buffers so the next stage reuses the warmed allocations.
     let _ = view;
-    ws.scratch.current_state_scratch = current_state_local;
     ws.scratch.unscaled_primal = unscaled_primal;
     ws.scratch.unscaled_dual = unscaled_dual;
 
@@ -1223,6 +1200,10 @@ mod tests {
     }
 
     impl SolverInterface for MockSolver {
+        type Profile = cobre_solver::HighsProfile;
+
+        fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
+
         fn solver_name_version(&self) -> String {
             "MockSolver 0.0.0".to_string()
         }
@@ -1256,10 +1237,14 @@ mod tests {
         fn name(&self) -> &'static str {
             "Mock"
         }
-        fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
-        fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
-        fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
-        fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
+
+        fn set_primal_feasibility_tolerance(&mut self, _tolerance: f64) {}
+
+        fn set_dual_feasibility_tolerance(&mut self, _tolerance: f64) {}
+
+        fn set_simplex_iteration_limit_profile(&mut self, _limit: u32) {}
+
+        fn set_ipm_iteration_limit_profile(&mut self, _limit: u32) {}
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
@@ -1548,9 +1533,7 @@ mod tests {
                 downstream_weight_accum: 0.0,
                 downstream_completed_lags: Vec::new(),
                 downstream_n_completed: 0,
-                current_state_scratch: Vec::new(),
                 recon_slot_lookup: Vec::new(),
-                promotion_scratch: crate::basis_reconstruct::PromotionScratch::default(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
@@ -1752,7 +1735,6 @@ mod tests {
         let config = SimulationConfig {
             n_scenarios: 1,
             io_channel_capacity: 4,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
         };
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
@@ -1794,9 +1776,7 @@ mod tests {
                 downstream_weight_accum: 0.0,
                 downstream_completed_lags: Vec::new(),
                 downstream_n_completed: 0,
-                current_state_scratch: Vec::new(),
                 recon_slot_lookup: Vec::new(),
-                promotion_scratch: crate::basis_reconstruct::PromotionScratch::default(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
@@ -1907,7 +1887,7 @@ mod tests {
         );
 
         // The load patch must also be reflected in the patch buffer.
-        let cat4_start = 2; // n_hydros * (2 + max_par_order) = 1 * 2 = 2
+        let cat4_start = 1; // n_hydros = 1
         assert_eq!(
             workspaces[0].patch_buf.lower[cat4_start], workspaces[0].scratch.load_rhs_buf[0],
             "patch_buf lower at load slot must equal load_rhs_buf[0]"
@@ -1936,10 +1916,9 @@ mod tests {
     }
 
     /// when `n_load_buses == 0`,
-    /// `load_rhs_buf` remains empty and `forward_patch_count` equals
-    /// `N*(2+L)` as with the training forward pass.
+    /// `load_rhs_buf` remains empty and `forward_patch_count` equals `N`.
     ///
-    /// With N=1, L=0: `forward_patch_count = 1 * (2 + 0) = 2`.
+    /// With N=1, L=0: `forward_patch_count = 1`.
     #[test]
     fn simulation_no_load_buses_unchanged() {
         let n_stages = 1;
@@ -1952,7 +1931,6 @@ mod tests {
         let config = SimulationConfig {
             n_scenarios: 1,
             io_channel_capacity: 4,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
         };
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
@@ -2034,11 +2012,11 @@ mod tests {
             workspaces[0].scratch.load_rhs_buf.is_empty(),
             "load_rhs_buf must be empty when n_load_buses=0"
         );
-        // forward_patch_count = N*(2+L) = 1*(2+0) = 2 (no load patches added).
+        // forward_patch_count = N = 1 (no load patches added).
         assert_eq!(
             workspaces[0].patch_buf.forward_patch_count(),
-            2,
-            "forward_patch_count must be N*(2+L)=2 when n_load_buses=0, got {}",
+            1,
+            "forward_patch_count must be N=1 when n_load_buses=0, got {}",
             workspaces[0].patch_buf.forward_patch_count()
         );
     }
@@ -2083,7 +2061,6 @@ mod tests {
         let config = SimulationConfig {
             n_scenarios: 1,
             io_channel_capacity: 4,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
         };
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
@@ -2125,9 +2102,7 @@ mod tests {
                 downstream_weight_accum: 0.0,
                 downstream_completed_lags: Vec::new(),
                 downstream_n_completed: 0,
-                current_state_scratch: Vec::new(),
                 recon_slot_lookup: Vec::new(),
-                promotion_scratch: crate::basis_reconstruct::PromotionScratch::default(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
@@ -2441,9 +2416,7 @@ mod tests {
                 downstream_weight_accum: 0.0,
                 downstream_completed_lags: Vec::new(),
                 downstream_n_completed: 0,
-                current_state_scratch: Vec::new(),
                 recon_slot_lookup: Vec::new(),
-                promotion_scratch: crate::basis_reconstruct::PromotionScratch::default(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
@@ -2488,7 +2461,6 @@ mod tests {
         let config = SimulationConfig {
             n_scenarios: 4,
             io_channel_capacity: 16,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
         };
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
@@ -2606,7 +2578,6 @@ mod tests {
         let config = SimulationConfig {
             n_scenarios: 4,
             io_channel_capacity: 16,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
         };
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,

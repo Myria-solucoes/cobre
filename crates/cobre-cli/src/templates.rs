@@ -196,25 +196,31 @@ mod tests {
         }
     }
 
+    /// Every embedded template file must be byte-identical to its canonical
+    /// source under `examples/1dtoy/`.
+    ///
+    /// `build.rs` embeds the `crates/cobre-cli/templates/1dtoy/` copy via
+    /// `include_bytes!`, while `examples/1dtoy/` is the canonical source the
+    /// book and docs point at. The two copies are kept in sync by hand, so
+    /// this test guards the whole set (JSON *and* parquet) against drift —
+    /// not just `config.json`.
     #[test]
-    fn test_1dtoy_config_json_content_matches_source() {
+    fn test_1dtoy_embedded_files_match_canonical_source() {
         let template = find_template("1dtoy").unwrap();
-        let embedded = template
-            .files
-            .iter()
-            .find(|f| f.relative_path == "config.json")
-            .expect("1dtoy template must contain config.json");
+        let source_root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/1dtoy");
 
-        let on_disk = std::fs::read(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../examples/1dtoy/config.json"
-        ))
-        .expect("examples/1dtoy/config.json must be readable");
-
-        assert_eq!(
-            embedded.content,
-            on_disk.as_slice(),
-            "embedded config.json content must be byte-identical to the source file"
-        );
+        for file in template.files {
+            let path = format!("{source_root}/{}", file.relative_path);
+            let on_disk = std::fs::read(&path)
+                .expect("canonical examples/1dtoy source file must be readable");
+            assert_eq!(
+                file.content,
+                on_disk.as_slice(),
+                "embedded '{0}' must be byte-identical to its canonical source \
+                 examples/1dtoy/{0} — build.rs embeds the \
+                 crates/cobre-cli/templates/1dtoy/ copy, so both copies must stay in sync",
+                file.relative_path,
+            );
+        }
     }
 }

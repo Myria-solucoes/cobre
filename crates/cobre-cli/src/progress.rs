@@ -180,12 +180,11 @@ pub fn resolve_term_width() -> u16 {
     if let Some((_, w)) = term.size_checked() {
         return w;
     }
-    if let Ok(val) = std::env::var("COLUMNS") {
-        if let Ok(w) = val.parse::<u16>() {
-            if w > 0 {
-                return w;
-            }
-        }
+    if let Ok(val) = std::env::var("COLUMNS")
+        && let Ok(w) = val.parse::<u16>()
+        && w > 0
+    {
+        return w;
     }
     120
 }

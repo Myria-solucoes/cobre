@@ -7,7 +7,6 @@
 use cobre_solver::{Basis, ProfiledSolver, SolverInterface};
 
 use crate::backward::StagedCut;
-use crate::basis_reconstruct::PromotionScratch;
 
 // ---------------------------------------------------------------------------
 // CapturedBasis
@@ -55,6 +54,16 @@ pub struct CapturedBasis {
 /// Stored as the second `i32` in every `Some`-path payload, immediately
 /// after the presence sentinel (`1_i32`). Bump this constant and update
 /// `try_from_broadcast_payload` whenever the field layout changes.
+///
+/// Version 1 carries: column statuses, template-row statuses, cut-row
+/// statuses, `cut_row_slots`, and `state_at_capture`. `cut_row_slots` is
+/// load-bearing on the reconstruction path — `build_slot_lookup` reads
+/// it to bind stored cut-row statuses to target-LP cut rows by slot id.
+/// `state_at_capture` is written by the forward capture and refreshed
+/// by the backward reuse path, but is not consumed by any current
+/// reconstruction reader; it is retained for diagnostic value and to
+/// preserve the option of re-introducing a state-dependent reuse
+/// policy without a wire-format change.
 pub const BASIS_BROADCAST_WIRE_VERSION: i32 = 1;
 
 impl CapturedBasis {
@@ -394,21 +403,6 @@ pub(crate) struct BackwardAccumulators {
     /// contributions across all workers into `metadata_sync_buf`, replacing
     /// the old per-`StagedCut` `binding_increments` Vec iteration.
     pub(crate) metadata_sync_contribution: Vec<u64>,
-    /// Per-worker sliding-window binding-activity contribution, indexed by cut pool slot.
-    ///
-    /// Each element is a `u32` bitmask where bit 0 indicates that the cut at
-    /// that slot was binding (dual > tolerance) during at least one trial
-    /// point processed by this worker for the current stage. Grown
-    /// monotonically via `.resize(pop, 0)` when the pool grows, and zeroed
-    /// per stage via `.fill(0)` because the slot index is pool-scoped:
-    /// slot `N` in pool `s` and slot `N` in pool `s+1` refer to different
-    /// cuts, so bits must not leak across stages.
-    ///
-    /// After the parallel region the sequential merge phase ORs contributions
-    /// across all workers into `metadata_sync_window_buf` (`BackwardPassState`),
-    /// then an MPI `allreduce(BitwiseOr)` aggregates across ranks so any rank
-    /// observing a cut binding globally sets bit 0 in the cut's `active_window`.
-    pub(crate) metadata_sync_window_contribution: Vec<u32>,
     /// Per-opening solver-statistics accumulator for this worker.
     ///
     /// Length equals `n_openings` for the current stage. Re-initialised to
@@ -470,7 +464,6 @@ impl BackwardAccumulators {
             slot_increments: vec![0u64; initial_pool_capacity],
             agg_coefficients: vec![0.0_f64; n_state],
             metadata_sync_contribution: vec![0u64; initial_pool_capacity],
-            metadata_sync_window_contribution: vec![0u32; initial_pool_capacity],
             per_opening_stats: Vec::new(),
             state_duals_buf: Vec::new(),
             cut_duals_buf: Vec::new(),
@@ -511,17 +504,6 @@ pub(crate) struct ScratchBuffers {
     // Slot 0 = oldest completed quarter, slot n-1 = most recent.
     pub(crate) downstream_completed_lags: Vec<f64>,
     pub(crate) downstream_n_completed: usize,
-    /// Scratch buffer for the current-state slice copied before each LP solve.
-    ///
-    /// Eliminates the per-scenario `Vec<f64>` allocation that previously
-    /// occurred in `run_forward_stage` and `solve_simulation_stage`.  The
-    /// buffer is filled via `clear()` + `extend_from_slice()` immediately
-    /// before constructing `StageInputs`, then borrowed immutably into
-    /// `StageInputs::current_state`.  Sized to `n_state` at construction so
-    /// the hot path never reallocates.
-    ///
-    /// Scratch buffer reused from `ws.scratch.current_state_scratch`.
-    pub(crate) current_state_scratch: Vec<f64>,
     /// Scratch lookup table for basis reconstruction.
     ///
     /// Maps each cut pool slot to its position in the stored
@@ -533,18 +515,6 @@ pub(crate) struct ScratchBuffers {
     /// When `initial_pool_capacity == 0` (simulation-only workspaces), this
     /// vec starts empty and grows in-place if needed.
     pub(crate) recon_slot_lookup: Vec<Option<u32>>,
-    /// Scratch buffers for Scheme 1 symmetric promotion and Scheme 2 tail
-    /// fallback in `reconstruct_basis`.
-    ///
-    /// `promotion_scratch.candidates` accumulates `(out_row_index, popcount)`
-    /// pairs for preserved-LOWER rows during the reconstruction loop.
-    /// `promotion_scratch.new_lower_indices` tracks output row indices of new
-    /// cuts classified LOWER so the Scheme 2 fallback can override the
-    /// most-recently-classified ones back to BASIC when the preserved-LOWER
-    /// pool is exhausted.  Both vecs are cleared at the start of each
-    /// `reconstruct_basis` call.  Pre-allocated to `initial_pool_capacity`
-    /// so the hot path avoids reallocation.
-    pub(crate) promotion_scratch: PromotionScratch,
 
     /// Per-worker trajectory-cost accumulator for the forward pass.
     ///
@@ -595,7 +565,8 @@ pub(crate) struct ScratchBuffers {
     /// `anticipated_state_out` columns (one column per anticipated plant per
     /// stage). Capacity is `n_anticipated`. Mirrors
     /// [`ScratchBuffers::ncs_col_indices_buf`].
-    // Pre-allocated here; read sites are wired in the next epic.
+    ///
+    /// Pre-allocated here; read sites are not yet wired.
     #[allow(dead_code)]
     pub(crate) anticipated_state_out_col_indices_buf: Vec<usize>,
 }
@@ -636,12 +607,14 @@ pub struct SolverWorkspace<S: SolverInterface> {
     pub current_state: Vec<f64>,
     /// Pre-allocated scratch buffers for noise transformation and simulation.
     pub(crate) scratch: ScratchBuffers,
-    /// Pre-allocated scratch basis for backward-pass padding (P03).
+    /// Pre-allocated destination basis for [`reconstruct_basis`].
     ///
-    /// Used to copy-then-pad a read-only basis from `BasisStore` before
-    /// passing it to `solve(Some(&basis))`. Sized after construction via
-    /// [`WorkspacePool::resize_scratch_bases`] to the maximum LP dimensions
-    /// so that `Basis::clone_from` never reallocates on the hot path.
+    /// Filled in-place from the read-only [`CapturedBasis`] in [`BasisStore`]
+    /// before being passed to `solve(Some(&basis))`. Sized after construction
+    /// via [`WorkspacePool::resize_scratch_bases`] to the maximum LP dimensions
+    /// so reconstruction never reallocates on the hot path.
+    ///
+    /// [`reconstruct_basis`]: crate::basis_reconstruct::reconstruct_basis
     pub(crate) scratch_basis: Basis,
     /// Pre-allocated accumulators for the backward pass trial-point loop.
     ///
@@ -682,7 +655,7 @@ impl<S: SolverInterface> SolverWorkspace<S> {
     /// simulation-only workspaces that do not participate in the backward pass.
     ///
     /// The `scratch_basis` starts empty. Call `WorkspacePool::resize_scratch_bases`
-    /// after construction to pre-allocate for backward-pass padding.
+    /// after construction to pre-allocate it for in-place basis reconstruction.
     #[must_use]
     pub fn new(
         rank: i32,
@@ -713,9 +686,9 @@ impl<S: SolverInterface> SolverWorkspace<S> {
 impl ScratchBuffers {
     /// Allocate scratch buffers sized for the given per-worker parameters.
     ///
-    /// Extracted from the three `SolverWorkspace` construction sites
+    /// Shared by all three `SolverWorkspace` construction sites
     /// (`SolverWorkspace::new`, `WorkspacePool::new`, `WorkspacePool::try_new`)
-    /// to keep them in sync (F1-008 fix).
+    /// to keep them in sync.
     pub(crate) fn new(s: WorkspaceSizing) -> Self {
         let WorkspaceSizing {
             hydro_count,
@@ -724,13 +697,13 @@ impl ScratchBuffers {
             max_blocks,
             downstream_par_order,
             initial_pool_capacity,
-            n_state,
             max_local_fwd,
             total_forward_passes,
             noise_dim,
             n_anticipated,
             k_max,
-            // max_openings used by BackwardAccumulators only
+            // `n_state` (state_at_capture sizing) and `max_openings` are used by
+            // CapturedBasis / BackwardAccumulators only.
             ..
         } = s;
         Self {
@@ -763,9 +736,7 @@ impl ScratchBuffers {
                 Vec::new()
             },
             downstream_n_completed: 0,
-            current_state_scratch: Vec::with_capacity(n_state),
             recon_slot_lookup: vec![None; initial_pool_capacity],
-            promotion_scratch: PromotionScratch::with_capacity(initial_pool_capacity),
             trajectory_costs_buf: Vec::with_capacity(max_local_fwd),
             raw_noise_buf: Vec::with_capacity(noise_dim),
             perm_scratch: Vec::with_capacity(total_forward_passes.max(1)),
@@ -902,8 +873,7 @@ impl<S: SolverInterface> WorkspacePool<S> {
 
     /// Pre-allocate each workspace's `scratch_basis` to the given LP dimensions.
     ///
-    /// Call after construction when backward-pass basis padding is enabled.
-    /// The allocation happens once during setup; `Basis::clone_from` on the
+    /// The allocation happens once during setup; basis reconstruction on the
     /// hot path then reuses the existing capacity without reallocating.
     pub(crate) fn resize_scratch_bases(&mut self, max_cols: usize, max_rows: usize) {
         for ws in &mut self.workspaces {
@@ -1092,7 +1062,7 @@ mod tests {
         BasisStore, CapturedBasis, ScratchBuffers, SolverWorkspace, WorkspacePool, WorkspaceSizing,
     };
     use cobre_solver::{
-        Basis, SolutionView, SolveProfile, SolverError, SolverInterface, SolverStatistics,
+        Basis, HighsProfile, SolutionView, SolverError, SolverInterface, SolverStatistics,
         types::{RowBatch, StageTemplate},
     };
 
@@ -1100,6 +1070,10 @@ mod tests {
     struct MockSolver;
 
     impl SolverInterface for MockSolver {
+        type Profile = cobre_solver::HighsProfile;
+
+        fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
+
         fn solver_name_version(&self) -> String {
             "MockSolver 0.0.0".to_string()
         }
@@ -1157,11 +1131,11 @@ mod tests {
 
     #[test]
     fn test_workspace_buffer_dimensions() {
-        // N=3, L=2 → patch_buf length = 3*(2+2) + 3 (z-inflow) = 15
+        // N=3, L=2, M=0, B=0 → patch_buf length = N + M*B + N = 3 + 0 + 3 = 6
         // n_state=9 → current_state capacity = 9
         let pool = WorkspacePool::new(0, 4, 9, sizing(3, 2, 0), || MockSolver);
         for ws in &pool.workspaces {
-            assert_eq!(ws.patch_buf.indices.len(), 15, "patch_buf length");
+            assert_eq!(ws.patch_buf.indices.len(), 6, "patch_buf length");
             assert_eq!(ws.current_state.capacity(), 9, "current_state capacity");
             assert_eq!(ws.current_state.len(), 0, "current_state starts empty");
         }
@@ -2155,43 +2129,6 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // ProfiledSolver integration
-    // ---------------------------------------------------------------------------
-
-    /// A freshly constructed workspace must expose a solver whose
-    /// `current_profile()` equals `SolveProfile::default()`.
-    ///
-    /// This confirms that `ProfiledSolver::new` wraps the inner solver without
-    /// issuing any FFI calls and that `WorkspacePool::new` correctly initialises
-    /// every workspace.
-    #[test]
-    fn workspace_solver_initialised_with_default_profile() {
-        let pool = WorkspacePool::new(0, 2, 0, WorkspaceSizing::default(), || MockSolver);
-        for ws in &pool.workspaces {
-            assert_eq!(
-                ws.solver.current_profile(),
-                &SolveProfile::default(),
-                "solver.current_profile() must equal SolveProfile::default() after construction"
-            );
-        }
-
-        // Also verify SolverWorkspace::new directly.
-        let ws = SolverWorkspace::new(
-            0,
-            0,
-            MockSolver,
-            crate::lp_builder::PatchBuffer::new(0, 0, 0, 0, 0, 0),
-            0,
-            WorkspaceSizing::default(),
-        );
-        assert_eq!(
-            ws.solver.current_profile(),
-            &SolveProfile::default(),
-            "SolverWorkspace::new must initialise solver with default profile"
-        );
-    }
-
-    // ---------------------------------------------------------------------------
     // Layout-invariance tests (indexer-layout-impact.md Q4, Q5)
     // ---------------------------------------------------------------------------
 
@@ -2315,5 +2252,42 @@ mod tests {
         assert_eq!(recovered.base_row_count, original.base_row_count);
         assert_eq!(recovered.cut_row_slots, original.cut_row_slots);
         assert_eq!(recovered.state_at_capture, original.state_at_capture);
+    }
+
+    // ---------------------------------------------------------------------------
+    // ProfiledSolver integration
+    // ---------------------------------------------------------------------------
+
+    /// A freshly constructed workspace must expose a solver whose
+    /// `current_profile()` equals `HighsProfile::default()`.
+    ///
+    /// Confirms that `ProfiledSolver::new` wraps the inner solver without
+    /// issuing any FFI calls and that `WorkspacePool::new` correctly initialises
+    /// every workspace.
+    #[test]
+    fn workspace_solver_initialised_with_default_profile() {
+        let pool = WorkspacePool::new(0, 2, 0, WorkspaceSizing::default(), || MockSolver);
+        for ws in &pool.workspaces {
+            assert_eq!(
+                ws.solver.current_profile(),
+                &HighsProfile::default(),
+                "solver.current_profile() must equal HighsProfile::default() after construction"
+            );
+        }
+
+        // Also verify SolverWorkspace::new directly.
+        let ws = SolverWorkspace::new(
+            0,
+            0,
+            MockSolver,
+            crate::lp_builder::PatchBuffer::new(0, 0, 0, 0, 0, 0),
+            0,
+            WorkspaceSizing::default(),
+        );
+        assert_eq!(
+            ws.solver.current_profile(),
+            &HighsProfile::default(),
+            "SolverWorkspace::new must initialise solver with default profile"
+        );
     }
 }

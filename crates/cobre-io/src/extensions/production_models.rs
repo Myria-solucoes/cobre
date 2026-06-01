@@ -447,18 +447,17 @@ fn validate_production_models(models: &[RawProductionModel], path: &Path) -> Res
                     // Validate productivity_mw_per_m3s value when present for non-FPHA seasons.
                     // `0.0` is accepted as a planned-outage marker; reject only negative
                     // or non-finite values.
-                    if season.model != "fpha" {
-                        if let Some(val) = season.productivity_mw_per_m3s {
-                            if val < 0.0 || !val.is_finite() {
-                                return Err(LoadError::SchemaError {
-                                    path: path.to_path_buf(),
-                                    field: field_base,
-                                    message: format!(
-                                        "productivity_mw_per_m3s must be finite and non-negative, got {val}"
-                                    ),
-                                });
-                            }
-                        }
+                    if season.model != "fpha"
+                        && let Some(val) = season.productivity_mw_per_m3s
+                        && (val < 0.0 || !val.is_finite())
+                    {
+                        return Err(LoadError::SchemaError {
+                            path: path.to_path_buf(),
+                            field: field_base,
+                            message: format!(
+                                "productivity_mw_per_m3s must be finite and non-negative, got {val}"
+                            ),
+                        });
                     }
 
                     if let Some(cfg) = &season.fpha_config {
@@ -486,20 +485,20 @@ fn validate_stage_range(
     path: &Path,
 ) -> Result<(), LoadError> {
     // start_stage_id must not exceed end_stage_id.
-    if let Some(end) = range.end_stage_id {
-        if range.start_stage_id > end {
-            return Err(LoadError::SchemaError {
-                path: path.to_path_buf(),
-                field: format!(
-                    "production_models[{entry_idx}].stage_ranges[{range_idx}].start_stage_id"
-                ),
-                message: format!(
-                    "stage_ranges entry has start_stage_id ({}) > end_stage_id ({}); \
+    if let Some(end) = range.end_stage_id
+        && range.start_stage_id > end
+    {
+        return Err(LoadError::SchemaError {
+            path: path.to_path_buf(),
+            field: format!(
+                "production_models[{entry_idx}].stage_ranges[{range_idx}].start_stage_id"
+            ),
+            message: format!(
+                "stage_ranges entry has start_stage_id ({}) > end_stage_id ({}); \
                      start_stage_id must be <= end_stage_id",
-                    range.start_stage_id, end
-                ),
-            });
-        }
+                range.start_stage_id, end
+            ),
+        });
     }
 
     let field_base =
@@ -517,18 +516,15 @@ fn validate_stage_range(
     // Validate productivity_mw_per_m3s value when present for non-FPHA stages.
     // `0.0` is accepted as a planned-outage marker; reject only negative or
     // non-finite values.
-    if range.model != "fpha" {
-        if let Some(val) = range.productivity_mw_per_m3s {
-            if val < 0.0 || !val.is_finite() {
-                return Err(LoadError::SchemaError {
-                    path: path.to_path_buf(),
-                    field: field_base,
-                    message: format!(
-                        "productivity_mw_per_m3s must be finite and non-negative, got {val}"
-                    ),
-                });
-            }
-        }
+    if range.model != "fpha"
+        && let Some(val) = range.productivity_mw_per_m3s
+        && (val < 0.0 || !val.is_finite())
+    {
+        return Err(LoadError::SchemaError {
+            path: path.to_path_buf(),
+            field: field_base,
+            message: format!("productivity_mw_per_m3s must be finite and non-negative, got {val}"),
+        });
     }
 
     // Validate fitting_window if present.

@@ -10,17 +10,33 @@
 //! {
 //!   "output_directory": "/abs/path/to/results",
 //!   "status": "complete",
+//!   "bounds": { "final_lower_bound": ..., "final_upper_bound": ... | null, ... },
 //!   "training": { "iterations": ..., "convergence": ..., "cuts": ..., ... },
+//!   "cost": { "mean_cost": ..., "std_cost": ..., ... } | null,
 //!   "simulation": { "scenarios": ..., ... } | null
 //! }
 //! ```
+//!
+//! The top-level `bounds` and `cost` keys are convenience projections that hoist
+//! the headline final objective bounds and the simulation expected cost so
+//! consumers can read `.bounds.final_lower_bound` and `.cost.mean_cost` without
+//! reaching through the nested `training`/`simulation` objects.
+//!
+//! `.training.solve_stats.total_lp_solves` and
+//! `.simulation.solve_stats.total_lp_solves` report the values persisted in
+//! metadata, whereas `cobre summary`'s displayed "LP solves:" line re-reads the
+//! convergence parquet directly; for a fresh run both are numerically identical
+//! because they reflect the same solves.
 
 use std::path::PathBuf;
 
 use clap::Args;
 use serde::Serialize;
 
-use cobre_io::{OutputError, SimulationMetadata, TrainingMetadata, read_training_metadata};
+use cobre_io::{
+    MetadataBounds, MetadataCost, OutputError, SimulationMetadata, TrainingMetadata,
+    read_training_metadata,
+};
 
 use crate::error::CliError;
 
@@ -33,8 +49,15 @@ pub struct ReportOutput {
     pub output_directory: String,
     /// Run status extracted from `training/metadata.json`.
     pub status: String,
+    /// Headline final objective bounds, hoisted from `training.bounds` as a
+    /// top-level convenience key (`.bounds.final_lower_bound`).
+    pub bounds: MetadataBounds,
     /// Training metadata from `training/metadata.json`.
     pub training: TrainingMetadata,
+    /// Simulation expected cost, hoisted from `simulation.cost` as a top-level
+    /// convenience key (`.cost.mean_cost`); `null` when no simulation metadata
+    /// or no cost statistics are present.
+    pub cost: Option<MetadataCost>,
     /// Simulation metadata from `simulation/metadata.json`, or `null` when
     /// simulation was skipped or not yet run.
     pub simulation: Option<SimulationMetadata>,
@@ -96,10 +119,17 @@ pub fn execute(args: ReportArgs) -> Result<(), CliError> {
 
     let status = training.status.clone();
 
+    // Capture the headline convenience values before moving `training` and
+    // `simulation` into the struct, avoiding a borrow-after-move.
+    let bounds = training.bounds.clone();
+    let cost = simulation.as_ref().and_then(|s| s.cost.clone());
+
     let report = ReportOutput {
         output_directory,
         status,
+        bounds,
         training,
+        cost,
         simulation,
     };
 
@@ -207,16 +237,96 @@ mod tests {
         }"#
     }
 
+    /// Training metadata carrying an explicit `bounds` object.
+    fn make_training_metadata_with_bounds_json() -> &'static str {
+        r#"{
+            "cobre_version": "0.3.2",
+            "hostname": "test-host",
+            "solver": "highs",
+            "started_at": "2026-01-17T08:00:00Z",
+            "completed_at": "2026-01-17T12:30:00Z",
+            "duration_seconds": 16200.0,
+            "status": "complete",
+            "configuration": {
+                "seed": 42,
+                "max_iterations": 100,
+                "forward_passes": 192,
+                "stopping_mode": "any",
+                "policy_mode": "fresh"
+            },
+            "problem_dimensions": {
+                "num_stages": 12,
+                "num_hydros": 160,
+                "num_thermals": 200,
+                "num_buses": 5,
+                "num_lines": 8
+            },
+            "iterations": { "completed": 10, "converged_at": 10 },
+            "convergence": {
+                "achieved": true,
+                "final_gap_percent": 0.45,
+                "termination_reason": "bound_stalling"
+            },
+            "row_pool": {
+                "total_generated": 1250000,
+                "total_active": 980000,
+                "peak_active": 1100000
+            },
+            "bounds": {
+                "final_lower_bound": 123456.0,
+                "final_upper_bound": 124000.0,
+                "final_upper_bound_std": 12.5
+            },
+            "distribution": {
+                "backend": "local",
+                "world_size": 1,
+                "ranks_participated": 1,
+                "num_nodes": 1,
+                "threads_per_rank": 1
+            }
+        }"#
+    }
+
+    /// Simulation metadata carrying an explicit `cost` object.
+    fn make_simulation_metadata_with_cost_json() -> &'static str {
+        r#"{
+            "cobre_version": "0.3.2",
+            "hostname": "test-host",
+            "solver": "highs",
+            "started_at": "2026-01-17T13:00:00Z",
+            "completed_at": "2026-01-17T13:15:00Z",
+            "duration_seconds": 900.0,
+            "status": "complete",
+            "scenarios": { "total": 100, "completed": 100, "failed": 0 },
+            "cost": {
+                "mean_cost": 789012.0,
+                "std_cost": 4321.0,
+                "cvar": 800000.0,
+                "cvar_alpha": 0.95
+            },
+            "distribution": {
+                "backend": "local",
+                "world_size": 1,
+                "ranks_participated": 1,
+                "num_nodes": 1,
+                "threads_per_rank": 1
+            }
+        }"#
+    }
+
     // ── ReportOutput serialization ────────────────────────────────────────
 
     #[test]
     fn report_output_serializes_to_valid_json() {
         let training: TrainingMetadata =
             serde_json::from_str(make_training_metadata_json()).unwrap();
+        let bounds = training.bounds.clone();
         let report = ReportOutput {
             output_directory: "/tmp/results".to_string(),
             status: training.status.clone(),
+            bounds,
             training,
+            cost: None,
             simulation: None,
         };
 
@@ -233,10 +343,13 @@ mod tests {
     fn report_output_contains_iterations_field() {
         let training: TrainingMetadata =
             serde_json::from_str(make_training_metadata_json()).unwrap();
+        let bounds = training.bounds.clone();
         let report = ReportOutput {
             output_directory: "/tmp/results".to_string(),
             status: training.status.clone(),
+            bounds,
             training,
+            cost: None,
             simulation: None,
         };
 
@@ -256,10 +369,14 @@ mod tests {
             serde_json::from_str(make_training_metadata_json()).unwrap();
         let simulation: SimulationMetadata =
             serde_json::from_str(make_simulation_metadata_json()).unwrap();
+        let bounds = training.bounds.clone();
+        let cost = simulation.cost.clone();
         let report = ReportOutput {
             output_directory: "/tmp/results".to_string(),
             status: training.status.clone(),
+            bounds,
             training,
+            cost,
             simulation: Some(simulation),
         };
 
@@ -277,10 +394,13 @@ mod tests {
     fn report_output_status_from_training_metadata() {
         let training: TrainingMetadata =
             serde_json::from_str(make_training_metadata_json()).unwrap();
+        let bounds = training.bounds.clone();
         let report = ReportOutput {
             output_directory: "/tmp/results".to_string(),
             status: training.status.clone(),
+            bounds,
             training,
+            cost: None,
             simulation: None,
         };
 
@@ -288,6 +408,94 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         assert_eq!(value["status"].as_str(), Some("complete"));
+    }
+
+    // ── Top-level bounds/cost convenience keys ───────────────────────────
+
+    fn build_value(
+        training: TrainingMetadata,
+        simulation: Option<SimulationMetadata>,
+    ) -> serde_json::Value {
+        let bounds = training.bounds.clone();
+        let cost = simulation.as_ref().and_then(|s| s.cost.clone());
+        let status = training.status.clone();
+        let report = ReportOutput {
+            output_directory: "/tmp/results".to_string(),
+            status,
+            bounds,
+            training,
+            cost,
+            simulation,
+        };
+        let json = serde_json::to_string_pretty(&report).unwrap();
+        serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn report_output_top_level_bounds_present() {
+        let training: TrainingMetadata =
+            serde_json::from_str(make_training_metadata_with_bounds_json()).unwrap();
+        let value = build_value(training, None);
+
+        assert_eq!(
+            value["bounds"]["final_lower_bound"].as_f64(),
+            Some(123_456.0),
+            "top-level .bounds.final_lower_bound must match the fixture"
+        );
+        assert_eq!(
+            value["training"]["bounds"]["final_lower_bound"].as_f64(),
+            Some(123_456.0),
+            "nested .training.bounds.final_lower_bound must match the fixture"
+        );
+    }
+
+    #[test]
+    fn report_output_top_level_cost_present() {
+        let training: TrainingMetadata =
+            serde_json::from_str(make_training_metadata_with_bounds_json()).unwrap();
+        let simulation: SimulationMetadata =
+            serde_json::from_str(make_simulation_metadata_with_cost_json()).unwrap();
+        let value = build_value(training, Some(simulation));
+
+        assert_eq!(
+            value["cost"]["mean_cost"].as_f64(),
+            Some(789_012.0),
+            "top-level .cost.mean_cost must match the fixture"
+        );
+        assert_eq!(
+            value["simulation"]["cost"]["mean_cost"].as_f64(),
+            Some(789_012.0),
+            "nested .simulation.cost.mean_cost must match the fixture"
+        );
+    }
+
+    #[test]
+    fn report_output_cost_null_without_simulation() {
+        let training: TrainingMetadata =
+            serde_json::from_str(make_training_metadata_with_bounds_json()).unwrap();
+        let value = build_value(training, None);
+
+        assert!(
+            value["cost"].is_null(),
+            "top-level .cost must serialize as null when no simulation is present"
+        );
+    }
+
+    #[test]
+    fn report_output_bounds_defaults_when_absent() {
+        let training: TrainingMetadata =
+            serde_json::from_str(make_training_metadata_json()).unwrap();
+        let value = build_value(training, None);
+
+        assert_eq!(
+            value["bounds"]["final_lower_bound"].as_f64(),
+            Some(0.0),
+            "legacy metadata without bounds must default final_lower_bound to 0.0"
+        );
+        assert!(
+            value["bounds"]["final_upper_bound"].is_null(),
+            "legacy metadata without bounds must default final_upper_bound to null"
+        );
     }
 
     // ── read_optional_metadata helper ────────────────────────────────────

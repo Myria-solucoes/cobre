@@ -28,15 +28,19 @@ pub use convergence_reader::{
 };
 pub use dictionary::write_dictionaries;
 pub use error::OutputError;
-pub use hydro_models::write_fpha_hyperplanes;
+pub use hydro_models::{
+    read_hydro_model_summary, write_fpha_hyperplanes, write_hydro_model_summary,
+};
 pub use manifest::{
-    DistributionInfo, MetadataConfiguration, MetadataConvergence, MetadataIterations,
-    MetadataProblemDimensions, MetadataRowPool, MetadataScenarios, OutputContext,
-    SimulationMetadata, TrainingMetadata, get_hostname, now_iso8601, read_simulation_metadata,
-    read_training_metadata, write_simulation_metadata, write_training_metadata,
+    DistributionInfo, HostLayout, MetadataBounds, MetadataConfiguration, MetadataConvergence,
+    MetadataCost, MetadataIterations, MetadataProblemDimensions, MetadataRowPool,
+    MetadataScenarios, MetadataSimulationSolveStats, MetadataTrainingSolveStats, OutputContext,
+    SimulationMetadata, TrainingMetadata, default_bounds, get_hostname, now_iso8601,
+    read_simulation_metadata, read_training_metadata, write_simulation_metadata,
+    write_training_metadata,
 };
 pub use parquet_config::ParquetWriterConfig;
-pub use provenance::write_provenance_report;
+pub use provenance::{read_provenance_report, write_provenance_report};
 pub use results_writer::{write_results, write_simulation_results, write_training_results};
 pub use scaling_report::write_scaling_report;
 pub use simulation_writer::SimulationParquetWriter;
@@ -188,7 +192,7 @@ pub struct IterationRecord {
 /// Summary statistics for the row pool at the end of a training run.
 ///
 /// Carried inside [`TrainingOutput`] and written to `training/timing/cut_stats.parquet`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct RowPoolStatistics {
     /// Total number of rows generated over the entire training run.
     pub total_generated: u64,
@@ -198,6 +202,9 @@ pub struct RowPoolStatistics {
 
     /// Highest number of active rows observed at any point during training.
     pub peak_active: u64,
+
+    /// Total rows currently active in the LP.
+    pub cuts_active: u64,
 }
 
 /// One row in `training/cut_selection/iterations.parquet`.
@@ -216,6 +223,8 @@ pub struct RowSelectionRecord {
     pub cuts_active_before: u32,
     /// Cuts deactivated by selection at this stage.
     pub cuts_deactivated: u32,
+    /// Number of cuts reactivated this iteration.
+    pub cuts_reactivated: u32,
     /// Active cuts after selection.
     pub cuts_active_after: u32,
     /// Wall-clock time for selection at this stage, in milliseconds.
@@ -280,6 +289,12 @@ pub struct TrainingOutput {
     /// `None` when the lower bound is zero/negative or `final_upper_bound` is `None`.
     pub final_gap_percent: Option<f64>,
 
+    /// Standard deviation of the final upper-bound estimate, if available.
+    ///
+    /// `None` when no upper-bound evaluation was performed. The mean is carried
+    /// separately in [`final_upper_bound`](Self::final_upper_bound).
+    pub final_upper_bound_std: Option<f64>,
+
     /// Number of iterations completed before the stopping condition was triggered.
     pub iterations_completed: u32,
 
@@ -310,6 +325,13 @@ pub struct TrainingOutput {
     /// rank-aggregated row first, then per-worker rows sorted by
     /// `(rank, worker_id)`.
     pub worker_timing_records: Vec<WorkerTimingRecord>,
+
+    /// Aggregate solve statistics for the training run.
+    ///
+    /// Default-constructed (all fields `None`) by producers that do not yet
+    /// record solve statistics; populated downstream and persisted into
+    /// `training/metadata.json` by the metadata writer.
+    pub training_solve_stats: MetadataTrainingSolveStats,
 }
 
 /// Aggregate type carrying simulation completion data for output writing.
@@ -337,6 +359,21 @@ pub struct SimulationOutput {
     /// Each element is a relative path string such as
     /// `"simulation/costs/year=2030/month=01/part-00.parquet"`.
     pub partitions_written: Vec<String>,
+
+    /// Aggregate cost statistics for the simulated scenarios.
+    ///
+    /// `None` until a producer supplies it. When several per-rank outputs are
+    /// combined via [`merge`](Self::merge), the first present value wins; the
+    /// producer is responsible for supplying the authoritative aggregate (which
+    /// the distributed pipeline computes on rank 0) first.
+    pub cost: Option<MetadataCost>,
+
+    /// Aggregate solve statistics for the simulation run.
+    ///
+    /// Default-constructed (all fields `None`) by producers that do not yet
+    /// record solve statistics; populated downstream and persisted into
+    /// `simulation/metadata.json` by the metadata writer.
+    pub solve_stats: MetadataSimulationSolveStats,
 }
 
 impl SimulationOutput {
@@ -349,9 +386,18 @@ impl SimulationOutput {
     /// - `total_time_ms`: max across all outputs (wall-clock = slowest rank).
     /// - `partitions_written`: concatenation of all outputs' partitions, sorted
     ///   for deterministic ordering regardless of input order.
+    /// - `cost`: first present value in slice order. The producer must supply
+    ///   the authoritative aggregate first (the distributed pipeline computes it
+    ///   on rank 0), so the merged cost is the rank-0 aggregate rather than a
+    ///   per-rank partial. `None` only when no input carried a cost.
+    /// - `solve_stats`: each count field is summed treating `None` as `0`, with
+    ///   the result `Some` when any input recorded it (and `None` only when no
+    ///   input did); `solve_seconds` is summed with the same convention;
+    ///   `parallelism` takes the maximum across inputs (`None`-safe). Sums and
+    ///   max are order-invariant, so the merge is declaration-order invariant.
     ///
-    /// Returns a zeroed [`SimulationOutput`] with empty partitions when the
-    /// input slice is empty.
+    /// Returns a zeroed [`SimulationOutput`] (no cost, default solve stats) with
+    /// empty partitions when the input slice is empty.
     #[must_use]
     pub fn merge(outputs: &[Self]) -> Self {
         if outputs.is_empty() {
@@ -361,6 +407,8 @@ impl SimulationOutput {
                 failed: 0,
                 total_time_ms: 0,
                 partitions_written: Vec::new(),
+                cost: None,
+                solve_stats: MetadataSimulationSolveStats::default(),
             };
         }
 
@@ -375,13 +423,70 @@ impl SimulationOutput {
             .collect();
         partitions_written.sort();
 
+        // First present cost: producer feeds the rank-0 authoritative aggregate first.
+        let cost = outputs.iter().find_map(|o| o.cost.clone());
+
+        let solve_stats = merge_simulation_solve_stats(outputs);
+
         Self {
             n_scenarios,
             completed,
             failed,
             total_time_ms,
             partitions_written,
+            cost,
+            solve_stats,
         }
+    }
+}
+
+/// Order-invariant sum of an optional `u64` field across simulation outputs.
+///
+/// Returns `Some(sum)` when at least one input carried the field (treating
+/// `None` as `0`), and `None` when no input recorded it. Addition is
+/// commutative, so the result is independent of slice order.
+fn sum_optional_u64(
+    outputs: &[SimulationOutput],
+    field: impl Fn(&MetadataSimulationSolveStats) -> Option<u64>,
+) -> Option<u64> {
+    let mut any = false;
+    let mut total: u64 = 0;
+    for output in outputs {
+        if let Some(value) = field(&output.solve_stats) {
+            any = true;
+            total = total.saturating_add(value);
+        }
+    }
+    any.then_some(total)
+}
+
+/// Combine per-rank simulation solve statistics into a single aggregate.
+///
+/// Count fields and `solve_seconds` are summed (treating `None` as `0`, result
+/// `Some` if any input was `Some`); `parallelism` takes the maximum. All
+/// operations are order-invariant.
+fn merge_simulation_solve_stats(outputs: &[SimulationOutput]) -> MetadataSimulationSolveStats {
+    let mut solve_seconds_any = false;
+    let mut solve_seconds_total: f64 = 0.0;
+    for output in outputs {
+        if let Some(value) = output.solve_stats.solve_seconds {
+            solve_seconds_any = true;
+            solve_seconds_total += value;
+        }
+    }
+
+    let parallelism = outputs
+        .iter()
+        .filter_map(|o| o.solve_stats.parallelism)
+        .max();
+
+    MetadataSimulationSolveStats {
+        total_lp_solves: sum_optional_u64(outputs, |s| s.total_lp_solves),
+        first_try: sum_optional_u64(outputs, |s| s.first_try),
+        retried: sum_optional_u64(outputs, |s| s.retried),
+        failed: sum_optional_u64(outputs, |s| s.failed),
+        solve_seconds: solve_seconds_any.then_some(solve_seconds_total),
+        parallelism,
     }
 }
 
@@ -439,6 +544,7 @@ impl SimulationOutput {
 ///
 /// ```no_run
 /// use cobre_io::{write_results, TrainingOutput, RowPoolStatistics};
+/// use cobre_io::MetadataTrainingSolveStats;
 /// use std::path::Path;
 ///
 /// # fn main() -> Result<(), cobre_io::OutputError> {
@@ -449,6 +555,7 @@ impl SimulationOutput {
 ///     final_lower_bound: 42.0,
 ///     final_upper_bound: Some(44.0),
 ///     final_gap_percent: Some(4.76),
+///     final_upper_bound_std: Some(2.0),
 ///     iterations_completed: 10,
 ///     converged: true,
 ///     termination_reason: "gap tolerance reached".to_string(),
@@ -457,9 +564,11 @@ impl SimulationOutput {
 ///         total_generated: 200,
 ///         total_active: 80,
 ///         peak_active: 95,
+///         cuts_active: 80,
 ///     },
 ///     cut_selection_records: Vec::new(),
 ///     worker_timing_records: Vec::new(),
+///     training_solve_stats: MetadataTrainingSolveStats::default(),
 /// };
 /// write_results(Path::new("/tmp/out"), &training, None, system, config)?;
 /// # Ok(())
@@ -515,6 +624,7 @@ mod tests {
             final_lower_bound: 50.0,
             final_upper_bound: Some(52.0),
             final_gap_percent: Some(3.85),
+            final_upper_bound_std: Some(0.5),
             iterations_completed: 5,
             converged: true,
             termination_reason: "relative gap < 1%".to_string(),
@@ -523,15 +633,18 @@ mod tests {
                 total_generated: 300,
                 total_active: 120,
                 peak_active: 150,
+                cuts_active: 120,
             },
             cut_selection_records: vec![],
             worker_timing_records: vec![],
+            training_solve_stats: MetadataTrainingSolveStats::default(),
         };
 
         assert_eq!(output.convergence_records.len(), 5);
         assert_eq!(output.final_lower_bound, 50.0);
         assert_eq!(output.final_upper_bound, Some(52.0));
         assert_eq!(output.final_gap_percent, Some(3.85));
+        assert_eq!(output.final_upper_bound_std, Some(0.5));
         assert_eq!(output.iterations_completed, 5);
         assert!(output.converged);
         assert_eq!(output.termination_reason, "relative gap < 1%");
@@ -608,6 +721,8 @@ mod tests {
                 "simulation/costs/year=2030/part-00.parquet".to_string(),
                 "simulation/costs/year=2031/part-00.parquet".to_string(),
             ],
+            cost: None,
+            solve_stats: MetadataSimulationSolveStats::default(),
         };
 
         assert_eq!(output.n_scenarios, 100);
@@ -623,11 +738,32 @@ mod tests {
             total_generated: 500,
             total_active: 200,
             peak_active: 250,
+            cuts_active: 200,
         };
 
         assert_eq!(stats.total_generated, 500);
         assert_eq!(stats.total_active, 200);
         assert_eq!(stats.peak_active, 250);
+        assert_eq!(stats.cuts_active, 200);
+    }
+
+    #[test]
+    fn row_pool_statistics_serializes_with_new_fields() {
+        let stats = RowPoolStatistics {
+            total_generated: 10,
+            total_active: 7,
+            peak_active: 9,
+            cuts_active: 7,
+        };
+        let json = serde_json::to_string(&stats).expect("serialization must succeed");
+        assert!(
+            !json.contains("\"cuts_in_lp\""),
+            "JSON must not contain cuts_in_lp key"
+        );
+        assert!(
+            json.contains("\"cuts_active\""),
+            "JSON must contain cuts_active key"
+        );
     }
 
     #[test]
@@ -648,6 +784,8 @@ mod tests {
             failed: 1,
             total_time_ms: 1000,
             partitions_written: vec!["simulation/costs/scenario_id=0000/data.parquet".to_string()],
+            cost: None,
+            solve_stats: MetadataSimulationSolveStats::default(),
         };
         let merged = SimulationOutput::merge(std::slice::from_ref(&output));
         assert_eq!(merged.n_scenarios, 5);
@@ -668,6 +806,8 @@ mod tests {
                 "simulation/costs/scenario_id=0000/data.parquet".to_string(),
                 "simulation/costs/scenario_id=0001/data.parquet".to_string(),
             ],
+            cost: None,
+            solve_stats: MetadataSimulationSolveStats::default(),
         };
         let b = SimulationOutput {
             n_scenarios: 2,
@@ -675,6 +815,8 @@ mod tests {
             failed: 1,
             total_time_ms: 800,
             partitions_written: vec!["simulation/costs/scenario_id=0002/data.parquet".to_string()],
+            cost: None,
+            solve_stats: MetadataSimulationSolveStats::default(),
         };
         let merged = SimulationOutput::merge(&[a, b]);
         assert_eq!(merged.n_scenarios, 5);
@@ -696,6 +838,8 @@ mod tests {
                 "simulation/hydros/scenario_id=0002/data.parquet".to_string(),
                 "simulation/costs/scenario_id=0002/data.parquet".to_string(),
             ],
+            cost: None,
+            solve_stats: MetadataSimulationSolveStats::default(),
         };
         let b = SimulationOutput {
             n_scenarios: 1,
@@ -706,6 +850,8 @@ mod tests {
                 "simulation/costs/scenario_id=0001/data.parquet".to_string(),
                 "simulation/hydros/scenario_id=0001/data.parquet".to_string(),
             ],
+            cost: None,
+            solve_stats: MetadataSimulationSolveStats::default(),
         };
         let merged = SimulationOutput::merge(&[a, b]);
         // Partitions must be sorted regardless of input order
@@ -716,5 +862,114 @@ mod tests {
             "simulation/hydros/scenario_id=0002/data.parquet".to_string(),
         ];
         assert_eq!(merged.partitions_written, expected);
+    }
+
+    #[test]
+    fn simulation_output_merge_combines_solve_stats_order_invariant() {
+        let a = SimulationOutput {
+            n_scenarios: 2,
+            completed: 2,
+            failed: 0,
+            total_time_ms: 500,
+            partitions_written: vec![],
+            cost: Some(MetadataCost {
+                mean_cost: 100.0,
+                std_cost: 10.0,
+                cvar: 120.0,
+                cvar_alpha: 0.95,
+            }),
+            solve_stats: MetadataSimulationSolveStats {
+                total_lp_solves: Some(40),
+                first_try: Some(35),
+                retried: Some(5),
+                failed: Some(0),
+                solve_seconds: Some(1.5),
+                parallelism: Some(4),
+            },
+        };
+        let b = SimulationOutput {
+            n_scenarios: 3,
+            completed: 3,
+            failed: 0,
+            total_time_ms: 800,
+            partitions_written: vec![],
+            cost: Some(MetadataCost {
+                mean_cost: 200.0,
+                std_cost: 20.0,
+                cvar: 240.0,
+                cvar_alpha: 0.95,
+            }),
+            solve_stats: MetadataSimulationSolveStats {
+                total_lp_solves: Some(60),
+                first_try: Some(50),
+                retried: Some(8),
+                failed: Some(2),
+                solve_seconds: Some(2.5),
+                parallelism: Some(8),
+            },
+        };
+
+        let merged_ab = SimulationOutput::merge(&[a.clone(), b.clone()]);
+        let merged_ba = SimulationOutput::merge(&[b, a]);
+
+        // Summed count fields are order-invariant.
+        assert_eq!(
+            merged_ab.solve_stats.total_lp_solves,
+            merged_ba.solve_stats.total_lp_solves
+        );
+        assert_eq!(merged_ab.solve_stats.total_lp_solves, Some(100));
+        assert_eq!(merged_ab.solve_stats.first_try, Some(85));
+        assert_eq!(
+            merged_ab.solve_stats.first_try,
+            merged_ba.solve_stats.first_try
+        );
+        assert_eq!(merged_ab.solve_stats.retried, Some(13));
+        assert_eq!(merged_ab.solve_stats.retried, merged_ba.solve_stats.retried);
+        assert_eq!(merged_ab.solve_stats.failed, Some(2));
+        assert_eq!(merged_ab.solve_stats.failed, merged_ba.solve_stats.failed);
+
+        // Summed solve_seconds is order-invariant.
+        assert_eq!(merged_ab.solve_stats.solve_seconds, Some(4.0));
+        assert_eq!(
+            merged_ab.solve_stats.solve_seconds,
+            merged_ba.solve_stats.solve_seconds
+        );
+
+        // parallelism takes the max regardless of order.
+        assert_eq!(merged_ab.solve_stats.parallelism, Some(8));
+        assert_eq!(
+            merged_ab.solve_stats.parallelism,
+            merged_ba.solve_stats.parallelism
+        );
+
+        // cost is first-present (rank-0 authoritative ordering supplied by producer).
+        assert_eq!(
+            merged_ab.cost.as_ref().map(|c| c.mean_cost),
+            Some(100.0),
+            "first-present cost wins in [a, b] order"
+        );
+        assert_eq!(
+            merged_ba.cost.as_ref().map(|c| c.mean_cost),
+            Some(200.0),
+            "first-present cost wins in [b, a] order"
+        );
+    }
+
+    #[test]
+    fn simulation_output_merge_solve_stats_none_when_no_input_records() {
+        let a = SimulationOutput {
+            n_scenarios: 1,
+            completed: 1,
+            failed: 0,
+            total_time_ms: 100,
+            partitions_written: vec![],
+            cost: None,
+            solve_stats: MetadataSimulationSolveStats::default(),
+        };
+        let merged = SimulationOutput::merge(std::slice::from_ref(&a));
+        assert_eq!(merged.solve_stats.total_lp_solves, None);
+        assert_eq!(merged.solve_stats.solve_seconds, None);
+        assert_eq!(merged.solve_stats.parallelism, None);
+        assert!(merged.cost.is_none());
     }
 }

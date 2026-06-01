@@ -677,8 +677,17 @@ fn description_for(file: &str, column: &str) -> &'static str {
         ("cut_selection", "cuts_populated") => "Total cuts ever generated at this stage",
         ("cut_selection", "cuts_active_before") => "Active cuts before selection ran",
         ("cut_selection", "cuts_deactivated") => "Cuts deactivated by selection",
+        ("cut_selection", "cuts_reactivated") => {
+            "Cuts reactivated (previously deactivated, re-entered LP)"
+        }
         ("cut_selection", "cuts_active_after") => "Active cuts after selection",
         ("cut_selection", "selection_time_ms") => "Wall-clock time for selection at this stage",
+        ("cut_selection", "budget_evicted") => {
+            "Cuts evicted by budget enforcement (null when budget disabled)"
+        }
+        ("cut_selection", "active_after_budget") => {
+            "Active cuts after budget enforcement (null when budget disabled)"
+        }
         // ── solver_iterations ─────────────────────────────────────────────
         ("solver_iterations", "iteration") => "Iteration number (1-based) or scenario ID (0-based)",
         ("solver_iterations", "phase") => {
@@ -701,11 +710,6 @@ fn description_for(file: &str, column: &str) -> &'static str {
         ("solver_iterations", "load_model_time_ms") => "Cumulative load_model call time",
         ("solver_iterations", "set_bounds_time_ms") => "Cumulative set_bounds call time",
         ("solver_iterations", "basis_set_time_ms") => "Cumulative set_basis call time",
-        ("solver_iterations", "basis_reconstructions") => {
-            "Number of reconstruct_basis invocations: incremented once per \
-             warm-start solve that applied a stored basis via slot reconciliation. \
-             A non-zero value indicates basis reconstruction is active."
-        }
         ("solver_iterations", "opening") => {
             "Opening (noise realization) index within the stage, for backward-pass \
              rows. NULL for forward, lower_bound, and simulation rows — these phases \

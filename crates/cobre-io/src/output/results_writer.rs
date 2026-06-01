@@ -16,9 +16,9 @@ use cobre_core::System;
 use super::dictionary::write_dictionaries;
 use super::error::OutputError;
 use super::manifest::{
-    MetadataConfiguration, MetadataConvergence, MetadataIterations, MetadataProblemDimensions,
-    MetadataRowPool, MetadataScenarios, OutputContext, SimulationMetadata, TrainingMetadata,
-    write_simulation_metadata, write_training_metadata,
+    MetadataBounds, MetadataConfiguration, MetadataConvergence, MetadataIterations,
+    MetadataProblemDimensions, MetadataRowPool, MetadataScenarios, OutputContext,
+    SimulationMetadata, TrainingMetadata, write_simulation_metadata, write_training_metadata,
 };
 use super::parquet_config::ParquetWriterConfig;
 use super::training_writer::TrainingParquetWriter;
@@ -99,7 +99,14 @@ pub fn write_training_results(
             total_generated: training_output.cut_stats.total_generated,
             total_active: training_output.cut_stats.total_active,
             peak_active: training_output.cut_stats.peak_active,
+            cuts_active: training_output.cut_stats.cuts_active,
         },
+        bounds: MetadataBounds {
+            final_lower_bound: training_output.final_lower_bound,
+            final_upper_bound: training_output.final_upper_bound,
+            final_upper_bound_std: training_output.final_upper_bound_std,
+        },
+        solve_stats: training_output.training_solve_stats.clone(),
         distribution: ctx.distribution.clone(),
     };
     write_training_metadata(&output_dir.join("training/metadata.json"), &metadata)?;
@@ -139,6 +146,8 @@ pub fn write_simulation_results(
             completed: simulation_output.completed,
             failed: simulation_output.failed,
         },
+        cost: simulation_output.cost.clone(),
+        solve_stats: simulation_output.solve_stats.clone(),
         distribution: ctx.distribution.clone(),
     };
     write_simulation_metadata(&output_dir.join("simulation/metadata.json"), &metadata)?;
@@ -179,12 +188,9 @@ fn extract_max_iterations(config: &Config) -> Option<u32> {
         .stopping_rules
         .as_ref()?
         .iter()
-        .find_map(|r| {
-            if let StoppingRuleConfig::IterationLimit { limit } = r {
-                Some(*limit)
-            } else {
-                None
-            }
+        .find_map(|r| match r {
+            StoppingRuleConfig::IterationLimit { limit } => Some(*limit),
+            _ => None,
         })
 }
 
@@ -240,6 +246,7 @@ mod tests {
             final_lower_bound: 99.5,
             final_upper_bound: Some(101.0),
             final_gap_percent: Some(1.51),
+            final_upper_bound_std: Some(0.5),
             iterations_completed: n_records as u32,
             converged: true,
             termination_reason: "gap tolerance reached".to_string(),
@@ -248,9 +255,11 @@ mod tests {
                 total_generated: 200,
                 total_active: 80,
                 peak_active: 95,
+                cuts_active: 0,
             },
             cut_selection_records: vec![],
             worker_timing_records: vec![],
+            training_solve_stats: crate::MetadataTrainingSolveStats::default(),
         }
     }
 
@@ -308,6 +317,8 @@ mod tests {
             failed: 0,
             total_time_ms: 1_000,
             partitions_written: vec!["simulation/costs/part-00.parquet".to_string()],
+            cost: None,
+            solve_stats: crate::MetadataSimulationSolveStats::default(),
         }
     }
 
@@ -329,6 +340,7 @@ mod tests {
                 mpi_standard: None,
                 thread_level: None,
                 slurm_job_id: None,
+                hosts: Vec::new(),
             },
         }
     }
@@ -390,6 +402,8 @@ mod tests {
             failed: 0,
             total_time_ms: 1_500,
             partitions_written: vec!["simulation/costs/part-00.parquet".to_string()],
+            cost: None,
+            solve_stats: crate::MetadataSimulationSolveStats::default(),
         };
 
         let result = write_results(
@@ -557,6 +571,8 @@ mod tests {
             failed: 0,
             total_time_ms: 0,
             partitions_written: vec![],
+            cost: None,
+            solve_stats: crate::MetadataSimulationSolveStats::default(),
         };
 
         write_results(
@@ -605,6 +621,8 @@ mod tests {
             failed: 0,
             total_time_ms: 0,
             partitions_written: vec![],
+            cost: None,
+            solve_stats: crate::MetadataSimulationSolveStats::default(),
         };
 
         write_results(
@@ -798,5 +816,81 @@ mod tests {
             Some(10),
             "configuration.max_iterations must be extracted from stopping rules"
         );
+    }
+
+    #[test]
+    fn training_results_persist_bounds_and_solve_stats() {
+        use crate::output::manifest::read_training_metadata;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut training = make_training_output(2);
+        training.final_lower_bound = 48_500.0;
+        training.final_upper_bound = Some(49_000.0);
+        training.final_upper_bound_std = Some(250.0);
+        training.training_solve_stats = crate::MetadataTrainingSolveStats {
+            total_lp_solves: Some(120),
+            first_try: Some(110),
+            retried: Some(10),
+            failed: Some(0),
+            forward_solve_seconds: Some(3.0),
+            backward_solve_seconds: Some(5.0),
+            parallelism: Some(4),
+        };
+
+        write_training_results(
+            tmp.path(),
+            &training,
+            &make_system(),
+            &make_config(),
+            &make_output_context(),
+        )
+        .expect("write_training_results must succeed");
+
+        let metadata = read_training_metadata(&tmp.path().join("training/metadata.json"))
+            .expect("read_training_metadata must succeed");
+
+        assert_eq!(metadata.bounds.final_lower_bound, 48_500.0);
+        assert_eq!(metadata.bounds.final_upper_bound, Some(49_000.0));
+        assert_eq!(metadata.bounds.final_upper_bound_std, Some(250.0));
+        assert_eq!(metadata.solve_stats.total_lp_solves, Some(120));
+        assert_eq!(metadata.solve_stats.forward_solve_seconds, Some(3.0));
+        assert_eq!(metadata.solve_stats.backward_solve_seconds, Some(5.0));
+        assert_eq!(metadata.solve_stats.parallelism, Some(4));
+    }
+
+    #[test]
+    fn simulation_results_persist_cost_and_solve_stats() {
+        use crate::output::manifest::read_simulation_metadata;
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
+        let mut sim = make_simulation_output();
+        sim.cost = Some(crate::MetadataCost {
+            mean_cost: 12_345.6,
+            std_cost: 678.9,
+            cvar: 15_000.0,
+            cvar_alpha: 0.95,
+        });
+        sim.solve_stats = crate::MetadataSimulationSolveStats {
+            total_lp_solves: Some(200),
+            first_try: Some(190),
+            retried: Some(9),
+            failed: Some(1),
+            solve_seconds: Some(7.5),
+            parallelism: Some(8),
+        };
+
+        write_simulation_results(tmp.path(), &sim, &make_output_context())
+            .expect("write_simulation_results must succeed");
+
+        let metadata = read_simulation_metadata(&tmp.path().join("simulation/metadata.json"))
+            .expect("read_simulation_metadata must succeed");
+
+        let cost = metadata.cost.expect("cost must be persisted");
+        assert_eq!(cost.mean_cost, 12_345.6);
+        assert_eq!(cost.std_cost, 678.9);
+        assert_eq!(metadata.solve_stats.total_lp_solves, Some(200));
+        assert_eq!(metadata.solve_stats.solve_seconds, Some(7.5));
+        assert_eq!(metadata.solve_stats.parallelism, Some(8));
     }
 }

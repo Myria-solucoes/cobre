@@ -3,41 +3,19 @@
 //! [`run_stage_solve`] encapsulates basis reconstruction, invariant enforcement,
 //! and the solver call so that `forward.rs`, `backward.rs`, and
 //! `simulation/pipeline.rs` can delegate to a single implementation instead of
-//! each maintaining their own copy. This
-//! module freezes the public API shape.
+//! each maintaining their own copy.
 
-use cobre_solver::{SolutionView, SolverInterface, StageTemplate};
+use cobre_solver::{SolutionView, SolverInterface};
 
 use crate::{
-    basis_reconstruct::{
-        PaddingContext, ReconstructionStats, ReconstructionTarget, enforce_basic_count_invariant,
-        reconstruct_basis,
-    },
+    basis_reconstruct::{ReconstructionTarget, enforce_basic_count_invariant, reconstruct_basis},
     context::StageContext,
     cut::pool::CutPool,
     error::SddpError,
-    indexer::StageIndexer,
     workspace::{CapturedBasis, SolverWorkspace},
 };
 
 use cobre_solver::SolverError;
-
-// ---------------------------------------------------------------------------
-// Phase
-// ---------------------------------------------------------------------------
-
-/// Which driver called `run_stage_solve`. Gates post-solve capture only;
-/// `load_model` / `set_bounds` / `reconstruct_basis` / solve sequence is
-/// identical across phases.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Phase {
-    /// Forward pass: scenario simulation with policy evaluation.
-    Forward,
-    /// Backward pass: Benders cut generation.
-    Backward,
-    /// Simulation pipeline: post-training scenario evaluation.
-    Simulation,
-}
 
 // ---------------------------------------------------------------------------
 // StageInputs
@@ -52,38 +30,17 @@ pub enum Phase {
 ///
 /// Constructed per-call inside each driver's inner loop; never stored across
 /// solves.
-///
-/// Several fields (`baked_template`, `horizon_is_terminal`,
-/// `terminal_has_boundary_cuts`) are populated by drivers for forward-pass
-/// gating but are not consumed by the current `run_stage_solve` body. They
-/// remain as deliberate fan-in points for future per-phase specialisation;
-/// keeping them on the struct keeps the wire-up cost zero when the gates
-/// move into the solve path.
-#[allow(dead_code)]
 pub struct StageInputs<'a> {
     /// Per-stage LP layout and noise scaling parameters.
     pub stage_context: &'a StageContext<'a>,
-    /// LP index layout for stage `t`.
-    pub indexer: &'a StageIndexer,
     /// Active cut pool for stage `t`.
     pub pool: &'a CutPool,
-    /// Current state vector; length equals `indexer.n_state`.
-    pub current_state: &'a [f64],
     /// Stored basis from the previous iteration, if any.
     pub stored_basis: Option<&'a CapturedBasis>,
-    /// Baked stage template for this stage. Always populated — the caller
-    /// guarantees that baked templates have been constructed before the solve.
-    pub baked_template: &'a StageTemplate,
     /// Stage index `t`.
     pub stage_index: usize,
     /// Scenario index `m`.
     pub scenario_index: usize,
-    /// True when the current stage is the terminal stage of the horizon.
-    /// Forward-only gate; harmless for other phases.
-    pub horizon_is_terminal: bool,
-    /// True when the terminal stage has boundary cuts loaded.
-    /// Forward-only gate; harmless for other phases.
-    pub terminal_has_boundary_cuts: bool,
     /// Training iteration number (1-based), if the caller is the forward pass.
     ///
     /// `None` on the backward and simulation phases, where iteration context
@@ -91,66 +48,26 @@ pub struct StageInputs<'a> {
     /// forward phase to populate `SddpError::Infeasible { iteration }` without
     /// the caller having to re-wrap the error.
     pub iteration: Option<u64>,
-    /// Activity-window size for the basis-reconstruction classifier (1..=31).
-    ///
-    /// Forwarded verbatim from [`crate::config::CutManagementConfig::basis_activity_window`]
-    /// and threaded into [`crate::basis_reconstruct::ReconstructionSource`].
-    pub basis_activity_window: u32,
-}
-
-// ---------------------------------------------------------------------------
-// StageOutcome
-// ---------------------------------------------------------------------------
-
-/// What each phase captures from one LP solve.
-///
-/// Variant layout covers what forward, backward, and simulation need today
-/// without requiring owned allocations inside `run_stage_solve`. The three
-/// variants carry identical data for now; they exist so that later we can
-/// specialize per-phase fields (e.g., add `captured_basis` to `Forward` only)
-/// without a breaking re-shape.
-///
-/// `recon_stats` is captured for diagnostic export but is not currently read
-/// by production code outside this module's tests.
-#[allow(dead_code)]
-#[derive(Debug)]
-pub enum StageOutcome<'solver> {
-    /// Outcome for the forward pass.
-    Forward {
-        /// LP solution view borrowing the solver's internal buffers.
-        view: SolutionView<'solver>,
-        /// Basis reconstruction counters (preserved, `new_tight`, `new_slack`,
-        /// demotions are tracked in the workspace stats).
-        recon_stats: ReconstructionStats,
-    },
-    /// Outcome for the backward pass.
-    Backward {
-        /// LP solution view borrowing the solver's internal buffers.
-        view: SolutionView<'solver>,
-        /// Basis reconstruction counters.
-        recon_stats: ReconstructionStats,
-    },
-    /// Outcome for the simulation pipeline.
-    Simulation {
-        /// LP solution view borrowing the solver's internal buffers.
-        view: SolutionView<'solver>,
-        /// Basis reconstruction counters.
-        recon_stats: ReconstructionStats,
-    },
 }
 
 // ---------------------------------------------------------------------------
 // run_stage_solve
 // ---------------------------------------------------------------------------
 
-/// Execute one LP solve at stage `t` for scenario `m` on the given phase.
+/// Execute one LP solve at stage `t` for scenario `m`.
 ///
 /// Load-and-bounds setup is the caller's responsibility (via `StageInputs`);
 /// `run_stage_solve` owns basis reconstruction, invariant enforcement, and
 /// the solve call.
 ///
-/// Returns on success an outcome referencing the solver's current solution
-/// view. The returned borrow is alive until the next mutation of `ws.solver`.
+/// Returns on success the solver's current solution view. The returned borrow
+/// is alive until the next mutation of `ws.solver`. Basis reconstruction
+/// counters are recorded on the workspace via
+/// [`SolverInterface::record_reconstruction_stats`] and are not surfaced to the
+/// caller (no caller consumes them).
+///
+/// The load / set-bounds / `reconstruct_basis` / solve sequence is identical
+/// regardless of which driver (forward, backward, simulation) issues the call.
 ///
 /// # Errors
 ///
@@ -159,9 +76,8 @@ pub enum StageOutcome<'solver> {
 /// `SddpError::Solver`.
 pub fn run_stage_solve<'ws, S: SolverInterface>(
     ws: &'ws mut SolverWorkspace<S>,
-    phase: Phase,
     inputs: &StageInputs<'_>,
-) -> Result<StageOutcome<'ws>, SddpError> {
+) -> Result<SolutionView<'ws>, SddpError> {
     // Grow slot-lookup scratch if the pool has allocated new slots since the last
     // call. `pool.populated_count` is monotonically non-decreasing, so after the
     // first few iterations this check is a no-op.
@@ -172,56 +88,48 @@ pub fn run_stage_solve<'ws, S: SolverInterface>(
     }
 
     // Select the basis path and solve.
-    let (view, recon_stats) = if let Some(captured) = inputs.stored_basis {
-        let theta_value = inputs
-            .pool
-            .evaluate_at_state(&inputs.current_state[..inputs.indexer.n_state]);
-        let padding = PaddingContext {
-            state: &inputs.current_state[..inputs.indexer.n_state],
-            theta: theta_value,
-            tolerance: 1e-7,
+    let view = if let Some(captured) = inputs.stored_basis {
+        // All solves use the baked path: cuts are structural rows in the baked
+        // template. `base_row_count` is set to the non-baked template row
+        // count so the reconstruction helper handles cut rows via slot
+        // identity rather than positional copy from the stored basis.
+        //
+        // The baked template carries one row per active cut in
+        // `active_cuts()` iteration order. The reconstruction helper iterates
+        // the same active cuts and matches stored slot ids to LP rows.
+        let target = ReconstructionTarget {
+            base_row_count: inputs.stage_context.templates[inputs.stage_index].num_rows,
+            num_cols: inputs.stage_context.templates[inputs.stage_index].num_cols,
         };
 
-        // All solves now use the baked path: cuts are structural rows in the
-        // baked template. base_row_count is set to the non-baked template
-        // row count so reconstruct_basis handles cut rows via slot identity
-        // rather than positional copy from the stored basis.
-        let source = crate::basis_reconstruct::ReconstructionSource {
-            target: ReconstructionTarget {
-                base_row_count: inputs.stage_context.templates[inputs.stage_index].num_rows,
-                num_cols: inputs.stage_context.templates[inputs.stage_index].num_cols,
-            },
-            cut_metadata: &inputs.pool.metadata,
-            basis_activity_window: inputs.basis_activity_window,
-        };
-        let recon_stats = reconstruct_basis(
+        // Reconstruction counters are accumulated on the workspace solver via
+        // `record_reconstruction_stats()` below; the returned value is unused.
+        let _ = reconstruct_basis(
             captured,
-            source,
+            target,
             inputs.pool.active_cuts(),
-            padding,
             &mut ws.scratch_basis,
             &mut ws.scratch.recon_slot_lookup,
-            &mut ws.scratch.promotion_scratch,
         );
-        // reconstruct_basis handles cut rows via slot identity (not positional
-        // truncation). Scheme 1 symmetric promotion keeps total_basic == num_row by
-        // construction on the happy path; enforce_basic_count_invariant is
-        // retained as a safety net for (a) the forward-apply path where cut
-        // selection drops BASIC cut rows whose stored status was LOWER (creates
-        // excess BASIC in the non-cut template rows), and (b) the Scheme 2
-        // fallback tail-override in reconstruct_basis where the activity-
-        // driven LOWER guesses exceed the preserved-LOWER promotion budget.
-        // base_row_for_invariant = n_state bounds promotion to rows
-        // [n_state, num_row); state-fixing rows at [0, n_state) are
-        // equality constraints and never BASIC, so excluding them is safe.
+        // `enforce_basic_count_invariant` is an unconditional safety net: when
+        // cut selection drops a cut whose stored row status was BASIC, the
+        // freshly reconstructed basis carries more BASIC entries than
+        // `num_row`. The post-pass demotes trailing BASIC cut rows to LOWER
+        // until `col_basic + row_basic == num_row` holds.
         //
-        // num_row_for_invariant uses the actual reconstructed basis length
-        // rather than baked.num_rows because active_cuts() may include delta
+        // `num_row_for_invariant` uses the reconstructed basis length (not
+        // baked.num_rows) because the populated-cuts iterator may yield delta
         // cuts (added during the current backward pass) that extend beyond
-        // the baked template row count. The two values agree when there are
-        // no delta cuts (forward path and first backward stage per iteration).
+        // the baked template row count. The two values agree when no delta
+        // cuts are present (forward path and first backward stage per
+        // iteration).
+        //
+        // `base_row_for_invariant = 0` is safe because the demotion loop
+        // touches only rows whose current status is BASIC, and equality rows
+        // (z_inflow, water_balance, FPHA, evaporation) are never BASIC by LP
+        // duality.
         let num_row_for_invariant = ws.scratch_basis.row_status.len();
-        let base_row_for_invariant = inputs.indexer.n_state;
+        let base_row_for_invariant = 0;
 
         enforce_basic_count_invariant(
             &mut ws.scratch_basis,
@@ -231,35 +139,27 @@ pub fn run_stage_solve<'ws, S: SolverInterface>(
 
         ws.solver.record_reconstruction_stats();
 
-        let view = ws.solver.solve(Some(&ws.scratch_basis)).map_err(|e| {
+        ws.solver.solve(Some(&ws.scratch_basis)).map_err(|e| {
             map_solver_error(
                 e,
                 inputs.stage_index,
                 inputs.scenario_index,
                 inputs.iteration,
             )
-        })?;
-        (view, recon_stats)
+        })?
     } else {
         // Cold path: no stored basis; solver starts from scratch.
-        let view = ws.solver.solve(None).map_err(|e| {
+        ws.solver.solve(None).map_err(|e| {
             map_solver_error(
                 e,
                 inputs.stage_index,
                 inputs.scenario_index,
                 inputs.iteration,
             )
-        })?;
-        (view, ReconstructionStats::default())
+        })?
     };
 
-    // Wrap the solution in the phase-appropriate outcome variant.
-    let outcome = match phase {
-        Phase::Forward => StageOutcome::Forward { view, recon_stats },
-        Phase::Backward => StageOutcome::Backward { view, recon_stats },
-        Phase::Simulation => StageOutcome::Simulation { view, recon_stats },
-    };
-    Ok(outcome)
+    Ok(view)
 }
 
 // ---------------------------------------------------------------------------
@@ -295,15 +195,12 @@ fn map_solver_error(
 mod tests {
     use cobre_solver::{HighsSolver, SolverError, SolverInterface, StageTemplate};
 
-    use super::{Phase, StageInputs, run_stage_solve};
+    use super::{StageInputs, run_stage_solve};
     use crate::{
         SddpError,
-        basis_reconstruct::{
-            HIGHS_BASIS_STATUS_BASIC as B, HIGHS_BASIS_STATUS_LOWER as L, ReconstructionStats,
-        },
+        basis_reconstruct::{HIGHS_BASIS_STATUS_BASIC as B, HIGHS_BASIS_STATUS_LOWER as L},
         context::StageContext,
         cut::pool::CutPool,
-        indexer::StageIndexer,
         lp_builder::PatchBuffer,
         workspace::{CapturedBasis, SolverWorkspace, WorkspaceSizing},
     };
@@ -405,49 +302,31 @@ mod tests {
         CutPool::new(16, 1, 1, 0)
     }
 
-    /// Build a minimal `StageIndexer` with `n_state = 1` (matches the fixture LP).
-    fn make_indexer() -> StageIndexer {
-        StageIndexer::new(1, 0)
-    }
-
-    /// Build a baked `StageTemplate` with the given total row count.
     // -----------------------------------------------------------------------
-    // Test 1: cold start — `stored_basis: None` returns default stats
+    // Test 1: cold start — `stored_basis: None` solves from scratch
     // -----------------------------------------------------------------------
 
     #[test]
-    fn run_stage_solve_cold_start_returns_outcome() {
+    fn run_stage_solve_cold_start_returns_view() {
         let template = make_template();
         let templates = std::slice::from_ref(&template);
         let ctx = make_context(templates);
         let pool = make_empty_pool();
-        let indexer = make_indexer();
         let mut ws = make_workspace(&template);
 
         let inputs = StageInputs {
             stage_context: &ctx,
-            indexer: &indexer,
             pool: &pool,
-            current_state: &[0.0],
             stored_basis: None,
-            baked_template: &template,
             stage_index: 0,
             scenario_index: 0,
-            horizon_is_terminal: false,
-            terminal_has_boundary_cuts: false,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             iteration: Some(1),
         };
 
-        let result = run_stage_solve(&mut ws, Phase::Forward, &inputs);
-        let outcome = result.expect("cold start should succeed");
-
-        match outcome {
-            crate::stage_solve::StageOutcome::Forward { recon_stats, .. } => {
-                assert_eq!(recon_stats, ReconstructionStats::default());
-            }
-            _ => panic!("expected Forward variant"),
-        }
+        let result = run_stage_solve(&mut ws, &inputs);
+        let view = result.expect("cold start should succeed");
+        // Optimal objective for the fixture LP: x1 = 14 - 2*6 = 2, cost = 2.
+        assert!(view.objective.is_finite());
     }
 
     // -----------------------------------------------------------------------
@@ -469,7 +348,6 @@ mod tests {
         let templates = std::slice::from_ref(&template);
         let ctx = make_context(templates);
         let pool = make_empty_pool();
-        let indexer = make_indexer();
         let mut ws = make_workspace(&template);
         ws.scratch.recon_slot_lookup = vec![None; 16];
 
@@ -495,20 +373,14 @@ mod tests {
 
         let inputs = StageInputs {
             stage_context: &ctx,
-            indexer: &indexer,
             pool: &pool,
-            current_state: &[6.0],
             stored_basis: Some(&captured),
-            baked_template: &template,
             stage_index: 0,
             scenario_index: 0,
-            horizon_is_terminal: false,
-            terminal_has_boundary_cuts: false,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             iteration: None,
         };
 
-        let result = run_stage_solve(&mut ws, Phase::Simulation, &inputs);
+        let result = run_stage_solve(&mut ws, &inputs);
         assert!(
             result.is_ok(),
             "warm start on baked path should succeed: {result:?}"
@@ -536,26 +408,18 @@ mod tests {
         let templates = std::slice::from_ref(&template);
         let ctx = make_context(templates);
         let pool = CutPool::new(16, 0, 1, 0);
-        // StageIndexer with n_state=0 (no hydros).
-        let indexer = StageIndexer::new(0, 0);
         let mut ws = make_workspace(&template);
 
         let inputs = StageInputs {
             stage_context: &ctx,
-            indexer: &indexer,
             pool: &pool,
-            current_state: &[],
             stored_basis: None,
-            baked_template: &template,
             stage_index: 0,
             scenario_index: 7,
-            horizon_is_terminal: false,
-            terminal_has_boundary_cuts: false,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             iteration: Some(42),
         };
 
-        let result = run_stage_solve(&mut ws, Phase::Forward, &inputs);
+        let result = run_stage_solve(&mut ws, &inputs);
         match result {
             Err(SddpError::Infeasible {
                 stage,
@@ -585,7 +449,6 @@ mod tests {
         let templates = std::slice::from_ref(&template);
         let ctx = make_context(templates);
         let pool = make_empty_pool();
-        let indexer = make_indexer();
         let mut ws = make_workspace(&template);
         ws.scratch.recon_slot_lookup = vec![None; 16];
 
@@ -608,20 +471,14 @@ mod tests {
 
         let inputs = StageInputs {
             stage_context: &ctx,
-            indexer: &indexer,
             pool: &pool,
-            current_state: &[0.0],
             stored_basis: Some(&all_lower),
-            baked_template: &template,
             stage_index: 0,
             scenario_index: 3,
-            horizon_is_terminal: false,
-            terminal_has_boundary_cuts: false,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             iteration: Some(5),
         };
 
-        let result = run_stage_solve(&mut ws, Phase::Forward, &inputs);
+        let result = run_stage_solve(&mut ws, &inputs);
         match result {
             Err(SddpError::Solver(SolverError::BasisInconsistent { .. })) => {
                 // Correct: BasisInconsistent routes to SddpError::Solver, not

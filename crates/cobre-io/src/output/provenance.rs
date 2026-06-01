@@ -39,11 +39,35 @@ pub fn write_provenance_report(
     Ok(())
 }
 
+/// Read a model provenance report from a JSON file.
+///
+/// Generic over any `DeserializeOwned` target so the report struct can stay
+/// defined in the calling algorithm crate (this crate is algorithm-agnostic).
+/// The caller supplies the concrete type at the call site, mirroring the
+/// `impl Serialize` genericity of [`write_provenance_report`].
+///
+/// # Errors
+///
+/// Returns [`OutputError::IoError`] if the file cannot be read — a missing file
+/// surfaces as an `IoError` whose `source.kind()` is
+/// [`std::io::ErrorKind::NotFound`], so callers can treat the section as absent
+/// and degrade gracefully. Returns [`OutputError::ManifestError`] if the file
+/// contains malformed JSON.
+pub fn read_provenance_report<T: serde::de::DeserializeOwned>(
+    path: &Path,
+) -> Result<T, OutputError> {
+    let content = std::fs::read_to_string(path).map_err(|e| OutputError::io(path, e))?;
+    serde_json::from_str(&content).map_err(|e| OutputError::ManifestError {
+        manifest_type: "model_provenance".to_string(),
+        message: e.to_string(),
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
-    use serde::Serialize;
+    use serde::{Deserialize, Serialize};
     use tempfile::TempDir;
 
     #[derive(Serialize)]
@@ -124,5 +148,80 @@ mod tests {
             "tmp file should be removed after rename"
         );
         assert!(path.exists(), "final file should exist");
+    }
+
+    // ── Generic reader ───────────────────────────────────────────────────────
+
+    /// Nested mock mirroring the cross-model report shape, defined locally so
+    /// the reader test never depends on an algorithm crate (genericity rule).
+    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    struct MockReport {
+        inflow: MockSection,
+        hydro_production: MockSection,
+    }
+
+    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    struct MockSection {
+        source: String,
+        count: usize,
+    }
+
+    fn make_nested_mock() -> MockReport {
+        MockReport {
+            inflow: MockSection {
+                source: "estimated".to_string(),
+                count: 5,
+            },
+            hydro_production: MockSection {
+                source: "precomputed".to_string(),
+                count: 12,
+            },
+        }
+    }
+
+    #[test]
+    fn read_provenance_report_round_trips_mock() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("training/model_provenance.json");
+
+        let report = make_nested_mock();
+        write_provenance_report(&path, &report).expect("write should succeed");
+
+        let decoded: MockReport = read_provenance_report(&path).expect("read should succeed");
+        assert_eq!(decoded, report);
+    }
+
+    #[test]
+    fn read_provenance_report_missing_file_is_not_found() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("does_not_exist.json");
+
+        let result = read_provenance_report::<MockReport>(&path);
+
+        assert!(
+            matches!(
+                &result,
+                Err(OutputError::IoError { source, .. })
+                    if source.kind() == std::io::ErrorKind::NotFound
+            ),
+            "missing file must return IoError with NotFound kind so callers \
+             can degrade gracefully, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn read_provenance_report_malformed_json_errors() {
+        use std::io::Write;
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("model_provenance.json");
+        let mut file = std::fs::File::create(&path).expect("create file");
+        writeln!(file, "{{not valid json at all").expect("write malformed json");
+
+        let result = read_provenance_report::<MockReport>(&path);
+
+        assert!(
+            matches!(result, Err(OutputError::ManifestError { .. })),
+            "malformed JSON must return the parse variant (not IoError), got: {result:?}"
+        );
     }
 }

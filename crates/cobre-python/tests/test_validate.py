@@ -72,23 +72,64 @@ def test_validate_clean_case_returns_valid_true() -> None:
     assert result["errors"] == []
 
 
-def test_validate_clean_case_warnings_populated() -> None:
-    """validate(examples/1dtoy) populates warnings (not always empty).
+def test_validate_emits_penalty_ordering_warning() -> None:
+    """validate() surfaces a penalty-ordering warning end-to-end.
 
-    The 1dtoy case emits at least one penalty-ordering warning from the
-    semantic validation layer. This test catches regressions where warnings
-    are silently discarded.
+    Rather than relying on a shipped example happening to violate the penalty
+    hierarchy (which is curated to be well-formed), this constructs a case that
+    deliberately re-inverts the ordering: the bus deficit-segment cost is set
+    BELOW the maximum hydro constraint-violation cost (``evaporation_violation_cost``
+    stays at 5000). That trips semantic "Check 8"
+    (``max(deficit_segment_costs) <= max(constraint_violation_costs)``), which
+    emits a ``ModelQuality`` penalty-ordering warning.
+
+    This pins the warnings plumbing (semantic layer → ReportEntry → Python dict)
+    end-to-end and is robust to future curation of the shipped example. A
+    warning must NOT invalidate the case, so ``valid`` stays ``True``.
     """
     import cobre.io  # noqa: PLC0415
 
-    result = cobre.io.validate(VALID_CASE_1DTOY)
-    # 1dtoy is known to emit at least one warning; if this breaks it means
-    # the case was updated and the test should be relaxed to >= 0.
-    assert isinstance(result["warnings"], list)
-    assert len(result["warnings"]) >= 1, (
-        "expected at least one warning from 1dtoy (penalty-ordering notice), "
-        "got zero — either the case changed or warnings are being dropped"
-    )
+    case_dir = copy_case_to_tempdir(VALID_CASE_1DTOY)
+    try:
+        # Re-invert the penalty hierarchy: drive the bus deficit-segment cost
+        # below the max constraint-violation cost (evaporation_violation_cost =
+        # 5000 in penalties.json). 1dtoy carries an entity-level deficit segment
+        # on its single bus, so system/buses.json is the resolved cost source.
+        buses_path = case_dir / "system" / "buses.json"
+        with buses_path.open() as f:
+            buses = json.load(f)
+        for bus in buses["buses"]:
+            for segment in bus["deficit_segments"]:
+                segment["cost"] = 1000.0
+        with buses_path.open("w") as f:
+            json.dump(buses, f, indent=2)
+
+        result = cobre.io.validate(str(case_dir))
+
+        # Warnings never invalidate a case.
+        assert result["valid"] is True, (
+            f"warnings must not invalidate; got errors: {result['errors']}"
+        )
+        assert isinstance(result["warnings"], list)
+        assert len(result["warnings"]) >= 1, (
+            "expected at least one warning after re-inverting the penalty "
+            "hierarchy, got zero — warnings are being dropped"
+        )
+
+        penalty_warnings = [
+            w
+            for w in result["warnings"]
+            if w["kind"] == "ModelQuality"
+            and (
+                "penalty" in w["message"].lower() or "ordering" in w["message"].lower()
+            )
+        ]
+        assert penalty_warnings, (
+            "expected a ModelQuality penalty-ordering warning, got: "
+            f"{result['warnings']}"
+        )
+    finally:
+        shutil.rmtree(case_dir.parent, ignore_errors=True)
 
 
 def test_validate_clean_case_accepts_pathlib_path() -> None:
@@ -127,8 +168,14 @@ def test_validate_missing_directory_returns_invalid() -> None:
 # ── Phase 8: StudyParams::from_config (ConfigValidationError) ─────────────────
 
 
-def test_validate_basis_activity_window_out_of_range() -> None:
-    """basis_activity_window > 31 triggers ConfigValidationError in Phase 8."""
+def test_validate_basis_activity_window_is_deprecated_not_rejected() -> None:
+    """basis_activity_window is deprecated (silently ignored); validate succeeds.
+
+    Previously this field was validated to be in 1..=31 and any out-of-range
+    value triggered a ConfigValidationError. After soft-deprecation the field
+    is read and discarded with a tracing warning, so validate must return
+    `valid=True` for any value (including formerly out-of-range values).
+    """
     import cobre.io  # noqa: PLC0415
 
     case_dir = copy_case_to_tempdir(VALID_CASE_1DTOY)
@@ -137,8 +184,8 @@ def test_validate_basis_activity_window_out_of_range() -> None:
         with config_path.open() as f:
             config = json.load(f)
 
-        # basis_activity_window lives at training.cut_selection.basis_activity_window
-        # and must be in 1..=31; 100 is out of range.
+        # A value that would have failed the old 1..=31 range check must
+        # now load successfully because the field is deprecated.
         config.setdefault("training", {}).setdefault("cut_selection", {})[
             "basis_activity_window"
         ] = 100
@@ -147,16 +194,9 @@ def test_validate_basis_activity_window_out_of_range() -> None:
             json.dump(config, f, indent=2)
 
         result = cobre.io.validate(str(case_dir))
-        assert result["valid"] is False, (
-            "expected valid=False for basis_activity_window=100"
-        )
-        assert len(result["errors"]) >= 1
-        err = result["errors"][0]
-        assert err["kind"] == "ConfigValidationError", (
-            f"expected ConfigValidationError, got {err['kind']!r}"
-        )
-        assert "basis_activity_window" in err["message"], (
-            f"expected 'basis_activity_window' in message, got: {err['message']!r}"
+        assert result["valid"] is True, (
+            "expected valid=True for deprecated basis_activity_window, "
+            f"got errors: {result.get('errors')!r}"
         )
     finally:
         shutil.rmtree(case_dir.parent, ignore_errors=True)
@@ -200,3 +240,63 @@ def test_validate_never_raises_for_valid_case() -> None:
 
     result = cobre.io.validate(VALID_CASE_1DTOY)
     assert isinstance(result, dict)
+
+
+# ── config_overrides ──────────────────────────────────────────────────────────
+
+
+def test_validate_config_overrides_none_is_valid() -> None:
+    """config_overrides=None reproduces the default valid result."""
+    import cobre.io  # noqa: PLC0415
+
+    result = cobre.io.validate(VALID_CASE_1DTOY, config_overrides=None)
+    assert result["valid"] is True, f"errors: {result['errors']}"
+
+
+def test_validate_config_overrides_invalid_value_surfaces_schema_error() -> None:
+    """An out-of-range override surfaces in the dict as a SchemaError, not a raise.
+
+    reference_volume_fraction must be in (0.0, 1.0]; 0.0 violates validate_config,
+    which `Config::with_overrides` runs identically to an edited config.json.
+    """
+    import cobre.io  # noqa: PLC0415
+
+    result = cobre.io.validate(
+        VALID_CASE_1DTOY,
+        config_overrides={"energy.reference_volume_fraction": 0.0},
+    )
+    assert result["valid"] is False, "an invalid override must mark the case invalid"
+    assert len(result["errors"]) >= 1
+    err = result["errors"][0]
+    assert err["kind"] == "SchemaError", f"expected SchemaError, got {err['kind']!r}"
+    assert "energy.reference_volume_fraction" in err["message"], (
+        f"error message must name the offending field, got: {err['message']!r}"
+    )
+
+
+def test_validate_config_overrides_typo_surfaces_schema_error() -> None:
+    """A typo override key is rejected via deny_unknown_fields as a SchemaError."""
+    import cobre.io  # noqa: PLC0415
+
+    result = cobre.io.validate(
+        VALID_CASE_1DTOY,
+        config_overrides={"trainning.tree_seed": 7},
+    )
+    assert result["valid"] is False
+    assert len(result["errors"]) >= 1
+    assert result["errors"][0]["kind"] == "SchemaError"
+
+
+def test_validate_config_overrides_unsupported_value_raises_value_error() -> None:
+    """A malformed override value (no JSON form) raises ValueError before merging.
+
+    Unlike case-validation failures (returned as data), a malformed call payload
+    is a programming error and is raised under the GIL before py.detach.
+    """
+    import cobre.io  # noqa: PLC0415
+
+    with pytest.raises(ValueError):
+        cobre.io.validate(
+            VALID_CASE_1DTOY,
+            config_overrides={"energy.reference_volume_fraction": {1, 2}},
+        )

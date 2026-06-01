@@ -43,22 +43,13 @@
 //! This is optimal for sequential stage iteration within a single window
 //! (same cache-line access pattern as [`PrecomputedPar`]).
 //!
-//! ## Lag storage layout (diagnostic only)
+//! ## Initial inflow lags
 //!
-//! The `_window_antecedent_lags_unused` buffer uses **window-major** layout:
-//! `lag_values[window * max_order * n_hydros + lag * n_hydros + hydro]`.
-//!
-//! lag index 0 is the most recent pre-study observation (lag-1),
-//! lag index 1 is lag-2, and so on.
-//!
-//! These are the raw historical inflow values at the `max_order` stages
-//! immediately before the window starts (BR6 specification). They are
-//! retained for diagnostics and parity inspection; they are **NOT** consumed
-//! during η inversion (that uses the `past_inflows`-seeded rolling chain) and
-//! are **NOT** injected into the solver state vector. Per NEWAVE's
-//! `TENDENCIA HIDROLOGICA` convention, the initial inflow lags come from
-//! `initial_conditions.past_inflows` for every scenario regardless of the
-//! historical window being replayed.
+//! The initial inflow lags are **NOT** stored on the library and are **NOT**
+//! injected into the solver state vector. Per NEWAVE's `TENDENCIA HIDROLOGICA`
+//! convention, they come from `initial_conditions.past_inflows` for every
+//! scenario regardless of the historical window being replayed; η inversion
+//! uses the `past_inflows`-seeded rolling chain.
 //!
 //! [`PrecomputedPar`]: crate::par::precompute::PrecomputedPar
 
@@ -113,10 +104,6 @@ use crate::{
 pub struct HistoricalScenarioLibrary {
     /// Flat eta buffer in window-major layout.
     eta: Box<[f64]>,
-    /// Flat pre-study lag buffer in window-major layout (diagnostic only — not consumed
-    /// during η inversion; see module-level doc for the `past_inflows`-seeded chain).
-    #[doc(hidden)]
-    window_antecedent_lags_unused: Box<[f64]>,
     /// Year labels for each window (for diagnostics).
     window_years: Box<[i32]>,
     /// Number of historical windows.
@@ -144,8 +131,8 @@ impl HistoricalScenarioLibrary {
     ///
     /// - `n_windows` — number of historical windows
     /// - `n_stages` — number of study stages per window
-    /// - `n_hydros` — number of hydro entities (eta and lag vector width)
-    /// - `max_order` — PAR model order; number of pre-window lag stages to store
+    /// - `n_hydros` — number of hydro entities (eta vector width)
+    /// - `max_order` — PAR model order (number of pre-window lag stages)
     /// - `window_years` — starting year for each window (diagnostic label)
     ///
     /// # Panics
@@ -168,8 +155,6 @@ impl HistoricalScenarioLibrary {
         );
         Self {
             eta: vec![0.0_f64; n_windows * n_stages * n_hydros].into_boxed_slice(),
-            window_antecedent_lags_unused: vec![0.0_f64; n_windows * max_order * n_hydros]
-                .into_boxed_slice(),
             window_years: window_years.into_boxed_slice(),
             n_windows,
             n_stages,
@@ -288,51 +273,6 @@ impl HistoricalScenarioLibrary {
         );
         let offset = (window * self.n_stages + stage) * self.n_hydros;
         &mut self.eta[offset..offset + self.n_hydros]
-    }
-
-    // -----------------------------------------------------------------------
-    // Lag accessors
-    // -----------------------------------------------------------------------
-
-    /// Returns the `max_order * n_hydros`-length slice of pre-study lag values
-    /// for `window`.
-    ///
-    /// Layout: `window_antecedent_lags_unused[window * max_order * n_hydros + lag * n_hydros + hydro]`.
-    ///
-    /// These are the raw historical inflow values at the `max_order` stages
-    /// immediately before the window starts. **Diagnostic only** — these values
-    /// are no longer consumed during η inversion, which uses the
-    /// `past_inflows`-seeded rolling chain instead. See the module-level
-    /// documentation for the correctness invariant.
-    #[must_use]
-    #[inline]
-    pub fn lag_slice(&self, window: usize) -> &[f64] {
-        debug_assert!(
-            window < self.n_windows,
-            "window ({window}) must be < n_windows ({})",
-            self.n_windows
-        );
-        let len = self.max_order * self.n_hydros;
-        let offset = window * len;
-        &self.window_antecedent_lags_unused[offset..offset + len]
-    }
-
-    /// Returns a mutable `max_order * n_hydros`-length slice of pre-study lag
-    /// values for `window`.
-    ///
-    /// Used by the standardisation pass to write the window antecedent lags
-    /// for diagnostic inspection. **Not consumed during η inversion.**
-    #[must_use]
-    #[inline]
-    pub fn lag_slice_mut(&mut self, window: usize) -> &mut [f64] {
-        debug_assert!(
-            window < self.n_windows,
-            "window ({window}) must be < n_windows ({})",
-            self.n_windows
-        );
-        let len = self.max_order * self.n_hydros;
-        let offset = window * len;
-        &mut self.window_antecedent_lags_unused[offset..offset + len]
     }
 }
 
@@ -566,12 +506,11 @@ pub fn standardize_historical_windows(
                     None
                 }
             });
-        if let Some(sid) = season_id {
-            if let Some(&h) = hydro_id_to_idx.get(&r.hydro_id) {
-                if let Some(idx) = table_idx(h, r.date.year(), sid) {
-                    obs_table[idx] = r.value_m3s;
-                }
-            }
+        if let Some(sid) = season_id
+            && let Some(&h) = hydro_id_to_idx.get(&r.hydro_id)
+            && let Some(idx) = table_idx(h, r.date.year(), sid)
+        {
+            obs_table[idx] = r.value_m3s;
         }
     }
 
@@ -624,25 +563,6 @@ pub fn standardize_historical_windows(
     let mut lag_accum = vec![0.0_f64; n_hydros];
 
     for (w, &window_year) in window_years.iter().enumerate() {
-        // ── Write window antecedent lags for diagnostics (not used in η inversion) ──
-        if max_order > 0 {
-            let diag_slice = library.lag_slice_mut(w);
-            for h in 0..n_hydros {
-                for lag_buf_idx in 0..max_order {
-                    let seq_idx = max_order - 1 - lag_buf_idx;
-                    let (year_offset, season_id) = full_sequence[seq_idx];
-                    let obs_year = window_year + year_offset;
-                    debug_assert!(
-                        table_idx(h, obs_year, season_id).is_some_and(|i| !obs_table[i].is_nan()),
-                        "missing lag observation for hydro={}, year={obs_year}, \
-                         season={season_id}; window discovery should have excluded this window",
-                        hydro_ids[h].0,
-                    );
-                    diag_slice[lag_buf_idx * n_hydros + h] = lookup(h, obs_year, season_id);
-                }
-            }
-        }
-
         // ── Reset lag state from past_lag_buf for this window ──
         lag_state.copy_from_slice(&past_lag_buf);
         lag_accum.fill(0.0);
@@ -939,16 +859,6 @@ mod tests {
             5,
             "eta slice length must equal n_hydros"
         );
-        assert_eq!(
-            lib.lag_slice(0).len(),
-            2 * 5,
-            "lag slice length must equal max_order * n_hydros"
-        );
-        assert_eq!(
-            lib.lag_slice(2).len(),
-            2 * 5,
-            "lag slice length must equal max_order * n_hydros"
-        );
     }
 
     #[test]
@@ -974,33 +884,6 @@ mod tests {
             lib.eta_slice(1, 0),
             &[0.0, 0.0, 0.0, 0.0],
             "untouched eta cells must remain zero"
-        );
-    }
-
-    #[test]
-    fn test_lag_roundtrip() {
-        let mut lib = HistoricalScenarioLibrary::new(2, 3, 3, 2, vec![1990, 1991]);
-
-        // lag_slice length = max_order * n_hydros = 2 * 3 = 6
-        let values = [10.0_f64, 20.0, 30.0, 40.0, 50.0, 60.0];
-        lib.lag_slice_mut(0).copy_from_slice(&values);
-
-        assert_eq!(
-            lib.lag_slice(0),
-            &values,
-            "lag_slice must return the values written via lag_slice_mut"
-        );
-        assert_eq!(
-            lib.lag_slice(0).len(),
-            6,
-            "lag slice length must equal max_order * n_hydros"
-        );
-
-        // Confirm window 1 was not disturbed.
-        assert_eq!(
-            lib.lag_slice(1),
-            &[0.0; 6],
-            "untouched lag cells must remain zero"
         );
     }
 
@@ -1258,14 +1141,6 @@ mod tests {
             &[],
         );
 
-        // Pre-study lag buffer (diagnostic): lag 0 = most recent = Dec 1989 = 110.0.
-        let lag_slice = lib.lag_slice(0);
-        assert!(
-            (lag_slice[0] - 110.0).abs() < 1e-10,
-            "pre-study lag[0] expected 110.0, got {}",
-            lag_slice[0]
-        );
-
         // Stage 0: lag_state seeded from past_inflows → lag = 110.0.
         // eta = (130 - 80 - 0.5*110) / 25 = -5/25 = -0.2
         let eta_0 = lib.eta_slice(0, 0)[0];
@@ -1389,118 +1264,6 @@ mod tests {
         let e11 = lib.eta_slice(1, 1);
         assert!((e11[0] - (-0.5)).abs() < 1e-10, "w=1,t=1,h=0: {}", e11[0]);
         assert!((e11[1] - (-0.5)).abs() < 1e-10, "w=1,t=1,h=1: {}", e11[1]);
-    }
-
-    // -----------------------------------------------------------------------
-    // Test 4: pre-study lag buffer populated correctly
-    // -----------------------------------------------------------------------
-
-    /// Single hydro, `max_order`=2 (AR(2) dummy), full 12-stage monthly year.
-    ///
-    /// With `n_seasons`=12 and `max_order`=2, under the new convention:
-    ///   - lag-2 (oldest, buf index 1): season (0-2+12)%12 = 10 (Nov), `year_offset` = -1
-    ///   - lag-1 (most recent, buf index 0): season (0-1+12)%12 = 11 (Dec), `year_offset` = -1
-    ///   - study stages: `year_offset` = 0
-    ///
-    /// Full sequence (after normalization): [(-1,10),(-1,11),(0,0),(0,1),...,(0,11)]
-    ///
-    /// The lag buffer layout is [`lag*n_hydros + h`] where lag=0 = most recent:
-    ///   `lag_slice`[0] = Dec 1989 = 66.0  (window_year-1 = 1989)
-    ///   `lag_slice`[1] = Nov 1989 = 55.0
-    #[test]
-    fn test_pre_study_lags_populated() {
-        let hydro = EntityId(1);
-        let stages = twelve_monthly_stages();
-
-        // AR(2) model: need ar_coefficients of length 2 so par.max_order()=2.
-        // Use psi=[0.0, 0.0] so the AR terms do not affect eta.
-        let study_models: Vec<InflowModel> = stages
-            .iter()
-            .map(|s| InflowModel {
-                hydro_id: hydro,
-                stage_id: s.id,
-                mean_m3s: 100.0,
-                std_m3s: 10.0,
-                ar_coefficients: vec![0.0, 0.0],
-                residual_std_ratio: 1.0,
-                annual: None,
-            })
-            .collect();
-        // Also add pre-study models for stage_id -1 (Dec) and -2 (Nov)
-        // so the coefficient unit conversion can resolve lag stds.
-        let pre_study_models = vec![
-            InflowModel {
-                hydro_id: hydro,
-                stage_id: -1,
-                mean_m3s: 100.0,
-                std_m3s: 10.0,
-                ar_coefficients: vec![0.0, 0.0],
-                residual_std_ratio: 1.0,
-                annual: None,
-            },
-            InflowModel {
-                hydro_id: hydro,
-                stage_id: -2,
-                mean_m3s: 100.0,
-                std_m3s: 10.0,
-                ar_coefficients: vec![0.0, 0.0],
-                residual_std_ratio: 1.0,
-                annual: None,
-            },
-        ];
-        let mut all_models = pre_study_models;
-        all_models.extend(study_models);
-        let par = PrecomputedPar::build(&all_models, &stages, &[hydro]).unwrap();
-        assert_eq!(par.max_order(), 2, "expected par.max_order()=2");
-
-        // Window year 1990 (new convention: study starts at window_year):
-        //   lag-2 (seq_idx=0): (1990-1, season 10 = Nov) = (1989, Nov) → 55.0
-        //   lag-1 (seq_idx=1): (1990-1, season 11 = Dec) = (1989, Dec) → 66.0
-        //   study stages at year_offset=0 (1990): months 0-11 → all 100.0
-        let mut history = vec![
-            make_row(hydro, 1989, 10, 55.0), // Nov 1989 = lag-2
-            make_row(hydro, 1989, 11, 66.0), // Dec 1989 = lag-1
-        ];
-        for m in 0..12_u32 {
-            history.push(make_row(hydro, 1990, m, 100.0));
-        }
-
-        // past_inflows: lag-1 = Dec 1989 = 66.0, lag-2 = Nov 1989 = 55.0.
-        // psi=[0.0, 0.0] so lags do not affect eta values; we pass them to
-        // exercise the rolling-chain path and confirm lag_slice diagnostic is
-        // still populated from the historical observations in the window.
-        let past = vec![HydroPastInflows {
-            hydro_id: hydro,
-            values_m3s: vec![66.0, 55.0], // lag-1 first, then lag-2
-            season_ids: None,
-        }];
-
-        let mut lib = HistoricalScenarioLibrary::new(1, 12, 1, 2, vec![1990]);
-        standardize_historical_windows(
-            &mut lib,
-            &history,
-            &[hydro],
-            &stages,
-            &par,
-            &[1990],
-            None,
-            &past,
-            &[],
-        );
-
-        let lag = lib.lag_slice(0);
-        // lag[0] = most recent (lag-1) = Dec 1989 = 66.0
-        assert!(
-            (lag[0] - 66.0).abs() < 1e-10,
-            "lag[0] (most recent) expected 66.0, got {}",
-            lag[0]
-        );
-        // lag[1] = lag-2 = Nov 1989 = 55.0
-        assert!(
-            (lag[1] - 55.0).abs() < 1e-10,
-            "lag[1] (lag-2) expected 55.0, got {}",
-            lag[1]
-        );
     }
 
     // -----------------------------------------------------------------------

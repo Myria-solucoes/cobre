@@ -1286,15 +1286,10 @@ mod tests {
             col_perm[state_start_b + s * n_ant + 1] = state_start_a + s * n_ant;
         }
 
-        // Build row permutation: identity outside anticipated_state_fixing,
-        // anticipated_fishing, and anticipated_state_out_def rows.
-        // The state-fixing rows live at the same numeric range as the state
-        // columns (per indexer convention).
+        // Build row permutation: identity outside anticipated_fishing and
+        // anticipated_state_out_def rows. State fixing now uses column bounds
+        // (no row equalities), so there are no state-fixing rows to permute.
         let mut row_perm: Vec<usize> = (0..tpl_a.num_rows).collect();
-        for s in 0..k_max {
-            row_perm[state_start_b + s * n_ant] = state_start_a + s * n_ant + 1;
-            row_perm[state_start_b + s * n_ant + 1] = state_start_a + s * n_ant;
-        }
         if n_fish_rows == 2 {
             row_perm[fish_start_b] = fish_start_a + 1;
             row_perm[fish_start_b + 1] = fish_start_a;

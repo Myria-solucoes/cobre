@@ -64,6 +64,18 @@ pub fn now_iso8601() -> String {
 
 // ── Shared nested structs ────────────────────────────────────────────────────
 
+/// Per-host rank assignment for a single physical host.
+///
+/// Captures which global ranks were placed on a given host, enabling
+/// reconstruction of the multi-host process layout from persisted metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostLayout {
+    /// Hostname as reported by the backend.
+    pub hostname: String,
+    /// Sorted global ranks assigned to this host.
+    pub ranks: Vec<u32>,
+}
+
 /// Execution distribution information embedded in metadata files.
 ///
 /// Captures the communication backend, process topology, and optional
@@ -93,6 +105,10 @@ pub struct DistributionInfo {
     /// SLURM job ID, if running under SLURM.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slurm_job_id: Option<String>,
+    /// Per-host rank assignment for multi-node runs. Empty for single-host or
+    /// local runs.
+    #[serde(default)]
+    pub hosts: Vec<HostLayout>,
 }
 
 /// Selected training configuration fields captured for reproducibility.
@@ -157,6 +173,55 @@ pub struct MetadataRowPool {
     pub total_active: u64,
     /// Highest number of simultaneously active rows observed.
     pub peak_active: u64,
+    /// Rows currently active in the LP at termination.
+    #[serde(default)]
+    pub cuts_active: u64,
+}
+
+/// Final objective bounds embedded in [`TrainingMetadata`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetadataBounds {
+    /// Final lower bound on the objective at termination.
+    pub final_lower_bound: f64,
+    /// Final upper bound estimate (`null` when upper-bound evaluation is disabled).
+    pub final_upper_bound: Option<f64>,
+    /// Standard deviation of the final upper-bound estimate (`null` when unavailable).
+    pub final_upper_bound_std: Option<f64>,
+}
+
+/// Default bounds used when legacy metadata omits the `bounds` field.
+///
+/// Yields zeroed bounds matching the historical fallback behaviour: a
+/// `final_lower_bound` of `0.0` and absent upper bounds.
+#[must_use]
+pub fn default_bounds() -> MetadataBounds {
+    MetadataBounds {
+        final_lower_bound: 0.0,
+        final_upper_bound: None,
+        final_upper_bound_std: None,
+    }
+}
+
+/// Training solve statistics embedded in [`TrainingMetadata`].
+///
+/// Each field is optional so that absence is represented faithfully when the
+/// producing run did not record the corresponding statistic.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MetadataTrainingSolveStats {
+    /// Total number of LP solves performed during training.
+    pub total_lp_solves: Option<u64>,
+    /// Number of LP solves that succeeded on the first attempt.
+    pub first_try: Option<u64>,
+    /// Number of LP solves that succeeded after one or more retries.
+    pub retried: Option<u64>,
+    /// Number of LP solves that failed terminally.
+    pub failed: Option<u64>,
+    /// Cumulative wall-clock seconds spent in forward-phase LP solves.
+    pub forward_solve_seconds: Option<f64>,
+    /// Cumulative wall-clock seconds spent in backward-phase LP solves.
+    pub backward_solve_seconds: Option<f64>,
+    /// Degree of parallelism (e.g. worker count) used during training.
+    pub parallelism: Option<u32>,
 }
 
 /// Scenario counts embedded in [`SimulationMetadata`].
@@ -168,6 +233,42 @@ pub struct MetadataScenarios {
     pub completed: u32,
     /// Number of scenarios that encountered a terminal error.
     pub failed: u32,
+}
+
+/// Aggregate cost statistics embedded in [`SimulationMetadata`].
+///
+/// Captures the expected total cost across the simulated scenarios together
+/// with its dispersion and a tail-risk summary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetadataCost {
+    /// Mean total cost across simulated scenarios.
+    pub mean_cost: f64,
+    /// Standard deviation of the total cost across simulated scenarios.
+    pub std_cost: f64,
+    /// Conditional Value-at-Risk at `cvar_alpha`.
+    pub cvar: f64,
+    /// Confidence level used for the `CVaR` computation, in `(0, 1)`.
+    pub cvar_alpha: f64,
+}
+
+/// Simulation solve statistics embedded in [`SimulationMetadata`].
+///
+/// Each field is optional so that absence is represented faithfully when the
+/// producing run did not record the corresponding statistic.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MetadataSimulationSolveStats {
+    /// Total number of LP solves performed during simulation.
+    pub total_lp_solves: Option<u64>,
+    /// Number of LP solves that succeeded on the first attempt.
+    pub first_try: Option<u64>,
+    /// Number of LP solves that succeeded after one or more retries.
+    pub retried: Option<u64>,
+    /// Number of LP solves that failed terminally.
+    pub failed: Option<u64>,
+    /// Cumulative wall-clock seconds spent in simulation LP solves.
+    pub solve_seconds: Option<f64>,
+    /// Degree of parallelism (e.g. worker count) used during simulation.
+    pub parallelism: Option<u32>,
 }
 
 // ── TrainingMetadata ─────────────────────────────────────────────────────────
@@ -206,6 +307,12 @@ pub struct TrainingMetadata {
     pub convergence: MetadataConvergence,
     /// Row-pool summary.
     pub row_pool: MetadataRowPool,
+    /// Final objective bounds at termination.
+    #[serde(default = "default_bounds")]
+    pub bounds: MetadataBounds,
+    /// Training solve statistics.
+    #[serde(default)]
+    pub solve_stats: MetadataTrainingSolveStats,
     /// Execution distribution and environment information.
     pub distribution: DistributionInfo,
 }
@@ -236,6 +343,12 @@ pub struct SimulationMetadata {
     pub status: String,
     /// Scenario completion counts.
     pub scenarios: MetadataScenarios,
+    /// Aggregate cost statistics (`null` when cost was not persisted).
+    #[serde(default)]
+    pub cost: Option<MetadataCost>,
+    /// Simulation solve statistics.
+    #[serde(default)]
+    pub solve_stats: MetadataSimulationSolveStats,
     /// Execution distribution and environment information.
     pub distribution: DistributionInfo,
 }
@@ -344,6 +457,7 @@ mod tests {
             mpi_standard: None,
             thread_level: None,
             slurm_job_id: None,
+            hosts: Vec::new(),
         }
     }
 
@@ -384,6 +498,21 @@ mod tests {
                 total_generated: 1_250_000,
                 total_active: 980_000,
                 peak_active: 1_100_000,
+                cuts_active: 980_000,
+            },
+            bounds: MetadataBounds {
+                final_lower_bound: 48_500.0,
+                final_upper_bound: Some(49_000.0),
+                final_upper_bound_std: Some(250.0),
+            },
+            solve_stats: MetadataTrainingSolveStats {
+                total_lp_solves: Some(84_000),
+                first_try: Some(80_000),
+                retried: Some(3_800),
+                failed: Some(200),
+                forward_solve_seconds: Some(123.5),
+                backward_solve_seconds: Some(456.75),
+                parallelism: Some(8),
             },
             distribution: make_distribution_info(),
         }
@@ -403,6 +532,20 @@ mod tests {
                 total: 100,
                 completed: 100,
                 failed: 0,
+            },
+            cost: Some(MetadataCost {
+                mean_cost: 12_345.6,
+                std_cost: 200.0,
+                cvar: 13_000.0,
+                cvar_alpha: 0.95,
+            }),
+            solve_stats: MetadataSimulationSolveStats {
+                total_lp_solves: Some(50_000),
+                first_try: Some(48_000),
+                retried: Some(1_900),
+                failed: Some(100),
+                solve_seconds: Some(321.0),
+                parallelism: Some(8),
             },
             distribution: make_distribution_info(),
         }
@@ -463,6 +606,258 @@ mod tests {
             decoded.distribution.world_size,
             original.distribution.world_size
         );
+    }
+
+    #[test]
+    fn simulation_metadata_cost_round_trip() {
+        let original = SimulationMetadata {
+            cost: Some(MetadataCost {
+                mean_cost: 12_345.6,
+                std_cost: 200.0,
+                cvar: 13_000.0,
+                cvar_alpha: 0.95,
+            }),
+            ..make_simulation_metadata()
+        };
+
+        let json = serde_json::to_string(&original).unwrap();
+        assert!(
+            json.contains(r#""mean_cost":12345.6"#),
+            "serialized JSON must contain the mean cost, got: {json}"
+        );
+        assert!(
+            json.contains(r#""cvar_alpha":0.95"#),
+            "serialized JSON must contain the CVaR alpha, got: {json}"
+        );
+
+        let decoded: SimulationMetadata = serde_json::from_str(&json).unwrap();
+        let cost = decoded.cost.expect("cost must be present after round-trip");
+        assert_eq!(cost.mean_cost, 12_345.6);
+        assert_eq!(cost.std_cost, 200.0);
+        assert_eq!(cost.cvar, 13_000.0);
+        assert_eq!(cost.cvar_alpha, 0.95);
+    }
+
+    #[test]
+    fn simulation_metadata_solve_stats_round_trip() {
+        let original = SimulationMetadata {
+            solve_stats: MetadataSimulationSolveStats {
+                total_lp_solves: Some(50_000),
+                first_try: Some(48_000),
+                retried: Some(1_900),
+                failed: Some(100),
+                solve_seconds: Some(321.0),
+                parallelism: Some(8),
+            },
+            ..make_simulation_metadata()
+        };
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("metadata.json");
+        write_simulation_metadata(&path, &original).expect("write must succeed");
+        let decoded = read_simulation_metadata(&path).expect("read must succeed");
+
+        assert_eq!(decoded.solve_stats.total_lp_solves, Some(50_000));
+        assert_eq!(decoded.solve_stats.first_try, Some(48_000));
+        assert_eq!(decoded.solve_stats.retried, Some(1_900));
+        assert_eq!(decoded.solve_stats.failed, Some(100));
+        assert_eq!(decoded.solve_stats.solve_seconds, Some(321.0));
+        assert_eq!(decoded.solve_stats.parallelism, Some(8));
+    }
+
+    #[test]
+    fn simulation_metadata_back_compat_without_cost_or_solve_stats() {
+        // Legacy metadata predating the `cost`/`solve_stats` fields omits both
+        // keys entirely.
+        let legacy = r#"{
+            "cobre_version": "0.0.0",
+            "hostname": "legacy-host",
+            "solver": "highs",
+            "started_at": "2026-01-17T13:00:00Z",
+            "completed_at": "2026-01-17T13:15:00Z",
+            "duration_seconds": 900.0,
+            "status": "complete",
+            "scenarios": {
+                "total": 100,
+                "completed": 100,
+                "failed": 0
+            },
+            "distribution": {
+                "backend": "local",
+                "world_size": 1,
+                "ranks_participated": 1,
+                "num_nodes": 1,
+                "threads_per_rank": 1
+            }
+        }"#;
+
+        let decoded: SimulationMetadata = serde_json::from_str(legacy).unwrap();
+        assert!(decoded.cost.is_none());
+        assert_eq!(decoded.solve_stats.total_lp_solves, None);
+        assert_eq!(decoded.solve_stats.parallelism, None);
+    }
+
+    #[test]
+    fn distribution_info_hosts_round_trip() {
+        let original = DistributionInfo {
+            hosts: vec![HostLayout {
+                hostname: "node01".to_string(),
+                ranks: vec![0, 1, 2, 3],
+            }],
+            ..make_distribution_info()
+        };
+
+        let json = serde_json::to_string(&original).unwrap();
+        assert!(
+            json.contains(r#""hosts":[{"hostname":"node01","ranks":[0,1,2,3]}]"#),
+            "serialized JSON must contain the hosts array, got: {json}"
+        );
+
+        let decoded: DistributionInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.hosts.len(), 1);
+        assert_eq!(decoded.hosts[0].hostname, "node01");
+        assert_eq!(decoded.hosts[0].ranks, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn distribution_info_empty_hosts_serialize_as_array() {
+        let info = make_distribution_info();
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(
+            json.contains(r#""hosts":[]"#),
+            "empty hosts must serialize as [], got: {json}"
+        );
+    }
+
+    #[test]
+    fn distribution_info_back_compat_without_hosts() {
+        // Legacy metadata predating the `hosts` field omits the key entirely.
+        let legacy = r#"{
+            "backend": "local",
+            "world_size": 1,
+            "ranks_participated": 1,
+            "num_nodes": 1,
+            "threads_per_rank": 1
+        }"#;
+
+        let decoded: DistributionInfo = serde_json::from_str(legacy).unwrap();
+        assert!(
+            decoded.hosts.is_empty(),
+            "missing hosts key must deserialize to an empty vector"
+        );
+    }
+
+    #[test]
+    fn training_metadata_bounds_round_trip() {
+        let original = TrainingMetadata {
+            bounds: MetadataBounds {
+                final_lower_bound: 48_500.0,
+                final_upper_bound: Some(49_000.0),
+                final_upper_bound_std: Some(250.0),
+            },
+            ..make_training_metadata()
+        };
+
+        let json = serde_json::to_string(&original).unwrap();
+        assert!(
+            json.contains(r#""final_lower_bound":48500.0"#),
+            "serialized JSON must contain the lower bound, got: {json}"
+        );
+        assert!(
+            json.contains(r#""final_upper_bound":49000.0"#),
+            "serialized JSON must contain the upper bound, got: {json}"
+        );
+
+        let decoded: TrainingMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.bounds.final_lower_bound, 48_500.0);
+        assert_eq!(decoded.bounds.final_upper_bound, Some(49_000.0));
+        assert_eq!(decoded.bounds.final_upper_bound_std, Some(250.0));
+    }
+
+    #[test]
+    fn training_metadata_solve_stats_round_trip() {
+        let original = TrainingMetadata {
+            solve_stats: MetadataTrainingSolveStats {
+                total_lp_solves: Some(84_000),
+                first_try: Some(80_000),
+                retried: Some(3_800),
+                failed: Some(200),
+                forward_solve_seconds: Some(123.5),
+                backward_solve_seconds: Some(456.75),
+                parallelism: Some(8),
+            },
+            ..make_training_metadata()
+        };
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("metadata.json");
+        write_training_metadata(&path, &original).expect("write must succeed");
+        let decoded = read_training_metadata(&path).expect("read must succeed");
+
+        assert_eq!(decoded.solve_stats.total_lp_solves, Some(84_000));
+        assert_eq!(decoded.solve_stats.first_try, Some(80_000));
+        assert_eq!(decoded.solve_stats.retried, Some(3_800));
+        assert_eq!(decoded.solve_stats.failed, Some(200));
+        assert_eq!(decoded.solve_stats.forward_solve_seconds, Some(123.5));
+        assert_eq!(decoded.solve_stats.backward_solve_seconds, Some(456.75));
+        assert_eq!(decoded.solve_stats.parallelism, Some(8));
+    }
+
+    #[test]
+    fn training_metadata_back_compat_without_bounds_or_solve_stats() {
+        // Legacy metadata predating the `bounds`/`solve_stats` fields omits both
+        // keys entirely.
+        let legacy = r#"{
+            "cobre_version": "0.0.0",
+            "hostname": "legacy-host",
+            "solver": "highs",
+            "started_at": "2026-01-17T08:00:00Z",
+            "completed_at": "2026-01-17T12:30:00Z",
+            "duration_seconds": 16200.0,
+            "status": "complete",
+            "configuration": {
+                "seed": 42,
+                "max_iterations": 100,
+                "forward_passes": 192,
+                "stopping_mode": "any",
+                "policy_mode": "fresh"
+            },
+            "problem_dimensions": {
+                "num_stages": 12,
+                "num_hydros": 160,
+                "num_thermals": 200,
+                "num_buses": 5,
+                "num_lines": 8
+            },
+            "iterations": {
+                "completed": 100,
+                "converged_at": 95
+            },
+            "convergence": {
+                "achieved": true,
+                "final_gap_percent": 0.45,
+                "termination_reason": "bound_stalling"
+            },
+            "row_pool": {
+                "total_generated": 1250000,
+                "total_active": 980000,
+                "peak_active": 1100000
+            },
+            "distribution": {
+                "backend": "local",
+                "world_size": 1,
+                "ranks_participated": 1,
+                "num_nodes": 1,
+                "threads_per_rank": 1
+            }
+        }"#;
+
+        let decoded: TrainingMetadata = serde_json::from_str(legacy).unwrap();
+        assert_eq!(decoded.bounds.final_lower_bound, 0.0);
+        assert_eq!(decoded.bounds.final_upper_bound, None);
+        assert_eq!(decoded.bounds.final_upper_bound_std, None);
+        assert_eq!(decoded.solve_stats.total_lp_solves, None);
+        assert_eq!(decoded.solve_stats.parallelism, None);
     }
 
     // ── Writer tests ─────────────────────────────────────────────────────────

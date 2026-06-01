@@ -301,7 +301,7 @@ impl StoppingRule {
         distance_tolerance: f64,
     ) -> StoppingRuleResult {
         // Only evaluate at multiples of `period`.
-        if period == 0 || state.iteration % period != 0 {
+        if period == 0 || !state.iteration.is_multiple_of(period) {
             return StoppingRuleResult {
                 rule_name: RULE_SIMULATION_BASED,
                 triggered: false,

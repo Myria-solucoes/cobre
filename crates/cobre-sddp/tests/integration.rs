@@ -214,6 +214,9 @@ impl MockSolver {
 }
 
 impl SolverInterface for MockSolver {
+    type Profile = cobre_solver::HighsProfile;
+
+    fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
     fn solver_name_version(&self) -> String {
         "MockSolver 0.0.0".to_string()
     }
@@ -251,10 +254,14 @@ impl SolverInterface for MockSolver {
     fn name(&self) -> &'static str {
         "MockIntegration"
     }
-    fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
-    fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
-    fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
-    fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
+
+    fn set_primal_feasibility_tolerance(&mut self, _tolerance: f64) {}
+
+    fn set_dual_feasibility_tolerance(&mut self, _tolerance: f64) {}
+
+    fn set_simplex_iteration_limit_profile(&mut self, _limit: u32) {}
+
+    fn set_ipm_iteration_limit_profile(&mut self, _limit: u32) {}
 }
 
 /// Mock solver that returns a zero-filled dual slice matching the current row count.
@@ -283,6 +290,9 @@ impl ExpandingMockSolver {
 }
 
 impl SolverInterface for ExpandingMockSolver {
+    type Profile = cobre_solver::HighsProfile;
+
+    fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
     fn solver_name_version(&self) -> String {
         "ExpandingMockSolver 0.0.0".to_string()
     }
@@ -330,10 +340,14 @@ impl SolverInterface for ExpandingMockSolver {
     fn name(&self) -> &'static str {
         "ExpandingMock"
     }
-    fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
-    fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
-    fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
-    fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
+
+    fn set_primal_feasibility_tolerance(&mut self, _tolerance: f64) {}
+
+    fn set_dual_feasibility_tolerance(&mut self, _tolerance: f64) {}
+
+    fn set_simplex_iteration_limit_profile(&mut self, _limit: u32) {}
+
+    fn set_ipm_iteration_limit_profile(&mut self, _limit: u32) {}
 }
 
 /// Build a `StochasticContext` with `n_stages` stages, 1 hydro, and seed 42.
@@ -598,7 +612,6 @@ fn run_one_deterministic_pass(
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: fx.risk_measures.clone(),
             },
@@ -630,6 +643,7 @@ fn run_one_deterministic_pass(
         },
         &StubComm,
         || Ok(MockSolver::with_fixed(50.0)),
+        None,
     )
     .unwrap()
 }
@@ -657,7 +671,6 @@ fn train_converges_with_mock_solver() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
             warm_start_cuts: 0,
             risk_measures: fx.risk_measures.clone(),
         },
@@ -710,6 +723,7 @@ fn train_converges_with_mock_solver() {
         },
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
+        None,
     )
     .unwrap();
 
@@ -767,7 +781,6 @@ fn train_lb_monotonically_nondecreasing() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
             warm_start_cuts: 0,
             risk_measures: fx.risk_measures.clone(),
         },
@@ -820,6 +833,7 @@ fn train_lb_monotonically_nondecreasing() {
         },
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
+        None,
     )
     .unwrap();
 
@@ -868,7 +882,6 @@ fn train_emits_correct_event_sequence() {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
             warm_start_cuts: 0,
             risk_measures: fx.risk_measures.clone(),
         },
@@ -921,6 +934,7 @@ fn train_emits_correct_event_sequence() {
         },
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
+        None,
     )
     .unwrap();
 
@@ -995,7 +1009,6 @@ fn train_stops_at_iteration_limit() {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: fx.risk_measures.clone(),
             },
@@ -1027,6 +1040,7 @@ fn train_stops_at_iteration_limit() {
         },
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
+        None,
     )
     .unwrap();
 
@@ -1085,7 +1099,6 @@ fn train_stops_on_graceful_shutdown() {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: fx.risk_measures.clone(),
             },
@@ -1117,6 +1130,7 @@ fn train_stops_on_graceful_shutdown() {
         },
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
+        None,
     )
     .unwrap();
 
@@ -1165,7 +1179,6 @@ fn train_propagates_infeasible_error() {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: fx.risk_measures.clone(),
             },
@@ -1197,6 +1210,7 @@ fn train_propagates_infeasible_error() {
         },
         &comm,
         || Ok(MockSolver::infeasible_on_first()),
+        None,
     );
 
     let outcome = result.expect("train must return Ok(TrainingOutcome) with captured error");
@@ -1215,10 +1229,10 @@ fn train_propagates_infeasible_error() {
 
 /// D17: Level1 cut selection produces convergent results with bounded pool.
 ///
-/// Verifies that enabling `CutSelectionStrategy::Level1 { threshold: 0,
-/// check_frequency: 2 }` does not break convergence. With the mock solver
-/// returning `dual: &[0.0, 0.0]`, all generated cuts have `active_count == 0`
-/// and are deactivated by Level1 selection.
+/// Verifies that enabling `CutSelectionStrategy::Level1 { check_frequency: 2,
+/// tie_tolerance: 1e-10 }` does not break convergence. With the stub kernel,
+/// no cuts are deactivated by Level1 selection (ticket-002 will implement the
+/// value-based kernel).
 ///
 /// Checks:
 /// - Lower bound is monotone non-decreasing.
@@ -1246,12 +1260,11 @@ fn d17_level1_cut_selection_convergence() {
         },
         cut_management: CutManagementConfig {
             cut_selection: Some(CutSelectionStrategy::Level1 {
-                threshold: 0,
                 check_frequency: 2,
+                tie_tolerance: 1e-10,
             }),
             budget: None,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
             warm_start_cuts: 0,
             risk_measures: fx.risk_measures.clone(),
         },
@@ -1304,6 +1317,7 @@ fn d17_level1_cut_selection_convergence() {
         },
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
+        None,
     )
     .unwrap();
 
@@ -1425,12 +1439,11 @@ fn d17_level1_cut_selection_reconstruction() {
             },
             cut_management: CutManagementConfig {
                 cut_selection: Some(CutSelectionStrategy::Level1 {
-                    threshold: 0,
                     check_frequency: 2,
+                    tie_tolerance: 1e-10,
                 }),
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: fx.risk_measures.clone(),
             },
@@ -1462,6 +1475,7 @@ fn d17_level1_cut_selection_reconstruction() {
         },
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
+        None,
     )
     .unwrap();
 
@@ -1483,11 +1497,10 @@ fn d17_level1_cut_selection_reconstruction() {
 
 /// D18: Lml1 cut selection produces convergent results with bounded pool.
 ///
-/// Verifies that enabling `CutSelectionStrategy::Lml1 { memory_window: 3,
-/// check_frequency: 2 }` does not break convergence. The mock solver produces
-/// zero-activity cuts (dual = 0), so `last_active_iter` never advances past
-/// `iteration_generated`. After `memory_window` iterations, all older cuts
-/// are deactivated by Lml1.
+/// Verifies that enabling `CutSelectionStrategy::Lml1 { check_frequency: 2,
+/// tie_tolerance: 1e-10 }` does not break convergence. With the stub kernel,
+/// no cuts are deactivated by Lml1 selection (ticket-002 will implement the
+/// value-based kernel).
 ///
 /// Checks:
 /// - Lower bound is monotone non-decreasing.
@@ -1515,12 +1528,11 @@ fn d18_lml1_cut_selection_convergence() {
         },
         cut_management: CutManagementConfig {
             cut_selection: Some(CutSelectionStrategy::Lml1 {
-                memory_window: 3,
                 check_frequency: 2,
+                tie_tolerance: 1e-10,
             }),
             budget: None,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
             warm_start_cuts: 0,
             risk_measures: fx.risk_measures.clone(),
         },
@@ -1573,6 +1585,7 @@ fn d18_lml1_cut_selection_convergence() {
         },
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
+        None,
     )
     .unwrap();
 
@@ -1779,7 +1792,6 @@ fn baked_backward_pass_smoke_test() {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: fx.risk_measures.clone(),
             },
@@ -1811,6 +1823,7 @@ fn baked_backward_pass_smoke_test() {
         },
         &StubComm,
         || Ok(ExpandingMockSolver::with_objectives(vec![50.0])),
+        None,
     )
     .expect("baked backward pass smoke: train must not error");
 

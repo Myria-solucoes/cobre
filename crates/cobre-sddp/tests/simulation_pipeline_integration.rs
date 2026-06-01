@@ -192,6 +192,9 @@ impl MockSolver {
 }
 
 impl SolverInterface for MockSolver {
+    type Profile = cobre_solver::HighsProfile;
+
+    fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
     fn solver_name_version(&self) -> String {
         "MockSolver 0.0.0".to_string()
     }
@@ -225,10 +228,14 @@ impl SolverInterface for MockSolver {
     fn name(&self) -> &'static str {
         "Mock"
     }
-    fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
-    fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
-    fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
-    fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
+
+    fn set_primal_feasibility_tolerance(&mut self, _tolerance: f64) {}
+
+    fn set_dual_feasibility_tolerance(&mut self, _tolerance: f64) {}
+
+    fn set_simplex_iteration_limit_profile(&mut self, _limit: u32) {}
+
+    fn set_ipm_iteration_limit_profile(&mut self, _limit: u32) {}
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -516,7 +523,6 @@ fn simulate_single_rank_4_scenarios_produces_4_results() {
     let config = SimulationConfig {
         n_scenarios: 4,
         io_channel_capacity: 16,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -630,7 +636,6 @@ fn simulate_infeasible_returns_lp_infeasible_error() {
     let config = SimulationConfig {
         n_scenarios: 4,
         io_channel_capacity: 16,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -735,7 +740,6 @@ fn simulate_infeasible_at_scenario2_stage3() {
     let config = SimulationConfig {
         n_scenarios: 4,
         io_channel_capacity: 16,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -837,7 +841,6 @@ fn simulate_channel_closed_returns_error() {
     let config = SimulationConfig {
         n_scenarios: 2,
         io_channel_capacity: 1,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -923,8 +926,8 @@ fn simulate_channel_closed_returns_error() {
 /// Acceptance criterion: `total_cost` in cost buffer equals sum of
 /// `(objective - primal[theta])` across all stages for each scenario.
 ///
-/// With objective=100.0 and theta=30.0: `stage_cost` = (100 - 30) * `COST_SCALE_FACTOR` = `70_000` per stage.
-/// For 3 stages: `total_cost` = 3 \* `70_000` = `210_000`.
+/// With objective=100.0 and theta=30.0: `stage_cost` = (100 - 30) * `COST_SCALE_FACTOR` = `70_000_000` per stage.
+/// For 3 stages: `total_cost` = 3 \* `70_000_000` = `210_000_000`.
 #[test]
 fn simulate_total_cost_equals_sum_of_stage_costs() {
     let n_stages = 3;
@@ -937,7 +940,6 @@ fn simulate_total_cost_equals_sum_of_stage_costs() {
     let config = SimulationConfig {
         n_scenarios: 2,
         io_channel_capacity: 16,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -946,10 +948,10 @@ fn simulate_total_cost_equals_sum_of_stage_costs() {
 
     let objective = 100.0_f64;
     let theta_val = 30.0_f64;
-    // stage_cost = (objective - theta) * COST_SCALE_FACTOR = 70 * 1000 = 70_000
-    let expected_stage_cost = (objective - theta_val) * 1000.0; // 70_000.0
+    // stage_cost = (objective - theta) * COST_SCALE_FACTOR = 70 * 1_000_000 = 70_000_000
+    let expected_stage_cost = (objective - theta_val) * 1_000_000.0; // 70_000_000.0
     #[allow(clippy::cast_precision_loss)]
-    let expected_total_cost = expected_stage_cost * n_stages as f64; // 210_000.0
+    let expected_total_cost = expected_stage_cost * n_stages as f64; // 210_000_000.0
 
     let solution = fixed_solution(objective, theta_val);
     let solver = MockSolver::always_ok(solution);
@@ -1045,7 +1047,6 @@ fn simulate_cost_buffer_scenario_ids_match_assigned_range() {
     let config = SimulationConfig {
         n_scenarios: 6,
         io_channel_capacity: 16,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -1148,7 +1149,6 @@ fn simulate_channel_receives_results_in_scenario_order() {
     let config = SimulationConfig {
         n_scenarios: 3,
         io_channel_capacity: 16,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -1245,7 +1245,6 @@ fn test_simulation_parallel_cost_determinism() {
     let config = SimulationConfig {
         n_scenarios,
         io_channel_capacity: 64,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -1451,7 +1450,6 @@ fn simulate_emits_progress_events() {
     let config = SimulationConfig {
         n_scenarios: 10,
         io_channel_capacity: 32,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -1575,7 +1573,6 @@ fn simulate_no_events_when_sender_is_none() {
     let config = SimulationConfig {
         n_scenarios: 4,
         io_channel_capacity: 16,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -1682,7 +1679,6 @@ fn simulate_progress_events_received_before_return() {
     let config = SimulationConfig {
         n_scenarios,
         io_channel_capacity: 32,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -1798,16 +1794,15 @@ fn simulate_progress_scenario_cost_equals_total_cost() {
     let config = SimulationConfig {
         n_scenarios,
         io_channel_capacity: 32,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
     };
     let initial_state = vec![50.0_f64];
 
-    // objective=100, theta=30 → stage_cost = (100-30)*COST_SCALE_FACTOR = 70_000.0 every scenario.
+    // objective=100, theta=30 → stage_cost = (100-30)*COST_SCALE_FACTOR = 70_000_000.0 every scenario.
     let solution = fixed_solution(100.0, 30.0);
-    let expected_stage_cost = 70_000.0_f64;
+    let expected_stage_cost = 70_000_000.0_f64;
 
     let solver = MockSolver::always_ok(solution);
     let comm = StubComm { rank: 0, size: 1 };
@@ -1919,7 +1914,6 @@ fn simulate_emits_simulation_finished_as_last_event() {
     let config = SimulationConfig {
         n_scenarios,
         io_channel_capacity: 32,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -2051,7 +2045,6 @@ fn simulate_progress_scenario_cost_is_finite() {
     let config = SimulationConfig {
         n_scenarios: 5,
         io_channel_capacity: 16,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -2168,7 +2161,6 @@ fn simulate_baked_path_issues_zero_add_rows() {
     let config = SimulationConfig {
         n_scenarios,
         io_channel_capacity: 16,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -2286,7 +2278,6 @@ fn simulate_fallback_path_issues_expected_add_rows() {
     let config = SimulationConfig {
         n_scenarios,
         io_channel_capacity: 16,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -2393,7 +2384,6 @@ fn simulate_baked_length_mismatch_returns_error() {
     let config = SimulationConfig {
         n_scenarios: 2,
         io_channel_capacity: 8,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -2556,7 +2546,6 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
     let config = SimulationConfig {
         n_scenarios,
         io_channel_capacity: 8,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -2653,24 +2642,38 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
         .as_ref()
         .expect("recorded_basis must be Some after a warm-start solve");
 
-    // Row count: base_row_count=2 + 3 active cut slots = 5.
+    // Row count: base_row_count=2 + active_count=3 = 5. Under the
+    // active-only bake model the LP carries one row per active cut only;
+    // inactive populated slots are not present in the baked template.
+    // updated after active-only bake landed
+    let active_count = fcf.pools[0].active_count();
     assert_eq!(
         recorded.row_status.len(),
-        2 + 3,
-        "reconstructed basis row_status must have length base_row_count(2) + cuts(3) = 5, \
-         got {}",
+        2 + active_count,
+        "reconstructed basis row_status must have length base_row_count(2) + \
+         active_count({active_count}) = {}, got {}",
+        2 + active_count,
         recorded.row_status.len()
     );
 
-    // The last 3 entries must match the stored cut statuses verbatim
-    // (all 3 slots were in the stored basis → preservation path).
-    let tail = &recorded.row_status[2..];
+    // The three slot identities recorded in the stored basis (10, 11, 12) are
+    // preserved verbatim at their respective LP row positions.  Under the
+    // active-only bake model the active cuts are iterated in slot order
+    // (10, 11, 12) so slot 10 lands at target position 0, i.e. LP row 2.
+    let preserved_offset = 2; // base rows + position of slot 10 in active-cuts order (position 0)
     assert_eq!(
-        tail,
-        &[CUT_STATUS_0, CUT_STATUS_1, CUT_STATUS_2],
-        "reconstructed basis tail must match stored cut statuses verbatim \
-         (preservation path): expected [{CUT_STATUS_0}, {CUT_STATUS_1}, {CUT_STATUS_2}], \
-         got {tail:?}"
+        recorded.row_status[preserved_offset], CUT_STATUS_0,
+        "slot 10 must preserve its stored cut status"
+    );
+    assert_eq!(
+        recorded.row_status[preserved_offset + 1],
+        CUT_STATUS_1,
+        "slot 11 must preserve its stored cut status"
+    );
+    assert_eq!(
+        recorded.row_status[preserved_offset + 2],
+        CUT_STATUS_2,
+        "slot 12 must preserve its stored cut status"
     );
 }
 
@@ -2692,7 +2695,6 @@ fn simulate_with_empty_stage_bases_cold_starts() {
     let config = SimulationConfig {
         n_scenarios,
         io_channel_capacity: 16,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,

@@ -285,6 +285,7 @@ pub(crate) struct StageLayout {
     /// (which mirrors `anticipated_state.start = N*(1+L)` numerically).
     /// Zero when `n_anticipated == 0` (empty row range).
     /// Row bounds are placeholder `0 == 0`; the RHS is patched during setup.
+    #[allow(dead_code)]
     pub(crate) row_anticipated_state_fixing_start: usize,
     /// Start of anticipated-fishing constraint rows (after operational violation rows).
     ///
@@ -741,12 +742,16 @@ impl StageLayout {
         let col_ncs_start = op_slack.operational_slack_end;
         let col_ncs_end = col_ncs_start + n_active_ncs * n_blks;
 
-        // Row offsets: state, water balance, load balance, FPHA, evap, operational, generic.
-        // `n_state` from the augmented indexer includes the anticipated-state block:
+        // Row offsets: z_inflow, water balance, load balance, FPHA, evap, operational, generic.
+        // z_inflow starts at row 0; state pinning is applied via column bounds.
+        // `n_state` from the augmented indexer is the column-side state dimension:
         // `N*(1+L) + n_anticipated*k_max`.
         let n_state = idx.n_state;
-        let n_dual_relevant = n_state;
-        let row_water_balance_start = n_dual_relevant + ctx.n_hydros;
+        // The dual-relevant structural prefix of view.dual is empty because state
+        // pinning uses column bounds. Cut-subgradient extraction reads
+        // view.reduced_costs; n_dual_relevant on the row side is unused by the cut path.
+        let n_dual_relevant = 0_usize;
+        let row_water_balance_start = ctx.n_hydros;
         let row_load_balance_start = row_water_balance_start + ctx.n_hydros;
         let row_fpha_start = row_load_balance_start + ctx.n_buses * n_blks;
         let n_fpha_rows: usize = fpha_planes_per_hydro.iter().map(|&p| p * n_blks).sum();
@@ -846,7 +851,9 @@ impl StageLayout {
             row_max_outflow_start,
             row_min_turbine_start,
             row_min_generation_start,
-            row_anticipated_state_fixing_start: idx.anticipated_state_fixing.start,
+            // Permanent sentinel: state pinning uses column bounds, not rows.
+            // This field is retained at 0 for API stability.
+            row_anticipated_state_fixing_start: 0,
             row_anticipated_fishing_start,
             n_anticipated_fishing_rows,
             row_anticipated_state_out_def_start,
@@ -1263,8 +1270,10 @@ mod tests {
         }
     }
 
-    /// `row_anticipated_state_fixing_start` and `col_anticipated_state_start`
-    /// have the same numeric value `N*(1+L)` (independent row/column spaces).
+    /// `row_anticipated_state_fixing_start` is always the sentinel value 0.
+    ///
+    /// State pinning uses column bounds; the field always equals 0 regardless of
+    /// `n_anticipated` or `k_max`. It is retained as a permanent sentinel for API stability.
     #[test]
     fn row_anticipated_state_fixing_start_equals_anticipated_state_column_start_numerically() {
         let n_anticipated = 2_usize;
@@ -1280,21 +1289,72 @@ mod tests {
         let stage = minimal_stage();
         let layout = StageLayout::new(&ctx, &stage, 0);
 
-        // Both start at N*(1+L) = 0 * (1+0) = 0 for zero hydros/lags.
+        // row_anticipated_state_fixing_start is a permanent sentinel: state pinning
+        // uses column bounds, so no state-fixing rows exist in the LP.
         assert_eq!(
-            layout.col_anticipated_state_start, layout.row_anticipated_state_fixing_start,
-            "col_anticipated_state_start ({}) must equal row_anticipated_state_fixing_start ({}) \
-             numerically (both = N*(1+L) = 0 when N=0)",
-            layout.col_anticipated_state_start, layout.row_anticipated_state_fixing_start,
+            layout.row_anticipated_state_fixing_start, 0,
+            "row_anticipated_state_fixing_start must be 0 (permanent sentinel)"
         );
-        // Both must be 0 for N=0.
+        // col_anticipated_state_start is unchanged: still N*(1+L) = 0 for N=0.
         assert_eq!(
             layout.col_anticipated_state_start, 0,
             "col_anticipated_state_start must be 0 for N=0"
         );
+
+        // num_rows in this fixture: n_state = N*(1+L) + A*K = 0 + 2*3 = 6
+        // (lifted into anticipated_state via the augmented indexer). The
+        // current row layout starts the first non-state block at row
+        // `ctx.n_hydros` (== 0 here). The structural invariant we assert
+        // is `row_water_balance_start == ctx.n_hydros` (no n_state offset;
+        // state pinning is via column bounds, not rows).
         assert_eq!(
-            layout.row_anticipated_state_fixing_start, 0,
-            "row_anticipated_state_fixing_start must be 0 for N=0"
+            layout.row_water_balance_start, ctx.n_hydros,
+            "row_water_balance_start must equal ctx.n_hydros (the n_state offset is gone)"
+        );
+    }
+
+    /// `num_rows` does not include state-fixing rows; the LP row layout starts
+    /// directly with `z_inflow_rows` at row 0.
+    ///
+    /// State pinning uses column bounds, so the `[0, n_state)` row prefix
+    /// from the pre-cutover layout is absent. `num_rows` equals the count of
+    /// structural rows only (`z_inflow`, water balance, load balance, FPHA,
+    /// evap, operational, fishing, `anticipated_state_out_def`, generic).
+    #[test]
+    fn num_rows_drops_by_n_state_with_anticipated_thermals() {
+        let n_anticipated = 2_usize;
+        let k_max = 3_usize;
+
+        let fixtures = ZeroEntityFixtures::new();
+        let ctx = fixtures.make_ctx(n_anticipated, k_max, vec![3, 2], vec![0, 1]);
+        let stage = minimal_stage();
+        let layout = StageLayout::new(&ctx, &stage, 0);
+
+        // n_state for this fixture: N*(1+L) + A*K = 0 + 2*3 = 6.
+        let n_state = ctx.n_hydros * (1 + ctx.max_par_order) + n_anticipated * k_max;
+        assert_eq!(n_state, 6);
+
+        // Post-ticket num_rows for this zero-hydro fixture: only the
+        // anticipated_fishing block contributes (2 active plants at stage 0).
+        // All other row blocks are 0 (no hydros, no buses, no FPHA, no evap).
+        let observed = layout.num_rows;
+        assert_eq!(
+            observed, 2,
+            "post-ticket num_rows equals anticipated_fishing_rows (2) for this fixture"
+        );
+
+        // Reference value: if state-fixing rows were present, num_rows would be observed + n_state.
+        let pre_ticket_expected = observed + n_state;
+        assert_eq!(
+            pre_ticket_expected, 8,
+            "pre-ticket reference value (observed + n_state) is 8 for this fixture"
+        );
+        // Structural invariant proving the reduction: row_water_balance_start
+        // equals ctx.n_hydros (no n_state offset). Pre-ticket it would have
+        // been n_state + ctx.n_hydros.
+        assert_eq!(
+            layout.row_water_balance_start, ctx.n_hydros,
+            "row_water_balance_start no longer includes the n_state offset"
         );
     }
 

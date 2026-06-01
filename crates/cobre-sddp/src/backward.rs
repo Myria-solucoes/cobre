@@ -24,15 +24,19 @@
 //! For a solve at stage `t + 1` with trial point state `x_hat`:
 //!
 //! ```text
-//! pi[i]  = dual[i] * row_scale[i]           for i in 0..n_state
-//! alpha  = Q - sum_i(pi[i] * x_hat[i])      (intercept)
+//! pi[i]  = reduced_cost[col_i] / col_scale[col_i]   for i in 0..n_state
+//! alpha  = Q - sum_i(pi[i] * x_hat[i])              (intercept)
 //! ```
 //!
-//! where `Q` is the LP objective and `dual[0..n_state]` are the duals of the
-//! fixing constraints (storage-fixing, lag-fixing, and anticipated-state-fixing rows).
-//! For all three categories the convention is `coefficients = dual` (raw `HiGHS` dual,
-//! no sign flip at extraction). Negation is applied later when building the
-//! LP cut row in `build_cut_row_batch_into` (forward.rs):
+//! where `Q` is the LP objective, `col_i = state_to_lp_incoming_column(i)` is the
+//! bound-pinned incoming-state column, and `reduced_cost[col_i]` is its `HiGHS`
+//! reduced cost (the dual of the `lb == ub` pin — equal to the legacy
+//! fixing-row dual by KKT stationarity). State fixing moved from equality rows to
+//! column bounds in the state-fixing cutover; the gradient is now a reduced cost,
+//! unscaled by `col_scale` (not `row_scale`). The convention is
+//! `coefficients = reduced_cost` (raw, no sign flip at extraction). Negation is
+//! applied later when building the LP cut row in `build_cut_row_batch_into`
+//! (forward.rs):
 //! `-coeff * x + theta >= intercept`.
 //! The intercept formula covers all `n_state` indices uniformly; no special handling
 //! for the anticipated-state subrange.
@@ -106,6 +110,7 @@
 
 #[cfg(test)]
 use cobre_comm::Communicator;
+use cobre_core::StageRowSelectionRecord;
 use cobre_solver::{RowBatch, SolutionView, SolverInterface, SolverStatistics};
 
 use crate::{
@@ -113,6 +118,7 @@ use crate::{
     context::{StageContext, TrainingContext},
     cut::pool::CutPool,
     forward::write_capture_metadata,
+    indexer::StageIndexer,
     noise::{NcsNoiseOffsets, transform_inflow_noise, transform_load_noise, transform_ncs_noise},
     risk_measure::RiskMeasure,
     solver_stats::SolverStatsDelta,
@@ -191,6 +197,16 @@ pub struct BackwardResult {
     /// Wall-clock time for per-stage cut synchronization (`allgatherv`)
     /// accumulated across all stages, in milliseconds.
     pub cut_sync_time_ms: u64,
+
+    /// Per-stage selection records collected when the in-backward selection
+    /// hook ran. Length is bounded by `num_stages - 1`; stages where the
+    /// hook did not run produce no entry. Sorted by stage index ascending.
+    ///
+    /// Populated only when `IN_BACKWARD_ENABLED` is true (set via
+    /// [`crate::set_inside_backward_enabled`]) AND a cut-selection strategy
+    /// is plumbed into the backward sweep AND the strategy's
+    /// `should_run(iteration)` gate fires. Otherwise this `Vec` is empty.
+    pub selection_records: Vec<StageRowSelectionRecord>,
 }
 
 /// Per-thread staging buffer for one aggregated cut produced at a single trial
@@ -245,8 +261,6 @@ pub(crate) struct SuccessorSpec<'a> {
     pub(crate) successor_active_slots: &'a [usize],
     /// Minimum dual multiplier for a cut to count as binding.
     pub(crate) cut_activity_tolerance: f64,
-    /// Activity-window size for the basis-reconstruction classifier (1..=31).
-    pub(crate) basis_activity_window: u32,
     /// Populated count of the successor's cut pool.
     pub(crate) successor_populated_count: usize,
     /// Cut pool at the successor stage for binding-activity tracking.
@@ -320,6 +334,9 @@ fn patch_opening_bounds<S: SolverInterface + Send>(
     // opening at a fixed trial point produced by the forward sampler. The
     // ring-buffer advance happens once in the forward pass; the backward
     // and simulation paths reuse those slot values without re-shifting.
+    //
+    ws.patch_buf
+        .fill_col_state_patches(training_ctx.indexer, x_hat, &ctx.templates[s].col_scale);
     ws.patch_buf.fill_forward_patches(
         training_ctx.indexer,
         x_hat,
@@ -340,6 +357,12 @@ fn patch_opening_bounds<S: SolverInterface + Send>(
         training_ctx.indexer.z_inflow_row_start,
         &ws.scratch.z_inflow_rhs_buf,
         &ctx.templates[s].row_scale,
+    );
+    let cp = ws.patch_buf.state_col_patch_count();
+    ws.solver.set_col_bounds(
+        &ws.patch_buf.col_indices[..cp],
+        &ws.patch_buf.col_lower[..cp],
+        &ws.patch_buf.col_upper[..cp],
     );
     let pc = ws.patch_buf.forward_patch_count();
     ws.solver.set_row_bounds(
@@ -390,34 +413,45 @@ fn resolve_backward_basis<'a>(
 ///
 /// # Dual-fill layout
 ///
-/// `state_duals`: unscaled duals for state-fixing rows `[0, n_state)`.
-/// Scaling: `dual_original[i] = row_scale[i] * dual_scaled[i]`; when
-/// `row_scale` is empty the raw duals are used directly.
+/// `state_duals`: unscaled reduced costs at the LP columns pinned by
+/// `fill_col_state_patches`, one entry per state-vector index.
+/// Scaling: `rc_original[j] = rc_scaled[j] / col_scale[col]` (the pin sets
+/// `v_scaled = v_orig / col_scale`, so the subgradient w.r.t. the original
+/// state divides by `col_scale`); when `col_scale` is empty the raw reduced
+/// costs are used directly.
 ///
 /// `cut_duals`: raw duals for cut rows `[template_num_rows, template_num_rows + num_cuts)`.
 /// These always have implicit `row_scale = 1.0`.
 fn extract_duals_from_view(
     view: &SolutionView<'_>,
     n_state: usize,
-    row_scale: &[f64],
+    indexer: &StageIndexer,
+    col_scale: &[f64],
     succ: &SuccessorSpec<'_>,
     state_duals: &mut Vec<f64>,
     cut_duals: &mut Vec<f64>,
 ) -> f64 {
     let objective = view.objective;
 
-    // Unscale state-fixing-row duals from scaled to original units.
-    // `state_duals` carries pre-warmed capacity; `clear` + `extend` reuses it.
+    // Unscale state-fixing-column reduced costs from scaled to original units.
+    // The incoming-state column is pinned in scaled space as `v_scaled =
+    // v_orig / col_scale[col]` (see `fill_col_state_patches` and
+    // `apply_col_scale`, which divides col bounds by `col_scale`). The reduced
+    // cost HiGHS reports is `rc_scaled = dQ/dv_scaled`; the cut subgradient we
+    // need is `dQ/dv_orig = rc_scaled * dv_scaled/dv_orig = rc_scaled /
+    // col_scale[col]`. Dividing (not multiplying) keeps parity with the legacy
+    // fixing-row dual, whose single-entry row carried `row_scale = 1/col_scale`.
+    // `state_duals` carries pre-warmed capacity; `clear` + `push` reuses it.
     state_duals.clear();
-    if row_scale.is_empty() {
-        state_duals.extend_from_slice(&view.dual[..n_state]);
-    } else {
-        state_duals.extend(
-            view.dual[..n_state]
-                .iter()
-                .zip(row_scale)
-                .map(|(&d, &rs)| d * rs),
-        );
+    for j in 0..n_state {
+        let col = indexer.state_to_lp_incoming_column(j);
+        let rc = view.reduced_costs[col];
+        let unscaled = if col_scale.is_empty() {
+            rc
+        } else {
+            rc / col_scale[col]
+        };
+        state_duals.push(unscaled);
     }
     debug_assert_eq!(
         state_duals.len(),
@@ -593,36 +627,22 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
         };
         let inputs = crate::stage_solve::StageInputs {
             stage_context: ctx,
-            indexer,
             pool: succ.successor_pool,
-            current_state: x_hat,
             stored_basis,
-            baked_template: succ.baked_template,
             stage_index: s,
             scenario_index: scenario,
             iteration: Some(iteration),
-            horizon_is_terminal: false,
-            terminal_has_boundary_cuts: false,
-            basis_activity_window: succ.basis_activity_window,
         };
 
-        let outcome =
-            crate::stage_solve::run_stage_solve(ws, crate::stage_solve::Phase::Backward, &inputs)?;
-
-        let crate::stage_solve::StageOutcome::Backward {
-            view,
-            recon_stats: _,
-        } = outcome
-        else {
-            unreachable!("run_stage_solve(Phase::Backward) returns Backward variant")
-        };
+        let view = crate::stage_solve::run_stage_solve(ws, &inputs)?;
 
         // Extract duals from view (which borrows ws for 'ws).
         // Statistics must be captured after view is dropped.
         let objective = extract_duals_from_view(
             &view,
             indexer.n_state,
-            &ctx.templates[s].row_scale,
+            indexer,
+            &ctx.templates[s].col_scale,
             succ,
             &mut state_duals,
             &mut cut_duals,
@@ -673,8 +693,6 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
         let count = ws.backward_accum.slot_increments[slot];
         if count > 0 {
             ws.backward_accum.metadata_sync_contribution[slot] += count;
-            // Set bit 0 to record iteration-level activity for the sliding window.
-            ws.backward_accum.metadata_sync_window_contribution[slot] |= 1u32;
         }
     }
     Ok(StagedCut {
@@ -698,9 +716,12 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
 /// feasible solution during the backward sweep. Returns
 /// `Err(SddpError::Solver(_))` for all other terminal LP solver failures.
 #[cfg(test)]
-fn run_backward_pass<S: SolverInterface + Send, C: Communicator>(
+fn run_backward_pass<S, C: Communicator>(
     inputs: &mut crate::backward_pass_state::BackwardPassInputs<'_, S, C>,
-) -> Result<BackwardResult, SddpError> {
+) -> Result<BackwardResult, SddpError>
+where
+    S: SolverInterface<Profile = cobre_solver::HighsProfile> + Send,
+{
     let n_workers_local = inputs.workspaces.len();
     let n_ranks = inputs.comm.size();
     let num_stages = inputs.training_ctx.horizon.num_stages();
@@ -873,6 +894,10 @@ mod tests {
     }
 
     impl SolverInterface for MockSolver {
+        type Profile = cobre_solver::HighsProfile;
+
+        fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
+
         fn solver_name_version(&self) -> String {
             "MockSolver 0.0.0".to_string()
         }
@@ -925,10 +950,14 @@ mod tests {
         fn name(&self) -> &'static str {
             "Mock"
         }
-        fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
-        fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
-        fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
-        fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
+
+        fn set_primal_feasibility_tolerance(&mut self, _tolerance: f64) {}
+
+        fn set_dual_feasibility_tolerance(&mut self, _tolerance: f64) {}
+
+        fn set_simplex_iteration_limit_profile(&mut self, _limit: u32) {}
+
+        fn set_ipm_iteration_limit_profile(&mut self, _limit: u32) {}
     }
 
     fn minimal_template_1_0() -> StageTemplate {
@@ -955,11 +984,17 @@ mod tests {
     }
 
     fn solution_1_0(objective: f64, dual_storage: f64) -> LpSolution {
+        // For StageIndexer::new(1, 0): storage_in.start = N*(2+L) = 1*(2+0) = 2.
+        // state_to_lp_incoming_column(0) = storage_in.start + 0 = 2.
+        // Cut subgradients are read from reduced_costs[storage_in_col], so
+        // reduced_costs[2] must hold the same value as the storage-fixing dual.
+        let mut reduced_costs = vec![0.0; 3];
+        reduced_costs[2] = dual_storage;
         LpSolution {
             objective,
             primal: vec![0.0, 0.0, 0.0],
             dual: vec![dual_storage],
-            reduced_costs: vec![0.0; 3],
+            reduced_costs,
             iterations: 0,
             solve_time_seconds: 0.0,
         }
@@ -1000,9 +1035,7 @@ mod tests {
                 downstream_weight_accum: 0.0,
                 downstream_completed_lags: Vec::new(),
                 downstream_n_completed: 0,
-                current_state_scratch: Vec::new(),
                 recon_slot_lookup: Vec::new(),
-                promotion_scratch: crate::basis_reconstruct::PromotionScratch::default(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
@@ -1031,10 +1064,16 @@ mod tests {
         basis: Basis,
     ) -> BasisStore {
         let mut store = BasisStore::new(num_scenarios, num_stages);
-        // test shim: zero metadata is acceptable for tests exercising the length path
+        // Set `base_row_count` to the full row_status length and leave
+        // `cut_row_slots` empty so the CapturedBasis invariant
+        // (`row_status.len() == base_row_count + cut_row_slots.len()`) holds
+        // by construction. These tests exercise the warm-start propagation
+        // path; the reconstruction copies the template rows verbatim and
+        // emits an empty cut block.
+        let base_row_count = basis.row_status.len();
         *store.get_mut(scenario, stage) = Some(crate::workspace::CapturedBasis {
             basis,
-            base_row_count: 0,
+            base_row_count,
             cut_row_slots: Vec::new(),
             state_at_capture: Vec::new(),
         });
@@ -1237,6 +1276,7 @@ mod tests {
             load_imbalance_ms: 0,
             scheduling_overhead_ms: 0,
             cut_sync_time_ms: 0,
+            selection_records: Vec::new(),
         };
         assert_eq!(r.cuts_generated, 6);
         assert_eq!(r.elapsed_ms, 42);
@@ -1247,6 +1287,7 @@ mod tests {
         assert_eq!(r.load_imbalance_ms, 0);
         assert_eq!(r.scheduling_overhead_ms, 0);
         assert_eq!(r.cut_sync_time_ms, 0);
+        assert!(r.selection_records.is_empty());
     }
 
     #[test]
@@ -1262,6 +1303,7 @@ mod tests {
             load_imbalance_ms: 0,
             scheduling_overhead_ms: 0,
             cut_sync_time_ms: 0,
+            selection_records: Vec::new(),
         };
         let c = r.clone();
         assert_eq!(c.cuts_generated, 3);
@@ -1347,7 +1389,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -1375,9 +1417,9 @@ mod tests {
             risk_measures: &risk_measures,
             exchange: &mut exchange,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -1441,7 +1483,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -1469,9 +1511,9 @@ mod tests {
             risk_measures: &risk_measures,
             exchange: &mut exchange,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -1535,7 +1577,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -1563,9 +1605,9 @@ mod tests {
             risk_measures: &risk_measures,
             exchange: &mut exchange,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -1625,7 +1667,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -1653,9 +1695,9 @@ mod tests {
             risk_measures: &risk_measures,
             exchange: &mut exchange,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -1715,7 +1757,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -1743,9 +1785,9 @@ mod tests {
             risk_measures: &risk_measures,
             exchange: &mut exchange,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -1803,7 +1845,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -1831,9 +1873,9 @@ mod tests {
             risk_measures: &risk_measures,
             exchange: &mut exchange,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
             event_sender: None,
         });
 
@@ -1936,7 +1978,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -1964,9 +2006,9 @@ mod tests {
             risk_measures: &risk_measures,
             exchange: &mut exchange,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -2047,7 +2089,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -2075,9 +2117,9 @@ mod tests {
             risk_measures: &risk_measures,
             exchange: &mut exchange,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -2163,7 +2205,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -2191,9 +2233,9 @@ mod tests {
             risk_measures: &risk_measures,
             exchange: &mut exchange,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -2265,7 +2307,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -2293,9 +2335,9 @@ mod tests {
             risk_measures: &risk_measures,
             exchange: &mut exchange,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -2377,7 +2419,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -2405,9 +2447,9 @@ mod tests {
             risk_measures: &risk_measures,
             exchange: &mut exchange,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -2484,7 +2526,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -2512,9 +2554,9 @@ mod tests {
             risk_measures: &risk_measures,
             exchange: &mut exchange,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -2584,7 +2626,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -2612,9 +2654,9 @@ mod tests {
             risk_measures: &risk_measures,
             exchange: &mut exchange,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -2692,7 +2734,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -2720,9 +2762,9 @@ mod tests {
             risk_measures: &risk_measures,
             exchange: &mut exchange,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
             event_sender: None,
         });
 
@@ -2809,9 +2851,7 @@ mod tests {
                 downstream_weight_accum: 0.0,
                 downstream_completed_lags: Vec::new(),
                 downstream_n_completed: 0,
-                current_state_scratch: Vec::new(),
                 recon_slot_lookup: Vec::new(),
-                promotion_scratch: crate::basis_reconstruct::PromotionScratch::default(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
@@ -2845,7 +2885,7 @@ mod tests {
             workspaces: &mut workspaces_1,
             basis_store: &mut basis_store_1,
             ctx: &ctx,
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf_1,
             cut_batches: &mut empty_cut_batches(n_stages),
             training_ctx: &TrainingContext {
@@ -2873,9 +2913,9 @@ mod tests {
             risk_measures: &risk_measures,
             exchange: &mut exchange,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -2912,9 +2952,7 @@ mod tests {
                     downstream_weight_accum: 0.0,
                     downstream_completed_lags: Vec::new(),
                     downstream_n_completed: 0,
-                    current_state_scratch: Vec::new(),
                     recon_slot_lookup: Vec::new(),
-                    promotion_scratch: crate::basis_reconstruct::PromotionScratch::default(),
                     trajectory_costs_buf: Vec::new(),
                     raw_noise_buf: Vec::new(),
                     perm_scratch: Vec::new(),
@@ -2932,7 +2970,7 @@ mod tests {
             workspaces: &mut workspaces_4,
             basis_store: &mut basis_store_4,
             ctx: &ctx,
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf_4,
             cut_batches: &mut empty_cut_batches(n_stages),
             training_ctx: &TrainingContext {
@@ -2960,9 +2998,9 @@ mod tests {
             risk_measures: &risk_measures,
             exchange: &mut exchange,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -3269,9 +3307,7 @@ mod tests {
                 downstream_weight_accum: 0.0,
                 downstream_completed_lags: Vec::new(),
                 downstream_n_completed: 0,
-                current_state_scratch: Vec::new(),
                 recon_slot_lookup: Vec::new(),
-                promotion_scratch: crate::basis_reconstruct::PromotionScratch::default(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
@@ -3313,7 +3349,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -3341,9 +3377,9 @@ mod tests {
             risk_measures: &risk_measures,
             exchange: &mut exchange,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -3441,9 +3477,7 @@ mod tests {
                 downstream_weight_accum: 0.0,
                 downstream_completed_lags: Vec::new(),
                 downstream_n_completed: 0,
-                current_state_scratch: Vec::new(),
                 recon_slot_lookup: Vec::new(),
-                promotion_scratch: crate::basis_reconstruct::PromotionScratch::default(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
@@ -3479,7 +3513,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -3507,18 +3541,18 @@ mod tests {
             risk_measures: &risk_measures,
             exchange: &mut exchange,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
 
-        // With n_load_buses=0, forward_patch_count = N*(2+L) + z_inflow = 1*(2+0)+1 = 3.
+        // With n_load_buses=0, forward_patch_count = N + z_inflow = 1 + 1 = 2.
         assert_eq!(
             workspaces[0].patch_buf.forward_patch_count(),
-            3,
-            "forward_patch_count must be N*(2+L)+N=3 when n_load_buses=0, got {}",
+            2,
+            "forward_patch_count must be N+z_inflow=2 when n_load_buses=0, got {}",
             workspaces[0].patch_buf.forward_patch_count()
         );
         // load_rhs_buf must remain empty.
@@ -3608,9 +3642,7 @@ mod tests {
                 downstream_weight_accum: 0.0,
                 downstream_completed_lags: Vec::new(),
                 downstream_n_completed: 0,
-                current_state_scratch: Vec::new(),
                 recon_slot_lookup: Vec::new(),
-                promotion_scratch: crate::basis_reconstruct::PromotionScratch::default(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
@@ -3650,7 +3682,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -3678,9 +3710,9 @@ mod tests {
             risk_measures: &risk_measures,
             exchange: &mut exchange,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -3768,7 +3800,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -3796,9 +3828,9 @@ mod tests {
             risk_measures: &risk_measures,
             exchange: &mut exchange,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -3895,7 +3927,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -3923,9 +3955,9 @@ mod tests {
             risk_measures: &risk_measures,
             exchange: &mut exchange,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -3958,372 +3990,9 @@ mod tests {
             );
         }
 
-        // active_window bit 0 must be set for binding slots.
-        // The BitwiseOr allreduce populates active_window |= 1 for any slot
-        // where at least one rank observed a binding event this iteration.
-        for slot in 3..6 {
-            assert_eq!(
-                fcf.pools[1].metadata[slot].active_window & 1,
-                1,
-                "slot {slot} active_window bit 0 should be set (cut was binding this iteration)"
-            );
-        }
-
-        // Non-binding slots (0..3 in pool[1]) should have active_window == 0.
-        for slot in 0..3 {
-            assert_eq!(
-                fcf.pools[1].metadata[slot].active_window, 0,
-                "slot {slot} active_window should be 0 (cut was not binding)"
-            );
-        }
-
         // Pool[2] (terminal successor) received no cuts and no binding
         // was checked against it — metadata should be at defaults.
         assert_eq!(fcf.pools[2].populated_count, 0);
-    }
-
-    // -----------------------------------------------------------------------
-    // active_window unit tests
-    // -----------------------------------------------------------------------
-
-    /// Pre-allocated metadata rows must have `active_window == 0` before any
-    /// `add_cut` call.
-    ///
-    /// `CutPool::new` zero-initialises all metadata slots so that unused slots
-    /// do not spuriously register as tight to the classifier. The transient
-    /// seed (`active_window: 1`) is applied exclusively inside `add_cut`; it
-    /// must not bleed into pre-allocated but un-populated slots.
-    #[test]
-    fn active_window_pre_allocation_is_zero() {
-        use crate::cut::CutPool;
-
-        let n_state = 1;
-        let capacity = 8;
-        let pool = CutPool::new(capacity, n_state, 3, 0);
-        // A new pool has no populated slots; verify the pre-allocated metadata
-        // rows all start with active_window == 0.
-        for m in &pool.metadata {
-            assert_eq!(
-                m.active_window, 0,
-                "newly allocated CutMetadata must have active_window == 0 before add_cut"
-            );
-        }
-    }
-
-    /// `add_cut` must seed `active_window = SEED_BIT` (transient) so the
-    /// activity-guided classifier treats the generating event as a bind
-    /// signal within the current iteration.
-    ///
-    /// A cut generated at `x̂_t` is tight at `x̂_t` by construction. Seeding
-    /// `SEED_BIT` (bit 31, outside `RECENT_WINDOW_BITS`) ensures the classifier
-    /// returns LOWER for that cut on its first LP encounter within the same
-    /// iteration. The seed is cleared at end-of-iter before the shift so it does
-    /// not carry into iter i+1's classifier decisions (transient semantics).
-    #[test]
-    fn add_cut_seeds_active_window_with_seed_bit() {
-        use crate::basis_reconstruct::{DEFAULT_RECENT_WINDOW_BITS, SEED_BIT};
-        use crate::cut::CutPool;
-        // CutPool::new(capacity=8, state_dim=1, forward_passes=3, warm_start=0).
-        // add_cut(iteration=1, fp=0) → slot = 0 + 1*3 + 0 = 3.
-        let mut pool = CutPool::new(8, 1, 3, 0);
-        pool.add_cut(
-            /*iteration=*/ 1,
-            /*forward_pass_index=*/ 0,
-            /*intercept=*/ 0.5,
-            /*coefficients=*/ &[1.0_f64],
-        );
-        // slot = warm_start_count(0) + iteration(1) * forward_passes(3) + fp(0) = 3.
-        assert_eq!(
-            pool.metadata[3].active_window, SEED_BIT,
-            "add_cut must seed active_window = SEED_BIT \
-             so the classifier treats the generating event as a bind signal."
-        );
-        // The classifier predicate is `(aw & (DEFAULT_RECENT_WINDOW_BITS | SEED_BIT)) != 0`;
-        // SEED_BIT alone (with bits 0..4 clear) must satisfy it.
-        assert_ne!(
-            pool.metadata[3].active_window & (DEFAULT_RECENT_WINDOW_BITS | SEED_BIT),
-            0,
-            "the seed must fire the classifier's new-cut LOWER branch"
-        );
-        // SEED_BIT must live outside DEFAULT_RECENT_WINDOW_BITS so it is not counted by
-        // the Scheme 1 popcount sort key.
-        assert_eq!(
-            SEED_BIT & DEFAULT_RECENT_WINDOW_BITS,
-            0,
-            "SEED_BIT must not overlap DEFAULT_RECENT_WINDOW_BITS"
-        );
-    }
-
-    /// The G1 seed must be transient: after the end-of-iter cleanup
-    /// (`(aw & !SEED_BIT) << 1`), the seed must be gone and genuine binding
-    /// observations (bit 0) must survive as bit 1.
-    #[test]
-    fn seed_bit_cleared_by_end_of_iter_shift() {
-        use crate::basis_reconstruct::{DEFAULT_RECENT_WINDOW_BITS, SEED_BIT};
-
-        // Scenario A: freshly seeded cut with no binding observation.
-        let mut aw: u32 = SEED_BIT;
-        aw = (aw & !SEED_BIT) << 1;
-        assert_eq!(
-            aw, 0,
-            "pure seed with no binding observation must shift to 0"
-        );
-
-        // Scenario B: seeded cut that was also observed binding this iter.
-        let mut aw: u32 = SEED_BIT | 0b1;
-        aw = (aw & !SEED_BIT) << 1;
-        assert_eq!(
-            aw, 0b10,
-            "observed-binding bit 0 must survive and land at bit 1; \
-             seed bit must be cleared"
-        );
-        assert_ne!(
-            aw & DEFAULT_RECENT_WINDOW_BITS,
-            0,
-            "surviving bit 1 still fires the classifier in iter i+1 (real activity)"
-        );
-    }
-
-    /// After a full backward pass where cuts are non-binding, `active_window` stays 0.
-    /// After the end-of-iteration shift (`<<= 1`), bit 0 remains 0 (shift of 0 is 0).
-    #[test]
-    fn active_window_shift_clears_bit_zero() {
-        // Bit 0 set → after shift, bit 0 is 0 and bit 1 is 1.
-        let mut window: u32 = 1; // bit 0 set
-        window <<= 1;
-        assert_eq!(window & 1, 0, "shift must clear bit 0");
-        assert_eq!(window & 2, 2, "shift must move bit 0 to bit 1");
-
-        // After 32 shifts, a u32 with bit 0 set overflows to 0 (shift by width).
-        let mut w: u32 = 0xFFFF_FFFF;
-        for _ in 0..32 {
-            w <<= 1;
-        }
-        assert_eq!(w, 0, "32 left-shifts of u32 must overflow to 0");
-
-        // All-zeros stays zero.
-        let mut w2: u32 = 0;
-        w2 <<= 1;
-        assert_eq!(w2, 0, "shift of 0 must remain 0");
-    }
-
-    /// The `allreduce(BitwiseOr)` via `LocalBackend` must propagate bit 0 from
-    /// a worker's `metadata_sync_window_contribution` into `active_window` for
-    /// binding slots, and leave non-binding slots at 0.
-    #[test]
-    #[allow(clippy::too_many_lines)]
-    fn active_window_or_reduction_round_trip_local() {
-        use cobre_comm::LocalBackend;
-
-        // 3-stage system; 1 opening; 3 trial points.
-        // The backward loop visits t=1 (cuts into pool[1]) then t=0 (cuts into
-        // pool[0], binding checked against pool[1]). Mock solver returns positive
-        // duals → cuts in pool[1] appear binding at t=0. active_window bit 0
-        // must be set after the OR reduction.
-        let n_stages = 3_usize;
-        let n_openings = 1_usize;
-        let stochastic = make_stochastic_context(n_stages, n_openings);
-        let indexer = StageIndexer::new(1, 0);
-        let templates = vec![minimal_template_1_0(); n_stages];
-        let base_rows = vec![1_usize; n_stages];
-        let n_state = indexer.n_state;
-        let forward_passes = 1_u32;
-        let mut fcf =
-            FutureCostFunction::new(n_stages, n_state, forward_passes, 20, &vec![0; n_stages]);
-        let mut exchange = exchange_with_states(n_state, vec![vec![10.0], vec![20.0], vec![30.0]]);
-        let horizon = HorizonMode::Finite {
-            num_stages: n_stages,
-        };
-        let risk_measures = vec![RiskMeasure::Expectation; n_stages];
-        // Solver returns positive duals → cuts appear binding.
-        let solution = solution_1_0(100.0, -5.0);
-        let local_count = exchange.local_count();
-        let solver = MockSolver::always_ok_with_binding_cuts(solution);
-        let comm = LocalBackend;
-        let mut workspaces = single_workspace(solver, n_state);
-        let mut basis_store = empty_basis_store(local_count, n_stages);
-        // max_cuts_per_rank must match exchange.local_count(), not forward_passes,
-        // because the exchange has 3 trial points but forward_passes=1.
-        let mut csb = CutSyncBuffers::new(n_state, local_count, 1);
-
-        let _ = run_backward_pass(&mut crate::backward_pass_state::BackwardPassInputs {
-            workspaces: &mut workspaces,
-            basis_store: &mut basis_store,
-            ctx: &StageContext {
-                templates: &templates,
-                base_rows: &base_rows,
-                noise_scale: &[],
-                n_hydros: 0,
-                n_load_buses: 0,
-                load_balance_row_starts: &[],
-                load_bus_indices: &[],
-                block_counts_per_stage: &[],
-                ncs_max_gen: &[],
-                ncs_allow_curtailment: &[],
-                discount_factors: &[],
-                cumulative_discount_factors: &[],
-                stage_lag_transitions: &[],
-                noise_group_ids: &[],
-                downstream_par_order: 0,
-            },
-            baked: &templates,
-            fcf: &mut fcf,
-            cut_batches: &mut empty_cut_batches(templates.len()),
-            training_ctx: &TrainingContext {
-                horizon: &horizon,
-                indexer: &indexer,
-                inflow_method: &InflowNonNegativityMethod::None,
-                stochastic: &stochastic,
-                initial_state: &[],
-                inflow_scheme: SamplingScheme::InSample,
-                load_scheme: SamplingScheme::InSample,
-                ncs_scheme: SamplingScheme::InSample,
-                stages: &[],
-                historical_library: None,
-                external_inflow_library: None,
-                external_load_library: None,
-                external_ncs_library: None,
-                recent_accum_seed: &[],
-                recent_weight_seed: 0.0,
-            },
-            comm: &comm,
-            records: &[],
-            iteration: 1,
-            local_work: local_count,
-            fwd_offset: 0,
-            risk_measures: &risk_measures,
-            exchange: &mut exchange,
-            cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
-            cut_sync_bufs: &mut csb,
-            visited_archive: None,
-            event_sender: None,
-        })
-        .unwrap();
-
-        // The cuts in pool[1] were generated at t=1, then evaluated as binding
-        // at t=0. Bit 0 of active_window must be set for every ACTIVE slot.
-        // This exercises the full OR reduction path: worker contribution →
-        // spec.metadata_sync_window_buf → allreduce(BitwiseOr) → active_window.
-        //
-        // Slot 0 is the warm-start sentinel (never populated); active cuts land
-        // at slots 1..4 (slot = 0 + iter*forward_passes + fpi = 1 + fpi).
-        let active_slots: Vec<usize> = fcf.pools[1]
-            .active_cuts()
-            .map(|(slot, _, _)| slot)
-            .collect();
-        assert!(
-            !active_slots.is_empty(),
-            "pool[1] must have at least one active cut"
-        );
-        for slot in active_slots {
-            let window = fcf.pools[1].metadata[slot].active_window;
-            assert_eq!(
-                window & 1,
-                1,
-                "slot {slot} active_window bit 0 must be set after a binding backward pass \
-                 (got {window:#010x})"
-            );
-        }
-    }
-
-    /// After `run_backward_pass` returns, all per-worker
-    /// `metadata_sync_window_contribution` buffers must be cleared to 0.
-    /// This guarantees the next iteration starts with a clean accumulator.
-    #[test]
-    fn active_window_cleared_at_iteration_start() {
-        use cobre_comm::LocalBackend;
-
-        // 3-stage system so the backward loop processes multiple stages and
-        // the window contribution buffers actually get populated.
-        let n_stages = 3_usize;
-        let n_openings = 1_usize;
-        let stochastic = make_stochastic_context(n_stages, n_openings);
-        let indexer = StageIndexer::new(1, 0);
-        let templates = vec![minimal_template_1_0(); n_stages];
-        let base_rows = vec![1_usize; n_stages];
-        let n_state = indexer.n_state;
-        let forward_passes = 1_u32;
-        let mut fcf =
-            FutureCostFunction::new(n_stages, n_state, forward_passes, 20, &vec![0; n_stages]);
-        let mut exchange = exchange_with_states(n_state, vec![vec![10.0], vec![20.0], vec![30.0]]);
-        let horizon = HorizonMode::Finite {
-            num_stages: n_stages,
-        };
-        let risk_measures = vec![RiskMeasure::Expectation; n_stages];
-        let solution = solution_1_0(100.0, -5.0);
-        let local_count = exchange.local_count();
-        let solver = MockSolver::always_ok_with_binding_cuts(solution);
-        let comm = LocalBackend;
-        let mut workspaces = single_workspace(solver, n_state);
-        let mut basis_store = empty_basis_store(local_count, n_stages);
-        let mut csb = CutSyncBuffers::new(n_state, local_count, 1);
-
-        let _ = run_backward_pass(&mut crate::backward_pass_state::BackwardPassInputs {
-            workspaces: &mut workspaces,
-            basis_store: &mut basis_store,
-            ctx: &StageContext {
-                templates: &templates,
-                base_rows: &base_rows,
-                noise_scale: &[],
-                n_hydros: 0,
-                n_load_buses: 0,
-                load_balance_row_starts: &[],
-                load_bus_indices: &[],
-                block_counts_per_stage: &[],
-                ncs_max_gen: &[],
-                ncs_allow_curtailment: &[],
-                discount_factors: &[],
-                cumulative_discount_factors: &[],
-                stage_lag_transitions: &[],
-                noise_group_ids: &[],
-                downstream_par_order: 0,
-            },
-            baked: &templates,
-            fcf: &mut fcf,
-            cut_batches: &mut empty_cut_batches(templates.len()),
-            training_ctx: &TrainingContext {
-                horizon: &horizon,
-                indexer: &indexer,
-                inflow_method: &InflowNonNegativityMethod::None,
-                stochastic: &stochastic,
-                initial_state: &[],
-                inflow_scheme: SamplingScheme::InSample,
-                load_scheme: SamplingScheme::InSample,
-                ncs_scheme: SamplingScheme::InSample,
-                stages: &[],
-                historical_library: None,
-                external_inflow_library: None,
-                external_load_library: None,
-                external_ncs_library: None,
-                recent_accum_seed: &[],
-                recent_weight_seed: 0.0,
-            },
-            comm: &comm,
-            records: &[],
-            iteration: 1,
-            local_work: local_count,
-            fwd_offset: 0,
-            risk_measures: &risk_measures,
-            exchange: &mut exchange,
-            cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
-            cut_sync_bufs: &mut csb,
-            visited_archive: None,
-            event_sender: None,
-        })
-        .unwrap();
-
-        // After run_backward_pass returns, all per-worker window contribution
-        // buffers must be zeroed. This ensures the next iteration begins clean.
-        for ws in &workspaces {
-            for &v in &ws.backward_accum.metadata_sync_window_contribution {
-                assert_eq!(
-                    v, 0,
-                    "metadata_sync_window_contribution must be cleared after backward pass"
-                );
-            }
-        }
     }
 
     /// Build N identical `SolverWorkspace<MockSolver>` instances and run a
@@ -4401,9 +4070,7 @@ mod tests {
                     downstream_weight_accum: 0.0,
                     downstream_completed_lags: Vec::new(),
                     downstream_n_completed: 0,
-                    current_state_scratch: Vec::new(),
                     recon_slot_lookup: Vec::new(),
-                    promotion_scratch: crate::basis_reconstruct::PromotionScratch::default(),
                     trajectory_costs_buf: Vec::new(),
                     raw_noise_buf: Vec::new(),
                     perm_scratch: Vec::new(),
@@ -4440,7 +4107,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -4468,9 +4135,9 @@ mod tests {
             risk_measures: &risk_measures,
             exchange: &mut exchange,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -4765,9 +4432,7 @@ mod tests {
                     downstream_weight_accum: 0.0,
                     downstream_completed_lags: Vec::new(),
                     downstream_n_completed: 0,
-                    current_state_scratch: Vec::new(),
                     recon_slot_lookup: Vec::new(),
-                    promotion_scratch: crate::basis_reconstruct::PromotionScratch::default(),
                     trajectory_costs_buf: Vec::new(),
                     raw_noise_buf: Vec::new(),
                     perm_scratch: Vec::new(),
@@ -4805,7 +4470,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -4833,9 +4498,9 @@ mod tests {
             risk_measures: &risk_measures,
             exchange: &mut exchange,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
             event_sender: None,
         })
         .expect("single-rank 2-worker backward must not error");
@@ -4990,9 +4655,7 @@ mod tests {
                     downstream_weight_accum: 0.0,
                     downstream_completed_lags: Vec::new(),
                     downstream_n_completed: 0,
-                    current_state_scratch: Vec::new(),
                     recon_slot_lookup: Vec::new(),
-                    promotion_scratch: crate::basis_reconstruct::PromotionScratch::default(),
                     trajectory_costs_buf: Vec::new(),
                     raw_noise_buf: Vec::new(),
                     perm_scratch: Vec::new(),
@@ -5030,7 +4693,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(templates.len()),
             training_ctx: &TrainingContext {
@@ -5058,9 +4721,9 @@ mod tests {
             risk_measures: &risk_measures,
             exchange: &mut exchange,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
             event_sender: None,
         })
         .expect("dual-rank stub backward must not error");
@@ -5198,7 +4861,6 @@ mod tests {
             baked_template: &baked_template,
             successor_active_slots: &successor_active_slots,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             successor_populated_count: fcf.pools[1].populated_count,
             successor_pool: &fcf.pools[1],
         };
@@ -5324,10 +4986,13 @@ mod tests {
 
         use crate::workspace::{BasisStore, CapturedBasis};
 
-        // Pre-populate slot [0, 1] with a sentinel basis.
+        // Pre-populate slot [0, 1] with a sentinel basis. `state_at_capture =
+        // [42.0]` is the sentinel that the reuse-path overwrite must
+        // replace. The remaining fields satisfy the `CapturedBasis`
+        // invariant `row_status.len() == base_row_count + cut_row_slots.len()`.
         let pre_existing = CapturedBasis {
             basis: Basis::new(2, 2),
-            base_row_count: 99,
+            base_row_count: 2,
             cut_row_slots: Vec::new(),
             state_at_capture: vec![42.0],
         };
@@ -5336,8 +5001,8 @@ mod tests {
 
         // Verify sentinel is in place before the call.
         assert_eq!(
-            basis_store.get(0, 1).unwrap().base_row_count,
-            99,
+            basis_store.get(0, 1).unwrap().state_at_capture,
+            vec![42.0_f64],
             "sentinel must be in place before the infeasible solve"
         );
 
@@ -5424,9 +5089,7 @@ mod tests {
                     downstream_weight_accum: 0.0,
                     downstream_completed_lags: Vec::new(),
                     downstream_n_completed: 0,
-                    current_state_scratch: Vec::new(),
                     recon_slot_lookup: Vec::new(),
-                    promotion_scratch: crate::basis_reconstruct::PromotionScratch::default(),
                     trajectory_costs_buf: Vec::new(),
                     raw_noise_buf: Vec::new(),
                     perm_scratch: Vec::new(),
@@ -5463,7 +5126,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(n_stages),
             training_ctx: &TrainingContext {
@@ -5491,9 +5154,9 @@ mod tests {
             risk_measures: &risk_measures,
             exchange: &mut exchange,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
             event_sender: None,
         });
 
@@ -5621,7 +5284,7 @@ mod tests {
                 noise_group_ids: &[],
                 downstream_par_order: 0,
             },
-            baked: &templates,
+            baked: &mut templates.clone(),
             fcf: &mut fcf,
             cut_batches: &mut empty_cut_batches(n_stages),
             training_ctx: &TrainingContext {
@@ -5649,9 +5312,9 @@ mod tests {
             risk_measures: &risk_measures,
             exchange: &mut exchange,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
+            cut_selection: None,
             event_sender: None,
         });
 

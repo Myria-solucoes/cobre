@@ -259,25 +259,6 @@ pub struct HydroEstimationEntry {
     pub contribution_reductions: Vec<ContributionReduction>,
 }
 
-/// Diagnostic record for an initial lag / user stats scale mismatch.
-///
-/// Populated by `run_partial_estimation` when a hydro's lag-1 past inflow
-/// value is closer (in absolute distance) to the history-estimated mean than
-/// to the user-provided seasonal mean at the first study stage (`stage_id == 0`).
-/// This can indicate that `initial_conditions.json` was calibrated to historical
-/// scale rather than to the user-provided stats scale.
-#[derive(Debug, Clone)]
-pub struct LagScaleWarning {
-    /// Hydro plant identifier.
-    pub hydro_id: EntityId,
-    /// Lag-1 past inflow value (m³/s) from `initial_conditions.json`.
-    pub lag_value: f64,
-    /// User-provided seasonal mean at stage 0 (m³/s).
-    pub user_mean: f64,
-    /// History-estimated seasonal mean at stage 0 (m³/s).
-    pub estimated_mean: f64,
-}
-
 /// Computation-side summary of the AR estimation pipeline.
 ///
 /// Contains one [`HydroEstimationEntry`] per hydro plant that was fitted,
@@ -293,10 +274,6 @@ pub struct EstimationReport {
     /// coefficients, resulting in white-noise fallback (empty AR, ratio=1.0).
     /// Only populated by `run_partial_estimation`; empty for other paths.
     pub white_noise_fallbacks: Vec<EntityId>,
-    /// Hydros whose lag-1 past inflow value is closer to the history-estimated
-    /// mean than to the user-provided mean at stage 0. Advisory only; never
-    /// blocks execution. Only populated by `run_partial_estimation`.
-    pub lag_scale_warnings: Vec<LagScaleWarning>,
     /// Warnings for hydros where consecutive-season std ratios diverge
     /// significantly between user-provided and history-estimated profiles.
     /// Only populated by `run_partial_estimation`; empty for other paths.
@@ -596,7 +573,7 @@ fn run_partial_estimation(
     )?;
 
     // ── Steps 5b-5d: coverage validation and advisory warnings ───────────────
-    let (white_noise_fallbacks, lag_scale_warnings, std_ratio_warnings) =
+    let (white_noise_fallbacks, std_ratio_warnings) =
         validate_partial_estimation_coverage(&system, &fitting_stats, stages)?;
 
     // ── Step 6: estimate or preserve correlation ─────────────────────────────
@@ -622,7 +599,6 @@ fn run_partial_estimation(
     let inflow_models = assemble_inflow_models(user_stats_rows, coeff_rows, annual_rows)?;
 
     estimation_report.white_noise_fallbacks = white_noise_fallbacks;
-    estimation_report.lag_scale_warnings = lag_scale_warnings;
     estimation_report.std_ratio_warnings = std_ratio_warnings;
 
     Ok((
@@ -654,12 +630,12 @@ fn load_and_aggregate_observations(
 }
 
 /// Return type of [`validate_partial_estimation_coverage`]:
-/// `(white_noise_fallbacks, lag_scale_warnings, std_ratio_warnings)`.
-type CoverageCheckResult = (Vec<EntityId>, Vec<LagScaleWarning>, Vec<StdRatioDivergence>);
+/// `(white_noise_fallbacks, std_ratio_warnings)`.
+type CoverageCheckResult = (Vec<EntityId>, Vec<StdRatioDivergence>);
 
 /// Validate bidirectional coverage and emit advisory warnings (steps 5b–5d).
 ///
-/// Returns `(white_noise_fallbacks, lag_scale_warnings, std_ratio_warnings)`.
+/// Returns `(white_noise_fallbacks, std_ratio_warnings)`.
 /// Errors only on hard coverage failures (estimated hydro missing user stats).
 fn validate_partial_estimation_coverage(
     system: &System,
@@ -698,9 +674,6 @@ fn validate_partial_estimation_coverage(
         .collect();
     white_noise_fallbacks.sort();
 
-    // Step 5c: initial lag / user stats scale mismatch check (advisory only).
-    let lag_scale_warnings = check_lag_scale_warnings(system, fitting_stats);
-
     // Step 5d: cross-season std ratio divergence check (advisory only).
     let std_ratio_warnings = check_std_ratio_divergence(system, fitting_stats, stages);
     for w in &std_ratio_warnings {
@@ -716,65 +689,7 @@ fn validate_partial_estimation_coverage(
         );
     }
 
-    Ok((
-        white_noise_fallbacks,
-        lag_scale_warnings,
-        std_ratio_warnings,
-    ))
-}
-
-/// Check whether each hydro's lag-1 initial condition is closer to the
-/// history-estimated mean than the user-provided mean (step 5c, advisory).
-fn check_lag_scale_warnings(
-    system: &System,
-    fitting_stats: &[SeasonalStats],
-) -> Vec<LagScaleWarning> {
-    let estimated_mean_at_stage0: BTreeMap<EntityId, f64> = fitting_stats
-        .iter()
-        .filter(|s| s.stage_id == 0)
-        .map(|s| (s.entity_id, s.mean))
-        .collect();
-    let user_mean_at_stage0: BTreeMap<EntityId, f64> = system
-        .inflow_models()
-        .iter()
-        .filter(|m| m.stage_id == 0)
-        .map(|m| (m.hydro_id, m.mean_m3s))
-        .collect();
-
-    let mut sorted_past_inflows: Vec<&cobre_core::HydroPastInflows> =
-        system.initial_conditions().past_inflows.iter().collect();
-    sorted_past_inflows.sort_by_key(|p| p.hydro_id);
-
-    let mut warnings = Vec::new();
-    for past in sorted_past_inflows {
-        let Some(&lag_value) = past.values_m3s.first() else {
-            continue;
-        };
-        let Some(&estimated_mean) = estimated_mean_at_stage0.get(&past.hydro_id) else {
-            continue;
-        };
-        let Some(&user_mean) = user_mean_at_stage0.get(&past.hydro_id) else {
-            continue;
-        };
-        if (lag_value - estimated_mean).abs() < (lag_value - user_mean).abs() {
-            tracing::warn!(
-                "hydro {} initial lag ({:.1}) is closer to estimated mean \
-                 ({:.1}) than user mean ({:.1}); initial conditions may be \
-                 at historical scale",
-                past.hydro_id.0,
-                lag_value,
-                estimated_mean,
-                user_mean
-            );
-            warnings.push(LagScaleWarning {
-                hydro_id: past.hydro_id,
-                lag_value,
-                user_mean,
-                estimated_mean,
-            });
-        }
-    }
-    warnings
+    Ok((white_noise_fallbacks, std_ratio_warnings))
 }
 
 /// Inner function that runs the P7 (`UserArHistoryStats`) estimation pipeline.
@@ -867,7 +782,6 @@ fn run_user_ar_estimation(
         entries: BTreeMap::new(),
         method: "user_provided".to_string(),
         white_noise_fallbacks: Vec::new(),
-        lag_scale_warnings: Vec::new(),
         std_ratio_warnings: Vec::new(),
     };
 
@@ -1169,7 +1083,6 @@ fn estimate_ar_with_pacf(
             entries: BTreeMap::new(),
             method: "PACF".to_string(),
             white_noise_fallbacks: Vec::new(),
-            lag_scale_warnings: Vec::new(),
             std_ratio_warnings: Vec::new(),
         };
         return Ok((estimates, report));
@@ -2309,12 +2222,12 @@ fn apply_contribution_validation(
                 // Recompute residual_std_ratio from stored sigma2 if available.
                 if reduced_order == 0 {
                     estimates[idx].residual_std_ratio = 1.0;
-                } else if let Some(sigma2_vec) = sigma2_map.get(&(hydro_id, season_id)) {
-                    if reduced_order <= sigma2_vec.len() {
-                        let sigma2 = sigma2_vec[reduced_order - 1];
-                        estimates[idx].residual_std_ratio =
-                            if sigma2 <= 0.0 { 1.0 } else { sigma2.sqrt() };
-                    }
+                } else if let Some(sigma2_vec) = sigma2_map.get(&(hydro_id, season_id))
+                    && reduced_order <= sigma2_vec.len()
+                {
+                    let sigma2 = sigma2_vec[reduced_order - 1];
+                    estimates[idx].residual_std_ratio =
+                        if sigma2 <= 0.0 { 1.0 } else { sigma2.sqrt() };
                 }
 
                 // Update the shared coefficient array.
@@ -2390,7 +2303,6 @@ pub(crate) fn build_estimation_report(
         entries,
         method: method.to_string(),
         white_noise_fallbacks: Vec::new(),
-        lag_scale_warnings: Vec::new(),
         std_ratio_warnings: Vec::new(),
     }
 }
@@ -2426,18 +2338,18 @@ fn seasonal_stats_to_rows(
 
     let mut rows = Vec::with_capacity(stats.len() * 10);
     for s in stats {
-        if let Some(&season_id) = stage_to_season.get(&s.stage_id) {
-            if let Some(stage_ids) = season_to_stages.get(&season_id) {
-                for &stage_id in stage_ids {
-                    rows.push(InflowSeasonalStatsRow {
-                        hydro_id: s.entity_id,
-                        stage_id,
-                        mean_m3s: s.mean,
-                        std_m3s: s.std,
-                    });
-                }
-                continue;
+        if let Some(&season_id) = stage_to_season.get(&s.stage_id)
+            && let Some(stage_ids) = season_to_stages.get(&season_id)
+        {
+            for &stage_id in stage_ids {
+                rows.push(InflowSeasonalStatsRow {
+                    hydro_id: s.entity_id,
+                    stage_id,
+                    mean_m3s: s.mean,
+                    std_m3s: s.std,
+                });
             }
+            continue;
         }
         // Fallback: emit just the original stage_id.
         rows.push(InflowSeasonalStatsRow {
@@ -3206,252 +3118,6 @@ mod tests {
         assert!(
             report.entries.contains_key(&EntityId(1)),
             "report must contain an entry for hydro_id=1"
-        );
-    }
-
-    // ── LagScaleWarning unit tests ────────────────────────────────────────────
-
-    /// Helper: build a minimal fitting_stats and user InflowModel pair for a
-    /// single hydro at stage_id == 0, then run the warning check inline.
-    ///
-    /// Returns the warnings collected. Extracted to avoid code duplication
-    /// across the three lag-scale warning tests.
-    #[allow(clippy::too_many_lines, clippy::similar_names)]
-    fn collect_lag_scale_warnings(
-        hydro_id: EntityId,
-        lag_value: f64,
-        user_mean: f64,
-        estimated_mean: f64,
-        include_past_inflows: bool,
-    ) -> Vec<LagScaleWarning> {
-        use cobre_core::scenario::InflowModel;
-        use cobre_core::{HydroPastInflows, InitialConditions};
-
-        // Build fitting_stats with estimated mean at stage_id == 0.
-        let fitting_stats = vec![SeasonalStats {
-            entity_id: hydro_id,
-            stage_id: 0,
-            mean: estimated_mean,
-            std: 50.0,
-        }];
-
-        // Build system with a user InflowModel at stage_id == 0.
-        let user_model = InflowModel {
-            hydro_id,
-            stage_id: 0,
-            mean_m3s: user_mean,
-            std_m3s: 50.0,
-            ar_coefficients: vec![],
-            residual_std_ratio: 1.0,
-            annual: None,
-        };
-        let past_inflows = if include_past_inflows {
-            vec![HydroPastInflows {
-                hydro_id,
-                values_m3s: vec![lag_value],
-                season_ids: None,
-            }]
-        } else {
-            vec![]
-        };
-        let ic = InitialConditions {
-            storage: vec![],
-            filling_storage: vec![],
-            past_inflows,
-            past_anticipated_commitments: vec![],
-            recent_observations: vec![],
-        };
-        let system = SystemBuilder::new()
-            .inflow_models(vec![user_model])
-            .initial_conditions(ic)
-            .build()
-            .expect("valid system");
-
-        // Replicate the check logic from run_partial_estimation step 5c.
-        let estimated_mean_at_stage0: BTreeMap<EntityId, f64> = fitting_stats
-            .iter()
-            .filter(|s| s.stage_id == 0)
-            .map(|s| (s.entity_id, s.mean))
-            .collect();
-        let user_mean_at_stage0: BTreeMap<EntityId, f64> = system
-            .inflow_models()
-            .iter()
-            .filter(|m| m.stage_id == 0)
-            .map(|m| (m.hydro_id, m.mean_m3s))
-            .collect();
-        let mut sorted_past_inflows: Vec<&cobre_core::HydroPastInflows> =
-            system.initial_conditions().past_inflows.iter().collect();
-        sorted_past_inflows.sort_by_key(|p| p.hydro_id);
-
-        let mut warnings: Vec<LagScaleWarning> = Vec::new();
-        for past in sorted_past_inflows {
-            let Some(&lv) = past.values_m3s.first() else {
-                continue;
-            };
-            let Some(&est_mean) = estimated_mean_at_stage0.get(&past.hydro_id) else {
-                continue;
-            };
-            let Some(&usr_mean) = user_mean_at_stage0.get(&past.hydro_id) else {
-                continue;
-            };
-            if (lv - est_mean).abs() < (lv - usr_mean).abs() {
-                warnings.push(LagScaleWarning {
-                    hydro_id: past.hydro_id,
-                    lag_value: lv,
-                    user_mean: usr_mean,
-                    estimated_mean: est_mean,
-                });
-            }
-        }
-        warnings
-    }
-
-    /// P8-001: Warning fires when lag-1 is closer to estimated mean than user mean.
-    ///
-    /// lag=500, user_mean=800, estimated_mean=480 -> |500-480|=20 < |500-800|=300
-    /// -> warning must be produced.
-    #[test]
-    fn test_lag_scale_warning_fires_when_closer_to_estimated() {
-        let warnings = collect_lag_scale_warnings(
-            EntityId(1),
-            500.0, // lag_value
-            800.0, // user_mean
-            480.0, // estimated_mean
-            true,  // include_past_inflows
-        );
-        assert_eq!(
-            warnings.len(),
-            1,
-            "expected exactly one LagScaleWarning when lag is closer to estimated mean"
-        );
-        assert_eq!(
-            warnings[0].hydro_id,
-            EntityId(1),
-            "warning must record the correct hydro_id"
-        );
-        assert!((warnings[0].lag_value - 500.0).abs() < f64::EPSILON);
-        assert!((warnings[0].user_mean - 800.0).abs() < f64::EPSILON);
-        assert!((warnings[0].estimated_mean - 480.0).abs() < f64::EPSILON);
-    }
-
-    /// P8-002: Warning does NOT fire when lag-1 is closer to user mean.
-    ///
-    /// lag=790, user_mean=800, estimated_mean=480 -> |790-480|=310 > |790-800|=10
-    /// -> no warning.
-    #[test]
-    fn test_lag_scale_warning_not_fires_when_closer_to_user() {
-        let warnings = collect_lag_scale_warnings(
-            EntityId(1),
-            790.0, // lag_value -- close to user_mean
-            800.0, // user_mean
-            480.0, // estimated_mean
-            true,  // include_past_inflows
-        );
-        assert!(
-            warnings.is_empty(),
-            "expected no LagScaleWarning when lag is closer to user mean"
-        );
-    }
-
-    /// P8-003: No warnings when past_inflows is empty.
-    #[test]
-    fn test_lag_scale_warning_empty_past_inflows() {
-        let warnings = collect_lag_scale_warnings(
-            EntityId(1),
-            500.0, // lag_value (irrelevant -- no past_inflows)
-            800.0, // user_mean
-            480.0, // estimated_mean
-            false, // include_past_inflows = false
-        );
-        assert!(
-            warnings.is_empty(),
-            "expected no warnings when past_inflows is empty"
-        );
-    }
-
-    /// P8-004: Hydro with past_inflows but no entry in fitting_stats is skipped.
-    #[test]
-    fn test_lag_scale_warning_skips_hydro_without_history() {
-        use cobre_core::scenario::InflowModel;
-        use cobre_core::{HydroPastInflows, InitialConditions};
-
-        let hydro_id = EntityId(1);
-        let other_hydro_id = EntityId(2);
-
-        // fitting_stats only covers hydro 2, not hydro 1 (the one with past_inflows).
-        let fitting_stats = vec![SeasonalStats {
-            entity_id: other_hydro_id,
-            stage_id: 0,
-            mean: 480.0,
-            std: 50.0,
-        }];
-
-        let user_model = InflowModel {
-            hydro_id,
-            stage_id: 0,
-            mean_m3s: 800.0,
-            std_m3s: 50.0,
-            ar_coefficients: vec![],
-            residual_std_ratio: 1.0,
-            annual: None,
-        };
-        let ic = InitialConditions {
-            storage: vec![],
-            filling_storage: vec![],
-            past_inflows: vec![HydroPastInflows {
-                hydro_id,
-                values_m3s: vec![500.0],
-                season_ids: None,
-            }],
-            past_anticipated_commitments: vec![],
-            recent_observations: vec![],
-        };
-        let system = SystemBuilder::new()
-            .inflow_models(vec![user_model])
-            .initial_conditions(ic)
-            .build()
-            .expect("valid system");
-
-        // Run the check inline.
-        let estimated_mean_at_stage0: BTreeMap<EntityId, f64> = fitting_stats
-            .iter()
-            .filter(|s| s.stage_id == 0)
-            .map(|s| (s.entity_id, s.mean))
-            .collect();
-        let user_mean_at_stage0: BTreeMap<EntityId, f64> = system
-            .inflow_models()
-            .iter()
-            .filter(|m| m.stage_id == 0)
-            .map(|m| (m.hydro_id, m.mean_m3s))
-            .collect();
-        let mut sorted_past_inflows: Vec<&cobre_core::HydroPastInflows> =
-            system.initial_conditions().past_inflows.iter().collect();
-        sorted_past_inflows.sort_by_key(|p| p.hydro_id);
-
-        let mut warnings: Vec<LagScaleWarning> = Vec::new();
-        for past in sorted_past_inflows {
-            let Some(&lv) = past.values_m3s.first() else {
-                continue;
-            };
-            let Some(&est_mean) = estimated_mean_at_stage0.get(&past.hydro_id) else {
-                continue;
-            };
-            let Some(&usr_mean) = user_mean_at_stage0.get(&past.hydro_id) else {
-                continue;
-            };
-            if (lv - est_mean).abs() < (lv - usr_mean).abs() {
-                warnings.push(LagScaleWarning {
-                    hydro_id: past.hydro_id,
-                    lag_value: lv,
-                    user_mean: usr_mean,
-                    estimated_mean: est_mean,
-                });
-            }
-        }
-
-        assert!(
-            warnings.is_empty(),
-            "hydro without fitting_stats entry must be skipped (no warning)"
         );
     }
 

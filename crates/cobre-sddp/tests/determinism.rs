@@ -149,6 +149,9 @@ impl MockSolver3H {
 }
 
 impl SolverInterface for MockSolver3H {
+    type Profile = cobre_solver::HighsProfile;
+
+    fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
     fn solver_name_version(&self) -> String {
         "MockSolver 0.0.0".to_string()
     }
@@ -180,10 +183,14 @@ impl SolverInterface for MockSolver3H {
     fn name(&self) -> &'static str {
         "MockDeterminism3H"
     }
-    fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
-    fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
-    fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
-    fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
+
+    fn set_primal_feasibility_tolerance(&mut self, _tolerance: f64) {}
+
+    fn set_dual_feasibility_tolerance(&mut self, _tolerance: f64) {}
+
+    fn set_simplex_iteration_limit_profile(&mut self, _limit: u32) {}
+
+    fn set_ipm_iteration_limit_profile(&mut self, _limit: u32) {}
 }
 
 // ===========================================================================
@@ -512,7 +519,6 @@ fn run_training(
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 0.0,
-            basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
             warm_start_cuts: 0,
             risk_measures: fx.risk_measures.clone(),
         },
@@ -574,6 +580,7 @@ fn run_training(
                 },
                 &comm,
                 || Ok(MockSolver3H::new(100.0)),
+                None,
             )
         })
         .unwrap();
@@ -597,7 +604,6 @@ fn run_simulation(
     let sim_config = SimulationConfig {
         n_scenarios,
         io_channel_capacity: 64,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
     let entity_counts = EntityCounts {
         hydro_ids: vec![1, 2, 3],

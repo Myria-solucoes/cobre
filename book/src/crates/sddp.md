@@ -94,10 +94,10 @@ near zero.
 | `state_exchange`      | `ExchangeBuffers`: step 3 allgatherv of trial point state vectors                                                                                                                                                                                                                  |
 | `backward`            | `run_backward_pass`: step 4 Benders cut generation with work-stealing parallelism                                                                                                                                                                                                  |
 | `cut_sync`            | `CutSyncBuffers`: step 5 allgatherv of new cut wire records                                                                                                                                                                                                                        |
-| `cut_selection`       | `CutSelectionStrategy`, `CutMetadata`, `DeactivationSet`: step 5a Stage 1 pool pruning                                                                                                                                                                                             |
+| `cut_selection`       | `CutSelectionStrategy`, `CutMetadata`, `CutActivityUpdates`: step 5a Stage 1 pool pruning                                                                                                                                                                                          |
 | `lower_bound`         | `evaluate_lower_bound`: step 5b risk-adjusted LB computation (parallelized across openings)                                                                                                                                                                                        |
 | `convergence`         | `ConvergenceMonitor`: step 6 bound tracking and stopping rule evaluation                                                                                                                                                                                                           |
-| `cut`                 | `CutPool`, `FutureCostFunction`, `CutRowMap`, `WARM_START_ITERATION`: cut data structures, wire format, and LP row mapping                                                                                                                                                         |
+| `cut`                 | `CutPool`, `FutureCostFunction`, `CutRowMap`, `WARM_START_ITERATION`: append-only cut storage with RHS-toggle deactivation, wire format, and LP row mapping                                                                                                                        |
 | `basis_reconstruct`   | `reconstruct_basis`: slot-tracked warm-start basis reconstruction — reconciles stored cut rows by slot identity and classifies newly added cuts at the capture-time state                                                                                                          |
 | `config`              | `TrainingConfig`: algorithm parameters                                                                                                                                                                                                                                             |
 | `context`             | `StageContext`, `TrainingContext`: hot-path argument bundles that absorb parameters into context structs                                                                                                                                                                           |
@@ -118,7 +118,7 @@ near zero.
 | `hydro_models`        | `prepare_hydro_models`, `EvaporationModel`, `FphaPlane`, `ResolvedProductionModel`: hydro model preprocessing at initialization                                                                                                                                                    |
 | `generic_constraints` | Generic constraint row entries — user-defined linear constraints with 20 variable types                                                                                                                                                                                            |
 | `inflow_method`       | `InflowNonNegativityMethod`: Truncation, Penalty, TruncationWithPenalty, and None strategies                                                                                                                                                                                       |
-| `estimation`          | `EstimationReport`, `LagScaleWarning`, `StdRatioDivergence`: PAR estimation pipeline outputs                                                                                                                                                                                       |
+| `estimation`          | `EstimationReport`, `StdRatioDivergence`: PAR estimation pipeline outputs                                                                                                                                                                                                          |
 | `provenance`          | `ModelProvenanceReport`, `build_provenance_report`: round-trip audit trail for model preprocessing                                                                                                                                                                                 |
 | `stochastic_summary`  | `StochasticSummary`, `build_stochastic_summary`: human-readable summary of stochastic preprocessing                                                                                                                                                                                |
 | `visited_states`      | `VisitedStatesArchive`: forward-pass trial point storage for cut selection and policy diagnostics                                                                                                                                                                                  |
@@ -202,19 +202,24 @@ two-stage cut management pipeline that also includes budget enforcement
 [Performance Accelerators](../guide/performance-accelerators.md#cut-management-pipeline)
 guide for the full pipeline description.
 
-| Variant     | Deactivation condition                                               |
-| ----------- | -------------------------------------------------------------------- |
-| `Level1`    | `active_count <= threshold` (never active; least aggressive)         |
-| `Lml1`      | `iteration - last_active_iter > memory_window` (outside time window) |
-| `Dominated` | Dominated at all visited forward pass states (most aggressive)       |
+| Variant     | Deactivation condition                                                             |
+| ----------- | ---------------------------------------------------------------------------------- |
+| `Level1`    | Below `tie_tolerance` of the per-state max at every visited state                  |
+| `Lml1`      | Not the oldest eligible cut at the per-state max at any visited state              |
+| `Dominated` | Below `threshold` of the per-state max at every visited state (all populated cuts) |
 
 All variants respect a `check_frequency` parameter: selection only runs at
 iterations that are multiples of `check_frequency` and never at iteration 0.
 Stage 0 is always exempt.
 
-`Dominated` selection performs `O(|active cuts| x |visited states|)` work
-per stage per check. It uses the `VisitedStatesArchive` (always collected
-during training) and the `domination_epsilon` tolerance parameter.
+All three variants share a single value-evaluation kernel
+(`select_for_stage` in `cut_selection.rs`) that performs
+`O(|populated cuts| x |visited states|)` work per stage per check.
+The `VisitedStatesArchive` is always collected during training when any
+cut-selection variant is enabled; the archive feeds the kernel for
+`Level1`, `Lml1`, and `Dominated` alike. `Dominated` uses its `threshold`
+field as the tie tolerance; `Level1` and `Lml1` use `tie_tolerance`
+(default `1e-10`).
 
 ## Key data structures
 
@@ -236,35 +241,89 @@ Callers borrow `StudySetup` to construct `TrainingContext` and `StageContext`; t
 ### `FutureCostFunction`
 
 The Future Cost Function (FCF) holds one `CutPool` per stage. Each `CutPool`
-is a pre-allocated flat array of cut slots. Cuts are inserted deterministically
+is an append-only flat array of cut slots. Cuts are inserted deterministically
 by `(iteration, forward_pass_index)` to guarantee bit-for-bit identical FCF
-state across all MPI ranks.
+state across all MPI ranks. Once a slot is populated it retains a stable
+integer index for the lifetime of the run — no slot is ever reused or removed.
 
 The FCF is built once before training begins. Total slot capacity is
 `warm_start_cuts + max_iterations * forward_passes` per stage.
 
+Cut deactivation is applied via `set_active(stage, slot, false)`. An inactive
+cut remains in storage and in the stage LP; only its row bounds are toggled to
+`[-f64::INFINITY, +f64::INFINITY]`, making the constraint trivially satisfied
+without affecting the slot index or LP row index. The LP row index of each
+cut slot is therefore stable across iterations, including after cut-selection
+deactivation.
+
+Two aggregate metrics are available per stage and are written to
+`training/metadata.json` under the `row_pool` object: `cuts_in_lp` counts the
+rows in the stage LP (active inactive sentinel rows together — equal to
+`populated_count`, the high-water mark of cuts ever inserted at that stage);
+`cuts_active` counts only the currently active subset.
+
+### Cut pool memory and LP shape
+
+The stage LP grows monotonically: each stage LP carries
+`base_rows + populated_count` rows, where `base_rows` is the fixed structural
+row count and `populated_count` is the number of cut slots ever populated at
+that stage. Sentinel rows for inactive cuts occupy a row in the LP permanently
+but contribute no binding constraint.
+
+The worst-case coefficient storage per rank is bounded by:
+
+```text
+populated_per_stage × state_dimension × 8 bytes × num_stages
+```
+
+For the convertido production scale (117 stages, 159 state dimensions, up to
+10 000 populated cuts per stage) this formula gives approximately 1.5 GB per
+rank. The actual measured value at process end on the convertido benchmark is
+(actual value from manual convertido benchmark to be inserted).
+
+Inactive cuts still consume pricing time during the LP solve: the row
+coefficients participate in dual-simplex scanning even when the RHS is at the
+infinity sentinel. This is a deliberate tradeoff — stable row indices enable
+allocation-free iteration and correct basis warm-start across cut-set changes,
+at the cost of a proportionally larger LP for runs that deactivate many cuts.
+
+The `cuts_in_lp` and `cuts_active` fields in `training/metadata.json` under
+`row_pool` expose this tradeoff quantitatively: `cuts_in_lp` is the total LP
+row count (active + inactive), and `cuts_active` is the active subset. Both
+fields are `u64` and default to `0` when deserialising older manifests that
+lack them.
+
 ### `PatchBuffer`
 
-A `PatchBuffer` holds the three parallel arrays consumed by the LP solver's
-`set_row_bounds` call. It is sized for `N * (2 + L) + M * B` patches, where
-N is the number of hydro plants, L is the maximum PAR order, M is the number
-of stochastic load buses, and B is the maximum block count across stages:
+A `PatchBuffer` holds the pre-allocated row-bound and column-bound arrays
+consumed by the LP solver's `set_row_bounds` and `set_col_bounds` calls.
+It carries two regions:
 
-- **Category 1** `[0, N)` — storage-fixing: equality constraint at incoming storage.
-- **Category 2** `[N, N*(1+L))` — lag-fixing: equality constraint at AR lagged inflows.
-- **Category 3** `[N*(1+L), N*(2+L))` — noise-fixing: equality constraint at scenario noise.
-- **Category 4** `[N*(2+L), N*(2+L) + M*B_active)` — load balance row patches: equality
-  constraint at stochastic load demand per bus per block (optional; empty when
-  `n_load_buses == 0`).
+- **Row-bound region** — sized for `N + M*B + N` patches (N hydros, M stochastic
+  load buses, B max blocks), holding Categories 3, 4, and 5:
+  - **Category 3** `[0, N)` — noise innovation: water-balance RHS at scenario noise.
+  - **Category 4** `[N, N + M*B_active)` — load balance row patches: equality
+    constraint at stochastic load demand per bus per block (optional; empty when
+    `n_load_buses == 0`).
+  - **Category 5** `[N + M*B, 2N + M*B)` — z-inflow definition RHS.
 
-The backward pass uses only categories 1 and 2 (`fill_state_patches`) for
-the state-fixing rows, then applies Category 4 (`fill_load_patches`) to set
-the stochastic load demand at each bus before solving the successor LP.
-The forward pass uses all four categories (`fill_forward_patches` followed by
-`fill_load_patches`).
+- **Column-bound region** — sized for `N*(1+L) + A*K` entries (A anticipated
+  thermals, K max lead stages), holding Categories 1, 2, and 6:
+  - **Category 1** — incoming storage columns: `col_lower[h] == col_upper[h] == state[h]`
+    for each hydro `h`.
+  - **Category 2** — AR lag columns: tight bounds at each lag state value.
+  - **Category 6** — anticipated-state columns: tight bounds at each ring-buffer slot.
+
+State pinning (Categories 1, 2, 6) is applied exclusively via column bounds
+(`fill_col_state_patches`); there are no equality rows for state fixing.
+The backward pass writes only the column-bound region; noise innovations come
+from the fixed opening tree and are written to the row-bound region via
+`fill_forward_patches`.
+The forward pass writes both regions (`fill_forward_patches`,
+`fill_col_state_patches`, and optionally `fill_load_patches`).
 
 When `n_load_buses == 0`, Category 4 is empty and `forward_patch_count`
-returns `N*(2+L)` unchanged, making load noise an optional zero-cost extension.
+returns `N` unchanged, making load noise an optional zero-cost extension.
 
 ### `ExchangeBuffers` and `CutSyncBuffers`
 
@@ -447,7 +506,7 @@ println!(
 
 ## Per-phase configuration
 
-`cobre-sddp` defines three algorithmic phases and associates a `SolveProfile`
+`cobre-sddp` defines three algorithmic phases and associates a `HighsProfile`
 with each one. This lets the LP solver be tuned differently for training and
 simulation without modifying call sites.
 
@@ -461,33 +520,35 @@ pub enum Phase {
 }
 ```
 
-| Variant      | When it runs                                                                      |
-|--------------|-----------------------------------------------------------------------------------|
-| `Forward`    | Forward sweep: solving LPs from stage 1 to T to sample trajectories.             |
-| `Backward`   | Backward sweep: solving LPs from stage T to 1 to generate Benders cuts.          |
-| `Simulation` | Policy simulation: evaluating the trained policy on out-of-sample scenarios.      |
+| Variant      | When it runs                                                                 |
+| ------------ | ---------------------------------------------------------------------------- |
+| `Forward`    | Forward sweep: solving LPs from stage 1 to T to sample trajectories.         |
+| `Backward`   | Backward sweep: solving LPs from stage T to 1 to generate Benders cuts.      |
+| `Simulation` | Policy simulation: evaluating the trained policy on out-of-sample scenarios. |
 
 `Phase` is `Copy + Eq`, so it can be used in `match` patterns and stored
-cheaply by value. `Phase::profile()` returns the `SolveProfile` that should be
+cheaply by value. `Phase::profile()` returns the `HighsProfile` that should be
 applied when entering that phase.
 
 ### Named profile constants
 
 Three `pub const` values define the per-phase solver configurations:
 
-| Constant            | Applied during            |
-|---------------------|---------------------------|
-| `FORWARD_PROFILE`   | `Phase::Forward` entry    |
-| `BACKWARD_PROFILE`  | `Phase::Backward` entry   |
-| `SIMULATION_PROFILE`| `Phase::Simulation` entry |
+| Constant             | Applied during            |
+| -------------------- | ------------------------- |
+| `FORWARD_PROFILE`    | `Phase::Forward` entry    |
+| `BACKWARD_PROFILE`   | `Phase::Backward` entry   |
+| `SIMULATION_PROFILE` | `Phase::Simulation` entry |
 
-In the current release all three constants equal `SolveProfile::default()`
-field-for-field, preserving bit-for-bit behavioral parity with the historical
-hard-coded solver tolerances. Compile-time assertions in `solver_phase.rs`
-catch any future drift between the constants and their documented values.
+In the current release `FORWARD_PROFILE` and `SIMULATION_PROFILE` equal
+`HighsProfile::default()` field-for-field, while `BACKWARD_PROFILE` overrides
+`simplex_price_strategy` to `2` (`RowHyperSparse`) to exploit sparsity on the
+backward LPs; all other backward fields match the default. Compile-time
+assertions in `solver_phase.rs` catch any future drift between the constants
+and their documented values.
 
-Future tuning — particularly of `BACKWARD_PROFILE` to reduce backward-pass
-load imbalance — will update these constants without changing the call sites
+Further tuning — particularly of `BACKWARD_PROFILE` to reduce backward-pass
+load imbalance — would update these constants without changing the call sites
 or the `Phase` API.
 
 ### Orchestrator call sites
@@ -551,19 +612,36 @@ region to preserve bit-for-bit determinism across thread counts.
 
 ### Model persistence and incremental cuts
 
-`CutRowMap` provides O(1) slot-to-row lookup for the persistent lower-bound
-LP so the append path skips cuts that are already present. The LB LP is
-strictly append-only: cuts are never removed from it, which keeps the lower
-bound monotonically non-decreasing. The shared row pool's active/inactive
-bit is not propagated to the LB LP — pool-deactivated rows remain as LP
-rows in the LB solver.
+`CutRowMap` provides O(1) slot-to-row lookup so the append path skips cuts
+that are already present in a given LP.
+
+Both the stage LP and the LB LP are append-only: cuts are added but never
+removed. The stage LP toggles inactive cuts' RHS to
+`[-f64::INFINITY, +f64::INFINITY]` (trivially satisfied) rather than dropping
+the row; the LB LP does not toggle activity at all (it never deactivates cuts).
+Cut row positions are stable across iterations in both LPs, and the lower
+bound remains monotonically non-decreasing because the LB LP accumulates
+every cut ever generated.
 
 ### Cut wire format
 
-The cut wire format used by `CutSyncBuffers` is a fixed-size record:
-24 bytes of header (slot index, iteration, forward pass index, intercept)
-followed by `n_state * 8` bytes of coefficients. The record size is
-`cut_wire_size(n_state) = 24 + n_state * 8` bytes.
+The cut wire format used by `CutSyncBuffers` is at version 2
+(`CUT_WIRE_VERSION = 2`). Each record carries a version byte at offset 0
+(value `2`) and a record-type tag at offset 13 to distinguish two record
+variants:
+
+- **Cut record**: a 24-byte header (slot index, iteration, forward pass
+  index, intercept) followed by `n_state * 8` bytes of coefficients. The
+  total record size is `cut_wire_size(n_state) = 24 + n_state * 8` bytes.
+- **Activity-update record**: a fixed-size payload encoding `(stage, slot,
+ActivityChange)`, where `ActivityChange` is either `Deactivate` (apply
+  the sentinel RHS) or `Reactivate` (restore the original intercept).
+  Activity-update records travel through the same allgatherv channel as
+  new cuts so that RHS toggles propagate to all ranks in the same step.
+
+Version-1 wire payloads are rejected by version-2 receivers with
+`SddpError::Validation`. Cross-version MPI runs are not a supported
+deployment mode.
 
 ### Basis cache wire format
 

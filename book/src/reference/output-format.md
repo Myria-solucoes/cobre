@@ -292,8 +292,12 @@ Per-iteration convergence log. One row per training iteration. 13 columns.
 
 ### `training/timing/iterations.parquet`
 
-Per-iteration wall-clock timing breakdown by phase. One row per training
-iteration. 16 columns. All columns are non-nullable.
+Per-iteration wall-clock timing breakdown by phase. 18 columns. Emitted as one
+row per `(iteration, rank)` for rank-only sequential values (`worker_id` is
+NULL) and one row per `(iteration, rank, worker_id)` for per-worker
+parallel-region values; `SUM(col) GROUP BY iteration` recovers the
+per-iteration total for each timing column. `rank` and `worker_id` are nullable
+Int32; the 15 timing columns are non-nullable.
 
 The top-level non-overlapping phases are: `forward_wall_ms`,
 `backward_wall_ms`, `cut_selection_ms`, `mpi_allreduce_ms`, and
@@ -309,6 +313,8 @@ attributed to any phase is `overhead_ms`.
 | Column                       | Type  | Nullable | Description                                                                                                                                                                                 |
 | ---------------------------- | ----- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `iteration`                  | Int32 | No       | Training iteration number (1-based).                                                                                                                                                        |
+| `rank`                       | Int32 | Yes      | MPI rank that produced this row. NULL for rank-aggregated rows.                                                                                                                             |
+| `worker_id`                  | Int32 | Yes      | Rayon worker index within the rank's pool. NULL for rank-only sequential rows.                                                                                                              |
 | `forward_wall_ms`            | Int64 | No       | Wall-clock time for the forward pass (all stages and scenarios).                                                                                                                            |
 | `backward_wall_ms`           | Int64 | No       | Wall-clock time for the backward pass (all stages and trial points).                                                                                                                        |
 | `cut_selection_ms`           | Int64 | No       | Time spent running the cut selection pipeline (all three stages).                                                                                                                           |
@@ -351,7 +357,7 @@ Per-iteration, per-phase, per-stage, per-opening, per-worker LP solver
 statistics for diagnosing conditioning issues and retry behavior. One row per
 `(iteration, phase, stage, opening, rank, worker_id)` tuple on the backward
 phase (per-opening, per-worker); one row per `(iteration, phase, stage)` tuple
-on the forward, `lower_bound`, and `simulation` phases. 19 columns. Columns
+on the forward, `lower_bound`, and `simulation` phases. 18 columns. Columns
 `opening`, `rank`, and `worker_id` are nullable Int32; all other columns are
 non-nullable.
 
@@ -375,19 +381,11 @@ non-nullable.
 | `load_model_time_ms`         | Float64 | No       | Cumulative time spent in `load_model` calls, in milliseconds.                                                        |
 | `set_bounds_time_ms`         | Float64 | No       | Cumulative time spent in `set_row_bounds` / `set_col_bounds` calls, in milliseconds.                                 |
 | `basis_set_time_ms`          | Float64 | No       | Cumulative time spent installing bases for warm-start, in milliseconds.                                              |
-| `basis_reconstructions`      | UInt64  | No       | Number of `reconstruct_basis` invocations with a non-empty stored basis (slot-tracked warm-start applications).      |
 
 ### `simulation/solver/iterations.parquet`
 
 Identical schema to [`training/solver/iterations.parquet`](#trainingsolveriterationsparquet).
 One row per `(scenario, phase, stage)` triple where `phase == "simulation"`.
-
-The `basis_reconstructions` column on simulation rows is a direct indicator
-that baked-template simulation is using the stored warm-start basis for every
-solve. A near-zero value on a multi-rank run suggests that `CapturedBasis`
-metadata was not delivered to non-root ranks; see
-`CapturedBasis::to_broadcast_payload` in
-`crates/cobre-sddp/src/workspace.rs` for the 4-broadcast wire format
 
 ### `training/solver/retry_histogram.parquet`
 
@@ -706,7 +704,7 @@ Stage and block-level cost breakdown. One row per (stage, block) pair. 26 column
 | `inflow_penalty_cost`          | Float64 | No       | Cost of inflow non-negativity slack (numerical penalty).                       |
 | `generic_violation_cost`       | Float64 | No       | Cost of generic constraint violations.                                         |
 | `spillage_cost`                | Float64 | No       | Cost of reservoir spillage.                                                    |
-| `turbined_cost`           | Float64 | No       | Turbined flow penalty from the future-production hydro approximation.          |
+| `turbined_cost`                | Float64 | No       | Turbined flow penalty from the future-production hydro approximation.          |
 | `curtailment_cost`             | Float64 | No       | Cost of non-controllable source curtailment.                                   |
 | `exchange_cost`                | Float64 | No       | Transmission exchange cost component.                                          |
 | `pumping_cost`                 | Float64 | No       | Pumping station energy cost component.                                         |
@@ -765,18 +763,18 @@ five energy columns (`equivalent_productivity_mw_per_m3s` through
 
 Thermal unit dispatch results. One row per (stage, block, thermal) triplet. 10 columns.
 
-| Column                 | Type    | Nullable | Description                                                                   |
-| ---------------------- | ------- | -------- | ----------------------------------------------------------------------------- |
-| `stage_id`             | Int32   | No       | Stage index (0-based).                                                        |
-| `block_id`             | Int32   | Yes      | Load block index. `null` for stage-level records.                             |
-| `thermal_id`           | Int32   | No       | Thermal unit ID.                                                              |
-| `generation_mw`        | Float64 | No       | Average power generation over the block in MW.                                |
-| `generation_mwh`       | Float64 | No       | Total energy generated over the block in MWh.                                 |
-| `generation_cost`      | Float64 | No       | Monetary generation cost for this block.                                      |
-| `is_anticipated`            | Boolean | No       | `true` if this unit is configured for anticipated dispatch.                         |
-| `anticipated_committed_mw`  | Float64 | Yes      | Committed capacity under anticipated dispatch in MW. `null` for non-anticipated units. |
-| `anticipated_decision_mw`   | Float64 | Yes      | Dispatch decision under anticipated dispatch in MW. `null` for non-anticipated units.  |
-| `operative_state_code` | Int8    | No       | Operative state code (see `codes.json` `operative_state` mapping).            |
+| Column                     | Type    | Nullable | Description                                                                            |
+| -------------------------- | ------- | -------- | -------------------------------------------------------------------------------------- |
+| `stage_id`                 | Int32   | No       | Stage index (0-based).                                                                 |
+| `block_id`                 | Int32   | Yes      | Load block index. `null` for stage-level records.                                      |
+| `thermal_id`               | Int32   | No       | Thermal unit ID.                                                                       |
+| `generation_mw`            | Float64 | No       | Average power generation over the block in MW.                                         |
+| `generation_mwh`           | Float64 | No       | Total energy generated over the block in MWh.                                          |
+| `generation_cost`          | Float64 | No       | Monetary generation cost for this block.                                               |
+| `is_anticipated`           | Boolean | No       | `true` if this unit is configured for anticipated dispatch.                            |
+| `anticipated_committed_mw` | Float64 | Yes      | Committed capacity under anticipated dispatch in MW. `null` for non-anticipated units. |
+| `anticipated_decision_mw`  | Float64 | Yes      | Dispatch decision under anticipated dispatch in MW. `null` for non-anticipated units.  |
+| `operative_state_code`     | Int8    | No       | Operative state code (see `codes.json` `operative_state` mapping).                     |
 
 ---
 

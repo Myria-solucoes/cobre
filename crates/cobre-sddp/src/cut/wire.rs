@@ -3,48 +3,61 @@
 //! During the SDDP backward pass, each MPI rank broadcasts its newly generated
 //! cuts to all other ranks via `allgatherv`. Because the coefficient count
 //! (`n_state`) is a runtime value, `allgatherv` is called with `T = u8` and
-//! cuts are packed into a contiguous byte buffer using the layout below.
+//! records are packed into a contiguous byte buffer.
 //!
-//! ## Wire format layout
+//! ## Wire format version 1 — cut records only
 //!
-//! Each cut occupies `25 + n_state * 8` bytes, laid out as:
+//! Every record is a single cut record. Byte 0 is the version byte (must
+//! equal `CUT_WIRE_VERSION = 1`). Byte 13 is `RECORD_TAG_CUT = 0` (zeroed
+//! padding in v1; reserved for future tag dispatch).
+//!
+//! ### `CutRecord` byte layout
+//!
+//! Total size: `25 + n_state * 8` bytes.
 //!
 //! ```text
 //! Offset  Size  Field
 //! ------  ----  -----
-//!  0       1   version             (u8 = CUT_WIRE_VERSION)
+//!  0       1   version             (u8 = 1)
 //!  1- 4    4   slot_index          (u32, native-endian)
 //!  5- 8    4   iteration           (u32, native-endian)
 //!  9-12    4   forward_pass_index  (u32, native-endian)
-//! 13-16    4   padding             (zeroed, reserved; F1-041-defended)
+//! 13       1   record_tag          (u8 = RECORD_TAG_CUT = 0; padding)
+//! 14-16    3   padding             (zeroed; reserved)
 //! 17-24    8   intercept           (f64, native-endian)
 //! 25 ...   8*n coefficients[0..n]  (f64 each, native-endian)
 //! ```
 //!
-//! The 4-byte padding at offset 13–16 aligns `intercept` to an 8-byte
-//! boundary, matching the `#[repr(C)]` layout described in the spec (SS4.2a).
-//! This padding is F1-041-defended and must not be repurposed.
-//! All multi-rank executions use the same binary, so native-endian byte order
-//! is sufficient and avoids unnecessary byte-swapping.
+//! ## Version compatibility
+//!
+//! Receivers reject any record whose version byte does not equal
+//! `CUT_WIRE_VERSION`. No compatibility shim is provided; redeploy all
+//! nodes when upgrading.
 //!
 //! ## Functions
 //!
 //! - [`cut_wire_size`] — compute the byte size for one cut record.
 //! - [`serialize_cut`] — write one cut record into a byte buffer.
 //! - [`deserialize_cut`] — read one cut record from a byte buffer.
-//! - [`serialize_cuts_to_buffer`] — pack multiple cuts into a new buffer.
-//! - [`deserialize_cuts_from_buffer`] — unpack multiple cuts from a buffer.
-//! - [`deserialize_cuts_from_buffer_into`] — unpack into caller-provided buffers (no allocation).
+//! - [`deserialize_cuts_from_buffer`] — unpack cut records from a buffer.
+//! - [`deserialize_cuts_from_buffer_into`] — unpack cuts into caller-provided buffers.
 
 use crate::SddpError;
 
 // ---------------------------------------------------------------------------
-// CUT_WIRE_VERSION
+// Wire version and record-tag constants
 // ---------------------------------------------------------------------------
 
 /// Wire format version byte. Bump when the payload layout changes
 /// in a backward-incompatible way.
 pub const CUT_WIRE_VERSION: u8 = 1;
+
+/// Record-tag value at offset 13 of every cut record.
+///
+/// In v1 this byte is zero (padding). The constant is documented here so that
+/// future record-tag dispatch can extend the format without breaking the byte
+/// layout.
+pub const RECORD_TAG_CUT: u8 = 0;
 
 // ---------------------------------------------------------------------------
 // CutWireHeader
@@ -97,10 +110,11 @@ pub fn cut_wire_size(n_state: usize) -> usize {
 
 /// Serialize one cut record into `buf` starting at offset 0.
 ///
-/// Writes the version byte at offset 0, then the header as three `u32` values
-/// (12 bytes) at offsets 1–12, then 4 bytes of zero padding at offsets 13–16,
-/// then one `f64` intercept (8 bytes) at offsets 17–24. Coefficients follow
-/// immediately as native-endian `f64` bytes starting at offset 25.
+/// Writes the version byte (`CUT_WIRE_VERSION`) at offset 0, then the header
+/// as three `u32` values (12 bytes) at offsets 1–12, then the record tag
+/// `RECORD_TAG_CUT` at offset 13 followed by 3 zero padding bytes at offsets
+/// 14–16, then one `f64` intercept (8 bytes) at offsets 17–24. Coefficients
+/// follow immediately as native-endian `f64` bytes starting at offset 25.
 ///
 /// # Panics (debug builds only)
 ///
@@ -124,7 +138,10 @@ pub fn serialize_cut(
     buf[1..5].copy_from_slice(&slot_index.to_ne_bytes());
     buf[5..9].copy_from_slice(&iteration.to_ne_bytes());
     buf[9..13].copy_from_slice(&forward_pass_index.to_ne_bytes());
-    buf[13..17].copy_from_slice(&0u32.to_ne_bytes());
+    buf[13] = RECORD_TAG_CUT;
+    buf[14] = 0;
+    buf[15] = 0;
+    buf[16] = 0;
     buf[17..25].copy_from_slice(&intercept.to_ne_bytes());
 
     for (i, &coeff) in coefficients.iter().enumerate() {
@@ -136,18 +153,21 @@ pub fn serialize_cut(
 /// Deserialize one cut record from `buf`, expecting `n_state` coefficients.
 ///
 /// Reads the version byte at offset 0 and returns an error if it does not
-/// match [`CUT_WIRE_VERSION`]. Then reads the 24-byte header from fixed
-/// offsets starting at 1 and recovers `n_state` `f64` values starting at
-/// offset 25.
+/// match [`CUT_WIRE_VERSION`]. Reads the record tag at offset 13 and returns
+/// an error if it does not equal [`RECORD_TAG_CUT`]. Then reads the 24-byte
+/// header from fixed offsets starting at 1 and recovers `n_state` `f64`
+/// values starting at offset 25.
 ///
 /// After the length `debug_assert`, all slice-to-array conversions use direct
 /// fixed-length indexing, which is infallible for the exact sizes used here.
 ///
 /// # Errors
 ///
-/// Returns `Err(SddpError::Validation(_))` if the version byte does not equal
-/// [`CUT_WIRE_VERSION`]. The error message contains
-/// `"unsupported cut wire version {version}"`.
+/// Returns `Err(SddpError::Validation(_))` if:
+/// - The version byte does not equal [`CUT_WIRE_VERSION`]. The message
+///   contains `"cut_wire: unsupported version"`.
+/// - The record tag at offset 13 does not equal [`RECORD_TAG_CUT`]. The
+///   message contains `"cut_wire: expected cut record"`.
 ///
 /// # Panics (debug builds only)
 ///
@@ -163,7 +183,14 @@ pub fn deserialize_cut(buf: &[u8], n_state: usize) -> Result<(CutWireHeader, Vec
     let version = buf[0];
     if version != CUT_WIRE_VERSION {
         return Err(SddpError::Validation(format!(
-            "unsupported cut wire version {version}"
+            "cut_wire: unsupported version {version}"
+        )));
+    }
+
+    let record_tag = buf[13];
+    if record_tag != RECORD_TAG_CUT {
+        return Err(SddpError::Validation(format!(
+            "cut_wire: expected cut record (tag {RECORD_TAG_CUT}), got tag {record_tag}"
         )));
     }
 
@@ -173,7 +200,6 @@ pub fn deserialize_cut(buf: &[u8], n_state: usize) -> Result<(CutWireHeader, Vec
     let slot_index = u32::from_ne_bytes([buf[1], buf[2], buf[3], buf[4]]);
     let iteration = u32::from_ne_bytes([buf[5], buf[6], buf[7], buf[8]]);
     let forward_pass_index = u32::from_ne_bytes([buf[9], buf[10], buf[11], buf[12]]);
-    // bytes 13-16 are padding — intentionally ignored
     let intercept = f64::from_ne_bytes([
         buf[17], buf[18], buf[19], buf[20], buf[21], buf[22], buf[23], buf[24],
     ]);
@@ -277,7 +303,7 @@ pub fn deserialize_cuts_from_buffer(
 
     let record_size = cut_wire_size(n_state);
     assert!(
-        buf.len() % record_size == 0,
+        buf.len().is_multiple_of(record_size),
         "buffer length {} is not a multiple of record size {record_size}",
         buf.len()
     );
@@ -329,7 +355,7 @@ pub fn deserialize_cuts_from_buffer_into(
 
     let record_size = cut_wire_size(n_state);
     assert!(
-        buf.len() % record_size == 0,
+        buf.len().is_multiple_of(record_size),
         "buffer length {} is not a multiple of record size {record_size}",
         buf.len()
     );
@@ -359,7 +385,7 @@ mod tests {
     )]
 
     use super::{
-        CUT_WIRE_VERSION, CutWireHeader, cut_wire_size, deserialize_cut,
+        CUT_WIRE_VERSION, CutWireHeader, RECORD_TAG_CUT, cut_wire_size, deserialize_cut,
         deserialize_cuts_from_buffer, deserialize_cuts_from_buffer_into, serialize_cut,
         serialize_cuts_to_buffer,
     };
@@ -448,8 +474,13 @@ mod tests {
             7u32,
             "forward_pass_index at offset 9"
         );
-        // padding at offset 13-16 must be zero
-        assert_eq!(&buf[13..17], &[0u8; 4], "padding at offset 13 must be zero");
+        // record tag at offset 13 (RECORD_TAG_CUT = 0) and padding at 14-16.
+        assert_eq!(buf[13], RECORD_TAG_CUT, "record tag at offset 13");
+        assert_eq!(
+            &buf[14..17],
+            &[0u8; 3],
+            "padding at offsets 14-16 must be zero"
+        );
         // intercept at offset 17-24
         assert_eq!(
             f64::from_ne_bytes(buf[17..25].try_into().unwrap()),
@@ -731,20 +762,20 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_cut_rejects_wrong_version() {
+    fn deserialize_cut_rejects_wrong_version_byte() {
         let n_state = 3;
         let mut buf = vec![0u8; cut_wire_size(n_state)];
         serialize_cut(&mut buf, 5, 3, 7, 42.0, &[1.0, 2.0, 3.0]);
 
-        // Overwrite the version byte with an unknown future version.
+        // Overwrite the version byte with wire version 2 (the removed format).
         buf[0] = 2_u8;
 
         let result = deserialize_cut(&buf, n_state);
         match result {
             Err(SddpError::Validation(msg)) => {
                 assert!(
-                    msg.contains("unsupported cut wire version 2"),
-                    "error message must contain 'unsupported cut wire version 2', got: {msg}"
+                    msg.contains("unsupported version"),
+                    "error message must contain 'unsupported version', got: {msg}"
                 );
             }
             other => panic!("expected Err(SddpError::Validation(_)), got: {other:?}"),
@@ -758,5 +789,52 @@ mod tests {
         assert_eq!(cut_wire_size(1), 33);
         assert_eq!(cut_wire_size(9), 97);
         assert_eq!(cut_wire_size(2080), 16665);
+    }
+
+    // ── Version-1 wire format tests ──────────────────────────────────────────
+
+    #[test]
+    fn wire_version_1_constant_value() {
+        assert_eq!(CUT_WIRE_VERSION, 1);
+    }
+
+    #[test]
+    fn serialize_cut_writes_record_tag_zero_at_offset_13() {
+        let n_state = 2;
+        let mut buf = vec![0xFFu8; cut_wire_size(n_state)];
+        serialize_cut(&mut buf, 7, 1, 3, 5.0, &[1.0, 2.0]);
+        assert_eq!(
+            buf[13], RECORD_TAG_CUT,
+            "byte 13 must equal RECORD_TAG_CUT after serialize_cut"
+        );
+    }
+
+    #[test]
+    fn deserialize_cut_rejects_wrong_version() {
+        let n_state = 2;
+        let mut buf = vec![0u8; cut_wire_size(n_state)];
+        // Write a structurally valid cut record but stamp it as wire version 2 (old format).
+        buf[0] = 2; // wrong wire version
+        buf[1..5].copy_from_slice(&10u32.to_ne_bytes()); // slot_index
+        buf[5..9].copy_from_slice(&1u32.to_ne_bytes()); // iteration
+        buf[9..13].copy_from_slice(&0u32.to_ne_bytes()); // forward_pass_index
+        buf[13] = RECORD_TAG_CUT;
+        buf[17..25].copy_from_slice(&1.0f64.to_ne_bytes()); // intercept
+
+        let result = deserialize_cut(&buf, n_state);
+        match result {
+            Err(SddpError::Validation(msg)) => {
+                assert!(
+                    msg.contains("wire") || msg.contains("version") || msg.contains("unsupported"),
+                    "error message must describe a wire version problem, got: {msg}"
+                );
+            }
+            other => panic!("expected Err(SddpError::Validation(_)), got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_tag_cut_constant_is_zero() {
+        assert_eq!(RECORD_TAG_CUT, 0u8);
     }
 }

@@ -207,10 +207,6 @@ pub struct CutManagementConfig {
     /// in a backward pass are candidates for deactivation. Typical value: `1e-6`.
     pub cut_activity_tolerance: f64,
 
-    /// Activity-window size for the basis-reconstruction classifier.
-    /// Validated range 1..=31 at `StudyParams::from_config`. Default 5.
-    pub basis_activity_window: u32,
-
     /// Number of pre-loaded cuts imported from a warm-start policy file.
     ///
     /// When non-zero, the cut pool is pre-populated from a serialised policy
@@ -233,7 +229,6 @@ impl Default for CutManagementConfig {
             cut_selection: None,
             budget: None,
             cut_activity_tolerance: 1e-6,
-            basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             warm_start_cuts: 0,
             risk_measures: vec![RiskMeasure::Expectation],
         }
@@ -285,8 +280,11 @@ pub struct EventConfig {
     /// Whether to allocate the visited-states archive for state export.
     ///
     /// When `true`, the archive is allocated so forward-pass trial points are
-    /// recorded for checkpoint persistence. When `false`, the archive is only
-    /// allocated if `cut_selection` requires it (i.e., `Dominated` variant).
+    /// recorded for checkpoint persistence. When `false`, the archive is
+    /// still allocated automatically if any
+    /// [`CutSelectionStrategy`] variant is
+    /// enabled, because the unified value-evaluation kernel evaluates every
+    /// populated cut at every state in this archive.
     /// Default: `false`.
     pub export_states: bool,
 }
@@ -305,8 +303,11 @@ pub(crate) struct EventParams {
     /// Whether to allocate the visited-states archive for state export.
     ///
     /// When `true`, the archive is allocated so forward-pass trial points are
-    /// recorded for checkpoint persistence. When `false`, the archive is only
-    /// allocated if `cut_selection` requires it (i.e., `Dominated` variant).
+    /// recorded for checkpoint persistence. When `false`, the archive is
+    /// still allocated automatically if any
+    /// [`CutSelectionStrategy`] variant is
+    /// enabled, because the unified value-evaluation kernel evaluates every
+    /// populated cut at every state in this archive.
     pub(crate) export_states: bool,
 }
 

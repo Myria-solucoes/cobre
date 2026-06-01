@@ -19,19 +19,19 @@ pub(super) fn check_cascade_acyclic(data: &ParsedData, ctx: &mut ValidationConte
     let mut adjacency: HashMap<i32, Vec<i32>> =
         all_ids.iter().copied().map(|id| (id, Vec::new())).collect();
     for hydro in &data.hydros {
-        if let Some(ds) = hydro.downstream_id {
-            if downstream_set.contains(&ds.0) {
-                adjacency.entry(hydro.id.0).or_default().push(ds.0);
-            }
+        if let Some(ds) = hydro.downstream_id
+            && downstream_set.contains(&ds.0)
+        {
+            adjacency.entry(hydro.id.0).or_default().push(ds.0);
         }
     }
 
     let mut in_degree: HashMap<i32, usize> = all_ids.iter().copied().map(|id| (id, 0)).collect();
     for hydro in &data.hydros {
-        if let Some(ds) = hydro.downstream_id {
-            if downstream_set.contains(&ds.0) {
-                *in_degree.entry(ds.0).or_insert(0) += 1;
-            }
+        if let Some(ds) = hydro.downstream_id
+            && downstream_set.contains(&ds.0)
+        {
+            *in_degree.entry(ds.0).or_insert(0) += 1;
         }
     }
 
@@ -110,9 +110,10 @@ pub(super) fn check_hydro_bounds(data: &ParsedData, ctx: &mut ValidationContext)
             );
         }
 
-        if let Some(max_outflow) = hydro.max_outflow_m3s {
-            if hydro.min_outflow_m3s > max_outflow {
-                ctx.add_error(
+        if let Some(max_outflow) = hydro.max_outflow_m3s
+            && hydro.min_outflow_m3s > max_outflow
+        {
+            ctx.add_error(
                     ErrorKind::InvalidValue,
                     "system/hydros.json",
                     Some(&entity_str),
@@ -121,7 +122,6 @@ pub(super) fn check_hydro_bounds(data: &ParsedData, ctx: &mut ValidationContext)
                         hydro.min_outflow_m3s, max_outflow
                     ),
                 );
-            }
         }
 
         if hydro.min_generation_mw > hydro.max_generation_mw {
@@ -140,10 +140,11 @@ pub(super) fn check_hydro_bounds(data: &ParsedData, ctx: &mut ValidationContext)
 
 pub(super) fn check_lifecycle_consistency(data: &ParsedData, ctx: &mut ValidationContext) {
     for hydro in &data.hydros {
-        if let (Some(entry), Some(exit)) = (hydro.entry_stage_id, hydro.exit_stage_id) {
-            if entry >= exit {
-                let entity_str = format!("Hydro {}", hydro.id.0);
-                ctx.add_error(
+        if let (Some(entry), Some(exit)) = (hydro.entry_stage_id, hydro.exit_stage_id)
+            && entry >= exit
+        {
+            let entity_str = format!("Hydro {}", hydro.id.0);
+            ctx.add_error(
                     ErrorKind::InvalidValue,
                     "system/hydros.json",
                     Some(&entity_str),
@@ -151,15 +152,15 @@ pub(super) fn check_lifecycle_consistency(data: &ParsedData, ctx: &mut Validatio
                         "{entity_str}: entry_stage_id ({entry}) >= exit_stage_id ({exit}); entry must precede exit"
                     ),
                 );
-            }
         }
     }
 
     for line in &data.lines {
-        if let (Some(entry), Some(exit)) = (line.entry_stage_id, line.exit_stage_id) {
-            if entry >= exit {
-                let entity_str = format!("Line {}", line.id.0);
-                ctx.add_error(
+        if let (Some(entry), Some(exit)) = (line.entry_stage_id, line.exit_stage_id)
+            && entry >= exit
+        {
+            let entity_str = format!("Line {}", line.id.0);
+            ctx.add_error(
                     ErrorKind::InvalidValue,
                     "system/lines.json",
                     Some(&entity_str),
@@ -167,15 +168,15 @@ pub(super) fn check_lifecycle_consistency(data: &ParsedData, ctx: &mut Validatio
                         "{entity_str}: entry_stage_id ({entry}) >= exit_stage_id ({exit}); entry must precede exit"
                     ),
                 );
-            }
         }
     }
 
     for thermal in &data.thermals {
-        if let (Some(entry), Some(exit)) = (thermal.entry_stage_id, thermal.exit_stage_id) {
-            if entry >= exit {
-                let entity_str = format!("Thermal {}", thermal.id.0);
-                ctx.add_error(
+        if let (Some(entry), Some(exit)) = (thermal.entry_stage_id, thermal.exit_stage_id)
+            && entry >= exit
+        {
+            let entity_str = format!("Thermal {}", thermal.id.0);
+            ctx.add_error(
                     ErrorKind::InvalidValue,
                     "system/thermals.json",
                     Some(&entity_str),
@@ -183,7 +184,6 @@ pub(super) fn check_lifecycle_consistency(data: &ParsedData, ctx: &mut Validatio
                         "{entity_str}: entry_stage_id ({entry}) >= exit_stage_id ({exit}); entry must precede exit"
                     ),
                 );
-            }
         }
     }
 }
@@ -198,19 +198,19 @@ pub(super) fn check_filling_config(data: &ParsedData, ctx: &mut ValidationContex
         .collect();
 
     for hydro in &data.hydros {
-        if let Some(filling) = &hydro.filling {
-            if !study_stage_ids.contains(&filling.start_stage_id) {
-                let entity_str = format!("Hydro {}", hydro.id.0);
-                ctx.add_error(
-                    ErrorKind::InvalidValue,
-                    "system/hydros.json",
-                    Some(&entity_str),
-                    format!(
-                        "{entity_str}: filling.start_stage_id ({}) is not a valid study stage ID",
-                        filling.start_stage_id
-                    ),
-                );
-            }
+        if let Some(filling) = &hydro.filling
+            && !study_stage_ids.contains(&filling.start_stage_id)
+        {
+            let entity_str = format!("Hydro {}", hydro.id.0);
+            ctx.add_error(
+                ErrorKind::InvalidValue,
+                "system/hydros.json",
+                Some(&entity_str),
+                format!(
+                    "{entity_str}: filling.start_stage_id ({}) is not a valid study stage ID",
+                    filling.start_stage_id
+                ),
+            );
         }
     }
 }

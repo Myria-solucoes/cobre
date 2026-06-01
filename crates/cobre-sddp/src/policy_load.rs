@@ -86,31 +86,90 @@ pub fn validate_policy_compatibility(
 /// a matching record get `Some(CapturedBasis)` (with `u8` status codes widened
 /// to `i32`); stages without a record get `None`.
 ///
-/// The returned `CapturedBasis` entries have empty metadata (`cut_row_slots`,
-/// `state_at_capture`, `base_row_count = 0`). Checkpoint files do not store
-/// slot-tracking metadata; on the simulation warm-start path, `reconstruct_basis`
-/// degrades gracefully when `cut_row_slots` is empty (all rows treated as new).
+/// # Cut-slot reconstruction
+///
+/// A checkpoint [`OwnedPolicyBasisRecord`](cobre_io::OwnedPolicyBasisRecord)
+/// stores `row_status` as `[template rows…, cut rows…]`, where the trailing
+/// `num_cut_rows` entries are the cut rows in capture-time
+/// [`CutPool::active_cuts`](crate::cut::pool::CutPool::active_cuts) order
+/// (active slots, increasing). To recover slot identity — which lets
+/// `reconstruct_basis` preserve a cut row's stored status across cut-set churn
+/// instead of falling back to BASIC — this function matches each basis record
+/// to its [`StageCutsReadResult`](cobre_io::StageCutsReadResult) by `stage_id`
+/// and derives `cut_row_slots` from the active cut records' `slot_index`
+/// values, in increasing order. `base_row_count` is then
+/// `row_status.len() - num_cut_rows`.
+///
+/// # Graceful fallback
+///
+/// When the derived active-slot count does not equal `num_cut_rows`
+/// (e.g. cut selection deactivated cuts between capture and export, so the
+/// exported `num_cut_rows` — a populated-slot count — exceeds the active-slot
+/// count that the captured basis actually carries), or when a basis record has
+/// no matching cut record at all, this function falls back to the safe
+/// all-template behavior: `base_row_count = row_status.len()` and
+/// `cut_row_slots` empty. `reconstruct_basis` then copies the first
+/// `target.base_row_count` template statuses positionally and reconstructs
+/// every current cut row as BASIC (non-binding). This only changes the
+/// warm-start solve path, never the optimum.
 #[must_use]
 pub fn build_basis_cache_from_checkpoint(
     num_stages: usize,
     stage_bases: &[cobre_io::OwnedPolicyBasisRecord],
+    stage_cuts: &[cobre_io::StageCutsReadResult],
 ) -> Vec<Option<CapturedBasis>> {
     let mut cache: Vec<Option<CapturedBasis>> = vec![None; num_stages];
     for record in stage_bases {
         let stage = record.stage_id as usize;
-        if stage < num_stages {
-            let col_status: Vec<i32> = record.column_status.iter().map(|&c| i32::from(c)).collect();
-            let row_status: Vec<i32> = record.row_status.iter().map(|&r| i32::from(r)).collect();
-            cache[stage] = Some(CapturedBasis {
-                basis: Basis {
-                    col_status,
-                    row_status,
-                },
-                base_row_count: 0,
-                cut_row_slots: Vec::new(),
-                state_at_capture: Vec::new(),
-            });
+        if stage >= num_stages {
+            continue;
         }
+        let col_status: Vec<i32> = record.column_status.iter().map(|&c| i32::from(c)).collect();
+        let row_status: Vec<i32> = record.row_status.iter().map(|&r| i32::from(r)).collect();
+
+        let num_cut = record.num_cut_rows as usize;
+        // Derive the active slot ids for this stage from the matched cut record.
+        // `build_stage_cut_records` exports cuts with `slot_index` equal to the
+        // pool slot, so the active records' `slot_index` values — taken in
+        // increasing order — reproduce the capture-time `active_cuts()` order
+        // that the basis row block was captured in.
+        let active_slots: Option<Vec<u32>> = stage_cuts
+            .iter()
+            .find(|sc| sc.stage_id == record.stage_id)
+            .map(|sc| {
+                sc.cuts
+                    .iter()
+                    .filter(|c| c.is_active)
+                    .map(|c| c.slot_index)
+                    .collect()
+            });
+
+        // Slot-matched path: a cut record exists and its active-slot count
+        // matches the basis's trailing cut-row count, so the stored cut rows
+        // can be bound to slots. Otherwise fall back to the safe all-template
+        // behavior (empty `cut_row_slots`, every cut row reconstructs BASIC).
+        let (base_row_count, cut_row_slots) = match active_slots {
+            Some(slots) if slots.len() == num_cut && num_cut <= row_status.len() => {
+                (row_status.len() - num_cut, slots)
+            }
+            _ => (row_status.len(), Vec::new()),
+        };
+        debug_assert_eq!(
+            cut_row_slots.len(),
+            row_status.len() - base_row_count,
+            "build_basis_cache_from_checkpoint: cut_row_slots length must equal the trailing \
+             cut-row count for the CapturedBasis invariant",
+        );
+
+        cache[stage] = Some(CapturedBasis {
+            basis: Basis {
+                col_status,
+                row_status,
+            },
+            base_row_count,
+            cut_row_slots,
+            state_at_capture: Vec::new(),
+        });
     }
     cache
 }

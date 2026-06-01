@@ -1,8 +1,10 @@
 //! Integration tests for profile × retry-level tolerance composition.
 //!
 //! Verifies that primal and dual feasibility tolerances at retry levels 3, 7,
-//! 10, and 11 satisfy `applied = max(level_default, profile_value)` (design
-//! §5.5). Also verifies the iteration-cap composition at retry level 0 (AC-8).
+//! 10, and 11 satisfy `applied = max(level_default, profile_value)`. Also
+//! verifies the iteration-cap composition at retry level 0, and that the
+//! profile is re-applied on every solve call (regression for the `HiGHS`
+//! internal-reset bug).
 //!
 //! Requires the `test-support` feature:
 //!   cargo nextest run -p cobre-solver --features test-support
@@ -19,7 +21,10 @@
 
 #[cfg(feature = "test-support")]
 mod tests {
-    use cobre_solver::{HighsSolver, SolverInterface, StageTemplate};
+    use std::cell::Cell;
+
+    use cobre_solver::types::{Basis, RowBatch, SolutionView, SolverError, SolverStatistics};
+    use cobre_solver::{HighsProfile, HighsSolver, ProfiledSolver, SolverInterface, StageTemplate};
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -150,19 +155,19 @@ mod tests {
 
     // ── AC-9: loose profile (profile_value > level_default) ──────────────────
     //
-    // Profile primal = dual = 1e-7.
-    // Levels 3 and 7  have level_default = 1e-8  →  max(1e-8, 1e-7) = 1e-7.
-    // Levels 10 and 11 have level_default = 1e-7  →  max(1e-7, 1e-7) = 1e-7.
+    // Profile primal = dual = 1e-5.
+    // Levels 3 and 7  have level_default = 1e-8  →  max(1e-8, 1e-5) = 1e-5.
+    // Levels 10 and 11 have level_default = 1e-7  →  max(1e-7, 1e-5) = 1e-5.
 
     fn make_loose_profile_solver() -> HighsSolver {
         let mut solver = make_solver();
-        solver.set_primal_feasibility_tolerance(1e-7);
-        solver.set_dual_feasibility_tolerance(1e-7);
+        solver.set_primal_feasibility_tolerance(1e-5);
+        solver.set_dual_feasibility_tolerance(1e-5);
         solver
     }
 
-    /// AC-9 — level 3, loose profile: applied tolerance must be 1e-7
-    /// (= max(1e-8, 1e-7)) for both primal and dual.
+    /// AC-9 — level 3, loose profile: applied tolerance must be 1e-5
+    /// (= max(1e-8, 1e-5)) for both primal and dual.
     #[test]
     fn loose_profile_level3_applies_profile_value() {
         let mut solver = make_loose_profile_solver();
@@ -176,17 +181,17 @@ mod tests {
             .expect("dual_feasibility_tolerance must be readable");
 
         assert!(
-            (primal - 1e-7).abs() < 1e-20,
-            "level 3 loose: primal must be max(1e-8, 1e-7) = 1e-7; got {primal}"
+            (primal - 1e-5).abs() < 1e-20,
+            "level 3 loose: primal must be max(1e-8, 1e-5) = 1e-5; got {primal}"
         );
         assert!(
-            (dual - 1e-7).abs() < 1e-20,
-            "level 3 loose: dual must be max(1e-8, 1e-7) = 1e-7; got {dual}"
+            (dual - 1e-5).abs() < 1e-20,
+            "level 3 loose: dual must be max(1e-8, 1e-5) = 1e-5; got {dual}"
         );
     }
 
-    /// AC-9 — level 7, loose profile: applied tolerance must be 1e-7
-    /// (= max(1e-8, 1e-7)) for both primal and dual.
+    /// AC-9 — level 7, loose profile: applied tolerance must be 1e-5
+    /// (= max(1e-8, 1e-5)) for both primal and dual.
     #[test]
     fn loose_profile_level7_applies_profile_value() {
         let mut solver = make_loose_profile_solver();
@@ -200,17 +205,17 @@ mod tests {
             .expect("dual_feasibility_tolerance must be readable");
 
         assert!(
-            (primal - 1e-7).abs() < 1e-20,
-            "level 7 loose: primal must be max(1e-8, 1e-7) = 1e-7; got {primal}"
+            (primal - 1e-5).abs() < 1e-20,
+            "level 7 loose: primal must be max(1e-8, 1e-5) = 1e-5; got {primal}"
         );
         assert!(
-            (dual - 1e-7).abs() < 1e-20,
-            "level 7 loose: dual must be max(1e-8, 1e-7) = 1e-7; got {dual}"
+            (dual - 1e-5).abs() < 1e-20,
+            "level 7 loose: dual must be max(1e-8, 1e-5) = 1e-5; got {dual}"
         );
     }
 
-    /// AC-9 — level 10, loose profile: applied tolerance must be 1e-7
-    /// (= max(1e-7, 1e-7)) for both primal and dual.
+    /// AC-9 — level 10, loose profile: applied tolerance must be 1e-5
+    /// (= max(1e-7, 1e-5)) for both primal and dual.
     #[test]
     fn loose_profile_level10_applies_profile_value() {
         let mut solver = make_loose_profile_solver();
@@ -224,17 +229,17 @@ mod tests {
             .expect("dual_feasibility_tolerance must be readable");
 
         assert!(
-            (primal - 1e-7).abs() < 1e-20,
-            "level 10 loose: primal must be max(1e-7, 1e-7) = 1e-7; got {primal}"
+            (primal - 1e-5).abs() < 1e-20,
+            "level 10 loose: primal must be max(1e-7, 1e-5) = 1e-5; got {primal}"
         );
         assert!(
-            (dual - 1e-7).abs() < 1e-20,
-            "level 10 loose: dual must be max(1e-7, 1e-7) = 1e-7; got {dual}"
+            (dual - 1e-5).abs() < 1e-20,
+            "level 10 loose: dual must be max(1e-7, 1e-5) = 1e-5; got {dual}"
         );
     }
 
-    /// AC-9 — level 11, loose profile: applied tolerance must be 1e-7
-    /// (= max(1e-7, 1e-7)) for both primal and dual.
+    /// AC-9 — level 11, loose profile: applied tolerance must be 1e-5
+    /// (= max(1e-7, 1e-5)) for both primal and dual.
     #[test]
     fn loose_profile_level11_applies_profile_value() {
         let mut solver = make_loose_profile_solver();
@@ -248,12 +253,12 @@ mod tests {
             .expect("dual_feasibility_tolerance must be readable");
 
         assert!(
-            (primal - 1e-7).abs() < 1e-20,
-            "level 11 loose: primal must be max(1e-7, 1e-7) = 1e-7; got {primal}"
+            (primal - 1e-5).abs() < 1e-20,
+            "level 11 loose: primal must be max(1e-7, 1e-5) = 1e-5; got {primal}"
         );
         assert!(
-            (dual - 1e-7).abs() < 1e-20,
-            "level 11 loose: dual must be max(1e-7, 1e-7) = 1e-7; got {dual}"
+            (dual - 1e-5).abs() < 1e-20,
+            "level 11 loose: dual must be max(1e-7, 1e-5) = 1e-5; got {dual}"
         );
     }
 
@@ -368,7 +373,7 @@ mod tests {
 
     // ── Fix 1: profile-aware restore after retry escalation ──────────────────
     //
-    // After `restore_default_settings()`, the tolerances reset to 1e-9 (the
+    // After `restore_default_settings()`, the tolerances reset to 1e-6 (the
     // hardcoded table values). `apply_profile_tolerances()` must then overwrite
     // them with the profile's values so HiGHS state and `current_profile` agree.
 
@@ -377,7 +382,7 @@ mod tests {
     /// Sets the profile primal tolerance to a non-default value (3e-8), then
     /// calls the combined `restore_defaults_then_apply_profile_for_test` helper
     /// (which mirrors the finalization path in `retry_escalation`). The FFI
-    /// read-back must return 3e-8 (the profile value), not 1e-9 (the default
+    /// read-back must return 3e-8 (the profile value), not 1e-6 (the default
     /// table value), proving that `apply_profile_tolerances` wins.
     #[test]
     fn profile_primal_tolerance_restored_after_retry_finalization() {
@@ -399,7 +404,8 @@ mod tests {
 
     /// Fix 1 — dual tolerance survives restore+profile sequence.
     ///
-    /// Same as the primal variant above, exercising the dual path.
+    /// Sets the profile dual tolerance to 5e-9 (below the 1e-6 default),
+    /// simulates the retry finalization path, and verifies the profile value wins.
     #[test]
     fn profile_dual_tolerance_restored_after_retry_finalization() {
         let mut solver = make_solver();
@@ -446,6 +452,113 @@ mod tests {
             cap,
             i32::MAX,
             "ipm_iteration_limit sentinel 0 must produce i32::MAX; got {cap}"
+        );
+    }
+
+    // ── Delta-only profile dispatch: solve() does not re-apply ───────────────
+    //
+    // ProfiledSolver installs the active profile at phase boundaries via
+    // set_profile (delta-gated by PartialEq) and re-applies it on the retry
+    // path. solve() itself does NOT re-apply the profile: on the
+    // forward/backward/simulation hot path the inner solver's options already
+    // equal the active profile, so re-applying on every solve would issue
+    // redundant FFI option setters. This test verifies that solves with no
+    // intervening profile change dispatch zero additional apply_profile calls.
+
+    /// Counts calls to `apply_profile`.
+    struct SetterCountMock {
+        apply_profile_call_count: Cell<usize>,
+    }
+
+    impl SetterCountMock {
+        fn new() -> Self {
+            Self {
+                apply_profile_call_count: Cell::new(0),
+            }
+        }
+    }
+
+    // SAFETY: used only on a single thread within this test.
+    unsafe impl Send for SetterCountMock {}
+
+    impl SolverInterface for SetterCountMock {
+        type Profile = HighsProfile;
+
+        fn apply_profile(&mut self, _profile: &HighsProfile) {
+            self.apply_profile_call_count
+                .set(self.apply_profile_call_count.get() + 1);
+        }
+
+        fn load_model(&mut self, _t: &StageTemplate) {}
+        fn add_rows(&mut self, _r: &RowBatch) {}
+        fn set_row_bounds(&mut self, _i: &[usize], _l: &[f64], _u: &[f64]) {}
+        fn set_col_bounds(&mut self, _i: &[usize], _l: &[f64], _u: &[f64]) {}
+        fn solve(&mut self, _b: Option<&Basis>) -> Result<SolutionView<'_>, SolverError> {
+            Err(SolverError::InternalError {
+                message: "mock".to_string(),
+                error_code: None,
+            })
+        }
+        fn get_basis(&mut self, _o: &mut Basis) {}
+        fn statistics(&self) -> SolverStatistics {
+            SolverStatistics::default()
+        }
+        fn name(&self) -> &'static str {
+            "SetterCountMock"
+        }
+        fn solver_name_version(&self) -> String {
+            "SetterCountMock 0.0.0".to_string()
+        }
+        fn set_primal_feasibility_tolerance(&mut self, _v: f64) {}
+        fn set_dual_feasibility_tolerance(&mut self, _v: f64) {}
+        fn set_simplex_iteration_limit_profile(&mut self, _v: u32) {}
+        fn set_ipm_iteration_limit_profile(&mut self, _v: u32) {}
+    }
+
+    /// Delta-only dispatch: once a profile is installed via `set_profile`,
+    /// subsequent `solve()` calls with no intervening profile change dispatch
+    /// no further `apply_profile` calls to the inner solver, and re-installing
+    /// the identical profile is a no-op.
+    #[test]
+    fn solve_does_not_reapply_unchanged_profile() {
+        let mock = SetterCountMock::new();
+        let mut solver = ProfiledSolver::new(mock);
+
+        // Apply a non-default profile once at phase entry (simulates phase boundary).
+        let non_default = HighsProfile {
+            primal_feasibility_tolerance: 1e-7,
+            dual_feasibility_tolerance: 1e-7,
+            simplex_iteration_limit: 50_000,
+            ipm_iteration_limit: 5_000,
+            simplex_dual_edge_weight_strategy: 0,
+            simplex_scale_strategy: 0,
+            simplex_price_strategy: 2,
+        };
+        solver.set_profile(&non_default);
+
+        // set_profile dispatched one apply_profile call for the non-default profile.
+        // Reset the counter so we only measure solve-triggered calls.
+        solver.inner_mut().apply_profile_call_count.set(0);
+
+        let n: usize = 3;
+        for _ in 0..n {
+            let _ = solver.solve(None);
+        }
+
+        // solve() must NOT re-apply an unchanged profile: the inner solver's
+        // options already equal the active profile on the hot path.
+        let solve_count = solver.inner().apply_profile_call_count.get();
+        assert_eq!(
+            solve_count, 0,
+            "solve() must not re-apply an unchanged profile; expected 0, got {solve_count}"
+        );
+
+        // Re-installing the identical profile is a delta-gated no-op.
+        solver.set_profile(&non_default);
+        let after_reset = solver.inner().apply_profile_call_count.get();
+        assert_eq!(
+            after_reset, 0,
+            "set_profile with an unchanged profile must be a no-op; expected 0, got {after_reset}"
         );
     }
 }

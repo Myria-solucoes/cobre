@@ -612,6 +612,10 @@ mod tests {
     }
 
     impl crate::SolverInterface for MockSolver {
+        type Profile = crate::HighsProfile;
+
+        fn apply_profile(&mut self, _profile: &crate::HighsProfile) {}
+
         fn load_model(&mut self, template: &StageTemplate) {
             self.last_loaded_num_rows = template.num_rows;
             self.stats.load_model_count += 1;

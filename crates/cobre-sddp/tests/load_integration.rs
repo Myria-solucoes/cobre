@@ -123,6 +123,9 @@ impl MockSolver {
 }
 
 impl SolverInterface for MockSolver {
+    type Profile = cobre_solver::HighsProfile;
+
+    fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
     fn solver_name_version(&self) -> String {
         "MockSolver 0.0.0".to_string()
     }
@@ -155,10 +158,14 @@ impl SolverInterface for MockSolver {
     fn name(&self) -> &'static str {
         "MockLoadIntegration"
     }
-    fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
-    fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
-    fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
-    fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
+
+    fn set_primal_feasibility_tolerance(&mut self, _tolerance: f64) {}
+
+    fn set_dual_feasibility_tolerance(&mut self, _tolerance: f64) {}
+
+    fn set_simplex_iteration_limit_profile(&mut self, _limit: u32) {}
+
+    fn set_ipm_iteration_limit_profile(&mut self, _limit: u32) {}
 }
 
 /// Build a `System` with 1 bus, 1 hydro, `n_stages` stages, and optionally
@@ -429,7 +436,6 @@ fn test_stochastic_load_training_completes() {
             budget: None,
             cut_activity_tolerance: 0.0,
             warm_start_cuts: 0,
-            basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
             risk_measures: risk_measures.clone(),
         },
         events: EventConfig {
@@ -489,6 +495,7 @@ fn test_stochastic_load_training_completes() {
         },
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
+        None,
     )
     .expect("train must succeed with stochastic load");
 
@@ -582,7 +589,6 @@ fn test_deterministic_load_training_matches_baseline() {
                 budget: None,
                 cut_activity_tolerance: 0.0,
                 warm_start_cuts: 0,
-                basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 risk_measures: risk_measures.clone(),
             },
             events: EventConfig {
@@ -613,6 +619,7 @@ fn test_deterministic_load_training_matches_baseline() {
         },
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
+        None,
     )
     .expect("train must succeed with deterministic load");
 
@@ -663,7 +670,6 @@ fn test_stochastic_load_seed_determinism() {
                 budget: None,
                 cut_activity_tolerance: 0.0,
                 warm_start_cuts: 0,
-                basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 risk_measures: risk_measures.clone(),
             },
             events: EventConfig {
@@ -719,6 +725,7 @@ fn test_stochastic_load_seed_determinism() {
             },
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            None,
         )
         .expect("train must succeed");
 

@@ -36,6 +36,9 @@ too_many_arguments = "deny"
 
 [dependencies]
 
+[dev-dependencies]
+matrixmultiply = { workspace = true }
+
 [build-dependencies]
 cmake = "0.1"
 cc = "1.2"

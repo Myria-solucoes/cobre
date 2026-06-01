@@ -84,7 +84,7 @@ pub struct ForwardResult {
     /// scenarios this rank processed. Length equals the number of
     /// stages in the study. Element `t` is the rank-local sum over
     /// `(scenario × this_rank)` of the per-stage `SolverStatsDelta`
-    /// produced by `run_stage_solve(Phase::Forward, ...)` for stage `t`.
+    /// produced by `run_stage_solve` for stage `t`.
     pub stage_stats: Vec<SolverStatsDelta>,
 }
 
@@ -698,11 +698,6 @@ pub struct ForwardPassBatch<'a> {
     /// the forward phase. When `None` (the default for tests), no events are
     /// emitted.
     pub event_sender: Option<&'a Sender<TrainingEvent>>,
-    /// Activity-window size for the basis-reconstruction classifier (1..=31).
-    ///
-    /// Forwarded verbatim from [`crate::config::CutManagementConfig::basis_activity_window`]
-    /// and threaded through `StageKey` into the stage-solve inputs.
-    pub basis_activity_window: u32,
 }
 
 /// Compute the scenario range `[start, end)` for worker `worker_id` when
@@ -763,26 +758,20 @@ pub(crate) struct StageKey<'a> {
     /// `write_capture_metadata` to record slot identities for the next
     /// iteration's warm-start, and forwarded into `StageInputs`.
     pub(crate) pool: &'a CutPool,
-    /// Baked stage template for stage `t`.
-    ///
-    /// Always populated on the always-baked forward path. The baked template
-    /// contains all active cuts as structural rows; `run_stage_solve` uses the
-    /// empty-iterator reconstruction path.
-    pub(crate) baked_template: &'a StageTemplate,
-    /// Activity-window size for the basis-reconstruction classifier (1..=31).
-    pub(crate) basis_activity_window: u32,
 }
 
-/// Populate `CapturedBasis` metadata after a forward solve.
+/// Populate `CapturedBasis` metadata after a stage solve.
 ///
 /// `cut_row_count` is the number of cut rows actually in the LP (derived from
-/// `basis_row_capacity - base_row_count`).  On terminal stages the pool may
-/// hold cuts that the LP does not load, so iterating `pool.active_cuts()`
-/// blindly would over-count; `take(cut_row_count)` limits to the LP shape.
+/// `basis_row_capacity - base_row_count`). Under the active-only bake model
+/// the baked template carries one row per active cut in `active_cuts()`
+/// iteration order; LP row `k` corresponds to the k-th active slot. The
+/// metadata captures that identity by pushing each active `slot as u32` in
+/// iteration order.
 ///
 /// `row_status` is defensively resized to `base_row_count + cut_row_count` so
 /// the metadata invariant holds even when the underlying solver's `get_basis`
-/// is a no-op (e.g. test mocks).  For real solvers this is a no-op since they
+/// is a no-op (e.g. test mocks). For real solvers this is a no-op since they
 /// write the correct length.
 #[allow(clippy::cast_possible_truncation)]
 pub(crate) fn write_capture_metadata(
@@ -842,8 +831,6 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         basis_row_capacity,
         terminal_has_boundary_cuts,
         pool,
-        baked_template,
-        basis_activity_window,
     } = *key;
     let n_hydros = ctx.n_hydros;
     let n_load_buses = ctx.n_load_buses;
@@ -886,6 +873,8 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         );
     }
 
+    ws.patch_buf
+        .fill_col_state_patches(indexer, &ws.current_state, &ctx.templates[t].col_scale);
     ws.patch_buf.fill_forward_patches(
         indexer,
         &ws.current_state,
@@ -906,6 +895,12 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         indexer.z_inflow_row_start,
         &ws.scratch.z_inflow_rhs_buf,
         &ctx.templates[t].row_scale,
+    );
+    let cp = ws.patch_buf.state_col_patch_count();
+    ws.solver.set_col_bounds(
+        &ws.patch_buf.col_indices[..cp],
+        &ws.patch_buf.col_lower[..cp],
+        &ws.patch_buf.col_upper[..cp],
     );
     let pc = ws.patch_buf.forward_patch_count();
     ws.solver.set_row_bounds(
@@ -946,47 +941,23 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         ws.solver.set_col_bounds(&[indexer.theta], &[0.0], &[0.0]);
     }
 
-    // Take the scratch buffer out of ws so that the immutable borrow of the
-    // local vec does not conflict with the `&mut ws` taken by run_stage_solve.
-    // Scratch buffer reused from `ws.scratch.current_state_scratch` via
-    // `std::mem::take` (capacity retained).
-    let mut current_state_local: Vec<f64> = std::mem::take(&mut ws.scratch.current_state_scratch);
-    current_state_local.clear();
-    current_state_local.extend_from_slice(&ws.current_state[..indexer.n_state]);
-
     let inputs = crate::stage_solve::StageInputs {
         stage_context: ctx,
-        indexer,
         pool,
-        current_state: &current_state_local,
         stored_basis: basis_slice.get_mut(m, t).as_ref(),
-        baked_template,
         stage_index: t,
         scenario_index: m,
         iteration: Some(iteration),
-        horizon_is_terminal: horizon.is_terminal(t + 1),
-        terminal_has_boundary_cuts,
-        basis_activity_window,
     };
 
-    let outcome =
-        crate::stage_solve::run_stage_solve(ws, crate::stage_solve::Phase::Forward, &inputs)
-            .map_err(|e| {
-                // Preserve today's behavior: invalidate the stored basis on
-                // Infeasible so the next warm-start attempt cold-solves.
-                if matches!(e, SddpError::Infeasible { .. }) {
-                    *basis_slice.get_mut(m, t) = None;
-                }
-                e
-            })?;
-
-    let crate::stage_solve::StageOutcome::Forward {
-        view,
-        recon_stats: _,
-    } = outcome
-    else {
-        unreachable!("run_stage_solve(Phase::Forward, ...) returns Forward variant")
-    };
+    let view = crate::stage_solve::run_stage_solve(ws, &inputs).map_err(|e| {
+        // Preserve today's behavior: invalidate the stored basis on
+        // Infeasible so the next warm-start attempt cold-solves.
+        if matches!(e, SddpError::Infeasible { .. }) {
+            *basis_slice.get_mut(m, t) = None;
+        }
+        e
+    })?;
 
     // Unscale primal values and capture the objective before the ws borrow
     // held by `view` ends its overlap with subsequent ws.scratch accesses.
@@ -1006,13 +977,8 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
     };
 
     // `view` is Copy, so use `let _ =` to end its borrow of ws for 'ws before
-    // the restore assignment below takes a mutable borrow of ws.scratch.
-    // `inputs` and its borrow of current_state_local ended at the `?` above
-    // (NLL sees no further use of inputs after that point).
-    // Restore scratch capacity back into the workspace slot so the next call
-    // reuses the warmed allocation without reallocating.
+    // the subsequent mutable borrows of ws.scratch below.
     let _ = view;
-    ws.scratch.current_state_scratch = current_state_local;
 
     let d_t = ctx.discount_factors.get(t).copied().unwrap_or(1.0);
     let stage_cost = (view_objective - d_t * unscaled_primal[indexer.theta]) * COST_SCALE_FACTOR;
@@ -1229,7 +1195,7 @@ pub fn build_sampler_from_ctx<'a>(
 /// `ForwardPassInputs` and calls `run` on them.
 /// Production callers use `TrainingSession::run_forward_phase` which drives
 /// `fwd_state.run(...)` directly.
-pub fn run_forward_pass<S: SolverInterface + Send>(
+pub fn run_forward_pass<S>(
     workspaces: &mut [SolverWorkspace<S>],
     basis_store: &mut BasisStore,
     ctx: &StageContext<'_>,
@@ -1238,7 +1204,10 @@ pub fn run_forward_pass<S: SolverInterface + Send>(
     training_ctx: &TrainingContext<'_>,
     batch: &ForwardPassBatch<'_>,
     records: &mut [TrajectoryRecord],
-) -> Result<ForwardResult, SddpError> {
+) -> Result<ForwardResult, SddpError>
+where
+    S: SolverInterface<Profile = cobre_solver::HighsProfile> + Send,
+{
     use crate::forward_pass_state::{ForwardPassInputs, ForwardPassState};
     let n_workers = workspaces.len().max(1);
     let num_stages = training_ctx.horizon.num_stages();
@@ -1256,7 +1225,6 @@ pub fn run_forward_pass<S: SolverInterface + Send>(
         iteration: batch.iteration,
         fwd_offset: batch.fwd_offset,
         event_sender: batch.event_sender,
-        basis_activity_window: batch.basis_activity_window,
     };
     state.run(&mut inputs)
 }
@@ -1388,6 +1356,10 @@ mod tests {
     }
 
     impl SolverInterface for MockSolver {
+        type Profile = cobre_solver::HighsProfile;
+
+        fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
+
         fn solver_name_version(&self) -> String {
             "MockSolver 0.0.0".to_string()
         }
@@ -1944,9 +1916,7 @@ mod tests {
                 downstream_weight_accum: 0.0,
                 downstream_completed_lags: Vec::new(),
                 downstream_n_completed: 0,
-                current_state_scratch: Vec::new(),
                 recon_slot_lookup: Vec::new(),
-                promotion_scratch: crate::basis_reconstruct::PromotionScratch::default(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
@@ -2017,7 +1987,6 @@ mod tests {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: vec![RiskMeasure::Expectation],
             },
@@ -2091,7 +2060,6 @@ mod tests {
                 iteration: 0,
                 fwd_offset: 0,
                 event_sender: None,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             },
             &mut records,
         )
@@ -2099,16 +2067,16 @@ mod tests {
 
         // AC: scenario_costs has exactly 2 entries (one per forward pass).
         assert_eq!(result.scenario_costs.len(), 2);
-        // AC: all 6 records have stage_cost = (100 - 30) * COST_SCALE_FACTOR = 70_000.
+        // AC: all 6 records have stage_cost = (100 - 30) * COST_SCALE_FACTOR = 70_000_000.
         for (i, record) in records.iter().enumerate() {
             assert_eq!(
-                record.stage_cost, 70_000.0,
-                "record[{i}].stage_cost should be 70_000.0 ((objective - theta) * COST_SCALE_FACTOR)"
+                record.stage_cost, 70_000_000.0,
+                "record[{i}].stage_cost should be 70_000_000.0 ((objective - theta) * COST_SCALE_FACTOR)"
             );
         }
-        // AC: each scenario cost = 70_000 * 3 stages = 210_000.
-        assert_eq!(result.scenario_costs[0], 210_000.0);
-        assert_eq!(result.scenario_costs[1], 210_000.0);
+        // AC: each scenario cost = 70_000_000 * 3 stages = 210_000_000.
+        assert_eq!(result.scenario_costs[0], 210_000_000.0);
+        assert_eq!(result.scenario_costs[1], 210_000_000.0);
     }
 
     /// AC: mock solver returns `Infeasible` at stage 1, scenario 0.
@@ -2142,7 +2110,6 @@ mod tests {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: vec![RiskMeasure::Expectation],
             },
@@ -2216,7 +2183,6 @@ mod tests {
                 iteration: 0,
                 fwd_offset: 0,
                 event_sender: None,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             },
             &mut records,
         );
@@ -2273,7 +2239,6 @@ mod tests {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: vec![RiskMeasure::Expectation],
             },
@@ -2347,22 +2312,21 @@ mod tests {
                 iteration: 0,
                 fwd_offset: 0,
                 event_sender: None,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             },
             &mut records,
         )
         .unwrap();
 
-        // stage_cost per solve = (100 - 30) * COST_SCALE_FACTOR = 70_000
-        // total_cost per scenario = 70_000 * 3 stages = 210_000
+        // stage_cost per solve = (100 - 30) * COST_SCALE_FACTOR = 70_000_000
+        // total_cost per scenario = 70_000_000 * 3 stages = 210_000_000
         assert_eq!(result.scenario_costs.len(), 2);
-        assert_eq!(result.scenario_costs[0], 210_000.0);
-        assert_eq!(result.scenario_costs[1], 210_000.0);
-        // Derived statistics: sum = 420_000, sum_sq = 210_000^2 * 2.
+        assert_eq!(result.scenario_costs[0], 210_000_000.0);
+        assert_eq!(result.scenario_costs[1], 210_000_000.0);
+        // Derived statistics: sum = 420_000_000, sum_sq = 210_000_000^2 * 2.
         let cost_sum: f64 = result.scenario_costs.iter().sum();
         let cost_sum_sq: f64 = result.scenario_costs.iter().map(|c| c * c).sum();
-        assert_eq!(cost_sum, 420_000.0);
-        assert_eq!(cost_sum_sq, 210_000.0_f64.powi(2) * 2.0);
+        assert_eq!(cost_sum, 420_000_000.0);
+        assert_eq!(cost_sum_sq, 210_000_000.0_f64.powi(2) * 2.0);
     }
 
     // ── Unit tests: SyncResult ───────────────────────────────────────────────
@@ -2724,7 +2688,6 @@ mod tests {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: vec![RiskMeasure::Expectation],
             },
@@ -2795,7 +2758,6 @@ mod tests {
                 iteration: 0,
                 fwd_offset: 0,
                 event_sender: None,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             },
             &mut records,
         )
@@ -2966,7 +2928,6 @@ mod tests {
                 iteration: 0,
                 fwd_offset: 0,
                 event_sender: None,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             },
             &mut records1,
         )
@@ -3007,7 +2968,6 @@ mod tests {
                 iteration: 0,
                 fwd_offset: 0,
                 event_sender: None,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             },
             &mut records4,
         )
@@ -3116,7 +3076,6 @@ mod tests {
                 iteration: 0,
                 fwd_offset: 0,
                 event_sender: None,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             },
             &mut records,
         )
@@ -3431,7 +3390,6 @@ mod tests {
                 iteration: 0,
                 fwd_offset: 0,
                 event_sender: None,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             },
             &mut records,
         )
@@ -3552,7 +3510,6 @@ mod tests {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: vec![RiskMeasure::Expectation],
             },
@@ -3625,7 +3582,6 @@ mod tests {
                 iteration: 0,
                 fwd_offset: 0,
                 event_sender: None,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             },
             &mut records,
         )
@@ -3635,8 +3591,8 @@ mod tests {
         assert_eq!(result.scenario_costs.len(), 2);
         for (i, record) in records.iter().enumerate() {
             assert_eq!(
-                record.stage_cost, 70_000.0,
-                "none_method: record[{i}].stage_cost should be 70_000.0 ((objective - theta) * COST_SCALE_FACTOR)"
+                record.stage_cost, 70_000_000.0,
+                "none_method: record[{i}].stage_cost should be 70_000_000.0 ((objective - theta) * COST_SCALE_FACTOR)"
             );
         }
     }
@@ -3871,7 +3827,6 @@ mod tests {
                 iteration: 0,
                 fwd_offset: 0,
                 event_sender: None,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             },
             &mut records,
         );
@@ -3953,9 +3908,7 @@ mod tests {
                 downstream_weight_accum: 0.0,
                 downstream_completed_lags: Vec::new(),
                 downstream_n_completed: 0,
-                current_state_scratch: Vec::new(),
                 recon_slot_lookup: Vec::new(),
-                promotion_scratch: crate::basis_reconstruct::PromotionScratch::default(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
@@ -4024,7 +3977,6 @@ mod tests {
                 iteration: 0,
                 fwd_offset: 0,
                 event_sender: None,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             },
             &mut records,
         )
@@ -4041,7 +3993,7 @@ mod tests {
             ws.scratch.load_rhs_buf[0]
         );
 
-        let cat4_start = 2;
+        let cat4_start = 1;
         assert_eq!(
             ws.patch_buf.lower[cat4_start], ws.scratch.load_rhs_buf[0],
             "patch_buf lower must equal load_rhs_buf[0]"
@@ -4101,9 +4053,7 @@ mod tests {
                 downstream_weight_accum: 0.0,
                 downstream_completed_lags: Vec::new(),
                 downstream_n_completed: 0,
-                current_state_scratch: Vec::new(),
                 recon_slot_lookup: Vec::new(),
-                promotion_scratch: crate::basis_reconstruct::PromotionScratch::default(),
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
@@ -4172,7 +4122,6 @@ mod tests {
                 iteration: 0,
                 fwd_offset: 0,
                 event_sender: None,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             },
             &mut records,
         )
@@ -4189,7 +4138,7 @@ mod tests {
             ws.scratch.load_rhs_buf[0]
         );
 
-        let cat4_start = 2;
+        let cat4_start = 1;
         assert_eq!(
             ws.patch_buf.lower[cat4_start], 0.0,
             "patch lower must be 0.0 (clamped)"
@@ -4201,10 +4150,10 @@ mod tests {
     }
 
     /// Verify that when `n_load_buses == 0` no load patches are applied and
-    /// `forward_patch_count()` equals `N*(2+L)`.
+    /// `forward_patch_count()` equals `N`.
     ///
     /// With N=1 hydro, L=0 PAR order, and no load buses the patch count must be
-    /// exactly `1 * (2 + 0) = 2`.
+    /// exactly `1`.
     #[test]
     fn forward_pass_no_load_buses_unchanged() {
         // Use the existing 1-hydro-3-stage context that has no load buses.
@@ -4272,19 +4221,18 @@ mod tests {
                 iteration: 0,
                 fwd_offset: 0,
                 event_sender: None,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
             },
             &mut records,
         )
         .unwrap();
 
         // With n_load_buses=0, active_load_patches stays 0.
-        // forward_patch_count = N*(2+L) = 1*(2+0) = 2.
+        // forward_patch_count = N = 1.
         // The PatchBuffer was constructed for 1 hydro (single_workspace uses indexer.hydro_count=1).
         assert_eq!(
             ws.patch_buf.forward_patch_count(),
-            2,
-            "forward_patch_count must be N*(2+L)=2 when n_load_buses=0, got {}",
+            1,
+            "forward_patch_count must be N=1 when n_load_buses=0, got {}",
             ws.patch_buf.forward_patch_count()
         );
         // load_rhs_buf must remain empty (never pushed to).
@@ -4312,6 +4260,10 @@ mod tests {
     }
 
     impl SolverInterface for RecordingMockSolver {
+        type Profile = cobre_solver::HighsProfile;
+
+        fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
+
         fn solver_name_version(&self) -> String {
             "MockSolver 0.0.0".to_string()
         }
@@ -4756,5 +4708,47 @@ mod tests {
         assert_eq!(batch.num_rows, 1);
         // Prior garbage must be gone.
         assert_eq!(batch.row_starts.len(), 2);
+    }
+
+    /// `build_delta_cut_row_batch_into` with a pool containing only warm-start
+    /// cuts must emit zero rows regardless of the requested iteration.
+    #[test]
+    fn build_delta_cut_row_batch_into_skips_warm_start_slots() {
+        use crate::cut::pool::CutPool;
+        use cobre_io::OwnedPolicyCutRecord;
+
+        // One warm-start cut at slot 0.
+        let ws_record = OwnedPolicyCutRecord {
+            cut_id: 0,
+            slot_index: 0,
+            coefficients: vec![1.0],
+            intercept: 99.0,
+            iteration: 0,
+            forward_pass_index: 0,
+            is_active: true,
+        };
+        let mut pool = CutPool::new_with_warm_start(1, 1, 10, &[ws_record]);
+        // One iteration-1 cut at slot 1 (warm_start_count=1, so slot = 1+1*1+0 = 2,
+        // but new_with_warm_start sets warm_start_count=1 → slot = 1+1*1+0 = 2).
+        pool.add_cut(1, 0, 7.0, &[1.0]);
+
+        let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
+        fcf.pools[0] = pool;
+
+        let indexer = StageIndexer::new(1, 0);
+        let mut batch = RowBatch {
+            num_rows: 0,
+            row_starts: Vec::new(),
+            col_indices: Vec::new(),
+            values: Vec::new(),
+            row_lower: Vec::new(),
+            row_upper: Vec::new(),
+        };
+
+        build_delta_cut_row_batch_into(&mut batch, &fcf, 0, &indexer, &[], 1);
+
+        // Warm-start slot must be excluded; only the iteration-1 cut appears.
+        assert_eq!(batch.num_rows, 1);
+        assert_eq!(batch.row_lower[0], 7.0);
     }
 }

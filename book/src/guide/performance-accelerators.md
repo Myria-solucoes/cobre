@@ -132,8 +132,9 @@ coefficients to reduce typical monetary values from ~1e11 to ~1e8,
 improving simplex numerical stability.
 
 Because the prescaler normalizes matrix entries toward 1.0, HiGHS's
-internal scaling (`simplex_scale_strategy`) is disabled by default
-(set to 0). Retry levels 5+ re-enable it as a fallback.
+internal scaling (`simplex_scale_strategy`) is disabled (set to 0) in
+every solver profile — including the retry-escalation levels — to avoid
+double-scaling the already-conditioned matrix.
 
 The scaling diagnostics are written to `training/scaling_report.json`
 after template construction, documenting the coefficient range before
@@ -162,22 +163,28 @@ Stage 2: Budget enforcement        (every iteration)
 Three strategies are available, configured via
 [`cut_selection`](./configuration.md#cut_selection) in `config.json`:
 
-| Strategy     | Deactivation Condition                             | Aggressiveness |
-| ------------ | -------------------------------------------------- | -------------- |
-| `level1`     | `active_count <= threshold` (never-binding rows)   | Least          |
-| `lml1`       | `iteration - last_active_iter > memory_window`     | Medium         |
-| `domination` | Dominated at all visited forward-pass trial points | Most           |
+| Strategy     | Deactivation Condition                                                             | Aggressiveness |
+| ------------ | ---------------------------------------------------------------------------------- | -------------- |
+| `level1`     | Below `tie_tolerance` of the per-state max at every visited state                  | Least          |
+| `lml1`       | Not the oldest eligible cut at the per-state max at any visited state              | Medium         |
+| `domination` | Below `threshold` of the per-state max at every visited state (all populated cuts) | Most           |
 
 All strategies respect `check_frequency`: selection runs only at
 iterations that are multiples of `check_frequency`. Stage 0 is always
 exempt (its rows drive the lower bound and are never backward-pass
 successors). Selection runs in parallel across stages via `rayon`.
 
-**Dominated** selection performs `O(|active rows| x |visited states|)` work
-per stage per check. It deactivates rows that are pointwise dominated
-at every visited forward-pass state, using the visited-states archive
-that is always collected during training. The `domination_epsilon`
-parameter controls the tolerance for domination comparisons.
+All three strategies share a single value-evaluation kernel that
+performs `O(|populated cuts| x |visited states|)` work per stage per
+check. Every populated cut is evaluated at every visited
+forward-pass state (including cuts currently flagged inactive,
+which means a previously deactivated cut can be reactivated when it
+later achieves the maximum at some state). The visited-states
+archive is collected during training for every cut-selection
+variant. The `tie_tolerance` parameter (default `1e-10`) on
+`level1` and `lml1` controls how closely a cut must approach the
+per-state maximum to be retained; `domination` uses the
+`threshold` field for the same purpose.
 
 ### Stage 2: Budget Enforcement
 
@@ -198,7 +205,7 @@ by `check_frequency`).
     "cut_selection": {
       "enabled": true,
       "method": "level1",
-      "threshold": 0,
+      "tie_tolerance": 1e-10,
       "check_frequency": 5,
       "max_active_per_stage": 500
     }
@@ -272,28 +279,24 @@ each row into one of two paths:
 
 - **Preserved** (slot present in the stored basis): the original status
   is copied verbatim.
-- **New** (slot not present — a row added since capture): the classifier
-  consults the row's sliding bitmap of recent binding observations. If
-  any bit within the `basis_activity_window` mask is set, or if the row
-  was generated in the current iteration, the row is assigned
-  `NONBASIC_LOWER` (tight guess); otherwise `BASIC` (slack guess).
+- **New** (slot not present — a row added since capture): the row is
+  unconditionally assigned `NONBASIC_LOWER` (tight guess).
 
 Each `NONBASIC_LOWER` classification on a new row requires a
 compensating demotion on a preserved row to keep HiGHS's
 column-basic + row-basic invariant. The stalest preserved-`LOWER`
-candidate is promoted, ranked lexicographically by recent-activity
-popcount, last-active iteration, and insertion order. When
-new-`LOWER` classifications outnumber preserved-`LOWER` candidates,
-a tail fallback flips the most recent new-`LOWER` rows back to
-`BASIC` until the invariant holds.
+candidate is promoted, ranked lexicographically by insertion order.
+When new-`LOWER` classifications outnumber preserved-`LOWER`
+candidates, a tail fallback flips the most recent new-`LOWER` rows
+back to `BASIC` until the invariant holds.
 
 Reconstruction is always active when a stored basis exists — there is
-no configuration flag.
+no configuration flag. The previous `basis_activity_window` config
+knob is deprecated and silently ignored; it will be removed from the
+schema in the next release.
 
-The `basis_reconstructions` counter in
-`training/solver/iterations.parquet` and
-`simulation/solver/iterations.parquet` tracks how often
-`reconstruct_basis` was invoked with a non-empty stored basis.
+The in-memory `SolverStatistics::basis_reconstructions` counter tracks how
+often `reconstruct_basis` was invoked with a non-empty stored basis.
 
 ### Backward-Pass Basis Cache
 
@@ -331,14 +334,15 @@ identical results regardless of thread count or completion order.
 ### Per-Phase Solver Profiles
 
 Each algorithmic phase — forward sweep, backward sweep, and simulation — can
-be configured with a distinct `SolveProfile` that sets the LP solver's
+be configured with a distinct `HighsProfile` that sets the LP solver's
 feasibility tolerances and per-attempt iteration caps. Tuning `BACKWARD_PROFILE`
 to tighter tolerances or stricter iteration caps can reduce backward-pass
 solve time variance, which in turn improves load balance across worker threads
-and shortens wall-clock training time. The current release ships all three
-profiles equal to `SolveProfile::default()`, preserving the historical
-behavior; a future tuning effort will set measured values for
-`BACKWARD_PROFILE`.
+and shortens wall-clock training time. `FORWARD_PROFILE` and
+`SIMULATION_PROFILE` ship equal to `HighsProfile::default()`, while
+`BACKWARD_PROFILE` already overrides `simplex_price_strategy` to `2`
+(`RowHyperSparse`) to exploit sparsity on the backward LPs; all other backward
+fields match the default.
 
 ### Forward Pass and Simulation
 
@@ -347,11 +351,13 @@ Scenarios are statically partitioned across solver workspace instances
 assignment deterministic. Within each scenario, the LP is loaded once
 per stage and only row bounds are patched per scenario.
 
-### Lower Bound Parallel Evaluation
+### Lower Bound Evaluation
 
-The lower bound evaluation (solving stage-0 LPs for every opening in the
-tree) is parallelized across the rayon thread pool using the same atomic
-work-stealing pattern as the backward pass.
+The lower bound evaluation (solving a stage-0 LP for every opening in the
+tree) runs as a single-threaded serial loop on rank 0. Each opening patches
+correctness-critical per-opening state (e.g. NCS column bounds) on a shared
+solver, so the openings cannot be split across workers without fragmenting
+those sequential steps; the step is therefore not parallelized.
 
 ### Communication-Free Seed Derivation
 
@@ -367,8 +373,11 @@ and shared read-only.
 
 ### Pre-Allocation Discipline
 
-The training loop makes no heap allocations on the hot path inside the
-iteration loop. All workspace buffers are allocated once before the loop:
+The forward, backward, and simulation per-solve hot paths make no heap
+allocations inside the iteration loop; all workspace buffers are allocated
+once before the loop. (The periodic cut-selection pass is the one documented
+exception — its rayon fold/reduce kernel allocates per-leaf scratch.) The
+pre-allocated buffers are:
 
 | Buffer                                 | Size                                                        |
 | -------------------------------------- | ----------------------------------------------------------- |

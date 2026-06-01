@@ -35,6 +35,7 @@ use crate::output::schemas::{convergence_schema, iteration_timing_schema};
 ///
 /// ```no_run
 /// use cobre_io::{TrainingOutput, RowPoolStatistics, ParquetWriterConfig};
+/// use cobre_io::MetadataTrainingSolveStats;
 /// use cobre_io::output::training_writer::TrainingParquetWriter;
 /// use std::path::Path;
 ///
@@ -46,6 +47,7 @@ use crate::output::schemas::{convergence_schema, iteration_timing_schema};
 ///     final_lower_bound: 42.0,
 ///     final_upper_bound: None,
 ///     final_gap_percent: None,
+///     final_upper_bound_std: None,
 ///     iterations_completed: 0,
 ///     converged: false,
 ///     termination_reason: "iteration limit".to_string(),
@@ -54,9 +56,11 @@ use crate::output::schemas::{convergence_schema, iteration_timing_schema};
 ///         total_generated: 0,
 ///         total_active: 0,
 ///         peak_active: 0,
+///         cuts_active: 0,
 ///     },
 ///     cut_selection_records: Vec::new(),
 ///     worker_timing_records: Vec::new(),
+///     training_solve_stats: MetadataTrainingSolveStats::default(),
 /// };
 /// writer.write(&training)?;
 /// # Ok(())
@@ -315,11 +319,11 @@ pub fn write_row_selection_records(
     let mut populated_builder = Int32Builder::with_capacity(n);
     let mut active_before_builder = Int32Builder::with_capacity(n);
     let mut deactivated_builder = Int32Builder::with_capacity(n);
+    let mut reactivated_builder = Int32Builder::with_capacity(n);
     let mut active_after_builder = Int32Builder::with_capacity(n);
     let mut selection_time_builder = Float64Builder::with_capacity(n);
     let mut budget_evicted_builder = Int32Builder::with_capacity(n);
     let mut active_after_budget_builder = Int32Builder::with_capacity(n);
-
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     for r in records {
         iteration_builder.append_value(r.iteration as i32);
@@ -327,6 +331,7 @@ pub fn write_row_selection_records(
         populated_builder.append_value(r.cuts_populated as i32);
         active_before_builder.append_value(r.cuts_active_before as i32);
         deactivated_builder.append_value(r.cuts_deactivated as i32);
+        reactivated_builder.append_value(r.cuts_reactivated as i32);
         active_after_builder.append_value(r.cuts_active_after as i32);
         selection_time_builder.append_value(r.selection_time_ms);
         budget_evicted_builder.append_option(r.budget_evicted.map(|v| v as i32));
@@ -339,6 +344,7 @@ pub fn write_row_selection_records(
         Arc::new(populated_builder.finish()),
         Arc::new(active_before_builder.finish()),
         Arc::new(deactivated_builder.finish()),
+        Arc::new(reactivated_builder.finish()),
         Arc::new(active_after_builder.finish()),
         Arc::new(selection_time_builder.finish()),
         Arc::new(budget_evicted_builder.finish()),
@@ -441,6 +447,7 @@ mod tests {
             final_lower_bound: 99.5,
             final_upper_bound: Some(101.0),
             final_gap_percent: Some(1.51),
+            final_upper_bound_std: Some(0.5),
             iterations_completed: 0,
             converged: true,
             termination_reason: "gap tolerance reached".to_string(),
@@ -449,9 +456,11 @@ mod tests {
                 total_generated: 200,
                 total_active: 80,
                 peak_active: 95,
+                cuts_active: 80,
             },
             cut_selection_records: vec![],
             worker_timing_records: vec![],
+            training_solve_stats: crate::MetadataTrainingSolveStats::default(),
         }
     }
 
@@ -925,6 +934,7 @@ mod tests {
                 cuts_populated: 10,
                 cuts_active_before: 10,
                 cuts_deactivated: 0,
+                cuts_reactivated: 0,
                 cuts_active_after: 10,
                 selection_time_ms: 0.0,
                 budget_evicted: None,
@@ -936,6 +946,7 @@ mod tests {
                 cuts_populated: 8,
                 cuts_active_before: 8,
                 cuts_deactivated: 2,
+                cuts_reactivated: 0,
                 cuts_active_after: 6,
                 selection_time_ms: 1.5,
                 budget_evicted: None,
@@ -953,7 +964,7 @@ mod tests {
             .unwrap();
         let batch: RecordBatch = reader.into_iter().next().unwrap().unwrap();
         assert_eq!(batch.num_rows(), 2);
-        assert_eq!(batch.num_columns(), 9);
+        assert_eq!(batch.num_columns(), 10);
     }
 
     #[test]
@@ -971,6 +982,7 @@ mod tests {
                 cuts_populated: 20,
                 cuts_active_before: 20,
                 cuts_deactivated: 0,
+                cuts_reactivated: 0,
                 cuts_active_after: 20,
                 selection_time_ms: 0.0,
                 budget_evicted: Some(3),
@@ -983,6 +995,7 @@ mod tests {
                 cuts_populated: 15,
                 cuts_active_before: 15,
                 cuts_deactivated: 2,
+                cuts_reactivated: 1,
                 cuts_active_after: 13,
                 selection_time_ms: 2.0,
                 budget_evicted: None,
@@ -1000,7 +1013,7 @@ mod tests {
             .unwrap();
         let batch = reader.next().unwrap().unwrap();
         assert_eq!(batch.num_rows(), 2);
-        assert_eq!(batch.num_columns(), 9);
+        assert_eq!(batch.num_columns(), 10);
 
         // Verify nullable columns: row 0 has Some values, row 1 has None.
         let budget_evicted_col = batch.column_by_name("budget_evicted").unwrap();
@@ -1035,5 +1048,52 @@ mod tests {
             .downcast_ref::<arrow::array::Int32Array>()
             .unwrap();
         assert_eq!(budget_arr.value(0), 15);
+    }
+
+    #[test]
+    fn parquet_schema_includes_cuts_active_column() {
+        use arrow::datatypes::DataType;
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+        use super::super::RowSelectionRecord;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config = ParquetWriterConfig::default();
+        let records = vec![RowSelectionRecord {
+            iteration: 1,
+            stage: 0,
+            cuts_populated: 5,
+            cuts_active_before: 5,
+            cuts_deactivated: 0,
+            cuts_reactivated: 0,
+            cuts_active_after: 5,
+            selection_time_ms: 0.0,
+            budget_evicted: None,
+            active_after_budget: None,
+        }];
+        write_row_selection_records(tmp.path(), &records, &config).unwrap();
+        let path = tmp.path().join("training/cut_selection/iterations.parquet");
+
+        let file = std::fs::File::open(&path).unwrap();
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+        let schema = builder.schema().clone();
+
+        let cuts_reactivated = schema
+            .field_with_name("cuts_reactivated")
+            .expect("cuts_reactivated column must exist in schema");
+        assert_eq!(
+            cuts_reactivated.data_type(),
+            &DataType::Int32,
+            "cuts_reactivated must be Int32"
+        );
+        assert!(
+            !cuts_reactivated.is_nullable(),
+            "cuts_reactivated must not be nullable"
+        );
+
+        assert!(
+            schema.field_with_name("cuts_in_lp").is_err(),
+            "cuts_in_lp column must not be present in schema"
+        );
     }
 }

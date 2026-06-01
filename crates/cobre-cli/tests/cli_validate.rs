@@ -210,20 +210,20 @@ fn valid_case_piped_stdout_has_no_ansi_escapes() {
 // only by the three additional phases (StudyParams::from_config, prepare_stochastic,
 // prepare_hydro_models_from_artifacts) that `validate` now exercises.
 
-/// A `config.json` with `basis_activity_window = 100` must cause `validate` to
-/// exit 1.  The IO pipeline accepts any integer in the config schema — only
-/// `StudyParams::from_config` (Phase 8) enforces the `1..=31` range constraint.
-///
-/// Failure mode: `StudyParams::from_config` returns `SddpError::Validation`
-/// because `basis_activity_window` is outside the valid range.
+/// A `config.json` that sets `basis_activity_window` must still pass
+/// `validate` because the field is deprecated — any value (including values
+/// that used to fail the old 1..=31 range check) is silently ignored after
+/// emitting a one-shot deprecation warning. This guards the soft-deprecation
+/// contract: existing user configs continue to load until the field is
+/// removed from the schema in the next release.
 #[test]
-fn basis_activity_window_out_of_range_fails_validate() {
+fn deprecated_basis_activity_window_does_not_fail_validate() {
     let dir = TempDir::new().unwrap();
     make_valid_case(&dir);
 
-    // Overwrite config.json with an out-of-range basis_activity_window.
-    // The IO pipeline accepts this without error; only Phase 8 rejects it.
-    let bad_config = r#"{
+    // `basis_activity_window: 100` would have failed the previous 1..=31
+    // range check. After soft-deprecation it must succeed.
+    let deprecated_config = r#"{
         "training": {
             "forward_passes": 10,
             "stopping_rules": [
@@ -233,24 +233,24 @@ fn basis_activity_window_out_of_range_fails_validate() {
             "cut_selection": { "basis_activity_window": 100 }
         }
     }"#;
-    write_file(dir.path(), "config.json", bad_config);
+    write_file(dir.path(), "config.json", deprecated_config);
 
     cobre()
         .args(["validate", dir.path().to_str().unwrap()])
         .assert()
-        .failure()
-        .code(1);
+        .success();
 }
 
-/// Same case as above — the stdout must mention both `basis_activity_window`
-/// and the valid range `1..=31` so the user can fix the problem without
-/// reading the source code.
+/// When the config sets `basis_activity_window`, the CLI must emit a
+/// deprecation warning to stderr that names the field and signals both the
+/// "deprecated" status and the "ignored" semantics. This wraps the contract
+/// that users have one release to remove the field from their TOML.
 #[test]
-fn basis_activity_window_out_of_range_stdout_mentions_field_and_range() {
+fn deprecated_basis_activity_window_emits_warning_to_stderr() {
     let dir = TempDir::new().unwrap();
     make_valid_case(&dir);
 
-    let bad_config = r#"{
+    let deprecated_config = r#"{
         "training": {
             "forward_passes": 10,
             "stopping_rules": [
@@ -260,17 +260,33 @@ fn basis_activity_window_out_of_range_stdout_mentions_field_and_range() {
             "cut_selection": { "basis_activity_window": 100 }
         }
     }"#;
-    write_file(dir.path(), "config.json", bad_config);
+    write_file(dir.path(), "config.json", deprecated_config);
 
     cobre()
         .args(["validate", dir.path().to_str().unwrap()])
         .assert()
-        .failure()
-        .code(1)
-        .stdout(
+        .success()
+        .stderr(
             predicate::str::contains("basis_activity_window")
-                .and(predicate::str::contains("1..=31")),
+                .and(predicate::str::contains("deprecated"))
+                .and(predicate::str::contains("ignored")),
         );
+}
+
+/// A config that does NOT set `basis_activity_window` must NOT mention the
+/// field anywhere in stderr — the deprecation warning fires only when the
+/// user-supplied field is `Some(_)`.
+#[test]
+fn absent_basis_activity_window_emits_no_deprecation_warning() {
+    let dir = TempDir::new().unwrap();
+    make_valid_case(&dir);
+    // `make_valid_case` writes a config.json that omits basis_activity_window.
+
+    cobre()
+        .args(["validate", dir.path().to_str().unwrap()])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("basis_activity_window").not());
 }
 
 /// A hydro plant configured with `"model": "fpha"` in `hydros.json` but with

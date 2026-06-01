@@ -16,10 +16,9 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc::Sender;
 use std::time::Instant;
 
-use cobre_comm::Communicator;
+use cobre_comm::{Communicator, ReduceOp};
 use cobre_core::{StageRowSelectionRecord, TrainingEvent};
 use cobre_solver::SolverInterface;
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 use crate::{
     SddpError, TrainingConfig,
@@ -27,13 +26,16 @@ use crate::{
     context::{StageContext, TrainingContext},
     convergence::ConvergenceMonitor,
     cut::fcf::FutureCostFunction,
-    cut_selection::DeactivationSet,
+    cut_selection::CutActivityUpdates,
     cut_sync::CutSyncBuffers,
     forward::{build_cut_row_batch_into, sync_forward},
     forward_pass_state::{ForwardPassInputs, ForwardPassState},
     lower_bound::evaluate_lower_bound,
     lower_bound::{LbEvalScratchBundle, LbEvalSpec},
-    solver_stats::{SolverStatsDelta, aggregate_solver_statistics},
+    solver_stats::{
+        SOLVER_STATS_DELTA_SCALAR_FIELDS, SolverStatsDelta, aggregate_solver_statistics,
+        pack_delta_scalars, unpack_delta_scalars,
+    },
     state_exchange::ExchangeBuffers,
     stopping_rule::RULE_GRACEFUL_SHUTDOWN,
     training::{TrainingOutcome, TrainingResult, broadcast_basis_cache},
@@ -118,7 +120,10 @@ pub(crate) struct TrainingSession<'a, S: SolverInterface + Send, C: Communicator
     results: TrainingResults,
 }
 
-impl<'a, S: SolverInterface + Send, C: Communicator> TrainingSession<'a, S, C> {
+impl<'a, S, C: Communicator> TrainingSession<'a, S, C>
+where
+    S: SolverInterface<Profile = cobre_solver::HighsProfile> + Send,
+{
     /// Allocate all per-training-run scratch and emit the `TrainingStarted` event.
     ///
     /// Performs exactly what the 400-712 prelude in the original `train()` did:
@@ -151,6 +156,12 @@ impl<'a, S: SolverInterface + Send, C: Communicator> TrainingSession<'a, S, C> {
         let num_stages = horizon.num_stages();
         let total_forward_passes = config.loop_config.forward_passes as usize;
         let ranks = RankDistribution::new(comm, num_stages, total_forward_passes, indexer.n_state);
+
+        // ── Dense cut packing ─────────────────────────────────────────────
+        // Map the first training iteration (start_iteration + 1) to slot
+        // `warm_start_count` so training cuts pack densely with no reserved
+        // leading block. Runs before the first backward pass adds any cut.
+        fcf.set_iteration_base(config.loop_config.start_iteration + 1);
 
         // ── Workspace pool ────────────────────────────────────────────────
         let n_threads = config.loop_config.n_fwd_threads.max(1);
@@ -218,10 +229,12 @@ impl<'a, S: SolverInterface + Send, C: Communicator> TrainingSession<'a, S, C> {
         );
 
         // ── Visited-states archive ────────────────────────────────────────
-        let needs_archive = matches!(
-            config.cut_management.cut_selection,
-            Some(crate::cut_selection::CutSelectionStrategy::Dominated { .. })
-        ) || config.events.export_states;
+        // All cut-selection strategies require the visited-states archive: the
+        // unified value-evaluation kernel evaluates every populated cut at the
+        // trial points stored here. Event export also needs the archive when
+        // `export_states` is enabled.
+        let needs_archive =
+            config.cut_management.cut_selection.is_some() || config.events.export_states;
         let visited_archive = if needs_archive {
             Some(crate::visited_states::VisitedStatesArchive::new(
                 ranks.num_stages,
@@ -352,10 +365,10 @@ impl<'a, S: SolverInterface + Send, C: Communicator> TrainingSession<'a, S, C> {
     /// bound evaluation failures.
     pub(crate) fn run_iteration(&mut self, iteration: u64) -> Result<IterationOutcome, SddpError> {
         // Check external shutdown flag before starting.
-        if let Some(flag) = self.runtime.shutdown_flag.as_ref() {
-            if flag.load(Ordering::Relaxed) {
-                self.convergence_monitor.set_shutdown();
-            }
+        if let Some(flag) = self.runtime.shutdown_flag.as_ref()
+            && flag.load(Ordering::Relaxed)
+        {
+            self.convergence_monitor.set_shutdown();
         }
 
         let iter_start = Instant::now();
@@ -590,7 +603,6 @@ impl<'a, S: SolverInterface + Send, C: Communicator> TrainingSession<'a, S, C> {
             &mut self.scratch,
             self.fcf,
             self.training_ctx,
-            &self.config.cut_management,
             &self.ranks,
             &self.runtime,
             iteration,
@@ -607,8 +619,46 @@ impl<'a, S: SolverInterface + Send, C: Communicator> TrainingSession<'a, S, C> {
             SolverStatsDelta::from_snapshots(&fwd_stats_before, &fwd_stats_after).solve_time_ms
         };
 
+        // Aggregate per-stage forward solver stats across MPI ranks before
+        // logging. Without this, only rank 0's slice (its share of the
+        // forward-pass workers) would be written to `iterations.parquet`,
+        // because `write_training_outputs` is rank-0-gated. Backward writes
+        // per-`(rank, worker_id)` rows via its own allgatherv path; forward
+        // emits one row per stage with global totals so the parquet's
+        // `lp_solves` column matches the true global LP count.
+        //
+        // `retry_level_histogram` is not packed by `pack_delta_scalars`; it is
+        // absent from the aggregated forward rows. Backward retains the histogram
+        // via its per-worker rows.
+        let num_stages = forward_result.stage_stats.len();
+        let global_forward_stage_stats = if num_stages == 0 {
+            Vec::new()
+        } else {
+            let mut local_buf = vec![0.0_f64; num_stages * SOLVER_STATS_DELTA_SCALAR_FIELDS];
+            for (i, delta) in forward_result.stage_stats.iter().enumerate() {
+                let packed = pack_delta_scalars(delta);
+                let slot = &mut local_buf[i * SOLVER_STATS_DELTA_SCALAR_FIELDS..]
+                    [..SOLVER_STATS_DELTA_SCALAR_FIELDS];
+                slot.copy_from_slice(&packed);
+            }
+            let mut global_buf = vec![0.0_f64; local_buf.len()];
+            self.comm
+                .allreduce(&local_buf, &mut global_buf, ReduceOp::Sum)
+                .map_err(SddpError::Communication)?;
+            global_buf
+                .chunks_exact(SOLVER_STATS_DELTA_SCALAR_FIELDS)
+                .map(|chunk| {
+                    #[allow(clippy::expect_used)]
+                    let arr: [f64; SOLVER_STATS_DELTA_SCALAR_FIELDS] = chunk.try_into().expect(
+                        "chunks_exact yields slices of exactly SOLVER_STATS_DELTA_SCALAR_FIELDS",
+                    );
+                    unpack_delta_scalars(&arr)
+                })
+                .collect::<Vec<SolverStatsDelta>>()
+        };
+
         #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
-        for (stage_idx, delta) in forward_result.stage_stats.iter().enumerate() {
+        for (stage_idx, delta) in global_forward_stage_stats.iter().enumerate() {
             let mut entry = SolverStatsDelta::default();
             delta.clone_into_reuse(&mut entry);
             self.results.solver_stats_log.push((
@@ -673,12 +723,17 @@ impl<'a, S: SolverInterface + Send, C: Communicator> TrainingSession<'a, S, C> {
     ) -> Result<(crate::backward::BackwardResult, f64), SddpError> {
         // Borrow bwd_state independently so the remaining fields can be
         // passed to the factory without a whole-struct borrow conflict.
+        // `IterationScratch` is split into named sub-field borrows so the
+        // disjoint scratch slots can be co-borrowed mutably (each is a
+        // distinct field of `self.scratch`).
         let bwd = &mut self.bwd_state;
         let mut inputs = BackwardPassInputs::from_session_fields(
             &mut self.fwd_pool,
             &mut self.basis_store,
             self.stage_ctx,
-            &mut self.scratch,
+            &mut self.scratch.baked_templates,
+            &mut self.scratch.cut_batches,
+            &self.scratch.records,
             self.fcf,
             &mut self.exchange_bufs,
             &mut self.cut_sync_bufs,
@@ -691,6 +746,14 @@ impl<'a, S: SolverInterface + Send, C: Communicator> TrainingSession<'a, S, C> {
             iteration,
         );
         let backward_result = bwd.run(&mut inputs)?;
+        // `selection_records` length is bounded by `num_stages - 1` (one entry
+        // per stage where the in-backward hook ran). Reading the length here
+        // also keeps the field visible to the dead-code lint until the
+        // rerouting consumer lands.
+        debug_assert!(
+            backward_result.selection_records.len() <= self.ranks.num_stages.saturating_sub(1),
+            "selection_records length must not exceed num_stages - 1"
+        );
 
         let bwd_solve_time_ms = {
             let agg = SolverStatsDelta::aggregate(
@@ -765,82 +828,135 @@ impl<'a, S: SolverInterface + Send, C: Communicator> TrainingSession<'a, S, C> {
         // stages_processed) when step 4a ran; None otherwise.
         let mut sel_state: Option<(Vec<StageRowSelectionRecord>, u32, u64, u32)> = None;
 
-        if let Some(strategy) = self.config.cut_management.cut_selection.as_ref() {
-            if strategy.should_run(iteration) {
-                let sel_start = Instant::now();
-                let num_sel_stages = self.ranks.num_stages.saturating_sub(1);
-                let mut rows_deactivated = 0u32;
-                let mut per_stage = Vec::with_capacity(num_sel_stages);
+        if let Some(strategy) = self.config.cut_management.cut_selection.as_ref()
+            && strategy.should_run(iteration)
+        {
+            let sel_start = Instant::now();
+            let num_sel_stages = self.ranks.num_stages.saturating_sub(1);
+            let mut rows_deactivated = 0u32;
+            let mut per_stage = Vec::with_capacity(num_sel_stages);
 
-                // Stage 0 is exempt: its cuts are never the "successor" in the
-                // backward pass, so their binding activity is never updated.
-                #[allow(clippy::cast_possible_truncation)]
-                {
-                    let pool0 = &self.fcf.pools[0];
-                    let active_0 = pool0.active_count() as u32;
-                    per_stage.push(StageRowSelectionRecord {
-                        stage: 0,
-                        rows_populated: pool0.populated_count as u32,
-                        rows_active_before: active_0,
-                        rows_deactivated: 0,
-                        rows_active_after: active_0,
-                        selection_time_ms: 0.0,
-                        budget_evicted: None,
-                        active_after_budget: None,
-                    });
-                }
-
-                let archive_ref = self.visited_archive.as_ref();
-                #[allow(clippy::cast_possible_truncation)]
-                let deactivations: Vec<(usize, DeactivationSet, f64)> = (1..num_sel_stages)
-                    .into_par_iter()
-                    .map(|stage| {
-                        let pool = &self.fcf.pools[stage];
-                        let states =
-                            archive_ref.map_or(&[] as &[f64], |a| a.states_for_stage(stage));
-                        let start = Instant::now();
-                        let deact =
-                            strategy.select_for_stage(pool, states, iteration, stage as u32);
-                        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-                        (stage, deact, elapsed_ms)
-                    })
-                    .collect();
-
-                #[allow(clippy::cast_possible_truncation)]
-                for (stage, deact, stage_sel_time_ms) in deactivations {
-                    let pool = &self.fcf.pools[stage];
-                    let populated = pool.populated_count as u32;
-                    let active_before = pool.active_count() as u32;
-                    let n_deact = deact.indices.len() as u32;
-                    rows_deactivated += n_deact;
-
-                    self.fcf.pools[stage].deactivate(&deact.indices);
-
-                    let active_after = self.fcf.pools[stage].active_count() as u32;
-                    per_stage.push(StageRowSelectionRecord {
-                        stage: stage as u32,
-                        rows_populated: populated,
-                        rows_active_before: active_before,
-                        rows_deactivated: n_deact,
-                        rows_active_after: active_after,
-                        selection_time_ms: stage_sel_time_ms,
-                        budget_evicted: None,
-                        active_after_budget: None,
-                    });
-                }
-
-                #[allow(clippy::cast_possible_truncation)]
-                let selection_time_ms = sel_start.elapsed().as_millis() as u64;
-                #[allow(clippy::cast_possible_truncation)]
-                let stages_processed_sel = num_sel_stages as u32;
-
-                sel_state = Some((
-                    per_stage,
-                    rows_deactivated,
-                    selection_time_ms,
-                    stages_processed_sel,
-                ));
+            // Stage 0 is exempt: its cuts are never the "successor" in the
+            // backward pass, so their binding activity is never updated.
+            // Stage T-1 (the terminal stage) is also exempt: the backward
+            // pass sweeps T-2 down to 0 (see `backward.rs` module docs),
+            // so the terminal-stage pool receives no cuts to select among.
+            // `num_sel_stages = num_stages - 1` (via the saturating_sub
+            // above) and the parallel loop ranges over `1..num_sel_stages`,
+            // which expands to stages 1..=T-2 — naturally excluding
+            // stage T-1 from selection.
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                let pool0 = &self.fcf.pools[0];
+                let active_0 = pool0.active_count() as u32;
+                per_stage.push(StageRowSelectionRecord {
+                    stage: 0,
+                    rows_populated: pool0.populated_count as u32,
+                    rows_active_before: active_0,
+                    rows_deactivated: 0,
+                    rows_reactivated: 0,
+                    rows_active_after: active_0,
+                    selection_time_ms: 0.0,
+                    budget_evicted: None,
+                    active_after_budget: None,
+                    rows_in_lp: pool0.cuts_in_lp() as u32,
+                });
             }
+
+            let archive_ref = self.visited_archive.as_ref();
+            // Sequential selection over interior stages 1..=T-2. Stage 0 was
+            // recorded above; stage T-1 (terminal) is skipped because the
+            // backward pass produces no cuts at stage T-1, so the pool is
+            // empty and selection would be a no-op.
+            //
+            // The outer loop is sequential (not `into_par_iter`) because the
+            // m-block kernel saturates the available cores via its inner
+            // parallelism; Design §4.2 confirms the 24-48 m-block tasks per
+            // stage saturate a 96-core machine on their own.
+            let pools = &self.fcf.pools;
+            #[allow(clippy::cast_possible_truncation)]
+            let deactivations: Vec<(usize, CutActivityUpdates, f64)> = (1..num_sel_stages)
+                .map(|stage| {
+                    let pool = &pools[stage];
+                    let states = archive_ref.map_or(&[] as &[f64], |a| a.states_for_stage(stage));
+                    let start = Instant::now();
+                    let deact = strategy.select_for_stage(pool, states, iteration, stage as u32);
+                    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+                    (stage, deact, elapsed_ms)
+                })
+                .collect();
+
+            #[allow(clippy::cast_possible_truncation)]
+            for (stage, deact, stage_sel_time_ms) in deactivations {
+                let pool = &self.fcf.pools[stage];
+                let populated = pool.populated_count as u32;
+                let active_before = pool.active_count() as u32;
+                let n_deact = deact.updates.len() as u32;
+                let n_reactivated = deact.reactivations.len() as u32;
+                rows_deactivated += n_deact;
+
+                // Apply both deactivations and reactivations from the
+                // unified kernel output.
+                self.fcf.pools[stage].apply_updates(&deact);
+
+                let active_after = self.fcf.pools[stage].active_count() as u32;
+                let rows_in_lp = self.fcf.pools[stage].cuts_in_lp() as u32;
+                per_stage.push(StageRowSelectionRecord {
+                    stage: stage as u32,
+                    rows_populated: populated,
+                    rows_active_before: active_before,
+                    rows_deactivated: n_deact,
+                    rows_reactivated: n_reactivated,
+                    rows_active_after: active_after,
+                    selection_time_ms: stage_sel_time_ms,
+                    budget_evicted: None,
+                    active_after_budget: None,
+                    rows_in_lp,
+                });
+            }
+
+            // Trim the visited-states archive to the active strategy's
+            // sliding window now that selection has consumed the current
+            // contents. Done AFTER the per-stage application loop so the
+            // immutable borrow held by `deactivations` is fully released.
+            //
+            // Trim runs AFTER selection so the kernel evaluates against
+            // the full accumulated archive (up to `2 * check_frequency`
+            // iterations of states); we then shrink back to a
+            // steady-state bound of `check_frequency` iterations.
+            // Selection benefits from seeing more visited states than the
+            // post-trim window — better selection quality — at the cost
+            // of a temporary ~2x memory peak just before this trim runs.
+            // The bound documented on
+            // [`VisitedStatesArchive::trim_to_window`] is the
+            // post-trim (steady-state) size.
+            if let Some(ref mut archive) = self.visited_archive {
+                let check_freq = match strategy {
+                    crate::cut_selection::CutSelectionStrategy::Level1 {
+                        check_frequency, ..
+                    }
+                    | crate::cut_selection::CutSelectionStrategy::Lml1 {
+                        check_frequency, ..
+                    }
+                    | crate::cut_selection::CutSelectionStrategy::Dominated {
+                        check_frequency,
+                        ..
+                    } => *check_frequency,
+                };
+                archive.trim_to_window(check_freq);
+            }
+
+            #[allow(clippy::cast_possible_truncation)]
+            let selection_time_ms = sel_start.elapsed().as_millis() as u64;
+            #[allow(clippy::cast_possible_truncation)]
+            let stages_processed_sel = num_sel_stages as u32;
+
+            sel_state = Some((
+                per_stage,
+                rows_deactivated,
+                selection_time_ms,
+                stages_processed_sel,
+            ));
         }
 
         // Step 4b: Budget enforcement (every iteration when budget is set).
@@ -860,11 +976,11 @@ impl<'a, S: SolverInterface + Send, C: Communicator> TrainingSession<'a, S, C> {
                 );
                 total_evicted += result.evicted_count;
                 // Annotate per-stage records with post-budget counts.
-                if let Some((ref mut per_stage, _, _, _)) = sel_state {
-                    if let Some(rec) = per_stage.get_mut(stage) {
-                        rec.budget_evicted = Some(result.evicted_count);
-                        rec.active_after_budget = Some(result.active_after);
-                    }
+                if let Some((ref mut per_stage, _, _, _)) = sel_state
+                    && let Some(rec) = per_stage.get_mut(stage)
+                {
+                    rec.budget_evicted = Some(result.evicted_count);
+                    rec.active_after_budget = Some(result.active_after);
                 }
             }
             #[allow(clippy::cast_possible_truncation)]
@@ -897,20 +1013,33 @@ impl<'a, S: SolverInterface + Send, C: Communicator> TrainingSession<'a, S, C> {
             );
         }
 
-        // Shift the sliding-window binding bitmap left by 1 on every populated
-        // cut slot. This ages the activity record so the next iteration's bit 0
-        // starts clear. Placed AFTER cut selection and BEFORE template baking.
-        for pool in &mut self.fcf.pools {
-            for m in pool.metadata.iter_mut().take(pool.populated_count) {
-                // Bit 31 (SEED_BIT) shifts off the top of u32 in the `<< 1` below;
-                // masking it first is redundant.
-                m.active_window <<= 1;
-            }
-        }
-
         // Step 4c: Template baking.
         // Rebuild per-stage baked templates from the current active cut set.
         let bake_start = Instant::now();
+        let total_rows_baked = self.bake_active_cuts_into_templates();
+        #[allow(clippy::cast_possible_truncation)]
+        let bake_time_ms = bake_start.elapsed().as_millis() as u64;
+        emit(
+            self.runtime.event_sender(),
+            #[allow(clippy::cast_possible_truncation)]
+            TrainingEvent::PolicyTemplateBakeComplete {
+                iteration,
+                stages_processed: self.ranks.num_stages as u32,
+                total_rows_baked,
+                bake_time_ms,
+            },
+        );
+    }
+
+    /// Rebuild every stage's baked template from the current active cut set,
+    /// returning the total number of cut rows baked.
+    ///
+    /// Each `baked_templates[t]` becomes the base template plus one structural
+    /// row per active cut in `fcf.pools[t]` (`active_cuts()` order). With no
+    /// active cuts (a fresh start) every batch is empty and the bake is a
+    /// structural copy of the base template — identical to the pre-bake done in
+    /// `IterationScratch::new`.
+    fn bake_active_cuts_into_templates(&mut self) -> u64 {
         let mut total_rows_baked: u64 = 0;
         let indexer = self.training_ctx.indexer;
         for t in 0..self.ranks.num_stages {
@@ -931,18 +1060,57 @@ impl<'a, S: SolverInterface + Send, C: Communicator> TrainingSession<'a, S, C> {
                 &mut self.scratch.baked_templates[t],
             );
         }
-        #[allow(clippy::cast_possible_truncation)]
-        let bake_time_ms = bake_start.elapsed().as_millis() as u64;
-        emit(
-            self.runtime.event_sender(),
-            #[allow(clippy::cast_possible_truncation)]
-            TrainingEvent::PolicyTemplateBakeComplete {
-                iteration,
-                stages_processed: self.ranks.num_stages as u32,
-                total_rows_baked,
-                bake_time_ms,
-            },
-        );
+        total_rows_baked
+    }
+
+    /// Seed the per-scenario basis store from a checkpoint's stored bases
+    /// before the first training iteration runs.
+    ///
+    /// `cache` carries one [`CapturedBasis`](crate::workspace::CapturedBasis)
+    /// per stage (as built by
+    /// [`build_basis_cache_from_checkpoint`](crate::build_basis_cache_from_checkpoint)).
+    /// The checkpoint stores a single basis per stage, but the forward pass
+    /// keeps one basis per `(forward-pass worker, stage)` cell. This method
+    /// therefore replicates each stage's basis across every forward-pass worker
+    /// (`0..max_local_fwd`) so that on iteration 1 every worker warm-starts its
+    /// cut-loaded LP from the checkpoint basis instead of cold-starting.
+    /// `reconstruct_basis` reconciles the stored cut rows against the current
+    /// LP's active cut set via slot identity, so the seeded basis stays correct
+    /// even if cut selection diverges from the checkpoint.
+    ///
+    /// Stages whose `cache[t]` is `None` are left untouched (no basis). Entries
+    /// beyond the store's stage count are ignored. No-op for a fresh start
+    /// (the caller passes no cache), so fresh-mode behavior and the
+    /// deterministic regression baselines are unchanged.
+    pub(crate) fn seed_basis_store(&mut self, cache: &[Option<crate::workspace::CapturedBasis>]) {
+        let max_local_fwd = self.ranks.max_local_fwd;
+        let num_stages = self.ranks.num_stages;
+        for (t, slot) in cache.iter().enumerate().take(num_stages) {
+            let Some(captured) = slot else { continue };
+            for scenario in 0..max_local_fwd {
+                *self.basis_store.get_mut(scenario, t) = Some(captured.clone());
+            }
+        }
+    }
+
+    /// Bake the warm-start / resume pre-loaded cuts into the stage templates
+    /// before the first training iteration runs.
+    ///
+    /// `IterationScratch::new` pre-bakes every template with an *empty* cut
+    /// batch — correct for a fresh start, but it leaves a warm-start/resume
+    /// FCF's loaded cuts out of the templates that iteration 1's forward and
+    /// backward passes solve (those passes use `scratch.baked_templates`
+    /// exclusively; the per-iteration rebake in `run_cut_management` only runs
+    /// *after* them). Without this, the first post-resume iteration would solve
+    /// a cut-less, myopic policy — yielding a spuriously high upper-bound
+    /// estimate and a wasted iteration — until the end-of-iteration rebake.
+    ///
+    /// No-op for a fresh start (no active cuts), so fresh-mode behavior and the
+    /// deterministic regression baselines are unchanged.
+    pub(crate) fn prime_baked_templates(&mut self) {
+        if self.fcf.total_active_cuts() > 0 {
+            let _ = self.bake_active_cuts_into_templates();
+        }
     }
 
     /// Evaluate the lower bound and push the solver stats entry.
@@ -1097,6 +1265,10 @@ mod tests {
     }
 
     impl SolverInterface for MockSolver {
+        type Profile = cobre_solver::HighsProfile;
+
+        fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
+
         fn solver_name_version(&self) -> String {
             "MockSolver 0.0.0".to_string()
         }
@@ -1131,10 +1303,14 @@ mod tests {
         fn name(&self) -> &'static str {
             "Mock"
         }
-        fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
-        fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
-        fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
-        fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
+
+        fn set_primal_feasibility_tolerance(&mut self, _tolerance: f64) {}
+
+        fn set_dual_feasibility_tolerance(&mut self, _tolerance: f64) {}
+
+        fn set_simplex_iteration_limit_profile(&mut self, _limit: u32) {}
+
+        fn set_ipm_iteration_limit_profile(&mut self, _limit: u32) {}
     }
 
     struct StubComm;
@@ -1389,7 +1565,6 @@ mod tests {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: vec![RiskMeasure::Expectation; n_stages],
             },

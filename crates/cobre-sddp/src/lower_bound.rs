@@ -125,6 +125,10 @@ pub struct LbEvalScratch {
     /// `lb_aggregate_and_broadcast`; capacity is reused across iterations to
     /// avoid the per-iteration allocation flagged by the architecture audit.
     pub uniform_prob_buf: Vec<f64>,
+    /// Per-opening objective values collected by `lb_evaluate_stage_0` and
+    /// consumed by `lb_aggregate_and_broadcast`. Cleared and refilled per call;
+    /// capacity is reused across iterations to avoid a per-iteration allocation.
+    pub objectives_buf: Vec<f64>,
 }
 
 impl LbEvalScratch {
@@ -146,6 +150,7 @@ impl LbEvalScratch {
             effective_eta_buf: Vec::new(),
             zero_targets_buf: Vec::new(),
             uniform_prob_buf: Vec::new(),
+            objectives_buf: Vec::new(),
         }
     }
 }
@@ -290,7 +295,7 @@ fn lb_init_rank0<S: SolverInterface>(
 /// computes effective eta, patches row bounds, patches NCS column bounds
 /// (correctness-critical per-opening step), solves, and records the objective.
 ///
-/// Returns the vector of per-opening objectives.
+/// Writes the per-opening objectives into `scratch.objectives_buf`.
 ///
 /// # Errors
 ///
@@ -306,7 +311,7 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
     initial_state: &[f64],
     indexer: &StageIndexer,
     scratch: &mut LbEvalScratch,
-) -> Result<Vec<f64>, SddpError> {
+) -> Result<(), SddpError> {
     let n_openings = spec.opening_tree.n_openings(0);
     let n_hydros = spec.n_hydros;
     let base_row = spec.base_row;
@@ -353,7 +358,7 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
         );
     }
 
-    let mut objectives = Vec::with_capacity(n_openings);
+    scratch.objectives_buf.clear();
 
     for opening_idx in 0..n_openings {
         let raw_noise = spec.opening_tree.opening(0, opening_idx);
@@ -402,8 +407,8 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
 
         // No shift_anticipated_state call here: the lower-bound evaluator
         // solves each stage at a fixed trial point, never advancing the ring
-        // buffer. The trial point itself carries the anticipated-state slots,
-        // patched by fill_forward_patches as Category 6.
+        // buffer.
+        patch_buf.fill_col_state_patches(indexer, initial_state, &spec.template.col_scale);
         patch_buf.fill_forward_patches(
             indexer,
             initial_state,
@@ -415,6 +420,12 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
             indexer.z_inflow_row_start,
             &scratch.z_inflow_rhs_buf,
             &spec.template.row_scale,
+        );
+        let cp = patch_buf.state_col_patch_count();
+        solver.set_col_bounds(
+            &patch_buf.col_indices[..cp],
+            &patch_buf.col_lower[..cp],
+            &patch_buf.col_upper[..cp],
         );
         let n_patches = patch_buf.forward_patch_count();
         solver.set_row_bounds(
@@ -464,10 +475,10 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
             },
             other => SddpError::Solver(other),
         })?;
-        objectives.push(view.objective);
+        scratch.objectives_buf.push(view.objective);
     }
 
-    Ok(objectives)
+    Ok(())
 }
 
 /// Phase 3 — risk-measure aggregation and MPI broadcast.
@@ -476,8 +487,8 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
 /// probabilities, scales by [`COST_SCALE_FACTOR`], then broadcasts the scalar
 /// lower bound from rank 0 to all other ranks.
 ///
-/// `scratch.uniform_prob_buf` is resized and refilled in-place every call so
-/// the per-iteration allocation pattern (`vec![1/n; n]`) is amortized to a
+/// `uniform_prob_buf` is resized and refilled in-place every call so the
+/// per-iteration allocation pattern (`vec![1/n; n]`) is amortized to a
 /// capacity-only growth on the first call.
 ///
 /// # Errors
@@ -486,17 +497,15 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
 fn lb_aggregate_and_broadcast<C: Communicator>(
     objectives: &[f64],
     risk_measure: &RiskMeasure,
-    scratch: &mut LbEvalScratch,
+    uniform_prob_buf: &mut Vec<f64>,
     comm: &C,
 ) -> Result<f64, SddpError> {
     #[allow(clippy::cast_precision_loss)]
     let uniform_prob = 1.0_f64 / objectives.len() as f64;
-    scratch.uniform_prob_buf.clear();
-    scratch
-        .uniform_prob_buf
-        .resize(objectives.len(), uniform_prob);
+    uniform_prob_buf.clear();
+    uniform_prob_buf.resize(objectives.len(), uniform_prob);
     let mut lb =
-        risk_measure.evaluate_risk(objectives, &scratch.uniform_prob_buf) * COST_SCALE_FACTOR;
+        risk_measure.evaluate_risk(objectives, uniform_prob_buf.as_slice()) * COST_SCALE_FACTOR;
     comm.broadcast(std::slice::from_mut(&mut lb), 0)
         .map_err(SddpError::from)?;
     Ok(lb)
@@ -551,7 +560,7 @@ pub fn evaluate_lower_bound<S: SolverInterface, C: Communicator>(
             "evaluate_lower_bound: stage 0 must have at least one opening"
         );
 
-        // Phase 1: populate scratch buffers and perform append-only LP load.
+        // Populate scratch buffers and perform append-only LP load.
         lb_init_rank0(
             solver,
             fcf,
@@ -562,8 +571,8 @@ pub fn evaluate_lower_bound<S: SolverInterface, C: Communicator>(
             scratch.lb_scratch,
         );
 
-        // Phase 2: truncation precompute + per-opening loop.
-        let objectives = lb_evaluate_stage_0(
+        // Truncation precompute + per-opening loop.
+        lb_evaluate_stage_0(
             solver,
             spec,
             scratch.patch_buf,
@@ -572,8 +581,15 @@ pub fn evaluate_lower_bound<S: SolverInterface, C: Communicator>(
             scratch.lb_scratch,
         )?;
 
-        // Phase 3: risk-measure aggregation + broadcast.
-        lb = lb_aggregate_and_broadcast(&objectives, spec.risk_measure, scratch.lb_scratch, comm)?;
+        // Phase 3: risk-measure aggregation + broadcast. `objectives_buf` and
+        // `uniform_prob_buf` are disjoint fields of `lb_scratch`, borrowed
+        // immutably and mutably respectively.
+        lb = lb_aggregate_and_broadcast(
+            &scratch.lb_scratch.objectives_buf,
+            spec.risk_measure,
+            &mut scratch.lb_scratch.uniform_prob_buf,
+            comm,
+        )?;
         return Ok(lb);
     }
 
@@ -873,6 +889,10 @@ mod tests {
     }
 
     impl SolverInterface for MockSolver {
+        type Profile = cobre_solver::HighsProfile;
+
+        fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
+
         fn solver_name_version(&self) -> String {
             "MockSolver 0.0.0".to_string()
         }
@@ -914,10 +934,14 @@ mod tests {
         fn name(&self) -> &'static str {
             "Mock"
         }
-        fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
-        fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
-        fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
-        fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
+
+        fn set_primal_feasibility_tolerance(&mut self, _tolerance: f64) {}
+
+        fn set_dual_feasibility_tolerance(&mut self, _tolerance: f64) {}
+
+        fn set_simplex_iteration_limit_profile(&mut self, _limit: u32) {}
+
+        fn set_ipm_iteration_limit_profile(&mut self, _limit: u32) {}
     }
 
     // ── Shared test setup ────────────────────────────────────────────────────
@@ -978,8 +1002,8 @@ mod tests {
         .unwrap();
 
         assert!(
-            (lb - 100_000.0).abs() < 1e-7,
-            "single opening expectation LB must equal objective 100.0 * COST_SCALE_FACTOR = 100_000.0, got {lb}"
+            (lb - 100_000_000.0).abs() < 1e-7,
+            "single opening expectation LB must equal objective 100.0 * COST_SCALE_FACTOR = 100_000_000.0, got {lb}"
         );
     }
 
@@ -1032,10 +1056,10 @@ mod tests {
         )
         .unwrap();
 
-        // E[60, 80, 100] with uniform probs = (60+80+100)/3 = 80.0; * COST_SCALE_FACTOR = 80_000.0
+        // E[60, 80, 100] with uniform probs = (60+80+100)/3 = 80.0; * COST_SCALE_FACTOR = 80_000_000.0
         assert!(
-            (lb - 80_000.0).abs() < 1e-7,
-            "three openings expectation LB must equal 80_000.0, got {lb}"
+            (lb - 80_000_000.0).abs() < 1e-7,
+            "three openings expectation LB must equal 80_000_000.0, got {lb}"
         );
     }
 
@@ -1095,10 +1119,10 @@ mod tests {
         .unwrap();
 
         // CVaR(alpha=0.5, lambda=1.0) with 2 uniform-probability openings
-        // concentrates all weight on the worst (150.0); * COST_SCALE_FACTOR = 150_000.0.
+        // concentrates all weight on the worst (150.0); * COST_SCALE_FACTOR = 150_000_000.0.
         assert!(
-            (lb - 150_000.0).abs() < 1e-7,
-            "pure CVaR(0.5, 1.0) with 2 openings must equal 150_000.0, got {lb}"
+            (lb - 150_000_000.0).abs() < 1e-7,
+            "pure CVaR(0.5, 1.0) with 2 openings must equal 150_000_000.0, got {lb}"
         );
     }
 
@@ -1153,10 +1177,10 @@ mod tests {
         )
         .unwrap();
 
-        // CVaR(alpha=1) = Expectation = (50+150)/2 = 100.0; * COST_SCALE_FACTOR = 100_000.0
+        // CVaR(alpha=1) = Expectation = (50+150)/2 = 100.0; * COST_SCALE_FACTOR = 100_000_000.0
         assert!(
-            (lb - 100_000.0).abs() < 1e-7,
-            "CVaR(alpha=1, lambda=1) must equal expectation 100_000.0, got {lb}"
+            (lb - 100_000_000.0).abs() < 1e-7,
+            "CVaR(alpha=1, lambda=1) must equal expectation 100_000_000.0, got {lb}"
         );
     }
 
@@ -1321,10 +1345,10 @@ mod tests {
         )
         .unwrap();
 
-        // E[200, 300] = 250.0; * COST_SCALE_FACTOR = 250_000.0
+        // E[200, 300] = 250.0; * COST_SCALE_FACTOR = 250_000_000.0
         assert!(
-            (lb - 250_000.0).abs() < 1e-7,
-            "integration round-trip must produce 250_000.0, got {lb}"
+            (lb - 250_000_000.0).abs() < 1e-7,
+            "integration round-trip must produce 250_000_000.0, got {lb}"
         );
     }
 
@@ -1461,9 +1485,9 @@ mod tests {
         )
         .unwrap();
 
-        // E[60, 80] = 70.0; * COST_SCALE_FACTOR = 70_000.0
+        // E[60, 80] = 70.0; * COST_SCALE_FACTOR = 70_000_000.0
         assert!(
-            (lb - 70_000.0).abs() < 1e-7,
+            (lb - 70_000_000.0).abs() < 1e-7,
             "None method must produce correct LB, got {lb}"
         );
     }
@@ -1794,10 +1818,12 @@ mod tests {
         )
         .unwrap();
 
-        // set_col_bounds must have been called exactly once per opening.
+        // set_col_bounds is called twice per opening: once for state-fixing and
+        // once for NCS bounds.
         assert_eq!(
-            solver.set_col_bounds_calls, actual_n_openings,
-            "set_col_bounds must be called once per opening ({actual_n_openings} openings), \
+            solver.set_col_bounds_calls,
+            2 * actual_n_openings,
+            "set_col_bounds must be called twice per opening ({actual_n_openings} openings), \
              got {} calls — NCS bounds are not being patched per opening",
             solver.set_col_bounds_calls
         );

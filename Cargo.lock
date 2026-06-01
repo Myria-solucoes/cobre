@@ -516,11 +516,11 @@ dependencies = [
 
 [[package]]
 name = "cobre"
-version = "0.7.0"
+version = "0.8.0"
 
 [[package]]
 name = "cobre-cli"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "arrow",
  "assert_cmd",
@@ -543,11 +543,12 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
 name = "cobre-comm"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "ferrompi",
  "thiserror",
@@ -555,7 +556,7 @@ dependencies = [
 
 [[package]]
 name = "cobre-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "chrono",
  "postcard",
@@ -566,15 +567,15 @@ dependencies = [
 
 [[package]]
 name = "cobre-emt"
-version = "0.7.0"
+version = "0.8.0"
 
 [[package]]
 name = "cobre-flow"
-version = "0.7.0"
+version = "0.8.0"
 
 [[package]]
 name = "cobre-io"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "arrow",
  "chrono",
@@ -594,11 +595,11 @@ dependencies = [
 
 [[package]]
 name = "cobre-mcp"
-version = "0.7.0"
+version = "0.8.0"
 
 [[package]]
 name = "cobre-sddp"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "arrow",
  "chrono",
@@ -609,6 +610,7 @@ dependencies = [
  "cobre-stochastic",
  "criterion",
  "dhat",
+ "matrixmultiply",
  "parquet",
  "postcard",
  "rand",
@@ -625,15 +627,16 @@ dependencies = [
 
 [[package]]
 name = "cobre-solver"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "cc",
  "cmake",
+ "matrixmultiply",
 ]
 
 [[package]]
 name = "cobre-stochastic"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "chrono",
  "cobre-core",
@@ -647,11 +650,11 @@ dependencies = [
 
 [[package]]
 name = "cobre-tui"
-version = "0.7.0"
+version = "0.8.0"
 
 [[package]]
 name = "cobre-uc"
-version = "0.7.0"
+version = "0.8.0"
 
 [[package]]
 name = "cobs"
@@ -1298,6 +1301,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
+name = "matchers"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
+dependencies = [
+ "regex-automata",
+]
+
+[[package]]
+name = "matrixmultiply"
+version = "0.3.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a06de3016e9fae57a36fd14dba131fccf49f74b40b7fbdb472f96e361ec71a08"
+dependencies = [
+ "autocfg",
+ "rawpointer",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1600,6 +1622,12 @@ checksum = "2a36dd10a879f5c16e363eed24471b321b114ce3112c2d5d8df06545fcf48152"
 dependencies = [
  "rand_core",
 ]
+
+[[package]]
+name = "rawpointer"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60a357793950651c4ed0f3f52338f53b2f809f32d83a07f72909fa13e4c6c1e3"
 
 [[package]]
 name = "rayon"
@@ -2034,10 +2062,14 @@ version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb7f578e5945fb242538965c2d0b04418d38ec25c79d160cd279bf0731c8d319"
 dependencies = [
+ "matchers",
  "nu-ansi-term",
+ "once_cell",
+ "regex-automata",
  "sharded-slab",
  "smallvec",
  "thread_local",
+ "tracing",
  "tracing-core",
  "tracing-log",
 ]

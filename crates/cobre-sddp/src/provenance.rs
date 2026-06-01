@@ -11,11 +11,14 @@
 
 use std::fmt;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use cobre_stochastic::{ComponentProvenance, StochasticProvenance};
 
 use crate::estimation::{EstimationPath, EstimationReport};
+use crate::hydro_models::{
+    EvaporationReferenceSource, EvaporationSource, HydroModelProvenance, ProductionModelSource,
+};
 
 // ── ProvenanceSource ──────────────────────────────────────────────────────────
 
@@ -23,7 +26,7 @@ use crate::estimation::{EstimationPath, EstimationReport};
 ///
 /// Used by [`ModelProvenanceReport`] to describe where seasonal stats, AR
 /// coefficients, spatial correlation, and the opening tree came from.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProvenanceSource {
     /// Computed from inflow history by the estimation pipeline.
@@ -49,35 +52,13 @@ impl fmt::Display for ProvenanceSource {
 
 // ── ModelProvenanceReport ─────────────────────────────────────────────────────
 
-/// Structured summary of which data sources were used in the stochastic
-/// preprocessing pipeline.
+/// Provenance of the **inflow** model's data sources.
 ///
-/// Intended for JSON output via `serde_json::to_writer_pretty`. Each field
-/// records the origin of one data role. Callers (CLI, Python bindings) pass
-/// this struct directly to `serde_json` without additional transformation.
-///
-/// # Example
-///
-/// ```rust
-/// use cobre_sddp::{ModelProvenanceReport, ProvenanceSource};
-///
-/// let report = ModelProvenanceReport {
-///     estimation_path: "full_estimation".to_string(),
-///     seasonal_stats_source: ProvenanceSource::Estimated,
-///     ar_coefficients_source: ProvenanceSource::Estimated,
-///     correlation_source: ProvenanceSource::Estimated,
-///     opening_tree_source: ProvenanceSource::Estimated,
-///     n_hydros: 3,
-///     ar_method: Some("AIC".to_string()),
-///     ar_max_order: Some(2),
-///     white_noise_fallbacks: vec![],
-///     historical_library_past_inflows_digest: None,
-/// };
-/// let json = serde_json::to_string_pretty(&report).unwrap();
-/// assert!(json.contains("\"full_estimation\""));
-/// ```
-#[derive(Debug, Clone, Serialize)]
-pub struct ModelProvenanceReport {
+/// Each field records the origin of one inflow-model data role: seasonal
+/// statistics, AR coefficients, spatial correlation, and the opening scenario
+/// tree. Carried as the `inflow` sub-section of [`ModelProvenanceReport`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InflowProvenance {
     /// Stable string label of the estimation path taken (from [`EstimationPath::as_str`]).
     pub estimation_path: String,
     /// Origin of seasonal mean/std data used in the inflow model.
@@ -113,6 +94,68 @@ pub struct ModelProvenanceReport {
     pub historical_library_past_inflows_digest: Option<u64>,
 }
 
+/// Provenance of the **hydro-production** model's data sources (FPHA and
+/// evaporation).
+///
+/// Carried as the `hydro_production` sub-section of [`ModelProvenanceReport`].
+/// All counts default to `0`; they are populated downstream from the
+/// hydro-model provenance.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HydroProductionProvenance {
+    /// Count of hydro plants whose FPHA hyperplanes were computed from geometry.
+    pub n_fpha_computed_from_geometry: usize,
+    /// Count of hydro plants whose FPHA hyperplanes were supplied precomputed.
+    pub n_fpha_precomputed_hyperplanes: usize,
+    /// Count of hydro plants whose evaporation reference level was user-supplied.
+    pub n_evaporation_ref_user_supplied: usize,
+    /// Count of hydro plants whose evaporation reference level defaulted to the
+    /// storage-curve midpoint.
+    pub n_evaporation_ref_default_midpoint: usize,
+}
+
+/// Structured summary of which data sources were used in the preprocessing
+/// pipeline, split by model.
+///
+/// Intended for JSON output via `serde_json::to_writer_pretty`. The report
+/// nests an [`InflowProvenance`] sub-section under `"inflow"` and a
+/// [`HydroProductionProvenance`] sub-section under `"hydro_production"`.
+/// Callers (CLI, Python bindings) pass this struct directly to `serde_json`
+/// without additional transformation.
+///
+/// # Example
+///
+/// ```rust
+/// use cobre_sddp::{
+///     HydroProductionProvenance, InflowProvenance, ModelProvenanceReport, ProvenanceSource,
+/// };
+///
+/// let report = ModelProvenanceReport {
+///     inflow: InflowProvenance {
+///         estimation_path: "full_estimation".to_string(),
+///         seasonal_stats_source: ProvenanceSource::Estimated,
+///         ar_coefficients_source: ProvenanceSource::Estimated,
+///         correlation_source: ProvenanceSource::Estimated,
+///         opening_tree_source: ProvenanceSource::Estimated,
+///         n_hydros: 3,
+///         ar_method: Some("AIC".to_string()),
+///         ar_max_order: Some(2),
+///         white_noise_fallbacks: vec![],
+///         historical_library_past_inflows_digest: None,
+///     },
+///     hydro_production: HydroProductionProvenance::default(),
+/// };
+/// let json = serde_json::to_string_pretty(&report).unwrap();
+/// assert!(json.contains("\"full_estimation\""));
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelProvenanceReport {
+    /// Provenance of the inflow model's data sources.
+    pub inflow: InflowProvenance,
+    /// Provenance of the hydro-production model's data sources.
+    #[serde(default)]
+    pub hydro_production: HydroProductionProvenance,
+}
+
 // ── build_provenance_report ───────────────────────────────────────────────────
 
 /// Map a [`ComponentProvenance`] to a [`ProvenanceSource`].
@@ -121,6 +164,52 @@ fn component_to_source(cp: ComponentProvenance) -> ProvenanceSource {
         ComponentProvenance::Generated => ProvenanceSource::Estimated,
         ComponentProvenance::UserSupplied => ProvenanceSource::UserFile,
         ComponentProvenance::NotApplicable => ProvenanceSource::NotApplicable,
+    }
+}
+
+/// Aggregate a [`HydroModelProvenance`] into the four hydro-production counts.
+///
+/// The FPHA counts are pure tallies over `production_sources`. The evaporation
+/// reference counts are restricted to hydros whose evaporation is actually
+/// modeled: for [`EvaporationSource::NotModeled`] hydros the reference source is
+/// a meaningless placeholder, so it is excluded by zipping with
+/// `evaporation_sources`. All four counts are declaration-order invariant.
+fn aggregate_hydro_production(hp: &HydroModelProvenance) -> HydroProductionProvenance {
+    let n_fpha_computed_from_geometry = hp
+        .production_sources
+        .iter()
+        .filter(|(_, source)| matches!(source, ProductionModelSource::ComputedFromGeometry))
+        .count();
+    let n_fpha_precomputed_hyperplanes = hp
+        .production_sources
+        .iter()
+        .filter(|(_, source)| matches!(source, ProductionModelSource::PrecomputedHyperplanes))
+        .count();
+
+    // Only count reference sources for hydros whose evaporation is modeled; the
+    // reference value is a placeholder for `NotModeled` hydros. Zipping (rather
+    // than indexing) stays panic-free even if the vectors disagree in length.
+    let modeled_refs = || {
+        hp.evaporation_sources
+            .iter()
+            .zip(hp.evaporation_reference_sources.iter())
+            .filter(|((_, evap_source), _)| {
+                matches!(evap_source, EvaporationSource::LinearizedFromGeometry)
+            })
+            .map(|(_, (_, ref_source))| *ref_source)
+    };
+    let n_evaporation_ref_user_supplied = modeled_refs()
+        .filter(|s| matches!(s, EvaporationReferenceSource::UserSupplied))
+        .count();
+    let n_evaporation_ref_default_midpoint = modeled_refs()
+        .filter(|s| matches!(s, EvaporationReferenceSource::DefaultMidpoint))
+        .count();
+
+    HydroProductionProvenance {
+        n_fpha_computed_from_geometry,
+        n_fpha_precomputed_hyperplanes,
+        n_evaporation_ref_user_supplied,
+        n_evaporation_ref_default_midpoint,
     }
 }
 
@@ -146,12 +235,18 @@ fn component_to_source(cp: ComponentProvenance) -> ProvenanceSource {
 ///
 /// When `estimation_report` is `Some`, `ar_method` and `ar_max_order` are
 /// populated from its fields; otherwise both are `None`.
+///
+/// The `hydro_production` section is aggregated from `hydro_provenance` via
+/// `aggregate_hydro_production`: the FPHA counts tally `production_sources`,
+/// and the evaporation reference counts tally `evaporation_reference_sources`
+/// restricted to hydros with modeled evaporation.
 #[must_use]
 pub fn build_provenance_report(
     estimation_path: EstimationPath,
     estimation_report: Option<&EstimationReport>,
     provenance: &StochasticProvenance,
     n_hydros: usize,
+    hydro_provenance: &HydroModelProvenance,
 ) -> ModelProvenanceReport {
     let (seasonal_stats_source, ar_coefficients_source) = match estimation_path {
         EstimationPath::Deterministic => (
@@ -192,16 +287,19 @@ pub fn build_provenance_report(
     };
 
     ModelProvenanceReport {
-        estimation_path: estimation_path.as_str().to_owned(),
-        seasonal_stats_source,
-        ar_coefficients_source,
-        correlation_source,
-        opening_tree_source,
-        n_hydros,
-        ar_method,
-        ar_max_order,
-        white_noise_fallbacks,
-        historical_library_past_inflows_digest: None,
+        inflow: InflowProvenance {
+            estimation_path: estimation_path.as_str().to_owned(),
+            seasonal_stats_source,
+            ar_coefficients_source,
+            correlation_source,
+            opening_tree_source,
+            n_hydros,
+            ar_method,
+            ar_max_order,
+            white_noise_fallbacks,
+            historical_library_past_inflows_digest: None,
+        },
+        hydro_production: aggregate_hydro_production(hydro_provenance),
     }
 }
 
@@ -222,8 +320,57 @@ mod tests {
     use cobre_stochastic::{ComponentProvenance, StochasticProvenance};
 
     use crate::estimation::{EstimationPath, EstimationReport, HydroEstimationEntry};
+    use crate::hydro_models::{
+        EvaporationReferenceSource, EvaporationSource, HydroModelProvenance, ProductionModelSource,
+    };
 
-    use super::{ProvenanceSource, build_provenance_report};
+    use super::{
+        HydroProductionProvenance, ModelProvenanceReport, ProvenanceSource, build_provenance_report,
+    };
+
+    // Helper: build a `HydroModelProvenance` from aligned per-hydro source slices.
+    //
+    // Each hydro is assigned a sequential `EntityId`. The three slices must be
+    // equal length; the production source is taken positionally from
+    // `production`, and the evaporation/reference sources from `evaporation` and
+    // `evap_ref` respectively.
+    fn make_hydro_provenance(
+        production: &[ProductionModelSource],
+        evaporation: &[EvaporationSource],
+        evap_ref: &[EvaporationReferenceSource],
+    ) -> HydroModelProvenance {
+        let id = |i: usize| EntityId(i as i32 + 1);
+        HydroModelProvenance {
+            production_sources: production
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(i, s)| (id(i), s))
+                .collect(),
+            evaporation_sources: evaporation
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(i, s)| (id(i), s))
+                .collect(),
+            evaporation_reference_sources: evap_ref
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(i, s)| (id(i), s))
+                .collect(),
+        }
+    }
+
+    // Helper: an all-`DefaultConstant`, all-`NotModeled` provenance of `n` hydros,
+    // for inflow-focused tests where the hydro counts must stay zero.
+    fn empty_hydro_provenance(n: usize) -> HydroModelProvenance {
+        make_hydro_provenance(
+            &vec![ProductionModelSource::DefaultConstant; n],
+            &vec![EvaporationSource::NotModeled; n],
+            &vec![EvaporationReferenceSource::DefaultMidpoint; n],
+        )
+    }
 
     // Helper: StochasticProvenance with all Generated.
     fn prov_all_generated() -> StochasticProvenance {
@@ -281,7 +428,6 @@ mod tests {
             entries,
             method: method.to_owned(),
             white_noise_fallbacks: fallbacks.iter().map(|&id| EntityId(id)).collect(),
-            lag_scale_warnings: Vec::new(),
             std_ratio_warnings: Vec::new(),
         }
     }
@@ -295,9 +441,13 @@ mod tests {
             None,
             &prov_all_generated(),
             2,
+            &empty_hydro_provenance(2),
         );
         assert!(
-            report.historical_library_past_inflows_digest.is_none(),
+            report
+                .inflow
+                .historical_library_past_inflows_digest
+                .is_none(),
             "builder must leave historical_library_past_inflows_digest unset; \
              callers populate it from setup.scenario_libraries.training.historical \
              when the historical scheme is active"
@@ -311,9 +461,10 @@ mod tests {
             None,
             &prov_all_generated(),
             1,
+            &empty_hydro_provenance(1),
         );
         let digest: u64 = 0xDEAD_BEEF_CAFE_F00D;
-        report.historical_library_past_inflows_digest = Some(digest);
+        report.inflow.historical_library_past_inflows_digest = Some(digest);
         let json = serde_json::to_string(&report).unwrap();
         assert!(
             json.contains("historical_library_past_inflows_digest"),
@@ -332,6 +483,7 @@ mod tests {
             None,
             &prov_not_applicable(),
             0,
+            &empty_hydro_provenance(0),
         );
         let json = serde_json::to_string(&report).unwrap();
         assert!(
@@ -347,24 +499,28 @@ mod tests {
             None,
             &prov_not_applicable(),
             0,
+            &empty_hydro_provenance(0),
         );
         assert!(
             matches!(
-                report.seasonal_stats_source,
+                report.inflow.seasonal_stats_source,
                 ProvenanceSource::NotApplicable
             ),
             "seasonal_stats_source must be NotApplicable for Deterministic"
         );
         assert!(
             matches!(
-                report.ar_coefficients_source,
+                report.inflow.ar_coefficients_source,
                 ProvenanceSource::NotApplicable
             ),
             "ar_coefficients_source must be NotApplicable for Deterministic"
         );
-        assert!(report.ar_method.is_none(), "ar_method must be None");
-        assert!(report.ar_max_order.is_none(), "ar_max_order must be None");
-        assert_eq!(report.estimation_path, "deterministic");
+        assert!(report.inflow.ar_method.is_none(), "ar_method must be None");
+        assert!(
+            report.inflow.ar_max_order.is_none(),
+            "ar_max_order must be None"
+        );
+        assert_eq!(report.inflow.estimation_path, "deterministic");
     }
 
     #[test]
@@ -374,19 +530,23 @@ mod tests {
             None,
             &prov_all_generated(),
             2,
+            &empty_hydro_provenance(2),
         );
         assert!(
-            matches!(report.seasonal_stats_source, ProvenanceSource::UserFile),
+            matches!(
+                report.inflow.seasonal_stats_source,
+                ProvenanceSource::UserFile
+            ),
             "seasonal_stats_source must be UserFile for UserStatsWhiteNoise"
         );
         assert!(
             matches!(
-                report.ar_coefficients_source,
+                report.inflow.ar_coefficients_source,
                 ProvenanceSource::NotApplicable
             ),
             "ar_coefficients_source must be NotApplicable for UserStatsWhiteNoise"
         );
-        assert_eq!(report.estimation_path, "user_stats_white_noise");
+        assert_eq!(report.inflow.estimation_path, "user_stats_white_noise");
     }
 
     #[test]
@@ -396,16 +556,23 @@ mod tests {
             None,
             &prov_all_generated(),
             2,
+            &empty_hydro_provenance(2),
         );
         assert!(
-            matches!(report.seasonal_stats_source, ProvenanceSource::UserFile),
+            matches!(
+                report.inflow.seasonal_stats_source,
+                ProvenanceSource::UserFile
+            ),
             "seasonal_stats_source must be UserFile for UserProvidedNoHistory"
         );
         assert!(
-            matches!(report.ar_coefficients_source, ProvenanceSource::UserFile),
+            matches!(
+                report.inflow.ar_coefficients_source,
+                ProvenanceSource::UserFile
+            ),
             "ar_coefficients_source must be UserFile for UserProvidedNoHistory"
         );
-        assert_eq!(report.estimation_path, "user_provided_no_history");
+        assert_eq!(report.inflow.estimation_path, "user_provided_no_history");
     }
 
     #[test]
@@ -416,18 +583,25 @@ mod tests {
             Some(&er),
             &prov_all_generated(),
             2,
+            &empty_hydro_provenance(2),
         );
         assert!(
-            matches!(report.seasonal_stats_source, ProvenanceSource::Estimated),
+            matches!(
+                report.inflow.seasonal_stats_source,
+                ProvenanceSource::Estimated
+            ),
             "seasonal_stats_source must be Estimated for FullEstimation"
         );
         assert!(
-            matches!(report.ar_coefficients_source, ProvenanceSource::Estimated),
+            matches!(
+                report.inflow.ar_coefficients_source,
+                ProvenanceSource::Estimated
+            ),
             "ar_coefficients_source must be Estimated for FullEstimation"
         );
-        assert_eq!(report.ar_method.as_deref(), Some("AIC"));
-        assert_eq!(report.ar_max_order, Some(3));
-        assert_eq!(report.estimation_path, "full_estimation");
+        assert_eq!(report.inflow.ar_method.as_deref(), Some("AIC"));
+        assert_eq!(report.inflow.ar_max_order, Some(3));
+        assert_eq!(report.inflow.estimation_path, "full_estimation");
     }
 
     #[test]
@@ -438,16 +612,23 @@ mod tests {
             Some(&er),
             &prov_all_generated(),
             1,
+            &empty_hydro_provenance(1),
         );
         assert!(
-            matches!(report.seasonal_stats_source, ProvenanceSource::Estimated),
+            matches!(
+                report.inflow.seasonal_stats_source,
+                ProvenanceSource::Estimated
+            ),
             "seasonal_stats_source must be Estimated for UserArHistoryStats"
         );
         assert!(
-            matches!(report.ar_coefficients_source, ProvenanceSource::UserFile),
+            matches!(
+                report.inflow.ar_coefficients_source,
+                ProvenanceSource::UserFile
+            ),
             "ar_coefficients_source must be UserFile for UserArHistoryStats"
         );
-        assert_eq!(report.estimation_path, "user_ar_history_stats");
+        assert_eq!(report.inflow.estimation_path, "user_ar_history_stats");
     }
 
     #[test]
@@ -458,17 +639,24 @@ mod tests {
             Some(&er),
             &prov_all_generated(),
             3,
+            &empty_hydro_provenance(3),
         );
         assert!(
-            matches!(report.seasonal_stats_source, ProvenanceSource::UserFile),
+            matches!(
+                report.inflow.seasonal_stats_source,
+                ProvenanceSource::UserFile
+            ),
             "seasonal_stats_source must be UserFile for PartialEstimation"
         );
         assert!(
-            matches!(report.ar_coefficients_source, ProvenanceSource::Estimated),
+            matches!(
+                report.inflow.ar_coefficients_source,
+                ProvenanceSource::Estimated
+            ),
             "ar_coefficients_source must be Estimated for PartialEstimation"
         );
-        assert_eq!(report.white_noise_fallbacks, vec![5, 7]);
-        assert_eq!(report.estimation_path, "partial_estimation");
+        assert_eq!(report.inflow.white_noise_fallbacks, vec![5, 7]);
+        assert_eq!(report.inflow.estimation_path, "partial_estimation");
     }
 
     #[test]
@@ -478,34 +666,52 @@ mod tests {
             None,
             &prov_all_generated(),
             4,
+            &empty_hydro_provenance(4),
         );
         assert!(
-            matches!(report.seasonal_stats_source, ProvenanceSource::UserFile),
+            matches!(
+                report.inflow.seasonal_stats_source,
+                ProvenanceSource::UserFile
+            ),
             "seasonal_stats_source must be UserFile for UserProvidedAll"
         );
         assert!(
-            matches!(report.ar_coefficients_source, ProvenanceSource::UserFile),
+            matches!(
+                report.inflow.ar_coefficients_source,
+                ProvenanceSource::UserFile
+            ),
             "ar_coefficients_source must be UserFile for UserProvidedAll"
         );
         assert!(
-            report.ar_method.is_none(),
+            report.inflow.ar_method.is_none(),
             "ar_method must be None when no report"
         );
-        assert_eq!(report.estimation_path, "user_provided_all");
+        assert_eq!(report.inflow.estimation_path, "user_provided_all");
     }
 
     // ── ComponentProvenance mapping tests ─────────────────────────────────────
 
     #[test]
     fn user_supplied_tree_maps_to_user_file() {
-        let report =
-            build_provenance_report(EstimationPath::FullEstimation, None, &prov_user_tree(), 2);
+        let report = build_provenance_report(
+            EstimationPath::FullEstimation,
+            None,
+            &prov_user_tree(),
+            2,
+            &empty_hydro_provenance(2),
+        );
         assert!(
-            matches!(report.opening_tree_source, ProvenanceSource::UserFile),
+            matches!(
+                report.inflow.opening_tree_source,
+                ProvenanceSource::UserFile
+            ),
             "UserSupplied opening tree must map to UserFile"
         );
         assert!(
-            matches!(report.correlation_source, ProvenanceSource::Estimated),
+            matches!(
+                report.inflow.correlation_source,
+                ProvenanceSource::Estimated
+            ),
             "Generated correlation must map to Estimated"
         );
     }
@@ -520,6 +726,7 @@ mod tests {
             Some(&er),
             &prov_all_generated(),
             1,
+            &empty_hydro_provenance(1),
         );
         let json = serde_json::to_string_pretty(&report).unwrap();
         assert!(
@@ -532,9 +739,9 @@ mod tests {
         );
         // Verify it parses as a valid JSON object with expected keys.
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(value["estimation_path"], "full_estimation");
-        assert_eq!(value["seasonal_stats_source"], "estimated");
-        assert_eq!(value["ar_coefficients_source"], "estimated");
+        assert_eq!(value["inflow"]["estimation_path"], "full_estimation");
+        assert_eq!(value["inflow"]["seasonal_stats_source"], "estimated");
+        assert_eq!(value["inflow"]["ar_coefficients_source"], "estimated");
     }
 
     #[test]
@@ -544,14 +751,15 @@ mod tests {
             None,
             &prov_not_applicable(),
             0,
+            &empty_hydro_provenance(0),
         );
         let json = serde_json::to_string_pretty(&report).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(
-            value["seasonal_stats_source"], "n/a",
+            value["inflow"]["seasonal_stats_source"], "n/a",
             "NotApplicable must serialize as \"n/a\""
         );
-        assert_eq!(value["ar_coefficients_source"], "n/a");
+        assert_eq!(value["inflow"]["ar_coefficients_source"], "n/a");
     }
 
     // ── ProvenanceSource Display tests ────────────────────────────────────────
@@ -573,9 +781,10 @@ mod tests {
             Some(&er),
             &prov_all_generated(),
             2,
+            &empty_hydro_provenance(2),
         );
         assert_eq!(
-            report.white_noise_fallbacks,
+            report.inflow.white_noise_fallbacks,
             vec![3, 7],
             "white_noise_fallbacks must carry raw i32 IDs"
         );
@@ -588,10 +797,254 @@ mod tests {
             None,
             &prov_not_applicable(),
             0,
+            &empty_hydro_provenance(0),
         );
         assert!(
-            report.white_noise_fallbacks.is_empty(),
+            report.inflow.white_noise_fallbacks.is_empty(),
             "white_noise_fallbacks must be empty when no estimation_report"
+        );
+    }
+
+    // ── Nested report shape / deserialization tests ───────────────────────────
+
+    #[test]
+    fn nested_report_serializes_inflow_and_hydro_production_keys() {
+        let report = build_provenance_report(
+            EstimationPath::FullEstimation,
+            None,
+            &prov_all_generated(),
+            2,
+            &empty_hydro_provenance(2),
+        );
+        let json = serde_json::to_string(&report).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            value.get("inflow").is_some(),
+            "JSON must contain a top-level \"inflow\" object: {json}"
+        );
+        assert!(
+            value.get("hydro_production").is_some(),
+            "JSON must contain a top-level \"hydro_production\" object: {json}"
+        );
+        let hp = &value["hydro_production"];
+        assert_eq!(hp["n_fpha_computed_from_geometry"], 0);
+        assert_eq!(hp["n_fpha_precomputed_hyperplanes"], 0);
+        assert_eq!(hp["n_evaporation_ref_user_supplied"], 0);
+        assert_eq!(hp["n_evaporation_ref_default_midpoint"], 0);
+    }
+
+    #[test]
+    fn report_deserializes_from_json() {
+        let original = build_provenance_report(
+            EstimationPath::FullEstimation,
+            Some(&make_estimation_report("AIC", &[2, 3], &[])),
+            &prov_all_generated(),
+            2,
+            &empty_hydro_provenance(2),
+        );
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: ModelProvenanceReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.inflow.estimation_path,
+            original.inflow.estimation_path
+        );
+        assert!(matches!(
+            parsed.inflow.seasonal_stats_source,
+            ProvenanceSource::Estimated
+        ));
+        assert_eq!(
+            parsed.hydro_production.n_fpha_computed_from_geometry,
+            original.hydro_production.n_fpha_computed_from_geometry
+        );
+        assert_eq!(
+            parsed.hydro_production.n_fpha_precomputed_hyperplanes,
+            original.hydro_production.n_fpha_precomputed_hyperplanes
+        );
+        assert_eq!(
+            parsed.hydro_production.n_evaporation_ref_user_supplied,
+            original.hydro_production.n_evaporation_ref_user_supplied
+        );
+        assert_eq!(
+            parsed.hydro_production.n_evaporation_ref_default_midpoint,
+            original.hydro_production.n_evaporation_ref_default_midpoint
+        );
+    }
+
+    #[test]
+    fn report_deserializes_when_hydro_production_omitted() {
+        let json = r#"{
+            "inflow": {
+                "estimation_path": "full_estimation",
+                "seasonal_stats_source": "estimated",
+                "ar_coefficients_source": "estimated",
+                "correlation_source": "estimated",
+                "opening_tree_source": "estimated",
+                "n_hydros": 2,
+                "ar_method": "AIC",
+                "ar_max_order": 3,
+                "white_noise_fallbacks": []
+            }
+        }"#;
+        let parsed: ModelProvenanceReport = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.inflow.estimation_path, "full_estimation");
+        let default = HydroProductionProvenance::default();
+        assert_eq!(
+            parsed.hydro_production.n_fpha_computed_from_geometry,
+            default.n_fpha_computed_from_geometry
+        );
+        assert_eq!(
+            parsed.hydro_production.n_fpha_precomputed_hyperplanes,
+            default.n_fpha_precomputed_hyperplanes
+        );
+        assert_eq!(
+            parsed.hydro_production.n_evaporation_ref_user_supplied,
+            default.n_evaporation_ref_user_supplied
+        );
+        assert_eq!(
+            parsed.hydro_production.n_evaporation_ref_default_midpoint,
+            default.n_evaporation_ref_default_midpoint
+        );
+    }
+
+    // ── hydro-production aggregation tests ─────────────────────────────────────
+
+    #[test]
+    fn hydro_production_counts_fpha_sources() {
+        // 2 ComputedFromGeometry + 3 PrecomputedHyperplanes (plus the evaporation
+        // arrays are not modeled, so they contribute zero reference counts).
+        let production = [
+            ProductionModelSource::ComputedFromGeometry,
+            ProductionModelSource::PrecomputedHyperplanes,
+            ProductionModelSource::ComputedFromGeometry,
+            ProductionModelSource::PrecomputedHyperplanes,
+            ProductionModelSource::PrecomputedHyperplanes,
+        ];
+        let evaporation = [EvaporationSource::NotModeled; 5];
+        let evap_ref = [EvaporationReferenceSource::DefaultMidpoint; 5];
+        let hp = make_hydro_provenance(&production, &evaporation, &evap_ref);
+
+        let report = build_provenance_report(
+            EstimationPath::FullEstimation,
+            None,
+            &prov_all_generated(),
+            5,
+            &hp,
+        );
+        assert_eq!(
+            report.hydro_production.n_fpha_computed_from_geometry, 2,
+            "two ComputedFromGeometry production sources must be tallied"
+        );
+        assert_eq!(
+            report.hydro_production.n_fpha_precomputed_hyperplanes, 3,
+            "three PrecomputedHyperplanes production sources must be tallied"
+        );
+    }
+
+    #[test]
+    fn hydro_production_excludes_not_modeled_evaporation_refs() {
+        // Hydro A: LinearizedFromGeometry + UserSupplied -> counted.
+        // Hydro B: NotModeled + DefaultMidpoint placeholder -> excluded.
+        let production = [
+            ProductionModelSource::DefaultConstant,
+            ProductionModelSource::DefaultConstant,
+        ];
+        let evaporation = [
+            EvaporationSource::LinearizedFromGeometry,
+            EvaporationSource::NotModeled,
+        ];
+        let evap_ref = [
+            EvaporationReferenceSource::UserSupplied,
+            EvaporationReferenceSource::DefaultMidpoint,
+        ];
+        let hp = make_hydro_provenance(&production, &evaporation, &evap_ref);
+
+        let report = build_provenance_report(
+            EstimationPath::FullEstimation,
+            None,
+            &prov_all_generated(),
+            2,
+            &hp,
+        );
+        assert_eq!(
+            report.hydro_production.n_evaporation_ref_user_supplied, 1,
+            "the modeled hydro's UserSupplied reference must be counted"
+        );
+        assert_eq!(
+            report.hydro_production.n_evaporation_ref_default_midpoint, 0,
+            "the NotModeled hydro's DefaultMidpoint placeholder must be excluded"
+        );
+    }
+
+    #[test]
+    fn hydro_production_counts_order_invariant() {
+        let production_a = [
+            ProductionModelSource::ComputedFromGeometry,
+            ProductionModelSource::PrecomputedHyperplanes,
+            ProductionModelSource::DefaultConstant,
+        ];
+        let evaporation_a = [
+            EvaporationSource::LinearizedFromGeometry,
+            EvaporationSource::NotModeled,
+            EvaporationSource::LinearizedFromGeometry,
+        ];
+        let evap_ref_a = [
+            EvaporationReferenceSource::UserSupplied,
+            EvaporationReferenceSource::DefaultMidpoint,
+            EvaporationReferenceSource::DefaultMidpoint,
+        ];
+        let hp_a = make_hydro_provenance(&production_a, &evaporation_a, &evap_ref_a);
+
+        // Same three hydros, permuted (reverse order). Counts must be identical.
+        let production_b = [
+            ProductionModelSource::DefaultConstant,
+            ProductionModelSource::PrecomputedHyperplanes,
+            ProductionModelSource::ComputedFromGeometry,
+        ];
+        let evaporation_b = [
+            EvaporationSource::LinearizedFromGeometry,
+            EvaporationSource::NotModeled,
+            EvaporationSource::LinearizedFromGeometry,
+        ];
+        let evap_ref_b = [
+            EvaporationReferenceSource::DefaultMidpoint,
+            EvaporationReferenceSource::DefaultMidpoint,
+            EvaporationReferenceSource::UserSupplied,
+        ];
+        let hp_b = make_hydro_provenance(&production_b, &evaporation_b, &evap_ref_b);
+
+        let report_a = build_provenance_report(
+            EstimationPath::FullEstimation,
+            None,
+            &prov_all_generated(),
+            3,
+            &hp_a,
+        );
+        let report_b = build_provenance_report(
+            EstimationPath::FullEstimation,
+            None,
+            &prov_all_generated(),
+            3,
+            &hp_b,
+        );
+        assert_eq!(
+            report_a.hydro_production.n_fpha_computed_from_geometry,
+            report_b.hydro_production.n_fpha_computed_from_geometry,
+            "computed-from-geometry count must be order invariant"
+        );
+        assert_eq!(
+            report_a.hydro_production.n_fpha_precomputed_hyperplanes,
+            report_b.hydro_production.n_fpha_precomputed_hyperplanes,
+            "precomputed-hyperplanes count must be order invariant"
+        );
+        assert_eq!(
+            report_a.hydro_production.n_evaporation_ref_user_supplied,
+            report_b.hydro_production.n_evaporation_ref_user_supplied,
+            "user-supplied reference count must be order invariant"
+        );
+        assert_eq!(
+            report_a.hydro_production.n_evaporation_ref_default_midpoint,
+            report_b.hydro_production.n_evaporation_ref_default_midpoint,
+            "default-midpoint reference count must be order invariant"
         );
     }
 }

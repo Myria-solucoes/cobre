@@ -45,6 +45,7 @@ pub mod estimation;
 pub mod forward;
 pub(crate) mod forward_pass_state;
 pub(crate) mod fpha_fitting;
+pub(crate) mod gemm;
 pub(crate) mod generic_constraints;
 pub mod horizon_mode;
 pub mod hydro_models;
@@ -77,8 +78,6 @@ pub mod validate_phases;
 pub(crate) mod visited_states;
 pub mod workspace;
 
-// ── basis_reconstruct ─────────────────────────────────────────────────────────
-pub use basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW;
 // ── config ────────────────────────────────────────────────────────────────────
 pub use config::TrainingConfig;
 // ── convergence ───────────────────────────────────────────────────────────────
@@ -115,7 +114,10 @@ pub use policy_load::{
     validate_policy_compatibility,
 };
 // ── provenance ────────────────────────────────────────────────────────────────
-pub use provenance::{ModelProvenanceReport, ProvenanceSource, build_provenance_report};
+pub use provenance::{
+    HydroProductionProvenance, InflowProvenance, ModelProvenanceReport, ProvenanceSource,
+    build_provenance_report,
+};
 // ── risk_measure ──────────────────────────────────────────────────────────────
 pub use risk_measure::{BackwardOutcome, RiskMeasure};
 // ── setup ─────────────────────────────────────────────────────────────────────
@@ -128,7 +130,7 @@ pub use simulation::{
     ScenarioCategoryCosts, SimulationError, SimulationHydroResult, SimulationScenarioResult,
     SimulationStageResult, SimulationSummary, aggregate_simulation, simulate,
 };
-// ── solver_phase ──────────────────────────────────────────────────────────────
+// ── solver_phase ─────────────────────────────────────────────────────────────
 pub use solver_phase::{BACKWARD_PROFILE, FORWARD_PROFILE, Phase, SIMULATION_PROFILE};
 // ── solver_stats ──────────────────────────────────────────────────────────────
 pub use solver_stats::{
@@ -158,3 +160,20 @@ pub use state_exchange::ExchangeBuffers;
 pub use trajectory::TrajectoryRecord;
 // ── workspace ─────────────────────────────────────────────────────────────────
 pub use workspace::{BASIS_BROADCAST_WIRE_VERSION, CapturedBasis};
+
+/// Enable or disable the in-backward cut-selection hook.
+///
+/// Default is `false`. The hook installed inside the backward sweep
+/// reads this toggle and skips execution unless enabled. Flip once at
+/// process startup before training begins; the expected usage is a
+/// single flip, not a runtime mode switch. Uses `Ordering::Relaxed`.
+pub fn set_inside_backward_enabled(enabled: bool) {
+    crate::backward_pass_state::IN_BACKWARD_ENABLED
+        .store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Read the current value of the in-backward cut-selection hook toggle.
+#[must_use]
+pub fn is_inside_backward_enabled() -> bool {
+    crate::backward_pass_state::IN_BACKWARD_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}

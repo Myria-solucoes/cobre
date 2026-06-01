@@ -57,6 +57,38 @@ use crate::types::{Basis, RowBatch, SolutionView, SolverError, SolverStatistics,
 /// and [Solver Interface Trait SS5](../../../cobre-docs/src/specs/architecture/solver-interface-trait.md)
 /// for the dispatch mechanism rationale.
 pub trait SolverInterface: Send {
+    /// The solver-specific profile type.
+    ///
+    /// Each solver backend defines its own profile struct with the full set of
+    /// tunable options. The profile must be `Copy + PartialEq + Default` so that
+    /// `ProfiledSolver` can perform delta-tracking field comparison and construct
+    /// a default profile without a factory function.
+    ///
+    /// For `HighsSolver`, this is [`HighsProfile`](crate::HighsProfile).
+    /// For mock solvers in tests, this is typically
+    /// [`HighsProfile`](crate::HighsProfile) (no-op impl).
+    ///
+    /// The associated-type form is deliberate: it gives each backend its **full**
+    /// parameter surface with zero lowest-common-denominator loss — a backend's
+    /// `Profile` is whatever rich struct that backend needs, not a shared subset.
+    /// Consumers that are generic over a backend should treat `Profile` as opaque
+    /// (construct via `Default`, pass through `apply_profile`) and avoid naming a
+    /// concrete profile type; cross-backend tuning intent belongs in a
+    /// backend-agnostic hint, not in a hardcoded concrete profile.
+    type Profile: Copy + PartialEq + Default + Send;
+
+    /// Apply all profile options to the underlying solver.
+    ///
+    /// Called by `ProfiledSolver` before each solve to ensure that any
+    /// internal solver option reset is overridden by the active profile.
+    /// Implementations MUST configure ALL fields of the profile on the
+    /// underlying solver in a single call.
+    ///
+    /// This is not a hot-path method in isolation — it is called once per
+    /// `solve()` invocation by `ProfiledSolver`. The implementation should
+    /// issue FFI option-setter calls for every profile field.
+    fn apply_profile(&mut self, profile: &Self::Profile);
+
     /// Bulk-loads a pre-assembled structural LP (first step of rebuild sequence).
     ///
     /// Replaces any previous model. Validates template is a valid CSC matrix
@@ -273,6 +305,7 @@ pub trait SolverInterface: Send {
 #[cfg(test)]
 mod tests {
     use super::SolverInterface;
+    use crate::HighsProfile;
 
     // Verify trait is usable as a generic bound (compile-time monomorphization).
     fn accepts_solver<S: SolverInterface>(_: &S) {}
@@ -280,6 +313,10 @@ mod tests {
     struct NoopSolver;
 
     impl SolverInterface for NoopSolver {
+        type Profile = HighsProfile;
+
+        fn apply_profile(&mut self, _profile: &HighsProfile) {}
+
         fn load_model(&mut self, _template: &crate::types::StageTemplate) {}
 
         fn add_rows(&mut self, _rows: &crate::types::RowBatch) {}

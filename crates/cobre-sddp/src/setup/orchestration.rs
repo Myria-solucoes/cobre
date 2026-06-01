@@ -32,7 +32,7 @@ impl StudySetup {
     ///
     /// Returns `SddpError::Infeasible`, `SddpError::Solver`, or
     /// `SddpError::Communication` on LP, solver, or MPI failure.
-    pub fn train<S: SolverInterface + Send, C: Communicator>(
+    pub fn train<S, C: Communicator>(
         &mut self,
         solver: &mut S,
         comm: &C,
@@ -40,7 +40,10 @@ impl StudySetup {
         solver_factory: impl Fn() -> Result<S, SolverError>,
         event_sender: Option<Sender<TrainingEvent>>,
         shutdown_flag: Option<&Arc<AtomicBool>>,
-    ) -> Result<TrainingOutcome, SddpError> {
+    ) -> Result<TrainingOutcome, SddpError>
+    where
+        S: SolverInterface<Profile = cobre_solver::HighsProfile> + Send,
+    {
         let training_config = TrainingConfig {
             loop_config: LoopConfig {
                 forward_passes: self.loop_params.forward_passes,
@@ -54,7 +57,6 @@ impl StudySetup {
                 cut_selection: self.cut_management.cut_selection.clone(),
                 budget: self.cut_management.budget,
                 cut_activity_tolerance: self.cut_management.cut_activity_tolerance,
-                basis_activity_window: self.cut_management.basis_activity_window,
                 warm_start_cuts: 0,
                 risk_measures: self.cut_management.risk_measures.clone(),
             },
@@ -106,6 +108,12 @@ impl StudySetup {
             recent_weight_seed: self.recent_observation_seed.weight_seed,
         };
 
+        // Hand the warm-start basis cache (if any) to the training session so
+        // iteration 1's cut-loaded LPs warm-start from the checkpoint's stored
+        // bases. `take` leaves `None` behind — fresh starts pass `None` and are
+        // untouched.
+        let warm_start_basis_cache = self.warm_start_basis_cache.take();
+
         crate::train(
             solver,
             training_config,
@@ -114,6 +122,7 @@ impl StudySetup {
             &training_ctx,
             comm,
             solver_factory,
+            warm_start_basis_cache,
         )
     }
 

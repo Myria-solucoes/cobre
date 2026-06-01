@@ -8,15 +8,28 @@
 //! - [`Communicator`] — backend abstraction for collective communication
 //!   operations (`allgatherv`, `allreduce`, `broadcast`, `barrier`, `rank`, `size`).
 //! - [`LocalCommunicator`] — object-safe sub-trait exposing only the non-generic
-//!   methods of `Communicator` (`rank`, `size`, `barrier`). Used as the return type
-//!   of `SharedMemoryProvider::split_local` to enable dynamic dispatch for
-//!   initialization-only intra-node coordination (see the design note on
-//!   [`SharedMemoryProvider::split_local`]).
+//!   methods of `Communicator` (`rank`, `size`, `barrier`). Only compiled with
+//!   the `shared-memory` feature (see below).
 //! - [`SharedRegion`] — handle to a shared memory region with read, write, and
-//!   fence-based synchronization methods.
+//!   fence-based synchronization methods. Only compiled with the `shared-memory`
+//!   feature.
 //! - [`SharedMemoryProvider`] — companion trait to `Communicator` for shared memory
-//!   region management. Combined with `Communicator` via `C: Communicator +
-//!   SharedMemoryProvider` bounds on functions that require both.
+//!   region management. Only compiled with the `shared-memory` feature.
+//!
+//! ## Shared-memory subsystem (`shared-memory` feature)
+//!
+//! `LocalCommunicator`, `SharedRegion`, and `SharedMemoryProvider` are gated behind
+//! `#[cfg(feature = "shared-memory")]` because the subsystem currently has zero
+//! production consumers and its only implementation (`HeapRegion`) provides no true
+//! intra-node shared memory — each rank holds its own `Vec<T>`.
+//!
+//! The real implementation should be built on ferrompi's `SharedWindow<T>`, which
+//! wraps `MPI_Win_allocate_shared` / `MPI_Win_shared_query` and exposes
+//! `local_slice` / `remote_slice` / `fence` / `lock`. One open design tension:
+//! `SharedWindow<T>` is `!Send + !Sync` (ferrompi v0.4.x), whereas
+//! `LocalCommunicator` and `SharedRegion` require `Send + Sync`. Resolving this
+//! requires either a wrapper type that enforces single-threaded access, or a
+//! ferrompi API change. No downstream consumer exists yet, so this is deferred.
 
 /// Marker trait for types that can be transmitted through collective operations.
 ///
@@ -365,6 +378,8 @@ pub trait Communicator: Send + Sync {
 /// Object-safe sub-trait of [`Communicator`] for intra-node initialization
 /// coordination.
 ///
+/// Only available with the `shared-memory` Cargo feature.
+///
 /// # Design rationale
 ///
 /// [`Communicator`] is **intentionally not object-safe** — it carries generic
@@ -403,6 +418,7 @@ pub trait Communicator: Send + Sync {
 ///     local_comm.rank() == 0
 /// }
 /// ```
+#[cfg(feature = "shared-memory")]
 pub trait LocalCommunicator: Send + Sync {
     /// Return the rank index of the calling process within the intra-node
     /// communicator.
@@ -459,6 +475,50 @@ pub trait LocalCommunicator: Send + Sync {
     fn barrier(&self) -> Result<(), crate::CommError>;
 }
 
+/// Concrete enum returned by [`SharedMemoryProvider::split_local`].
+///
+/// Provides enum dispatch over the closed set of intra-node communicator
+/// backends, replacing the former `Box<dyn LocalCommunicator>` return type.
+/// Adding a new variant here requires updating all `match` arms in the
+/// `LocalCommunicator` impl below.
+///
+/// Only available with the `shared-memory` Cargo feature.
+#[cfg(feature = "shared-memory")]
+pub enum LocalCommKind {
+    /// Single-process local backend (always available).
+    Local(crate::local::LocalBackend),
+    /// Ferrompi intra-node communicator wrapping `MPI_Comm_split_type SHARED`.
+    #[cfg(feature = "mpi")]
+    Ferrompi(crate::ferrompi::FerrompiLocalComm),
+}
+
+#[cfg(feature = "shared-memory")]
+impl LocalCommunicator for LocalCommKind {
+    fn rank(&self) -> usize {
+        match self {
+            Self::Local(b) => LocalCommunicator::rank(b),
+            #[cfg(feature = "mpi")]
+            Self::Ferrompi(c) => LocalCommunicator::rank(c),
+        }
+    }
+
+    fn size(&self) -> usize {
+        match self {
+            Self::Local(b) => LocalCommunicator::size(b),
+            #[cfg(feature = "mpi")]
+            Self::Ferrompi(c) => LocalCommunicator::size(c),
+        }
+    }
+
+    fn barrier(&self) -> Result<(), crate::CommError> {
+        match self {
+            Self::Local(b) => LocalCommunicator::barrier(b),
+            #[cfg(feature = "mpi")]
+            Self::Ferrompi(c) => LocalCommunicator::barrier(c),
+        }
+    }
+}
+
 /// Handle to a shared memory region holding `count` elements of type `T`.
 ///
 /// The region follows a strict **three-phase lifecycle**:
@@ -500,6 +560,7 @@ pub trait LocalCommunicator: Send + Sync {
 /// Trait methods use safe Rust signatures. Any `unsafe` for raw pointer
 /// dereference into MPI shared windows is encapsulated within backend
 /// implementations, not exposed here.
+#[cfg(feature = "shared-memory")]
 pub trait SharedRegion<T: CommData>: Send + Sync {
     /// Return a shared reference to the region contents as a contiguous slice.
     ///
@@ -612,6 +673,7 @@ pub trait SharedRegion<T: CommData>: Send + Sync {
 /// The trait requires `Send + Sync`. `create_shared_region` and `split_local`
 /// are initialization-only operations called before any parallel regions are
 /// entered.
+#[cfg(feature = "shared-memory")]
 pub trait SharedMemoryProvider: Send + Sync {
     /// The shared memory region handle type.
     ///
@@ -685,7 +747,7 @@ pub trait SharedMemoryProvider: Send + Sync {
     ///
     /// Returns [`crate::CommError::CollectiveFailed`] if the underlying
     /// communicator split operation fails (e.g., MPI communicator split failure).
-    fn split_local(&self) -> Result<Box<dyn LocalCommunicator>, crate::CommError>;
+    fn split_local(&self) -> Result<LocalCommKind, crate::CommError>;
 
     /// Return whether the calling rank is the leader for shared memory operations
     /// on its node.
@@ -736,8 +798,11 @@ pub trait TopologyProvider: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::{CommData, Communicator, LocalCommunicator, SharedMemoryProvider, SharedRegion};
+    use super::{CommData, Communicator};
     use crate::{CommError, ReduceOp};
+
+    #[cfg(feature = "shared-memory")]
+    use super::{LocalCommunicator, SharedMemoryProvider, SharedRegion};
 
     /// Compile-time assertion that a type satisfies `CommData`.
     ///
@@ -820,16 +885,15 @@ mod tests {
         }
     }
 
-    fn assert_local_communicator_is_object_safe(comm: &dyn super::LocalCommunicator) {
-        let _ = comm.rank();
-        let _ = comm.size();
-    }
+    // ── shared-memory feature tests ───────────────────────────────────────────
 
+    #[cfg(feature = "shared-memory")]
     fn use_local_communicator_generic<L: super::LocalCommunicator>(lc: &L) {
         let _ = lc.rank();
         let _ = lc.size();
     }
 
+    #[cfg(feature = "shared-memory")]
     #[test]
     fn test_local_communicator_object_safe_and_generic_compile() {
         struct LocalImpl;
@@ -849,16 +913,16 @@ mod tests {
         }
 
         let lc = LocalImpl;
-        assert_local_communicator_is_object_safe(&lc);
         use_local_communicator_generic(&lc);
         assert_eq!(lc.rank(), 0);
         assert_eq!(lc.size(), 1);
         assert!(lc.barrier().is_ok());
     }
 
+    #[cfg(feature = "shared-memory")]
     #[test]
     fn test_local_communicator_requires_send_sync() {
-        fn needs_send_sync<T: Send + Sync + ?Sized>(_v: &T) {}
+        fn needs_send_sync<T: Send + Sync>(_v: &T) {}
 
         struct SendSyncLocalImpl;
 
@@ -878,21 +942,22 @@ mod tests {
 
         let lc = SendSyncLocalImpl;
         needs_send_sync(&lc);
-        let boxed: Box<dyn super::LocalCommunicator> = Box::new(SendSyncLocalImpl);
-        needs_send_sync(boxed.as_ref());
     }
 
+    #[cfg(feature = "shared-memory")]
     fn use_shared_region_as_bound<R: super::SharedRegion<f64>>(region: &mut R) {
         let _slice: &[f64] = region.as_slice();
         let _mut_slice: &mut [f64] = region.as_mut_slice();
         let _fence: Result<(), CommError> = region.fence();
     }
 
+    #[cfg(feature = "shared-memory")]
     fn assert_shared_region_requires_send_sync<R: super::SharedRegion<f64>>(region: &R) {
         fn needs_send_sync<T: Send + Sync>(_v: &T) {}
         needs_send_sync(region);
     }
 
+    #[cfg(feature = "shared-memory")]
     #[test]
     fn test_shared_region_trait_bounds() {
         struct HeapRegionStub(Vec<f64>);
@@ -918,14 +983,15 @@ mod tests {
         assert!(region.fence().is_ok());
     }
 
+    #[cfg(feature = "shared-memory")]
     fn use_shared_memory_provider_as_bound<P: super::SharedMemoryProvider>(provider: &P) {
         let _region_result: Result<P::Region<f64>, CommError> =
             provider.create_shared_region::<f64>(100);
-        let _local_comm_result: Result<Box<dyn super::LocalCommunicator>, CommError> =
-            provider.split_local();
+        let _local_comm_result: Result<super::LocalCommKind, CommError> = provider.split_local();
         let _leader: bool = provider.is_leader();
     }
 
+    #[cfg(feature = "shared-memory")]
     #[test]
     fn test_shared_memory_provider_gat() {
         struct HeapRegionStub<T>(Vec<T>);
@@ -944,22 +1010,6 @@ mod tests {
             }
         }
 
-        struct LocalCommStub;
-
-        impl super::LocalCommunicator for LocalCommStub {
-            fn rank(&self) -> usize {
-                0
-            }
-
-            fn size(&self) -> usize {
-                1
-            }
-
-            fn barrier(&self) -> Result<(), CommError> {
-                Ok(())
-            }
-        }
-
         struct HeapProviderStub;
 
         impl super::SharedMemoryProvider for HeapProviderStub {
@@ -972,8 +1022,8 @@ mod tests {
                 Ok(HeapRegionStub::<T>(Vec::with_capacity(count)))
             }
 
-            fn split_local(&self) -> Result<Box<dyn super::LocalCommunicator>, CommError> {
-                Ok(Box::new(LocalCommStub))
+            fn split_local(&self) -> Result<super::LocalCommKind, CommError> {
+                Ok(super::LocalCommKind::Local(crate::local::LocalBackend))
             }
 
             fn is_leader(&self) -> bool {
@@ -992,6 +1042,7 @@ mod tests {
         assert!(provider.is_leader());
     }
 
+    #[cfg(feature = "shared-memory")]
     #[test]
     fn test_shared_memory_provider_requires_send_sync() {
         fn needs_send_sync<T: Send + Sync>(_v: &T) {}
@@ -1012,22 +1063,6 @@ mod tests {
             }
         }
 
-        struct LocalCommStub;
-
-        impl super::LocalCommunicator for LocalCommStub {
-            fn rank(&self) -> usize {
-                0
-            }
-
-            fn size(&self) -> usize {
-                1
-            }
-
-            fn barrier(&self) -> Result<(), CommError> {
-                Ok(())
-            }
-        }
-
         struct HeapProviderStub;
 
         impl super::SharedMemoryProvider for HeapProviderStub {
@@ -1040,8 +1075,8 @@ mod tests {
                 Ok(HeapRegionStub(vec![]))
             }
 
-            fn split_local(&self) -> Result<Box<dyn super::LocalCommunicator>, CommError> {
-                Ok(Box::new(LocalCommStub))
+            fn split_local(&self) -> Result<super::LocalCommKind, CommError> {
+                Ok(super::LocalCommKind::Local(crate::local::LocalBackend))
             }
 
             fn is_leader(&self) -> bool {

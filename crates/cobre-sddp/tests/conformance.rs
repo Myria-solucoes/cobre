@@ -92,6 +92,10 @@ impl MockSolver {
 }
 
 impl SolverInterface for MockSolver {
+    type Profile = cobre_solver::HighsProfile;
+
+    fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
+
     fn solver_name_version(&self) -> String {
         "MockSolver 0.0.0".to_string()
     }
@@ -129,10 +133,14 @@ impl SolverInterface for MockSolver {
     fn name(&self) -> &'static str {
         "MockConformance"
     }
-    fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
-    fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
-    fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
-    fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
+
+    fn set_primal_feasibility_tolerance(&mut self, _tolerance: f64) {}
+
+    fn set_dual_feasibility_tolerance(&mut self, _tolerance: f64) {}
+
+    fn set_simplex_iteration_limit_profile(&mut self, _limit: u32) {}
+
+    fn set_ipm_iteration_limit_profile(&mut self, _limit: u32) {}
 }
 
 /// Minimal stage template for a single hydro, zero PAR lags.
@@ -862,7 +870,7 @@ mod lb_conformance {
         let mut lb_scratch = LbEvalScratch::new();
 
         // First call: solver returns [50, 100] → LB = E[50, 100] = 75 (scaled).
-        // After unscaling by COST_SCALE_FACTOR (1000), LB = 75_000.
+        // After unscaling by COST_SCALE_FACTOR (1_000_000), LB = 75_000_000.
         let mut solver1 = MockSolver::with_objectives(vec![50.0, 100.0]);
         let lb1 = {
             let mut bundle = LbEvalScratchBundle::from_scratch_fields(
@@ -884,12 +892,12 @@ mod lb_conformance {
         .expect("first evaluate_lower_bound must succeed");
 
         assert!(
-            (lb1 - 75_000.0).abs() < 1e-7,
-            "lb1 must equal 75_000.0, got {lb1}"
+            (lb1 - 75_000_000.0).abs() < 1e-1,
+            "lb1 must equal 75_000_000.0, got {lb1}"
         );
 
         // Second call: solver returns [80, 120] → LB = E[80, 120] = 100 (scaled).
-        // After unscaling by COST_SCALE_FACTOR (1000), LB = 100_000.
+        // After unscaling by COST_SCALE_FACTOR (1_000_000), LB = 100_000_000.
         // This simulates the effect of tighter cuts (higher stage-0 LP objectives).
         let mut solver2 = MockSolver::with_objectives(vec![80.0, 120.0]);
         let lb2 = {
@@ -912,8 +920,8 @@ mod lb_conformance {
         .expect("second evaluate_lower_bound must succeed");
 
         assert!(
-            (lb2 - 100_000.0).abs() < 1e-7,
-            "lb2 must equal 100_000.0, got {lb2}"
+            (lb2 - 100_000_000.0).abs() < 1e-1,
+            "lb2 must equal 100_000_000.0, got {lb2}"
         );
 
         // Monotonicity: lb2 >= lb1

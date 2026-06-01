@@ -13,7 +13,7 @@
 
 use cobre_sddp::{
     SddpError,
-    cut::wire::{cut_wire_size, deserialize_cut, serialize_cut},
+    cut::wire::{CUT_WIRE_VERSION, cut_wire_size, deserialize_cut, serialize_cut},
     workspace::{BASIS_BROADCAST_WIRE_VERSION, CapturedBasis},
 };
 
@@ -92,12 +92,12 @@ fn basis_try_from_broadcast_payload_rejects_wrong_version() {
 }
 
 // ---------------------------------------------------------------------------
-// Ticket-005: cut wire-format version guard
+// Cut wire-format version guard
 // ---------------------------------------------------------------------------
 
 /// Serialize a single cut via `serialize_cut`, corrupt the version byte at
-/// offset 0 to `2_u8`, then verify that `deserialize_cut` returns
-/// `SddpError::Validation` containing `"unsupported cut wire version 2"`.
+/// offset 0 to an unknown value, then verify that `deserialize_cut` returns
+/// `SddpError::Validation` referencing the unsupported version.
 #[test]
 fn deserialize_cut_rejects_wrong_version() {
     let n_state = 2;
@@ -113,23 +113,24 @@ fn deserialize_cut_rejects_wrong_version() {
         /* coefficients */ &[1.0, 2.0],
     );
 
-    // Verify the correct version was written before corruption.
-    assert_eq!(buf[0], 1, "version byte must be 1 before corruption");
+    assert_eq!(
+        buf[0], CUT_WIRE_VERSION,
+        "serialize_cut must write the current version byte"
+    );
 
-    // Corrupt the version byte to 2.
-    buf[0] = 2_u8;
+    buf[0] = 99_u8;
 
     let result = deserialize_cut(&buf, n_state);
 
     match result {
         Err(SddpError::Validation(ref msg)) => {
             assert!(
-                msg.contains("unsupported cut wire version 2"),
-                "error must contain 'unsupported cut wire version 2'; got: {msg}"
+                msg.contains("99"),
+                "error must reference the corrupted version 99; got: {msg}"
             );
         }
         other => panic!(
-            "expected Err(SddpError::Validation(_)) containing 'unsupported cut wire version 2', \
+            "expected Err(SddpError::Validation(_)) referencing the corrupted version, \
              got: {other:?}"
         ),
     }

@@ -96,6 +96,80 @@ const SIMULATION_METADATA_JSON: &str = r#"{
     }
 }"#;
 
+const TRAINING_METADATA_WITH_BOUNDS_JSON: &str = r#"{
+    "cobre_version": "0.3.2",
+    "hostname": "test-host",
+    "solver": "highs",
+    "started_at": "2026-01-17T08:00:00Z",
+    "completed_at": "2026-01-17T12:30:00Z",
+    "duration_seconds": 16200.0,
+    "status": "complete",
+    "configuration": {
+        "seed": 42,
+        "max_iterations": 100,
+        "forward_passes": 192,
+        "stopping_mode": "any",
+        "policy_mode": "fresh"
+    },
+    "problem_dimensions": {
+        "num_stages": 12,
+        "num_hydros": 160,
+        "num_thermals": 200,
+        "num_buses": 5,
+        "num_lines": 8
+    },
+    "iterations": {
+        "completed": 10,
+        "converged_at": 10
+    },
+    "convergence": {
+        "achieved": true,
+        "final_gap_percent": 0.45,
+        "termination_reason": "bound_stalling"
+    },
+    "row_pool": {
+        "total_generated": 1250000,
+        "total_active": 980000,
+        "peak_active": 1100000
+    },
+    "bounds": {
+        "final_lower_bound": 123456.0,
+        "final_upper_bound": 124000.0,
+        "final_upper_bound_std": 12.5
+    },
+    "distribution": {
+        "backend": "local",
+        "world_size": 1,
+        "ranks_participated": 1,
+        "num_nodes": 1,
+        "threads_per_rank": 1
+    }
+}"#;
+
+const SIMULATION_METADATA_WITH_COST_JSON: &str = r#"{
+    "cobre_version": "0.3.2",
+    "hostname": "test-host",
+    "solver": "highs",
+    "started_at": "2026-01-17T13:00:00Z",
+    "completed_at": "2026-01-17T13:15:00Z",
+    "duration_seconds": 900.0,
+    "status": "complete",
+    "scenarios": { "total": 100, "completed": 100, "failed": 0 },
+    "cost": {
+        "mean_cost": 789012.0,
+        "std_cost": 4321.0,
+        "cvar": 800000.0,
+        "cvar_alpha": 0.95
+    },
+    "distribution": {
+        "backend": "local",
+        "world_size": 1,
+        "ranks_participated": 1,
+        "num_nodes": 1,
+        "threads_per_rank": 1
+    }
+}"#;
+
 // ── Fixture helpers ───────────────────────────────────────────────────────────
 
 fn write_file(root: &Path, relative: &str, content: &str) {
@@ -119,6 +193,22 @@ fn make_full_results(dir: &TempDir) {
         dir.path(),
         "simulation/metadata.json",
         SIMULATION_METADATA_JSON,
+    );
+}
+
+/// Build a results directory whose training and simulation metadata carry
+/// explicit `bounds` and `cost` objects.
+fn make_results_with_bounds_and_cost(dir: &TempDir) {
+    let root = dir.path();
+    write_file(
+        root,
+        "training/metadata.json",
+        TRAINING_METADATA_WITH_BOUNDS_JSON,
+    );
+    write_file(
+        root,
+        "simulation/metadata.json",
+        SIMULATION_METADATA_WITH_COST_JSON,
     );
 }
 
@@ -314,4 +404,71 @@ fn missing_training_manifest_exits_2() {
         .assert()
         .failure()
         .code(2);
+}
+
+// ── Top-level bounds/cost convenience keys ────────────────────────────────────
+
+#[test]
+fn with_bounds_and_cost_top_level_keys_present() {
+    let dir = TempDir::new().unwrap();
+    make_results_with_bounds_and_cost(&dir);
+
+    let output = cobre()
+        .args(["report", dir.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "exit code must be 0");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    // Top-level convenience keys.
+    assert_eq!(
+        value["bounds"]["final_lower_bound"].as_f64(),
+        Some(123_456.0),
+        ".bounds.final_lower_bound must match the fixture"
+    );
+    assert_eq!(
+        value["cost"]["mean_cost"].as_f64(),
+        Some(789_012.0),
+        ".cost.mean_cost must match the fixture"
+    );
+
+    // Nested dump (e2e gate) must remain populated and consistent.
+    assert_eq!(
+        value["training"]["bounds"]["final_lower_bound"].as_f64(),
+        Some(123_456.0),
+        ".training.bounds.final_lower_bound must match the fixture"
+    );
+    assert_eq!(
+        value["simulation"]["cost"]["mean_cost"].as_f64(),
+        Some(789_012.0),
+        ".simulation.cost.mean_cost must match the fixture"
+    );
+}
+
+#[test]
+fn legacy_metadata_cost_is_null_bounds_default() {
+    let dir = TempDir::new().unwrap();
+    // The existing fixtures omit `bounds`/`cost`, exercising graceful degradation.
+    make_full_results(&dir);
+
+    let output = cobre()
+        .args(["report", dir.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "exit code must be 0");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert!(
+        value["cost"].is_null(),
+        ".cost must serialize as null for legacy metadata without cost"
+    );
+    assert_eq!(
+        value["bounds"]["final_lower_bound"].as_f64(),
+        Some(0.0),
+        ".bounds.final_lower_bound must default to 0.0 for legacy metadata"
+    );
 }

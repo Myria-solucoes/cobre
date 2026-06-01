@@ -50,7 +50,6 @@ use crate::{
             emit_sim_progress, process_scenario_stages,
         },
     },
-    solver_phase::{Phase, SIMULATION_PROFILE},
     solver_stats::SolverStatsDelta,
     workspace::{CapturedBasis, SolverWorkspace},
 };
@@ -196,14 +195,14 @@ impl SimulationState {
         debug_assert_inputs(inputs.ctx, num_stages, initial_state.len(), indexer.n_state);
 
         // Validate baked-template slice length if provided.
-        if let Some(baked) = inputs.baked_templates {
-            if baked.len() != num_stages {
-                return Err(SimulationError::InvalidConfiguration(format!(
-                    "baked_templates length {} != num_stages {}",
-                    baked.len(),
-                    num_stages
-                )));
-            }
+        if let Some(baked) = inputs.baked_templates
+            && baked.len() != num_stages
+        {
+            return Err(SimulationError::InvalidConfiguration(format!(
+                "baked_templates length {} != num_stages {}",
+                baked.len(),
+                num_stages
+            )));
         }
 
         // Populate `self.owned_baked` when the caller did not provide templates.
@@ -246,19 +245,6 @@ impl SimulationState {
                 threads_per_rank: n_workers as u32,
                 timestamp: String::new(),
             });
-        }
-
-        // Apply the simulation-phase solver profile to every worker workspace
-        // before the rayon parallel region begins.  In v1 all named profiles
-        // equal `SolveProfile::default()`, so this is a no-op (delta tracking
-        // skips all FFI calls), preserving bit-identical parity with the
-        // pre-profile branch.
-        for ws in inputs.workspaces.iter_mut() {
-            ws.solver.set_profile(&Phase::Simulation.profile());
-            debug_assert!(
-                ws.solver.current_profile() == &SIMULATION_PROFILE,
-                "solver profile must equal SIMULATION_PROFILE after set_profile"
-            );
         }
 
         let sampler = build_sim_sampler(training_ctx)?;
@@ -425,7 +411,6 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
         let load_spec = crate::simulation::pipeline::SimScenarioLoadSpec {
             baked_templates,
             stage_bases,
-            basis_activity_window: config.basis_activity_window,
         };
         // Split raw_noise_buf and perm_scratch out of ws.scratch so that the
         // immutable borrows of those slices in ScenarioIds do not conflict with

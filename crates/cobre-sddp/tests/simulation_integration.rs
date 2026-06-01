@@ -30,7 +30,7 @@ use cobre_core::{
     },
 };
 use cobre_solver::{
-    Basis, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
+    Basis, HighsProfile, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
 };
 use cobre_stochastic::{
     ClassSchemes, OpeningTreeInputs, StochasticContext, build_stochastic_context,
@@ -119,6 +119,10 @@ impl MockSolver {
 }
 
 impl SolverInterface for MockSolver {
+    type Profile = HighsProfile;
+
+    fn apply_profile(&mut self, _profile: &HighsProfile) {}
+
     fn solver_name_version(&self) -> String {
         "MockSolver 0.0.0".to_string()
     }
@@ -126,6 +130,10 @@ impl SolverInterface for MockSolver {
     fn add_rows(&mut self, _cuts: &RowBatch) {}
     fn set_row_bounds(&mut self, _indices: &[usize], _lower: &[f64], _upper: &[f64]) {}
     fn set_col_bounds(&mut self, _indices: &[usize], _lower: &[f64], _upper: &[f64]) {}
+    fn set_primal_feasibility_tolerance(&mut self, _v: f64) {}
+    fn set_dual_feasibility_tolerance(&mut self, _v: f64) {}
+    fn set_simplex_iteration_limit_profile(&mut self, _v: u32) {}
+    fn set_ipm_iteration_limit_profile(&mut self, _v: u32) {}
 
     fn solve(
         &mut self,
@@ -153,10 +161,6 @@ impl SolverInterface for MockSolver {
     fn name(&self) -> &'static str {
         "MockIntegration"
     }
-    fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
-    fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
-    fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
-    fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
 }
 
 #[allow(clippy::cast_possible_wrap)]
@@ -570,7 +574,6 @@ fn train_simulate_write_cycle() {
             budget: None,
             cut_activity_tolerance: 0.0,
             warm_start_cuts: 0,
-            basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
             risk_measures: fx.risk_measures.clone(),
         },
         events: EventConfig {
@@ -623,6 +626,7 @@ fn train_simulate_write_cycle() {
         },
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
+        None,
     )
     .expect("train must succeed");
 
@@ -717,7 +721,6 @@ fn train_simulate_write_cycle() {
     let sim_config = SimulationConfig {
         n_scenarios: 2,
         io_channel_capacity: 4,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
 
     let entity_counts = EntityCounts {
@@ -834,6 +837,8 @@ fn train_simulate_write_cycle() {
         failed: 0,
         total_time_ms: 0,
         partitions_written: vec![],
+        cost: None,
+        solve_stats: cobre_io::MetadataSimulationSolveStats::default(),
     };
 
     let system = make_system();
@@ -856,6 +861,7 @@ fn train_simulate_write_cycle() {
             mpi_standard: None,
             thread_level: None,
             slurm_job_id: None,
+            hosts: Vec::new(),
         },
     };
     write_results(
@@ -954,6 +960,10 @@ impl SizedMockSolver {
 }
 
 impl SolverInterface for SizedMockSolver {
+    type Profile = HighsProfile;
+
+    fn apply_profile(&mut self, _profile: &HighsProfile) {}
+
     fn solver_name_version(&self) -> String {
         "MockSolver 0.0.0".to_string()
     }
@@ -968,6 +978,10 @@ impl SolverInterface for SizedMockSolver {
 
     fn set_row_bounds(&mut self, _indices: &[usize], _lower: &[f64], _upper: &[f64]) {}
     fn set_col_bounds(&mut self, _indices: &[usize], _lower: &[f64], _upper: &[f64]) {}
+    fn set_primal_feasibility_tolerance(&mut self, _v: f64) {}
+    fn set_dual_feasibility_tolerance(&mut self, _v: f64) {}
+    fn set_simplex_iteration_limit_profile(&mut self, _v: u32) {}
+    fn set_ipm_iteration_limit_profile(&mut self, _v: u32) {}
 
     fn solve(
         &mut self,
@@ -992,10 +1006,6 @@ impl SolverInterface for SizedMockSolver {
     fn name(&self) -> &'static str {
         "SizedMockSolver"
     }
-    fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
-    fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
-    fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
-    fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
 }
 
 /// Build a 1-hydro, 1-bus system with `min_outflow_m3s` > 0 for integration testing.
@@ -1361,7 +1371,6 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
             budget: None,
             cut_activity_tolerance: 0.0,
             warm_start_cuts: 0,
-            basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
             risk_measures: vec![RiskMeasure::Expectation; n_stages],
         },
         events: EventConfig {
@@ -1396,13 +1405,13 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
         },
         &StubComm,
         || Ok(SizedMockSolver::new(t0.num_cols, t0.num_rows)),
+        None,
     )
     .expect("training must succeed");
 
     let sim_config = SimulationConfig {
         n_scenarios: 1,
         io_channel_capacity: 4,
-        basis_activity_window: cobre_sddp::DEFAULT_BASIS_ACTIVITY_WINDOW,
     };
 
     let entity_counts = EntityCounts {

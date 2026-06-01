@@ -339,9 +339,10 @@ pub fn build_training_output(
         .collect();
 
     let cut_stats = RowPoolStatistics {
-        total_generated: fcf.pools.iter().map(|p| p.populated_count as u64).sum(),
+        total_generated: fcf.total_generated_cuts() as u64,
         total_active: fcf.total_active_cuts() as u64,
         peak_active,
+        cuts_active: fcf.total_active_cuts() as u64,
     };
 
     let converged = result.reason == crate::stopping_rule::RULE_BOUND_STALLING
@@ -377,6 +378,7 @@ pub fn build_training_output(
                     cuts_populated: rec.rows_populated,
                     cuts_active_before: rec.rows_active_before,
                     cuts_deactivated: rec.rows_deactivated,
+                    cuts_reactivated: rec.rows_reactivated,
                     cuts_active_after: rec.rows_active_after,
                     selection_time_ms: rec.selection_time_ms,
                     budget_evicted: rec.budget_evicted,
@@ -396,6 +398,7 @@ pub fn build_training_output(
         final_lower_bound: result.final_lb,
         final_upper_bound: Some(result.final_ub),
         final_gap_percent,
+        final_upper_bound_std: Some(result.final_ub_std),
         iterations_completed,
         converged,
         termination_reason: result.reason.clone(),
@@ -403,6 +406,8 @@ pub fn build_training_output(
         cut_stats,
         cut_selection_records,
         worker_timing_records,
+        // Populated downstream (CLI/Python) from live solver statistics.
+        training_solve_stats: cobre_io::MetadataTrainingSolveStats::default(),
     }
 }
 
@@ -619,11 +624,44 @@ mod tests {
 
         assert_eq!(
             output.cut_stats.total_generated, 5,
-            "total_generated must equal sum of populated_count across all pools"
+            "total_generated must equal the true number of cuts added (iteration 0 has no gap)"
         );
         assert_eq!(
             output.cut_stats.total_active, 5,
             "total_active must equal active cuts in all pools"
+        );
+    }
+
+    #[test]
+    fn total_generated_excludes_reserved_leading_slots() {
+        // With 1-based iterations and forward_passes > 1, the slot block
+        // [0, forward_passes) is never written, so populated_count over-counts
+        // by forward_passes per cut-receiving pool. total_generated must report
+        // the true number of cuts added, not the high-water mark.
+        let result = make_result("iteration_limit", 80.0, 100.0, 0.2, 1);
+        let events = vec![make_iteration_summary(1, 80.0, 100.0, 0.2)];
+
+        let mut fcf = FutureCostFunction::new(2, 1, 2, 10, &[0; 2]);
+        // iteration 1, forward_passes 2 -> slots 2,3 (block [0,2) stays empty).
+        fcf.add_cut(0, 1, 0, 1.0, &[1.0]);
+        fcf.add_cut(0, 1, 1, 2.0, &[1.0]);
+        // stage 1: one cut at iteration 1 -> slot 2.
+        fcf.add_cut(1, 1, 0, 3.0, &[1.0]);
+
+        let populated: u64 = fcf.pools.iter().map(|p| p.populated_count as u64).sum();
+        assert_eq!(
+            populated, 7,
+            "high-water mark includes the empty leading block"
+        );
+
+        let output = build_training_output(&result, &events, &fcf);
+        assert_eq!(
+            output.cut_stats.total_generated, 3,
+            "total_generated must count the 3 cuts actually added"
+        );
+        assert!(
+            output.cut_stats.total_generated < populated,
+            "total_generated must exclude reserved-but-empty leading slots"
         );
     }
 
@@ -1010,20 +1048,24 @@ mod tests {
                         rows_populated: 5,
                         rows_active_before: 5,
                         rows_deactivated: 0,
+                        rows_reactivated: 0,
                         rows_active_after: 5,
                         selection_time_ms: 0.0,
                         budget_evicted: None,
                         active_after_budget: None,
+                        rows_in_lp: 5,
                     },
                     StageRowSelectionRecord {
                         stage: 1,
                         rows_populated: 8,
                         rows_active_before: 8,
                         rows_deactivated: 3,
+                        rows_reactivated: 0,
                         rows_active_after: 5,
                         selection_time_ms: 2.5,
                         budget_evicted: None,
                         active_after_budget: None,
+                        rows_in_lp: 8,
                     },
                 ],
             },

@@ -9,8 +9,8 @@
 #   "No plan-structure references in user-facing artifacts"
 #
 # Forbidden patterns:
-#   Epic [0-9]+      — "Epic 06", "Epic 12", etc.
-#   ticket-[0-9]+    — "ticket-001", "ticket-042", etc.
+#   [Ee]pic[ -][0-9]+   — "Epic 06", "epic-03", "Epic-12", etc.
+#   [Tt]icket[ -][0-9]+ — "ticket-001", "Ticket 42", etc.
 #   T0[0-9][0-9]     — "T002", "T007", "T015", etc.
 #   \bsprint\b       — sprint planning vocabulary
 #
@@ -28,7 +28,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-readonly PATTERN='Epic [0-9]+|ticket-[0-9]+|T0[0-9][0-9]|\bsprint\b'
+readonly PATTERN='[Ee]pic[ -][0-9]+|[Tt]icket[ -][0-9]+|T0[0-9][0-9]|\bsprint\b'
 
 readonly SCAN_PATHS=(
     "${REPO_ROOT}/crates/cobre-core/src"

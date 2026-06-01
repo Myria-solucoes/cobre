@@ -50,7 +50,7 @@ use cobre_core::scenario::{HistoricalYears, SamplingScheme, ScenarioSource};
 
 use crate::LoadError;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Top-level deserialized representation of `config.json`.
 ///
@@ -151,10 +151,10 @@ pub fn parse_config(path: &Path) -> Result<Config, LoadError> {
 /// Extracts the identifier between backticks, returning a best-effort field name
 /// or `"<unknown>"` when no match is found.
 fn extract_field_from_serde_msg(msg: &str) -> String {
-    if let Some(start) = msg.find('`') {
-        if let Some(end) = msg[start + 1..].find('`') {
-            return msg[start + 1..start + 1 + end].to_string();
-        }
+    if let Some(start) = msg.find('`')
+        && let Some(end) = msg[start + 1..].find('`')
+    {
+        return msg[start + 1..start + 1 + end].to_string();
     }
     "<unknown>".to_string()
 }
@@ -329,14 +329,14 @@ fn validate_scenario_source_cfg(
         });
     }
 
-    if let Some(HistoricalYears::Range { from, to }) = source.historical_years {
-        if from > to {
-            return Err(LoadError::SchemaError {
-                path: path.to_path_buf(),
-                field: format!("{section}.scenario_source.historical_years"),
-                message: format!("range 'from' ({from}) must be <= 'to' ({to})"),
-            });
-        }
+    if let Some(HistoricalYears::Range { from, to }) = source.historical_years
+        && from > to
+    {
+        return Err(LoadError::SchemaError {
+            path: path.to_path_buf(),
+            field: format!("{section}.scenario_source.historical_years"),
+            message: format!("range 'from' ({from}) must be <= 'to' ({to})"),
+        });
     }
 
     Ok(())
@@ -396,6 +396,117 @@ impl Config {
         } else {
             self.training_scenario_source(path)
         }
+    }
+
+    /// Deep-merge a flat map of dotted-key overrides into `base` and re-deserialize
+    /// the result into a validated [`Config`].
+    ///
+    /// `base` is the parsed-but-not-typed `config.json` (a [`serde_json::Value::Object`]).
+    /// `overrides` is a flat map whose keys are dotted paths into the config schema
+    /// (e.g. `"training.tree_seed"`, `"policy.checkpointing.compress"`). For each
+    /// `(dotted_key, value)` entry the value is inserted into a clone of `base` at the
+    /// dotted path, creating intermediate objects as needed. Intermediate objects are
+    /// reused rather than replaced, so setting `policy.checkpointing.compress` does not
+    /// clobber sibling keys under `policy` or `policy.checkpointing`.
+    ///
+    /// After merging, the value is re-deserialized into [`Config`]. Because `Config`
+    /// is `#[serde(deny_unknown_fields)]`, an override key that does not exist in the
+    /// schema (a typo such as `trainning.tree_seed`) fails loudly. The same
+    /// post-deserialization checks as [`parse_config`] then run via `validate_config`.
+    ///
+    /// All errors carry the synthetic path `"<config_overrides>"` so callers can
+    /// recognize override-originated failures.
+    ///
+    /// # Errors
+    ///
+    /// - [`LoadError::SchemaError`] if `base` is not a JSON object.
+    /// - [`LoadError::SchemaError`] if any override key contains an empty path segment
+    ///   (e.g. `"training..seed"` or a leading/trailing dot).
+    /// - [`LoadError::SchemaError`] if the merged value fails to deserialize into
+    ///   [`Config`] (e.g. an unknown field) or fails `validate_config`.
+    pub fn with_overrides(
+        base: &serde_json::Value,
+        overrides: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<Config, LoadError> {
+        if !base.is_object() {
+            return Err(LoadError::SchemaError {
+                path: PathBuf::from("<config_overrides>"),
+                field: "<root>".to_string(),
+                message: "base config must be a JSON object".to_string(),
+            });
+        }
+
+        let mut merged = base.clone();
+        for (dotted_key, value) in overrides {
+            Self::set_dotted(&mut merged, dotted_key, value.clone())?;
+        }
+
+        let config: Config = serde_json::from_value(merged).map_err(|e| {
+            let msg = e.to_string();
+            LoadError::SchemaError {
+                path: PathBuf::from("<config_overrides>"),
+                field: extract_field_from_serde_msg(&msg),
+                message: msg,
+            }
+        })?;
+
+        validate_config(&config, Path::new("<config_overrides>")).map(|()| config)
+    }
+
+    /// Deep-merge `value` into `target` at the dotted path `dotted_key`.
+    ///
+    /// Splits `dotted_key` on `'.'`, walking `target` one segment at a time. Missing
+    /// intermediate objects are created in place; existing ones are reused so that
+    /// sibling keys are preserved. The final segment is inserted (overwriting any
+    /// prior value at that exact key).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LoadError::SchemaError`] (with `field` set to the offending
+    /// `dotted_key`) when any path segment is empty — i.e. an empty key, a leading or
+    /// trailing dot, or a doubled dot such as `"training..seed"`.
+    fn set_dotted(
+        target: &mut serde_json::Value,
+        dotted_key: &str,
+        value: serde_json::Value,
+    ) -> Result<(), LoadError> {
+        let segments: Vec<&str> = dotted_key.split('.').collect();
+        if segments.iter().any(|s| s.is_empty()) {
+            return Err(LoadError::SchemaError {
+                path: PathBuf::from("<config_overrides>"),
+                field: dotted_key.to_string(),
+                message: format!("override key has an empty path segment: `{dotted_key}`"),
+            });
+        }
+
+        let mut current = target;
+        for segment in &segments[..segments.len() - 1] {
+            // Coerce non-object nodes to an empty object so the walk can descend,
+            // then reuse the existing object — preserving siblings (the deep-merge
+            // requirement). `as_object_mut` is `Some` because we just coerced.
+            if !current.is_object() {
+                *current = serde_json::Value::Object(serde_json::Map::new());
+            }
+            let serde_json::Value::Object(map) = current else {
+                unreachable!("current was just coerced to an object")
+            };
+            current = map
+                .entry((*segment).to_string())
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        }
+
+        // `segments` is non-empty (an empty `dotted_key` yields one empty segment,
+        // already rejected above), so the last index is valid.
+        let last = segments[segments.len() - 1];
+        if !current.is_object() {
+            *current = serde_json::Value::Object(serde_json::Map::new());
+        }
+        let serde_json::Value::Object(map) = current else {
+            unreachable!("current was just coerced to an object")
+        };
+        map.insert(last.to_string(), value);
+
+        Ok(())
     }
 }
 
@@ -1099,7 +1210,12 @@ mod tests {
     }
 
     /// max_active_per_stage serde roundtrip: Some(100) serializes and deserializes correctly.
+    ///
+    /// The deprecated `basis_activity_window` field still round-trips because
+    /// the schema retains it for one release. `#[allow(deprecated)]` is needed
+    /// to read it without triggering the deprecation lint.
     #[test]
+    #[allow(deprecated)]
     fn max_active_per_stage_serde_roundtrip() {
         let original = RowSelectionConfig {
             enabled: Some(true),
@@ -1111,6 +1227,7 @@ mod tests {
             cut_activity_tolerance: None,
             max_active_per_stage: Some(100),
             basis_activity_window: Some(7),
+            tie_tolerance: None,
         };
         let json = serde_json::to_string(&original).unwrap();
         let roundtripped: RowSelectionConfig = serde_json::from_str(&json).unwrap();
@@ -1439,6 +1556,169 @@ mod tests {
                     field.contains("energy.reference_volume_fraction"),
                     "field should name energy.reference_volume_fraction, got: {field}"
                 );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    // ── with_overrides ────────────────────────────────────────────────────────
+
+    /// Minimal valid config used as the `base` Value in override tests.
+    const OVERRIDE_BASE_CONFIG: &str = r#"{
+      "training": {
+        "tree_seed": 42,
+        "forward_passes": 192,
+        "stopping_rules": [{"type": "iteration_limit", "limit": 50}],
+        "stopping_mode": "any"
+      },
+      "policy": {
+        "checkpointing": {"enabled": true}
+      }
+    }"#;
+
+    fn base_value(json: &str) -> serde_json::Value {
+        serde_json::from_str(json).unwrap()
+    }
+
+    fn override_map(
+        pairs: &[(&str, serde_json::Value)],
+    ) -> serde_json::Map<String, serde_json::Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect()
+    }
+
+    /// AC-1: scalar override sets the value and leaves sibling `training` fields intact.
+    #[test]
+    fn with_overrides_sets_scalar_and_preserves_siblings() {
+        let base = base_value(OVERRIDE_BASE_CONFIG);
+        let overrides = override_map(&[("training.tree_seed", serde_json::json!(7))]);
+
+        let cfg = Config::with_overrides(&base, &overrides).unwrap();
+
+        assert_eq!(cfg.training.tree_seed, Some(7));
+        // Siblings unchanged from base.
+        assert_eq!(cfg.training.forward_passes, Some(192));
+        assert_eq!(cfg.training.stopping_mode, "any");
+        let rules = cfg.training.stopping_rules.as_deref().unwrap();
+        assert!(matches!(
+            rules,
+            [StoppingRuleConfig::IterationLimit { limit: 50 }]
+        ));
+    }
+
+    /// AC-2: an array override deserializes into the expected typed vector.
+    #[test]
+    fn with_overrides_accepts_array_value() {
+        let base = base_value(OVERRIDE_BASE_CONFIG);
+        let overrides = override_map(&[(
+            "training.stopping_rules",
+            serde_json::json!([{"type": "iteration_limit", "limit": 50}]),
+        )]);
+
+        let cfg = Config::with_overrides(&base, &overrides).unwrap();
+
+        let rules = cfg.training.stopping_rules.as_deref().unwrap();
+        assert!(matches!(
+            rules,
+            [StoppingRuleConfig::IterationLimit { limit: 50 }]
+        ));
+    }
+
+    /// AC-3: a typo key produces SchemaError whose message contains "unknown field".
+    #[test]
+    fn with_overrides_typo_key_is_schema_error() {
+        let base = base_value(OVERRIDE_BASE_CONFIG);
+        let overrides = override_map(&[("trainning.tree_seed", serde_json::json!(7))]);
+
+        let err = Config::with_overrides(&base, &overrides).unwrap_err();
+        match &err {
+            LoadError::SchemaError { message, path, .. } => {
+                assert!(
+                    message.contains("unknown field"),
+                    "message should contain 'unknown field', got: {message}"
+                );
+                assert_eq!(path, std::path::Path::new("<config_overrides>"));
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// AC-4: deep-merge into a nested object does not clobber sibling keys.
+    #[test]
+    fn with_overrides_deep_merge_preserves_nested_sibling() {
+        let base = base_value(OVERRIDE_BASE_CONFIG);
+        let overrides = override_map(&[("policy.checkpointing.compress", serde_json::json!(true))]);
+
+        let cfg = Config::with_overrides(&base, &overrides).unwrap();
+
+        assert_eq!(cfg.policy.checkpointing.compress, Some(true));
+        // Sibling `enabled` (true in base) must survive the merge.
+        assert_eq!(cfg.policy.checkpointing.enabled, Some(true));
+    }
+
+    /// AC-5: a structurally-valid but semantically-invalid override fails validation.
+    #[test]
+    fn with_overrides_invalid_value_fails_validation() {
+        let base = base_value(OVERRIDE_BASE_CONFIG);
+        let overrides =
+            override_map(&[("energy.reference_volume_fraction", serde_json::json!(0.0))]);
+
+        let err = Config::with_overrides(&base, &overrides).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, .. } => {
+                assert!(
+                    field.contains("energy.reference_volume_fraction"),
+                    "field should name energy.reference_volume_fraction, got: {field}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// Empty override map yields a Config equal to `from_value(base)`.
+    #[test]
+    fn with_overrides_empty_map_equals_direct_deserialize() {
+        let base = base_value(OVERRIDE_BASE_CONFIG);
+        let overrides = serde_json::Map::new();
+
+        let cfg = Config::with_overrides(&base, &overrides).unwrap();
+        let direct: Config = serde_json::from_value(base.clone()).unwrap();
+
+        // `Config` has no `PartialEq`; compare via canonical JSON round-trip instead.
+        assert_eq!(
+            serde_json::to_value(&cfg).unwrap(),
+            serde_json::to_value(&direct).unwrap()
+        );
+    }
+
+    /// An empty path segment (`"training..seed"`) is a SchemaError naming the key.
+    #[test]
+    fn with_overrides_empty_segment_is_schema_error() {
+        let base = base_value(OVERRIDE_BASE_CONFIG);
+        let overrides = override_map(&[("training..seed", serde_json::json!(7))]);
+
+        let err = Config::with_overrides(&base, &overrides).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, .. } => {
+                assert_eq!(field, "training..seed");
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// A non-object `base` is rejected with a SchemaError naming `<root>`.
+    #[test]
+    fn with_overrides_non_object_base_is_schema_error() {
+        let base = serde_json::json!([1, 2, 3]);
+        let overrides = serde_json::Map::new();
+
+        let err = Config::with_overrides(&base, &overrides).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert_eq!(field, "<root>");
+                assert!(message.contains("must be a JSON object"));
             }
             other => panic!("expected SchemaError, got: {other:?}"),
         }

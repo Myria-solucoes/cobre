@@ -74,19 +74,32 @@ pub struct RowSelectionConfig {
     #[serde(default)]
     pub method: Option<String>,
 
-    /// Activity-count threshold for the `"level1"` row-selection method.
+    /// Deprecated. Silently ignored. Retained for backward compatibility with
+    /// existing config files.
     ///
-    /// A row is deactivated when its `active_count <= threshold`. Typical
-    /// value: 0 (deactivate only fully-inactive rows). Ignored by the
-    /// `"lml1"` and `"domination"` methods.
+    /// Previously used as an activity-count threshold for the `"level1"`
+    /// row-selection method. The correct algorithm (de Matos 2015) is
+    /// value-based and uses `tie_tolerance` instead.
     #[serde(default)]
     pub threshold: Option<u32>,
 
-    /// Memory window size for the `"lml1"` method (iterations).
+    /// Deprecated. Silently ignored. Retained for backward compatibility with
+    /// existing config files.
     ///
-    /// Required when `method = "lml1"`. Ignored for other methods.
+    /// Previously used as the memory window size for the `"lml1"` method.
+    /// The correct algorithm (Guigues 2017/2019) is value-based and uses
+    /// `tie_tolerance` instead.
     #[serde(default)]
     pub memory_window: Option<u32>,
+
+    /// Tie-tolerance for the `"level1"` and `"lml1"` value-based row-selection
+    /// methods.
+    ///
+    /// A row is considered tied at an evaluation point when its value is
+    /// within `tie_tolerance` of the best active row value. Default: `1e-10`.
+    /// Ignored by the `"domination"` method.
+    #[serde(default)]
+    pub tie_tolerance: Option<f64>,
 
     /// Epsilon for the `"domination"` method.
     ///
@@ -108,16 +121,19 @@ pub struct RowSelectionConfig {
     #[serde(default)]
     pub cut_activity_tolerance: Option<f64>,
 
-    /// Width (in iterations) of the sliding observation window used to track
-    /// which constraint rows have been recently active.
+    /// DEPRECATED. Silently ignored as of this release; will be removed in
+    /// the next. Retained for one release so existing config files continue
+    /// to deserialise.
     ///
-    /// A larger window retains activity information over a longer recent
-    /// history, making row-selection decisions less sensitive to short-term
-    /// fluctuations. A smaller window is more responsive to recent changes in
-    /// the active set.
-    ///
-    /// Validated range: 1..=31. Default when absent: 5.
+    /// Previously controlled a sliding-window mask used during basis
+    /// reconstruction. Reconstruction now matches stored constraint rows by
+    /// slot identity alone, which makes the window value unobservable. See
+    /// `CHANGELOG.md` for the deprecation announcement.
     #[serde(default)]
+    #[deprecated(
+        since = "0.1.0",
+        note = "field is ignored; basis reconstruction now uses slot-identity matching. Will be removed next release."
+    )]
     pub basis_activity_window: Option<u32>,
 
     /// Row budget per stage: maximum number of constraint rows allowed to be

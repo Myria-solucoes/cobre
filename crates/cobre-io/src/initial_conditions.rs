@@ -375,20 +375,20 @@ fn validate_past_inflows_season_ids(
     path: &Path,
 ) -> Result<(), LoadError> {
     for (i, entry) in entries.iter().enumerate() {
-        if let Some(season_ids) = &entry.season_ids {
-            if season_ids.len() != entry.values_m3s.len() {
-                return Err(LoadError::SchemaError {
-                    path: path.to_path_buf(),
-                    field: format!("past_inflows[{i}].season_ids"),
-                    message: format!(
-                        "past_inflows[{i}].season_ids has {} element(s) but \
+        if let Some(season_ids) = &entry.season_ids
+            && season_ids.len() != entry.values_m3s.len()
+        {
+            return Err(LoadError::SchemaError {
+                path: path.to_path_buf(),
+                field: format!("past_inflows[{i}].season_ids"),
+                message: format!(
+                    "past_inflows[{i}].season_ids has {} element(s) but \
                          past_inflows[{i}].values_m3s has {} element(s); \
                          season_ids length must equal values_m3s length",
-                        season_ids.len(),
-                        entry.values_m3s.len()
-                    ),
-                });
-            }
+                    season_ids.len(),
+                    entry.values_m3s.len()
+                ),
+            });
         }
     }
     Ok(())

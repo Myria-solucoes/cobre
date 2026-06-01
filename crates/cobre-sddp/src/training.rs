@@ -388,7 +388,7 @@ pub(crate) fn broadcast_basis_cache<C: Communicator>(
 ///
 /// Always panics if `comm.rank() > i32::MAX`. MPI world sizes are bounded well
 /// below this on all real systems.
-pub fn train<S: SolverInterface + Send, C: Communicator>(
+pub fn train<S, C: Communicator>(
     solver: &mut S,
     config: TrainingConfig,
     fcf: &mut FutureCostFunction,
@@ -396,7 +396,11 @@ pub fn train<S: SolverInterface + Send, C: Communicator>(
     training_ctx: &TrainingContext<'_>,
     comm: &C,
     solver_factory: impl Fn() -> Result<S, cobre_solver::SolverError>,
-) -> Result<TrainingOutcome, SddpError> {
+    warm_start_basis_cache: Option<Vec<Option<crate::workspace::CapturedBasis>>>,
+) -> Result<TrainingOutcome, SddpError>
+where
+    S: SolverInterface<Profile = cobre_solver::HighsProfile> + Send,
+{
     let mut session = TrainingSession::new(
         solver,
         config,
@@ -406,6 +410,17 @@ pub fn train<S: SolverInterface + Send, C: Communicator>(
         comm,
         solver_factory,
     )?;
+    // Seed the per-scenario basis store from the checkpoint's stored bases
+    // (warm-start / resume only) so iteration 1's cut-loaded LPs warm-start
+    // instead of cold-start. Must run before `prime_baked_templates` bakes the
+    // loaded cuts into the templates. No-op for a fresh start (`None`).
+    if let Some(cache) = warm_start_basis_cache {
+        session.seed_basis_store(&cache);
+    }
+    // Bake any warm-start / resume cuts into the stage templates before the
+    // first iteration so iteration 1's forward pass solves the loaded policy
+    // rather than a cut-less, myopic one. No-op for a fresh start.
+    session.prime_baked_templates();
     for iteration in session.iteration_range() {
         match session.run_iteration(iteration) {
             Ok(IterationOutcome::Continue) => {}
@@ -548,6 +563,10 @@ mod tests {
     }
 
     impl SolverInterface for MockSolver {
+        type Profile = cobre_solver::HighsProfile;
+
+        fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
+
         fn solver_name_version(&self) -> String {
             "MockSolver 0.0.0".to_string()
         }
@@ -593,10 +612,14 @@ mod tests {
         fn name(&self) -> &'static str {
             "Mock"
         }
-        fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
-        fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
-        fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
-        fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
+
+        fn set_primal_feasibility_tolerance(&mut self, _tolerance: f64) {}
+
+        fn set_dual_feasibility_tolerance(&mut self, _tolerance: f64) {}
+
+        fn set_simplex_iteration_limit_profile(&mut self, _limit: u32) {}
+
+        fn set_ipm_iteration_limit_profile(&mut self, _limit: u32) {}
     }
 
     struct StubComm;
@@ -878,7 +901,6 @@ mod tests {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: vec![RiskMeasure::Expectation; n_stages],
             },
@@ -934,6 +956,7 @@ mod tests {
             },
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            None,
         )
         .unwrap();
 
@@ -975,7 +998,6 @@ mod tests {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: vec![RiskMeasure::Expectation; n_stages],
             },
@@ -1031,6 +1053,7 @@ mod tests {
             },
             &comm,
             || Ok(MockSolver::infeasible()),
+            None,
         );
 
         let outcome = result.unwrap();
@@ -1091,7 +1114,6 @@ mod tests {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: vec![RiskMeasure::Expectation; n_stages],
             },
@@ -1147,6 +1169,7 @@ mod tests {
             },
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            None,
         )
         .unwrap();
 
@@ -1290,7 +1313,6 @@ mod tests {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: vec![RiskMeasure::Expectation; n_stages],
             },
@@ -1346,6 +1368,7 @@ mod tests {
             },
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            None,
         )
         .unwrap();
 
@@ -1458,7 +1481,6 @@ mod tests {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: vec![RiskMeasure::Expectation; n_stages],
             },
@@ -1514,6 +1536,7 @@ mod tests {
             },
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            None,
         )
         .unwrap();
 
@@ -1553,7 +1576,6 @@ mod tests {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: vec![RiskMeasure::Expectation; n_stages],
             },
@@ -1609,6 +1631,7 @@ mod tests {
             },
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            None,
         );
 
         assert!(result.is_ok(), "train with no event_sender must not panic");
@@ -1645,7 +1668,6 @@ mod tests {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: vec![RiskMeasure::Expectation; n_stages],
             },
@@ -1701,6 +1723,7 @@ mod tests {
             },
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            None,
         )
         .unwrap();
 
@@ -1745,7 +1768,6 @@ mod tests {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: vec![RiskMeasure::Expectation; n_stages],
             },
@@ -1801,6 +1823,7 @@ mod tests {
             },
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            None,
         )
         .unwrap();
 
@@ -1818,8 +1841,8 @@ mod tests {
 
     /// `cut_selection_level1_runs_at_frequency`
     ///
-    /// Given `train` with `cut_selection: Some(Level1 { threshold: 0,
-    /// check_frequency: 3 })` running for 5 iterations, then
+    /// Given `train` with `cut_selection: Some(Level1 { check_frequency: 3,
+    /// tie_tolerance: 1e-10 })` running for 5 iterations, then
     /// `PolicySelectionComplete` is emitted exactly once (at iteration 3).
     #[test]
     fn cut_selection_level1_runs_at_frequency() {
@@ -1850,12 +1873,11 @@ mod tests {
             },
             cut_management: CutManagementConfig {
                 cut_selection: Some(CutSelectionStrategy::Level1 {
-                    threshold: 0,
                     check_frequency: 3,
+                    tie_tolerance: 1e-10,
                 }),
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: vec![RiskMeasure::Expectation; n_stages],
             },
@@ -1911,6 +1933,7 @@ mod tests {
             },
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            None,
         )
         .unwrap();
 
@@ -1970,12 +1993,11 @@ mod tests {
             },
             cut_management: CutManagementConfig {
                 cut_selection: Some(CutSelectionStrategy::Level1 {
-                    threshold: 0,
                     check_frequency: 2,
+                    tie_tolerance: 1e-10,
                 }),
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: vec![RiskMeasure::Expectation; n_stages],
             },
@@ -2031,6 +2053,7 @@ mod tests {
             },
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            None,
         )
         .unwrap();
 
@@ -2106,7 +2129,6 @@ mod tests {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: vec![RiskMeasure::Expectation; n_stages],
             },
@@ -2162,6 +2184,7 @@ mod tests {
             },
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            None,
         )
         .unwrap();
 
@@ -2207,7 +2230,6 @@ mod tests {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: vec![RiskMeasure::Expectation; n_stages],
             },
@@ -2267,6 +2289,7 @@ mod tests {
             },
             &comm,
             || Ok(MockSolver::infeasible()),
+            None,
         )
         .unwrap();
 
@@ -2325,7 +2348,6 @@ mod tests {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: vec![RiskMeasure::Expectation; n_stages],
             },
@@ -2381,6 +2403,7 @@ mod tests {
             },
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            None,
         )
         .unwrap();
 
@@ -2420,7 +2443,6 @@ mod tests {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: vec![RiskMeasure::Expectation; n_stages],
             },
@@ -2476,6 +2498,7 @@ mod tests {
             },
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            None,
         )
         .unwrap();
 
@@ -3145,7 +3168,6 @@ mod tests {
                 cut_selection: None,
                 budget: None,
                 cut_activity_tolerance: 0.0,
-                basis_activity_window: crate::basis_reconstruct::DEFAULT_BASIS_ACTIVITY_WINDOW,
                 warm_start_cuts: 0,
                 risk_measures: vec![RiskMeasure::Expectation; n_stages],
             },
@@ -3202,6 +3224,7 @@ mod tests {
             },
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            None,
         )
         .unwrap();
 

@@ -123,6 +123,24 @@ fn main() {
     // progress bars, and error messages all honour the chosen setting.
     resolve_color(cli.color);
 
+    // Install a minimal tracing subscriber so library-level WARN events
+    // (e.g. config deprecation warnings emitted by `StudyParams::from_config`)
+    // reach the user via stderr. `RUST_LOG` honours the standard env-filter
+    // syntax; the default `warn` level keeps quiet for ordinary runs while
+    // ensuring deprecation notices surface. Errors during init are
+    // intentionally ignored — installing the subscriber twice is not
+    // possible after the first call, and a CLI that cannot subscribe must
+    // still execute its command.
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_target(false)
+        .without_time()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .try_init();
+
     let result = match cli.command {
         Command::Init(args) => init::execute(args),
         Command::Run(ref args) => run::execute(args),

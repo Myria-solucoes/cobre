@@ -118,19 +118,19 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
         }
 
         // exit_stage_id < lead_stages
-        if let Some(x) = thermal.exit_stage_id {
-            if i64::from(x) < i64::from(k) {
-                ctx.add_error(
-                    ErrorKind::BusinessRuleViolation,
-                    "system/thermals.json",
-                    Some(&entity_str),
-                    format!(
-                        "Thermal {thermal_id}: exit_stage_id ({x}) < lead_stages ({k}); \
+        if let Some(x) = thermal.exit_stage_id
+            && i64::from(x) < i64::from(k)
+        {
+            ctx.add_error(
+                ErrorKind::BusinessRuleViolation,
+                "system/thermals.json",
+                Some(&entity_str),
+                format!(
+                    "Thermal {thermal_id}: exit_stage_id ({x}) < lead_stages ({k}); \
                          the plant exits before its earliest possible delivery at stage {k}, \
                          so the anticipated configuration cannot produce a valid delivery"
-                    ),
-                );
-            }
+                ),
+            );
         }
     }
 
@@ -276,22 +276,22 @@ pub(super) fn check_anticipated_decision_target_is_anticipated(
 
     for constraint in &data.generic_constraints {
         for term in &constraint.expression.terms {
-            if let VariableRef::AnticipatedDecision { thermal_id } = term.variable {
-                if !anticipated_ids.contains(&thermal_id) {
-                    let entity_str = format!("constraint[id={}]", constraint.id.0);
-                    ctx.add_error(
-                        ErrorKind::BusinessRuleViolation,
-                        "constraints/generic_constraints.json",
-                        Some(&entity_str),
-                        format!(
-                            "Constraint \"{}\": anticipated_decision({}) references Thermal {} \
+            if let VariableRef::AnticipatedDecision { thermal_id } = term.variable
+                && !anticipated_ids.contains(&thermal_id)
+            {
+                let entity_str = format!("constraint[id={}]", constraint.id.0);
+                ctx.add_error(
+                    ErrorKind::BusinessRuleViolation,
+                    "constraints/generic_constraints.json",
+                    Some(&entity_str),
+                    format!(
+                        "Constraint \"{}\": anticipated_decision({}) references Thermal {} \
                              which is not an anticipated thermal (anticipated_config is None). \
                              The anticipated_decision column only exists for plants with \
                              anticipated_config set.",
-                            constraint.name, thermal_id.0, thermal_id.0,
-                        ),
-                    );
-                }
+                        constraint.name, thermal_id.0, thermal_id.0,
+                    ),
+                );
             }
         }
     }
@@ -327,24 +327,24 @@ pub(super) fn warn_thermal_generation_on_anticipated_thermal(
 
     for constraint in &data.generic_constraints {
         for term in &constraint.expression.terms {
-            if let VariableRef::ThermalGeneration { thermal_id, .. } = term.variable {
-                if anticipated_ids.contains(&thermal_id) {
-                    let entity_str = format!("constraint[id={}]", constraint.id.0);
-                    ctx.add_warning(
-                        ErrorKind::SemanticAmbiguity,
-                        "constraints/generic_constraints.json",
-                        Some(&entity_str),
-                        format!(
-                            "Constraint \"{}\": thermal_generation({id}) references an \
+            if let VariableRef::ThermalGeneration { thermal_id, .. } = term.variable
+                && anticipated_ids.contains(&thermal_id)
+            {
+                let entity_str = format!("constraint[id={}]", constraint.id.0);
+                ctx.add_warning(
+                    ErrorKind::SemanticAmbiguity,
+                    "constraints/generic_constraints.json",
+                    Some(&entity_str),
+                    format!(
+                        "Constraint \"{}\": thermal_generation({id}) references an \
                              anticipated thermal. thermal_generation refers to the \
                              per-block generation at the delivery stage, not the \
                              forward commitment. If you intend to constrain the \
                              commitment itself, use anticipated_decision({id}) instead.",
-                            constraint.name,
-                            id = thermal_id.0,
-                        ),
-                    );
-                }
+                        constraint.name,
+                        id = thermal_id.0,
+                    ),
+                );
             }
         }
     }

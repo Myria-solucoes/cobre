@@ -15,21 +15,23 @@
 //!   `simulation/{entity_type}/scenario_id=NNNN/data.parquet` with dynamic
 //!   schema discovery and returns rows as Python dicts.
 //! - [`load_policy`] reads a `FlatBuffers` policy checkpoint from
-//!   `training/policy/` via `cobre_io::read_policy_checkpoint` and returns
-//!   a nested Python dict.
+//!   `<output_dir>/<policy_subdir>` (default `policy`) via
+//!   `cobre_io::read_policy_checkpoint` and returns a nested Python dict.
 
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
-use arrow::array::{Array, BooleanArray, Float64Array, Int8Array, Int32Array, Int64Array};
+use arrow::array::{
+    Array, BooleanArray, Float64Array, Int8Array, Int32Array, Int64Array, UInt32Array,
+};
 use arrow::compute::concat_batches;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use pyo3::BoundObject;
-use pyo3::exceptions::{PyFileNotFoundError, PyOSError, PyValueError};
+use pyo3::exceptions::{PyFileNotFoundError, PyIndexError, PyOSError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyList, PyString};
 
@@ -427,6 +429,364 @@ pub fn load_convergence_arrow(py: Python<'_>, output_dir: PathBuf) -> PyResult<P
     Ok(table.unbind())
 }
 
+// ── Stochastic-model introspection (`cobre.results.load_stochastic`) ───────────
+
+/// Number of columns in the flat `par_coefficients()` table:
+/// `[hydro_id, stage_id, lag, coefficient, residual_std_ratio]`.
+const PAR_COEFFICIENT_COLUMNS: usize = 5;
+
+/// Parsed rows of `stochastic/inflow_ar_coefficients.parquet`.
+///
+/// Stored as five parallel owned vectors (one per column), in the file's
+/// on-disk row order (`(hydro_id, stage_id, lag)` ascending). All vectors share
+/// the same length (`n_rows`).
+struct ParRows {
+    hydro_id: Vec<i32>,
+    stage_id: Vec<i32>,
+    lag: Vec<i32>,
+    coefficient: Vec<f64>,
+    residual_std_ratio: Vec<f64>,
+}
+
+/// Parsed rows of `stochastic/noise_openings.parquet`.
+///
+/// Stored as four parallel owned vectors (one per column), in the file's
+/// on-disk row order (`(stage_id, opening_index, entity_index)` ascending). All
+/// vectors share the same length (`n_rows`).
+struct OpeningRows {
+    stage_id: Vec<i32>,
+    opening_index: Vec<u32>,
+    entity_index: Vec<u32>,
+    value: Vec<f64>,
+}
+
+/// Open a Parquet file, mapping a missing file to a `FileNotFoundError` that
+/// names the path and notes the `exports.stochastic` requirement.
+///
+/// Other open failures (permissions, etc.) map to `OSError`, mirroring
+/// [`load_convergence_arrow`].
+fn open_stochastic_parquet(path: &Path) -> PyResult<fs::File> {
+    fs::File::open(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            PyFileNotFoundError::new_err(format!(
+                "{} not found — stochastic artifacts are written only when \
+                 exports.stochastic is enabled in config.json",
+                path.display()
+            ))
+        } else {
+            PyOSError::new_err(format!("failed to open {}: {e}", path.display()))
+        }
+    })
+}
+
+/// Extract a typed column from `batch` by name, mapping a missing column or a
+/// type mismatch to `OSError` (a parquet-decode failure, per the ticket).
+fn stochastic_column<'a, T: Array + 'static>(
+    batch: &'a RecordBatch,
+    file: &str,
+    name: &str,
+) -> PyResult<&'a T> {
+    batch
+        .column_by_name(name)
+        .ok_or_else(|| PyOSError::new_err(format!("{file} missing '{name}' column")))?
+        .as_any()
+        .downcast_ref::<T>()
+        .ok_or_else(|| PyOSError::new_err(format!("{file}: '{name}' column has unexpected type")))
+}
+
+/// Read every record batch of a stochastic Parquet file into a flat owned
+/// representation, with the GIL already released by the caller.
+///
+/// `extract` pulls the per-row values out of one decoded [`RecordBatch`] and
+/// appends them to the accumulator. A missing file raises `FileNotFoundError`;
+/// any decode failure raises `OSError`.
+fn read_stochastic_parquet<A>(
+    path: &Path,
+    mut acc: A,
+    mut extract: impl FnMut(&RecordBatch, &mut A) -> PyResult<()>,
+) -> PyResult<A> {
+    let file = open_stochastic_parquet(path)?;
+    let display = path.display().to_string();
+
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| PyOSError::new_err(format!("failed to open {display}: {e}")))?
+        .build()
+        .map_err(|e| PyOSError::new_err(format!("failed to build reader for {display}: {e}")))?;
+
+    for batch_result in reader {
+        let batch = batch_result
+            .map_err(|e| PyOSError::new_err(format!("error reading {display}: {e}")))?;
+        extract(&batch, &mut acc)?;
+    }
+
+    Ok(acc)
+}
+
+/// Read `stochastic/inflow_ar_coefficients.parquet` into [`ParRows`].
+///
+/// GIL-free: takes a `&Path` and returns owned vectors, raising `PyErr` only on
+/// the not-found / decode paths. Columns are read by name so the read is robust
+/// to schema column reordering; rows are appended in on-disk order.
+fn read_par_rows(path: &Path) -> PyResult<ParRows> {
+    let file = "inflow_ar_coefficients.parquet";
+    read_stochastic_parquet(
+        path,
+        ParRows {
+            hydro_id: Vec::new(),
+            stage_id: Vec::new(),
+            lag: Vec::new(),
+            coefficient: Vec::new(),
+            residual_std_ratio: Vec::new(),
+        },
+        |batch, rows| {
+            let hydro_id = stochastic_column::<Int32Array>(batch, file, "hydro_id")?;
+            let stage_id = stochastic_column::<Int32Array>(batch, file, "stage_id")?;
+            let lag = stochastic_column::<Int32Array>(batch, file, "lag")?;
+            let coefficient = stochastic_column::<Float64Array>(batch, file, "coefficient")?;
+            let residual_std_ratio =
+                stochastic_column::<Float64Array>(batch, file, "residual_std_ratio")?;
+
+            rows.hydro_id.extend(hydro_id.values().iter().copied());
+            rows.stage_id.extend(stage_id.values().iter().copied());
+            rows.lag.extend(lag.values().iter().copied());
+            rows.coefficient
+                .extend(coefficient.values().iter().copied());
+            rows.residual_std_ratio
+                .extend(residual_std_ratio.values().iter().copied());
+            Ok(())
+        },
+    )
+}
+
+/// Read `stochastic/noise_openings.parquet` into [`OpeningRows`].
+///
+/// GIL-free: takes a `&Path` and returns owned vectors, raising `PyErr` only on
+/// the not-found / decode paths. The writer emits rows in
+/// `(stage_id, opening_index, entity_index)` order; this is asserted in debug
+/// builds so `opening_tree`'s reshape cannot silently scramble.
+fn read_opening_rows(path: &Path) -> PyResult<OpeningRows> {
+    let file = "noise_openings.parquet";
+    let rows = read_stochastic_parquet(
+        path,
+        OpeningRows {
+            stage_id: Vec::new(),
+            opening_index: Vec::new(),
+            entity_index: Vec::new(),
+            value: Vec::new(),
+        },
+        |batch, rows| {
+            let stage_id = stochastic_column::<Int32Array>(batch, file, "stage_id")?;
+            let opening_index = stochastic_column::<UInt32Array>(batch, file, "opening_index")?;
+            let entity_index = stochastic_column::<UInt32Array>(batch, file, "entity_index")?;
+            let value = stochastic_column::<Float64Array>(batch, file, "value")?;
+
+            rows.stage_id.extend(stage_id.values().iter().copied());
+            rows.opening_index
+                .extend(opening_index.values().iter().copied());
+            rows.entity_index
+                .extend(entity_index.values().iter().copied());
+            rows.value.extend(value.values().iter().copied());
+            Ok(())
+        },
+    )?;
+
+    // `opening_tree` slices each stage's contiguous block and reshapes it, so the
+    // reshape is only correct when rows are sorted by (stage_id, opening_index,
+    // entity_index). The standard writer always emits this order, but enforce it at
+    // load time (once) so a corrupted or third-party parquet fails loudly here rather
+    // than silently returning a scrambled array in a release build.
+    if !is_opening_order_sorted(&rows) {
+        return Err(PyOSError::new_err(
+            "noise_openings.parquet rows are not sorted by \
+             (stage_id, opening_index, entity_index); cannot reshape the opening tree",
+        ));
+    }
+
+    Ok(rows)
+}
+
+/// True when `rows` are sorted ascending by `(stage_id, opening_index, entity_index)`,
+/// the order `opening_tree` relies on for its reshape.
+fn is_opening_order_sorted(rows: &OpeningRows) -> bool {
+    rows.stage_id
+        .iter()
+        .zip(&rows.opening_index)
+        .zip(&rows.entity_index)
+        .map(|((s, o), e)| (*s, *o, *e))
+        .is_sorted()
+}
+
+/// Read-only view of a run's fitted stochastic model, projected from the
+/// on-disk artifacts under `{output_dir}/stochastic/`.
+///
+/// Construct with [`load_stochastic`]; the two accessor methods lazily import
+/// `numpy` and return `float64` arrays. Constructing the handle does **not**
+/// require `numpy`.
+#[pyclass(name = "Stochastic", frozen, module = "cobre.results")]
+pub struct Stochastic {
+    par_rows: ParRows,
+    opening_rows: OpeningRows,
+}
+
+#[pymethods]
+impl Stochastic {
+    /// Return the fitted PAR(p) coefficients as a `(n_rows, 5)` `float64` array.
+    ///
+    /// Columns, in fixed order, are
+    /// `[hydro_id, stage_id, lag, coefficient, residual_std_ratio]` — a lossless
+    /// projection of `stochastic/inflow_ar_coefficients.parquet` in its on-disk
+    /// row order (`(hydro_id, stage_id, lag)` ascending). The three integer
+    /// columns are cast to `float64`. `lag` is 1-based (ψ₁ = lag 1).
+    ///
+    /// Lazily imports `numpy`; an `ImportError` propagates if it is absent.
+    fn par_coefficients(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let n_rows = self.par_rows.hydro_id.len();
+        let mut flat = Vec::with_capacity(n_rows * PAR_COEFFICIENT_COLUMNS);
+        for i in 0..n_rows {
+            flat.push(f64::from(self.par_rows.hydro_id[i]));
+            flat.push(f64::from(self.par_rows.stage_id[i]));
+            flat.push(f64::from(self.par_rows.lag[i]));
+            flat.push(self.par_rows.coefficient[i]);
+            flat.push(self.par_rows.residual_std_ratio[i]);
+        }
+
+        reshape_f64(py, flat, (n_rows, PAR_COEFFICIENT_COLUMNS))
+    }
+
+    /// Return the opening tree at 0-based `stage` as a `(n_openings, dim)`
+    /// `float64` array.
+    ///
+    /// Row `k` is the noise vector of opening `k` at `stage`, with `dim` the
+    /// number of distinct `entity_index` values within the stage. Values are
+    /// taken from `stochastic/noise_openings.parquet`, which is stored in
+    /// `(opening_index, entity_index)` order within each stage, so the flat
+    /// slice reshapes directly.
+    ///
+    /// Raises `IndexError` if `stage` is not present in the file, and lazily
+    /// imports `numpy` (`ImportError` propagates if absent).
+    fn opening_tree(&self, py: Python<'_>, stage: usize) -> PyResult<Py<PyAny>> {
+        let stage_i32 = i32::try_from(stage).map_err(|_| {
+            PyIndexError::new_err(format!(
+                "stage {stage} is out of range for the opening tree"
+            ))
+        })?;
+
+        let rows = &self.opening_rows;
+        let mut start = None;
+        let mut end = 0usize;
+        for (i, &s) in rows.stage_id.iter().enumerate() {
+            if s == stage_i32 {
+                if start.is_none() {
+                    start = Some(i);
+                }
+                end = i + 1;
+            }
+        }
+
+        let Some(start) = start else {
+            let valid = stage_range_message(rows);
+            return Err(PyIndexError::new_err(format!(
+                "stage {stage} not present in the opening tree ({valid})"
+            )));
+        };
+
+        // Rows are sorted by (stage_id, opening_index, entity_index), so the
+        // matching rows form a contiguous block; dim/n_openings derive from the
+        // maxima within that block (every opening in a stage shares `dim`).
+        let opening_slice = &rows.opening_index[start..end];
+        let entity_slice = &rows.entity_index[start..end];
+        let value_slice = &rows.value[start..end];
+
+        let n_openings = opening_slice
+            .iter()
+            .copied()
+            .max()
+            .map_or(0usize, |m| m as usize + 1);
+        let dim = entity_slice
+            .iter()
+            .copied()
+            .max()
+            .map_or(0usize, |m| m as usize + 1);
+
+        let expected = n_openings.checked_mul(dim).ok_or_else(|| {
+            PyOSError::new_err("noise_openings.parquet: opening-tree dimensions overflow usize")
+        })?;
+        if value_slice.len() != expected {
+            return Err(PyOSError::new_err(format!(
+                "noise_openings.parquet: stage {stage} has {} values, expected {expected} \
+                 (n_openings={n_openings} × dim={dim}) — the opening tree is ragged",
+                value_slice.len()
+            )));
+        }
+
+        reshape_f64(py, value_slice.to_vec(), (n_openings, dim))
+    }
+}
+
+/// Lazily import `numpy` and return `np.asarray(flat).reshape(shape)`.
+///
+/// `flat` must already be in row-major order for `shape`. An `ImportError`
+/// propagates verbatim if `numpy` is absent.
+fn reshape_f64(py: Python<'_>, flat: Vec<f64>, shape: (usize, usize)) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let array = numpy.call_method1("asarray", (flat,))?;
+    let reshaped = array.call_method1("reshape", (shape,))?;
+    Ok(reshaped.unbind())
+}
+
+/// Human-readable description of the stage values present in `rows`, for the
+/// `IndexError` raised by [`Stochastic::opening_tree`] on an absent stage.
+fn stage_range_message(rows: &OpeningRows) -> String {
+    match (rows.stage_id.iter().min(), rows.stage_id.iter().max()) {
+        (Some(&lo), Some(&hi)) => format!("valid stages are {lo}..={hi}"),
+        _ => "the opening tree is empty".to_string(),
+    }
+}
+
+/// Load a run's fitted stochastic model for read-only introspection.
+///
+/// Reads `{output_dir}/stochastic/inflow_ar_coefficients.parquet` and
+/// `{output_dir}/stochastic/noise_openings.parquet` (written only when
+/// `exports.stochastic` is enabled) and returns a [`Stochastic`] handle. The
+/// parquet reads run with the GIL released; constructing the handle requires no
+/// `numpy`.
+///
+/// # Errors
+///
+/// - `FileNotFoundError` — `output_dir` does not exist, or either required
+///   parquet (or the `stochastic/` directory) is missing. The message names the
+///   missing path and notes it requires `exports.stochastic`.
+/// - `OSError` — a parquet file fails to decode.
+///
+/// # Examples (Python)
+///
+/// ```python
+/// import cobre.results
+///
+/// stoch = cobre.results.load_stochastic("output/")
+/// par = stoch.par_coefficients()        # (n_rows, 5) float64
+/// tree = stoch.opening_tree(0)          # (n_openings, dim) float64 at stage 0
+/// ```
+#[pyfunction]
+#[allow(clippy::needless_pass_by_value)]
+pub fn load_stochastic(py: Python<'_>, output_dir: PathBuf) -> PyResult<Stochastic> {
+    let output_dir = canonicalize_dir(&output_dir)?;
+    let stochastic_dir = output_dir.join("stochastic");
+    let par_path = stochastic_dir.join("inflow_ar_coefficients.parquet");
+    let openings_path = stochastic_dir.join("noise_openings.parquet");
+
+    let (par_rows, opening_rows) = py.detach(|| -> PyResult<(ParRows, OpeningRows)> {
+        let par_rows = read_par_rows(&par_path)?;
+        let opening_rows = read_opening_rows(&openings_path)?;
+        Ok((par_rows, opening_rows))
+    })?;
+
+    Ok(Stochastic {
+        par_rows,
+        opening_rows,
+    })
+}
+
 /// Extract a column from a batch and downcast to its expected type, or return an error.
 fn get_column_by_name<'a, T: Array + 'static>(
     batch: &'a RecordBatch,
@@ -525,17 +885,137 @@ where
 
 /// Convert a [`cobre_io::OutputError`] to an appropriate Python exception.
 ///
+/// A thin shim over the single [`crate::errors::convert_error`] mapping site,
+/// which folds in the read-path `NotFound` branch:
+///
 /// - [`cobre_io::OutputError::IoError`] with `NotFound` kind → `FileNotFoundError`
-/// - All other variants → `OSError`
+/// - [`cobre_io::OutputError::IoError`] (other) → `cobre.errors.CaseIoError` (`OSError`)
+/// - [`cobre_io::OutputError::SerializationError`] / `SchemaError` →
+///   `cobre.errors.OutputError` (`OSError`)
+/// - [`cobre_io::OutputError::ManifestError`] → `cobre.errors.ValidationError` (`ValueError`)
 fn output_error_to_py(err: &cobre_io::OutputError) -> PyErr {
-    match err {
-        cobre_io::OutputError::IoError { source, .. }
-            if source.kind() == std::io::ErrorKind::NotFound =>
-        {
-            PyFileNotFoundError::new_err(err.to_string())
+    crate::errors::convert_error(crate::errors::ErrorSource::Output(err))
+}
+
+/// Read an optional simulation-metadata file, treating file-not-found as `None`.
+///
+/// Mirrors the CLI's `read_optional_metadata` (`cobre-cli`'s `report.rs`):
+/// a missing file yields `Ok(None)`; malformed JSON yields `Err(ValueError)`;
+/// any other I/O error yields `Err(OSError)`.
+fn read_optional_simulation_metadata(
+    path: &Path,
+) -> PyResult<Option<cobre_io::SimulationMetadata>> {
+    match fs::read_to_string(path) {
+        Ok(content) => {
+            let value: cobre_io::SimulationMetadata =
+                serde_json::from_str(&content).map_err(|e| {
+                    PyValueError::new_err(format!("malformed JSON in {}: {e}", path.display()))
+                })?;
+            Ok(Some(value))
         }
-        _ => PyOSError::new_err(err.to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(PyOSError::new_err(format!(
+            "failed to read {}: {e}",
+            path.display()
+        ))),
     }
+}
+
+/// Assemble the `cobre report` JSON value for `output_dir`.
+///
+/// Reproduces the CLI `report` subcommand's assembly exactly: it reads the
+/// required `training/metadata.json`, the optional `simulation/metadata.json`
+/// (absent → `None`), and builds a [`serde_json::Value`] with the same shape,
+/// including the hoisted top-level `bounds` and `cost` convenience keys.
+///
+/// Returns a plain [`serde_json::Value`] (no Python token) so this helper can be
+/// unit-tested without linking the Python interpreter; callers convert the value
+/// to a Python dict via [`json_value_to_py`].
+///
+/// # Errors
+///
+/// - `FileNotFoundError` when `training/metadata.json` is absent.
+/// - `ValueError` when a metadata file contains malformed JSON.
+/// - `OSError` for other I/O failures.
+fn build_report_value(output_dir: &Path) -> PyResult<serde_json::Value> {
+    // training/metadata.json is required; absence is a FileNotFoundError.
+    let training_metadata_path = output_dir.join("training/metadata.json");
+    let training = cobre_io::read_training_metadata(&training_metadata_path)
+        .map_err(|e| output_error_to_py(&e))?;
+
+    // simulation/metadata.json is optional (absent when simulation was skipped).
+    let simulation_metadata_path = output_dir.join("simulation/metadata.json");
+    let simulation = read_optional_simulation_metadata(&simulation_metadata_path)?;
+
+    let output_directory = output_dir.canonicalize().map_or_else(
+        |_| output_dir.display().to_string(),
+        |p| p.display().to_string(),
+    );
+
+    // Hoist the headline convenience values before serializing the full structs.
+    let bounds = serde_json::to_value(&training.bounds)
+        .map_err(|e| PyValueError::new_err(format!("failed to serialize bounds: {e}")))?;
+    let cost = match simulation.as_ref().and_then(|s| s.cost.as_ref()) {
+        Some(cost) => serde_json::to_value(cost)
+            .map_err(|e| PyValueError::new_err(format!("failed to serialize cost: {e}")))?,
+        None => serde_json::Value::Null,
+    };
+    let simulation_value = match simulation.as_ref() {
+        Some(simulation) => serde_json::to_value(simulation)
+            .map_err(|e| PyValueError::new_err(format!("failed to serialize simulation: {e}")))?,
+        None => serde_json::Value::Null,
+    };
+
+    Ok(serde_json::json!({
+        "output_directory": output_directory,
+        "status": training.status.clone(),
+        "bounds": bounds,
+        "training": serde_json::to_value(&training)
+            .map_err(|e| PyValueError::new_err(format!("failed to serialize training: {e}")))?,
+        "cost": cost,
+        "simulation": simulation_value,
+    }))
+}
+
+/// Assemble the machine-readable `cobre report` summary for a run output directory.
+///
+/// Reads `training/metadata.json` (required) and `simulation/metadata.json`
+/// (optional — `None` when absent), and returns a dict matching the shape of the
+/// `cobre report` CLI subcommand, with top-level `bounds` and `cost` convenience
+/// keys hoisted from `training.bounds` and `simulation.cost`.
+///
+/// ## Returns
+///
+/// A dict with the keys:
+///
+/// - `output_directory` — canonicalized absolute path to `output_dir`.
+/// - `status` — run status from `training/metadata.json`.
+/// - `bounds` — headline final objective bounds (hoisted from `training.bounds`).
+/// - `training` — full training metadata.
+/// - `cost` — simulation expected cost (hoisted from `simulation.cost`), or `None`.
+/// - `simulation` — full simulation metadata, or `None` when simulation was skipped.
+///
+/// ## Errors
+///
+/// - `FileNotFoundError` if `training/metadata.json` is absent.
+/// - `ValueError` if a metadata file contains malformed JSON.
+/// - `OSError` for other I/O failures.
+///
+/// ## Examples (Python)
+///
+/// ```python
+/// import cobre.results
+///
+/// report = cobre.results.report("output/")
+/// print(report["bounds"]["final_lower_bound"])
+/// if report["cost"] is not None:
+///     print(report["cost"]["mean_cost"])
+/// ```
+#[pyfunction]
+#[allow(clippy::needless_pass_by_value)]
+pub fn report(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAny>> {
+    let value = build_report_value(&output_dir)?;
+    json_value_to_py(py, &value)
 }
 
 /// Read one `scenario_id=NNNN/data.parquet` partition and append rows to `result_list`.
@@ -686,9 +1166,11 @@ const ENTITY_TYPES: &[&str] = &[
 ///
 /// - `output_dir` — root output directory (same as passed to `cobre.run.run()`).
 /// - `entity_type` — optional entity type name (`"costs"`, `"buses"`, `"hydros"`,
-///   `"thermals"`, or `"inflow_lags"`). When provided, only that entity type is
-///   loaded and a flat list of dicts is returned. When `None`, all available
-///   entity types are loaded and a dict of lists is returned.
+///   `"thermals"`, `"exchanges"`, `"pumping_stations"`, `"contracts"`,
+///   `"non_controllables"`, `"inflow_lags"`, or `"violations/generic"`). When
+///   provided, only that entity type is loaded and a flat list of dicts is
+///   returned. When `None`, all available entity types are loaded and a dict of
+///   lists is returned.
 ///
 /// ## Returns
 ///
@@ -941,9 +1423,11 @@ fn ipc_bytes_to_py_table<'py>(
 ///
 /// - `output_dir` — root output directory (same as passed to `cobre.run.run()`).
 /// - `entity_type` — optional entity type name (`"costs"`, `"buses"`, `"hydros"`,
-///   `"thermals"`, or `"inflow_lags"`). When provided, only that entity type is
-///   loaded and a single `pyarrow.Table` is returned. When `None`, all available
-///   entity types are loaded and a `dict[str, pyarrow.Table]` is returned.
+///   `"thermals"`, `"exchanges"`, `"pumping_stations"`, `"contracts"`,
+///   `"non_controllables"`, `"inflow_lags"`, or `"violations/generic"`). When
+///   provided, only that entity type is loaded and a single `pyarrow.Table` is
+///   returned. When `None`, all available entity types are loaded and a
+///   `dict[str, pyarrow.Table]` is returned.
 ///
 /// ## Returns
 ///
@@ -1049,11 +1533,16 @@ pub fn load_simulation_arrow(
     }
 }
 
-/// Load a `FlatBuffers` policy checkpoint from `training/policy/`.
+/// Load a `FlatBuffers` policy checkpoint from `<output_dir>/<policy_subdir>`.
 ///
 /// Reads the policy metadata, per-stage cut pools, and per-stage solver bases
 /// written by `cobre-io`'s policy checkpoint writer and returns them as a
 /// nested Python dict.
+///
+/// `policy_subdir` selects the checkpoint sub-directory under `output_dir` and
+/// defaults to `"policy"` — the location the standard solve lifecycle writes
+/// (matching the default `policy_path` of `"./policy"`). A study configured
+/// with a non-default `policy_path` passes that sub-directory explicitly.
 ///
 /// ## Returns
 ///
@@ -1102,7 +1591,8 @@ pub fn load_simulation_arrow(
 ///
 /// ## Errors
 ///
-/// - `FileNotFoundError` if `output_dir` or `training/policy/` does not exist.
+/// - `FileNotFoundError` if `output_dir` or `<output_dir>/<policy_subdir>` does
+///   not exist.
 /// - `OSError` for corrupt `FlatBuffers` files or other I/O failures.
 ///
 /// ## Examples (Python)
@@ -1113,13 +1603,21 @@ pub fn load_simulation_arrow(
 /// policy = cobre.results.load_policy("output/")
 /// print(policy["metadata"]["completed_iterations"])
 /// first_stage_cuts = policy["stage_cuts"][0]["cuts"]
+///
+/// # Non-default policy_path: pass the sub-directory explicitly.
+/// policy = cobre.results.load_policy("output/", policy_subdir="my_policy")
 /// ```
 #[pyfunction]
+#[pyo3(signature = (output_dir, policy_subdir = "policy"))]
 #[allow(clippy::needless_pass_by_value)]
-pub fn load_policy(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAny>> {
+pub fn load_policy(
+    py: Python<'_>,
+    output_dir: PathBuf,
+    policy_subdir: &str,
+) -> PyResult<Py<PyAny>> {
     let output_dir = canonicalize_dir(&output_dir)?;
 
-    let policy_dir = output_dir.join("training").join("policy");
+    let policy_dir = output_dir.join(policy_subdir);
 
     if !policy_dir.exists() {
         return Err(PyFileNotFoundError::new_err(format!(
@@ -1198,4 +1696,219 @@ pub fn load_policy(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAny>> {
     result.set_item("stage_bases", stage_bases_list)?;
 
     Ok(result.unbind().into())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use std::fs;
+
+    use pyo3::Python;
+    use tempfile::TempDir;
+
+    use super::build_report_value;
+
+    /// Training metadata carrying an explicit `bounds` object.
+    ///
+    /// Mirrors the shape of the CLI report test's `make_training_metadata_json`
+    /// fixture (`cobre-cli`'s `report.rs`).
+    fn training_metadata_json() -> &'static str {
+        r#"{
+            "cobre_version": "0.3.2",
+            "hostname": "test-host",
+            "solver": "highs",
+            "started_at": "2026-01-17T08:00:00Z",
+            "completed_at": "2026-01-17T12:30:00Z",
+            "duration_seconds": 16200.0,
+            "status": "complete",
+            "configuration": {
+                "seed": 42,
+                "max_iterations": 100,
+                "forward_passes": 192,
+                "stopping_mode": "any",
+                "policy_mode": "fresh"
+            },
+            "problem_dimensions": {
+                "num_stages": 12,
+                "num_hydros": 160,
+                "num_thermals": 200,
+                "num_buses": 5,
+                "num_lines": 8
+            },
+            "iterations": { "completed": 10, "converged_at": 10 },
+            "convergence": {
+                "achieved": true,
+                "final_gap_percent": 0.45,
+                "termination_reason": "bound_stalling"
+            },
+            "row_pool": {
+                "total_generated": 1250000,
+                "total_active": 980000,
+                "peak_active": 1100000
+            },
+            "bounds": {
+                "final_lower_bound": 123456.0,
+                "final_upper_bound": 124000.0,
+                "final_upper_bound_std": 12.5
+            },
+            "distribution": {
+                "backend": "local",
+                "world_size": 1,
+                "ranks_participated": 1,
+                "num_nodes": 1,
+                "threads_per_rank": 1
+            }
+        }"#
+    }
+
+    /// Simulation metadata carrying an explicit `cost` object.
+    fn simulation_metadata_json() -> &'static str {
+        r#"{
+            "cobre_version": "0.3.2",
+            "hostname": "test-host",
+            "solver": "highs",
+            "started_at": "2026-01-17T13:00:00Z",
+            "completed_at": "2026-01-17T13:15:00Z",
+            "duration_seconds": 900.0,
+            "status": "complete",
+            "scenarios": { "total": 100, "completed": 100, "failed": 0 },
+            "cost": {
+                "mean_cost": 789012.0,
+                "std_cost": 4321.0,
+                "cvar": 800000.0,
+                "cvar_alpha": 0.95
+            },
+            "distribution": {
+                "backend": "local",
+                "world_size": 1,
+                "ranks_participated": 1,
+                "num_nodes": 1,
+                "threads_per_rank": 1
+            }
+        }"#
+    }
+
+    /// Write `training/metadata.json` under `dir`, creating the subdirectory.
+    fn write_training_metadata(dir: &std::path::Path, json: &str) {
+        let training_dir = dir.join("training");
+        fs::create_dir_all(&training_dir).unwrap();
+        fs::write(training_dir.join("metadata.json"), json).unwrap();
+    }
+
+    /// Write `simulation/metadata.json` under `dir`, creating the subdirectory.
+    fn write_simulation_metadata(dir: &std::path::Path, json: &str) {
+        let simulation_dir = dir.join("simulation");
+        fs::create_dir_all(&simulation_dir).unwrap();
+        fs::write(simulation_dir.join("metadata.json"), json).unwrap();
+    }
+
+    #[test]
+    fn build_report_value_has_six_top_level_keys() {
+        let dir = TempDir::new().unwrap();
+        write_training_metadata(dir.path(), training_metadata_json());
+        write_simulation_metadata(dir.path(), simulation_metadata_json());
+
+        let value = build_report_value(dir.path()).unwrap();
+
+        let obj = value.as_object().expect("report value must be an object");
+        for key in [
+            "output_directory",
+            "status",
+            "bounds",
+            "training",
+            "cost",
+            "simulation",
+        ] {
+            assert!(
+                obj.contains_key(key),
+                "report must contain top-level '{key}'"
+            );
+        }
+        assert_eq!(value["status"].as_str(), Some("complete"));
+    }
+
+    #[test]
+    fn build_report_value_hoists_bounds() {
+        let dir = TempDir::new().unwrap();
+        write_training_metadata(dir.path(), training_metadata_json());
+
+        let value = build_report_value(dir.path()).unwrap();
+
+        assert_eq!(
+            value["bounds"]["final_lower_bound"].as_f64(),
+            Some(123_456.0),
+            "top-level .bounds.final_lower_bound must match the fixture"
+        );
+        assert_eq!(
+            value["training"]["bounds"]["final_lower_bound"].as_f64(),
+            Some(123_456.0),
+            "nested .training.bounds.final_lower_bound must match the fixture"
+        );
+        assert_eq!(
+            value["bounds"]["final_lower_bound"].as_f64(),
+            value["training"]["bounds"]["final_lower_bound"].as_f64(),
+            "the bounds hoist must be consistent with the nested value"
+        );
+    }
+
+    #[test]
+    fn build_report_value_hoists_cost() {
+        let dir = TempDir::new().unwrap();
+        write_training_metadata(dir.path(), training_metadata_json());
+        write_simulation_metadata(dir.path(), simulation_metadata_json());
+
+        let value = build_report_value(dir.path()).unwrap();
+
+        assert_eq!(
+            value["cost"]["mean_cost"].as_f64(),
+            Some(789_012.0),
+            "top-level .cost.mean_cost must match the fixture"
+        );
+        assert_eq!(
+            value["simulation"]["cost"]["mean_cost"].as_f64(),
+            Some(789_012.0),
+            "nested .simulation.cost.mean_cost must match the fixture"
+        );
+        assert_eq!(
+            value["cost"]["mean_cost"].as_f64(),
+            value["simulation"]["cost"]["mean_cost"].as_f64(),
+            "the cost hoist must be consistent with the nested value"
+        );
+    }
+
+    #[test]
+    fn build_report_value_simulation_none_when_absent() {
+        let dir = TempDir::new().unwrap();
+        write_training_metadata(dir.path(), training_metadata_json());
+        // No simulation/metadata.json written.
+
+        let value = build_report_value(dir.path()).unwrap();
+
+        assert!(
+            value["simulation"].is_null(),
+            ".simulation must be null when simulation metadata is absent"
+        );
+        assert!(
+            value["cost"].is_null(),
+            ".cost must be null when simulation metadata is absent"
+        );
+    }
+
+    #[test]
+    fn build_report_value_missing_training_is_err() {
+        // The error path now routes through `crate::errors::convert_error`, which
+        // attaches the GIL (`Python::attach`) to build the typed exception, so the
+        // interpreter must be initialized first (mirrors the GIL-bound test
+        // scaffolding elsewhere in this crate).
+        Python::initialize();
+        let dir = TempDir::new().unwrap();
+        // No training/metadata.json written.
+
+        let result = build_report_value(dir.path());
+
+        assert!(
+            result.is_err(),
+            "missing training/metadata.json must produce an error"
+        );
+    }
 }

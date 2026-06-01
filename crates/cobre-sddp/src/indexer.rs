@@ -75,9 +75,12 @@
 //!
 //! ## Row layout (Solver Abstraction SS2.2)
 //!
+//! State pinning uses column bounds (`set_col_bounds`) on the incoming-state
+//! columns, so the `storage_fixing`, `lag_fixing`, and `anticipated_state_fixing`
+//! row ranges are always empty (`0..0`). z-inflow rows start at row 0.
+//!
 //! ```text
-//! [0, N)          storage_fixing — storage-fixing constraints (RHS = incoming storage)
-//! [N, N*(1+L))    lag_fixing     — AR lag-fixing constraints (RHS = lagged inflows)
+//! [0, N)   z_inflow_rows — z-inflow definition rows
 //! ```
 //!
 //! After evaporation rows, 4 operational violation constraint row regions are
@@ -271,25 +274,41 @@ pub struct StageIndexer {
     /// Scalar: there is exactly one theta variable per stage LP.
     pub theta: usize,
 
-    /// Total state dimension `N*(1+L)`.
+    /// State-vector dimension.
+    ///
+    /// Without anticipated thermals: `N*(1+L)`.
+    /// With `A` anticipated thermals at `K_max` lead stages each:
+    /// `N*(1+L) + A*K_max`.
     ///
     /// The state vector consists of the `N` outgoing storage volumes followed
-    /// by the `N*L` lag variables. State transfer copies
+    /// by the `N*L` lag variables (and `A*K_max` anticipated-state slots when
+    /// anticipated thermals are present). State transfer copies
     /// `primal[0..n_transfer]` (all but the oldest lag row).
+    ///
+    /// ## Semantic distinction
+    ///
+    /// `n_state` is the state-vector **dimension** used by cut storage and
+    /// broadcast payloads. It is **not** a valid LP row index. Do not slice
+    /// the LP row buffer as `[0, n_state)` — no state-fixing rows exist.
+    /// Use [`StageIndexer::state_to_lp_incoming_column`] to resolve the
+    /// column index for state-pinning and cut-subgradient extraction.
     pub n_state: usize,
 
-    /// Row range `[0, N)` for storage-fixing constraints.
+    /// Row range for storage-fixing constraints.
     ///
-    /// Each constraint fixes one incoming storage variable to the value
-    /// received from the preceding stage. Dual values over this range form
-    /// the storage-volume cut coefficients.
+    /// Always empty (`0..0`): state pinning uses column bounds
+    /// (`set_col_bounds` on the incoming-state columns) rather than equality
+    /// rows. The field is retained as a permanent sentinel for API stability;
+    /// downstream consumers will observe an empty range.
+    /// Use [`StageIndexer::state_to_lp_incoming_column`] to resolve the
+    /// column index for state pinning and cut-subgradient extraction.
     pub storage_fixing: Range<usize>,
 
-    /// Row range `[N, N*(1+L))` for AR lag-fixing constraints.
+    /// Row range for AR lag-fixing constraints.
     ///
-    /// Each constraint fixes one lag variable to the value received from the
-    /// preceding stage. Dual values over this range form the inflow-lag cut
-    /// coefficients.
+    /// Always empty (`0..0`): state pinning uses column bounds rather than
+    /// equality rows. Retained as a permanent sentinel for the same reason
+    /// as `storage_fixing`.
     pub lag_fixing: Range<usize>,
 
     /// Column range `[N*(1+L), N*(1+L) + n_anticipated*K_max)` for
@@ -306,11 +325,12 @@ pub struct StageIndexer {
     /// [`StageIndexer::new`].
     pub anticipated_state: Range<usize>,
 
-    /// Row range mirroring [`Self::anticipated_state`] — one fixing constraint
-    /// per state slot, RHS fixed by the incoming state from the preceding stage.
+    /// Row range for anticipated-state-fixing constraints.
     ///
-    /// Empty (`0..0`) when `n_anticipated == 0` or when built via
-    /// [`StageIndexer::new`].
+    /// Always empty (`0..0`) regardless of `n_anticipated`: state pinning for
+    /// anticipated thermals also uses column bounds. Retained as a permanent
+    /// sentinel for API stability. The column range [`Self::anticipated_state`]
+    /// carries the state-pinning semantics via `set_col_bounds`.
     pub anticipated_state_fixing: Range<usize>,
 
     /// Number of anticipated thermals (plants with
@@ -835,13 +855,15 @@ impl StageIndexer {
     /// assert_eq!(idx.storage_in, 12..15);
     /// assert_eq!(idx.theta,   15);
     /// assert_eq!(idx.n_state,  9);
-    /// assert_eq!(idx.storage_fixing, 0..3);
-    /// assert_eq!(idx.lag_fixing, 3..9);
+    /// // State-fixing row ranges are permanent empty sentinels.
+    /// assert_eq!(idx.storage_fixing, 0..0);
+    /// assert_eq!(idx.lag_fixing, 0..0);
     /// // Equipment ranges are empty when built via `new`.
     /// assert!(idx.turbine.is_empty());
     /// assert_eq!(idx.n_blks, 0);
-    /// assert_eq!(idx.z_inflow_rows, 9..12);
-    /// assert_eq!(idx.z_inflow_row_start, 9);
+    /// // z_inflow rows start at row 0.
+    /// assert_eq!(idx.z_inflow_rows, 0..3);
+    /// assert_eq!(idx.z_inflow_row_start, 0);
     /// ```
     #[must_use]
     pub fn new(hydro_count: usize, max_par_order: usize) -> Self {
@@ -860,14 +882,16 @@ impl StageIndexer {
         let theta = n * (3 + l);
         let n_state = n * (1 + l);
 
-        // Row layout mirrors the column layout for the state-relevant rows.
-        let storage_fixing = 0..n;
-        let lag_fixing = n..n * (1 + l);
+        // State fixing uses column bounds; the row ranges are permanent empty
+        // sentinels. The column ranges (storage, inflow_lags, anticipated_state)
+        // carry the state-pinning semantics via set_col_bounds.
+        let storage_fixing = 0..0;
+        let lag_fixing = 0..0;
 
-        // z_inflow rows at fixed offset N*(1+L), after lag-fixing rows
-        // and before water balance rows.
-        let z_inflow_rows = z_inflow_start..z_inflow_start + n;
-        let z_inflow_row_start = z_inflow_start;
+        // z_inflow rows start at row 0 — the first row block in the LP.
+        let z_inflow_start_row = 0_usize;
+        let z_inflow_rows = z_inflow_start_row..z_inflow_start_row + n;
+        let z_inflow_row_start = z_inflow_start_row;
 
         Self {
             storage,
@@ -1123,14 +1147,17 @@ impl StageIndexer {
         } else {
             0..0
         };
-        let anticipated_state_fixing = anticipated_state.clone();
+        // Anticipated-state fixing uses column bounds; row range is a permanent empty sentinel.
+        let anticipated_state_fixing = 0..0;
         let z_inflow_start = anticipated_state_end;
         let z_inflow = z_inflow_start..z_inflow_start + hydro_count;
         let storage_in_start = z_inflow.end;
         let storage_in = storage_in_start..storage_in_start + hydro_count;
         let theta = storage_in.end;
-        let z_inflow_rows = z_inflow_start..z_inflow_start + hydro_count;
-        let z_inflow_row_start = z_inflow_start;
+        // z_inflow rows start at row 0 (ROW start, not column start).
+        let z_inflow_start_row = 0_usize;
+        let z_inflow_rows = z_inflow_start_row..z_inflow_start_row + hydro_count;
+        let z_inflow_row_start = z_inflow_start_row;
 
         let decision_start = theta + 1;
 
@@ -1193,11 +1220,9 @@ impl StageIndexer {
         let n_evap_hydros = evap_hydro_indices.len();
         let evap_col_start = generation_end;
 
-        // Row layout: [storage_fixing | lag_fixing | anticipated_state_fixing | z_inflow | water_balance | load_balance | fpha_rows]
-        // `n_state` includes the anticipated_state_fixing rows
-        // (= base.n_state + n_ant_state), so water_balance_start follows
-        // directly after `n_state` rows plus the `hydro_count` z_inflow rows.
-        let water_balance_start = n_state + hydro_count;
+        // z_inflow rows start at row 0 (z_inflow_start_row declared above);
+        // water_balance follows z_inflow at row hydro_count.
+        let water_balance_start = z_inflow_start_row + hydro_count;
         let load_balance_start = water_balance_start + hydro_count;
         let load_balance_end = load_balance_start + n_buses * n_blks;
 
@@ -1480,6 +1505,56 @@ impl StageIndexer {
             self.z_inflow.start + h
         } else {
             n + (lag - 1) * n + h
+        }
+    }
+
+    /// Map a state-vector index to the LP column pinned by
+    /// [`fill_col_state_patches`](crate::lp_builder::PatchBuffer::fill_col_state_patches).
+    ///
+    /// This is the **incoming-state column** — the column whose bound is set to
+    /// `lb = ub = v` when state-fixing is applied via `set_col_bounds`. The
+    /// column indices returned here are exactly those written into
+    /// `PatchBuffer::col_indices[..state_col_patch_count()]` by
+    /// `fill_col_state_patches`, in state-vector order.
+    ///
+    /// Use this method in the backward pass to read `view.reduced_costs[col]`
+    /// for the cut subgradient, one entry per state-vector component
+    /// `j ∈ [0, n_state)`.
+    ///
+    /// ## Mapping by range
+    ///
+    /// - `j ∈ [0, N)` (storage): returns `self.storage_in.start + j`.
+    /// - `j ∈ [N, N*(1+L))` (AR lags): returns
+    ///   `self.inflow_lags.start + (j − N)`.
+    /// - `j ∈ [N*(1+L), n_state)` (anticipated state): returns
+    ///   `self.anticipated_state.start + (j − N*(1+L))`.
+    ///
+    /// ## Contrast with [`state_to_lp_column`]
+    ///
+    /// [`state_to_lp_column`] returns the **outgoing** column used for
+    /// cut-row coefficient construction in the forward pass (`forward.rs`).
+    /// For the storage range, `state_to_lp_column(j) = j` (the outgoing
+    /// storage column), while this method returns `storage_in.start + j`
+    /// (the incoming storage column). The two columns are related via the
+    /// water-balance equality row, and by KKT duality the reduced cost on
+    /// the incoming column equals the dual of the equivalent equality row
+    /// that a row-based state-fixing formulation would produce.
+    ///
+    /// [`state_to_lp_column`]: Self::state_to_lp_column
+    #[inline]
+    #[must_use]
+    pub fn state_to_lp_incoming_column(&self, j: usize) -> usize {
+        let n = self.hydro_count;
+        let lag_end = n * (1 + self.max_par_order);
+        if j < n {
+            // Storage range: incoming storage column.
+            self.storage_in.start + j
+        } else if j < lag_end {
+            // AR lag range: incoming lag column.
+            self.inflow_lags.start + (j - n)
+        } else {
+            // Anticipated-state range: anticipated state column.
+            self.anticipated_state.start + (j - lag_end)
         }
     }
 
@@ -1766,19 +1841,25 @@ mod tests {
 
     #[test]
     fn storage_fixing_range_3_2() {
-        assert_eq!(indexer_3_2().storage_fixing, 0..3);
+        // storage_fixing is a permanent empty sentinel.
+        assert_eq!(indexer_3_2().storage_fixing, 0..0);
     }
 
     #[test]
     fn lag_fixing_range_3_2() {
-        assert_eq!(indexer_3_2().lag_fixing, 3..9);
+        // lag_fixing is a permanent empty sentinel.
+        assert_eq!(indexer_3_2().lag_fixing, 0..0);
     }
 
     #[test]
     fn row_column_symmetry_3_2() {
+        // State-fixing row ranges are permanent empty sentinels; column ranges are unchanged.
         let idx = indexer_3_2();
-        assert_eq!(idx.storage_fixing, idx.storage);
-        assert_eq!(idx.lag_fixing, idx.inflow_lags);
+        assert_eq!(idx.storage_fixing, 0..0);
+        assert_eq!(idx.lag_fixing, 0..0);
+        // Column ranges are unchanged.
+        assert_eq!(idx.storage, 0..3);
+        assert_eq!(idx.inflow_lags, 3..9);
     }
 
     // Production scale: N = 160, L = 12
@@ -1799,9 +1880,13 @@ mod tests {
 
     #[test]
     fn row_column_symmetry_production_scale() {
+        // State-fixing row ranges are permanent empty sentinels; column ranges are unchanged.
         let idx = indexer_160_12();
-        assert_eq!(idx.storage_fixing, idx.storage);
-        assert_eq!(idx.lag_fixing, idx.inflow_lags);
+        assert_eq!(idx.storage_fixing, 0..0);
+        assert_eq!(idx.lag_fixing, 0..0);
+        // Column ranges are unchanged.
+        assert_eq!(idx.storage, 0..160);
+        assert_eq!(idx.inflow_lags, 160..160 * 13);
     }
 
     #[test]
@@ -1814,10 +1899,9 @@ mod tests {
         assert_eq!(idx.storage_in, 2..3);
         assert_eq!(idx.theta, 3);
         assert_eq!(idx.n_state, 1);
-        assert_eq!(idx.storage_fixing, 0..1);
-        assert_eq!(idx.lag_fixing, 1..1);
-        assert_eq!(idx.storage_fixing, idx.storage);
-        assert_eq!(idx.lag_fixing, idx.inflow_lags);
+        // storage_fixing and lag_fixing are permanent empty sentinels.
+        assert_eq!(idx.storage_fixing, 0..0);
+        assert_eq!(idx.lag_fixing, 0..0);
     }
 
     // Edge case: N = 0, L = 0 (degenerate — all ranges empty)
@@ -2294,13 +2378,12 @@ mod tests {
     // generation: empty (no FPHA)
     // evap cols: [15, 18)  (3 columns: Q_ev, f_evap_plus, f_evap_minus)
     //
-    // Row layout:
-    // n_state = N*(1+L) = 2
-    // z_inflow rows = 2..4
-    // water_balance_start = N*(2+L) = 4
-    // load_balance_start = 4 + 2 = 6
-    // load_balance_end   = 6 + 1*1 = 7
-    // evap_row[0] = 7
+    // Row layout (Phase 1: state-fixing rows removed):
+    // z_inflow rows = 0..2  (start at row 0)
+    // water_balance_start = 2  (z_inflow rows end)
+    // load_balance_start = 2 + 2 = 4
+    // load_balance_end   = 4 + 1*1 = 5
+    // evap_row[0] = 5
     #[test]
     fn evap_one_hydro_column_row_positions() {
         let idx = StageIndexer::with_equipment_and_evaporation(
@@ -2318,8 +2401,8 @@ mod tests {
         assert_eq!(ei.q_ev_col, 15);
         assert_eq!(ei.f_evap_plus_col, 16);
         assert_eq!(ei.f_evap_minus_col, 17);
-        // row placed after load_balance.end = 7
-        assert_eq!(ei.evap_row, 7);
+        // Row placed after load_balance.end = 5.
+        assert_eq!(ei.evap_row, 5);
     }
 
     // 2 evaporation hydros — verify column/row ranges are
@@ -2336,16 +2419,15 @@ mod tests {
     // excess:     [26, 27)
     // generation: [27, 28) (1 FPHA hydro * 1 block)
     //
-    // Row layout:
-    // n_state = 4
-    // z_inflow rows = 4..8
-    // water_balance_start = N*(2+L) = 8
-    // load_balance_start = 8 + 4 = 12
-    // load_balance_end   = 12 + 1*1 = 13
-    // fpha_rows[0].start = 13
-    // fpha_row_cursor after FPHA = 13 + 3*1 = 16
+    // Row layout (Phase 1: state-fixing rows removed):
+    // z_inflow rows = 0..4  (start at row 0)
+    // water_balance_start = 4  (z_inflow rows end)
+    // load_balance_start = 4 + 4 = 8
+    // load_balance_end   = 8 + 1*1 = 9
+    // fpha_rows[0].start = 9
+    // fpha_row_cursor after FPHA = 9 + 3*1 = 12
     // evap cols: [28, 34)   (2 evap hydros * 3 = 6 columns)
-    // evap_row[0] = 16, evap_row[1] = 17
+    // evap_row[0] = 12, evap_row[1] = 13
     #[test]
     fn evap_two_hydros_with_fpha_contiguous() {
         let idx = StageIndexer::with_equipment_and_evaporation(
@@ -2369,9 +2451,9 @@ mod tests {
         assert_eq!(ei1.f_evap_plus_col, 32);
         assert_eq!(ei1.f_evap_minus_col, 33);
 
-        // Rows placed after fpha_rows region: fpha_row_cursor = 13 + 3*1 = 16
-        assert_eq!(ei0.evap_row, 16);
-        assert_eq!(ei1.evap_row, 17);
+        // Rows placed after fpha_rows region: fpha_row_cursor = 9 + 3*1 = 12.
+        assert_eq!(ei0.evap_row, 12);
+        assert_eq!(ei1.evap_row, 13);
 
         // Evap rows do not overlap FPHA rows
         assert!(ei0.evap_row > idx.fpha_rows[0].start);
@@ -2617,13 +2699,13 @@ mod tests {
         assert_eq!(idx.z_inflow_row_start, 0);
     }
 
-    // z_inflow_rows and z_inflow_row_start at N*(1+L) for the simple constructor.
+    // z_inflow rows start at row 0.
     #[test]
     fn z_inflow_row_fields() {
         let idx = StageIndexer::new(5, 1);
-        // N*(1+L) = 5*(1+1) = 10
-        assert_eq!(idx.z_inflow_rows, 10..15);
-        assert_eq!(idx.z_inflow_row_start, 10);
+        // z_inflow rows start at row 0, length = hydro_count = 5.
+        assert_eq!(idx.z_inflow_rows, 0..5);
+        assert_eq!(idx.z_inflow_row_start, 0);
         assert_eq!(idx.z_inflow.len(), 5);
     }
 
@@ -2631,12 +2713,12 @@ mod tests {
     #[test]
     fn z_inflow_range_with_equipment() {
         let idx = StageIndexer::with_equipment(&eq(2, 1, 1, 1, 1, 1, false), &fpha(vec![], vec![]));
-        // N*(1+L) = 2*(1+1) = 4
+        // N*(1+L) = 2*(1+1) = 4 (column range unchanged)
         assert_eq!(idx.z_inflow, 4..6);
         assert_eq!(idx.z_inflow.len(), 2);
-        // z_inflow rows inherited from base at N*(1+L)
-        assert_eq!(idx.z_inflow_rows, 4..6);
-        assert_eq!(idx.z_inflow_row_start, 4);
+        // z_inflow rows start at row 0, length = hydro_count = 2.
+        assert_eq!(idx.z_inflow_rows, 0..2);
+        assert_eq!(idx.z_inflow_row_start, 0);
     }
 
     // z_inflow placed correctly for single hydro, no lags case.
@@ -3025,7 +3107,8 @@ mod tests {
         );
 
         assert_eq!(idx.anticipated_state, 9..15);
-        assert_eq!(idx.anticipated_state_fixing, 9..15);
+        // anticipated_state_fixing is a permanent empty sentinel; state fixing uses column bounds.
+        assert_eq!(idx.anticipated_state_fixing, 0..0);
         assert_eq!(idx.z_inflow, 15..18);
         assert_eq!(idx.storage_in, 18..21);
         assert_eq!(idx.theta, 21);
@@ -3045,7 +3128,8 @@ mod tests {
         );
 
         assert_eq!(idx.anticipated_state, 0..6);
-        assert_eq!(idx.anticipated_state_fixing, 0..6);
+        // anticipated_state_fixing is a permanent empty sentinel; state fixing uses column bounds.
+        assert_eq!(idx.anticipated_state_fixing, 0..0);
         assert_eq!(idx.n_state, 6);
         assert_eq!(idx.z_inflow, 6..6);
         assert_eq!(idx.storage_in, 6..6);
@@ -3082,8 +3166,8 @@ mod tests {
         assert_eq!(idx.k_max, 0);
     }
 
-    /// `anticipated_state_fixing` always exactly mirrors `anticipated_state`
-    /// across a sweep of (`n_anticipated`, `k_max`) combinations.
+    /// `anticipated_state_fixing` is always empty (`0..0`);
+    /// state pinning uses column bounds, not rows.
     #[test]
     fn anticipated_state_fixing_mirrors_state() {
         for (n_anticipated, k_max) in [(0, 0), (1, 1), (1, 3), (2, 3), (5, 4)] {
@@ -3093,10 +3177,84 @@ mod tests {
                 &evap(vec![]),
             );
             assert_eq!(
-                idx.anticipated_state_fixing, idx.anticipated_state,
-                "fixing must mirror state for n_anticipated={n_anticipated} k_max={k_max}"
+                idx.anticipated_state_fixing,
+                0..0,
+                "anticipated_state_fixing must be 0..0 (sentinel) for n_anticipated={n_anticipated} k_max={k_max}"
             );
         }
+    }
+
+    /// All three state-fixing row ranges are permanent empty sentinels in every constructor.
+    ///
+    /// Covers `StageIndexer::new`, `StageIndexer::with_equipment`, and
+    /// `StageIndexer::with_equipment_and_evaporation` (with anticipated thermals).
+    #[test]
+    fn state_fixing_rows_collapsed_to_empty_in_all_constructors() {
+        // new() constructor
+        let idx_new = StageIndexer::new(3, 2);
+        assert_eq!(
+            idx_new.storage_fixing,
+            0..0,
+            "new: storage_fixing must be 0..0"
+        );
+        assert_eq!(idx_new.lag_fixing, 0..0, "new: lag_fixing must be 0..0");
+        assert_eq!(
+            idx_new.anticipated_state_fixing,
+            0..0,
+            "new: anticipated_state_fixing must be 0..0"
+        );
+
+        // with_equipment() constructor (delegates to with_equipment_and_evaporation)
+        let idx_eq =
+            StageIndexer::with_equipment(&eq(3, 2, 0, 0, 0, 0, false), &fpha(vec![], vec![]));
+        assert_eq!(
+            idx_eq.storage_fixing,
+            0..0,
+            "with_equipment: storage_fixing must be 0..0"
+        );
+        assert_eq!(
+            idx_eq.lag_fixing,
+            0..0,
+            "with_equipment: lag_fixing must be 0..0"
+        );
+        assert_eq!(
+            idx_eq.anticipated_state_fixing,
+            0..0,
+            "with_equipment: anticipated_state_fixing must be 0..0"
+        );
+
+        // with_equipment_and_evaporation() with anticipated thermals (n_anticipated=1, k_max=2)
+        let idx_ant = StageIndexer::with_equipment_and_evaporation(
+            &eq_with_anticipated(3, 2, 0, 0, 1, 1, false, 1, 2),
+            &fpha(vec![], vec![]),
+            &evap(vec![]),
+        );
+        assert_eq!(
+            idx_ant.storage_fixing,
+            0..0,
+            "with_equipment_and_evaporation: storage_fixing must be 0..0"
+        );
+        assert_eq!(
+            idx_ant.lag_fixing,
+            0..0,
+            "with_equipment_and_evaporation: lag_fixing must be 0..0"
+        );
+        assert_eq!(
+            idx_ant.anticipated_state_fixing,
+            0..0,
+            "with_equipment_and_evaporation: anticipated_state_fixing must be 0..0"
+        );
+        // Column range anticipated_state is unchanged (N*(1+L) .. N*(1+L) + k_max).
+        assert_eq!(
+            idx_ant.anticipated_state,
+            9..11,
+            "anticipated_state column range must be N*(1+L)..N*(1+L)+n_ant*k_max = 9..11"
+        );
+        // water_balance starts immediately after z_inflow (hydro_count rows from row 0).
+        assert_eq!(
+            idx_ant.water_balance.start, idx_ant.z_inflow_rows.end,
+            "water_balance.start must equal z_inflow_rows.end"
+        );
     }
 
     /// `z_inflow.start` is exactly `N*(1+L) + n_anticipated * k_max`.
@@ -4312,6 +4470,194 @@ mod tests {
         assert_eq!(idx.n_state, 9);
     }
 
+    // ── state_to_lp_incoming_column tests ────────────────────────────────────
+
+    /// Storage range: for a `with_equipment` indexer with `N=3, L=2, A=0`,
+    /// `state_to_lp_incoming_column(j)` for `j ∈ [0, N)` returns
+    /// `storage_in.start + j`.
+    #[test]
+    fn state_to_lp_incoming_column_storage_range() {
+        // N=3, L=2: storage_in.start = N*(2+L) = 3*4 = 12.
+        let idx = StageIndexer::with_equipment_and_evaporation(
+            &eq_with_anticipated(3, 2, 0, 0, 1, 1, false, 0, 0),
+            &fpha(vec![], vec![]),
+            &evap(vec![]),
+        );
+        // storage_in.start should be N*(2+L) = 12.
+        assert_eq!(idx.storage_in.start, 12);
+        for j in 0..3_usize {
+            assert_eq!(
+                idx.state_to_lp_incoming_column(j),
+                idx.storage_in.start + j,
+                "j={j}: expected storage_in.start + {j}"
+            );
+        }
+    }
+
+    /// AR lag range: for a `with_equipment` indexer with `N=3, L=2, A=0`,
+    /// `state_to_lp_incoming_column(j)` for `j ∈ [N, N*(1+L))` returns
+    /// `inflow_lags.start + (j − N)`.
+    #[test]
+    fn state_to_lp_incoming_column_lag_range() {
+        // N=3, L=2: inflow_lags = 3..9.
+        let idx = StageIndexer::with_equipment_and_evaporation(
+            &eq_with_anticipated(3, 2, 0, 0, 1, 1, false, 0, 0),
+            &fpha(vec![], vec![]),
+            &evap(vec![]),
+        );
+        assert_eq!(idx.inflow_lags.start, 3);
+        for j in 3..9_usize {
+            assert_eq!(
+                idx.state_to_lp_incoming_column(j),
+                idx.inflow_lags.start + (j - 3),
+                "j={j}: expected inflow_lags.start + {}",
+                j - 3
+            );
+        }
+    }
+
+    /// Anticipated-state range: for an indexer with `N=0, L=0, A=1, K=2`,
+    /// `state_to_lp_incoming_column(j)` for `j ∈ [0, n_state)` returns
+    /// `anticipated_state.start + j` (since `lag_end` = N*(1+L) = 0).
+    #[test]
+    fn state_to_lp_incoming_column_anticipated_range() {
+        // N=0, L=0, A=1, K=2: n_state = 0 + 1*2 = 2.
+        // anticipated_state.start = N*(1+L) = 0.
+        let idx = StageIndexer::with_equipment_and_evaporation(
+            &eq_with_anticipated(0, 0, 0, 0, 1, 1, false, 1, 2),
+            &fpha(vec![], vec![]),
+            &evap(vec![]),
+        );
+        assert_eq!(idx.anticipated_state.start, 0);
+        assert_eq!(idx.n_state, 2);
+        for j in 0..2_usize {
+            assert_eq!(
+                idx.state_to_lp_incoming_column(j),
+                idx.anticipated_state.start + j,
+                "j={j}: expected anticipated_state.start + {j}"
+            );
+        }
+    }
+
+    /// Combined boundary-case test: `N=3, L=2, A=1, K=2`.
+    /// Checks j = 0, 2, 3, 8, 9, 10 (the boundary points from the spec).
+    #[test]
+    fn state_to_lp_incoming_column_combined_with_equipment_indexer() {
+        // N=3, L=2, A=1, K=2:
+        //   n_state = N*(1+L) + A*K = 3*3 + 1*2 = 11.
+        //   storage_in.start = N*(2+L) + A*K_max = 3*4 + 1*2 = 14.
+        //   inflow_lags.start = N = 3.
+        //   anticipated_state.start = N*(1+L) = 9.
+        //   lag_end = N*(1+L) = 9.
+        let idx = StageIndexer::with_equipment_and_evaporation(
+            &eq_with_anticipated(3, 2, 0, 0, 1, 1, false, 1, 2),
+            &fpha(vec![], vec![]),
+            &evap(vec![]),
+        );
+        assert_eq!(idx.n_state, 11);
+        // j=0: storage range → storage_in.start + 0.
+        assert_eq!(
+            idx.state_to_lp_incoming_column(0),
+            idx.storage_in.start,
+            "j=0"
+        );
+        // j=2: storage range → storage_in.start + 2.
+        assert_eq!(
+            idx.state_to_lp_incoming_column(2),
+            idx.storage_in.start + 2,
+            "j=2"
+        );
+        // j=3: first lag → inflow_lags.start + 0.
+        assert_eq!(
+            idx.state_to_lp_incoming_column(3),
+            idx.inflow_lags.start,
+            "j=3"
+        );
+        // j=8: last lag → inflow_lags.start + 5.
+        assert_eq!(
+            idx.state_to_lp_incoming_column(8),
+            idx.inflow_lags.start + 5,
+            "j=8"
+        );
+        // j=9: first anticipated-state → anticipated_state.start + 0.
+        assert_eq!(
+            idx.state_to_lp_incoming_column(9),
+            idx.anticipated_state.start,
+            "j=9"
+        );
+        // j=10: last anticipated-state → anticipated_state.start + 1.
+        assert_eq!(
+            idx.state_to_lp_incoming_column(10),
+            idx.anticipated_state.start + 1,
+            "j=10"
+        );
+        // All returned columns must be within the LP's column range.
+        for j in 0..idx.n_state {
+            let col = idx.state_to_lp_incoming_column(j);
+            assert!(
+                col < idx.theta + 1,
+                "j={j}: column {col} out of range (theta={})",
+                idx.theta
+            );
+        }
+    }
+
+    /// For the lag range, `state_to_lp_incoming_column` and `state_to_lp_column`
+    /// return different values under `with_equipment` (the former returns the
+    /// incoming-lag column, the latter returns the `z_inflow` or lag-out column).
+    /// For the storage range under `with_equipment`, the results differ because
+    /// `storage_in.start > 0` while `state_to_lp_column` returns `j` (outgoing,
+    /// which starts at column 0).
+    #[test]
+    fn state_to_lp_incoming_column_differs_from_state_to_lp_column_for_lag() {
+        // N=2, L=1: storage_in.start = N*(2+L) = 2*3 = 6.
+        // state_to_lp_column(0) = 0 (outgoing storage).
+        // state_to_lp_incoming_column(0) = storage_in.start + 0 = 6.
+        let idx = StageIndexer::with_equipment_and_evaporation(
+            &eq_with_anticipated(2, 1, 0, 0, 1, 1, false, 0, 0),
+            &fpha(vec![], vec![]),
+            &evap(vec![]),
+        );
+        // Storage range: incoming ≠ outgoing under with_equipment.
+        assert_ne!(
+            idx.state_to_lp_incoming_column(0),
+            idx.state_to_lp_column(0),
+            "storage range should differ: incoming={} outgoing={}",
+            idx.state_to_lp_incoming_column(0),
+            idx.state_to_lp_column(0)
+        );
+        // j=0: incoming returns storage_in.start, outgoing returns 0.
+        assert_eq!(idx.state_to_lp_incoming_column(0), idx.storage_in.start);
+        assert_eq!(idx.state_to_lp_column(0), 0);
+
+        // Lag range (j=2, j=3): incoming returns inflow_lags column;
+        // outgoing returns z_inflow (lag=0) or lag-out (lag>=1) column.
+        // j=2: lag 0, hydro 0. incoming = inflow_lags.start + 0.
+        //                       outgoing = z_inflow.start + 0.
+        assert_eq!(
+            idx.state_to_lp_incoming_column(2),
+            idx.inflow_lags.start,
+            "j=2 incoming should be inflow_lags.start"
+        );
+        assert_eq!(
+            idx.state_to_lp_column(2),
+            idx.z_inflow.start,
+            "j=2 outgoing should be z_inflow.start"
+        );
+        assert_ne!(
+            idx.state_to_lp_incoming_column(2),
+            idx.state_to_lp_column(2),
+            "lag range should differ for j=2"
+        );
+        // j=3: lag 0, hydro 1. incoming = inflow_lags.start + 1.
+        //                       outgoing = z_inflow.start + 1.
+        assert_ne!(
+            idx.state_to_lp_incoming_column(3),
+            idx.state_to_lp_column(3),
+            "lag range should differ for j=3"
+        );
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // state_to_lp_column branch tests
     // ─────────────────────────────────────────────────────────────────────────
@@ -4665,22 +5011,28 @@ mod tests {
             }
         }
 
-        /// I4: state rows mirror state columns (range equality).
+        /// I4 (Phase 1): all three state-fixing row ranges are empty sentinel `0..0`.
+        ///
+        /// State fixing has moved to column bounds; the row-side ranges are
+        /// no longer expected to mirror the column ranges.
         #[test]
         fn i4_state_row_symmetry() {
             for p in parameter_grid() {
                 let (idx, _) = build_indexer(&p);
                 assert_eq!(
-                    idx.storage_fixing, idx.storage,
-                    "I4 storage symmetry failed at {p:?}"
+                    idx.storage_fixing,
+                    0..0,
+                    "I4 storage_fixing must be 0..0 (sentinel) at {p:?}"
                 );
                 assert_eq!(
-                    idx.lag_fixing, idx.inflow_lags,
-                    "I4 lag symmetry failed at {p:?}"
+                    idx.lag_fixing,
+                    0..0,
+                    "I4 lag_fixing must be 0..0 (sentinel) at {p:?}"
                 );
                 assert_eq!(
-                    idx.anticipated_state_fixing, idx.anticipated_state,
-                    "I4 anticipated symmetry failed at {p:?}"
+                    idx.anticipated_state_fixing,
+                    0..0,
+                    "I4 anticipated_state_fixing must be 0..0 (sentinel) at {p:?}"
                 );
             }
         }

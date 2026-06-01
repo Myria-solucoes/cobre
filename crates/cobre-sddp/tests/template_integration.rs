@@ -41,7 +41,7 @@ use cobre_sddp::{
 };
 
 /// LP objective cost scale factor. Matches `cobre_sddp::lp_builder::COST_SCALE_FACTOR`.
-const COST_SCALE_FACTOR: f64 = 1_000.0;
+const COST_SCALE_FACTOR: f64 = 1_000_000.0;
 
 /// Evaporation flow safety margin multiplier. Matches `cobre_sddp::lp_builder::Q_EV_SAFETY_MARGIN`.
 const Q_EV_SAFETY_MARGIN: f64 = 2.0;
@@ -566,7 +566,8 @@ fn num_rows_formula_one_hydro_lag_zero() {
     let t = &result.templates[0];
     // + 1 z-inflow row for N=1.
     // + 4 operational violation rows for N=1.
-    assert_eq!(t.num_rows, 8, "num_rows mismatch for N=1 L=0");
+    // State-fixing rows removed in Phase 1 (column bounds used instead).
+    assert_eq!(t.num_rows, 7, "num_rows mismatch for N=1 L=0");
 }
 
 #[test]
@@ -589,7 +590,8 @@ fn num_rows_formula_one_hydro_lag_two() {
     let t = &result.templates[0];
     // + 1 z-inflow row for N=1.
     // + 4 operational violation rows for N=1.
-    assert_eq!(t.num_rows, 10, "num_rows mismatch for N=1 L=2");
+    // State-fixing rows removed in Phase 1 (column bounds used instead).
+    assert_eq!(t.num_rows, 7, "num_rows mismatch for N=1 L=2");
 }
 
 #[test]
@@ -627,27 +629,6 @@ fn n_transfer_is_n_times_lag_order() {
     .expect("constant productivity ok");
     let t = &result.templates[0];
     assert_eq!(t.n_transfer, 2, "n_transfer = N*L");
-}
-
-#[test]
-fn n_dual_relevant_equals_n_state_for_constant_productivity() {
-    // For v0.1.0 with no FPHA, n_dual_relevant = n_state.
-    let system = one_hydro_system(1, 2);
-    let result = build_stage_templates(
-        &system,
-        no_penalty_config(),
-        &PrecomputedPar::default(),
-        &PrecomputedNormal::default(),
-        &default_production(&system),
-        &default_evaporation(&system),
-        &ResolvedParameters::default(),
-    )
-    .expect("constant productivity ok");
-    let t = &result.templates[0];
-    assert_eq!(
-        t.n_dual_relevant, t.n_state,
-        "n_dual_relevant must equal n_state for constant-productivity hydros"
-    );
 }
 
 #[test]
@@ -1600,12 +1581,10 @@ fn test_no_penalty_columns_when_none() {
         t.num_cols, 17,
         "method=none must not add extra penalty columns"
     );
-    // num_rows = N*(1+L) fixing + N z_inflow + N water_balance + B*K load_balance = 3+1+1+1 = 6
-    // + 4 operational violation rows = 10.
-    assert_eq!(
-        t.num_rows, 10,
-        "method=none must not add extra penalty rows"
-    );
+    // Phase 1: state-fixing rows removed (column bounds used instead).
+    // num_rows = N z_inflow + N water_balance + B*K load_balance = 1+1+1 = 3
+    // + 4 operational violation rows = 7.
+    assert_eq!(t.num_rows, 7, "method=none must not add extra penalty rows");
 }
 
 // test_penalty_slack_in_water_balance:
@@ -1632,8 +1611,8 @@ fn test_penalty_slack_in_water_balance() {
     let slack_col = t.num_cols - 1 - 6 * t.n_hydro;
 
     // Iterate the CSC to find the entry for slack_col in the water balance row.
-    // Water balance row for hydro 0: row_water_balance_start = n_state + n_hydros = N*(1+L) + N = 2.
-    let water_balance_row = 2_usize; // n_state + 0 = N*(1+L) + N = 2*(1+0) = 2
+    // Phase 1: water_balance_row = N + h = 1 + 0 = 1 (state-fixing rows removed).
+    let water_balance_row = 1_usize; // N + h = 1 + 0 = 1
 
     let col_start = t.col_starts[slack_col] as usize;
     let col_end = t.col_starts[slack_col + 1] as usize;
@@ -1703,7 +1682,8 @@ fn test_penalty_water_balance_coefficient_value() {
 
     // For N=1, L=0: inflow_slack is before withdrawal + 4 operational violation slack groups.
     let slack_col = t.num_cols - 1 - 6 * t.n_hydro;
-    let water_balance_row = 2_usize; // n_state + n_hydros = N*(1+L) + N = 2
+    // Phase 1: water_balance_row = N + h = 1 + 0 = 1 (state-fixing rows removed).
+    let water_balance_row = 1_usize; // N + h = 1 + 0 = 1
     let zeta = 744.0 * (3_600.0 / 1_000_000.0);
     let expected_coeff = -zeta; // slack enters LHS with -ζ (virtual inflow)
 
@@ -1756,7 +1736,7 @@ fn test_penalty_multi_stage_consistent() {
 // because the deficit cannot be absorbed by storage drawdown alone.
 //
 // System: N=1, L=0, K=1 block (744 h), B=1 bus, T=0, Lines=0.
-// Column layout:
+// Column layout (Phase 1):
 //   col 0: storage_out    col 1: z_inflow      col 2: storage_in
 //   col 3: theta          col 4: turbine        col 5: spillage
 //   col 6: diversion      col 7: deficit        col 8: excess
@@ -1764,11 +1744,11 @@ fn test_penalty_multi_stage_consistent() {
 //   col 11: outflow_below col 12: outflow_above
 //   col 13: turbine_below col 14: generation_below
 //
-// Row layout:
-//   row 0: storage_fixing  row 1: z_inflow_def  row 2: water_balance
-//   row 3: load_balance
-//   row 4: min_outflow     row 5: max_outflow
-//   row 6: min_turbine     row 7: min_generation
+// Row layout (Phase 1, state-fixing rows removed):
+//   row 0: z_inflow_def   row 1: water_balance
+//   row 2: load_balance
+//   row 3: min_outflow    row 4: max_outflow
+//   row 5: min_turbine    row 6: min_generation
 //
 // Water balance: v_out - v_in + ζ*(turbine + spillage - inflow_slack) = RHS.
 // With v_in = 100 hm³ and RHS = -110 hm³:
@@ -1799,9 +1779,10 @@ fn test_penalty_slack_absorbs_negative_inflow() {
     // The inflow slack is before withdrawal + 4 operational violation slack groups.
     let col_inflow_slack_start = template.num_cols - 1 - 6 * template.n_hydro;
 
-    // base_row for stage 0 is n_dual_relevant + n_hydro = n_state + N = 2 (for N=1, L=0).
-    let base_row = result.base_rows[0];
-    let water_balance_row = base_row; // hydro 0: base_row + 0
+    // Phase 1: storage_in column (col 2 for N=1 L=0).
+    // water_balance row = N + h = 1 + 0 = 1.
+    let col_storage_in = 2_usize; // storage_in for hydro 0 when N=1, L=0
+    let water_balance_row = 1_usize; // N + h = 1 + 0 = 1
 
     let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
 
@@ -1819,19 +1800,15 @@ fn test_penalty_slack_absorbs_negative_inflow() {
     };
     solver.add_rows(&empty_cuts);
 
-    // Patch the state rows.
-    // Row 0 (storage_fixing): fix incoming storage to 100 hm³.
-    // Row water_balance_row (water_balance): set RHS to -110.0 hm³.
+    // Phase 1: pin incoming storage via column bounds (not row 0 equality).
+    // Fix storage_in to 100 hm³ and set water_balance RHS to -110.0 hm³.
     // The magnitude 110 exceeds v_in = 100 hm³, so inflow_slack is mandatory:
     //   v_out + ζ*(turbine + spillage - inflow_slack) = v_in + (-110) = -10
     //   ⟹ ζ*inflow_slack ≥ 10 + v_out + ζ*(turbine + spillage) ≥ 10 > 0.
     let initial_storage = 100.0_f64;
     let negative_noise = -110.0_f64;
-    solver.set_row_bounds(
-        &[0, water_balance_row],
-        &[initial_storage, negative_noise],
-        &[initial_storage, negative_noise],
-    );
+    solver.set_col_bounds(&[col_storage_in], &[initial_storage], &[initial_storage]);
+    solver.set_row_bounds(&[water_balance_row], &[negative_noise], &[negative_noise]);
 
     // The solve must succeed — the slack absorbs the negative inflow.
     let view = solver
@@ -2663,12 +2640,11 @@ fn fpha_ac1_dimensions_one_fpha_hydro_five_planes() {
 /// - 7: `excess[0,0]`
 /// - 8: `g` (generation, FPHA, `col_generation_start = 8`)
 ///
-/// Row layout for N=1, L=0, B=1, K=1, 5 planes:
-/// - 0: storage-fixing row (`n_state = n_dual_relevant = 1`)
-/// - 1: z_inflow-def row 0
-/// - 2: water balance row 0 (`row_water_balance_start = 2`)
-/// - 3: load balance row 0 (`row_load_balance_start = 3`)
-/// - 4..8: FPHA rows 0..4 (`row_fpha_start = 4`)
+/// Row layout for N=1, L=0, B=1, K=1, 5 planes (Phase 1, state-fixing rows removed):
+/// - 0: z_inflow-def row 0
+/// - 1: water balance row 0 (`row_water_balance_start = 1`)
+/// - 2: load balance row 0 (`row_load_balance_start = 2`)
+/// - 3..7: FPHA rows 0..4 (`row_fpha_start = 3`)
 #[test]
 fn fpha_ac2_generation_column_entries() {
     let n_planes = 5;
@@ -2691,8 +2667,8 @@ fn fpha_ac2_generation_column_entries() {
     // (turbine[4..5], spillage[5..6], diversion[6..7], deficit[7..8], excess[8..9], generation[9])
     let col_g = 9_usize;
 
-    // row_fpha_start = 4 (= n_state + N z_inflow + N water balance + B*1 load balance)
-    let row_fpha_start = 4_usize;
+    // Phase 1: row_fpha_start = 3 (= N z_inflow + N water balance + B*1 load balance)
+    let row_fpha_start = 3_usize;
 
     // Check: generation column has +1.0 in each of the 5 FPHA rows.
     for p in 0..n_planes {
@@ -2705,8 +2681,8 @@ fn fpha_ac2_generation_column_entries() {
         );
     }
 
-    // Check: generation column has +1.0 in the load balance row (row 3).
-    let row_lb = 3_usize;
+    // Phase 1: load balance row = 2.
+    let row_lb = 2_usize;
     let lb_coeff = csc_entry(tmpl, col_g, row_lb)
         .unwrap_or_else(|| panic!("generation column missing entry in load balance row {row_lb}"));
     assert!(
@@ -2739,7 +2715,8 @@ fn fpha_ac3_v_in_column_entries() {
 
     // v_in column: for N=1, L=0, storage_in.start = 2 (after z_inflow).
     let col_v_in = 2_usize;
-    let row_fpha_start = 4_usize;
+    // Phase 1: row_fpha_start = 3 (state-fixing rows removed).
+    let row_fpha_start = 3_usize;
     // gamma_v = 0.5 → expected coefficient = -0.25
     let expected = -0.5_f64 / 2.0;
 
@@ -2778,7 +2755,8 @@ fn fpha_ac4_v_out_column_entries() {
 
     // v (outgoing storage) column: for N=1, index 0.
     let col_v = 0_usize;
-    let row_fpha_start = 4_usize;
+    // Phase 1: row_fpha_start = 3 (state-fixing rows removed).
+    let row_fpha_start = 3_usize;
     let expected = -0.5_f64 / 2.0;
 
     for p in 0..n_planes {
@@ -2802,10 +2780,10 @@ fn fpha_ac4_v_out_column_entries() {
 /// - FPHA hydro 0 (`local_idx=0`, `h_idx=2`): g col = 23
 /// - FPHA hydro 1 (`local_idx=1`, `h_idx=3`): g col = 24
 ///
-/// Row layout:
-/// - `n_state = 4`, `z_inflow rows = [4,8)`, `row_water_balance_start = 8`
-/// - `row_load_balance_start = 12`, `row_fpha_start = 13`
-/// - Load balance for bus B1 (`bus_idx=0`, blk=0): row = 12
+/// Row layout (Phase 1, state-fixing rows removed):
+/// - `z_inflow rows = [0,4)`, `row_water_balance_start = 4`
+/// - `row_load_balance_start = 8`, `row_fpha_start = 9`
+/// - Load balance for bus B1 (`bus_idx=0`, blk=0): row = 8
 #[test]
 fn fpha_ac5_mixed_system_load_balance_uses_generation_col() {
     let (system, production) = four_hydro_mixed_system();
@@ -2830,21 +2808,21 @@ fn fpha_ac5_mixed_system_load_balance_uses_generation_col() {
     // With FPHA: 27 + 2 = 29.
     // With withdrawal slack (N=4): 29 + 4 = 33.
     // With operational violation slacks (4*N=16): 33 + 16 = 49.
-    // z-inflow is now embedded in state region (not appended at end).
-    // Base num_rows = n_state + N z_inflow + 4 water balance + 1*1 load balance = 4 + 4 + 4 + 1 = 13.
-    // With FPHA: 13 + 2*1*3 = 13 + 6 = 19.
-    // With operational violation rows (4*N=16): 19 + 16 = 35.
+    // Phase 1: state-fixing rows removed (N=4 rows gone).
+    // Base num_rows = N z_inflow + N water balance + 1*1 load balance = 4 + 4 + 1 = 9.
+    // With FPHA: 9 + 2*1*3 = 9 + 6 = 15.
+    // With operational violation rows (4*N=16): 15 + 16 = 31.
     assert_eq!(
         tmpl.num_cols, 53,
         "4-hydro mixed system: num_cols should be 53 (includes diversion, 2*4 withdrawal, and operational slacks)"
     );
     assert_eq!(
-        tmpl.num_rows, 35,
-        "4-hydro mixed system: num_rows should be 35 (includes z_inflow and operational violation rows)"
+        tmpl.num_rows, 31,
+        "4-hydro mixed system: num_rows should be 31 (Phase 1: state-fixing rows removed)"
     );
 
-    // Load balance row for the single bus, block 0: row = 12.
-    let row_lb = 12_usize;
+    // Phase 1: load balance row = N + N + bus_blk_idx = 4 + 4 + 0 = 8.
+    let row_lb = 8_usize;
 
     // FPHA hydro at h_idx=2 (local_idx=0): generation col = 27.
     // (shifted +4 from 23 due to diversion columns for 4 hydros)
@@ -3180,13 +3158,14 @@ fn fpha_solve_storage_fixing_dual_differs_from_constant() {
             row_upper: vec![],
         };
         solver.add_rows(&empty_cuts);
-        // Fix v_in = 100 hm³ via the storage-fixing equality row (row 0).
+        // Phase 1: storage is pinned via column bounds on storage_in (col 2 for N=1, L=0).
+        // Layout: col 0 = storage_out, col 1 = z_inflow, col 2 = storage_in.
+        let col_storage_in = 2_usize;
         let v_in = 100.0_f64;
-        solver.set_row_bounds(&[0], &[v_in], &[v_in]);
+        solver.set_col_bounds(&[col_storage_in], &[v_in], &[v_in]);
         let view = solver.solve(None).expect("LP must solve to optimal");
-        // Row 0 is the storage-fixing equality; its dual is the marginal cost
-        // of one additional hm³ of initial storage.
-        view.dual[0]
+        // The reduced cost of the storage_in column is the shadow price of fixing v_in.
+        view.reduced_costs[col_storage_in]
     };
 
     let fpha_dual = solve_and_get_storage_dual(&fpha_result.templates[0]);
@@ -3617,19 +3596,19 @@ fn evap_csc_entries_one_hydro_correct_coefficients() {
     //   col 4 = turbine  col 5 = spillage  col 6 = diversion
     //   col 7 = deficit  col 8 = excess
     //   col_evap_start = num_cols - 4 - 4*N
-    // Row layout for N=1, L=0, B=1, K=1, no FPHA:
-    //   row 0: storage-fixing
-    //   row 1: z_inflow definition
-    //   row 2: water balance (row_water_balance_start = n_state + n_hydros = 2)
-    //   row 3: load balance
-    //   row 4: evaporation constraint (row_evap_start = 4)
-    //   rows 5-8: operational violation rows
+    // Row layout for N=1, L=0, B=1, K=1, no FPHA (Phase 1, state-fixing rows removed):
+    //   row 0: z_inflow definition
+    //   row 1: water balance (row_water_balance_start = N = 1)
+    //   row 2: load balance
+    //   row 3: evaporation constraint
+    //   rows 4-7: operational violation rows
     // Evaporation columns come before withdrawal slack + 4*N operational slacks.
     let col_q_ev = t.num_cols - 4 - 5 * t.n_hydro;
     let col_f_plus = t.num_cols - 3 - 5 * t.n_hydro;
     let col_f_minus = t.num_cols - 2 - 5 * t.n_hydro;
     let evap_row = t.num_rows - 1 - 4 * t.n_hydro;
-    let water_balance_row = 2_usize; // row_water_balance_start = n_state + n_hydros = 2
+    // Phase 1: water_balance_row = N + h = 1 + 0 = 1.
+    let water_balance_row = 1_usize; // row_water_balance_start = N = 1
 
     // Q_ev has 2 entries: water balance row (+zeta) and
     // evaporation constraint row (+1.0). Entries are sorted by row ascending.
@@ -3942,9 +3921,8 @@ fn evap_water_balance_one_hydro_coefficient_is_zeta() {
 
     let t = &result.templates[0];
 
-    // For N=1, L=0: n_state = 1, row_water_balance_start = n_state + n_hydros = 2.
-    // Hydro 0's water balance row = 2.
-    let water_balance_row = 2_usize;
+    // Phase 1: row_water_balance_start = N = 1; hydro 0 water balance row = 1.
+    let water_balance_row = 1_usize;
 
     // Q_ev is the first of the 3 evaporation columns; before withdrawal + 4*N operational slacks.
     let col_q_ev = t.num_cols - 4 - 5 * t.n_hydro;
@@ -4153,10 +4131,10 @@ fn evap_water_balance_only_second_hydro_has_evap() {
 
     let t = &result.templates[0];
 
-    // For N=2, L=0: n_state = 2, z_inflow rows [2,4), row_water_balance_start = 4.
-    // Hydro 0 water balance row = 4, hydro 1 water balance row = 5.
-    let water_balance_row_h0 = 4_usize;
-    let water_balance_row_h1 = 5_usize;
+    // Phase 1: row_water_balance_start = N = 2; z_inflow rows [0,2).
+    // Hydro 0 water balance row = 2, hydro 1 water balance row = 3.
+    let water_balance_row_h0 = 2_usize;
+    let water_balance_row_h1 = 3_usize;
 
     // Q_ev for hydro 1 (local_idx=0, since only hydro 1 is evap): col_evap_start + 0*3.
     // N=2 withdrawal + 4*N operational slack columns follow evap.
@@ -4555,9 +4533,10 @@ fn evap_lp_solvable_and_q_ev_positive_coefficients() {
     };
     solver.add_rows(&empty_cuts);
 
-    // Fix v_in = 1000 hm3 via the storage-fixing equality row (row 0).
+    // Phase 1: Fix v_in = 1000 hm3 via column bounds on storage_in (col 2 for N=1, L=0).
+    let col_storage_in = 2_usize; // col 0 = storage_out, col 1 = z_inflow, col 2 = storage_in
     let v_in = 1_000.0_f64;
-    solver.set_row_bounds(&[0], &[v_in], &[v_in]);
+    solver.set_col_bounds(&[col_storage_in], &[v_in], &[v_in]);
 
     let view = solver
         .solve(None)
@@ -4754,11 +4733,14 @@ fn evap_bound_prevents_dump_valve() {
     };
     solver.add_rows(&empty_cuts);
 
-    // Fix v_in at max_storage = 2000 hm3.
+    // Phase 1: Fix v_in at max_storage = 2000 hm3 via column bounds on storage_in (col 2).
+    // col 0 = storage_out, col 1 = z_inflow, col 2 = storage_in (N=1, L=0).
+    let col_storage_in = 2_usize;
     let v_in = 2_000.0_f64;
-    solver.set_row_bounds(&[0], &[v_in], &[v_in]);
+    solver.set_col_bounds(&[col_storage_in], &[v_in], &[v_in]);
 
-    // Patch water balance RHS (row 2 for N=1, L=0) to inject large inflow.
+    // Patch water balance RHS (row 1 for N=1, L=0) to inject large inflow.
+    // Phase 1 row layout: row 0 = z_inflow[0], row 1 = water_balance[0].
     // Water balance: v + zeta*(turbine + spill + div) - v_in + zeta*Q_ev = RHS.
     // The template RHS = zeta * base = 2.628 * 50 = 131.4.
     // Set RHS to zeta * 500 = 1314 to simulate a 500 m3/s inflow.
@@ -4766,8 +4748,8 @@ fn evap_bound_prevents_dump_valve() {
     // With v <= 2000 and max turbine = 262.8 hm3, surplus > 1000 hm3 must spill.
     let zeta = 730.0 * 3600.0 / 1e6;
     let high_inflow_rhs = zeta * 500.0;
-    // Water balance row index: n_state + n_hydros = 1 + 1 = 2 for N=1, L=0.
-    let water_balance_row = 2_usize;
+    // Water balance row index: N + h = 1 + 0 = 1 for N=1, L=0, h=0.
+    let water_balance_row = 1_usize;
     solver.set_row_bounds(&[water_balance_row], &[high_inflow_rhs], &[high_inflow_rhs]);
 
     let view = solver
@@ -5559,8 +5541,8 @@ fn withdrawal_rhs_subtracted_from_water_balance() {
     .expect("build ok");
 
     let t = &result.templates[0];
-    // N=1, L=0: row_water_balance_start = n_state + n_hydros = N*(1+L) + N = 2.
-    let row_water = 2_usize;
+    // Phase 1: row_water_balance_start = N = 1; hydro 0 water balance = row 1.
+    let row_water = 1_usize;
     let total_hours = 744.0_f64;
     let zeta = total_hours * 3_600.0 / 1_000_000.0;
     // base = 0 (no PAR data), withdrawal = 10.0
@@ -5638,8 +5620,8 @@ fn withdrawal_zero_leaves_rhs_unchanged_from_base() {
 ///   col 0: `v_out`, col 1: `z_inflow`, col 2: `v_in`, col 3: theta,
 ///   col 4: turbine, col 5: spillage, col 6: diversion, col 7: deficit,
 ///   col 8: excess, col 9: `withdrawal_slack` (= `num_cols` - 1)
-/// Row layout for N=1, L=0:
-///   row 0: storage-fixing, row 1: z_inflow-def, row 2: water-balance, row 3: load-balance
+/// Row layout for N=1, L=0 (Phase 1):
+///   row 0: z_inflow-def, row 1: water-balance, row 2: load-balance
 #[test]
 fn withdrawal_slack_matrix_entry_coefficient_is_minus_zeta() {
     let system = one_hydro_system_with_withdrawal(1, 0, 5.0, 1000.0);
@@ -5657,8 +5639,8 @@ fn withdrawal_slack_matrix_entry_coefficient_is_minus_zeta() {
     let t = &result.templates[0];
     // Withdrawal slack neg column: followed by N pos cols and 4*N operational violation slack columns.
     let col_neg = t.num_cols - 1 - 4 * t.n_hydro - t.n_hydro;
-    // Water balance row for hydro 0: N=1, L=0 → row_water = n_state + n_hydros = 2.
-    let row_water = 2_usize;
+    // Phase 1: water balance row for hydro 0 = N + h = 1 + 0 = 1.
+    let row_water = 1_usize;
 
     let total_hours = 744.0_f64;
     let zeta = total_hours * 3_600.0 / 1_000_000.0;
@@ -6010,9 +5992,9 @@ fn two_hydro_withdrawal_slack_entries_per_hydro() {
     let col_w0 = t.num_cols - 6 * t.n_hydro;
     let col_w1 = t.num_cols - 6 * t.n_hydro + 1;
 
-    // N=2, L=0: row_water_balance_start = n_state + n_hydros = 2 + 2 = 4.
-    let row_w0 = 4_usize; // water balance for hydro 0
-    let row_w1 = 5_usize; // water balance for hydro 1
+    // Phase 1: row_water_balance_start = N = 2; hydro 0 row = 2, hydro 1 row = 3.
+    let row_w0 = 2_usize; // water balance for hydro 0
+    let row_w1 = 3_usize; // water balance for hydro 1
 
     let total_hours = 744.0_f64;
     let zeta = total_hours * 3_600.0 / 1_000_000.0;
@@ -8446,9 +8428,10 @@ fn operational_violation_rows_outside_dual_relevant() {
     let result = build_active_violations_template();
     let t = &result.templates[0];
 
+    // Phase 1: state-fixing rows removed; n_dual_relevant is always 0.
     assert_eq!(
-        t.n_dual_relevant, 1,
-        "n_dual_relevant must be N*(1+L) = 1, unaffected by operational violation rows"
+        t.n_dual_relevant, 0,
+        "n_dual_relevant is always 0 after Phase 1 state-fixing removal"
     );
 
     let indexer = StageIndexer::with_equipment(
@@ -8956,14 +8939,12 @@ fn max_par_order_z_inflow_row_has_twelve_lag_entries() {
         "precondition: max_par_order must be 12"
     );
 
-    // Row index of the z-inflow definition for hydro 0.
-    // N=2, L=12: z_inflow_row_start = N*(1+L) = 2*13 = 26.
+    // Phase 1: z_inflow rows start at 0; row for hydro 0 is row 0.
     let n_h = 2_usize;
     let l = 12_usize;
-    let row_z_inflow_h0 = n_h * (1 + l); // = 26
+    let row_z_inflow_h0 = 0_usize; // z_inflow rows start at 0 in Phase 1
 
-    // Count nonzero entries in that row, excluding the z_inflow column itself
-    // (col_z_inflow_start + 0 = N*(1+L) = 26 in CSC column space).
+    // z_inflow column for hydro 0: col_z_inflow_start = N*(1+L) = 2*13 = 26 (unchanged).
     let col_z_inflow_h0 = n_h * (1 + l); // = 26
     let mut lag_entry_count = 0usize;
     for col in 0..t.num_cols {
@@ -8985,17 +8966,17 @@ fn max_par_order_z_inflow_row_has_twelve_lag_entries() {
 
 /// Regression guard: [`PatchBuffer`] must never grow to include generic-constraint rows.
 ///
-/// The five row categories that [`PatchBuffer`] mutates at solve time are:
-/// storage-fixing (Category 1), AR lag-fixing (Category 2), AR dynamics /
-/// noise (Category 3), load-balance (Category 4), and z-inflow definition
-/// (Category 5). Generic-constraint rows are not in this list; their
+/// Phase 1: state-fixing rows removed; Categories 1 and 2 moved to column bounds.
+/// The three row categories that [`PatchBuffer`] mutates at solve time are:
+/// AR dynamics / noise (Category 3), load-balance (Category 4), and z-inflow
+/// definition (Category 5). Generic-constraint rows are not in this list; their
 /// coefficients — including those derived from parameter resolution — are
 /// immutable after stage-template construction.
 ///
 /// This test pins the invariant by verifying that `forward_patch_count`
-/// after filling all five categories equals exactly
-/// `N*(2+L) + M*B_active + N_z` and never exceeds the allocated capacity
-/// `N*(2+L) + M*B_max + N`. If a future change adds generic-constraint
+/// after filling all three categories equals exactly
+/// `N + M*B_active + N` and never exceeds the allocated capacity
+/// `N + M*B_max + N`. If a future change adds generic-constraint
 /// patching, either the count or the capacity formula must change,
 /// triggering a compile-time or run-time failure here.
 #[test]
@@ -9005,30 +8986,31 @@ fn parameter_coefficient_persists_across_stage_template_uses() {
     use StageIndexer;
 
     // Realistic-scale system: N=3, L=2, M=2, B_max=3.
-    // Capacity = N*(2+L) + M*B_max + N = 3*(2+2) + 2*3 + 3 = 12 + 6 + 3 = 21.
+    // Phase 1 row capacity = N + M*B_max + N = 3 + 2*3 + 3 = 12.
     let n: usize = 3;
     let l: usize = 2;
     let m: usize = 2;
     let b_max: usize = 3;
 
-    let capacity_formula = n * (2 + l) + m * b_max + n;
+    let capacity_formula = n + m * b_max + n;
     let mut buf = PatchBuffer::new(n, l, m, b_max, 0, 0);
 
     // Verify the capacity matches the documented formula.
     assert_eq!(
         buf.indices.len(),
         capacity_formula,
-        "PatchBuffer capacity must equal N*(2+L) + M*B_max + N; \
+        "PatchBuffer capacity must equal N + M*B_max + N; \
          formula change indicates new patch categories were added"
     );
 
-    // Fill all five categories with realistic values.
+    // Fill all three row categories with realistic values.
     let n_state = n * (1 + l);
     let state: Vec<f64> = (0..n_state).map(|i| (i + 1) as f64 * 10.0).collect();
     let noise: Vec<f64> = (0..n).map(|h| h as f64 * 0.5).collect();
-    let base_row: usize = n * (2 + l); // typical value: AR dynamics start
+    // base_row = water_balance_start = N (Phase 1 layout).
+    let base_row: usize = n;
 
-    // Categories 1, 2, 3.
+    // Category 3 — AR dynamics / noise.
     buf.fill_forward_patches(&StageIndexer::new(n, l), &state, &noise, base_row, &[]);
 
     // Category 4 — 2 load buses, 2 active blocks (< max 3).
@@ -9043,16 +9025,16 @@ fn parameter_coefficient_persists_across_stage_template_uses() {
     let z_inflow_row_start: usize = 50;
     buf.fill_z_inflow_patches(z_inflow_row_start, &z_inflow_rhs, &[]);
 
-    // forward_patch_count must equal N*(2+L) + M*b_active + N exactly.
+    // forward_patch_count must equal N + M*b_active + N exactly.
     // It must not equal the total capacity (which includes unused B_max - b_active
-    // load slots and z-inflow capacity). If generic-constraint rows were ever
-    // patched, this count would exceed N*(2+L) + M*B_max + N, which is already
-    // the full capacity — an out-of-bounds write caught by the Vec length check.
-    let expected_count = n * (2 + l) + m * b_active + n;
+    // load slots). If generic-constraint rows were ever patched, this count would
+    // exceed N + M*B_max + N, which is already the full capacity — an out-of-bounds
+    // write caught by the Vec length check.
+    let expected_count = n + m * b_active + n;
     assert_eq!(
         buf.forward_patch_count(),
         expected_count,
-        "forward_patch_count must equal N*(2+L) + M*b_active + N; \
+        "forward_patch_count must equal N + M*b_active + N; \
          any generic-constraint patching would alter this count"
     );
 
@@ -10072,157 +10054,6 @@ fn two_anticipated_thermal_system(n_stages: usize) -> cobre_core::System {
         .expect("two_anticipated_thermal_system: valid")
 }
 
-/// Build a system with two anticipated thermals (K_0=2, K_1=3) → n_anticipated=2, k_max=3.
-///
-/// Used by AC-3 to exercise the state-fixing CSC diagonal across all 3 slots
-/// (the original `two_anticipated_thermal_system` only covers 2 slots / k_max=2).
-///
-/// Geometry: 0 hydros, 2 thermals, 1 bus, `n_stages` stages.
-/// - n_ant_state = n_anticipated * k_max = 2 * 3 = 6
-/// - col_anticipated_state_start = row_anticipated_state_fixing_start = 0
-#[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
-fn two_anticipated_thermal_system_k23(n_stages: usize) -> cobre_core::System {
-    use chrono::NaiveDate;
-    use cobre_core::entities::thermal::Thermal;
-    use cobre_core::scenario::LoadModel;
-    use cobre_core::temporal::{
-        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
-        StageStateConfig,
-    };
-
-    let bus = Bus {
-        id: EntityId(1),
-        name: "B1".to_string(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: 500.0,
-        }],
-        excess_cost: 0.0,
-    };
-
-    // Thermal 0: K_0=2 (two-stage lead).
-    let thermal_0 = Thermal {
-        id: EntityId(2),
-        name: "T_ant0".to_string(),
-        bus_id: EntityId(1),
-        min_generation_mw: 0.0,
-        max_generation_mw: 100.0,
-        cost_per_mwh: 50.0,
-        anticipated_config: Some(AnticipatedConfig { lead_stages: 2 }),
-        entry_stage_id: None,
-        exit_stage_id: None,
-    };
-    // Thermal 1: K_1=3 (three-stage lead) → k_max=3.
-    let thermal_1 = Thermal {
-        id: EntityId(3),
-        name: "T_ant1".to_string(),
-        bus_id: EntityId(1),
-        min_generation_mw: 0.0,
-        max_generation_mw: 100.0,
-        cost_per_mwh: 50.0,
-        anticipated_config: Some(AnticipatedConfig { lead_stages: 3 }),
-        entry_stage_id: None,
-        exit_stage_id: None,
-    };
-
-    let stages: Vec<Stage> = (0..n_stages)
-        .map(|i| Stage {
-            index: i,
-            id: i as i32,
-            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-            season_id: None,
-            blocks: vec![Block {
-                index: 0,
-                name: "BLK0".to_string(),
-                duration_hours: 744.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: false,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
-        })
-        .collect();
-
-    let load_models: Vec<LoadModel> = (0..n_stages)
-        .map(|i| LoadModel {
-            bus_id: EntityId(1),
-            stage_id: i as i32,
-            mean_mw: 100.0,
-            std_mw: 0.0,
-        })
-        .collect();
-
-    // k_max = max(K_0, K_1) = max(2, 3) = 3.
-    let k_max = 3_usize;
-    let n_st = n_stages.max(1);
-    let bounds = ResolvedBounds::new(
-        &BoundsCountsSpec {
-            n_hydros: 0,
-            n_thermals: 2,
-            n_lines: 0,
-            n_pumping: 0,
-            n_contracts: 0,
-            n_stages: n_st,
-            k_max,
-        },
-        &BoundsDefaults {
-            hydro: default_hydro_bounds(),
-            thermal: ThermalStageBounds {
-                min_generation_mw: 0.0,
-                max_generation_mw: 100.0,
-                cost_per_mwh: 50.0,
-            },
-            line: LineStageBounds {
-                direct_mw: 0.0,
-                reverse_mw: 0.0,
-            },
-            pumping: PumpingStageBounds {
-                min_flow_m3s: 0.0,
-                max_flow_m3s: 0.0,
-            },
-            contract: ContractStageBounds {
-                min_mw: 0.0,
-                max_mw: 0.0,
-                price_per_mwh: 0.0,
-            },
-        },
-    );
-    let penalties = ResolvedPenalties::new(
-        &PenaltiesCountsSpec {
-            n_hydros: 0,
-            n_buses: 1,
-            n_lines: 0,
-            n_ncs: 0,
-            n_stages: n_st,
-        },
-        &PenaltiesDefaults {
-            hydro: default_hydro_penalties(),
-            bus: BusStagePenalties { excess_cost: 0.0 },
-            line: LineStagePenalties { exchange_cost: 0.0 },
-            ncs: NcsStagePenalties {
-                curtailment_cost: 0.0,
-            },
-        },
-    );
-
-    SystemBuilder::new()
-        .buses(vec![bus])
-        .thermals(vec![thermal_0, thermal_1])
-        .stages(stages)
-        .load_models(load_models)
-        .bounds(bounds)
-        .penalties(penalties)
-        .build()
-        .expect("two_anticipated_thermal_system_k23: valid")
-}
-
 /// Build a system with 1 hydro (max_par_order=1) and 1 anticipated thermal (K=2).
 ///
 /// Used by AC-6 and AC-7 to exercise the `n_state = N*(1+L) + n_ant_state` formula
@@ -10431,244 +10262,6 @@ fn one_hydro_one_ant_system(n_stages: usize) -> cobre_core::System {
         .build()
         .expect("one_hydro_one_ant_system: valid")
 }
-
-/// Build a system with one anticipated thermal (K=`lead_stages`), one bus, and
-/// `n_blks` equal-duration blocks per stage (each `block_hours` long).
-///
-/// Used by CSC tests (AC-4, AC-5) that need a configurable block count.
-#[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
-fn one_anticipated_thermal_system_n_blks(
-    n_stages: usize,
-    lead_stages: u32,
-    n_blks: usize,
-    block_hours: f64,
-) -> cobre_core::System {
-    use chrono::NaiveDate;
-    use cobre_core::entities::thermal::Thermal;
-    use cobre_core::scenario::LoadModel;
-    use cobre_core::temporal::{
-        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
-        StageStateConfig,
-    };
-
-    let bus = Bus {
-        id: EntityId(1),
-        name: "B1".to_string(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: 500.0,
-        }],
-        excess_cost: 0.0,
-    };
-
-    let thermal = Thermal {
-        id: EntityId(2),
-        name: "T_ant".to_string(),
-        bus_id: EntityId(1),
-        min_generation_mw: 0.0,
-        max_generation_mw: 100.0,
-        cost_per_mwh: 50.0,
-        anticipated_config: Some(AnticipatedConfig { lead_stages }),
-        entry_stage_id: None,
-        exit_stage_id: None,
-    };
-
-    let blocks: Vec<Block> = (0..n_blks)
-        .map(|b| Block {
-            index: b,
-            name: format!("BLK{b}"),
-            duration_hours: block_hours,
-        })
-        .collect();
-
-    let stages: Vec<Stage> = (0..n_stages)
-        .map(|i| Stage {
-            index: i,
-            id: i as i32,
-            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-            season_id: None,
-            blocks: blocks.clone(),
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: false,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
-        })
-        .collect();
-
-    let load_models: Vec<LoadModel> = (0..n_stages)
-        .map(|i| LoadModel {
-            bus_id: EntityId(1),
-            stage_id: i as i32,
-            mean_mw: 100.0,
-            std_mw: 0.0,
-        })
-        .collect();
-
-    let k_max = lead_stages as usize;
-    let n_st = n_stages.max(1);
-    let bounds = ResolvedBounds::new(
-        &BoundsCountsSpec {
-            n_hydros: 0,
-            n_thermals: 1,
-            n_lines: 0,
-            n_pumping: 0,
-            n_contracts: 0,
-            n_stages: n_st,
-            k_max,
-        },
-        &BoundsDefaults {
-            hydro: default_hydro_bounds(),
-            thermal: ThermalStageBounds {
-                min_generation_mw: 0.0,
-                max_generation_mw: 100.0,
-                cost_per_mwh: 50.0,
-            },
-            line: LineStageBounds {
-                direct_mw: 0.0,
-                reverse_mw: 0.0,
-            },
-            pumping: PumpingStageBounds {
-                min_flow_m3s: 0.0,
-                max_flow_m3s: 0.0,
-            },
-            contract: ContractStageBounds {
-                min_mw: 0.0,
-                max_mw: 0.0,
-                price_per_mwh: 0.0,
-            },
-        },
-    );
-    let penalties = ResolvedPenalties::new(
-        &PenaltiesCountsSpec {
-            n_hydros: 0,
-            n_buses: 1,
-            n_lines: 0,
-            n_ncs: 0,
-            n_stages: n_st,
-        },
-        &PenaltiesDefaults {
-            hydro: default_hydro_penalties(),
-            bus: BusStagePenalties { excess_cost: 0.0 },
-            line: LineStagePenalties { exchange_cost: 0.0 },
-            ncs: NcsStagePenalties {
-                curtailment_cost: 0.0,
-            },
-        },
-    );
-
-    SystemBuilder::new()
-        .buses(vec![bus])
-        .thermals(vec![thermal])
-        .stages(stages)
-        .load_models(load_models)
-        .bounds(bounds)
-        .penalties(penalties)
-        .build()
-        .expect("one_anticipated_thermal_system_n_blks: valid")
-}
-
-/// Compute `row_anticipated_fishing_start` for the two-anticipated-thermal
-/// geometry (0 hydros, 2 thermals (both anticipated), 1 bus, 1 blk).
-///
-/// Layout derivation:
-/// - `n_ant_state = n_anticipated * k_max = 2 * 2 = 4`
-/// - `n_state = 4` (N=0 hydros: N*(1+L) + n_ant_state = 4)
-/// - `row_load_balance_start = n_state = 4` (no water-balance rows: N=0)
-/// - load-balance rows: 1 bus * 1 blk = 1 row → row 4
-/// - No FPHA, no evap, no op-violation rows (N=0 hydros).
-/// - `row_anticipated_fishing_start = 4 + 1 = 5`
-fn two_ant_fishing_row_start() -> usize {
-    let n_ant_state = 2 * 2; // n_anticipated=2, k_max=2
-    let n_state = n_ant_state; // N=0 hydros
-    n_state + 1 // 1 load-balance row (1 bus * 1 blk)
-}
-
-/// Compute `row_anticipated_fishing_start` for the single-anticipated-thermal
-/// geometry with `n_blks` blocks (0 hydros, 1 thermal, 1 bus, `n_blks` blks).
-///
-/// Layout derivation:
-/// - `n_ant_state = 1 * k_max = k_max`
-/// - `n_state = k_max`
-/// - `row_load_balance_start = k_max` (no water-balance rows)
-/// - load-balance rows: 1 bus * n_blks → ends at `k_max + n_blks`
-/// - `row_anticipated_fishing_start = k_max + n_blks`
-fn one_ant_fishing_row_start(k_max: usize, n_blks: usize) -> usize {
-    k_max + n_blks // n_state + n_buses * n_blks
-}
-
-/// Compute `col_thermal_start` for the single-anticipated-thermal geometry
-/// with `n_blks` blocks (0 hydros, 1 thermal, K=k_max).
-///
-/// Layout derivation:
-/// - `theta = k_max` (n_ant_state = k_max for n_anticipated=1)
-/// - `decision_start = k_max + 1`
-/// - `col_thermal_start = decision_start` (0 turbine/spillage/diversion cols)
-fn one_ant_col_thermal_start(k_max: usize) -> usize {
-    k_max + 1
-}
-
-/// Compute `col_anticipated_state_start` for any geometry with 0 hydros.
-///
-/// The anticipated-state block starts immediately after `inflow_lags`
-/// (`N*(1+L) = 0` when N=0), so the start is always 0.
-fn col_ant_state_start_zero_hydros() -> usize {
-    0 // N*(1+L) = 0 when N=0
-}
-
-// ── AC-1: fishing rows present at stage 0 (always-active) ───────────────────
-
-/// AC-1: with two anticipated thermals (K_0=1, K_1=2) and n_stages=4, at stage 0
-/// both plants are active under the always-active predicate, so
-/// `n_anticipated_fishing_rows == n_anticipated == 2`.
-///
-/// Under always-active fishing, every stage carries one fishing row per anticipated
-/// plant regardless of `K_i`. The row layout is:
-///   `num_rows = fishing_start + n_fishing + n_state_out_def`
-///
-/// At stage 0: 2 fishing rows + 2 state_out_def rows (both 0+1<4 and 0+2<4).
-/// At stage 1: 2 fishing rows + 2 state_out_def rows (both 1+1<4 and 1+2<4).
-/// Both stages therefore have identical row counts.
-#[test]
-fn test_anticipated_fishing_rows_match_n_anticipated_at_stage_zero() {
-    let system = two_anticipated_thermal_system(4);
-    let result = build_stage_templates(
-        &system,
-        no_penalty_config(),
-        &PrecomputedPar::default(),
-        &PrecomputedNormal::default(),
-        &default_production(&system),
-        &default_evaporation(&system),
-        &ResolvedParameters::default(),
-    )
-    .expect("build ok");
-
-    let rows_stage_0 = result.templates[0].num_rows;
-    let rows_stage_1 = result.templates[1].num_rows;
-
-    // Under always-active fishing, stage 0 and stage 1 both carry 2 fishing rows
-    // and 2 state_out_def rows, so their row counts must be equal.
-    assert_eq!(
-        rows_stage_0, rows_stage_1,
-        "stage 0 and stage 1 must have equal row counts (fishing always-active at every stage)"
-    );
-    // Directly verify: at stage 0 there are 2 fishing rows + 2 state_out_def rows.
-    // fishing_start = n_state + n_buses*n_blks = 5.
-    let fishing_row_start = two_ant_fishing_row_start();
-    assert_eq!(
-        rows_stage_0,
-        fishing_row_start + 4,
-        "at stage 0, num_rows must equal row_anticipated_fishing_start + 4 \
-         (2 fishing rows always-active + 2 state_out_def rows)"
-    );
-}
-
 // ── AC-2: fishing row count is constant across stages (always-active) ────────
 
 /// AC-2: with two anticipated thermals (K_0=1, K_1=2) and n_stages=4,
@@ -10718,191 +10311,6 @@ fn test_anticipated_fishing_rows_count_by_stage() {
         base - 2,
         "stage 3: 2 fishing + 0 state_out_def = base - 2 (both def inactive)"
     );
-}
-
-// ── AC-3: fishing row bounds are equality 0=0 ─────────────────────────────────
-
-/// AC-3: at stage 2, both active fishing rows have `row_lower == row_upper == 0.0`.
-///
-/// System: two anticipated thermals (K_0=1, K_1=2), n_stages=4.
-/// At stage 2: both plants matured → 2 fishing rows starting at
-/// `row_anticipated_fishing_start = two_ant_fishing_row_start() = 5`.
-#[test]
-fn test_anticipated_fishing_rows_have_equality_zero_bounds() {
-    let system = two_anticipated_thermal_system(4);
-    let result = build_stage_templates(
-        &system,
-        no_penalty_config(),
-        &PrecomputedPar::default(),
-        &PrecomputedNormal::default(),
-        &default_production(&system),
-        &default_evaporation(&system),
-        &ResolvedParameters::default(),
-    )
-    .expect("build ok");
-
-    let t = &result.templates[2]; // stage 2: both plants matured
-    let fishing_start = two_ant_fishing_row_start();
-
-    // Row 0 of fishing block (plant 0, K_0=1).
-    assert_eq!(
-        t.row_lower[fishing_start], 0.0,
-        "fishing row 0: row_lower must be 0.0"
-    );
-    assert_eq!(
-        t.row_upper[fishing_start], 0.0,
-        "fishing row 0: row_upper must be 0.0"
-    );
-    // Row 1 of fishing block (plant 1, K_1=2).
-    assert_eq!(
-        t.row_lower[fishing_start + 1],
-        0.0,
-        "fishing row 1: row_lower must be 0.0"
-    );
-    assert_eq!(
-        t.row_upper[fishing_start + 1],
-        0.0,
-        "fishing row 1: row_upper must be 0.0"
-    );
-}
-
-// ── AC-4: CSC +block_hours on thermal generation columns ─────────────────────
-
-/// AC-4: 1 anticipated thermal (K=1), n_stages=3, n_blks=3 (240h each).
-///
-/// At stage 1 (where K_i=1 <= stage_idx=1), the fishing row for plant 0 is at
-/// `row_anticipated_fishing_start`. Each per-block thermal column
-/// `col_thermal_start + 0 * n_blks + blk` carries coefficient `+240.0` in the
-/// CSC matrix at that row.
-#[test]
-fn test_anticipated_fishing_csc_thermal_column_block_hours() {
-    let n_blks = 3_usize;
-    let block_hours = 240.0_f64;
-    let k_max = 1_usize;
-    let system = one_anticipated_thermal_system_n_blks(3, k_max as u32, n_blks, block_hours);
-    let result = build_stage_templates(
-        &system,
-        no_penalty_config(),
-        &PrecomputedPar::default(),
-        &PrecomputedNormal::default(),
-        &default_production(&system),
-        &default_evaporation(&system),
-        &ResolvedParameters::default(),
-    )
-    .expect("build ok");
-
-    let t = &result.templates[1]; // stage 1: K_i=1 <= 1 → plant matured
-    let fishing_row = one_ant_fishing_row_start(k_max, n_blks);
-    let col_thermal_start = one_ant_col_thermal_start(k_max);
-
-    // Each per-block thermal column must carry +block_hours in the fishing row.
-    // thermal_idx = 0 for the sole anticipated plant (local index 0).
-    let thermal_idx = 0_usize;
-    for blk in 0..n_blks {
-        let col = col_thermal_start + thermal_idx * n_blks + blk;
-        let entries = csc_entries_at(t, col, fishing_row);
-        assert_eq!(
-            entries,
-            vec![block_hours],
-            "thermal col (blk={blk}): CSC entry at fishing row must be +{block_hours}"
-        );
-    }
-}
-
-// ── AC-5: CSC -block_hours_total on anticipated_state slot 0 ─────────────────
-
-/// AC-5: 1 anticipated thermal (K=1), n_stages=3, n_blks=3 (240h each).
-///
-/// At stage 1, the anticipated-state column at
-/// `col_anticipated_state_start + 0 = 0` carries coefficient
-/// `-720.0` (= -(240 + 240 + 240)) in the fishing row.
-#[test]
-fn test_anticipated_fishing_csc_state_slot_negative_block_hours_total() {
-    let n_blks = 3_usize;
-    let block_hours = 240.0_f64;
-    let k_max = 1_usize;
-    let system = one_anticipated_thermal_system_n_blks(3, k_max as u32, n_blks, block_hours);
-    let result = build_stage_templates(
-        &system,
-        no_penalty_config(),
-        &PrecomputedPar::default(),
-        &PrecomputedNormal::default(),
-        &default_production(&system),
-        &default_evaporation(&system),
-        &ResolvedParameters::default(),
-    )
-    .expect("build ok");
-
-    let t = &result.templates[1]; // stage 1: K_i=1 <= 1 → plant matured
-    let fishing_row = one_ant_fishing_row_start(k_max, n_blks);
-    // Slot-major layout: slot 0, plant 0 → col_anticipated_state_start + 0 * n_anticipated + 0
-    //                                    = col_anticipated_state_start (= 0 for N=0 hydros).
-    let col_state = col_ant_state_start_zero_hydros(); // slot 0, plant 0
-
-    let expected = -(block_hours * n_blks as f64); // -(240+240+240) = -720.0
-    let entries = csc_entries_at(t, col_state, fishing_row);
-    assert_eq!(
-        entries,
-        vec![expected],
-        "anticipated_state col 0: CSC entry at fishing row must be {expected}"
-    );
-}
-
-// ── AC-6: fishing always present; state_out_def drops at the maturity boundary ─
-
-/// AC-6: one anticipated thermal K=2, n_stages=4.
-///
-/// Under always-active fishing the fishing row is present at every stage.
-/// The `state_out_def` row drops when `stage + K_i >= n_stages` (strict gate).
-///
-/// Row layout per stage (`fishing_start = one_ant_fishing_row_start(2, 1) = 3`):
-///   stage 1: 1 fishing (always-active) + 1 state_out_def (1+2=3 < 4) = fishing_start + 2
-///   stage 2: 1 fishing (always-active) + 0 state_out_def (2+2=4, NOT < 4) = fishing_start + 1
-///
-/// The state_out_def row is lost at stage 2 while the fishing row was already
-/// present, so `num_rows` at stage 2 is exactly 1 less than at stage 1.
-/// Verified via a direct row-count comparison and fishing-row bounds at both stages.
-#[test]
-fn test_anticipated_fishing_active_at_maturity_boundary() {
-    let system = one_anticipated_thermal_system(4, 2, 0.0, 100.0);
-    let result = build_stage_templates(
-        &system,
-        no_penalty_config(),
-        &PrecomputedPar::default(),
-        &PrecomputedNormal::default(),
-        &default_production(&system),
-        &default_evaporation(&system),
-        &ResolvedParameters::default(),
-    )
-    .expect("build ok");
-
-    // Under always-active fishing:
-    //   stage 1: 1 fishing + 1 state_out_def row
-    //   stage 2: 1 fishing + 0 state_out_def rows  (2+2=4, NOT < 4)
-    // The state_out_def row is lost at stage 2; the fishing row was already there.
-    let rows_stage_1 = result.templates[1].num_rows;
-    let rows_stage_2 = result.templates[2].num_rows;
-    assert_eq!(
-        rows_stage_1,
-        rows_stage_2 + 1,
-        "stage 2 must have exactly 1 fewer row than stage 1 \
-         (state_out_def drops at the maturity boundary; fishing was already present)"
-    );
-
-    // Verify that the fishing row is present at both stage 1 and stage 2
-    // (always-active: equality bounds 0==0 at every stage).
-    let fishing_row_start = one_ant_fishing_row_start(2, 1);
-    for stage_idx in [1_usize, 2] {
-        let t = &result.templates[stage_idx];
-        assert_eq!(
-            t.row_lower[fishing_row_start], 0.0,
-            "stage {stage_idx} fishing row must have row_lower == 0.0 (equality row, always-active)"
-        );
-        assert_eq!(
-            t.row_upper[fishing_row_start], 0.0,
-            "stage {stage_idx} fishing row must have row_upper == 0.0 (equality row, always-active)"
-        );
-    }
 }
 
 // ── Fishing-row count stage-invariance under always-active predicate ─────────
@@ -10980,9 +10388,9 @@ fn test_anticipated_state_columns_unconstrained() {
     .expect("build ok");
 
     let t = &result.templates[0];
-    // col_anticipated_state_start = 0 for N=0 hydros.
+    // col_anticipated_state_start = 0 for N=0 hydros (N*(1+L) = 0).
     // n_anticipated=2, k_max=2 → n_ant_state=4 columns: indices 0..3.
-    let col_state_start = col_ant_state_start_zero_hydros();
+    let col_state_start = 0_usize; // N*(1+L) = 0 when N=0
     let n_ant_state = 2 * 2; // n_anticipated * k_max
 
     for i in 0..n_ant_state {
@@ -10997,94 +10405,6 @@ fn test_anticipated_state_columns_unconstrained() {
             "col {col}: col_upper must be +INF, got {}",
             t.col_upper[col]
         );
-    }
-}
-
-// ── AC-2: state-fixing rows have equality bounds 0 == 0 ───────────────────
-
-/// AC-2: with two anticipated thermals (K_0=1, K_1=2) → n_ant_state=4,
-/// all 4 state-fixing rows have row_lower == row_upper == 0.0.
-///
-/// Row bounds default to 0.0 in fill_stage_rows; no explicit fill is needed
-/// (the rows fall within the 0-initialised vector). This test confirms the
-/// structural invariant.
-#[test]
-fn test_anticipated_state_fixing_rows_equality_zero() {
-    let system = two_anticipated_thermal_system(4);
-    let result = build_stage_templates(
-        &system,
-        no_penalty_config(),
-        &PrecomputedPar::default(),
-        &PrecomputedNormal::default(),
-        &default_production(&system),
-        &default_evaporation(&system),
-        &ResolvedParameters::default(),
-    )
-    .expect("build ok");
-
-    let t = &result.templates[0];
-    // row_anticipated_state_fixing_start = 0 for N=0 hydros.
-    // n_ant_state = 4.
-    let row_fix_start = 0_usize; // N*(1+L) = 0
-    let n_ant_state = 2 * 2;
-
-    for i in 0..n_ant_state {
-        let row = row_fix_start + i;
-        assert!(
-            (t.row_lower[row] - 0.0).abs() < f64::EPSILON,
-            "row {row}: row_lower must be 0.0, got {}",
-            t.row_lower[row]
-        );
-        assert!(
-            (t.row_upper[row] - 0.0).abs() < f64::EPSILON,
-            "row {row}: row_upper must be 0.0, got {}",
-            t.row_upper[row]
-        );
-    }
-}
-
-// ── AC-3: state-fixing CSC diagonal entries are +1.0 ─────────────────────
-
-/// AC-3: with two anticipated thermals (K_0=2, K_1=3) → n_anticipated=2, k_max=3,
-/// for each (slot, plant) in [0..k_max) × [0..n_anticipated), the CSC entry at
-/// (col_anticipated_state_start + slot*n_anticipated + plant,
-///  row_anticipated_state_fixing_start + slot*n_anticipated + plant)
-/// is exactly +1.0.
-///
-/// Uses `two_anticipated_thermal_system_k23` so that `slot` runs over 3 values,
-/// exercising the full loop `slot in 0..k_max` with k_max=3.
-#[test]
-fn test_anticipated_state_fixing_csc_diagonal_plus_one() {
-    let system = two_anticipated_thermal_system_k23(4);
-    let result = build_stage_templates(
-        &system,
-        no_penalty_config(),
-        &PrecomputedPar::default(),
-        &PrecomputedNormal::default(),
-        &default_production(&system),
-        &default_evaporation(&system),
-        &ResolvedParameters::default(),
-    )
-    .expect("build ok");
-
-    let t = &result.templates[0];
-    let n_anticipated = 2_usize;
-    let k_max = 3_usize; // K_0=2, K_1=3 → k_max=3 (6 diagonal entries total)
-    // col_anticipated_state_start = row_anticipated_state_fixing_start = 0 (no hydros).
-    let col_state_start = col_ant_state_start_zero_hydros();
-    let row_fix_start = 0_usize;
-
-    for slot in 0..k_max {
-        for plant in 0..n_anticipated {
-            let col = col_state_start + slot * n_anticipated + plant;
-            let row = row_fix_start + slot * n_anticipated + plant;
-            let entries = csc_entries_at(t, col, row);
-            assert_eq!(
-                entries,
-                vec![1.0],
-                "slot={slot} plant={plant}: CSC at (col={col}, row={row}) must be [+1.0], got {entries:?}"
-            );
-        }
     }
 }
 
@@ -11208,33 +10528,6 @@ fn test_n_state_includes_n_ant_state() {
         t.n_state, expected_n_state,
         "n_state must equal N*(1+L) + n_ant_state = {expected_n_state}, got {}",
         t.n_state
-    );
-}
-
-// ── AC-7: n_dual_relevant equals n_state ──────────────────────────────────
-
-/// AC-7: same fixture as AC-6 (1 hydro, max_par_order=1, 1 anticipated thermal K=2).
-/// `n_dual_relevant == n_state == 4` (every state-fixing row contributes a dual,
-/// including the n_ant_state anticipated rows).
-#[test]
-fn test_n_dual_relevant_includes_anticipated_state_fixing() {
-    let system = one_hydro_one_ant_system(4);
-    let result = build_stage_templates(
-        &system,
-        no_penalty_config(),
-        &PrecomputedPar::default(),
-        &PrecomputedNormal::default(),
-        &default_production(&system),
-        &default_evaporation(&system),
-        &ResolvedParameters::default(),
-    )
-    .expect("build ok");
-
-    let t = &result.templates[0];
-    assert_eq!(
-        t.n_dual_relevant, t.n_state,
-        "n_dual_relevant must equal n_state ({}) for all anticipated configurations, got {}",
-        t.n_state, t.n_dual_relevant
     );
 }
 
@@ -11779,16 +11072,21 @@ fn rt_col_ant_dec_start(k: usize) -> usize {
 
 /// `row_anticipated_state_fixing_start` for the roundtrip geometry (N=1, L=0).
 ///
-/// = N*(1+L) = 1.
+/// Phase 1: state-fixing rows removed. This function is kept for call-site
+/// compatibility but the row it returned no longer exists.
+///
+/// Dead after Phase 1 — callers must remove their uses of this row.
+#[allow(dead_code)]
 fn rt_row_ant_state_fix_start() -> usize {
-    1
+    0 // Phase 1: state-fixing rows gone; this function is dead
 }
 
 /// `row_anticipated_fishing_start` for the roundtrip geometry.
 ///
-/// = min_generation_start + n_op_rows = (11+K) + 2 = 13+K.
-fn rt_row_ant_fishing_start(k: usize) -> usize {
-    13 + k
+/// Phase 1: state-fixing rows (K) removed from the LP.
+/// = min_generation_start + n_op_rows = 11 + 1 = 12 (constant, no longer K-dependent).
+fn rt_row_ant_fishing_start(_k: usize) -> usize {
+    12
 }
 
 /// Expected `num_cols` for the roundtrip geometry with anticipation K=k.
@@ -11803,14 +11101,16 @@ fn rt_expected_num_cols(k: usize) -> usize {
 /// Expected `num_rows` for the roundtrip geometry with anticipation K=k and
 /// stage index `stage_idx`.
 ///
+/// Phase 1: state-fixing rows (1 storage + K anticipated) removed from LP.
 /// Fishing row always-active (one row per anticipated plant = 1 plant here).
 /// `anticipated_state_out_def` row active iff `stage_idx + k < 4` (strict gate;
 /// n_stages=4 in the roundtrip geometry).
 fn rt_expected_num_rows(k: usize, stage_idx: usize) -> usize {
-    // Always-active predicate: 1 fishing row at every stage (n_anticipated=1).
-    let fishing = 1_usize;
+    // Phase 1: base = 12 (was 13 + k; state-fixing rows removed).
+    let fishing = 1_usize; // always-active: 1 fishing row per anticipated plant
     let state_out_def = usize::from(stage_idx + k < 4);
-    13 + k + fishing + state_out_def
+    let _ = k; // k no longer affects num_rows after Phase 1
+    12 + fishing + state_out_def
 }
 
 // ─── AC-1: K=1 roundtrip integration ────────────────────────────────────────
@@ -11852,8 +11152,7 @@ fn test_anticipated_thermals_lp_roundtrip_k1() {
     let col_ant_state = rt_col_ant_state_start(); // 1
     let col_ant_dec = rt_col_ant_dec_start(k); // 13
     let col_thermal = rt_col_thermal_start(k); // 11
-    let row_fix_start = rt_row_ant_state_fix_start(); // 1
-    let row_fish_start = rt_row_ant_fishing_start(k); // 14
+    let row_fish_start = rt_row_ant_fishing_start(k); // Phase 1: 12
 
     // ── n_state (AC-1.a) ─────────────────────────────────────────────────────
     for t in 0..n_stages {
@@ -11924,36 +11223,6 @@ fn test_anticipated_thermals_lp_roundtrip_k1() {
         "K=1, stage 0: anticipated_decision objective must be {expected_obj:.6}, got {:.6}",
         result.templates[0].objective[col_ant_dec]
     );
-
-    // ── State-fixing CSC diagonal +1.0 for slot 0, plant 0 (AC-1.f) ─────────
-    // n_anticipated=1, k_max=1: one (slot, plant) pair: (0, 0).
-    // col = col_ant_state + 0*1 + 0 = 1; row = row_fix_start + 0*1 + 0 = 1.
-    {
-        let t = &result.templates[0];
-        let col = col_ant_state;
-        let row = row_fix_start;
-        let entries = csc_entries_at(t, col, row);
-        assert_eq!(
-            entries,
-            vec![1.0],
-            "K=1, stage 0: state-fixing CSC at (col={col}, row={row}) must be [+1.0], got {entries:?}"
-        );
-    }
-
-    // ── Decision-write no longer at Cat 6 state-fixing slot (AC-1.g) ─────────
-    // Under Alternative A, the decision column no longer writes to the state-fixing slot K-1.
-    // The positive wiring (decision -1.0 / state_out +1.0 at the def row) is added by ticket-010.
-    // This section verifies the removal: old Cat 6 entry must be absent at stage 0 (active).
-    {
-        let t = &result.templates[0];
-        let old_row = row_fix_start + (k - 1); // 1+0 = 1
-        let old_entries = csc_entries_at(t, col_ant_dec, old_row);
-        assert!(
-            old_entries.is_empty(),
-            "K=1, stage 0: decision column must have NO entry at old state_fixing row={old_row} \
-             (Cat 6 write removed in ticket-008), got {old_entries:?}"
-        );
-    }
 
     // ── Fishing row CSC at stage 1 (K=1 <= 1) (AC-1.h) ──────────────────────
     {
@@ -12053,8 +11322,7 @@ fn test_anticipated_thermals_lp_roundtrip_k2() {
     let col_ant_state = rt_col_ant_state_start(); // 1
     let col_ant_dec = rt_col_ant_dec_start(k); // 14
     let col_thermal = rt_col_thermal_start(k); // 12
-    let row_fix_start = rt_row_ant_state_fix_start(); // 1
-    let row_fish_start = rt_row_ant_fishing_start(k); // 15
+    let row_fish_start = rt_row_ant_fishing_start(k); // Phase 1: 12
 
     // ── n_state (AC-2.a) ─────────────────────────────────────────────────────
     for t in 0..n_stages {
@@ -12117,54 +11385,6 @@ fn test_anticipated_thermals_lp_roundtrip_k2() {
         "K=2, stage 0: anticipated_decision objective must be {expected_obj:.6}, got {:.6}",
         result.templates[0].objective[col_ant_dec]
     );
-
-    // ── State-fixing CSC diagonal (AC-2.f) ───────────────────────────────────
-    // n_anticipated=1, k_max=2: 2 (slot, plant) pairs.
-    // (slot=0, plant=0): col=1, row=row_fix_start+0=1.
-    // (slot=1, plant=0): col=2, row=row_fix_start+1=2.
-    {
-        let t = &result.templates[0];
-        for slot in 0..k {
-            let col = col_ant_state + slot; // slot-major, n_anticipated=1
-            let row = row_fix_start + slot;
-            let entries = csc_entries_at(t, col, row);
-            assert_eq!(
-                entries,
-                vec![1.0],
-                "K=2, stage 0: state-fixing CSC at (col={col}, row={row}) must be [+1.0], \
-                 got {entries:?}"
-            );
-        }
-    }
-
-    // ── Decision-write no longer at Cat 6 state-fixing slot (AC-2.g) ─────────
-    // Under Alternative A, the decision column no longer writes to the state-fixing slot K-1.
-    // The positive wiring (decision -1.0 / state_out +1.0 at the def row) is added by ticket-010.
-    // This section verifies the removal: old Cat 6 entry must be absent at stage 0 (active).
-    {
-        let t = &result.templates[0];
-        let old_row = row_fix_start + (k - 1); // 1+1 = 2
-        let old_entries = csc_entries_at(t, col_ant_dec, old_row);
-        assert!(
-            old_entries.is_empty(),
-            "K=2, stage 0: decision column must have NO entry at old state_fixing row={old_row} \
-             (Cat 6 write removed in ticket-008), got {old_entries:?}"
-        );
-    }
-
-    // ── Decision write absent at stages 2 and 3 (inactive under strict predicate) (AC-2.g) ─────
-    for inactive_stage in 2..n_stages {
-        let t = &result.templates[inactive_stage]; // inactive (2+2=4 NOT < 4, 3+2=5>4)
-        for slot in 0..k {
-            let row = row_fix_start + slot;
-            let entries = csc_entries_at(t, col_ant_dec, row);
-            assert!(
-                entries.is_empty(),
-                "K=2, stage {inactive_stage} (inactive): decision-write CSC at row {row} must be empty, \
-                 got {entries:?}"
-            );
-        }
-    }
 
     // ── Fishing row CSC at stage 2 (K=2 <= 2) (AC-2.h) ──────────────────────
     {
@@ -12264,7 +11484,6 @@ fn test_anticipated_thermals_lp_roundtrip_k3() {
     let col_ant_state = rt_col_ant_state_start(); // 1
     let col_ant_dec = rt_col_ant_dec_start(k); // 15
     let col_thermal = rt_col_thermal_start(k); // 13
-    let row_fix_start = rt_row_ant_state_fix_start(); // 1
     let row_fish_start = rt_row_ant_fishing_start(k); // 16
 
     // ── n_state (AC-3.a) ─────────────────────────────────────────────────────
@@ -12328,52 +11547,6 @@ fn test_anticipated_thermals_lp_roundtrip_k3() {
         "K=3, stage 0: anticipated_decision objective must be {expected_obj:.6}, got {:.6}",
         result.templates[0].objective[col_ant_dec]
     );
-
-    // ── State-fixing CSC diagonal (AC-3.f) ───────────────────────────────────
-    // n_anticipated=1, k_max=3: 3 (slot, plant) pairs.
-    {
-        let t = &result.templates[0];
-        for slot in 0..k {
-            let col = col_ant_state + slot;
-            let row = row_fix_start + slot;
-            let entries = csc_entries_at(t, col, row);
-            assert_eq!(
-                entries,
-                vec![1.0],
-                "K=3, stage 0: state-fixing CSC at (col={col}, row={row}) must be [+1.0], \
-                 got {entries:?}"
-            );
-        }
-    }
-
-    // ── Decision-write no longer at Cat 6 state-fixing slot (AC-3.g) ─────────
-    // Under Alternative A, the decision column no longer writes to the state-fixing slot K-1.
-    // The positive wiring (decision -1.0 / state_out +1.0 at the def row) is added by ticket-010.
-    // This section verifies the removal: old Cat 6 entry must be absent at stage 0 (active).
-    {
-        let t = &result.templates[0];
-        let old_row = row_fix_start + (k - 1); // 1+2 = 3
-        let old_entries = csc_entries_at(t, col_ant_dec, old_row);
-        assert!(
-            old_entries.is_empty(),
-            "K=3, stage 0: decision column must have NO entry at old state_fixing row={old_row} \
-             (Cat 6 write removed in ticket-008), got {old_entries:?}"
-        );
-    }
-
-    // ── Decision write absent at stages 1, 2, 3 (inactive under strict predicate) ──
-    for t_idx in [1_usize, 2, 3] {
-        let t = &result.templates[t_idx];
-        for slot in 0..k {
-            let row = row_fix_start + slot;
-            let entries = csc_entries_at(t, col_ant_dec, row);
-            assert!(
-                entries.is_empty(),
-                "K=3, stage {t_idx} (inactive): decision-write CSC at row {row} must be empty, \
-                 got {entries:?}"
-            );
-        }
-    }
 
     // ── Row-count invariants across stages (K=3 implicit) ───────────────────
     // For K=3, n_stages=4:
@@ -12575,10 +11748,10 @@ fn test_anticipated_thermals_lp_roundtrip_k0_baseline_parity() {
         result_baseline.templates[0].num_cols, 26,
         "K=0 baseline: num_cols must be 26 (no anticipated state or decision columns)"
     );
-    // num_rows = 13 (K=0 baseline, no fishing rows).
+    // num_rows = 12 (K=0 baseline after Phase 1: state-fixing rows removed).
     assert_eq!(
-        result_baseline.templates[0].num_rows, 13,
-        "K=0 baseline: num_rows must be 13 (no fishing rows)"
+        result_baseline.templates[0].num_rows, 12,
+        "K=0 baseline: num_rows must be 12 (state-fixing rows removed in Phase 1)"
     );
 }
 

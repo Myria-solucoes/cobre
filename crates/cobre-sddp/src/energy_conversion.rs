@@ -6,10 +6,10 @@
 //! The output [`EnergyConversionSet`] is consumed by simulation extraction
 //! and by the energy-balance constraints that compute ENA and EARM.
 //!
-//! ## Ownership of derivation logic
+//! ## Derivation logic
 //!
-//! This module owns the data layout and the placeholder builder. The actual
-//! derivation lives in sibling tickets:
+//! This module owns both the data layout and the builder that derives every
+//! scalar:
 //!
 //! - non-FPHA `ρ_eq` derivation populates `equivalent_productivity_mw_per_m3s`
 //!   from the model's stored scalar.

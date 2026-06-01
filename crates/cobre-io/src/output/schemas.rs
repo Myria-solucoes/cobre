@@ -5,7 +5,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 
 /// Schema for `simulation/costs/` — stage and block-level cost breakdown.
 ///
-/// 20 fields. `block_id` is nullable. See output-schemas.md SS5.1.
+/// 26 fields. `block_id` is nullable. See output-schemas.md SS5.1.
 pub(crate) fn costs_schema() -> Schema {
     Schema::new(vec![
         Field::new("stage_id", DataType::Int32, false),
@@ -254,7 +254,7 @@ pub(crate) fn convergence_schema() -> Schema {
 /// rank-only sequential values (`worker_id = NULL`), and one row per
 /// `(iteration, rank, worker_id)` for per-worker parallel-region values.
 /// `SUM(col) GROUP BY iteration` recovers the single-row-per-iteration
-/// value for each of the 16 timing columns.
+/// value for each of the 15 timing columns.
 ///
 /// Top-level non-overlapping phases: `forward_wall_ms`,
 /// `backward_wall_ms`, `cut_selection_ms`, `mpi_allreduce_ms`,
@@ -305,12 +305,11 @@ pub(crate) fn rank_timing_schema() -> Schema {
 /// Schema for `training/solver/iterations.parquet` -- per-iteration, per-phase
 /// solver statistics for diagnosing LP conditioning and retry behavior.
 ///
-/// 19 columns. One row per (iteration, phase, stage, opening) tuple for
+/// 18 columns. One row per (iteration, phase, stage, opening) tuple for
 /// backward rows; forward, `lower_bound`, and simulation rows carry
 /// `opening = NULL`. The `rank` and `worker_id` columns (positions 5 and 6,
 /// 0-indexed) are `Int32 nullable`; they are `NULL` for rank-aggregated rows
-/// and carry the producing rank's index and worker index respectively. Includes
-/// one basis reconstruction column: `basis_reconstructions`.
+/// and carry the producing rank's index and worker index respectively.
 pub(crate) fn solver_iterations_schema() -> Schema {
     Schema::new(vec![
         Field::new("iteration", DataType::UInt32, false),
@@ -331,7 +330,6 @@ pub(crate) fn solver_iterations_schema() -> Schema {
         Field::new("load_model_time_ms", DataType::Float64, false),
         Field::new("set_bounds_time_ms", DataType::Float64, false),
         Field::new("basis_set_time_ms", DataType::Float64, false),
-        Field::new("basis_reconstructions", DataType::UInt64, false),
     ])
 }
 
@@ -376,7 +374,7 @@ pub(crate) fn hydro_energy_productivity_schema() -> Schema {
 /// Schema for `training/cut_selection/iterations.parquet` — per-stage
 /// row-selection statistics.
 ///
-/// 9 fields. One row per (iteration, stage) pair. The two nullable Int32
+/// 11 fields. One row per (iteration, stage) pair. The two nullable Int32
 /// columns (`budget_evicted`, `active_after_budget`) are `None` when
 /// budget enforcement is disabled.
 pub(crate) fn row_selection_schema() -> Schema {
@@ -386,6 +384,7 @@ pub(crate) fn row_selection_schema() -> Schema {
         Field::new("cuts_populated", DataType::Int32, false),
         Field::new("cuts_active_before", DataType::Int32, false),
         Field::new("cuts_deactivated", DataType::Int32, false),
+        Field::new("cuts_reactivated", DataType::Int32, false),
         Field::new("cuts_active_after", DataType::Int32, false),
         Field::new("selection_time_ms", DataType::Float64, false),
         Field::new("budget_evicted", DataType::Int32, true),
@@ -835,19 +834,19 @@ mod tests {
         let schema = row_selection_schema();
         assert_eq!(
             schema.fields().len(),
-            9,
-            "cut_selection schema must have 9 fields"
+            10,
+            "cut_selection schema must have 10 fields"
         );
-        // First 6 fields are non-nullable Int32.
-        for field in &schema.fields()[..6] {
+        // First 7 fields (indices 0-6) are non-nullable Int32.
+        for field in &schema.fields()[..7] {
             assert_eq!(field.data_type(), &DataType::Int32);
             assert!(!field.is_nullable());
         }
-        // Field 7 (index 6): selection_time_ms, Float64, non-nullable.
-        assert_eq!(schema.fields()[6].name(), "selection_time_ms");
-        assert_eq!(schema.fields()[6].data_type(), &DataType::Float64);
-        assert!(!schema.fields()[6].is_nullable());
-        // Fields 8-9 (indices 7-8): nullable Int32.
+        // Field 8 (index 7): selection_time_ms, Float64, non-nullable.
+        assert_eq!(schema.fields()[7].name(), "selection_time_ms");
+        assert_eq!(schema.fields()[7].data_type(), &DataType::Float64);
+        assert!(!schema.fields()[7].is_nullable());
+        // Fields 9-10 (indices 8-9): nullable Int32.
         for &name in &["budget_evicted", "active_after_budget"] {
             let field = schema
                 .field_with_name(name)
@@ -859,6 +858,10 @@ mod tests {
             );
             assert!(field.is_nullable(), "field '{name}' must be nullable");
         }
+        assert!(
+            schema.field_with_name("cuts_in_lp").is_err(),
+            "cuts_in_lp must not be present in schema"
+        );
     }
 
     #[test]
@@ -866,8 +869,8 @@ mod tests {
         let schema = solver_iterations_schema();
         assert_eq!(
             schema.fields().len(),
-            19,
-            "solver_iterations schema must have 19 fields"
+            18,
+            "solver_iterations schema must have 18 fields"
         );
         let expected: &[(&str, DataType, bool)] = &[
             ("iteration", DataType::UInt32, false),
@@ -888,7 +891,6 @@ mod tests {
             ("load_model_time_ms", DataType::Float64, false),
             ("set_bounds_time_ms", DataType::Float64, false),
             ("basis_set_time_ms", DataType::Float64, false),
-            ("basis_reconstructions", DataType::UInt64, false),
         ];
         for (i, (name, dtype, nullable)) in expected.iter().enumerate() {
             let field = &schema.fields()[i];
@@ -976,8 +978,8 @@ mod tests {
             ("convergence", 13),
             ("iteration_timing", 18),
             ("rank_timing", 8),
-            ("cut_selection", 9),
-            ("solver_iterations", 19),
+            ("cut_selection", 10),
+            ("solver_iterations", 18),
             ("retry_histogram", 5),
         ];
         for ((name, actual), (_, exp)) in counts.iter().zip(expected.iter()) {

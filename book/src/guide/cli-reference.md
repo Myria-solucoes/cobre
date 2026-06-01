@@ -81,11 +81,12 @@ Stochastic artifact export is controlled by `exports.stochastic` in `config.json
 
 ### Options
 
-| Option           | Type    | Default              | Description                                                                                                                                                            |
-| ---------------- | ------- | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--output <DIR>` | Path    | `<CASE_DIR>/output/` | Output directory for results                                                                                                                                           |
-| `--threads <N>`  | integer | `1`                  | Number of worker threads per MPI rank. Each thread solves its own LP instances; scenarios are distributed across threads. Resolves: `--threads` > `COBRE_THREADS` > 1. |
-| `--quiet`        | flag    | off                  | Suppress the banner and progress bars. Errors still go to stderr                                                                                                       |
+| Option                     | Type    | Default              | Description                                                                                                                                                            |
+| -------------------------- | ------- | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--output <DIR>`           | Path    | `<CASE_DIR>/output/` | Output directory for results                                                                                                                                           |
+| `--threads <N>`            | integer | `1`                  | Number of worker threads per MPI rank. Each thread solves its own LP instances; scenarios are distributed across threads. Resolves: `--threads` > `COBRE_THREADS` > 1. |
+| `--quiet`                  | flag    | off                  | Suppress the banner and progress bars. Errors still go to stderr                                                                                                       |
+| `--enable-inside-backward` | flag    | off                  | **Experimental.** Run cut selection inside the backward pass (in-backward cut selection).                                                                              |
 
 ### Config-First Principle
 
@@ -351,7 +352,7 @@ support, host architecture, and build profile.
 ### Output Format
 
 ```
-cobre   v0.7.0
+cobre   v0.8.0
 solver: HiGHS
 comm:   local
 zstd:   enabled

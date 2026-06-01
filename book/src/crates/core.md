@@ -374,8 +374,9 @@ order for determinism.
 ## Penalty resolution
 
 Penalty values are resolved from a three-tier cascade: global defaults,
-entity-level overrides, and stage-level overrides. The first two tiers are
-implemented in Phase 1. Stage-varying overrides are deferred to Phase 2.
+entity-level overrides, and stage-level overrides. All three tiers are
+resolved at case-load time; stage-level overrides are supplied via
+`constraints/penalty_overrides_*.parquet`.
 
 `GlobalPenaltyDefaults` holds system-wide fallback values for all penalty fields:
 
@@ -441,7 +442,7 @@ the resolved `HydroPenalties` (with no `Option`s) is what is stored on each
 | `InvalidReference`     | A cross-reference field points to an ID that does not exist                    |
 | `CascadeCycle`         | The hydro `downstream_id` graph contains a cycle                               |
 | `InvalidFillingConfig` | A hydro's filling configuration has non-positive inflow or no `entry_stage_id` |
-| `DisconnectedBus`      | A bus has no lines, generators, or loads (reserved for Phase 2 validation)     |
+| `DisconnectedBus`      | A bus has no lines, generators, or loads (defined but not yet enforced)        |
 | `InvalidPenalty`       | An entity-level penalty value is invalid (e.g., negative cost)                 |
 
 All variants implement `Display` and the standard `Error` trait. The error

@@ -15,10 +15,13 @@
 //! This backend imposes zero overhead and zero external dependencies. As a zero-sized
 //! type (ZST), it occupies zero bytes at runtime and has no construction cost.
 
-use crate::{
-    CommData, CommError, Communicator, LocalCommunicator, ReduceOp, SharedMemoryProvider,
-    SharedRegion,
-};
+use crate::{CommData, CommError, Communicator, ReduceOp};
+
+#[cfg(feature = "shared-memory")]
+use crate::{SharedMemoryProvider, SharedRegion};
+
+#[cfg(feature = "shared-memory")]
+use crate::traits::{LocalCommKind, LocalCommunicator};
 
 /// Single-process communication backend with identity collective semantics.
 ///
@@ -176,20 +179,13 @@ impl Communicator for LocalBackend {
 /// `HeapRegion<T>` is `Send + Sync` when `T: Send + Sync`, which is guaranteed
 /// by the `CommData` bound.
 ///
-/// # Examples
-///
-/// ```rust
-/// use cobre_comm::{LocalBackend, SharedMemoryProvider, SharedRegion};
-///
-/// let backend = LocalBackend;
-/// let mut region = backend.create_shared_region::<f64>(5).unwrap();
-/// region.as_mut_slice().copy_from_slice(&[1.0, 2.0, 3.0, 4.0, 5.0]);
-/// assert_eq!(region.as_slice(), &[1.0, 2.0, 3.0, 4.0, 5.0]);
-/// ```
+/// Only available with the `shared-memory` Cargo feature.
+#[cfg(feature = "shared-memory")]
 pub struct HeapRegion<T: CommData> {
     data: Vec<T>,
 }
 
+#[cfg(feature = "shared-memory")]
 impl<T: CommData> HeapRegion<T> {
     /// Construct a `HeapRegion` with `count` zero-initialized elements.
     ///
@@ -204,6 +200,7 @@ impl<T: CommData> HeapRegion<T> {
     }
 }
 
+#[cfg(feature = "shared-memory")]
 impl<T: CommData> SharedRegion<T> for HeapRegion<T> {
     fn as_slice(&self) -> &[T] {
         &self.data
@@ -218,6 +215,7 @@ impl<T: CommData> SharedRegion<T> for HeapRegion<T> {
     }
 }
 
+#[cfg(feature = "shared-memory")]
 impl SharedMemoryProvider for LocalBackend {
     type Region<T: CommData> = HeapRegion<T>;
 
@@ -240,14 +238,16 @@ impl SharedMemoryProvider for LocalBackend {
     /// # Errors
     ///
     /// Always returns `Ok(...)`.
-    fn split_local(&self) -> Result<Box<dyn LocalCommunicator>, CommError> {
-        Ok(Box::new(LocalBackend))
+    fn split_local(&self) -> Result<LocalCommKind, CommError> {
+        Ok(LocalCommKind::Local(LocalBackend))
     }
+
     fn is_leader(&self) -> bool {
         true
     }
 }
 
+#[cfg(feature = "shared-memory")]
 impl LocalCommunicator for LocalBackend {
     fn rank(&self) -> usize {
         0
@@ -296,10 +296,13 @@ impl crate::TopologyProvider for LocalBackend {
 #[cfg(test)]
 #[allow(clippy::float_cmp)]
 mod tests {
-    use super::{HeapRegion, LocalBackend};
-    use crate::{
-        CommError, Communicator, LocalCommunicator, ReduceOp, SharedMemoryProvider, SharedRegion,
-    };
+    use super::LocalBackend;
+    use crate::{CommError, Communicator, ReduceOp};
+
+    #[cfg(feature = "shared-memory")]
+    use super::HeapRegion;
+    #[cfg(feature = "shared-memory")]
+    use crate::{LocalCommunicator, SharedMemoryProvider, SharedRegion};
 
     #[test]
     fn test_local_backend_is_zst() {
@@ -511,33 +514,38 @@ mod tests {
         assert_send_sync::<LocalBackend>();
     }
 
+    #[cfg(feature = "shared-memory")]
     #[test]
     fn test_local_communicator_rank() {
         let comm = LocalBackend;
         assert_eq!(LocalCommunicator::rank(&comm), 0);
     }
 
+    #[cfg(feature = "shared-memory")]
     #[test]
     fn test_local_communicator_size() {
         let comm = LocalBackend;
         assert_eq!(LocalCommunicator::size(&comm), 1);
     }
 
+    #[cfg(feature = "shared-memory")]
     #[test]
     fn test_local_communicator_barrier_noop() {
         let comm = LocalBackend;
         assert!(LocalCommunicator::barrier(&comm).is_ok());
     }
 
+    #[cfg(feature = "shared-memory")]
     #[test]
-    fn test_local_communicator_as_dyn() {
+    fn test_local_communicator_as_trait_ref() {
+        use crate::traits::LocalCommunicator as LC;
         let comm = LocalBackend;
-        let dyn_comm: &dyn LocalCommunicator = &comm;
-        assert_eq!(dyn_comm.rank(), 0);
-        assert_eq!(dyn_comm.size(), 1);
-        assert!(dyn_comm.barrier().is_ok());
+        assert_eq!(LC::rank(&comm), 0);
+        assert_eq!(LC::size(&comm), 1);
+        assert!(LC::barrier(&comm).is_ok());
     }
 
+    #[cfg(feature = "shared-memory")]
     #[test]
     fn test_heap_region_create() {
         let backend = LocalBackend;
@@ -545,6 +553,7 @@ mod tests {
         assert_eq!(region.as_slice().len(), 10);
     }
 
+    #[cfg(feature = "shared-memory")]
     #[test]
     fn test_heap_region_write_read() {
         let backend = LocalBackend;
@@ -555,6 +564,7 @@ mod tests {
         assert_eq!(region.as_slice(), &[1.0, 2.0, 3.0, 4.0, 5.0]);
     }
 
+    #[cfg(feature = "shared-memory")]
     #[test]
     fn test_heap_region_fence_noop() {
         let backend = LocalBackend;
@@ -562,6 +572,7 @@ mod tests {
         assert!(region.fence().is_ok());
     }
 
+    #[cfg(feature = "shared-memory")]
     #[test]
     fn test_heap_region_zero_count() {
         let backend = LocalBackend;
@@ -569,6 +580,7 @@ mod tests {
         assert_eq!(region.as_slice().len(), 0);
     }
 
+    #[cfg(feature = "shared-memory")]
     #[test]
     fn test_local_create_shared_region() {
         let backend = LocalBackend;
@@ -577,6 +589,7 @@ mod tests {
         assert!(region.as_slice().iter().all(|&x| x == 0.0));
     }
 
+    #[cfg(feature = "shared-memory")]
     #[test]
     fn test_local_split_local() {
         let backend = LocalBackend;
@@ -585,26 +598,29 @@ mod tests {
         assert_eq!(local_comm.size(), 1);
     }
 
+    #[cfg(feature = "shared-memory")]
     #[test]
     fn test_local_is_leader() {
         let backend = LocalBackend;
         assert!(backend.is_leader());
     }
 
+    #[cfg(feature = "shared-memory")]
     #[test]
     fn test_heap_region_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<HeapRegion<f64>>();
     }
 
+    #[cfg(all(feature = "shared-memory", feature = "mpi"))]
     #[test]
-    #[cfg(feature = "mpi")]
     fn test_heap_region_new_crate_visible() {
         let region = HeapRegion::<f64>::new(5);
         assert_eq!(region.as_slice().len(), 5);
         assert!(region.as_slice().iter().all(|&x| x == 0.0));
     }
 
+    #[cfg(feature = "shared-memory")]
     #[test]
     fn test_heap_region_lifecycle() {
         let backend = LocalBackend;

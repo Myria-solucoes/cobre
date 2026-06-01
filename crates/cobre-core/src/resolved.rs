@@ -2044,7 +2044,7 @@ mod tests {
         assert_eq!(table.thermal_stage_axis_len(), 8);
     }
 
-    /// Parameter-sweep invariant test (epic-03 `anticipated_invariants`
+    /// Parameter-sweep invariant test (`anticipated_invariants`
     /// pattern). Asserts `thermal_stage_axis_len() == n_stages + k_max` across
     /// a 3 x 4 x 3 grid of configurations. The coverage gate at the end
     /// confirms every combination was reached.
