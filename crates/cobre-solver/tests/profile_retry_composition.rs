@@ -455,13 +455,15 @@ mod tests {
         );
     }
 
-    // ── Decision 2 regression: profile re-applied on every solve ─────────────
+    // ── Delta-only profile dispatch: solve() does not re-apply ───────────────
     //
-    // ProfiledSolver::solve() must call apply_profile() before forwarding to
-    // the inner solver. This ensures that any HiGHS internal option reset
-    // between solves is overridden by the active profile. The regression test
-    // verifies that each solve() call dispatches exactly one apply_profile call
-    // to the inner solver.
+    // ProfiledSolver installs the active profile at phase boundaries via
+    // set_profile (delta-gated by PartialEq) and re-applies it on the retry
+    // path. solve() itself does NOT re-apply the profile: on the
+    // forward/backward/simulation hot path the inner solver's options already
+    // equal the active profile, so re-applying on every solve would issue
+    // redundant FFI option setters. This test verifies that solves with no
+    // intervening profile change dispatch zero additional apply_profile calls.
 
     /// Counts calls to `apply_profile`.
     struct SetterCountMock {
@@ -513,15 +515,12 @@ mod tests {
         fn set_ipm_iteration_limit_profile(&mut self, _v: u32) {}
     }
 
-    /// Regression: each `ProfiledSolver::solve()` must dispatch exactly one
-    /// `apply_profile` call to the inner solver (to survive any solver-internal
-    /// option reset between solves), even without any intervening `set_profile`
-    /// call.
-    ///
-    /// After N solves with no `set_profile` call in between, the total
-    /// `apply_profile` count must equal N.
+    /// Delta-only dispatch: once a profile is installed via `set_profile`,
+    /// subsequent `solve()` calls with no intervening profile change dispatch
+    /// no further `apply_profile` calls to the inner solver, and re-installing
+    /// the identical profile is a no-op.
     #[test]
-    fn profile_reapplied_on_every_solve() {
+    fn solve_does_not_reapply_unchanged_profile() {
         let mock = SetterCountMock::new();
         let mut solver = ProfiledSolver::new(mock);
 
@@ -546,10 +545,20 @@ mod tests {
             let _ = solver.solve(None);
         }
 
-        let count = solver.inner().apply_profile_call_count.get();
+        // solve() must NOT re-apply an unchanged profile: the inner solver's
+        // options already equal the active profile on the hot path.
+        let solve_count = solver.inner().apply_profile_call_count.get();
         assert_eq!(
-            count, n,
-            "each solve() must dispatch one apply_profile call; expected {n}, got {count}"
+            solve_count, 0,
+            "solve() must not re-apply an unchanged profile; expected 0, got {solve_count}"
+        );
+
+        // Re-installing the identical profile is a delta-gated no-op.
+        solver.set_profile(&non_default);
+        let after_reset = solver.inner().apply_profile_call_count.get();
+        assert_eq!(
+            after_reset, 0,
+            "set_profile with an unchanged profile must be a no-op; expected 0, got {after_reset}"
         );
     }
 }
