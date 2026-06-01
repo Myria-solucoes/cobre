@@ -64,8 +64,9 @@ pub trait SolverInterface: Send {
     /// `ProfiledSolver` can perform delta-tracking field comparison and construct
     /// a default profile without a factory function.
     ///
-    /// For `HighsSolver`, this is [`HighsProfile`].
-    /// For mock solvers in tests, this is typically [`HighsProfile`] (no-op impl).
+    /// For `HighsSolver`, this is [`HighsProfile`](crate::HighsProfile).
+    /// For mock solvers in tests, this is typically
+    /// [`HighsProfile`](crate::HighsProfile) (no-op impl).
     ///
     /// The associated-type form is deliberate: it gives each backend its **full**
     /// parameter surface with zero lowest-common-denominator loss — a backend's

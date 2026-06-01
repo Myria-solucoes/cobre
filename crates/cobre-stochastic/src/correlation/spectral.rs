@@ -69,8 +69,8 @@ impl SpectralFactor {
     ///
     /// Eigendecomposes the input as `C = V * diag(λ) * Vᵀ`, clips negative
     /// eigenvalues to 0.0, and returns `D = V * diag(√λ) * Vᵀ` such that
-    /// `D * Dᵀ ≈ C`. To observe how much clipping occurred, use
-    /// [`Self::decompose_with_diagnostics`].
+    /// `D * Dᵀ ≈ C`. To observe how much clipping occurred, use the
+    /// crate-internal `decompose_with_diagnostics`.
     ///
     /// Unlike Cholesky decomposition, this method succeeds for non-positive-
     /// definite and rank-deficient matrices.

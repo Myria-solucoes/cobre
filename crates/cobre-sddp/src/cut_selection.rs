@@ -7,7 +7,7 @@
 //!
 //! # Kernel
 //!
-//! Selection runs as a [`crate::gemm::gemm_block`]-based block-GEMM over trial
+//! Selection runs as a `gemm_block`-based block-GEMM over trial
 //! points. Each rayon task computes one `K × M_BLOCK` panel of
 //! `V = coef · stateᵀ`, applies the per-column survival rule into a local
 //! accumulator bitmap, and returns. The final reduce ORs all per-task bitmaps.
@@ -334,8 +334,8 @@ impl CutSelectionStrategy {
     ///
     /// # Parallelism (m-block fold/reduce)
     ///
-    /// Trial points are partitioned into [`M_BLOCK`]-sized blocks and each
-    /// block is dispatched to a rayon task that calls [`gemm_block`] once
+    /// Trial points are partitioned into `M_BLOCK`-sized blocks and each
+    /// block is dispatched to a rayon task that calls `gemm_block` once
     /// then applies the per-column survival rule into a per-task accumulator
     /// bitmap. The final reduce ORs all per-task bitmaps. Because trial
     /// points are independent and the merge (union) is commutative and

@@ -237,7 +237,7 @@ fn aggregate_hydro_production(hp: &HydroModelProvenance) -> HydroProductionProve
 /// populated from its fields; otherwise both are `None`.
 ///
 /// The `hydro_production` section is aggregated from `hydro_provenance` via
-/// [`aggregate_hydro_production`]: the FPHA counts tally `production_sources`,
+/// `aggregate_hydro_production`: the FPHA counts tally `production_sources`,
 /// and the evaporation reference counts tally `evaporation_reference_sources`
 /// restricted to hydros with modeled evaporation.
 #[must_use]

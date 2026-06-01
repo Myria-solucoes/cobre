@@ -256,7 +256,7 @@ impl crate::TopologyProvider for FerrompiBackend {
 /// Intra-node communicator wrapping a ferrompi shared communicator.
 ///
 /// Implements [`crate::LocalCommunicator`] only (not full [`crate::Communicator`]).
-/// Returned by [`FerrompiBackend::split_local`] as the `Ferrompi` variant of
+/// Returned by `FerrompiBackend::split_local` as the `Ferrompi` variant of
 /// [`crate::traits::LocalCommKind`].
 ///
 /// Held by value inside the [`crate::traits::LocalCommKind::Ferrompi`] variant.
