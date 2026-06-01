@@ -41,10 +41,10 @@
 #     serialise the policy checkpoint format (FlatBuffers schema SS3.1). The
 #     schema field names (cut_id, cut_intercept, PolicyCutRecord,
 #     StageCutsPayload, etc.) are part of the persisted binary format and
-#     cannot be renamed without a format-version bump. Renaming is tracked as
-#     tech debt in docs/ROADMAP.md under "Policy format genericity". Until that
-#     work is done, all files in the output/policy/ directory module are
-#     excluded from this gate.
+#     cannot be renamed without a format-version bump. Renaming is deferred
+#     tech debt: it requires a policy format-version bump (FlatBuffers SS3.1).
+#     Until that work is done, all files in the output/policy/ directory module
+#     are excluded from this gate.
 #
 # Exit codes:
 #   0 — No violations found.
@@ -76,8 +76,8 @@ SCAN_DIRS=(
 # (FlatBuffers schema SS3.1). The schema field names (cut_id, cut_intercept,
 # PolicyCutRecord, StageCutsPayload, etc.) are part of the persisted binary
 # format and cannot be renamed without a format-version bump. Renaming is
-# tracked as tech debt in docs/ROADMAP.md under "Policy format genericity".
-# Until that work is done, all four submodule files in output/policy/ are
+# deferred tech debt: it requires a policy format-version bump. Until that
+# work is done, all four submodule files in output/policy/ are
 # excluded from this gate.
 EXCLUDED_FILES=(
     "crates/cobre-io/src/output/policy/mod.rs"

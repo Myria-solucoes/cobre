@@ -21,8 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   be removed from the schema in the next release; remove the entry
   from `config.json` to silence the warning. The rationale is that
   basis reconstruction now matches stored cut rows by slot identity
-  alone, which makes the activity-window mask unobservable. See
-  `docs/design/basis-reconstruction-simplification.md`.
+  alone, which makes the activity-window mask unobservable.
 
 ### Changed
 

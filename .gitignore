@@ -34,6 +34,7 @@ plans/
 !.claude/architecture-rules.md
 !.claude/settings.json
 !.claude/hooks/
+!.claude/rules/
 assessment*.md
 
 # Stale vendor directory (real HiGHS submodule is at crates/cobre-solver/vendor/)
@@ -51,7 +52,6 @@ __pycache__/
 
 # Python bindings
 .venv.claude/
-.claude/
 doc/
 tests/slurm/staging/
 dhat-heap.json

@@ -30,7 +30,7 @@
 ## Install
 
 ```bash
-# Rust CLI (requires Rust 1.86+ and HiGHS)
+# Rust CLI (requires Rust 1.88+ and HiGHS)
 cargo install cobre-cli
 
 # Python bindings (3.12 / 3.13 / 3.14)
