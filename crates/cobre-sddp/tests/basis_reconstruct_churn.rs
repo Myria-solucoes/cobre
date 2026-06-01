@@ -284,10 +284,17 @@ fn basis_reconstruct_churn() {
          the ±5 % band [{LO_SIMPLEX}, {HI_SIMPLEX}] around pin={PINNED_SIMPLEX_ITERS}"
     );
 
-    assert_eq!(
-        result.final_lb, PINNED_FINAL_LB,
-        "basis_reconstruct_churn: final_lb={} does not match pin={PINNED_FINAL_LB:.15e} \
-         (lower bound must be deterministic for fixed seed and scenario count)",
+    // `final_lb` is deterministic for a fixed seed and scenario count, but its
+    // last ULP can shift with the HiGHS build or feasibility-tolerance settings
+    // (e.g. the 1e-9 tightening). Pin to a tight relative tolerance — strong
+    // enough to catch any real drift (~9 significant figures) while absorbing
+    // floating-point noise — mirroring the ±5 % band used for the simplex pin.
+    let lb_rel_err = (result.final_lb - PINNED_FINAL_LB).abs() / PINNED_FINAL_LB.abs();
+    assert!(
+        lb_rel_err <= 1e-9,
+        "basis_reconstruct_churn: final_lb={} deviates from pin={PINNED_FINAL_LB:.15e} \
+         by relative error {lb_rel_err:.3e} (> 1e-9); the lower bound must be \
+         deterministic for a fixed seed and scenario count",
         result.final_lb
     );
 }
