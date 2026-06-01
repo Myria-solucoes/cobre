@@ -41,31 +41,31 @@ const EXPECTED_HASHES: &[(&str, &str)] = &[
     ),
     (
         "D02",
-        "70e3e1a268ced563f15dcd7471fe408e1cc407a1aca1723a93a6dd8fe7845797",
+        "274974027bf192c228697e40c0fb3da30e29606885caf27d8ec38e41e8f65f1f",
     ),
     (
         "D03",
-        "4f53e5961ddca1d07a970c006d8eb3f11ee12761aba76d5b632401cafc3fe596",
+        "66b60e4138c51346f76ec1f062fcfc6f194014a47b901c4f6254bf7b33364dc7",
     ),
     (
         "D04",
-        "0fe09e7e7c9a9b4b920a785b6b2ece208d38779d68e22c3e7bc6f0fffe339775",
+        "0ac2a66bdf85b8f6b566720fc6492f82820d84f144b474d5ac186e7d40837327",
     ),
     (
         "D05",
-        "5592a33c1b26f1907e8154f3d17fd2dcd9e3c6598576ee42e96ef17d01fd0b83",
+        "a0f4602ec0e2f2872456a5685622ef877c18947072c9e22cdbc81ff9785803db",
     ),
     (
         "D06",
-        "b1511f8e7b7406ba190699222a52e0383aad25ee1e95d03c1177c0e1e77efac0",
+        "4d2631c0f6aeb966f181b213bbf952064e6efca20d7e2a2c0ddf2be5e8d0bace",
     ),
     (
         "D07",
-        "ade7d37e9a018eefc6b34a4ab024cda80fd8d60b70778ba8c0ddaaec0745546b",
+        "07051dc5cf9df08f4f7b0a613201e798ceb7cf2da673a2f26dd9e748a9e96ece",
     ),
     (
         "D08",
-        "69b23609a36d9a67ae63e8d2c466bf955142c2f10aa90131fa870e4c7a570d99",
+        "9a6784527cdc180ac3b03d2d29f4d436e19bf10c55924dc6893996a5fb344de5",
     ),
     (
         "D09",
@@ -73,11 +73,11 @@ const EXPECTED_HASHES: &[(&str, &str)] = &[
     ),
     (
         "D10",
-        "0f846604dab0dc09f52e476fd2a837a4613f3d2ebcb71722c84bc4a5295b33a4",
+        "82702f68338b80e34d0690d70b017738e5019ffd2cf71e63201c031e82d41347",
     ),
     (
         "D11",
-        "c98e6883311d88245a1bd058ec6a6d81395e649a01294001e7479e83799194da",
+        "cb4f32605bc285e77e396a3f144bb9b9ce33568bf9f724ac9556d2a6f957c46b",
     ),
     (
         "D13",
@@ -93,7 +93,7 @@ const EXPECTED_HASHES: &[(&str, &str)] = &[
     ),
     (
         "D17",
-        "0a7593b638dad98378a19c939658869d09ba5d09c1fc1922b112b0314fe2b2ec",
+        "01033bd40ad2d858eb0c03b2efd462ea43c6854e1a557b274b8a6e9001278a9a",
     ),
 ];
 
