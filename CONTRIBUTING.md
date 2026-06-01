@@ -341,13 +341,22 @@ Cobre is currently maintained by [@rjmalves](https://github.com/rjmalves). Major
 Before tagging a new release:
 
 1. Update `CHANGELOG.md` with the new version's changes
-2. Run quality checks:
+2. If the release changed deterministic numerical output (solver tolerances,
+   scaling, cut selection, basis handling, …), regenerate the parity baselines
+   and update the guard table **in the same change** — otherwise the `Test`
+   job goes red on the stale baselines:
+   ```bash
+   COBRE_PARITY_REGEN=1 cargo test -p cobre-sddp --features slow-tests --test parity_hash_d01_d15
+   # then copy the new hashes into EXPECTED_HASHES in
+   # crates/cobre-sddp/tests/parity_baselines_unchanged.rs
+   ```
+3. Run quality checks:
    ```bash
    python3 scripts/check_book_version.py
    python3 scripts/check_python_parity.py --max 0
    ```
-3. Run `cargo fmt --all && cargo clippy --workspace --all-targets --all-features -- -D warnings`
-4. Tag: `git tag v<version>`
+4. Run `cargo fmt --all && cargo clippy --workspace --all-targets --all-features -- -D warnings`
+5. Tag: `git tag v<version>`
 
 ## License
 
