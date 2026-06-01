@@ -19,6 +19,14 @@ on:
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+*"
+  # Build + test wheels across all platforms on PRs that touch the Python
+  # bindings, so platform-specific failures (e.g. a Windows-only test) are
+  # caught before a release tag rather than in the post-tag publish. The
+  # publish job is gated to tag-push / workflow_dispatch, so PRs never publish.
+  pull_request:
+    paths:
+      - "crates/cobre-python/**"
+      - ".github/workflows/release-python.yml"
   workflow_dispatch:
     inputs:
       dry-run:
