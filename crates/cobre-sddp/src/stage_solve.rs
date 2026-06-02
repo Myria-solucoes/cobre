@@ -8,12 +8,58 @@
 use cobre_solver::{SolutionView, SolverError, SolverInterface};
 
 use crate::{
-    basis_reconstruct::{ReconstructionTarget, enforce_basic_count_invariant, reconstruct_basis},
+    basis_reconstruct::{
+        ReconstructionTarget, enforce_basic_count_invariant, reconstruct_basis,
+        reconstruct_basis_core,
+    },
     context::StageContext,
     cut::pool::CutPool,
     error::SddpError,
     workspace::{CapturedBasis, SolverWorkspace},
 };
+
+/// Warm-start basis strategy, selected once from the `COBRE_TUNE_WARMSTART`
+/// environment variable (benchmark-only; inert by default).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WarmStartMode {
+    /// Slot-identity reconstruction across cut-set churn ([`reconstruct_basis`]).
+    /// The production default.
+    Full,
+    /// Warm-start the LP core only; every cut row starts BASIC (non-binding)
+    /// ([`reconstruct_basis_core`]).
+    Core,
+    /// No warm-start: every solve cold-starts.
+    Off,
+}
+
+/// Resolve the warm-start mode once from `COBRE_TUNE_WARMSTART`
+/// (`full` | `core` | `off`). Defaults to [`WarmStartMode::Full`], so with the
+/// variable unset the hot path is byte-for-byte the previous behavior and stays
+/// deterministic. A present-but-invalid value warns and falls back to `full`.
+fn warm_start_mode() -> WarmStartMode {
+    static MODE: std::sync::OnceLock<WarmStartMode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| {
+        let Some(raw) = std::env::var("COBRE_TUNE_WARMSTART").ok() else {
+            return WarmStartMode::Full;
+        };
+        let mode = match raw.trim().to_ascii_lowercase().as_str() {
+            "full" => WarmStartMode::Full,
+            "core" => WarmStartMode::Core,
+            "off" | "none" | "cold" => WarmStartMode::Off,
+            other => {
+                eprintln!(
+                    "[cobre tune] WARNING: COBRE_TUNE_WARMSTART={other:?} is not \
+                     full|core|off; using full"
+                );
+                WarmStartMode::Full
+            }
+        };
+        if mode != WarmStartMode::Full {
+            eprintln!("[cobre tune] warm-start mode override active: {mode:?}");
+        }
+        mode
+    })
+}
 
 // ---------------------------------------------------------------------------
 // StageInputs
@@ -85,8 +131,16 @@ pub fn run_stage_solve<'ws, S: SolverInterface>(
             .resize(inputs.pool.populated_count, None);
     }
 
-    // Select the basis path and solve.
-    let view = if let Some(captured) = inputs.stored_basis {
+    // Select the basis path and solve. The warm-start mode (resolved once from
+    // `COBRE_TUNE_WARMSTART`) chooses between slot-identity reconstruction
+    // (`Full`, the default), core-only warm-start with all cuts BASIC (`Core`),
+    // and no warm-start (`Off`). `Off` — or a missing stored basis — takes the
+    // cold path.
+    let warm: Option<(WarmStartMode, &CapturedBasis)> = match warm_start_mode() {
+        WarmStartMode::Off => None,
+        mode => inputs.stored_basis.map(|captured| (mode, captured)),
+    };
+    let view = if let Some((mode, captured)) = warm {
         // All solves use the baked path: cuts are structural rows in the baked
         // template. `base_row_count` is set to the non-baked template row
         // count so the reconstruction helper handles cut rows via slot
@@ -102,13 +156,28 @@ pub fn run_stage_solve<'ws, S: SolverInterface>(
 
         // Reconstruction counters are accumulated on the workspace solver via
         // `record_reconstruction_stats()` below; the returned value is unused.
-        let _ = reconstruct_basis(
-            captured,
-            target,
-            inputs.pool.active_cuts(),
-            &mut ws.scratch_basis,
-            &mut ws.scratch.recon_slot_lookup,
-        );
+        // `Core` mode warm-starts only the LP core and leaves every cut row
+        // BASIC (non-binding), skipping slot-identity matching entirely.
+        match mode {
+            WarmStartMode::Core => {
+                let _ = reconstruct_basis_core(
+                    captured,
+                    target,
+                    inputs.pool.active_cuts(),
+                    &mut ws.scratch_basis,
+                );
+            }
+            // `Full` (default) and any non-`Off` mode use slot identity.
+            _ => {
+                let _ = reconstruct_basis(
+                    captured,
+                    target,
+                    inputs.pool.active_cuts(),
+                    &mut ws.scratch_basis,
+                    &mut ws.scratch.recon_slot_lookup,
+                );
+            }
+        }
         // `enforce_basic_count_invariant` is an unconditional safety net: when
         // cut selection drops a cut whose stored row status was BASIC, the
         // freshly reconstructed basis carries more BASIC entries than

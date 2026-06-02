@@ -104,22 +104,33 @@ From a read of the cut-selection and warm-start code:
   `stage_solve.rs::run_stage_solve` when `inputs.stored_basis.is_some()`.
   `policy.checkpointing.store_basis` gates **disk** persistence only; in-run
   warm-start always happens when a stored basis is present.
-- **No runtime way to disable warm-start** exists today. Forcing cold-start needs
-  a one-point gate in `run_stage_solve` (the `if let Some(captured) =
-inputs.stored_basis` branch).
-- **Dynamic Cut Selection (NEWAVE SC)** is **not implemented**. It would be a new
-  in-solve loop (lazy row generation) interacting with the rebake and warm-start.
+- **Warm-start toggle (implemented)**: `COBRE_TUNE_WARMSTART` selects, once, at
+  the single `run_stage_solve` basis branch — inert/default `full`:
+  - `full` — slot-identity reconstruction (`reconstruct_basis`), current default.
+  - `core` — warm-start the LP core only; **every cut row starts BASIC**
+    (non-binding) via `reconstruct_basis_core`, skipping slot-identity matching.
+    The simplex pivots in whichever cuts actually bind.
+  - `off` — no warm-start; every solve cold-starts.
+    All three are correctness-neutral (verified: identical converged bound on a
+    deterministic case); they change only the solve path.
+- **Dynamic Cut Selection (NEWAVE SC)** is **not implemented**. Designed for
+  near-future implementation in `dynamic-cut-selection-design.md` — a new in-solve
+  lazy-row-generation loop interacting with the rebake and warm-start.
 
 ## 4. Experiment design
 
 Three accelerator axes, crossed, on the deep-pool Mode-C probe (primary) with
 Mode-A correctness gating throughout:
 
-| Axis              | Levels                                                        |
-| ----------------- | ------------------------------------------------------------- |
-| **Warm-start**    | on (current) · **off** (force cold-start)                     |
-| **Cut selection** | none (append-only) · Level1 · Dominated · **DCS (NEWAVE SC)** |
-| **Solver params** | the per-backend grid from `solver-parameter-tuning.md`        |
+| Axis              | Levels                                                                 |
+| ----------------- | ---------------------------------------------------------------------- |
+| **Warm-start**    | `full` (slot-identity) · `core` (core-only, cuts BASIC) · `off` (cold) |
+| **Cut selection** | none (append-only) · Level1 · Dominated · DCS (deferred — see design)  |
+| **Solver params** | the per-backend grid from `solver-parameter-tuning.md`                 |
+
+The `core` warm-start level is the direct test of the user's hypothesis: if
+`core` ≈ `full` under cut-set churn, the slot-identity reconstruction complexity
+is not paying off and can be replaced by the far simpler core-only warm-start.
 
 The decisive sub-experiment is the **warm-start × cut-selection 2×N interaction**:
 
@@ -150,28 +161,25 @@ Readout:
   tolerance as the correctness gate (selection and DCS must preserve policy
   quality, per NEWAVE §4.4); watch `solve_stats.retried`.
 
-## 5. Instruments to build
+## 5. Instruments
 
-1. **Warm-start toggle** (small, low-risk): an env-gated `COBRE_TUNE_WARMSTART`
-   (`on`|`off`) checked once and applied at the single `run_stage_solve` basis
-   branch — inert by default, mirroring the `COBRE_TUNE_*` solver-param seam.
-   Required to evaluate basis reconstruction at all.
-2. **Cut-selection variants**: no code needed — driven by `training.cut_selection`
-   config; the harness templates the variants.
-3. **Dynamic Cut Selection (NEWAVE SC)**: a **substantial implementation spike** —
-   a lazy row-generation loop inside the stage solve (initial active set → solve →
-   score omitted cuts at `x*` → add `nadic` most-violated → warm re-solve →
-   repeat). Must interact correctly with the append-only pool, the rebake, and
-   warm-start, and preserve determinism. Scope and approve separately before
-   building.
+1. **Warm-start toggle** — **built**. Env-gated `COBRE_TUNE_WARMSTART`
+   (`full`|`core`|`off`), resolved once at the single `run_stage_solve` basis
+   branch, inert by default. The `core` mode (`reconstruct_basis_core`) warm-starts
+   the LP core and starts every cut row BASIC; `off` cold-starts. Verified
+   correctness-neutral on a deterministic case.
+2. **Cut-selection variants** — no code needed; driven by `training.cut_selection`
+   config, templated by the harness.
+3. **Dynamic Cut Selection (NEWAVE SC)** — **deferred, designed separately** in
+   `dynamic-cut-selection-design.md`. It has real hyperparameters and tricks
+   (initial-set window, candidate scoring, `nadic`, basis-recovery dependence,
+   incremental row addition) and is not a spike; it will be implemented in the
+   near future per that design.
 
 ## 6. Open decisions
 
-- **DCS scope**: implement a minimal NEWAVE-SC spike now, or first run the
-  warm-start × existing-selection interaction (which already answers the
-  basis-reconstruction question) and decide on DCS from those results?
-- **Reconstruction-complexity variant**: to isolate _complexity_ (not just
-  on/off), do we also want a "naive length-keyed warm-start" arm, or is on/off
-  plus selection-churn enough?
+- **DCS**: design first (done — see `dynamic-cut-selection-design.md`), implement
+  in a near-future dedicated effort. The warm-start × existing-selection
+  interaction already answers the basis-reconstruction question and runs now.
 - Confirm the correctness tolerance and the deep-pool depth `K` (shared with the
   solver-parameter study).

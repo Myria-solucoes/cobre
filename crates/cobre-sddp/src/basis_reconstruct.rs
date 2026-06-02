@@ -183,6 +183,47 @@ where
     stats
 }
 
+/// Reconstruct a [`Basis`] that warm-starts only the LP **core**, leaving every
+/// cut row non-binding.
+///
+/// This is the deliberately simpler alternative to [`reconstruct_basis`]:
+/// instead of guessing each cut row's basis status from the previous iteration
+/// by slot identity, it copies only the core (column + template-row) statuses
+/// from the stored basis and assigns [`HIGHS_BASIS_STATUS_BASIC`] (slack basic →
+/// constraint non-binding) to **every** cut row. The simplex then pivots in
+/// whichever cuts actually bind. It carries no `cut_row_slots` dependency and
+/// needs no slot-lookup scratch.
+///
+/// It exists to measure (via the `COBRE_TUNE_WARMSTART=core` toggle) whether the
+/// slot-identity machinery in [`reconstruct_basis`] earns its complexity, or
+/// whether warm-starting the core alone is competitive. Like
+/// [`reconstruct_basis`], the caller must follow with
+/// [`enforce_basic_count_invariant`] to restore `col_basic + row_basic ==
+/// num_row` before handing the basis to the solver.
+///
+/// Returns [`ReconstructionStats`] with `new_slack` equal to the cut-row count
+/// (every cut row is treated as new) and the other counters zero.
+pub fn reconstruct_basis_core<'a, I>(
+    stored: &CapturedBasis,
+    target: ReconstructionTarget,
+    current_cut_rows: I,
+    out: &mut Basis,
+) -> ReconstructionStats
+where
+    I: Iterator<Item = (usize, f64, &'a [f64])>,
+{
+    reconstruct_col_statuses(stored, target, out);
+    reconstruct_template_row_statuses(stored, target, out);
+
+    let mut stats = ReconstructionStats::default();
+    for _ in current_cut_rows {
+        out.row_status.push(HIGHS_BASIS_STATUS_BASIC);
+        stats.new_slack += 1;
+    }
+
+    stats
+}
+
 // ---------------------------------------------------------------------------
 // Phase helpers (private — not part of the public API)
 // ---------------------------------------------------------------------------
@@ -365,7 +406,7 @@ mod tests {
 
     use super::{
         HIGHS_BASIS_STATUS_BASIC as B, HIGHS_BASIS_STATUS_LOWER as L, ReconstructionStats,
-        ReconstructionTarget, reconstruct_basis,
+        ReconstructionTarget, reconstruct_basis, reconstruct_basis_core,
     };
     use crate::workspace::CapturedBasis;
 
@@ -561,5 +602,46 @@ mod tests {
             out.row_status.iter().all(|&s| s == B),
             "template rows must be copied verbatim (all BASIC in this fixture)",
         );
+    }
+
+    /// `reconstruct_basis_core` copies the core (template rows) verbatim and
+    /// sets EVERY cut row `BASIC`, ignoring stored cut statuses and slot
+    /// identity entirely. Slot 10 carries a stored `LOWER` status that must be
+    /// overridden to `BASIC`.
+    #[test]
+    fn core_sets_all_cut_rows_basic() {
+        let stored = make_stored_basis(2, 3, &[10, 20], &[L, B], &[1.0, 2.0]);
+        let cuts: Vec<(usize, f64, Vec<f64>)> = vec![
+            (10, 0.0, vec![0.0, 0.0, 0.0]),
+            (30, 0.0, vec![0.0, 0.0, 0.0]),
+            (40, 0.0, vec![0.0, 0.0, 0.0]),
+        ];
+        let target = ReconstructionTarget {
+            base_row_count: 2,
+            num_cols: 3,
+        };
+        let mut out = Basis::new(0, 0);
+
+        let stats = reconstruct_basis_core(
+            &stored,
+            target,
+            cuts.iter().map(|(s, i, c)| (*s, *i, c.as_slice())),
+            &mut out,
+        );
+
+        assert_eq!(
+            stats,
+            ReconstructionStats {
+                preserved: 0,
+                new_tight: 0,
+                new_slack: 3,
+            },
+        );
+        // 2 core rows + 3 cut rows.
+        assert_eq!(out.row_status.len(), 5);
+        // Core rows copied verbatim (BASIC in this fixture).
+        assert_eq!(&out.row_status[..2], &[B, B]);
+        // Every cut row BASIC — including slot 10 whose stored status was LOWER.
+        assert_eq!(&out.row_status[2..], &[B, B, B]);
     }
 }
