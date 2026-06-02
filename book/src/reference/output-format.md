@@ -218,8 +218,8 @@ current release and will be populated in a future minor version.
 | `completed_at`     | string | Yes      | ISO 8601 completion timestamp.                                                    |
 | `duration_seconds` | number | Yes      | Total run duration in seconds.                                                    |
 | `cobre_version`    | string | No       | Version of the cobre binary that produced this output (from `CARGO_PKG_VERSION`). |
-| `solver`           | string | Yes      | LP solver backend identifier (e.g. `"highs"`).                                    |
-| `solver_version`   | string | Yes      | LP solver library version string.                                                 |
+| `solver`           | string | Yes      | Active LP backend identifier: `"highs"` or `"clp"`, depending on the build-time backend selection. |
+| `solver_version`   | string | Yes      | Version string of the active LP backend library.                                  |
 | `hostname`         | string | Yes      | Primary compute node hostname. `null` in current release.                         |
 | `user`             | string | Yes      | Username that initiated the run. `null` in current release.                       |
 

@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Selectable LP backend at build time. A binary is now bound to exactly
+  one LP solver backend, chosen via Cargo features:
+  - `highs` (enabled by default) — [HiGHS](https://highs.dev) LP solver, MIT-licensed.
+  - `clp` (opt-in) — [CLP/CoinUtils](https://github.com/coin-or/Clp) LP solver, EPL-2.0-licensed.
+    Build with `--no-default-features --features clp`.
+
+  The two features are **mutually exclusive**: enabling both is a compile
+  error. Enabling `clp` selects CLP; `highs` applies only when `clp` is
+  not enabled. The active backend is reflected in `cobre version` and in
+  the `solver` / `solver_version` fields of the run output metadata.
+
+  The CLP backend ships the following capabilities: dual and primal
+  simplex algorithms; native incremental row and bound mutation
+  (appending rows or patching bounds preserves the solver's factorization
+  across mutations, enabling warm-start continuity across solve sequences);
+  per-phase tuning covering the dual-simplex pricing strategy,
+  factorization cadence, feasibility and optimality tolerances, and
+  iteration limits; and hot-start (snapshot and restore of the simplex
+  rim), delivered through the C++ class interface.
+
+  Each backend is internally deterministic: run-to-run bit-for-bit
+  reproducible and declaration-order invariant (a permutation of the
+  input entities produces the correspondingly permuted result). Switching
+  backends may legitimately change numerical results — the two solvers can
+  reach different optimal vertices on degenerate problems — so each
+  backend maintains its own deterministic parity baselines.
+
+  Existing builds are unaffected: the default backend remains HiGHS, and
+  the CLP backend is strictly opt-in.
+
 ## [0.8.0] - 2026-06-01
 
 ### Deprecated

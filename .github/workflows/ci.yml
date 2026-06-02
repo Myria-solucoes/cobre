@@ -207,6 +207,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: clp
+      # cargo-nextest gives per-process test isolation, which the CLP FFI suite
+      # requires: an in-process runner can mask a CLP FFI SIGSEGV through
+      # heap-layout luck, whereas nextest spawns each test in its own process so
+      # a fault fails the case deterministically.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
       - name: Check (CLP)
         run: cargo check --workspace --all-targets --no-default-features --features "clp ${{ env.NON_SOLVER_FEATURES }}"
       - name: Clippy (CLP)
@@ -214,10 +222,15 @@ jobs:
       - name: Build (CLP)
         run: cargo build --workspace --all-targets --no-default-features --features "clp ${{ env.NON_SOLVER_FEATURES }}"
       # Unit + integration tests + the CLP-specific parity baselines (gated behind
-      # `feature = "clp"`). The HiGHS-keyed correctness tests are feature-gated
-      # off under CLP and are neither compiled nor run here.
+      # `feature = "clp"`; the parity sweep un-ignores under `slow-tests`, which is
+      # in NON_SOLVER_FEATURES). The HiGHS-keyed correctness tests are feature-gated
+      # off under CLP and are neither compiled nor run here. Run under cargo nextest
+      # for per-process isolation so the CLP parity sweep is a real regression gate
+      # that surfaces any CLP FFI fault instead of masking it in-process.
+      # `--no-fail-fast` runs the full multi-crate CLP sweep so one failure does not
+      # hide later regressions.
       - name: Test (CLP)
-        run: cargo test --workspace --no-default-features --features "clp ${{ env.NON_SOLVER_FEATURES }}"
+        run: cargo nextest run --workspace --no-default-features --features "clp ${{ env.NON_SOLVER_FEATURES }}" --no-fail-fast
 
   # Formatting is solver-agnostic; it runs once (under the HiGHS pipeline) and is
   # NOT duplicated onto the CLP job.

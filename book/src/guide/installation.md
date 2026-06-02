@@ -109,6 +109,88 @@ cargo test --workspace --all-features
 
 ---
 
+## Choosing the LP Backend
+
+Cobre supports two LP solver backends, selected at build time via Cargo features.
+Exactly one backend is compiled into any given binary.
+
+| Backend | Feature flag | License | Notes                                                   |
+| ------- | ------------ | ------- | ------------------------------------------------------- |
+| HiGHS   | `highs`      | MIT     | Default. No extra steps required.                       |
+| CLP     | `clp`        | EPL-2.0 | COIN-OR. Opt-in; requires the CLP/CoinUtils submodules. |
+
+### Default build (HiGHS)
+
+```bash
+cargo build --release -p cobre-cli
+```
+
+No flags are needed. HiGHS is the default backend and the one shipped in
+pre-built binaries.
+
+### CLP build
+
+```bash
+# Initialize the CLP and CoinUtils submodules first
+git submodule update --init --recursive
+
+# Build with CLP, disabling the HiGHS default
+cargo build --release -p cobre-cli --no-default-features --features clp
+```
+
+### Mutual exclusivity
+
+The `highs` and `clp` features are mutually exclusive — exactly one LP backend
+is compiled into a binary, and enabling both at once is a compile error. Because
+`highs` is the default feature, selecting CLP requires `--no-default-features`
+to suppress the default before `--features clp` is applied; a plain
+`--features clp` leaves the `highs` default on and fails the build. Enabling
+neither backend is also a compile error, so a backend is always chosen
+explicitly. The default build (no extra flags) uses HiGHS.
+
+### Identifying the active backend
+
+The `cobre version` banner shows which backend is compiled in:
+
+```
+cobre   v0.8.0
+solver: CLP
+comm:   local
+...
+```
+
+The `solver` and `solver_version` fields in each run's
+[output metadata](../reference/output-format.md) record the active backend
+identifier (`"highs"` or `"clp"`) and its library version string. These fields
+are written by both the CLI and the Python bindings.
+
+### Determinism
+
+Each backend is internally deterministic: the same input, solved twice, produces
+bit-for-bit identical results; permuting the input entities produces the
+correspondingly permuted output. Switching from one backend to the other may
+legitimately change numerical results — the two simplex implementations can reach
+different optimal vertices on degenerate problems, all of which are valid. No
+cross-backend numerical equality is guaranteed; each backend maintains its own
+parity baselines.
+
+### Migration note
+
+Existing builds are unaffected. The default backend is HiGHS, unchanged from
+prior releases. The CLP backend is strictly opt-in: users who do not pass
+`--no-default-features --features clp` continue to build and run against HiGHS
+exactly as before.
+
+### Known limitation
+
+Re-loading a fresh model into a CLP solver instance after a hot-start snapshot
+has been taken is unsupported and guarded against at runtime. This situation does
+not arise on the production solve paths; it is relevant only to callers that
+construct solver instances directly and interleave `load_model` calls with
+hot-start operations.
+
+---
+
 ## Next Steps
 
 - [Quickstart](../tutorial/quickstart.md) — run a complete study end to end using the built-in `1dtoy` template
