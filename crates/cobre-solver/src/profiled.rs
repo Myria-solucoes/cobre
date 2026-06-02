@@ -14,12 +14,14 @@
 //! # Usage
 //!
 //! ```rust
+//! # #[cfg(feature = "highs")] {
 //! use cobre_solver::{HighsProfile, ProfiledSolver, SolverInterface, HighsSolver};
 //!
 //! let inner = HighsSolver::new().expect("HiGHS init");
 //! let mut solver = ProfiledSolver::new(inner);
 //! solver.set_profile(&HighsProfile::default());
 //! assert_eq!(solver.current_profile(), &HighsProfile::default());
+//! # }
 //! ```
 
 use crate::{
@@ -178,7 +180,11 @@ impl<S: SolverInterface> SolverInterface for ProfiledSolver<S> {
     }
 }
 
-#[cfg(test)]
+// This test module uses `HighsProfile` with field values for delta-tracking
+// assertions, so it cannot use the backend-agnostic fieldless mock profile. It
+// is gated behind `feature = "highs"`; `ProfiledSolver`'s delta-tracking is
+// backend-agnostic, so exercising it on the HiGHS job is sufficient coverage.
+#[cfg(all(test, feature = "highs"))]
 mod tests {
     use std::cell::RefCell;
 
@@ -340,11 +346,7 @@ mod tests {
     fn new_issues_no_ffi_calls() {
         let mock = RecordingMockSolver::new();
         let solver = ProfiledSolver::new(mock);
-        // Access the inner mock's call log via the wrapper's inner field —
-        // since inner is private, we use current_profile() as the construction
-        // witness and retrieve the mock after consuming the wrapper.
-        let mock = solver.inner;
-        let calls = mock.recorded_calls();
+        let calls = solver.inner.recorded_calls();
         assert!(
             calls.is_empty(),
             "expected zero calls after ProfiledSolver::new, got: {calls:?}"

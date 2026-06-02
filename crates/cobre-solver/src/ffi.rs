@@ -302,7 +302,11 @@ unsafe extern "C" {
     pub fn cobre_highs_version_patch() -> c_int;
 }
 
-#[cfg(test)]
+// This smoke test calls the `cobre_highs_*` FFI symbols directly, which are
+// only compiled and linked into the wrapper when the `highs` backend is built.
+// Gate it behind `feature = "highs"` so a clp-only test build links no HiGHS
+// symbol.
+#[cfg(all(test, feature = "highs"))]
 mod tests {
     use super::*;
 

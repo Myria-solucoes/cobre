@@ -18,6 +18,7 @@
         clippy::panic
     )
 )]
+#![cfg(feature = "highs")]
 
 #[cfg(feature = "test-support")]
 mod tests {
@@ -540,8 +541,7 @@ mod tests {
         // Reset the counter so we only measure solve-triggered calls.
         solver.inner_mut().apply_profile_call_count.set(0);
 
-        let n: usize = 3;
-        for _ in 0..n {
+        for _ in 0..3 {
             let _ = solver.solve(None);
         }
 

@@ -19,6 +19,7 @@
         clippy::panic
     )
 )]
+#![cfg(feature = "highs")]
 
 use cobre_solver::{Basis, HighsSolver, SolverInterface, StageTemplate};
 

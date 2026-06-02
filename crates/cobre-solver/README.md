@@ -55,6 +55,23 @@ built and its test suite is exercised in every CI run. Expect the first CI
 build after a cache miss to be slower than a HiGHS-only build due to the C++
 superbuild.
 
+### Per-solver test invocations
+
+Each backend's test suite can be run in isolation, building only that solver:
+
+```
+# HiGHS backend (default features)
+cargo test -p cobre-solver --features highs
+
+# CLP backend only (HiGHS excluded)
+cargo test -p cobre-solver --no-default-features --features clp
+```
+
+Both invocations compile, run, and lint clean on their own: the test suite is
+backend-agnostic where possible, and each backend's tests are gated on its
+feature so neither build pulls in the other solver. The CLP-only build always
+includes at least one runnable end-to-end integration test.
+
 ## Key Types
 
 - **`SolverInterface`** — the core trait every backend must implement; defines

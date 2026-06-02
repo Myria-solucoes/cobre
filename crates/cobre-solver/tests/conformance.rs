@@ -15,9 +15,17 @@
     )
 )]
 
-use cobre_solver::{
-    Basis, HighsSolver, RowBatch, SolutionView, SolverError, SolverInterface, StageTemplate,
-};
+// Backend-agnostic types used by the shared fixture builders and the fixture
+// self-check tests, regardless of which solver backend is active.
+use cobre_solver::{RowBatch, StageTemplate};
+
+// Shared by both backends' conformance tests; gated on either backend so a
+// no-backend build (neither `highs` nor `clp`) does not import unused items.
+#[cfg(any(feature = "highs", feature = "clp"))]
+use cobre_solver::{Basis, SolverInterface};
+
+#[cfg(feature = "highs")]
+use cobre_solver::{HighsSolver, SolutionView, SolverError};
 
 #[cfg(feature = "clp")]
 use cobre_solver::ClpSolver;
@@ -61,6 +69,7 @@ fn make_fixture_row_batch() -> RowBatch {
 
 // ─── SS1.4 load_model conformance tests ──────────────────────────────────────
 
+#[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_load_model_and_solve() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -96,6 +105,7 @@ fn test_solver_highs_load_model_and_solve() {
 }
 
 // SS1.4 row 3: load_model replaces previous model completely
+#[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_load_model_replaces_previous() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -164,6 +174,7 @@ fn test_fixture_row_batch_data() {
 
 // ─── SS1.5 add_rows conformance tests ────────────────────────────────────────
 
+#[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_add_rows_tightens() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -195,6 +206,7 @@ fn test_solver_highs_add_rows_tightens() {
 }
 
 // SS1.5 row 3: add_rows with single cut
+#[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_add_rows_single_cut() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -231,6 +243,7 @@ fn test_solver_highs_add_rows_single_cut() {
 
 // ─── SS1.6 set_row_bounds conformance tests ───────────────────────────────────
 
+#[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_set_row_bounds_state_change() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -270,6 +283,7 @@ fn test_solver_highs_set_row_bounds_state_change() {
 
 // ─── SS1.6a set_col_bounds conformance tests ──────────────────────────────────
 
+#[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_set_col_bounds_basic() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -291,6 +305,7 @@ fn test_solver_highs_set_col_bounds_basic() {
 }
 
 // SS1.6a row 3: set_col_bounds tightens variable
+#[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_set_col_bounds_tightens() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -318,6 +333,7 @@ fn test_solver_highs_set_col_bounds_tightens() {
 }
 
 // SS1.6a row 5: set_col_bounds: patch, re-patch, verify restore
+#[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_set_col_bounds_repatch() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -356,6 +372,7 @@ fn test_solver_highs_set_col_bounds_repatch() {
 
 // ─── SS1.7 solve dual values and reduced costs conformance tests ──────────────
 
+#[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_solve_dual_values() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -387,6 +404,7 @@ fn test_solver_highs_solve_dual_values() {
 }
 
 // SS1.7 row 3: solve() returns correct dual values with binding cuts
+#[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_solve_dual_values_with_cuts() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -417,6 +435,7 @@ fn test_solver_highs_solve_dual_values_with_cuts() {
 }
 
 // SS1.7 row 5: solve() returns correct reduced costs
+#[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_solve_reduced_costs() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -442,6 +461,7 @@ fn test_solver_highs_solve_reduced_costs() {
 }
 
 // SS1.7 row 7: solve() reports iteration count and solve time
+#[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_solve_iterations_reported() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -465,6 +485,7 @@ fn test_solver_highs_solve_iterations_reported() {
 // ─── SS5 Dual normalization conformance tests ─────────────────────────────────
 
 /// SS5 row 1: load fixture, solve, verify cut-relevant row dual=-100.0 (canonical sign).
+#[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_dual_normalization_cut_relevant_row() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -484,6 +505,7 @@ fn test_solver_highs_dual_normalization_cut_relevant_row() {
 }
 
 /// SS5 row 3: finite-difference sensitivity check: dual sign convention via RHS perturbation.
+#[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_dual_normalization_sensitivity_check() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -516,6 +538,7 @@ fn test_solver_highs_dual_normalization_sensitivity_check() {
 }
 
 /// SS5 row 5: load fixture, add cuts, solve, verify binding cut dual=1.0 (canonical sign).
+#[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_dual_normalization_with_binding_cut() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -542,6 +565,7 @@ fn test_solver_highs_dual_normalization_with_binding_cut() {
 ///
 /// `reset()` was removed — statistics are now always cumulative
 /// and survive `load_model` calls.
+#[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_statistics_are_cumulative() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -574,6 +598,7 @@ fn test_solver_highs_statistics_are_cumulative() {
 // ─── SS1.11 statistics conformance tests ──────────────────────────────────────
 
 /// SS1.11 row 1: fresh solver, call `statistics()`, verify all counters = 0.
+#[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_statistics_initial() {
     let solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -610,6 +635,7 @@ fn test_solver_highs_statistics_initial() {
 }
 
 /// SS1.11 row 3: load fixture, solve 3 times, verify statistics counters increment.
+#[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_statistics_increment() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -654,6 +680,7 @@ fn test_solver_highs_statistics_increment() {
 // ─── SS1.12 name conformance tests ────────────────────────────────────────────
 
 /// SS1.12 row 1: verify `name()` returns `"HiGHS"` and is non-empty.
+#[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_name_returns_identifier() {
     let solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -675,6 +702,7 @@ fn test_solver_highs_name_returns_identifier() {
 ///
 /// The infeasibility at x0=8 arises because the power balance requires
 /// x2 = 14 - 2*8 = -2, which violates x2 >= 0.
+#[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_lifecycle_repeated_patch_solve() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -724,6 +752,7 @@ fn test_solver_highs_lifecycle_repeated_patch_solve() {
 /// - `solve_count` = 1
 /// - `failure_count` = 1
 /// - `success_count` = 0
+#[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_solve_infeasible() {
     let infeasible_template = StageTemplate {
@@ -787,6 +816,7 @@ fn test_solver_highs_solve_infeasible() {
 /// - `solve_count` = 1
 /// - `failure_count` = 1
 /// - `success_count` = 0
+#[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_solve_unbounded() {
     let unbounded_template = StageTemplate {
@@ -876,6 +906,7 @@ fn test_solver_highs_solve_unbounded() {
 ///
 /// 5 variables, 4 chained >= constraints, all coefficients 1.0.
 /// Cannot be solved at the crash point; requires >= 4 simplex pivots.
+#[cfg(feature = "highs")]
 #[allow(dead_code)]
 fn make_larger_lp_template() -> StageTemplate {
     StageTemplate {
@@ -907,7 +938,7 @@ fn make_larger_lp_template() -> StageTemplate {
 /// and wall-clock checks are used instead). An externally-set
 /// `time_limit=0` causes immediate `TIME_LIMIT` on every `run_once()`,
 /// exhausting all retry levels and returning `NumericalDifficulty`.
-#[cfg(feature = "test-support")]
+#[cfg(all(feature = "highs", feature = "test-support"))]
 #[test]
 fn test_solver_highs_solve_time_limit() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -940,7 +971,7 @@ fn test_solver_highs_solve_time_limit() {
 /// before `run_once()`, overriding any externally-set `simplex_iteration_limit`.
 /// This ensures the LP solves successfully even if an external caller sets
 /// `simplex_iteration_limit=0`.
-#[cfg(feature = "test-support")]
+#[cfg(all(feature = "highs", feature = "test-support"))]
 #[test]
 fn test_solver_highs_solve_iteration_limit() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -978,7 +1009,7 @@ fn test_solver_highs_solve_iteration_limit() {
 /// across multiple `load_model`/`solve`/`reset` cycles. External limit overrides
 /// do not persist because `solve()` sets its own limits before each attempt
 /// and restores them afterward.
-#[cfg(feature = "test-support")]
+#[cfg(all(feature = "highs", feature = "test-support"))]
 #[test]
 fn test_solver_highs_restore_defaults_after_limit() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -1054,6 +1085,7 @@ fn test_solver_highs_restore_defaults_after_limit() {
 ///   x0, x1 >= 0
 ///
 /// `HiGHS` simplex discovers infeasibility and returns `SolverError::Infeasible`.
+#[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_infeasible_with_rows() {
     // CSC: 2 cols, 2 rows, 4 non-zeros
@@ -1096,7 +1128,7 @@ fn test_solver_highs_infeasible_with_rows() {
 /// Some `HiGHS` solver paths only provide dual rays when presolve is enabled.
 /// This test re-runs the infeasible LP with presolve=on to maximise the
 /// chance of exercising the `Some(ray_buf)` branch.
-#[cfg(feature = "test-support")]
+#[cfg(all(feature = "highs", feature = "test-support"))]
 #[test]
 fn test_solver_highs_infeasible_with_presolve() {
     let infeasible_with_rows = StageTemplate {
@@ -1148,6 +1180,7 @@ fn test_solver_highs_infeasible_with_presolve() {
 ///   x0 >= 0, x1 free
 ///
 /// `HiGHS` simplex discovers unboundedness and returns `SolverError::Unbounded`.
+#[cfg(feature = "highs")]
 #[test]
 fn test_solver_highs_unbounded_with_primal_ray() {
     // CSC: 2 cols, 1 row, 1 non-zero
@@ -1200,7 +1233,7 @@ fn test_solver_highs_unbounded_with_primal_ray() {
 ///
 /// If `HiGHS` reports status 8 (INFEASIBLE) instead, the test still succeeds —
 /// the ray extraction code for INFEASIBLE is exercised by the previous test.
-#[cfg(feature = "test-support")]
+#[cfg(all(feature = "highs", feature = "test-support"))]
 #[test]
 fn test_solver_highs_unbounded_or_infeasible() {
     // CSC: 2 cols, 2 rows, 2 non-zeros
@@ -1257,6 +1290,7 @@ fn test_solver_highs_unbounded_or_infeasible() {
 ///
 /// Both calls read from the same `HiGHS` internal buffers on equivalent solvers;
 /// values must be bitwise-equal (same IEEE 754 bits), not merely close.
+#[cfg(feature = "highs")]
 #[test]
 fn solve_equals_solve_owned() {
     // Solver A: view path converted to owned
@@ -1297,6 +1331,7 @@ fn solve_equals_solve_owned() {
 /// Verifies that: (a) the first view is correctly dropped at end of the scope,
 /// (b) the second `solve()` call acquires the `&mut self` borrow without conflict,
 /// and (c) both results are identical.
+#[cfg(feature = "highs")]
 #[test]
 fn solve_borrows_internal_buffers() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -1326,6 +1361,7 @@ fn solve_borrows_internal_buffers() {
 /// The fixture with two Benders cuts has an optimal objective of 162.0
 /// (x0=6, x1=62, x2=2; the tighter cut forces x1 up to 62).
 /// `view.dual.len()` must equal `template.num_rows + cuts.num_rows` (2 + 2 = 4).
+#[cfg(feature = "highs")]
 #[test]
 fn solve_after_add_rows() {
     let template = make_fixture_stage_template();
@@ -1355,6 +1391,7 @@ fn solve_after_add_rows() {
 }
 
 /// After `solve()`, `statistics().solve_count` and `success_count` must each be 1.
+#[cfg(feature = "highs")]
 #[test]
 fn solve_statistics_updated() {
     let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -1377,6 +1414,7 @@ fn solve_statistics_updated() {
 
 /// `get_basis` must write exactly `num_cols` col statuses and `num_rows` row
 /// statuses, each in the valid `HiGHS` range [0, 4].
+#[cfg(feature = "highs")]
 #[test]
 fn basis_dimensions_after_solve() {
     let mut solver = HighsSolver::new().expect("solver");
@@ -1411,7 +1449,7 @@ fn basis_dimensions_after_solve() {
 /// The production caller reconciles the basis size to the current LP row count
 /// before invoking `solve`, so the `debug_assert!` would fire on this fallback
 /// path. The test runs only when `debug_assertions` is disabled.
-#[cfg(not(debug_assertions))]
+#[cfg(all(feature = "highs", not(debug_assertions)))]
 #[test]
 fn basis_cut_extension() {
     let mut solver = HighsSolver::new().expect("solver");
@@ -1438,6 +1476,7 @@ fn basis_cut_extension() {
 
 /// A warm-start via `solve(Some(&basis))` must not require more simplex
 /// iterations than a cold-start, and `basis_consistency_failures` must remain zero.
+#[cfg(feature = "highs")]
 #[test]
 fn basis_warm_start_iterations() {
     let mut solver = HighsSolver::new().expect("solver");
@@ -1472,6 +1511,7 @@ fn basis_warm_start_iterations() {
 /// Full basis round-trip: solve SS1.1, extract basis via `get_basis`,
 /// reload the same model, warm-start via `solve(Some(&basis))`, and verify
 /// that the objective matches and the solver needs at most 1 simplex iteration.
+#[cfg(feature = "highs")]
 #[test]
 fn test_basis_roundtrip() {
     let mut solver = HighsSolver::new().expect("solver");

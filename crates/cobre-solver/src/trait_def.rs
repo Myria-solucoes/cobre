@@ -64,9 +64,8 @@ pub trait SolverInterface: Send {
     /// `ProfiledSolver` can perform delta-tracking field comparison and construct
     /// a default profile without a factory function.
     ///
-    /// For `HighsSolver`, this is [`HighsProfile`](crate::HighsProfile).
-    /// For mock solvers in tests, this is typically
-    /// [`HighsProfile`](crate::HighsProfile) (no-op impl).
+    /// Each concrete backend supplies its own profile struct (selected by
+    /// feature); in-crate test mocks use a fieldless placeholder profile.
     ///
     /// The associated-type form is deliberate: it gives each backend its **full**
     /// parameter surface with zero lowest-common-denominator loss — a backend's
@@ -202,6 +201,7 @@ pub trait SolverInterface: Send {
     /// # Examples
     ///
     /// ```no_run
+    /// # #[cfg(feature = "highs")] {
     /// use cobre_solver::{Basis, HighsSolver, SolverInterface};
     ///
     /// let mut solver = HighsSolver::new().expect("HiGHS init");
@@ -216,6 +216,7 @@ pub trait SolverInterface: Send {
     /// let basis: Basis = unimplemented!("previously captured");
     /// let warm = solver.solve(Some(&basis)).expect("warm solve");
     /// assert!((warm.objective - cold_obj).abs() < 1e-9);
+    /// # }
     /// ```
     ///
     /// See [Solver Interface Trait SS2.4] for the post-conditions on
@@ -305,7 +306,7 @@ pub trait SolverInterface: Send {
 #[cfg(test)]
 mod tests {
     use super::SolverInterface;
-    use crate::HighsProfile;
+    use crate::profile::MockProfile;
 
     // Verify trait is usable as a generic bound (compile-time monomorphization).
     fn accepts_solver<S: SolverInterface>(_: &S) {}
@@ -313,9 +314,9 @@ mod tests {
     struct NoopSolver;
 
     impl SolverInterface for NoopSolver {
-        type Profile = HighsProfile;
+        type Profile = MockProfile;
 
-        fn apply_profile(&mut self, _profile: &HighsProfile) {}
+        fn apply_profile(&mut self, _profile: &MockProfile) {}
 
         fn load_model(&mut self, _template: &crate::types::StageTemplate) {}
 

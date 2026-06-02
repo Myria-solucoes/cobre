@@ -24,3 +24,14 @@ pub const DEFAULT_PROFILE_HEURISTIC_SENTINEL: u32 = 0;
 /// `0` is chosen as the sentinel because zero IPM iterations is nonsensical;
 /// legitimate iteration caps are always positive.
 pub const DEFAULT_PROFILE_IPM_UNBOUNDED_SENTINEL: u32 = 0;
+
+/// Backend-agnostic, fieldless profile type for in-crate test mocks.
+///
+/// This exists so that test-only `SolverInterface` implementations need not name
+/// `HighsProfile`, which is only available under `#[cfg(feature = "highs")]`. As
+/// a zero-field unit struct it trivially satisfies the
+/// `SolverInterface::Profile` bound (`Copy + PartialEq + Default + Send`). It is
+/// strictly test-only and must never be exported from the public API surface.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct MockProfile;
