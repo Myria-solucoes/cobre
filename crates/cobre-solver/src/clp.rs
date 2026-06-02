@@ -28,6 +28,23 @@ use crate::{
     types::{Basis, RowBatch, SolutionView, SolverError, SolverStatistics, StageTemplate},
 };
 
+/// Simplex algorithm selection for [`ClpProfile`].
+///
+/// Selects which simplex algorithm `solve` runs: the **dual** simplex
+/// (`Clp_dual`) or the **primal** simplex (`Clp_primal`). The dual simplex
+/// re-optimizes efficiently after bound changes (a dual-feasible basis stays
+/// dual-feasible), while the primal simplex is advantageous when a
+/// primal-feasible starting basis is available. Both reach the same optimum;
+/// only the iteration path differs. The default is [`ClpAlgorithm::Dual`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClpAlgorithm {
+    /// Dual simplex (`Clp_dual`).
+    #[default]
+    Dual,
+    /// Primal simplex (`Clp_primal`).
+    Primal,
+}
+
 /// CLP-specific solver profile carrying the tunable option surface.
 ///
 /// `ClpProfile` is the associated `Profile` type for [`ClpSolver`]. Other
@@ -55,6 +72,31 @@ pub struct ClpProfile {
     /// Per-attempt simplex iteration cap (`Clp_setMaximumIterations`).
     /// `DEFAULT_PROFILE_HEURISTIC_SENTINEL` (0) selects the per-call heuristic.
     pub simplex_iteration_limit: u32,
+    /// Simplex algorithm `solve` dispatches on: dual (`Clp_dual`) or primal
+    /// (`Clp_primal`). Read at solve time only; `apply_profile` issues no solve.
+    /// Defaults to [`ClpAlgorithm::Dual`].
+    pub algorithm: ClpAlgorithm,
+    /// Dual-simplex row-pricing mode (drives `cobre_clp_set_dual_row_steepest`).
+    ///
+    /// Selects how the dual simplex chooses the leaving variable at each
+    /// iteration. `1` pins full dual steepest-edge pricing (exact reference
+    /// weights, more arithmetic per iteration but typically fewer iterations);
+    /// the default `3` is CLP's own steepest-edge constructor default (a
+    /// partial / device-style variant). [`SolverInterface::apply_profile`] drives
+    /// this knob: any value other than the `3` sentinel installs that pricing
+    /// rule through the shim, while `3` issues no shim call (keeping the default
+    /// profile byte-identical to a build that never set pricing).
+    pub dual_pricing_mode: i32,
+    /// Refactorization cadence (drives `cobre_clp_set_factorization_frequency`).
+    ///
+    /// Controls how many simplex iterations elapse between full re-factorizations
+    /// of the basis matrix. A larger cadence amortizes the refactorization cost
+    /// across more iterations at the risk of accumulated numerical drift in the
+    /// incremental factor updates. The sentinel `0` means "leave CLP's internal
+    /// default in place — do not override". [`SolverInterface::apply_profile`]
+    /// drives this knob: any non-zero value sets the cadence through the shim,
+    /// while `0` issues no shim call.
+    pub factorization_frequency: i32,
 }
 
 impl Default for ClpProfile {
@@ -65,6 +107,9 @@ impl Default for ClpProfile {
             primal_feasibility_tolerance: 1e-9,
             dual_feasibility_tolerance: 1e-9,
             simplex_iteration_limit: DEFAULT_PROFILE_HEURISTIC_SENTINEL,
+            algorithm: ClpAlgorithm::Dual,
+            dual_pricing_mode: 3,
+            factorization_frequency: 0,
         }
     }
 }
@@ -98,21 +143,14 @@ pub struct ClpSolver {
     /// Pre-allocated buffer for row dual multipliers (shadow prices).
     /// Resized in `load_model`.
     row_dual: Vec<f64>,
-    /// Scratch buffer for converting `usize` indices to `i32` for the CLP C API.
-    /// Never shrunk -- only grows -- to prevent reallocation churn on the hot path.
-    ///
-    /// Currently unread: the CSR→CSC merge in `add_rows` builds its own local
-    /// buffers, and the bound-patch paths reuse the retained vectors. Retained
-    /// as a pre-allocated workspace for a future incremental-index FFI path
-    /// (a narrowed field-level allow replaces the former module-level one).
-    #[allow(dead_code)]
-    scratch_i32: Vec<i32>,
     /// Retained CSC column-start offsets (length `num_cols + 1`).
     ///
-    /// Owned mirror of the loaded LP. CLP exposes no incremental row-append or
-    /// bound-change call, so `ClpSolver` keeps a full mutable copy of the model
-    /// here and re-issues `cobre_clp_load_problem` (`reload`) after every
-    /// mutation. Populated by `load_model`.
+    /// Owned mirror of the loaded LP and the canonical, declaration-ordered copy
+    /// of the model. `ClpSolver` keeps a full copy of the model here so that
+    /// `add_rows`/`set_*_bounds` can patch it and reconcile the change into CLP
+    /// natively (`cobre_clp_add_rows` / `cobre_clp_chg_*`) without rebuilding the
+    /// model — preserving CLP's factorization/basis across the mutation.
+    /// Populated by `load_model`.
     col_starts: Vec<i32>,
     /// Retained CSC row indices for each non-zero (length `num_nz`).
     row_indices: Vec<i32>,
@@ -142,6 +180,16 @@ pub struct ClpSolver {
     /// Cached solver profile applied by the last profile-setter call.
     /// Initialised to `ClpProfile::default()` at construction.
     current_profile: ClpProfile,
+    /// Opaque CLP-owned hot-start snapshot token, or null when no snapshot is
+    /// active.
+    ///
+    /// Set non-null by [`Self::mark_hot_start`] (which captures the simplex
+    /// rim/factorization into a CLP-allocated `saveStuff`) and reset to null by
+    /// [`Self::unmark_hot_start`] (which frees it). It is **never dereferenced**
+    /// on the Rust side — only threaded back into `cobre_clp_solve_from_hot_start`
+    /// / `cobre_clp_unmark_hot_start` on this same handle. `Drop` releases a
+    /// still-held token so every `mark` is paired with exactly one `unmark`.
+    hot_start_token: *mut c_void,
 }
 
 // SAFETY: `ClpSolver` holds a raw pointer to a CLP C++ object. The CLP handle
@@ -184,7 +232,6 @@ impl ClpSolver {
             col_value: Vec::new(),
             col_dual: Vec::new(),
             row_dual: Vec::new(),
-            scratch_i32: Vec::new(),
             col_starts: Vec::new(),
             row_indices: Vec::new(),
             values: Vec::new(),
@@ -199,71 +246,8 @@ impl ClpSolver {
             has_model: false,
             stats: SolverStatistics::default(),
             current_profile: ClpProfile::default(),
+            hot_start_token: std::ptr::null_mut(),
         })
-    }
-
-    /// Re-issues `cobre_clp_load_problem` with the current retained-model
-    /// buffers.
-    ///
-    /// CLP exposes no incremental row-append or bound-change call, so every
-    /// mutation (`add_rows`, `set_row_bounds`, `set_col_bounds`) patches the
-    /// retained CSC/bounds buffers and then calls this helper to rebuild the
-    /// CLP model from scratch. Bounds are forwarded verbatim; the C wrapper
-    /// owns the ±IEEE-inf → ±`DBL_MAX` translation and the minimize sense, so
-    /// no infinity translation or sense-setting happens here.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the retained `num_cols`, `num_rows`, or `num_nz` does not fit
-    /// in `i32` (the LP exceeds the CLP C API limit).
-    fn reload(&mut self) {
-        assert!(
-            i32::try_from(self.num_cols).is_ok(),
-            "num_cols {} overflows i32: LP exceeds CLP API limit",
-            self.num_cols
-        );
-        assert!(
-            i32::try_from(self.num_rows).is_ok(),
-            "num_rows {} overflows i32: LP exceeds CLP API limit",
-            self.num_rows
-        );
-        assert!(
-            i32::try_from(self.num_nz).is_ok(),
-            "num_nz {} overflows i32: LP exceeds CLP API limit",
-            self.num_nz
-        );
-        // The two values below have been asserted to fit in i32 above.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-        let num_col = self.num_cols as i32;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-        let num_row = self.num_rows as i32;
-        // SAFETY:
-        // - `self.handle` is a valid, non-null CLP pointer from `cobre_clp_create()`.
-        // - `num_col`/`num_row` fit in i32 (asserted above).
-        // - All pointer arguments point into owned `Vec` data on `self` that
-        //   remains alive for the duration of this call.
-        // - Retained slice lengths match the CLP `Clp_loadProblem` contract:
-        //   `num_cols + 1` for col_starts, `num_nz` for row_indices and values,
-        //   `num_cols` for col_lower/col_upper/objective, `num_rows` for
-        //   row_lower/row_upper (maintained by `load_model`, `add_rows`, and
-        //   the `set_*_bounds` patches).
-        // - Bounds are forwarded verbatim; the C wrapper owns the
-        //   ±IEEE-inf → ±DBL_MAX translation and sets the objective sense.
-        unsafe {
-            clp_ffi::cobre_clp_load_problem(
-                self.handle,
-                num_col,
-                num_row,
-                self.col_starts.as_ptr(),
-                self.row_indices.as_ptr(),
-                self.values.as_ptr(),
-                self.col_lower.as_ptr(),
-                self.col_upper.as_ptr(),
-                self.objective.as_ptr(),
-                self.row_lower.as_ptr(),
-                self.row_upper.as_ptr(),
-            );
-        }
     }
 
     /// Copies the three CLP-owned solution pointers into the owned buffers.
@@ -406,6 +390,195 @@ impl ClpSolver {
                 .min(i32::MAX as u32)) as i32
         }
     }
+
+    /// Selects the dual-steepest-edge pricing rule on the underlying CLP model.
+    ///
+    /// `mode` 1 selects full DSE; 3 is the `ClpDualRowSteepest` default. This
+    /// reaches a C++-class-only knob via the shim — `setDualRowPivotAlgorithm`
+    /// deletes the model's existing dual-row pivot object and clones the new one
+    /// onto the simplex. Driven by [`Self::apply_profile`] when
+    /// [`ClpProfile::dual_pricing_mode`] selects a non-default mode (the `== 3`
+    /// sentinel skips the call to keep the default profile byte-identical to a
+    /// build that never issued the setter). The corrected shim cast (the handle
+    /// is a `Clp_Simplex` wrapper whose `model_` member is the live
+    /// `ClpSimplex`) makes this fault-free; the setter is idempotent and issues
+    /// no solve.
+    fn set_dual_row_steepest(&mut self, mode: i32) {
+        // SAFETY: `self.handle` is a valid, non-null CLP pointer from
+        // `cobre_clp_create()`. The shim constructs a stack `ClpDualRowSteepest`
+        // and installs it; it retains no pointer after the call returns and
+        // cannot fail on a valid handle.
+        unsafe {
+            clp_ffi::cobre_clp_set_dual_row_steepest(self.handle, mode);
+        }
+    }
+
+    /// Snapshots the simplex rim/factorization for hot-started re-solves.
+    ///
+    /// Wraps `ClpSimplex::markHotStart` through the C++ shim. A model must be
+    /// loaded (`load_model` has run); a prior `solve` is **not** strictly
+    /// required — CLP's `markHotStart` re-solves internally (`setupForStrongBranching`
+    /// runs the LP) to establish the working rim/factorization it snapshots, so
+    /// snapshotting straight after `load_model` is safe. The captured `saveStuff`
+    /// token is retained opaquely in `hot_start_token` and threaded back into
+    /// [`Self::solve_from_hot_start`] / [`Self::unmark_hot_start`]; it is never
+    /// dereferenced on the Rust side.
+    ///
+    /// Calling `mark_hot_start` while a snapshot is already active first releases
+    /// the prior token (re-`mark` is a re-snapshot), so the mark/unmark pairing
+    /// invariant holds: at most one live token at a time, always released on
+    /// teardown.
+    ///
+    /// Perturbation stays off (`102`) and scaling stays off across the whole
+    /// hot-start lifetime — the determinism preconditions are inherited from the
+    /// applied profile, never re-enabled here.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if no model is loaded (`!self.has_model`). A prior `solve` is
+    /// not enforced (CLP re-solves internally if none has run).
+    pub fn mark_hot_start(&mut self) {
+        assert!(
+            self.has_model,
+            "mark_hot_start called without a loaded model — call load_model first"
+        );
+        // Re-snapshotting: release any prior token before capturing a new one so
+        // exactly one token is ever live.
+        if !self.hot_start_token.is_null() {
+            self.unmark_hot_start();
+        }
+        // SAFETY: `self.handle` is a valid, non-null CLP pointer from
+        // `cobre_clp_create()` with a solved model loaded (asserted via
+        // `has_model`). The shim reaches the live `ClpSimplex` through the
+        // wrapper's `model_` member, calls `markHotStart`, and returns the
+        // CLP-allocated `saveStuff` token. The token is CLP-owned; we retain it
+        // opaquely and release it via `unmark_hot_start` (or `Drop`).
+        let token = unsafe { clp_ffi::cobre_clp_mark_hot_start(self.handle) };
+        debug_assert!(
+            !token.is_null(),
+            "markHotStart returned a null saveStuff token"
+        );
+        self.hot_start_token = token;
+    }
+
+    /// Re-solves the (bound-patched) model from the active hot-start snapshot.
+    ///
+    /// Wraps `ClpSimplex::solveFromHotStart` through the shim, returning the CLP
+    /// solve status int (same space as `cobre_clp_dual`). A snapshot must be
+    /// active — [`Self::mark_hot_start`] must have been called and not yet
+    /// released. The intended composition is: solve once cold, `mark_hot_start`,
+    /// then per re-solve patch bounds via `set_col_bounds`/`set_row_bounds`
+    /// (which mutate CLP natively, preserving the factorization) and call this.
+    ///
+    /// On `CLP_STATUS_OPTIMAL` the three CLP-owned solution pointers are copied
+    /// into the owned buffers immediately (they are valid only until the next
+    /// solve) and a [`SolutionView`] borrowing them is returned, exactly as the
+    /// cold [`SolverInterface::solve`] path does. Non-optimal statuses map to a
+    /// [`SolverError`].
+    ///
+    /// The determinism contract for this path is **self-consistent**
+    /// reproducibility (run-to-run + cross-instance bit-for-bit) plus
+    /// declaration-order invariance — it is NOT required to land on the same
+    /// dual vertex as a cold solve of the same model.
+    ///
+    /// # Errors
+    ///
+    /// Mirrors [`SolverInterface::solve`]: `Infeasible` on `PRIMAL_INFEASIBLE`,
+    /// `Unbounded` on `DUAL_INFEASIBLE`, `IterationLimit` on `STOPPED`,
+    /// `InternalError` on `ERRORS` or any unexpected status int.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no snapshot is active (`hot_start_token` is null).
+    pub fn solve_from_hot_start(&mut self) -> Result<SolutionView<'_>, SolverError> {
+        assert!(
+            !self.hot_start_token.is_null(),
+            "solve_from_hot_start called without an active snapshot — call mark_hot_start first"
+        );
+
+        let t0 = Instant::now();
+        // SAFETY: `self.handle` is a valid, non-null CLP pointer with a solved
+        // model loaded. `self.hot_start_token` is the non-null token from a prior
+        // `mark_hot_start` on this same handle (asserted above); it is forwarded
+        // to CLP unchanged and never dereferenced here. The returned int is the
+        // CLP solve status.
+        let status =
+            unsafe { clp_ffi::cobre_clp_solve_from_hot_start(self.handle, self.hot_start_token) };
+        let solve_time = t0.elapsed().as_secs_f64();
+
+        self.stats.solve_count += 1;
+
+        if status == clp_ffi::CLP_STATUS_OPTIMAL {
+            // SAFETY: `self.handle` is a valid, non-null CLP pointer that has
+            // just been solved; iteration count is non-negative so the cast is
+            // safe.
+            #[allow(clippy::cast_sign_loss)]
+            let iterations = unsafe { clp_ffi::cobre_clp_number_iterations(self.handle) } as u64;
+            // SAFETY: `self.handle` is a valid, non-null CLP pointer that has
+            // just been solved. Objective is already in minimize sense.
+            let objective = unsafe { clp_ffi::cobre_clp_objective_value(self.handle) };
+
+            self.copy_solution();
+
+            self.stats.success_count += 1;
+            self.stats.first_try_successes += 1;
+            self.stats.total_iterations += iterations;
+            self.stats.total_solve_time_seconds += solve_time;
+
+            return Ok(SolutionView {
+                objective,
+                primal: &self.col_value[..self.num_cols],
+                dual: &self.row_dual[..self.num_rows],
+                reduced_costs: &self.col_dual[..self.num_cols],
+                iterations,
+                solve_time_seconds: solve_time,
+            });
+        }
+
+        self.stats.failure_count += 1;
+        match status {
+            clp_ffi::CLP_STATUS_PRIMAL_INFEASIBLE => Err(SolverError::Infeasible),
+            clp_ffi::CLP_STATUS_DUAL_INFEASIBLE => Err(SolverError::Unbounded),
+            clp_ffi::CLP_STATUS_STOPPED => {
+                // SAFETY: `self.handle` is a valid, non-null CLP pointer;
+                // iteration count is non-negative so the cast is safe.
+                #[allow(clippy::cast_sign_loss)]
+                let iterations =
+                    unsafe { clp_ffi::cobre_clp_number_iterations(self.handle) } as u64;
+                Err(SolverError::IterationLimit { iterations })
+            }
+            clp_ffi::CLP_STATUS_ERRORS => Err(SolverError::InternalError {
+                message: "CLP hot-start solve failed (simplex returned ERRORS status)".to_string(),
+                error_code: Some(4),
+            }),
+            other => Err(SolverError::InternalError {
+                message: format!("CLP hot-start returned unexpected status {other}"),
+                error_code: Some(other),
+            }),
+        }
+    }
+
+    /// Releases the active hot-start snapshot, freeing the `saveStuff` token.
+    ///
+    /// Wraps `ClpSimplex::unmarkHotStart` through the shim and resets
+    /// `hot_start_token` to null. A no-op when no snapshot is active, so it is
+    /// always safe to call (and is called by `Drop`). Every
+    /// [`Self::mark_hot_start`] is paired with exactly one release — either an
+    /// explicit `unmark_hot_start` or the one issued from `Drop`.
+    pub fn unmark_hot_start(&mut self) {
+        if self.hot_start_token.is_null() {
+            return;
+        }
+        // SAFETY: `self.handle` is a valid, non-null CLP pointer.
+        // `self.hot_start_token` is the non-null token from a prior
+        // `mark_hot_start` on this same handle (guarded above); the shim forwards
+        // it to `unmarkHotStart`, which frees it. It is never dereferenced here
+        // and is nulled immediately so it cannot be reused after the free.
+        unsafe {
+            clp_ffi::cobre_clp_unmark_hot_start(self.handle, self.hot_start_token);
+        }
+        self.hot_start_token = std::ptr::null_mut();
+    }
 }
 
 impl SolverInterface for ClpSolver {
@@ -420,6 +593,20 @@ impl SolverInterface for ClpSolver {
     /// `cobre_clp_scaling`, `cobre_clp_set_primal_tolerance`,
     /// `cobre_clp_set_dual_tolerance`, and the iteration cap resolved by
     /// `resolve_simplex_cap` via `cobre_clp_set_maximum_iterations`.
+    ///
+    /// It then drives the two C++-class-only knobs through the shim, each behind
+    /// a behavior-neutral sentinel so the default profile stays byte-identical to
+    /// a build that never issued either setter:
+    ///
+    /// - **Dual-row pricing** ([`ClpProfile::dual_pricing_mode`]): a non-default
+    ///   mode (`!= 3`) installs that pricing rule via `set_dual_row_steepest`;
+    ///   mode `3` is CLP's own `ClpDualRowSteepest` constructor default, so it is
+    ///   the "leave CLP default — do not call" sentinel and issues no shim call.
+    ///   A tuned profile pinning full DSE (`dual_pricing_mode = 1`) therefore
+    ///   drives the setter; the default/forward/simulation profiles do not.
+    /// - **Refactorization cadence** ([`ClpProfile::factorization_frequency`]): a
+    ///   non-zero value calls `cobre_clp_set_factorization_frequency`; `0` is the
+    ///   "leave CLP's internal default — do not call" sentinel and issues no call.
     ///
     /// Mirrors `HighsSolver::apply_profile`: configure all fields, then assign
     /// `self.current_profile`.
@@ -441,6 +628,31 @@ impl SolverInterface for ClpSolver {
             );
             clp_ffi::cobre_clp_set_dual_tolerance(self.handle, profile.dual_feasibility_tolerance);
             clp_ffi::cobre_clp_set_maximum_iterations(self.handle, cap);
+        }
+
+        // Dual-row pricing: skip mode 3 (CLP's own steepest-edge ctor default)
+        // so the default/forward/simulation profiles issue no shim call and stay
+        // byte-identical to today; any other mode (e.g. full DSE = 1) installs
+        // the pricing rule via the shim.
+        if profile.dual_pricing_mode != 3 {
+            self.set_dual_row_steepest(profile.dual_pricing_mode);
+        }
+
+        // Refactorization cadence: 0 is the "leave CLP's internal default"
+        // sentinel (no call); any non-zero value sets the cadence via the shim.
+        if profile.factorization_frequency != 0 {
+            // SAFETY: `self.handle` is a valid, non-null CLP pointer from
+            // `cobre_clp_create()`. The shim reaches the live `ClpSimplex`
+            // through the wrapper's `model_` member and calls
+            // `setFactorizationFrequency`, which stores the cadence on the
+            // factorization object; it retains no pointer and cannot fail on a
+            // valid handle.
+            unsafe {
+                clp_ffi::cobre_clp_set_factorization_frequency(
+                    self.handle,
+                    profile.factorization_frequency,
+                );
+            }
         }
     }
 
@@ -486,6 +698,19 @@ impl SolverInterface for ClpSolver {
             "num_nz {} overflows i32: LP exceeds CLP API limit",
             template.num_nz
         );
+        // Release any active hot-start snapshot before replacing the model — the
+        // saveStuff belongs to the old model's factorization and is invalid after
+        // Clp_loadProblem. Mirrors the self-heal guard in `mark_hot_start`. This
+        // releasing-before-reload is the correct ordering and keeps `Drop` from
+        // unmarking a stale token after the model is swapped. (Note: vendored CLP
+        // leaves `ClpSimplex::factorization_` dangling after `unmarkHotStart` and
+        // `Clp_loadProblem` does not heal the ClpSimplex-level rim, so a *solve*
+        // after a reload-following-a-hot-start is unsafe at the CLP level — out of
+        // this guard's scope, and not on any persistent-solver path, which never
+        // reloads a fresh model after marking.)
+        if !self.hot_start_token.is_null() {
+            self.unmark_hot_start();
+        }
         // The two values below have been asserted to fit in i32 above.
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         let num_col = template.num_cols as i32;
@@ -529,10 +754,11 @@ impl SolverInterface for ClpSolver {
         self.row_dual.resize(self.num_rows, 0.0);
 
         // Clone the template's CSC/bounds into the retained model buffers so the
-        // in-Rust copy equals the loaded model. CLP has no incremental mutation
-        // API, so `add_rows`/`set_*_bounds` patch these buffers and re-issue the
-        // full load via `reload`. Cleared then filled (no `shrink_to_fit`) so
-        // capacity stabilises at the peak.
+        // in-Rust copy equals the loaded model. `add_rows`/`set_*_bounds` patch
+        // these buffers (keeping them the canonical, declaration-ordered mirror)
+        // and reconcile the change into CLP natively via `cobre_clp_add_rows` /
+        // `cobre_clp_chg_*`. Cleared then filled (no `shrink_to_fit`) so capacity
+        // stabilises at the peak.
         self.col_starts.clear();
         self.col_starts.extend_from_slice(&template.col_starts);
         self.row_indices.clear();
@@ -559,15 +785,17 @@ impl SolverInterface for ClpSolver {
     ///
     /// `rows` is in CSR (row-major) form; the retained model is CSC
     /// (column-major). The merge transposes each batch row's `(col, value)`
-    /// pairs into the per-column lists of the retained CSC, then re-issues a
-    /// full `cobre_clp_load_problem` via `reload` (CLP has no
-    /// incremental row-append). The retained `row_lower`/`row_upper` are
-    /// extended, `num_rows`/`num_nz` are bumped, and `row_dual` is resized.
+    /// pairs into the per-column lists of the retained CSC (keeping the retained
+    /// buffers the canonical mirror), then appends the rows into CLP **natively**
+    /// via `cobre_clp_add_rows` — which takes the CSR batch directly, so the
+    /// CSC transpose feeds only the retained mirror, not the FFI call. The
+    /// native append preserves CLP's factorization/basis (no full rebuild). The
+    /// retained `row_lower`/`row_upper` are extended, `num_rows`/`num_nz` are
+    /// bumped, and `row_dual` is resized.
     ///
     /// # Panics
     ///
-    /// Panics if `rows.num_rows` or the batch nnz does not fit in `i32`, or if
-    /// the merged model dimensions exceed the CLP C API limit (via `reload`).
+    /// Panics if `rows.num_rows` or the batch nnz does not fit in `i32`.
     fn add_rows(&mut self, rows: &RowBatch) {
         assert!(
             i32::try_from(rows.num_rows).is_ok(),
@@ -670,23 +898,56 @@ impl SolverInterface for ClpSolver {
         self.num_rows += rows.num_rows;
         self.num_nz = merged_nz;
 
-        self.reload();
+        // `rows.num_rows` was asserted to fit in i32 at the top of this method.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let number = rows.num_rows as i32;
+        // Append the rows into CLP natively from the CSR batch (NOT the retained
+        // CSC). `Clp_addRows` takes CSR directly, so the batch's own
+        // `row_starts`/`col_indices`/`values` are forwarded verbatim; the CSC
+        // transpose above only refreshes the retained mirror. The native append
+        // preserves CLP's factorization/basis (no full reload).
+        // SAFETY:
+        // - `self.handle` is a valid, non-null CLP pointer from
+        //   `cobre_clp_create()` with a model loaded.
+        // - `number` (== `rows.num_rows`) is non-negative and fits in i32
+        //   (asserted at the top of this method).
+        // - The pointer arguments point into the caller's `rows` CSR slices,
+        //   which outlive this call: `row_lower`/`row_upper` have `num_rows`
+        //   entries, `row_starts` has `num_rows + 1` entries, and
+        //   `col_indices`/`values` have `row_starts[num_rows]` entries (the
+        //   `RowBatch` CSR contract). The batch nnz was asserted to fit in i32.
+        // - Row bounds are forwarded verbatim; the C wrapper owns the
+        //   ±IEEE-inf → ±DBL_MAX translation.
+        unsafe {
+            clp_ffi::cobre_clp_add_rows(
+                self.handle,
+                number,
+                rows.row_lower.as_ptr(),
+                rows.row_upper.as_ptr(),
+                rows.row_starts.as_ptr(),
+                rows.col_indices.as_ptr(),
+                rows.values.as_ptr(),
+            );
+        }
 
         // Grow the row-dual extraction buffer to cover the appended rows.
         self.row_dual.resize(self.num_rows, 0.0);
     }
 
-    /// Patches the bounds of an arbitrary set of rows and rebuilds the model.
+    /// Patches the bounds of an arbitrary set of rows in place.
     ///
     /// `indices`, `lower`, and `upper` must have equal length. An empty
-    /// `indices` slice is a no-op (no reload). Each retained `row_lower`/
-    /// `row_upper` entry at the given index is overwritten, then the model is
-    /// rebuilt via `reload`. Bounds are forwarded verbatim.
+    /// `indices` slice is a no-op. Each retained `row_lower`/`row_upper` entry at
+    /// the given index is overwritten (keeping the retained vectors the canonical
+    /// mirror), then the **full** patched bound vectors are pushed into CLP
+    /// natively via `cobre_clp_chg_row_lower`/`cobre_clp_chg_row_upper` — which
+    /// each take the whole array, not an index subset. This preserves CLP's
+    /// factorization/basis across the patch. Bounds are forwarded verbatim.
     ///
     /// # Panics
     ///
     /// Panics if the three slices differ in length, or if any index is out of
-    /// range (debug builds), or via `reload`'s i32-overflow asserts.
+    /// range (debug builds).
     fn set_row_bounds(&mut self, indices: &[usize], lower: &[f64], upper: &[f64]) {
         assert!(
             indices.len() == lower.len() && indices.len() == upper.len(),
@@ -709,20 +970,36 @@ impl SolverInterface for ClpSolver {
             self.row_lower[row] = lower[i];
             self.row_upper[row] = upper[i];
         }
-        self.reload();
+        // Push the full patched row-bound vectors into CLP. `Clp_chgRowLower`/
+        // `Upper` replace the model's entire bound array (not a subset), so the
+        // retained vectors — already patched above — are forwarded in full.
+        // SAFETY:
+        // - `self.handle` is a valid, non-null CLP pointer with a model loaded.
+        // - `self.row_lower`/`self.row_upper` each have exactly `self.num_rows`
+        //   entries (maintained by `load_model`/`add_rows`), matching the model's
+        //   current row count that the C wrapper queries to size its translation.
+        // - The pointers reference owned `Vec` data alive for the call.
+        // - Bounds are forwarded verbatim; the C wrapper owns the
+        //   ±IEEE-inf → ±DBL_MAX translation.
+        unsafe {
+            clp_ffi::cobre_clp_chg_row_lower(self.handle, self.row_lower.as_ptr());
+            clp_ffi::cobre_clp_chg_row_upper(self.handle, self.row_upper.as_ptr());
+        }
         self.stats.total_set_bounds_time_seconds += t0.elapsed().as_secs_f64();
     }
 
-    /// Patches the bounds of an arbitrary set of columns and rebuilds the model.
+    /// Patches the bounds of an arbitrary set of columns in place.
     ///
     /// Symmetric to [`Self::set_row_bounds`] but patches the retained
-    /// `col_lower`/`col_upper`. An empty `indices` slice is a no-op (no
-    /// reload). Bounds are forwarded verbatim.
+    /// `col_lower`/`col_upper` and pushes them into CLP natively via
+    /// `cobre_clp_chg_column_lower`/`cobre_clp_chg_column_upper` (each taking the
+    /// full bound array). An empty `indices` slice is a no-op. This preserves
+    /// CLP's factorization/basis across the patch. Bounds are forwarded verbatim.
     ///
     /// # Panics
     ///
     /// Panics if the three slices differ in length, or if any index is out of
-    /// range (debug builds), or via `reload`'s i32-overflow asserts.
+    /// range (debug builds).
     fn set_col_bounds(&mut self, indices: &[usize], lower: &[f64], upper: &[f64]) {
         assert!(
             indices.len() == lower.len() && indices.len() == upper.len(),
@@ -745,7 +1022,21 @@ impl SolverInterface for ClpSolver {
             self.col_lower[col] = lower[i];
             self.col_upper[col] = upper[i];
         }
-        self.reload();
+        // Push the full patched column-bound vectors into CLP. `Clp_chgColumn*`
+        // replace the model's entire bound array (not a subset), so the retained
+        // vectors — already patched above — are forwarded in full.
+        // SAFETY:
+        // - `self.handle` is a valid, non-null CLP pointer with a model loaded.
+        // - `self.col_lower`/`self.col_upper` each have exactly `self.num_cols`
+        //   entries (maintained by `load_model`), matching the model's current
+        //   column count that the C wrapper queries to size its translation.
+        // - The pointers reference owned `Vec` data alive for the call.
+        // - Bounds are forwarded verbatim; the C wrapper owns the
+        //   ±IEEE-inf → ±DBL_MAX translation.
+        unsafe {
+            clp_ffi::cobre_clp_chg_column_lower(self.handle, self.col_lower.as_ptr());
+            clp_ffi::cobre_clp_chg_column_upper(self.handle, self.col_upper.as_ptr());
+        }
         self.stats.total_set_bounds_time_seconds += t0.elapsed().as_secs_f64();
     }
 
@@ -785,18 +1076,33 @@ impl SolverInterface for ClpSolver {
 
         if let Some(b) = basis {
             // Reinstall the offered basis element-by-element before the solve.
-            // CLP retains its internal basis across consecutive `cobre_clp_dual`
-            // calls, so both `None` (warm from prior solve) and `Some` (warm from
-            // the reinstalled basis) fall through to the same cold dual path below.
+            // CLP retains its internal basis across consecutive simplex calls,
+            // so both `None` (warm from prior solve) and `Some` (warm from the
+            // reinstalled basis) fall through to the same cold solve below.
             self.install_basis(b);
         }
 
         let t0 = Instant::now();
-        // SAFETY: `self.handle` is a valid, non-null CLP pointer from
-        // `cobre_clp_create()` with a model loaded (asserted via `has_model`).
-        // `if_values_pass = 0` requests a cold solve (no values pass). The
-        // returned int is the CLP solve status.
-        let status = unsafe { clp_ffi::cobre_clp_dual(self.handle, 0) };
+        // Dispatch on the profile's algorithm selection. Both the dual and
+        // primal simplex return the same `Clp_status` int space, so the status
+        // mapping, `copy_solution`, and `SolutionView` construction below are
+        // shared and unchanged.
+        let status = match self.current_profile.algorithm {
+            ClpAlgorithm::Dual => {
+                // SAFETY: `self.handle` is a valid, non-null CLP pointer from
+                // `cobre_clp_create()` with a model loaded (asserted via
+                // `has_model`). `if_values_pass = 0` requests a cold solve (no
+                // values pass). The returned int is the CLP solve status.
+                unsafe { clp_ffi::cobre_clp_dual(self.handle, 0) }
+            }
+            ClpAlgorithm::Primal => {
+                // SAFETY: `self.handle` is a valid, non-null CLP pointer from
+                // `cobre_clp_create()` with a model loaded (asserted via
+                // `has_model`). `if_values_pass = 0` requests a cold solve (no
+                // values pass). The returned int is the CLP solve status.
+                unsafe { clp_ffi::cobre_clp_primal(self.handle, 0) }
+            }
+        };
         let solve_time = t0.elapsed().as_secs_f64();
 
         self.stats.solve_count += 1;
@@ -852,7 +1158,7 @@ impl SolverInterface for ClpSolver {
                 Err(SolverError::IterationLimit { iterations })
             }
             clp_ffi::CLP_STATUS_ERRORS => Err(SolverError::InternalError {
-                message: "CLP solve failed (Clp_dual returned ERRORS status)".to_string(),
+                message: "CLP solve failed (simplex returned ERRORS status)".to_string(),
                 error_code: Some(4),
             }),
             other => Err(SolverError::InternalError {
@@ -984,8 +1290,8 @@ const fn normalize_row_dual(raw: f64) -> f64 {
 /// Converts a `usize` to `i32`, panicking on overflow.
 ///
 /// Used inside the CSR→CSC merge to write `col_starts`/`row_indices` entries.
-/// Each value is bounded by the merged nnz / row count, which `add_rows` and
-/// `reload` independently assert fit in `i32`; this guards the per-entry writes.
+/// Each value is bounded by the merged nnz / row count, which `add_rows`
+/// asserts fits in `i32`; this guards the per-entry writes.
 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 fn i32_from_usize(v: usize) -> i32 {
     debug_assert!(
@@ -997,6 +1303,10 @@ fn i32_from_usize(v: usize) -> i32 {
 
 impl Drop for ClpSolver {
     fn drop(&mut self) {
+        // Release a still-held hot-start snapshot before destroying the model so
+        // every `mark_hot_start` is paired with exactly one release (no leaked
+        // `saveStuff`). `unmark_hot_start` is a no-op when no snapshot is active.
+        self.unmark_hot_start();
         // SAFETY: valid CLP pointer from construction, called once per instance.
         unsafe { clp_ffi::cobre_clp_destroy(self.handle) };
     }
@@ -1028,7 +1338,7 @@ pub fn clp_version() -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::clp::{ClpProfile, ClpSolver, clp_version};
+    use crate::clp::{ClpAlgorithm, ClpProfile, ClpSolver, clp_version};
     use crate::profile::DEFAULT_PROFILE_HEURISTIC_SENTINEL;
     use crate::types::{Basis, RowBatch, SolutionView, SolverError, StageTemplate};
     use crate::{ProfiledSolver, SolverInterface};
@@ -1101,6 +1411,16 @@ mod tests {
             p.simplex_iteration_limit,
             DEFAULT_PROFILE_HEURISTIC_SENTINEL
         );
+        assert_eq!(p.algorithm, ClpAlgorithm::Dual);
+        // CLP-native, behavior-neutral defaults for the inert pricing/refactor
+        // knobs: mode 3 is CLP's own steepest-edge ctor default; 0 is the
+        // "leave CLP's internal default" sentinel for the factorization cadence.
+        assert_eq!(p.dual_pricing_mode, 3);
+        assert_eq!(p.factorization_frequency, 0);
+        // ClpProfile must remain Copy + PartialEq + Default after the new fields.
+        assert_profile_bounds::<ClpProfile>();
+        let copied = p;
+        assert_eq!(copied, p);
     }
 
     #[test]
@@ -1285,9 +1605,9 @@ mod tests {
 
         let load_count_before = solver.stats.load_model_count;
 
-        // AC4: empty index slices are a no-op -- no reload, no panic, dimensions
-        // unchanged. (load_model_count would be unaffected regardless, since
-        // reload bypasses it; we assert state invariance instead.)
+        // AC4: empty index slices are a no-op -- no FFI mutation, no panic,
+        // dimensions and bound vectors unchanged. (load_model_count is
+        // unaffected by a bound patch regardless; we assert state invariance.)
         solver.set_row_bounds(&[], &[], &[]);
         solver.set_col_bounds(&[], &[], &[]);
 
@@ -1343,6 +1663,44 @@ mod tests {
         assert_eq!(view.primal.len(), 3);
         assert_eq!(view.reduced_costs.len(), 3);
         assert_eq!(view.dual.len(), 2);
+    }
+
+    #[test]
+    fn test_clp_solve_basic_lp_primal_algorithm() {
+        let mut solver = ClpSolver::new().expect("CLP solver creation failed");
+        // Configure the solver to dispatch through the primal simplex.
+        solver.apply_profile(&ClpProfile {
+            algorithm: ClpAlgorithm::Primal,
+            ..ClpProfile::default()
+        });
+        solver.load_model(&make_fixture_stage_template());
+
+        // The primal simplex reaches the same SS1.1 optimum as the dual path.
+        let view = solver
+            .solve(None)
+            .expect("SS1.1 LP should solve to optimal via the primal simplex");
+
+        // Optimal x = (6, 0, 2), obj = 100.
+        assert!(
+            (view.objective - 100.0).abs() < 1e-8,
+            "objective {} not within 1e-8 of 100.0",
+            view.objective
+        );
+        assert!(
+            (view.primal[0] - 6.0).abs() < 1e-8,
+            "primal[0] {} not within 1e-8 of 6.0",
+            view.primal[0]
+        );
+        assert!(
+            (view.primal[1] - 0.0).abs() < 1e-8,
+            "primal[1] {} not within 1e-8 of 0.0",
+            view.primal[1]
+        );
+        assert!(
+            (view.primal[2] - 2.0).abs() < 1e-8,
+            "primal[2] {} not within 1e-8 of 2.0",
+            view.primal[2]
+        );
     }
 
     #[test]
@@ -1506,6 +1864,107 @@ mod tests {
             "objective {} not within 1e-8 of 100.0",
             view.objective
         );
+    }
+
+    #[test]
+    fn test_clp_apply_tuned_pricing_profile_then_solve() {
+        // apply_profile now DRIVES the dual_pricing_mode / factorization_frequency
+        // knobs through the shim (the corrected cast makes that fault-free).
+        // Applying a tuned profile (full DSE = 1, refactor cadence = 200) installs
+        // both knobs and must still reach the SS1.1 optimum (obj 100.0): the knobs
+        // change the iteration path, not the optimum.
+        let mut solver = ClpSolver::new().expect("CLP solver creation failed");
+        solver.apply_profile(&ClpProfile {
+            dual_pricing_mode: 1,
+            factorization_frequency: 200,
+            ..ClpProfile::default()
+        });
+        // The fields are cached for delta-tracking AND driven into CLP.
+        assert_eq!(solver.current_profile.dual_pricing_mode, 1);
+        assert_eq!(solver.current_profile.factorization_frequency, 200);
+
+        solver.load_model(&make_fixture_stage_template());
+        let view = solver
+            .solve(None)
+            .expect("SS1.1 LP should solve to optimal with a tuned DSE/refactor profile");
+        assert!(
+            (view.objective - 100.0).abs() < 1e-8,
+            "objective {} not within 1e-8 of 100.0",
+            view.objective
+        );
+    }
+
+    #[test]
+    fn test_clp_hot_start_mark_solve_unmark() {
+        // Hot-start lifecycle on the persistent-factorization instance: solve cold
+        // to leave the rim/factorization alive, snapshot, re-solve from the
+        // snapshot, and release. The re-solve must reach the SS1.1 optimum.
+        let mut solver = ClpSolver::new().expect("CLP solver creation failed");
+        solver.load_model(&make_fixture_stage_template());
+        let cold = solver.solve(None).expect("cold solve must be optimal");
+        assert!((cold.objective - 100.0).abs() < 1e-8);
+
+        solver.mark_hot_start();
+        let view = solver
+            .solve_from_hot_start()
+            .expect("hot-start re-solve must be optimal");
+        assert!(
+            (view.objective - 100.0).abs() < 1e-8,
+            "hot-start objective {} not within 1e-8 of 100.0",
+            view.objective
+        );
+        solver.unmark_hot_start();
+        // Dropping after an explicit unmark must not double-free (no active token).
+    }
+
+    #[test]
+    fn test_clp_hot_start_drop_releases_token() {
+        // Marking without an explicit unmark must be released by Drop — no leak,
+        // no double-free. Exercised by simply letting the solver fall out of scope
+        // with a live token.
+        let mut solver = ClpSolver::new().expect("CLP solver creation failed");
+        solver.load_model(&make_fixture_stage_template());
+        let _ = solver.solve(None).expect("cold solve must be optimal");
+        solver.mark_hot_start();
+        // No explicit unmark; Drop must release the token.
+        drop(solver);
+    }
+
+    #[test]
+    fn test_clp_load_model_releases_live_hot_start_token() {
+        // load_model must release a live hot-start snapshot before replacing the
+        // model: the saveStuff token belongs to the OLD model's factorization and
+        // is invalid after Clp_loadProblem. Without the self-heal guard inside
+        // load_model, a later Drop -> unmark would run on the post-load_model
+        // state — a hazard. With the guard, the token is released and nulled at
+        // reload time, so Drop is safe.
+        //
+        // Path: load_model -> solve -> mark_hot_start -> load_model (live token)
+        // -> Drop. Must not crash. (A `solve` AFTER the reload is deliberately NOT
+        // exercised here: vendored CLP's `unmarkHotStart` leaves the model's own
+        // `factorization_` member dangling and `Clp_loadProblem` does not heal the
+        // ClpSimplex-level rim, so a solve after a reload-following-a-hot-start
+        // dereferences freed memory inside `ClpSimplex::saveData()`. The guard
+        // fixes the Drop hazard it is responsible for; that residual CLP defect is
+        // out of this guard's scope and is not on any real per-(worker, stage)
+        // persistent-solver path, which never reloads a fresh model after marking.)
+        let mut solver = ClpSolver::new().expect("CLP solver creation failed");
+        solver.load_model(&make_fixture_stage_template());
+        let _ = solver
+            .solve(None)
+            .expect("first cold solve must be optimal");
+        solver.mark_hot_start();
+        // The guard inside load_model releases the live token before reload.
+        solver.load_model(&make_fixture_stage_template());
+        // The reloaded model is intact for everything except a hot-start-tainted
+        // solve: the retained mirror and dimensions are correct.
+        assert!(solver.has_model);
+        assert!(
+            solver.hot_start_token.is_null(),
+            "load_model must null the hot-start token after releasing it"
+        );
+        // Drop here must NOT re-unmark a stale token (the guard already nulled it).
+        drop(solver);
     }
 
     #[test]

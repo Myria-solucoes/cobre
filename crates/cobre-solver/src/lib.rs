@@ -84,6 +84,8 @@ pub use highs::highs_version;
 #[cfg(feature = "clp")]
 pub mod clp;
 #[cfg(feature = "clp")]
+pub use clp::ClpAlgorithm;
+#[cfg(feature = "clp")]
 pub use clp::ClpProfile;
 #[cfg(feature = "clp")]
 pub use clp::ClpSolver;

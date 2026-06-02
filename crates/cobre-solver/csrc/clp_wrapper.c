@@ -145,11 +145,110 @@ void cobre_clp_load_problem(
 }
 
 /* =========================================================================
+ * Incremental Mutation
+ * ========================================================================= */
+
+void cobre_clp_add_rows(
+    void*           model,
+    int32_t         number,
+    const double*   row_lower,
+    const double*   row_upper,
+    const int32_t*  row_starts,
+    const int32_t*  columns,
+    const double*   elements
+) {
+    /* Nothing to append: leave the model untouched (matches the Rust-side
+     * empty-batch guard, where number == 0 returns before reaching the FFI). */
+    if (number <= 0) {
+        return;
+    }
+
+    /* Translate the appended row bounds into malloc'd scratch so the caller's
+     * arrays are left untouched, then free after the append. The matrix data
+     * (row_starts / columns / elements) never carries infinity sentinels and is
+     * forwarded directly. */
+    double* row_lower_t = (double*)malloc((size_t)number * sizeof(double));
+    double* row_upper_t = (double*)malloc((size_t)number * sizeof(double));
+    if (row_lower_t == NULL || row_upper_t == NULL) {
+        /* Genuine allocation failure: free whatever succeeded and bail without
+         * touching the model. The Rust layer treats an unsolved model
+         * (status != optimal) as an error on the subsequent solve. */
+        free(row_lower_t);
+        free(row_upper_t);
+        return;
+    }
+
+    cobre_clp_translate_bounds(row_lower, row_lower_t, number);
+    cobre_clp_translate_bounds(row_upper, row_upper_t, number);
+
+    Clp_addRows(
+        (Clp_Simplex*)model,
+        (int)number,
+        row_lower_t,
+        row_upper_t,
+        (const CoinBigIndex*)row_starts,
+        (const int*)columns,
+        elements
+    );
+
+    free(row_lower_t);
+    free(row_upper_t);
+}
+
+/* Shared helper for the four full-length bound-change wrappers: translate the
+ * caller's `n`-length bound array into malloc'd scratch (so IEEE infinities
+ * become ±COIN_DBL_MAX) and hand the scratch to `chg`. `n` is the model's
+ * current row or column count, queried by the caller. A non-positive `n` (no
+ * rows/columns) is a no-op; an allocation failure bails without touching the
+ * model, matching cobre_clp_load_problem's failure handling. */
+static void cobre_clp_chg_bounds(
+    void* model,
+    const double* bounds,
+    int n,
+    void (*chg)(Clp_Simplex*, const double*)
+) {
+    if (n <= 0) {
+        return;
+    }
+    double* scratch = (double*)malloc((size_t)n * sizeof(double));
+    if (scratch == NULL) {
+        return;
+    }
+    cobre_clp_translate_bounds(bounds, scratch, (int32_t)n);
+    chg((Clp_Simplex*)model, scratch);
+    free(scratch);
+}
+
+void cobre_clp_chg_row_lower(void* model, const double* row_lower) {
+    cobre_clp_chg_bounds(
+        model, row_lower, Clp_getNumRows((Clp_Simplex*)model), Clp_chgRowLower);
+}
+
+void cobre_clp_chg_row_upper(void* model, const double* row_upper) {
+    cobre_clp_chg_bounds(
+        model, row_upper, Clp_getNumRows((Clp_Simplex*)model), Clp_chgRowUpper);
+}
+
+void cobre_clp_chg_column_lower(void* model, const double* column_lower) {
+    cobre_clp_chg_bounds(
+        model, column_lower, Clp_getNumCols((Clp_Simplex*)model), Clp_chgColumnLower);
+}
+
+void cobre_clp_chg_column_upper(void* model, const double* column_upper) {
+    cobre_clp_chg_bounds(
+        model, column_upper, Clp_getNumCols((Clp_Simplex*)model), Clp_chgColumnUpper);
+}
+
+/* =========================================================================
  * Solving
  * ========================================================================= */
 
 int32_t cobre_clp_dual(void* model, int32_t if_values_pass) {
     return (int32_t)Clp_dual((Clp_Simplex*)model, (int)if_values_pass);
+}
+
+int32_t cobre_clp_primal(void* model, int32_t if_values_pass) {
+    return (int32_t)Clp_primal((Clp_Simplex*)model, (int)if_values_pass);
 }
 
 /* =========================================================================

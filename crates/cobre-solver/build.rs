@@ -207,6 +207,7 @@ fn main() {
     if env::var("CARGO_FEATURE_CLP").is_ok() {
         println!("cargo:rerun-if-changed=csrc/clp_wrapper.c");
         println!("cargo:rerun-if-changed=csrc/clp_wrapper.h");
+        println!("cargo:rerun-if-changed=csrc/clp_wrapper_cpp.cpp");
         println!("cargo:rerun-if-changed=vendor/coin-build/CMakeLists.txt");
         // The vendored config headers drive the superbuild's compilation; edits
         // to them must retrigger cmake or the build tree goes stale.
@@ -329,6 +330,44 @@ fn main() {
         }
 
         clp_build.compile("clp_wrapper");
+
+        // C++ shim: implements the CLP class-only knobs (dual-steepest-edge
+        // pricing, factorization frequency, hot-start snapshot/restore) that
+        // live solely on the C++ ClpSimplex class and are absent from
+        // <Clp_C_Interface.h>. It casts the opaque model handle to `Clp_Simplex*`
+        // (the concrete C-interface wrapper struct) and reads `->model_` to reach
+        // the live C++ `ClpSimplex`, then calls the class API. Compiled as a
+        // separate C++17 object so the plain-C wrapper above is unaffected. The same
+        // -isystem set as the C wrapper supplies the vendored C++ class headers
+        // (ClpSimplex.hpp / ClpDualRowSteepest.hpp live in the vendored source
+        // dirs, NOT the cmake-installed include/).
+        let mut clp_build_cpp = cc::Build::new();
+        clp_build_cpp
+            .file("csrc/clp_wrapper_cpp.cpp")
+            .cpp(true)
+            .include("csrc")
+            .warnings(true)
+            .extra_warnings(true);
+
+        add_system_or_include(&mut clp_build_cpp, target_env == "msvc", &clp_src_include);
+        add_system_or_include(
+            &mut clp_build_cpp,
+            target_env == "msvc",
+            &coinutils_src_include,
+        );
+        add_system_or_include(&mut clp_build_cpp, target_env == "msvc", &clp_include);
+
+        clp_build_cpp.flag_if_supported("-std=c++17");
+
+        // Mirror the MSVC CRT setting used for the CLP cmake build above:
+        // static CRT (`/MT`) so the linker accepts the C++ wrapper alongside
+        // CLP's C++ objects (which were also compiled `/MT`).
+        if target_env == "msvc" {
+            clp_build_cpp.flag("/std:c++17");
+            clp_build_cpp.static_crt(true);
+        }
+
+        clp_build_cpp.compile("clp_wrapper_cpp");
     }
 }
 

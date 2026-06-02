@@ -68,6 +68,56 @@ void cobre_clp_load_problem(
 );
 
 /* =========================================================================
+ * Incremental Mutation
+ *
+ * These mutate a loaded model in place instead of rebuilding it from scratch,
+ * preserving CLP's factorization/basis across the change. Like
+ * cobre_clp_load_problem, this layer owns the ±IEEE-infinity → ±COIN_DBL_MAX
+ * bound translation: any +inf maps to +DBL_MAX and -inf to -DBL_MAX before the
+ * call; finite bounds pass through unchanged.
+ * ========================================================================= */
+
+/** Append `number` constraint rows to a loaded model from row-major (CSR) data.
+ *  Wraps Clp_addRows(), translating IEEE ±infinity in row_lower / row_upper to
+ *  ±COIN_DBL_MAX first.
+ *
+ *  number: count of appended rows.
+ *  row_lower, row_upper: length `number` row bounds (infinity-translated).
+ *  row_starts: length number+1 CSR row-start offsets.
+ *  columns, elements: length row_starts[number] CSR entries.
+ *
+ *  A `number` of 0 is a no-op (matching the Rust-side empty-batch guard). */
+void cobre_clp_add_rows(
+    void*           model,
+    int32_t         number,
+    const double*   row_lower,
+    const double*   row_upper,
+    const int32_t*  row_starts,
+    const int32_t*  columns,
+    const double*   elements
+);
+
+/** Replace the model's row lower bounds with a full-length array.
+ *  Wraps Clp_chgRowLower(), translating IEEE ±infinity to ±COIN_DBL_MAX first.
+ *  row_lower must have length equal to the model's current row count. */
+void cobre_clp_chg_row_lower(void* model, const double* row_lower);
+
+/** Replace the model's row upper bounds with a full-length array.
+ *  Wraps Clp_chgRowUpper(), translating IEEE ±infinity to ±COIN_DBL_MAX first.
+ *  row_upper must have length equal to the model's current row count. */
+void cobre_clp_chg_row_upper(void* model, const double* row_upper);
+
+/** Replace the model's column lower bounds with a full-length array.
+ *  Wraps Clp_chgColumnLower(), translating IEEE ±infinity to ±COIN_DBL_MAX
+ *  first. column_lower must have length equal to the model's column count. */
+void cobre_clp_chg_column_lower(void* model, const double* column_lower);
+
+/** Replace the model's column upper bounds with a full-length array.
+ *  Wraps Clp_chgColumnUpper(), translating IEEE ±infinity to ±COIN_DBL_MAX
+ *  first. column_upper must have length equal to the model's column count. */
+void cobre_clp_chg_column_upper(void* model, const double* column_upper);
+
+/* =========================================================================
  * Solving
  * ========================================================================= */
 
@@ -77,6 +127,13 @@ void cobre_clp_load_problem(
  *  Returns the CLP solve status int (0 = optimal); the Rust layer interprets
  *  it. */
 int32_t cobre_clp_dual(void* model, int32_t if_values_pass);
+
+/** Run the primal simplex algorithm.
+ *  Wraps Clp_primal().
+ *  if_values_pass is forwarded verbatim (0 = no values pass).
+ *  Returns the CLP solve status int (0 = optimal); the Rust layer interprets
+ *  it. */
+int32_t cobre_clp_primal(void* model, int32_t if_values_pass);
 
 /* =========================================================================
  * Solution Extraction
@@ -162,6 +219,48 @@ int32_t cobre_clp_get_row_status(const void* model, int32_t sequence);
 /** Set the basis status of a row (slack).
  *  Wraps Clp_setRowStatus(). */
 void cobre_clp_set_row_status(void* model, int32_t sequence, int32_t value);
+
+/* =========================================================================
+ * C++ class-only knobs (implemented in clp_wrapper_cpp.cpp)
+ *
+ * These five entry points reach methods that exist only on the C++ ClpSimplex
+ * class and are NOT in Clp_C_Interface.h: the dual-row pivot setter, the
+ * factorization frequency, and the hot-start snapshot/restore trio. The opaque
+ * model handle from cobre_clp_create is a Clp_Simplex* wrapper struct whose
+ * ->model_ member is the real C++ ClpSimplex; the shim casts the handle to
+ * that wrapper and calls the class API on ->model_ (the same model the Clp_*
+ * C API reaches). They are declared here with C linkage and void/int32_t types
+ * so the plain-C wrapper translation unit never pulls in the C++ class
+ * headers.
+ * ========================================================================= */
+
+/** Select the dual-steepest-edge pricing rule for the dual simplex.
+ *  Constructs ClpDualRowSteepest(mode) and calls
+ *  ClpSimplex::setDualRowPivotAlgorithm.
+ *  mode: 1 = full DSE; 3 = the ClpDualRowSteepest default. */
+void cobre_clp_set_dual_row_steepest(void* model, int32_t mode);
+
+/** Set the simplex factorization refactor cadence.
+ *  Wraps ClpSimplex::setFactorizationFrequency(value). */
+void cobre_clp_set_factorization_frequency(void* model, int32_t value);
+
+/** Snapshot the model for hot-started re-solves.
+ *  Wraps ClpSimplex::markHotStart(void*&saveStuff) and returns the opaque
+ *  CLP-allocated saveStuff token. The caller keeps the token opaque and must
+ *  pair it with cobre_clp_unmark_hot_start on the same model. */
+void* cobre_clp_mark_hot_start(void* model);
+
+/** Re-solve the model from the hot-start snapshot.
+ *  Wraps ClpSimplex::solveFromHotStart(saveStuff) and returns the CLP solve
+ *  status int (0 = optimal; same space as cobre_clp_status). save_stuff must be
+ *  a token from a prior cobre_clp_mark_hot_start on this same model. */
+int32_t cobre_clp_solve_from_hot_start(void* model, void* save_stuff);
+
+/** Release a hot-start snapshot, freeing the saveStuff token.
+ *  Wraps ClpSimplex::unmarkHotStart(saveStuff). save_stuff must be a token from
+ *  a prior cobre_clp_mark_hot_start on this same model; after this call it is
+ *  freed and must not be reused. */
+void cobre_clp_unmark_hot_start(void* model, void* save_stuff);
 
 /* =========================================================================
  * Version query (no instance required)

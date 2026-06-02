@@ -33,7 +33,7 @@
 //! types are foreign, which the orphan rule permits.
 
 #[cfg(feature = "clp")]
-use cobre_solver::ClpProfile;
+use cobre_solver::{ClpAlgorithm, ClpProfile};
 #[cfg(feature = "highs")]
 use cobre_solver::{DEFAULT_PROFILE_HEURISTIC_SENTINEL, HighsProfile};
 
@@ -121,10 +121,17 @@ impl PhaseProfiles for HighsProfile {
 
 /// Per-phase `ClpProfile` selection.
 ///
-/// All three phases use [`ClpProfile::default()`]'s field set. These are
-/// CLP-native values, independently chosen for CLP's own option surface — they
-/// are **not** a translation of the `HiGHS` per-phase profiles. CLP has no
-/// per-phase override yet; a future phase may differentiate `BACKWARD`.
+/// `FORWARD` and `SIMULATION` equal [`ClpProfile::default()`]'s field set.
+/// `BACKWARD` is tuned for the backward pass: it pins full dual steepest-edge
+/// pricing (`dual_pricing_mode = 1`) and sets an SDDP-tuned refactorization
+/// cadence (`factorization_frequency = 200`), leaving every other field at the
+/// default. This is the CLP-native analog of the `HiGHS` backward override of
+/// `simplex_price_strategy`. These are CLP-native values, independently chosen
+/// for CLP's own option surface — they are **not** a translation of the `HiGHS`
+/// per-phase profiles. `algorithm` stays [`ClpAlgorithm::Dual`] in all three
+/// phases (no phase selects the primal simplex). The full field literals are
+/// written out because associated constants cannot use the
+/// `..ClpProfile::default()` struct-update spread in const context.
 #[cfg(feature = "clp")]
 impl PhaseProfiles for ClpProfile {
     const FORWARD: Self = ClpProfile {
@@ -133,6 +140,9 @@ impl PhaseProfiles for ClpProfile {
         primal_feasibility_tolerance: 1e-9,
         dual_feasibility_tolerance: 1e-9,
         simplex_iteration_limit: cobre_solver::DEFAULT_PROFILE_HEURISTIC_SENTINEL,
+        algorithm: ClpAlgorithm::Dual,
+        dual_pricing_mode: 3,       // CLP steepest-edge ctor default
+        factorization_frequency: 0, // CLP internal default (sentinel)
     };
     const BACKWARD: Self = ClpProfile {
         perturbation: 102,
@@ -140,6 +150,9 @@ impl PhaseProfiles for ClpProfile {
         primal_feasibility_tolerance: 1e-9,
         dual_feasibility_tolerance: 1e-9,
         simplex_iteration_limit: cobre_solver::DEFAULT_PROFILE_HEURISTIC_SENTINEL,
+        algorithm: ClpAlgorithm::Dual,
+        dual_pricing_mode: 1,         // full DSE pinned (backward-pass override)
+        factorization_frequency: 200, // tuned refactor cadence (backward-pass override)
     };
     const SIMULATION: Self = ClpProfile {
         perturbation: 102,
@@ -147,6 +160,9 @@ impl PhaseProfiles for ClpProfile {
         primal_feasibility_tolerance: 1e-9,
         dual_feasibility_tolerance: 1e-9,
         simplex_iteration_limit: cobre_solver::DEFAULT_PROFILE_HEURISTIC_SENTINEL,
+        algorithm: ClpAlgorithm::Dual,
+        dual_pricing_mode: 3,       // CLP steepest-edge ctor default
+        factorization_frequency: 0, // CLP internal default (sentinel)
     };
 }
 
@@ -389,13 +405,41 @@ mod clp_tests {
 
     use super::{Phase, PhaseProfiles};
 
-    /// All three CLP per-phase profiles equal [`ClpProfile::default()`].
+    /// The CLP `FORWARD`/`SIMULATION` per-phase profiles equal
+    /// [`ClpProfile::default()`].
     #[test]
-    fn clp_phase_profiles_all_equal_default() {
+    fn clp_phase_profiles_forward_simulation_equal_default() {
         let default = ClpProfile::default();
         assert_eq!(<ClpProfile as PhaseProfiles>::FORWARD, default);
-        assert_eq!(<ClpProfile as PhaseProfiles>::BACKWARD, default);
         assert_eq!(<ClpProfile as PhaseProfiles>::SIMULATION, default);
+    }
+
+    /// The CLP `BACKWARD` profile overrides only `dual_pricing_mode` (to `1`,
+    /// full DSE) and `factorization_frequency` (to `200`), matching the default
+    /// on every other field.
+    #[test]
+    fn clp_backward_profile_overrides_only_pricing_and_factorization() {
+        let default = ClpProfile::default();
+        let backward = <ClpProfile as PhaseProfiles>::BACKWARD;
+        assert_ne!(backward, default);
+        assert_eq!(backward.dual_pricing_mode, 1);
+        assert_eq!(backward.factorization_frequency, 200);
+        // Fields that are NOT overridden must match the default.
+        assert_eq!(backward.perturbation, default.perturbation);
+        assert_eq!(backward.scaling, default.scaling);
+        assert_eq!(
+            backward.primal_feasibility_tolerance,
+            default.primal_feasibility_tolerance
+        );
+        assert_eq!(
+            backward.dual_feasibility_tolerance,
+            default.dual_feasibility_tolerance
+        );
+        assert_eq!(
+            backward.simplex_iteration_limit,
+            default.simplex_iteration_limit
+        );
+        assert_eq!(backward.algorithm, default.algorithm);
     }
 
     /// `Phase::profile()` returns the matching CLP per-phase profile for each

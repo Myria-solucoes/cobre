@@ -79,12 +79,85 @@ unsafe extern "C" {
     );
 
     // ============================================================
+    // Incremental Mutation
+    //
+    // These mutate a loaded model in place (preserving CLP's factorization and
+    // basis across the change) instead of rebuilding it. The C wrapper owns the
+    // ±IEEE-infinity → ±COIN_DBL_MAX bound translation, so the bound slices are
+    // forwarded verbatim. `row_starts`/`columns` are `*const i32`, matching the
+    // `CoinBigIndex == int` build asserted at compile time in the C wrapper.
+    // ============================================================
+
+    /// Append `number` constraint rows from row-major (CSR) data.
+    /// Wraps `Clp_addRows()`. Bounds are infinity-translated by the C wrapper.
+    ///
+    /// # Safety
+    ///
+    /// `model` must be a valid, non-null CLP model pointer with a model loaded.
+    /// `row_lower`/`row_upper` must be valid for `number` reads; `row_starts`
+    /// for `number + 1` reads; `columns`/`elements` for `row_starts[number]`
+    /// reads. All pointers must outlive the call. `number` must be non-negative.
+    pub fn cobre_clp_add_rows(
+        model: *mut c_void,
+        number: int32_t,
+        row_lower: *const c_double,
+        row_upper: *const c_double,
+        row_starts: *const int32_t,
+        columns: *const int32_t,
+        elements: *const c_double,
+    );
+
+    /// Replace the model's row lower bounds with a full-length array.
+    /// Wraps `Clp_chgRowLower()`. Bounds are infinity-translated by the wrapper.
+    ///
+    /// # Safety
+    ///
+    /// `model` must be a valid, non-null CLP model pointer with a model loaded.
+    /// `row_lower` must be valid for reads of the model's current row count
+    /// `f64`s and must outlive the call.
+    pub fn cobre_clp_chg_row_lower(model: *mut c_void, row_lower: *const c_double);
+
+    /// Replace the model's row upper bounds with a full-length array.
+    /// Wraps `Clp_chgRowUpper()`. Bounds are infinity-translated by the wrapper.
+    ///
+    /// # Safety
+    ///
+    /// `model` must be a valid, non-null CLP model pointer with a model loaded.
+    /// `row_upper` must be valid for reads of the model's current row count
+    /// `f64`s and must outlive the call.
+    pub fn cobre_clp_chg_row_upper(model: *mut c_void, row_upper: *const c_double);
+
+    /// Replace the model's column lower bounds with a full-length array.
+    /// Wraps `Clp_chgColumnLower()`. Bounds are infinity-translated by the wrapper.
+    ///
+    /// # Safety
+    ///
+    /// `model` must be a valid, non-null CLP model pointer with a model loaded.
+    /// `column_lower` must be valid for reads of the model's current column count
+    /// `f64`s and must outlive the call.
+    pub fn cobre_clp_chg_column_lower(model: *mut c_void, column_lower: *const c_double);
+
+    /// Replace the model's column upper bounds with a full-length array.
+    /// Wraps `Clp_chgColumnUpper()`. Bounds are infinity-translated by the wrapper.
+    ///
+    /// # Safety
+    ///
+    /// `model` must be a valid, non-null CLP model pointer with a model loaded.
+    /// `column_upper` must be valid for reads of the model's current column count
+    /// `f64`s and must outlive the call.
+    pub fn cobre_clp_chg_column_upper(model: *mut c_void, column_upper: *const c_double);
+
+    // ============================================================
     // Solving
     // ============================================================
 
     /// Run the dual simplex algorithm. Wraps `Clp_dual()`.
     /// Returns the CLP solve status int (0 = optimal).
     pub fn cobre_clp_dual(model: *mut c_void, if_values_pass: int32_t) -> int32_t;
+
+    /// Run the primal simplex algorithm. Wraps `Clp_primal()`.
+    /// Returns the CLP solve status int (0 = optimal).
+    pub fn cobre_clp_primal(model: *mut c_void, if_values_pass: int32_t) -> int32_t;
 
     // ============================================================
     // Solution Extraction
@@ -153,6 +226,71 @@ unsafe extern "C" {
 
     /// Set the basis status of a row (slack). Wraps `Clp_setRowStatus()`.
     pub fn cobre_clp_set_row_status(model: *mut c_void, sequence: int32_t, value: int32_t);
+
+    // ============================================================
+    // C++ class-only knobs (implemented in clp_wrapper_cpp.cpp)
+    //
+    // These reach methods that exist only on the C++ `ClpSimplex` class and are
+    // not in the CLP C interface: dual-steepest-edge pricing, factorization
+    // frequency, and the hot-start snapshot/restore trio. The C++ shim
+    // static-casts the opaque `model` handle to the concrete `Clp_Simplex`
+    // wrapper struct (what `cobre_clp_create` returns) and reads `->model_` to
+    // reach the live `ClpSimplex`, matching how every `Clp_*` C-API call reaches
+    // the model. The `save_stuff` token is CLP-owned and kept opaque on the Rust
+    // side — never dereferenced, always paired (mark/unmark) on the same model
+    // instance.
+    // ============================================================
+
+    /// Select dual-steepest-edge pricing. Wraps
+    /// `ClpSimplex::setDualRowPivotAlgorithm(ClpDualRowSteepest(mode))`.
+    /// `mode` 1 = full DSE; 3 = the `ClpDualRowSteepest` default.
+    ///
+    /// # Safety
+    ///
+    /// `model` must be a valid, non-null CLP model pointer from
+    /// `cobre_clp_create`.
+    pub fn cobre_clp_set_dual_row_steepest(model: *mut c_void, mode: int32_t);
+
+    /// Set the simplex factorization refactor cadence.
+    /// Wraps `ClpSimplex::setFactorizationFrequency()`.
+    ///
+    /// # Safety
+    ///
+    /// `model` must be a valid, non-null CLP model pointer from
+    /// `cobre_clp_create`.
+    pub fn cobre_clp_set_factorization_frequency(model: *mut c_void, value: int32_t);
+
+    /// Snapshot the model for hot-started re-solves. Wraps
+    /// `ClpSimplex::markHotStart` and returns the opaque CLP-allocated
+    /// `saveStuff` token.
+    ///
+    /// # Safety
+    ///
+    /// `model` must be a valid, non-null CLP model pointer with a model loaded.
+    /// The returned token is CLP-owned; keep it opaque and release it with
+    /// `cobre_clp_unmark_hot_start` on the same `model`.
+    pub fn cobre_clp_mark_hot_start(model: *mut c_void) -> *mut c_void;
+
+    /// Re-solve the model from the hot-start snapshot. Wraps
+    /// `ClpSimplex::solveFromHotStart` and returns the CLP solve status int
+    /// (0 = optimal; same space as `cobre_clp_status`).
+    ///
+    /// # Safety
+    ///
+    /// `model` must be a valid, non-null CLP model pointer. `save_stuff` must be
+    /// a non-null token from a prior `cobre_clp_mark_hot_start` on this same
+    /// `model`. It is forwarded to CLP unchanged and never dereferenced by Rust.
+    pub fn cobre_clp_solve_from_hot_start(model: *mut c_void, save_stuff: *mut c_void) -> int32_t;
+
+    /// Release a hot-start snapshot, freeing the `saveStuff` token. Wraps
+    /// `ClpSimplex::unmarkHotStart`.
+    ///
+    /// # Safety
+    ///
+    /// `model` must be a valid, non-null CLP model pointer. `save_stuff` must be
+    /// a non-null token from a prior `cobre_clp_mark_hot_start` on this same
+    /// `model`; after this call it is freed and must not be reused.
+    pub fn cobre_clp_unmark_hot_start(model: *mut c_void, save_stuff: *mut c_void);
 
     // ============================================================
     // Version query (no instance required)
