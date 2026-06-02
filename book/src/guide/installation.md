@@ -154,7 +154,7 @@ The `cobre version` banner shows which backend is compiled in:
 
 ```
 cobre   v0.8.0
-solver: CLP
+solver: CLP 1.17.11
 comm:   local
 ...
 ```

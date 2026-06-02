@@ -207,12 +207,13 @@ pub fn active_solver_metadata_id() -> &'static str {
     "highs"
 }
 
-#[cfg(feature = "test-support")]
+#[cfg(all(feature = "test-support", feature = "highs"))]
 pub mod test_support {
     //! Test-only utilities for configuring solver options from integration tests.
     //!
     //! Do **not** enable this feature in production builds. The re-exported functions
-    //! call into the `HiGHS` C API directly and bypass all safe-wrapper validation.
+    //! call into the `HiGHS` C API directly and bypass all safe-wrapper validation,
+    //! so the module is HiGHS-only (gated on both `test-support` and `highs`).
 
     pub use crate::ffi::{
         cobre_highs_get_double_option, cobre_highs_get_int_option, cobre_highs_set_double_option,
