@@ -1062,7 +1062,7 @@ mod tests {
         BasisStore, CapturedBasis, ScratchBuffers, SolverWorkspace, WorkspacePool, WorkspaceSizing,
     };
     use cobre_solver::{
-        Basis, HighsProfile, SolutionView, SolverError, SolverInterface, SolverStatistics,
+        Basis, SolutionView, SolverError, SolverInterface, SolverStatistics,
         types::{RowBatch, StageTemplate},
     };
 
@@ -1070,9 +1070,9 @@ mod tests {
     struct MockSolver;
 
     impl SolverInterface for MockSolver {
-        type Profile = cobre_solver::HighsProfile;
+        type Profile = cobre_solver::ActiveProfile;
 
-        fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
+        fn apply_profile(&mut self, _profile: &cobre_solver::ActiveProfile) {}
 
         fn solver_name_version(&self) -> String {
             "MockSolver 0.0.0".to_string()
@@ -2264,8 +2264,15 @@ mod tests {
     /// Confirms that `ProfiledSolver::new` wraps the inner solver without
     /// issuing any FFI calls and that `WorkspacePool::new` correctly initialises
     /// every workspace.
+    ///
+    /// Gated to `feature = "highs"` because it embeds the backend-specific
+    /// default-profile value `HighsProfile::default()`; a CLP analog is a
+    /// separate assertion.
+    #[cfg(all(test, feature = "highs"))]
     #[test]
     fn workspace_solver_initialised_with_default_profile() {
+        use cobre_solver::HighsProfile;
+
         let pool = WorkspacePool::new(0, 2, 0, WorkspaceSizing::default(), || MockSolver);
         for ws in &pool.workspaces {
             assert_eq!(

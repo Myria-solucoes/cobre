@@ -1759,7 +1759,7 @@ fn test_penalty_multi_stage_consistent() {
 // guaranteeing that the slack is mandatory regardless of turbine level.
 #[test]
 fn test_penalty_slack_absorbs_negative_inflow() {
-    use cobre_solver::{HighsSolver, RowBatch, SolverInterface};
+    use cobre_solver::{ActiveSolver, RowBatch, SolverInterface};
 
     let system = one_hydro_system(1, 0);
     let config = penalty_config(1000.0);
@@ -1784,7 +1784,7 @@ fn test_penalty_slack_absorbs_negative_inflow() {
     let col_storage_in = 2_usize; // storage_in for hydro 0 when N=1, L=0
     let water_balance_row = 1_usize; // N + h = 1 + 0 = 1
 
-    let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
 
     // Load the structural LP.
     solver.load_model(template);
@@ -2931,7 +2931,7 @@ fn fpha_solve_system() -> (cobre_core::System, ProductionModelSet) {
 /// - `g` (col 7) is strictly positive
 #[test]
 fn fpha_solve_one_hydro_optimal() {
-    use cobre_solver::{HighsSolver, RowBatch, SolverInterface};
+    use cobre_solver::{ActiveSolver, RowBatch, SolverInterface};
 
     let (system, production) = fpha_solve_system();
     let result = build_stage_templates(
@@ -2946,7 +2946,7 @@ fn fpha_solve_one_hydro_optimal() {
     .expect("FPHA template build must succeed");
 
     let template = &result.templates[0];
-    let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
     solver.load_model(template);
 
     // No cuts at this point.
@@ -2987,7 +2987,7 @@ fn fpha_solve_one_hydro_optimal() {
 ///   col 0: `v`, col 1: `v_in`, col 3: `q`, col 4: `s`, col 8: `g`
 #[test]
 fn fpha_solve_hyperplane_constraints_hold() {
-    use cobre_solver::{HighsSolver, RowBatch, SolverInterface};
+    use cobre_solver::{ActiveSolver, RowBatch, SolverInterface};
 
     let (system, production) = fpha_solve_system();
 
@@ -3011,7 +3011,7 @@ fn fpha_solve_hyperplane_constraints_hold() {
     .expect("FPHA template build must succeed");
 
     let template = &result.templates[0];
-    let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
     solver.load_model(template);
 
     let empty_cuts = RowBatch {
@@ -3097,7 +3097,7 @@ fn fpha_solve_hyperplane_constraints_hold() {
 /// the direct `gamma_v*v_in` term, reducing the deficit and hence the cost.
 #[test]
 fn fpha_solve_storage_fixing_dual_differs_from_constant() {
-    use cobre_solver::{HighsSolver, RowBatch, SolverInterface};
+    use cobre_solver::{ActiveSolver, RowBatch, SolverInterface};
 
     let (system, _) = one_fpha_hydro_system(1);
 
@@ -3147,7 +3147,7 @@ fn fpha_solve_storage_fixing_dual_differs_from_constant() {
     .expect("constant productivity template build must succeed");
 
     let solve_and_get_storage_dual = |template: &cobre_solver::StageTemplate| -> f64 {
-        let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
         solver.load_model(template);
         let empty_cuts = RowBatch {
             num_rows: 0,
@@ -3208,7 +3208,7 @@ fn fpha_solve_storage_fixing_dual_differs_from_constant() {
 ///   cols 19..20: g[0..1] (FPHA generation variables for hydros 2 and 3)
 #[test]
 fn fpha_solve_mixed_system_optimal() {
-    use cobre_solver::{HighsSolver, RowBatch, SolverInterface};
+    use cobre_solver::{ActiveSolver, RowBatch, SolverInterface};
 
     let (system, production) = four_hydro_mixed_system();
 
@@ -3224,7 +3224,7 @@ fn fpha_solve_mixed_system_optimal() {
     .expect("mixed FPHA/constant system template build must succeed");
 
     let template = &result.templates[0];
-    let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
     solver.load_model(template);
 
     let empty_cuts = RowBatch {
@@ -4503,7 +4503,7 @@ fn evap_q_ev_objective_is_zero() {
 /// whose minimum at `v = v_min = 0` is `1.0 + 0.01 · 1000 = 11.0`.
 #[test]
 fn evap_lp_solvable_and_q_ev_positive_coefficients() {
-    use cobre_solver::{HighsSolver, RowBatch, SolverInterface};
+    use cobre_solver::{ActiveSolver, RowBatch, SolverInterface};
 
     let system = evap_hydro_system_with_violation_cost(730.0, 500.0);
     let evap = evap_set_with_k_evap_v(&system, &[0], 1.0, 0.02);
@@ -4520,7 +4520,7 @@ fn evap_lp_solvable_and_q_ev_positive_coefficients() {
     .expect("evap system template build must succeed");
 
     let template = &result.templates[0];
-    let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
     solver.load_model(template);
 
     let empty_cuts = RowBatch {
@@ -4565,7 +4565,7 @@ fn evap_lp_solvable_and_q_ev_positive_coefficients() {
 /// drive the high-cost violation slacks to zero.
 #[test]
 fn evap_violation_slacks_near_zero_feasible_constraint() {
-    use cobre_solver::{HighsSolver, RowBatch, SolverInterface};
+    use cobre_solver::{ActiveSolver, RowBatch, SolverInterface};
 
     let system = evap_hydro_system_with_violation_cost(730.0, 500.0);
     let evap = evap_set_with_k_evap_v(&system, &[0], 1.0, 0.02);
@@ -4582,7 +4582,7 @@ fn evap_violation_slacks_near_zero_feasible_constraint() {
     .expect("evap system template build must succeed");
 
     let template = &result.templates[0];
-    let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
     solver.load_model(template);
 
     let empty_cuts = RowBatch {
@@ -4627,7 +4627,7 @@ fn evap_violation_slacks_near_zero_feasible_constraint() {
 /// row must differ between the two configurations.
 #[test]
 fn evap_storage_fixing_dual_differs_from_no_evaporation() {
-    use cobre_solver::{HighsSolver, RowBatch, SolverInterface};
+    use cobre_solver::{ActiveSolver, RowBatch, SolverInterface};
 
     // System with evaporation violation cost (so slacks are penalised).
     let system_evap = evap_hydro_system_with_violation_cost(730.0, 500.0);
@@ -4658,7 +4658,7 @@ fn evap_storage_fixing_dual_differs_from_no_evaporation() {
     .expect("baseline system template build must succeed");
 
     let solve_and_get_storage_dual = |template: &cobre_solver::StageTemplate| -> f64 {
-        let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
         solver.load_model(template);
         let empty_cuts = RowBatch {
             num_rows: 0,
@@ -4703,7 +4703,7 @@ fn evap_storage_fixing_dual_differs_from_no_evaporation() {
 /// f_minus ~ 0, and spillage > 0.
 #[test]
 fn evap_bound_prevents_dump_valve() {
-    use cobre_solver::{HighsSolver, RowBatch, SolverInterface};
+    use cobre_solver::{ActiveSolver, RowBatch, SolverInterface};
 
     let system = evap_hydro_system_with_violation_cost(730.0, 500.0);
     let evap = evap_set_with_k_evap_v(&system, &[0], 2.0, 0.0001);
@@ -4720,7 +4720,7 @@ fn evap_bound_prevents_dump_valve() {
     .expect("evap dump valve test: template build must succeed");
 
     let template = &result.templates[0];
-    let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
     solver.load_model(template);
 
     let empty_cuts = RowBatch {

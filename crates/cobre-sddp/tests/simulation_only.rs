@@ -27,7 +27,7 @@ use cobre_sddp::{
     },
     setup::prepare_stochastic,
 };
-use cobre_solver::highs::HighsSolver;
+use cobre_solver::ActiveSolver;
 
 /// Single-rank communicator stub for testing.
 struct StubComm;
@@ -102,10 +102,10 @@ fn simulation_only_fcf_round_trip() {
         StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup");
 
     let comm = StubComm;
-    let mut solver = HighsSolver::new().expect("HighsSolver");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver");
 
     let outcome = setup
-        .train(&mut solver, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
         .expect("train must return Ok");
     assert!(outcome.error.is_none(), "expected no training error");
     let training_result = outcome.result;

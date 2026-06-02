@@ -23,7 +23,7 @@ use crate::{
     error::SddpError,
     forward::{ForwardResult, StageKey, partition, run_forward_stage},
     indexer::StageIndexer,
-    solver_phase::{FORWARD_PROFILE, Phase},
+    solver_phase::{Phase, PhaseProfiles},
     solver_stats::SolverStatsDelta,
     trajectory::TrajectoryRecord,
     workspace::{BasisStore, BasisStoreSliceMut, SolverWorkspace},
@@ -309,7 +309,7 @@ impl ForwardPassState {
         inputs: &mut ForwardPassInputs<'_, S>,
     ) -> Result<ForwardResult, SddpError>
     where
-        S: SolverInterface<Profile = cobre_solver::HighsProfile> + Send,
+        S: SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
     {
         let training_ctx = inputs.training_ctx;
         let TrainingContext {
@@ -414,8 +414,9 @@ impl ForwardPassState {
         for ws in inputs.workspaces.iter_mut() {
             ws.solver.set_profile(&Phase::Forward.profile());
             debug_assert!(
-                ws.solver.current_profile() == &FORWARD_PROFILE,
-                "solver profile must equal FORWARD_PROFILE after set_profile"
+                ws.solver.current_profile()
+                    == &<cobre_solver::ActiveProfile as PhaseProfiles>::FORWARD,
+                "solver profile must equal the active FORWARD profile after set_profile"
             );
         }
 
@@ -872,9 +873,9 @@ mod tests {
     }
 
     impl SolverInterface for MockSolver {
-        type Profile = cobre_solver::HighsProfile;
+        type Profile = cobre_solver::ActiveProfile;
 
-        fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
+        fn apply_profile(&mut self, _profile: &cobre_solver::ActiveProfile) {}
 
         fn load_model(&mut self, _template: &StageTemplate) {}
         fn add_rows(&mut self, _rows: &RowBatch) {}

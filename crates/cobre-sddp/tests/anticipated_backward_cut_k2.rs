@@ -102,7 +102,7 @@ use cobre_io::config::{
     TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
 use cobre_sddp::{StudySetup, hydro_models::PrepareHydroModelsResult};
-use cobre_solver::highs::HighsSolver;
+use cobre_solver::ActiveSolver;
 use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
 // ---------------------------------------------------------------------------
@@ -484,7 +484,7 @@ fn three_stage_k2_anticipated_cut_coefficient_propagates_correctly() {
     let config = build_config();
     let mut setup = build_setup(system, &config);
     let comm = StubComm;
-    let mut solver = HighsSolver::new().expect("HighsSolver::new");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
 
     // Run N_ITERATIONS = 5 training iterations so the FCF at stage 0 receives
     // a non-zero cut propagated from stage 2 via stage 1.
@@ -493,7 +493,7 @@ fn three_stage_k2_anticipated_cut_coefficient_propagates_correctly() {
             &mut solver,
             &comm,
             N_ITERATIONS as usize,
-            HighsSolver::new,
+            ActiveSolver::new,
             None,
             None,
         )

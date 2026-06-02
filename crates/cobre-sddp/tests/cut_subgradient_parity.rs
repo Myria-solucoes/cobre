@@ -105,7 +105,7 @@ use cobre_sddp::{
     inflow_method::InflowNonNegativityMethod,
     resolved_parameters::ResolvedParameters,
 };
-use cobre_solver::{HighsSolver, RowBatch, SolverInterface};
+use cobre_solver::{ActiveSolver, RowBatch, SolverInterface};
 use cobre_stochastic::{PrecomputedPar, normal::precompute::PrecomputedNormal};
 
 /// FPHA plane coefficients for the test: modest gamma_v so the FPHA constraint
@@ -401,7 +401,7 @@ fn cut_subgradient_parity_with_fpha_and_evaporation() {
     // These are validated by the assertions below after the solve.
 
     // Load the template into HiGHS.
-    let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
     solver.load_model(template);
 
     // Add an empty cut row batch (no future-cost cuts at this stage).

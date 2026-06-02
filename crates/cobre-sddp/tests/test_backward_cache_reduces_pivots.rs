@@ -60,7 +60,7 @@ use std::sync::mpsc;
 use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::scenario::ScenarioSource;
 use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic};
-use cobre_solver::highs::HighsSolver;
+use cobre_solver::ActiveSolver;
 
 // ---------------------------------------------------------------------------
 // Baseline constant
@@ -195,10 +195,10 @@ fn test_backward_cache_reduces_pivots() {
 
     let comm = StubComm;
     let (tx, _rx) = mpsc::channel();
-    let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
 
     let outcome = setup
-        .train(&mut solver, &comm, 1, HighsSolver::new, Some(tx), None)
+        .train(&mut solver, &comm, 1, ActiveSolver::new, Some(tx), None)
         .expect("train must succeed");
 
     assert!(

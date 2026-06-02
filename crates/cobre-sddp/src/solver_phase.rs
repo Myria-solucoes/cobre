@@ -201,19 +201,26 @@ pub const SIMULATION_PROFILE: HighsProfile = HighsProfile {
     simplex_price_strategy: 1,            // Row (default)
 };
 
-#[cfg(feature = "highs")]
 impl Phase {
-    /// Returns the [`HighsProfile`] that should be applied when entering this
-    /// phase.
+    /// Returns the [`cobre_solver::ActiveProfile`] that should be applied when
+    /// entering this phase.
     ///
-    /// The returned profile is cheap to copy (`HighsProfile` is `Copy`) and
-    /// should be passed to `ProfiledSolver::set_profile` at phase entry.
+    /// `ActiveProfile` is the compile-time-selected backend profile
+    /// (`HighsProfile` under `--features highs`, `ClpProfile` under
+    /// `--features clp`). The per-phase value is delegated to the backend's
+    /// [`PhaseProfiles`] impl, so under `HiGHS` the returned values are
+    /// bit-for-bit identical to the `FORWARD_PROFILE`/`BACKWARD_PROFILE`/
+    /// `SIMULATION_PROFILE` named constants.
+    ///
+    /// The returned profile is cheap to copy (`ActiveProfile` is `Copy` for both
+    /// backends) and should be passed to `ProfiledSolver::set_profile` at phase
+    /// entry.
     #[must_use]
-    pub fn profile(self) -> HighsProfile {
+    pub fn profile(self) -> cobre_solver::ActiveProfile {
         match self {
-            Phase::Forward => FORWARD_PROFILE,
-            Phase::Backward => BACKWARD_PROFILE,
-            Phase::Simulation => SIMULATION_PROFILE,
+            Phase::Forward => <cobre_solver::ActiveProfile as PhaseProfiles>::FORWARD,
+            Phase::Backward => <cobre_solver::ActiveProfile as PhaseProfiles>::BACKWARD,
+            Phase::Simulation => <cobre_solver::ActiveProfile as PhaseProfiles>::SIMULATION,
         }
     }
 }
@@ -380,7 +387,7 @@ mod highs_tests {
 mod clp_tests {
     use cobre_solver::ClpProfile;
 
-    use super::PhaseProfiles;
+    use super::{Phase, PhaseProfiles};
 
     /// All three CLP per-phase profiles equal [`ClpProfile::default()`].
     #[test]
@@ -389,5 +396,23 @@ mod clp_tests {
         assert_eq!(<ClpProfile as PhaseProfiles>::FORWARD, default);
         assert_eq!(<ClpProfile as PhaseProfiles>::BACKWARD, default);
         assert_eq!(<ClpProfile as PhaseProfiles>::SIMULATION, default);
+    }
+
+    /// `Phase::profile()` returns the matching CLP per-phase profile for each
+    /// variant (under `--features clp`, `ActiveProfile` resolves to `ClpProfile`).
+    #[test]
+    fn phase_profile_returns_matching_clp_profile() {
+        assert_eq!(
+            Phase::Forward.profile(),
+            <ClpProfile as PhaseProfiles>::FORWARD
+        );
+        assert_eq!(
+            Phase::Backward.profile(),
+            <ClpProfile as PhaseProfiles>::BACKWARD
+        );
+        assert_eq!(
+            Phase::Simulation.profile(),
+            <ClpProfile as PhaseProfiles>::SIMULATION
+        );
     }
 }

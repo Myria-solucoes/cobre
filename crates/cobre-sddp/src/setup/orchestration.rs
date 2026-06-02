@@ -42,7 +42,7 @@ impl StudySetup {
         shutdown_flag: Option<&Arc<AtomicBool>>,
     ) -> Result<TrainingOutcome, SddpError>
     where
-        S: SolverInterface<Profile = cobre_solver::HighsProfile> + Send,
+        S: SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
     {
         let training_config = TrainingConfig {
             loop_config: LoopConfig {

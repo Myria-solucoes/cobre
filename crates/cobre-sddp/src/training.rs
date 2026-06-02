@@ -399,7 +399,7 @@ pub fn train<S, C: Communicator>(
     warm_start_basis_cache: Option<Vec<Option<crate::workspace::CapturedBasis>>>,
 ) -> Result<TrainingOutcome, SddpError>
 where
-    S: SolverInterface<Profile = cobre_solver::HighsProfile> + Send,
+    S: SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
 {
     let mut session = TrainingSession::new(
         solver,
@@ -563,9 +563,9 @@ mod tests {
     }
 
     impl SolverInterface for MockSolver {
-        type Profile = cobre_solver::HighsProfile;
+        type Profile = cobre_solver::ActiveProfile;
 
-        fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
+        fn apply_profile(&mut self, _profile: &cobre_solver::ActiveProfile) {}
 
         fn solver_name_version(&self) -> String {
             "MockSolver 0.0.0".to_string()

@@ -107,7 +107,7 @@ use cobre_io::config::{
     TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
 use cobre_sddp::{StudySetup, hydro_models::PrepareHydroModelsResult};
-use cobre_solver::highs::HighsSolver;
+use cobre_solver::ActiveSolver;
 use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
 // ---------------------------------------------------------------------------
@@ -610,11 +610,11 @@ fn lp_total_cost_matches_analytical_optimum_k2_discount_zero() {
     let config = build_config();
     let mut setup = build_setup(system, &config);
     let comm = StubComm;
-    let mut solver = HighsSolver::new().expect("HighsSolver::new: must succeed");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new: must succeed");
 
     // Train the policy for 10 iterations.
     let outcome = setup
-        .train(&mut solver, &comm, 10, HighsSolver::new, None, None)
+        .train(&mut solver, &comm, 10, ActiveSolver::new, None, None)
         .expect("training error: train() must not return Err");
     assert!(
         outcome.error.is_none(),
@@ -624,7 +624,7 @@ fn lp_total_cost_matches_analytical_optimum_k2_discount_zero() {
 
     // Step 2: run a single deterministic simulation.
     let mut pool = setup
-        .create_workspace_pool(&comm, 1, HighsSolver::new)
+        .create_workspace_pool(&comm, 1, ActiveSolver::new)
         .expect("workspace pool error: create_workspace_pool must succeed");
     let io_capacity = setup.simulation_config.io_channel_capacity.max(1);
     let (result_tx, result_rx) = mpsc::sync_channel(io_capacity);

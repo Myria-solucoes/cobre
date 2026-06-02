@@ -2009,7 +2009,7 @@ mod tests {
     #[test]
     fn train_completes_within_iteration_limit() {
         use cobre_comm::LocalBackend;
-        use cobre_solver::highs::HighsSolver;
+        use cobre_solver::ActiveSolver;
 
         let system = minimal_system(2);
         let config = minimal_config(1, 3);
@@ -2036,10 +2036,10 @@ mod tests {
         )
         .expect("setup");
         let comm = LocalBackend;
-        let mut solver = HighsSolver::new().expect("solver");
+        let mut solver = ActiveSolver::new().expect("solver");
 
         let result = setup
-            .train(&mut solver, &comm, 1, HighsSolver::new, None, None)
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
             .expect("train");
 
         assert!(
@@ -2059,7 +2059,7 @@ mod tests {
     #[test]
     fn train_generates_cuts_in_fcf() {
         use cobre_comm::LocalBackend;
-        use cobre_solver::highs::HighsSolver;
+        use cobre_solver::ActiveSolver;
 
         let system = minimal_system(2);
         let config = minimal_config(1, 3);
@@ -2086,10 +2086,10 @@ mod tests {
         )
         .expect("setup");
         let comm = LocalBackend;
-        let mut solver = HighsSolver::new().expect("solver");
+        let mut solver = ActiveSolver::new().expect("solver");
 
         setup
-            .train(&mut solver, &comm, 1, HighsSolver::new, None, None)
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
             .expect("train");
 
         assert!(
@@ -2150,7 +2150,7 @@ mod tests {
     #[test]
     fn create_workspace_pool_returns_correct_size() {
         use cobre_comm::LocalBackend;
-        use cobre_solver::highs::HighsSolver;
+        use cobre_solver::ActiveSolver;
 
         let system = minimal_system(2);
         let config = minimal_config(1, 3);
@@ -2179,7 +2179,7 @@ mod tests {
 
         let comm = LocalBackend;
         let pool = setup
-            .create_workspace_pool(&comm, 2, HighsSolver::new)
+            .create_workspace_pool(&comm, 2, ActiveSolver::new)
             .expect("workspace pool");
 
         assert_eq!(pool.workspaces.len(), 2);
@@ -2191,7 +2191,7 @@ mod tests {
     #[test]
     fn build_training_output_non_empty() {
         use cobre_comm::LocalBackend;
-        use cobre_solver::highs::HighsSolver;
+        use cobre_solver::ActiveSolver;
 
         let system = minimal_system(2);
         let config = minimal_config(1, 2);
@@ -2218,7 +2218,7 @@ mod tests {
         )
         .expect("setup");
         let comm = LocalBackend;
-        let mut solver = HighsSolver::new().expect("solver");
+        let mut solver = ActiveSolver::new().expect("solver");
 
         // Collect events from training so we have at least one IterationSummary.
         let (event_tx, event_rx) = std::sync::mpsc::channel();
@@ -2227,7 +2227,7 @@ mod tests {
                 &mut solver,
                 &comm,
                 1,
-                HighsSolver::new,
+                ActiveSolver::new,
                 Some(event_tx),
                 None,
             )
@@ -2247,7 +2247,7 @@ mod tests {
     #[test]
     fn simulate_after_train_returns_nonempty_costs() {
         use cobre_comm::LocalBackend;
-        use cobre_solver::highs::HighsSolver;
+        use cobre_solver::ActiveSolver;
 
         // Enable simulation with 3 scenarios.
         let mut config = minimal_config(1, 3);
@@ -2284,14 +2284,14 @@ mod tests {
 
         // Train first so the FCF has cuts.
         let comm = LocalBackend;
-        let mut solver = HighsSolver::new().expect("solver");
+        let mut solver = ActiveSolver::new().expect("solver");
         setup
-            .train(&mut solver, &comm, 1, HighsSolver::new, None, None)
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
             .expect("train");
 
         // Build simulation pool.
         let mut pool = setup
-            .create_workspace_pool(&comm, 1, HighsSolver::new)
+            .create_workspace_pool(&comm, 1, ActiveSolver::new)
             .expect("sim pool");
 
         // Create the result channel and drain thread.

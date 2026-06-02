@@ -33,7 +33,7 @@ use cobre_sddp::{
     setup::{StudyParams, prepare_stochastic},
     simulation::SimulationScenarioResult,
 };
-use cobre_solver::highs::HighsSolver;
+use cobre_solver::ActiveSolver;
 
 /// Single-rank communicator stub for deterministic testing (no MPI).
 struct StubComm;
@@ -141,16 +141,16 @@ fn run_with_simulation(case_dir: &Path) -> Vec<SimulationScenarioResult> {
     );
 
     let comm = StubComm;
-    let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
 
     let outcome = setup
-        .train(&mut solver, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
         .expect("train must return Ok");
     assert!(outcome.error.is_none(), "expected no training error");
     let result = outcome.result;
 
     let mut pool = setup
-        .create_workspace_pool(&comm, 1, HighsSolver::new)
+        .create_workspace_pool(&comm, 1, ActiveSolver::new)
         .expect("simulation workspace pool must build");
 
     let io_capacity = setup.simulation_config.io_channel_capacity.max(1);

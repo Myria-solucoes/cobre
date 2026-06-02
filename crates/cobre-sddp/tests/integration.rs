@@ -214,9 +214,9 @@ impl MockSolver {
 }
 
 impl SolverInterface for MockSolver {
-    type Profile = cobre_solver::HighsProfile;
+    type Profile = cobre_solver::ActiveProfile;
 
-    fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
+    fn apply_profile(&mut self, _profile: &cobre_solver::ActiveProfile) {}
     fn solver_name_version(&self) -> String {
         "MockSolver 0.0.0".to_string()
     }
@@ -290,9 +290,9 @@ impl ExpandingMockSolver {
 }
 
 impl SolverInterface for ExpandingMockSolver {
-    type Profile = cobre_solver::HighsProfile;
+    type Profile = cobre_solver::ActiveProfile;
 
-    fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
+    fn apply_profile(&mut self, _profile: &cobre_solver::ActiveProfile) {}
     fn solver_name_version(&self) -> String {
         "ExpandingMockSolver 0.0.0".to_string()
     }
@@ -1659,8 +1659,8 @@ fn test_forward_basis_reconstruct_bit_identical_d01() {
     use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
     use cobre_core::scenario::ScenarioSource;
     use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic};
+    use cobre_solver::ActiveSolver;
     use cobre_solver::SolverInterface;
-    use cobre_solver::highs::HighsSolver;
 
     struct LocalStubComm;
 
@@ -1719,10 +1719,10 @@ fn test_forward_basis_reconstruct_bit_identical_d01() {
         StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup must build");
 
     let comm = LocalStubComm;
-    let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
 
     let outcome = setup
-        .train(&mut solver, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
         .expect("train must return Ok");
     assert!(outcome.error.is_none(), "expected no training error");
 

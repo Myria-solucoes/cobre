@@ -1206,7 +1206,7 @@ pub fn run_forward_pass<S>(
     records: &mut [TrajectoryRecord],
 ) -> Result<ForwardResult, SddpError>
 where
-    S: SolverInterface<Profile = cobre_solver::HighsProfile> + Send,
+    S: SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
 {
     use crate::forward_pass_state::{ForwardPassInputs, ForwardPassState};
     let n_workers = workspaces.len().max(1);
@@ -1356,9 +1356,9 @@ mod tests {
     }
 
     impl SolverInterface for MockSolver {
-        type Profile = cobre_solver::HighsProfile;
+        type Profile = cobre_solver::ActiveProfile;
 
-        fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
+        fn apply_profile(&mut self, _profile: &cobre_solver::ActiveProfile) {}
 
         fn solver_name_version(&self) -> String {
             "MockSolver 0.0.0".to_string()
@@ -4260,9 +4260,9 @@ mod tests {
     }
 
     impl SolverInterface for RecordingMockSolver {
-        type Profile = cobre_solver::HighsProfile;
+        type Profile = cobre_solver::ActiveProfile;
 
-        fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
+        fn apply_profile(&mut self, _profile: &cobre_solver::ActiveProfile) {}
 
         fn solver_name_version(&self) -> String {
             "MockSolver 0.0.0".to_string()

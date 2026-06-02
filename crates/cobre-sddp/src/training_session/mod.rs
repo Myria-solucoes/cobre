@@ -122,7 +122,7 @@ pub(crate) struct TrainingSession<'a, S: SolverInterface + Send, C: Communicator
 
 impl<'a, S, C: Communicator> TrainingSession<'a, S, C>
 where
-    S: SolverInterface<Profile = cobre_solver::HighsProfile> + Send,
+    S: SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
 {
     /// Allocate all per-training-run scratch and emit the `TrainingStarted` event.
     ///
@@ -1265,9 +1265,9 @@ mod tests {
     }
 
     impl SolverInterface for MockSolver {
-        type Profile = cobre_solver::HighsProfile;
+        type Profile = cobre_solver::ActiveProfile;
 
-        fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
+        fn apply_profile(&mut self, _profile: &cobre_solver::ActiveProfile) {}
 
         fn solver_name_version(&self) -> String {
             "MockSolver 0.0.0".to_string()

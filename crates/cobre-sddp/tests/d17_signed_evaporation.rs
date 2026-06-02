@@ -39,7 +39,7 @@ use cobre_sddp::{
     hydro_models::prepare_hydro_models,
     setup::{StudyParams, prepare_stochastic},
 };
-use cobre_solver::highs::HighsSolver;
+use cobre_solver::ActiveSolver;
 
 // ---------------------------------------------------------------------------
 // Stub communicator (single-rank, mirrors parity_hash_d01_d15.rs)
@@ -142,16 +142,16 @@ fn d17_evaporation_is_signed_per_month() {
     .expect("StudySetup must build");
 
     let comm = StubComm;
-    let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
 
     let outcome = setup
-        .train(&mut solver, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
         .expect("train must return Ok");
     assert!(outcome.error.is_none(), "D17: expected no training error");
     let result = outcome.result;
 
     let mut pool = setup
-        .create_workspace_pool(&comm, 1, HighsSolver::new)
+        .create_workspace_pool(&comm, 1, ActiveSolver::new)
         .expect("simulation workspace pool must build");
 
     let io_capacity = setup.simulation_config.io_channel_capacity.max(1);

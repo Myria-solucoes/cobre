@@ -21,7 +21,7 @@ use cobre_io::output::policy::{read_policy_checkpoint, write_policy_checkpoint};
 use cobre_sddp::{
     FutureCostFunction, StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic,
 };
-use cobre_solver::highs::HighsSolver;
+use cobre_solver::ActiveSolver;
 
 /// Single-rank communicator stub for testing.
 struct StubComm;
@@ -146,9 +146,9 @@ fn resume_training_from_checkpoint() {
     // Phase 1: Train for exactly 5 iterations.
     let mut setup_phase1 = build_setup(&case_dir, &config_phase1);
     let comm = StubComm;
-    let mut solver_phase1 = HighsSolver::new().expect("HighsSolver");
+    let mut solver_phase1 = ActiveSolver::new().expect("ActiveSolver");
     let outcome_phase1 = setup_phase1
-        .train(&mut solver_phase1, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut solver_phase1, &comm, 1, ActiveSolver::new, None, None)
         .expect("train phase1");
     assert!(outcome_phase1.error.is_none());
     let result_phase1 = outcome_phase1.result;
@@ -178,9 +178,9 @@ fn resume_training_from_checkpoint() {
     setup_phase2.replace_fcf(warm_fcf);
     setup_phase2.set_start_iteration(u64::from(checkpoint.metadata.completed_iterations));
 
-    let mut solver_phase2 = HighsSolver::new().expect("HighsSolver");
+    let mut solver_phase2 = ActiveSolver::new().expect("ActiveSolver");
     let outcome_phase2 = setup_phase2
-        .train(&mut solver_phase2, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut solver_phase2, &comm, 1, ActiveSolver::new, None, None)
         .expect("train phase2");
     assert!(outcome_phase2.error.is_none());
     let result_phase2 = outcome_phase2.result;
@@ -211,9 +211,9 @@ fn warm_start_training_preserves_cuts_and_trains_further() {
     // Phase 1: Fresh training.
     let mut setup_fresh = build_setup(&case_dir, &config);
     let comm = StubComm;
-    let mut solver = HighsSolver::new().expect("HighsSolver");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver");
     let fresh_outcome = setup_fresh
-        .train(&mut solver, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
         .expect("train");
     assert!(fresh_outcome.error.is_none());
     let fresh_result = fresh_outcome.result;
@@ -250,9 +250,9 @@ fn warm_start_training_preserves_cuts_and_trains_further() {
     );
 
     // Train warm-start.
-    let mut solver_warm = HighsSolver::new().expect("HighsSolver");
+    let mut solver_warm = ActiveSolver::new().expect("ActiveSolver");
     let warm_outcome = setup_warm
-        .train(&mut solver_warm, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut solver_warm, &comm, 1, ActiveSolver::new, None, None)
         .expect("warm-start train");
     assert!(warm_outcome.error.is_none());
     let warm_result = warm_outcome.result;

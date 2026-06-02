@@ -18,7 +18,7 @@
 //! tree is generated with 10 openings per stage from seed 42, guaranteeing
 //! that multiple openings carry negative noise realisations.
 //!
-//! `HighsSolver` is used throughout so the LP is actually solved and slack
+//! `ActiveSolver` is used throughout so the LP is actually solved and slack
 //! columns receive non-trivial primal values when inflow is negative.
 
 #![allow(
@@ -67,7 +67,7 @@ use cobre_sddp::{
     train,
     workspace::{SolverWorkspace, WorkspaceSizing},
 };
-use cobre_solver::HighsSolver;
+use cobre_solver::ActiveSolver;
 use cobre_stochastic::{
     ClassSchemes, OpeningTreeInputs, PrecomputedPar, StochasticContext, build_stochastic_context,
 };
@@ -509,7 +509,7 @@ fn train_fixture(
 ) -> Result<cobre_sddp::TrainingOutcome, cobre_sddp::SddpError> {
     let n_stages = fx.stage_templates.templates.len();
     let mut fcf = FutureCostFunction::new(n_stages, fx.indexer.n_state, 1, 20, &vec![0; n_stages]);
-    let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
     let comm = StubComm;
 
     let _n_stages = fx.stage_templates.templates.len();
@@ -586,7 +586,7 @@ fn train_fixture(
             recent_weight_seed: 0.0,
         },
         &comm,
-        HighsSolver::new,
+        ActiveSolver::new,
         None,
     )
 }
@@ -608,7 +608,7 @@ fn simulate_fixture(
     let mut sim_workspaces = vec![SolverWorkspace::new(
         0,
         0,
-        HighsSolver::new().expect("HighsSolver::new must succeed"),
+        ActiveSolver::new().expect("ActiveSolver::new must succeed"),
         PatchBuffer::new(fx.indexer.hydro_count, fx.indexer.max_par_order, 0, 0, 0, 0),
         fx.indexer.n_state,
         WorkspaceSizing {

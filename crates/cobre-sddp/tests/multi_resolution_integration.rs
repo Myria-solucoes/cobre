@@ -30,7 +30,7 @@ use std::sync::mpsc;
 use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::temporal::SeasonCycleType;
 use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic};
-use cobre_solver::highs::HighsSolver;
+use cobre_solver::ActiveSolver;
 
 // ---------------------------------------------------------------------------
 // StubComm — single-rank communicator for testing
@@ -272,10 +272,10 @@ fn multi_resolution_structural_properties_and_training() {
     // ── 4. Train ──────────────────────────────────────────────────────────────
 
     let comm = StubComm;
-    let mut solver = HighsSolver::new().expect("solver");
+    let mut solver = ActiveSolver::new().expect("solver");
 
     let outcome = setup
-        .train(&mut solver, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
         .expect("D30: train must not return Err");
 
     assert!(
@@ -302,7 +302,7 @@ fn multi_resolution_structural_properties_and_training() {
     // ── 5. Simulate ───────────────────────────────────────────────────────────
 
     let mut pool = setup
-        .create_workspace_pool(&comm, 1, HighsSolver::new)
+        .create_workspace_pool(&comm, 1, ActiveSolver::new)
         .expect("D30: workspace pool must build");
     let io_capacity = setup.simulation_config.io_channel_capacity.max(1);
     let (result_tx, result_rx) = mpsc::sync_channel(io_capacity);

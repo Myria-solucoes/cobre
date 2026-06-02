@@ -23,6 +23,7 @@
     clippy::panic,
     clippy::doc_markdown
 )]
+#![cfg(feature = "highs")]
 
 use std::path::{Path, PathBuf};
 

@@ -5,7 +5,7 @@
 //! `simulation/pipeline.rs` can delegate to a single implementation instead of
 //! each maintaining their own copy.
 
-use cobre_solver::{SolutionView, SolverInterface};
+use cobre_solver::{SolutionView, SolverError, SolverInterface};
 
 use crate::{
     basis_reconstruct::{ReconstructionTarget, enforce_basic_count_invariant, reconstruct_basis},
@@ -14,8 +14,6 @@ use crate::{
     error::SddpError,
     workspace::{CapturedBasis, SolverWorkspace},
 };
-
-use cobre_solver::SolverError;
 
 // ---------------------------------------------------------------------------
 // StageInputs
@@ -193,7 +191,11 @@ fn map_solver_error(
 
 #[cfg(test)]
 mod tests {
-    use cobre_solver::{HighsSolver, SolverError, SolverInterface, StageTemplate};
+    use cobre_solver::{ActiveSolver, SolverInterface, StageTemplate};
+    // `SolverError` is only referenced by the `highs`-gated
+    // `basis_inconsistent_propagates_as_sddp_solver_error` test below.
+    #[cfg(feature = "highs")]
+    use cobre_solver::SolverError;
 
     use super::{StageInputs, run_stage_solve};
     use crate::{
@@ -262,9 +264,9 @@ mod tests {
         }
     }
 
-    /// Build a fresh `SolverWorkspace<HighsSolver>` with an LP loaded.
-    fn make_workspace(template: &StageTemplate) -> SolverWorkspace<HighsSolver> {
-        let mut solver = HighsSolver::new().expect("HighsSolver::new()");
+    /// Build a fresh `SolverWorkspace<ActiveSolver>` with an LP loaded.
+    fn make_workspace(template: &StageTemplate) -> SolverWorkspace<ActiveSolver> {
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new()");
         solver.load_model(template);
         SolverWorkspace::new(
             0,
@@ -443,6 +445,12 @@ mod tests {
     /// and return `HIGHS_STATUS_ERROR`.  The solver converts this to
     /// `SolverError::BasisInconsistent`, which `map_solver_error` must route
     /// to `SddpError::Solver(...)` — not `SddpError::Infeasible`.
+    ///
+    /// HiGHS-specific: relies on `cobre_highs_set_basis_non_alien`'s
+    /// `isBasisConsistent` rejection of a zero-basic basis. CLP accepts such a
+    /// basis and solves normally, so this assertion is gated to the `highs`
+    /// backend; a CLP-equivalent lands with CLP's own basis-rejection coverage.
+    #[cfg(feature = "highs")]
     #[test]
     fn basis_inconsistent_propagates_as_sddp_solver_error() {
         let template = make_template();

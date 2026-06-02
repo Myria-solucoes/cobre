@@ -78,7 +78,7 @@ use cobre_io::config::{
     TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
 use cobre_sddp::{StudySetup, hydro_models::PrepareHydroModelsResult};
-use cobre_solver::highs::HighsSolver;
+use cobre_solver::ActiveSolver;
 use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
 // ---------------------------------------------------------------------------
@@ -542,11 +542,11 @@ fn simulation_ring_buffer_shifts_anticipated_state_k1() {
     let config = build_config(50);
     let mut setup = build_setup(system, &config);
     let comm = StubComm;
-    let mut solver = HighsSolver::new().expect("HighsSolver::new");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
 
     // Train the policy.
     let outcome = setup
-        .train(&mut solver, &comm, 50, HighsSolver::new, None, None)
+        .train(&mut solver, &comm, 50, ActiveSolver::new, None, None)
         .expect("train must not return Err");
     assert!(
         outcome.error.is_none(),
@@ -556,7 +556,7 @@ fn simulation_ring_buffer_shifts_anticipated_state_k1() {
 
     // Run the simulation (1 deterministic scenario).
     let mut pool = setup
-        .create_workspace_pool(&comm, 1, HighsSolver::new)
+        .create_workspace_pool(&comm, 1, ActiveSolver::new)
         .expect("workspace pool must build");
     let io_capacity = setup.simulation_config.io_channel_capacity.max(1);
     let (result_tx, result_rx) = mpsc::sync_channel(io_capacity);
@@ -684,10 +684,10 @@ fn simulation_ring_buffer_shifts_anticipated_state_k2() {
     let config = build_config(10);
     let mut setup = build_setup(system, &config);
     let comm = StubComm;
-    let mut solver = HighsSolver::new().expect("HighsSolver::new");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
 
     let outcome = setup
-        .train(&mut solver, &comm, 10, HighsSolver::new, None, None)
+        .train(&mut solver, &comm, 10, ActiveSolver::new, None, None)
         .expect("train must not return Err");
     assert!(
         outcome.error.is_none(),
@@ -696,7 +696,7 @@ fn simulation_ring_buffer_shifts_anticipated_state_k2() {
     );
 
     let mut pool = setup
-        .create_workspace_pool(&comm, 1, HighsSolver::new)
+        .create_workspace_pool(&comm, 1, ActiveSolver::new)
         .expect("workspace pool must build");
     let io_capacity = setup.simulation_config.io_channel_capacity.max(1);
     let (result_tx, result_rx) = mpsc::sync_channel(io_capacity);

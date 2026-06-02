@@ -205,7 +205,7 @@ use cobre_io::config::{
     TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
 use cobre_sddp::{StudySetup, hydro_models::PrepareHydroModelsResult};
-use cobre_solver::highs::HighsSolver;
+use cobre_solver::ActiveSolver;
 use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
 // ---------------------------------------------------------------------------
@@ -590,10 +590,10 @@ fn anticipated_closed_form_lb_k1_single_thermal() {
     let config = build_config();
     let mut setup = build_setup(system, &config);
     let comm = StubComm;
-    let mut solver = HighsSolver::new().expect("HighsSolver::new");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
 
     let outcome = setup
-        .train(&mut solver, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
         .expect("train must not return Err");
 
     assert!(

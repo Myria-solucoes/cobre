@@ -27,7 +27,7 @@ use crate::{
     error::SddpError,
     forward::{build_cut_row_batch_into, build_delta_cut_row_batch_into, partition},
     risk_measure::RiskMeasure,
-    solver_phase::{BACKWARD_PROFILE, Phase},
+    solver_phase::{Phase, PhaseProfiles},
     solver_stats::{
         SolverStatsDelta, StageWorkerStatsBuffer, WORKER_STATS_ENTRY_STRIDE,
         pack_worker_opening_stats, unpack_worker_opening_stats,
@@ -330,7 +330,7 @@ impl BackwardPassState {
         inputs: &mut BackwardPassInputs<'_, S, C>,
     ) -> Result<BackwardResult, SddpError>
     where
-        S: SolverInterface<Profile = cobre_solver::HighsProfile> + Send,
+        S: SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
     {
         let training_ctx = inputs.training_ctx;
         let num_stages = training_ctx.horizon.num_stages();
@@ -358,8 +358,9 @@ impl BackwardPassState {
         for ws in inputs.workspaces.iter_mut() {
             ws.solver.set_profile(&Phase::Backward.profile());
             debug_assert!(
-                ws.solver.current_profile() == &BACKWARD_PROFILE,
-                "solver profile must equal BACKWARD_PROFILE after set_profile"
+                ws.solver.current_profile()
+                    == &<cobre_solver::ActiveProfile as PhaseProfiles>::BACKWARD,
+                "solver profile must equal the active BACKWARD profile after set_profile"
             );
         }
 
@@ -1173,9 +1174,9 @@ mod tests {
     }
 
     impl SolverInterface for MockSolver {
-        type Profile = cobre_solver::HighsProfile;
+        type Profile = cobre_solver::ActiveProfile;
 
-        fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
+        fn apply_profile(&mut self, _profile: &cobre_solver::ActiveProfile) {}
 
         fn name(&self) -> &'static str {
             "mock"

@@ -86,7 +86,7 @@ use cobre_io::config::{
     TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
 use cobre_sddp::{StudySetup, hydro_models::PrepareHydroModelsResult};
-use cobre_solver::highs::HighsSolver;
+use cobre_solver::ActiveSolver;
 use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
 // ---------------------------------------------------------------------------
@@ -544,15 +544,15 @@ fn declaration_order_invariance_anticipated_thermals() {
 
     let comm = StubComm;
 
-    let mut solver_a = HighsSolver::new().expect("HighsSolver::new");
-    let mut solver_b = HighsSolver::new().expect("HighsSolver::new");
+    let mut solver_a = ActiveSolver::new().expect("ActiveSolver::new");
+    let mut solver_b = ActiveSolver::new().expect("ActiveSolver::new");
 
     let outcome_a = setup_a
-        .train(&mut solver_a, &comm, 8, HighsSolver::new, None, None)
+        .train(&mut solver_a, &comm, 8, ActiveSolver::new, None, None)
         .expect("train");
 
     let outcome_b = setup_b
-        .train(&mut solver_b, &comm, 8, HighsSolver::new, None, None)
+        .train(&mut solver_b, &comm, 8, ActiveSolver::new, None, None)
         .expect("train");
 
     assert!(

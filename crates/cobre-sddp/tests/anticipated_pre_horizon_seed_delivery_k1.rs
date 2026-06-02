@@ -88,7 +88,7 @@ use cobre_io::config::{
     TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
 use cobre_sddp::{StudySetup, hydro_models::PrepareHydroModelsResult};
-use cobre_solver::highs::HighsSolver;
+use cobre_solver::ActiveSolver;
 use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
 // ---------------------------------------------------------------------------
@@ -595,11 +595,11 @@ fn pre_horizon_seed_delivers_at_stage_zero_k1() {
     let config = build_config();
     let mut setup = build_setup(system, &config);
     let comm = StubComm;
-    let mut solver = HighsSolver::new().expect("HighsSolver::new");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
 
     // Step 1: train the policy for 1 iteration.
     let outcome = setup
-        .train(&mut solver, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
         .expect("train: must not return Err");
     assert!(
         outcome.error.is_none(),
@@ -609,7 +609,7 @@ fn pre_horizon_seed_delivers_at_stage_zero_k1() {
 
     // Step 2: run a single deterministic simulation.
     let mut pool = setup
-        .create_workspace_pool(&comm, 1, HighsSolver::new)
+        .create_workspace_pool(&comm, 1, ActiveSolver::new)
         .expect("create_workspace_pool: must succeed");
     let io_capacity = setup.simulation_config.io_channel_capacity.max(1);
     let (result_tx, result_rx) = mpsc::sync_channel(io_capacity);

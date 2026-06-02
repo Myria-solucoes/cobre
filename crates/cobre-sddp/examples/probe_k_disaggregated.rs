@@ -64,18 +64,35 @@
     clippy::print_stdout
 )]
 
-use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+#[cfg(feature = "highs")]
+use std::path::{Path, PathBuf};
+
+#[cfg(feature = "highs")]
 use cobre_comm::LocalBackend;
+#[cfg(feature = "highs")]
 use cobre_core::scenario::ScenarioSource;
+#[cfg(feature = "highs")]
 use cobre_io::{config::StoppingRuleConfig, parse_config};
+#[cfg(feature = "highs")]
 use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic};
+#[cfg(feature = "highs")]
 use cobre_solver::highs::HighsSolver;
 
 /// Force the probe to run exactly one SDDP iteration.
+#[cfg(feature = "highs")]
 const PROBE_MAX_ITERATIONS: u32 = 1;
 
+#[cfg(not(feature = "highs"))]
+fn main() -> ExitCode {
+    eprintln!(
+        "probe_k_disaggregated example requires the `highs` feature; rebuild with --features highs"
+    );
+    ExitCode::from(2)
+}
+
+#[cfg(feature = "highs")]
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() != 2 || args.iter().any(|a| a == "--help" || a == "-h") {
@@ -92,6 +109,7 @@ fn main() -> ExitCode {
 
 /// Drive the single-iteration probe. Returns an [`ExitCode`] on error so the
 /// caller can propagate it; returns `Ok(())` on success.
+#[cfg(feature = "highs")]
 fn run_probe(config_path: &Path) -> Result<(), ExitCode> {
     // The CLI accepts a case directory and looks for `config.json` inside it;
     // we accept the config path directly and derive the case directory as
@@ -192,6 +210,7 @@ fn run_probe(config_path: &Path) -> Result<(), ExitCode> {
 
 /// Outcome of [`print_pool_report`]: either the report printed normally, or
 /// every stage pool was empty (caller should exit with code 3).
+#[cfg(feature = "highs")]
 enum PoolReport {
     Ok,
     EmptyPools,
@@ -200,6 +219,7 @@ enum PoolReport {
 /// Format per-stage `populated_count` / `active_count` lines and the trailing
 /// summary line. Returns [`PoolReport::EmptyPools`] if every pool is empty
 /// (which should not happen at disaggregated scale).
+#[cfg(feature = "highs")]
 fn print_pool_report(setup: &StudySetup) -> PoolReport {
     let pools = &setup.fcf.pools;
     let d = setup.fcf.state_dimension;

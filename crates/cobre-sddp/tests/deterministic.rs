@@ -39,8 +39,8 @@ use cobre_sddp::{
     hydro_models::prepare_hydro_models,
     setup::{StudyParams, prepare_stochastic},
 };
+use cobre_solver::ActiveSolver;
 use cobre_solver::SolverInterface;
-use cobre_solver::highs::HighsSolver;
 
 mod common;
 
@@ -125,11 +125,11 @@ fn build_setup_for_case(
 }
 
 /// Execute the full training pipeline for a case directory and return both the
-/// `TrainingResult` and the `HighsSolver`. Uses `StubComm`, seed 42, and 1 thread.
+/// `TrainingResult` and the `ActiveSolver`. Uses `StubComm`, seed 42, and 1 thread.
 ///
 /// Unlike `run_deterministic`, this helper keeps the solver alive so callers can
 /// inspect `solver.statistics()` (e.g. `basis_consistency_failures`) after training completes.
-fn run_deterministic_with_solver(case_dir: &Path) -> (cobre_sddp::TrainingResult, HighsSolver) {
+fn run_deterministic_with_solver(case_dir: &Path) -> (cobre_sddp::TrainingResult, ActiveSolver) {
     let config_path = case_dir.join("config.json");
     let config = cobre_io::parse_config(&config_path).expect("config must parse");
 
@@ -147,17 +147,17 @@ fn run_deterministic_with_solver(case_dir: &Path) -> (cobre_sddp::TrainingResult
     let mut setup = build_setup_for_case(case_dir, &config, &system, stochastic, hydro_models);
 
     let comm = StubComm;
-    let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
 
     let outcome = setup
-        .train(&mut solver, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
         .expect("train must return Ok");
     assert!(outcome.error.is_none(), "expected no training error");
     (outcome.result, solver)
 }
 
 /// Execute the full training pipeline for a case directory and return the
-/// `TrainingResult`. Uses `StubComm`, `HighsSolver`, seed 42, and 1 thread.
+/// `TrainingResult`. Uses `StubComm`, `ActiveSolver`, seed 42, and 1 thread.
 fn run_deterministic(case_dir: &Path) -> cobre_sddp::TrainingResult {
     let config_path = case_dir.join("config.json");
     let config = cobre_io::parse_config(&config_path).expect("config must parse");
@@ -176,10 +176,10 @@ fn run_deterministic(case_dir: &Path) -> cobre_sddp::TrainingResult {
     let mut setup = build_setup_for_case(case_dir, &config, &system, stochastic, hydro_models);
 
     let comm = StubComm;
-    let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
 
     let outcome = setup
-        .train(&mut solver, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
         .expect("train must return Ok");
     assert!(outcome.error.is_none(), "expected no training error");
     outcome.result
@@ -222,16 +222,16 @@ fn run_with_simulation(
     );
 
     let comm = StubComm;
-    let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
 
     let outcome = setup
-        .train(&mut solver, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
         .expect("train must return Ok");
     assert!(outcome.error.is_none(), "expected no training error");
     let result = outcome.result;
 
     let mut pool = setup
-        .create_workspace_pool(&comm, 1, HighsSolver::new)
+        .create_workspace_pool(&comm, 1, ActiveSolver::new)
         .expect("simulation workspace pool must build");
 
     let io_capacity = setup.simulation_config.io_channel_capacity.max(1);
@@ -1408,10 +1408,10 @@ fn d12_checkpoint_round_trip() {
         .expect("StudySetup must build");
 
     let comm = StubComm;
-    let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
 
     let outcome = setup
-        .train(&mut solver, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
         .expect("train must return Ok");
     assert!(outcome.error.is_none(), "expected no training error");
     let result = outcome.result;
@@ -1540,7 +1540,7 @@ fn d12_checkpoint_round_trip() {
     // ── Step 8: simulate using the FCF already in setup ───────────────────────
 
     let mut pool = setup
-        .create_workspace_pool(&comm, 1, HighsSolver::new)
+        .create_workspace_pool(&comm, 1, ActiveSolver::new)
         .expect("simulation workspace pool must build");
 
     let io_capacity = setup.simulation_config.io_channel_capacity.max(1);
@@ -3266,10 +3266,10 @@ fn d29_weekly_par_noise_sharing() {
 
     // Train.
     let comm = StubComm;
-    let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
 
     let outcome = setup
-        .train(&mut solver, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
         .expect("train must return Ok");
     assert!(
         outcome.error.is_none(),
@@ -3290,7 +3290,7 @@ fn d29_weekly_par_noise_sharing() {
 
     // Simulate.
     let mut pool = setup
-        .create_workspace_pool(&comm, 1, HighsSolver::new)
+        .create_workspace_pool(&comm, 1, ActiveSolver::new)
         .expect("simulation workspace pool must build");
 
     let io_capacity = setup.simulation_config.io_channel_capacity.max(1);
@@ -3367,10 +3367,10 @@ fn d30_multi_resolution_loads_and_trains() {
         StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup must build");
 
     let comm = StubComm;
-    let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
 
     let outcome = setup
-        .train(&mut solver, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
         .expect("train must return Ok");
     assert!(
         outcome.error.is_none(),
@@ -3435,10 +3435,10 @@ fn baked_vs_fallback_simulation_costs_are_identical() {
         .expect("StudySetup must build");
 
     let comm = StubComm;
-    let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
 
     let outcome = setup
-        .train(&mut solver, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
         .expect("train must return Ok");
     assert!(outcome.error.is_none(), "expected no training error");
     let training_result = outcome.result;
@@ -3450,7 +3450,7 @@ fn baked_vs_fallback_simulation_costs_are_identical() {
     );
 
     let mut pool = setup
-        .create_workspace_pool(&comm, 1, HighsSolver::new)
+        .create_workspace_pool(&comm, 1, ActiveSolver::new)
         .expect("simulation workspace pool must build");
 
     // ── Baked path ────────────────────────────────────────────────────────────
