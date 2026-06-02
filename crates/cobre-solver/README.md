@@ -24,11 +24,21 @@ solver lifecycle for you.
 
 ## Features
 
-| Feature        | Default | Description                                                                                                                             |
-| -------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `highs`        | on      | Gates `HighsSolver` and `HighsProfile`. On by default.                                                                                  |
-| `clp`          | off     | Gates `ClpSolver`, `ClpProfile`, and `clp_version`. Additive — `highs` and `clp` may be enabled together. See build requirements below. |
-| `test-support` | off     | Exposes FFI option-setting helpers for integration tests. Must not be enabled in production builds.                                     |
+| Feature        | Default | Description                                                                                                        |
+| -------------- | ------- | ------------------------------------------------------------------------------------------------------------------ |
+| `highs`        | on      | Gates `HighsSolver` and `HighsProfile`. On by default.                                                             |
+| `clp`          | off     | Gates `ClpSolver`, `ClpProfile`, and `clp_version`. Mutually exclusive with `highs`. See build requirements below. |
+| `test-support` | off     | Exposes FFI option-setting helpers for integration tests. Must not be enabled in production builds.                |
+
+## Backend selection
+
+Exactly one LP backend is compiled in. The backends are mutually exclusive:
+
+- `--features highs` (the default) selects HiGHS.
+- `--no-default-features --features clp` selects CLP.
+- Enabling both `highs` and `clp` is a compile error, and enabling neither is
+  also a compile error. Building with `--all-features` therefore fails by
+  design.
 
 ### `clp` build requirements
 
@@ -49,9 +59,16 @@ fast.
 
 ### CI behavior
 
-CI jobs (`check`, `test`, `clippy`, `docs`, `coverage`) all run with
-`--all-features` and check out submodules recursively, so the CLP backend is
-built and its test suite is exercised in every CI run. Expect the first CI
+Because the backends are mutually exclusive, CI runs a two-backend matrix
+rather than a single `--all-features` pass:
+
+- A primary HiGHS job runs the full suite (`check`, `test`, `clippy`, `docs`,
+  `coverage`) with the default feature set plus the shared non-solver features.
+- A lean CLP job checks out submodules recursively and runs
+  `check`/`clippy`/`build`/`test` under
+  `--no-default-features --features clp` plus the same non-solver features.
+
+`docs`, `fmt`, and `coverage` run once (HiGHS only). Expect the first CLP CI
 build after a cache miss to be slower than a HiGHS-only build due to the C++
 superbuild.
 

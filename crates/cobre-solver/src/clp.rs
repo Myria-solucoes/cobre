@@ -34,15 +34,15 @@ use crate::{
 /// solvers (e.g. `HiGHS`) define their own concrete profile types with their
 /// native option names.
 ///
-/// The field defaults are SDDP-safe: perturbation is off (`102`, not CLP's
-/// own `100`=auto default), scaling is off (the cobre prescaler conditions the
-/// matrix), and the feasibility tolerances match [`crate::HighsProfile`]
-/// bit-for-bit.
+/// The field defaults are tuned for deterministic, warm-started repeated
+/// re-solves: perturbation is off (`102`, not CLP's own `100`=auto default),
+/// scaling is off (the cobre prescaler conditions the matrix), and the
+/// feasibility tolerances match [`crate::HighsProfile`] bit-for-bit.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ClpProfile {
     /// CLP perturbation mode (`Clp_setPerturbation`). `102` disables
-    /// perturbation (SDDP-safe); CLP's own default `100` requests automatic
-    /// perturbation.
+    /// perturbation (required for deterministic, reproducible re-solves);
+    /// CLP's own default `100` requests automatic perturbation.
     pub perturbation: i32,
     /// CLP scaling mode (`Clp_scaling`). `0` disables scaling because the
     /// cobre prescaler already normalizes matrix entries, mirroring `HiGHS`
@@ -415,8 +415,9 @@ impl SolverInterface for ClpSolver {
     /// pass, then caches the profile in `current_profile`.
     ///
     /// Issues `cobre_clp_set_perturbation` (CRITICAL: the default profile sends
-    /// `102` to disable CLP's auto-perturbation — CLP's own default `100` is
-    /// NOT SDDP-safe), `cobre_clp_scaling`, `cobre_clp_set_primal_tolerance`,
+    /// `102` to disable CLP's auto-perturbation — CLP's own default `100`
+    /// breaks bit-for-bit reproducibility across re-solves),
+    /// `cobre_clp_scaling`, `cobre_clp_set_primal_tolerance`,
     /// `cobre_clp_set_dual_tolerance`, and the iteration cap resolved by
     /// `resolve_simplex_cap` via `cobre_clp_set_maximum_iterations`.
     ///

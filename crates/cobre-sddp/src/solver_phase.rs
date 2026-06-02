@@ -1,7 +1,8 @@
-//! SDDP algorithm phase enum and named solver-profile constants.
+//! SDDP algorithm phase enum, the backend-agnostic [`PhaseProfiles`] trait, and
+//! the per-phase named solver-profile constants.
 //!
-//! Each [`Phase`] variant maps to a [`HighsProfile`] constant that configures
-//! the LP solver for that phase. [`FORWARD_PROFILE`] and
+//! Each [`Phase`] variant maps to a backend profile that configures the LP
+//! solver for that phase. For the `HiGHS` backend, [`FORWARD_PROFILE`] and
 //! [`SIMULATION_PROFILE`] match [`HighsProfile::default()`] field-for-field.
 //! [`BACKWARD_PROFILE`] overrides one option — `simplex_price_strategy`
 //! (`RowHyperSparse`, value `2`) — to exploit sparse cut subgradient rows
@@ -11,28 +12,29 @@
 //! and tail latency respectively.
 //!
 //! Compile-time assertions at the bottom of this module catch any future drift
-//! between the named constants and the documented field values.
+//! between the named `HiGHS` constants and the documented field values.
 //!
-//! ## Why these profiles are `HighsProfile`-concrete
+//! Every field of both `HighsProfile` and `ClpProfile` is a primitive
+//! `f64`/`u32`/`i32`, so both profile structs are fully const-constructible and
+//! the [`PhaseProfiles`] trait exposes its per-phase profiles as **associated
+//! constants** (`const FORWARD`/`BACKWARD`/`SIMULATION`) rather than methods.
 //!
-//! The per-phase profiles are authored here as concrete [`HighsProfile`] values,
-//! which couples this module to the `HiGHS` backend. This is deliberate, not an
-//! oversight: the *mapping* "which phase wants which solver behaviour" (e.g. the
-//! backward pass exploits sparse cut-subgradient rows) is algorithm knowledge
-//! that must live in the algorithm crate, while `cobre-solver` is kept strictly
-//! backend-agnostic and so cannot know about SDDP phases. With a single backend,
-//! holding the concrete profile here is the correct equilibrium and preserves
-//! full control over every `HiGHS` option.
+//! ## Why the per-phase profiles live here, not in `cobre-solver`
 //!
-//! To make `SolverInterface::Profile` genuinely backend-independent (so a second
-//! backend can be selected without editing this module), introduce a
-//! backend-agnostic tuning vocabulary in `cobre-solver` — a small hint enum such
-//! as `ExploitSparseRows` that each backend maps to its own options — and have
-//! this module emit hints per phase instead of concrete `HighsProfile` literals.
-//! That step is best taken alongside the first additional backend, when the
-//! second profile's real parameter surface is known and the minimal hint set can
-//! be derived from it rather than guessed.
+//! The per-phase profiles are authored here as concrete backend values, which
+//! couples this module to whichever backend is active. This is deliberate, not
+//! an oversight: the *mapping* "which phase wants which solver behaviour" (e.g.
+//! the backward pass exploits sparse cut-subgradient rows) is algorithm
+//! knowledge that must live in the algorithm crate, while `cobre-solver` is kept
+//! strictly backend-agnostic and so cannot know about SDDP phases. The
+//! [`PhaseProfiles`] trait abstracts only *which phase is running* — never the
+//! tuning content — and its impls keep the SDDP-tuned values inside
+//! `cobre-sddp`. The trait is local to this crate and the implemented profile
+//! types are foreign, which the orphan rule permits.
 
+#[cfg(feature = "clp")]
+use cobre_solver::ClpProfile;
+#[cfg(feature = "highs")]
 use cobre_solver::{DEFAULT_PROFILE_HEURISTIC_SENTINEL, HighsProfile};
 
 /// The three algorithmic phases of the SDDP algorithm.
@@ -54,10 +56,105 @@ pub enum Phase {
     Simulation,
 }
 
+/// Per-phase identity selection of a backend solver profile.
+///
+/// `PhaseProfiles` is a backend-agnostic vocabulary that abstracts only *which
+/// phase is running* — `FORWARD`, `BACKWARD`, or `SIMULATION` — never the tuning
+/// content. Each implementing backend profile type supplies its own per-phase
+/// values: the `HiGHS` impl reproduces the SDDP-tuned `HighsProfile` constants
+/// in this module bit-for-bit, while the CLP impl supplies CLP-native values.
+///
+/// The trait is defined in `cobre-sddp` (the algorithm crate), not in
+/// `cobre-solver`, so the SDDP-tuned per-phase *values* stay with the algorithm
+/// and `cobre-solver` remains strictly backend-generic. The trait is local and
+/// the implemented profile types are foreign, which the orphan rule permits.
+///
+/// The three members are **associated constants** because every field of every
+/// backend profile struct is const-constructible (see the module docs).
+pub trait PhaseProfiles: Sized {
+    /// Profile applied when entering the forward pass.
+    const FORWARD: Self;
+    /// Profile applied when entering the backward pass.
+    const BACKWARD: Self;
+    /// Profile applied when entering policy simulation.
+    const SIMULATION: Self;
+}
+
+/// Per-phase `HighsProfile` selection.
+///
+/// Reproduces the SDDP-tuned [`FORWARD_PROFILE`]/[`BACKWARD_PROFILE`]/
+/// [`SIMULATION_PROFILE`] constants of this module bit-for-bit:
+/// `FORWARD` and `SIMULATION` equal [`HighsProfile::default()`]; `BACKWARD`
+/// overrides only `simplex_price_strategy` to `2` (`RowHyperSparse`). The full
+/// field literals are written out because associated constants cannot use the
+/// `..HighsProfile::default()` struct-update spread in const context.
+#[cfg(feature = "highs")]
+impl PhaseProfiles for HighsProfile {
+    const FORWARD: Self = HighsProfile {
+        primal_feasibility_tolerance: 1e-9,
+        dual_feasibility_tolerance: 1e-9,
+        simplex_iteration_limit: DEFAULT_PROFILE_HEURISTIC_SENTINEL,
+        ipm_iteration_limit: 10_000,
+        simplex_dual_edge_weight_strategy: 1, // Devex (default)
+        simplex_scale_strategy: 0, // Off (default; cobre prescaler conditions the matrix)
+        simplex_price_strategy: 1, // Row (default)
+    };
+    const BACKWARD: Self = HighsProfile {
+        primal_feasibility_tolerance: 1e-9,
+        dual_feasibility_tolerance: 1e-9,
+        simplex_iteration_limit: DEFAULT_PROFILE_HEURISTIC_SENTINEL,
+        ipm_iteration_limit: 10_000,
+        simplex_dual_edge_weight_strategy: 1, // Devex (matches default)
+        simplex_scale_strategy: 0, // Off (matches default; cobre prescaler conditions the matrix)
+        simplex_price_strategy: 2, // RowHyperSparse override
+    };
+    const SIMULATION: Self = HighsProfile {
+        primal_feasibility_tolerance: 1e-9,
+        dual_feasibility_tolerance: 1e-9,
+        simplex_iteration_limit: DEFAULT_PROFILE_HEURISTIC_SENTINEL,
+        ipm_iteration_limit: 10_000,
+        simplex_dual_edge_weight_strategy: 1, // Devex (default)
+        simplex_scale_strategy: 0, // Off (default; cobre prescaler conditions the matrix)
+        simplex_price_strategy: 1, // Row (default)
+    };
+}
+
+/// Per-phase `ClpProfile` selection.
+///
+/// All three phases use [`ClpProfile::default()`]'s field set. These are
+/// CLP-native values, independently chosen for CLP's own option surface — they
+/// are **not** a translation of the `HiGHS` per-phase profiles. CLP has no
+/// per-phase override yet; a future phase may differentiate `BACKWARD`.
+#[cfg(feature = "clp")]
+impl PhaseProfiles for ClpProfile {
+    const FORWARD: Self = ClpProfile {
+        perturbation: 102,
+        scaling: 0,
+        primal_feasibility_tolerance: 1e-9,
+        dual_feasibility_tolerance: 1e-9,
+        simplex_iteration_limit: cobre_solver::DEFAULT_PROFILE_HEURISTIC_SENTINEL,
+    };
+    const BACKWARD: Self = ClpProfile {
+        perturbation: 102,
+        scaling: 0,
+        primal_feasibility_tolerance: 1e-9,
+        dual_feasibility_tolerance: 1e-9,
+        simplex_iteration_limit: cobre_solver::DEFAULT_PROFILE_HEURISTIC_SENTINEL,
+    };
+    const SIMULATION: Self = ClpProfile {
+        perturbation: 102,
+        scaling: 0,
+        primal_feasibility_tolerance: 1e-9,
+        dual_feasibility_tolerance: 1e-9,
+        simplex_iteration_limit: cobre_solver::DEFAULT_PROFILE_HEURISTIC_SENTINEL,
+    };
+}
+
 /// Solver profile applied during the SDDP forward pass.
 ///
 /// All fields equal [`HighsProfile::default()`], which uses the tightened
 /// `1e-9` primal/dual feasibility tolerances.
+#[cfg(feature = "highs")]
 pub const FORWARD_PROFILE: HighsProfile = HighsProfile {
     primal_feasibility_tolerance: 1e-9,
     dual_feasibility_tolerance: 1e-9,
@@ -78,6 +175,7 @@ pub const FORWARD_PROFILE: HighsProfile = HighsProfile {
 ///
 /// See `docs/design/highs-backward-pass-tuning.md` for the empirical
 /// sweep that selected this minimal override.
+#[cfg(feature = "highs")]
 pub const BACKWARD_PROFILE: HighsProfile = HighsProfile {
     primal_feasibility_tolerance: 1e-9,
     dual_feasibility_tolerance: 1e-9,
@@ -92,6 +190,7 @@ pub const BACKWARD_PROFILE: HighsProfile = HighsProfile {
 ///
 /// All fields equal [`HighsProfile::default()`], which uses the tightened
 /// `1e-9` primal/dual feasibility tolerances.
+#[cfg(feature = "highs")]
 pub const SIMULATION_PROFILE: HighsProfile = HighsProfile {
     primal_feasibility_tolerance: 1e-9,
     dual_feasibility_tolerance: 1e-9,
@@ -102,6 +201,7 @@ pub const SIMULATION_PROFILE: HighsProfile = HighsProfile {
     simplex_price_strategy: 1,            // Row (default)
 };
 
+#[cfg(feature = "highs")]
 impl Phase {
     /// Returns the [`HighsProfile`] that should be applied when entering this
     /// phase.
@@ -125,6 +225,7 @@ impl Phase {
 // added to `HighsProfile`, the compiler will reject any const struct literal
 // that does not include it, forcing an explicit update here.
 
+#[cfg(feature = "highs")]
 const _: () = {
     // FORWARD_PROFILE — all fields equal HighsProfile::default()
     assert!(FORWARD_PROFILE.primal_feasibility_tolerance == 1e-9);
@@ -152,13 +253,28 @@ const _: () = {
     assert!(SIMULATION_PROFILE.simplex_dual_edge_weight_strategy == 1);
     assert!(SIMULATION_PROFILE.simplex_scale_strategy == 0);
     assert!(SIMULATION_PROFILE.simplex_price_strategy == 1);
+
+    // PhaseProfiles for HighsProfile — bit-for-bit identical to the named
+    // constants above, proving numeric inertness of the trait abstraction.
+    assert!(matches!(
+        <HighsProfile as PhaseProfiles>::FORWARD.simplex_price_strategy,
+        1
+    ));
+    assert!(matches!(
+        <HighsProfile as PhaseProfiles>::BACKWARD.simplex_price_strategy,
+        2
+    ));
+    assert!(matches!(
+        <HighsProfile as PhaseProfiles>::SIMULATION.simplex_price_strategy,
+        1
+    ));
 };
 
-#[cfg(test)]
-mod tests {
+#[cfg(all(test, feature = "highs"))]
+mod highs_tests {
     use cobre_solver::HighsProfile;
 
-    use super::{BACKWARD_PROFILE, FORWARD_PROFILE, Phase, SIMULATION_PROFILE};
+    use super::{BACKWARD_PROFILE, FORWARD_PROFILE, Phase, PhaseProfiles, SIMULATION_PROFILE};
 
     /// `Phase::profile()` returns the matching named constant for each variant.
     #[test]
@@ -168,8 +284,7 @@ mod tests {
         assert_eq!(Phase::Simulation.profile(), SIMULATION_PROFILE);
     }
 
-    /// Forward and simulation profiles equal [`HighsProfile::default()`];
-    /// backward profile differs in two fields.
+    /// Forward and simulation named constants equal [`HighsProfile::default()`].
     #[test]
     fn forward_and_simulation_equal_default() {
         let default = HighsProfile::default();
@@ -207,5 +322,72 @@ mod tests {
             BACKWARD_PROFILE.simplex_scale_strategy,
             default.simplex_scale_strategy
         );
+    }
+
+    /// The `PhaseProfiles` impl's `FORWARD`/`SIMULATION` equal the default.
+    #[test]
+    fn phase_profiles_forward_simulation_equal_default() {
+        let default = HighsProfile::default();
+        assert_eq!(<HighsProfile as PhaseProfiles>::FORWARD, default);
+        assert_eq!(<HighsProfile as PhaseProfiles>::SIMULATION, default);
+    }
+
+    /// The `PhaseProfiles` impl's `BACKWARD` overrides only
+    /// `simplex_price_strategy` to `2`, matching the default elsewhere.
+    #[test]
+    fn phase_profiles_backward_overrides_only_price_strategy() {
+        let default = HighsProfile::default();
+        let backward = <HighsProfile as PhaseProfiles>::BACKWARD;
+        assert_ne!(backward, default);
+        assert_eq!(backward.simplex_price_strategy, 2);
+        assert_eq!(
+            backward.simplex_dual_edge_weight_strategy,
+            default.simplex_dual_edge_weight_strategy
+        );
+        assert_eq!(
+            backward.primal_feasibility_tolerance,
+            default.primal_feasibility_tolerance
+        );
+        assert_eq!(
+            backward.dual_feasibility_tolerance,
+            default.dual_feasibility_tolerance
+        );
+        assert_eq!(
+            backward.simplex_iteration_limit,
+            default.simplex_iteration_limit
+        );
+        assert_eq!(backward.ipm_iteration_limit, default.ipm_iteration_limit);
+        assert_eq!(
+            backward.simplex_scale_strategy,
+            default.simplex_scale_strategy
+        );
+    }
+
+    /// Numeric inertness: every `PhaseProfiles` value is bit-for-bit equal to
+    /// the corresponding current named constant.
+    #[test]
+    fn phase_profiles_bit_for_bit_match_named_constants() {
+        assert_eq!(<HighsProfile as PhaseProfiles>::FORWARD, FORWARD_PROFILE);
+        assert_eq!(<HighsProfile as PhaseProfiles>::BACKWARD, BACKWARD_PROFILE);
+        assert_eq!(
+            <HighsProfile as PhaseProfiles>::SIMULATION,
+            SIMULATION_PROFILE
+        );
+    }
+}
+
+#[cfg(all(test, feature = "clp"))]
+mod clp_tests {
+    use cobre_solver::ClpProfile;
+
+    use super::PhaseProfiles;
+
+    /// All three CLP per-phase profiles equal [`ClpProfile::default()`].
+    #[test]
+    fn clp_phase_profiles_all_equal_default() {
+        let default = ClpProfile::default();
+        assert_eq!(<ClpProfile as PhaseProfiles>::FORWARD, default);
+        assert_eq!(<ClpProfile as PhaseProfiles>::BACKWARD, default);
+        assert_eq!(<ClpProfile as PhaseProfiles>::SIMULATION, default);
     }
 }
