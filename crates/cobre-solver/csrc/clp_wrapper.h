@@ -34,6 +34,12 @@ void* cobre_clp_create(void);
  *  Wraps Clp_deleteModel(). */
 void cobre_clp_destroy(void* model);
 
+/** Set the model's logging verbosity.  Wraps Clp_setLogLevel().
+ *  CLP defaults to level 1 (per-solve progress printed to stdout); cobre sets
+ *  level 0 (silent) at construction so the solver does not pollute CLI/Python
+ *  output, mirroring the HiGHS backend's `output_flag=0`. */
+void cobre_clp_set_log_level(void* model, int32_t value);
+
 /* =========================================================================
  * Model Loading
  * ========================================================================= */

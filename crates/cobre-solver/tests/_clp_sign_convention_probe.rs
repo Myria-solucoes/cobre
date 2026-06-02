@@ -44,7 +44,8 @@
 
 use cobre_solver::clp_ffi::{
     CLP_STATUS_OPTIMAL, cobre_clp_create, cobre_clp_destroy, cobre_clp_dual,
-    cobre_clp_get_row_price, cobre_clp_load_problem, cobre_clp_objective_value, cobre_clp_status,
+    cobre_clp_get_row_price, cobre_clp_load_problem, cobre_clp_objective_value,
+    cobre_clp_set_log_level, cobre_clp_status,
 };
 
 #[test]
@@ -54,6 +55,11 @@ fn clp_sign_convention_row_equality() {
     // failure). We check for null immediately below.
     let model = unsafe { cobre_clp_create() };
     assert!(!model.is_null(), "cobre_clp_create() returned null");
+
+    // Silence CLP's default level-1 progress output (this raw-FFI probe does not
+    // go through `ClpSolver::new`, which silences it for production).
+    // SAFETY: `model` is the non-null handle just created above.
+    unsafe { cobre_clp_set_log_level(model, 0) };
 
     // Reference LP — verbatim numeric data from `make_fixture_stage_template`
     // (conformance.rs). 3 columns, 2 equality rows in CSC form.

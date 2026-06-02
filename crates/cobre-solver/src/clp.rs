@@ -227,6 +227,16 @@ impl ClpSolver {
             });
         }
 
+        // Silence CLP by default. CLP ships with log level 1, which prints
+        // per-solve progress to stdout; that would pollute CLI/Python output on
+        // every LP solve. Setting level 0 at construction mirrors the HiGHS
+        // backend forcing `output_flag=0`.
+        //
+        // SAFETY: `handle` is the non-null model just returned by
+        // `cobre_clp_create`; `cobre_clp_set_log_level` only forwards the level
+        // to `Clp_setLogLevel` on that model and has no other preconditions.
+        unsafe { clp_ffi::cobre_clp_set_log_level(handle, 0) };
+
         Ok(Self {
             handle,
             col_value: Vec::new(),

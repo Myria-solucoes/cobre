@@ -58,6 +58,11 @@ unsafe extern "C" {
     /// Wraps `Clp_deleteModel()`.
     pub fn cobre_clp_destroy(model: *mut c_void);
 
+    /// Set the model's logging verbosity. Wraps `Clp_setLogLevel()`.
+    /// Level `0` is silent; cobre applies it at construction so CLP does not
+    /// print per-solve progress to stdout (mirrors `HiGHS` `output_flag=0`).
+    pub fn cobre_clp_set_log_level(model: *mut c_void, value: int32_t);
+
     // ============================================================
     // Model Loading
     // ============================================================
@@ -310,7 +315,8 @@ unsafe extern "C" {
 mod tests {
     use super::{
         CLP_STATUS_OPTIMAL, cobre_clp_create, cobre_clp_destroy, cobre_clp_dual,
-        cobre_clp_load_problem, cobre_clp_objective_value, cobre_clp_status,
+        cobre_clp_load_problem, cobre_clp_objective_value, cobre_clp_set_log_level,
+        cobre_clp_status,
     };
 
     /// Smoke test: create a CLP model, load a trivial 1-variable LP
@@ -327,6 +333,11 @@ mod tests {
         // failure). We check for null immediately below.
         let model = unsafe { cobre_clp_create() };
         assert!(!model.is_null(), "cobre_clp_create() returned null");
+
+        // Silence CLP's default level-1 progress output (this raw-FFI test does
+        // not go through `ClpSolver::new`, which silences it for production).
+        // SAFETY: `model` is the non-null handle just created above.
+        unsafe { cobre_clp_set_log_level(model, 0) };
 
         // Minimize x where x ∈ [0, 10] with no constraints. Expected: x* = 0, obj = 0.
         // CSC form for a 1-column, 0-row, 0-nonzero matrix:

@@ -66,6 +66,10 @@ void cobre_clp_destroy(void* model) {
     Clp_deleteModel((Clp_Simplex*)model);
 }
 
+void cobre_clp_set_log_level(void* model, int32_t value) {
+    Clp_setLogLevel((Clp_Simplex*)model, (int)value);
+}
+
 /* =========================================================================
  * Model Loading
  * ========================================================================= */
