@@ -1144,6 +1144,40 @@ pub fn highs_version() -> String {
     format!("{major}.{minor}.{patch}")
 }
 
+/// Benchmark-only `presolve` override read from the `COBRE_TUNE_HIGHS_PRESOLVE`
+/// environment variable.
+///
+/// Returns `Some(value)` when the variable is set to a recognized value
+/// (`"on"`, `"off"`, or `"choose"`), otherwise `None`. The value is parsed once
+/// and cached. This exists because `presolve` is a fixed default option rather
+/// than a [`HighsProfile`] field, so it cannot be tuned through the per-phase
+/// profile; this is its dedicated tuning seam. Entirely inert when the variable
+/// is unset — `apply_profile` then leaves `presolve` at its construction
+/// default, so the production path and its determinism are unchanged.
+fn presolve_tuning_override() -> Option<&'static std::ffi::CStr> {
+    static OVERRIDE: std::sync::OnceLock<Option<&'static std::ffi::CStr>> =
+        std::sync::OnceLock::new();
+    *OVERRIDE.get_or_init(|| {
+        let raw = std::env::var("COBRE_TUNE_HIGHS_PRESOLVE").ok()?;
+        let value = match raw.trim().to_ascii_lowercase().as_str() {
+            "on" => Some(c"on"),
+            "off" => Some(c"off"),
+            "choose" => Some(c"choose"),
+            other => {
+                eprintln!(
+                    "[cobre tune] WARNING: COBRE_TUNE_HIGHS_PRESOLVE={other:?} \
+                     is not one of on|off|choose; ignoring"
+                );
+                None
+            }
+        };
+        if let Some(v) = value {
+            eprintln!("[cobre tune] HiGHS presolve override active: {v:?}");
+        }
+        value
+    })
+}
+
 impl SolverInterface for HighsSolver {
     type Profile = HighsProfile;
 
@@ -1169,6 +1203,21 @@ impl SolverInterface for HighsSolver {
                 c"simplex_price_strategy".as_ptr(),
                 profile.simplex_price_strategy,
             );
+        }
+        // Benchmark-only `presolve` override. `presolve` is a fixed default
+        // option, not a `HighsProfile` field, so this hook is its tuning seam.
+        // Inert unless `COBRE_TUNE_HIGHS_PRESOLVE` is set; the production path
+        // keeps the construction default and stays deterministic.
+        if let Some(presolve) = presolve_tuning_override() {
+            // SAFETY: self.handle is a valid HiGHS pointer; `presolve` is a
+            // valid NUL-terminated C string.
+            unsafe {
+                ffi::cobre_highs_set_string_option(
+                    self.handle,
+                    c"presolve".as_ptr(),
+                    presolve.as_ptr(),
+                );
+            }
         }
         self.current_profile = *profile;
     }

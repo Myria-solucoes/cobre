@@ -23,7 +23,7 @@ use crate::{
     error::SddpError,
     forward::{ForwardResult, StageKey, partition, run_forward_stage},
     indexer::StageIndexer,
-    solver_phase::{Phase, PhaseProfiles},
+    solver_phase::Phase,
     solver_stats::SolverStatsDelta,
     trajectory::TrajectoryRecord,
     workspace::{BasisStore, BasisStoreSliceMut, SolverWorkspace},
@@ -411,12 +411,15 @@ impl ForwardPassState {
         // the parallel region begins.  In v1 all named profiles equal
         // `HighsProfile::default()`, so this is a no-op (delta tracking skips all
         // FFI calls), preserving bit-identical parity with the pre-profile branch.
+        // Resolved once (it may carry benchmark-only `COBRE_TUNE_*` overrides,
+        // so it is not necessarily the `FORWARD` const); the assert verifies
+        // `set_profile` stored exactly the profile we passed.
+        let forward_profile = Phase::Forward.profile();
         for ws in inputs.workspaces.iter_mut() {
-            ws.solver.set_profile(&Phase::Forward.profile());
+            ws.solver.set_profile(&forward_profile);
             debug_assert!(
-                ws.solver.current_profile()
-                    == &<cobre_solver::ActiveProfile as PhaseProfiles>::FORWARD,
-                "solver profile must equal the active FORWARD profile after set_profile"
+                ws.solver.current_profile() == &forward_profile,
+                "solver profile must equal the profile passed to set_profile"
             );
         }
 

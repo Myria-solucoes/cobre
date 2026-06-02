@@ -27,7 +27,7 @@ use crate::{
     error::SddpError,
     forward::{build_cut_row_batch_into, build_delta_cut_row_batch_into, partition},
     risk_measure::RiskMeasure,
-    solver_phase::{Phase, PhaseProfiles},
+    solver_phase::Phase,
     solver_stats::{
         SolverStatsDelta, StageWorkerStatsBuffer, WORKER_STATS_ENTRY_STRIDE,
         pack_worker_opening_stats, unpack_worker_opening_stats,
@@ -355,12 +355,15 @@ impl BackwardPassState {
         // the per-stage loop begins.  In v1 all named profiles equal
         // `HighsProfile::default()`, so this is a no-op (delta tracking skips all
         // FFI calls), preserving bit-identical parity with the pre-profile branch.
+        // Resolved once (it may carry benchmark-only `COBRE_TUNE_*` overrides,
+        // so it is not necessarily the `BACKWARD` const); the assert verifies
+        // `set_profile` stored exactly the profile we passed.
+        let backward_profile = Phase::Backward.profile();
         for ws in inputs.workspaces.iter_mut() {
-            ws.solver.set_profile(&Phase::Backward.profile());
+            ws.solver.set_profile(&backward_profile);
             debug_assert!(
-                ws.solver.current_profile()
-                    == &<cobre_solver::ActiveProfile as PhaseProfiles>::BACKWARD,
-                "solver profile must equal the active BACKWARD profile after set_profile"
+                ws.solver.current_profile() == &backward_profile,
+                "solver profile must equal the profile passed to set_profile"
             );
         }
 

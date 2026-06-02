@@ -233,11 +233,238 @@ impl Phase {
     /// entry.
     #[must_use]
     pub fn profile(self) -> cobre_solver::ActiveProfile {
-        match self {
+        let base = match self {
             Phase::Forward => <cobre_solver::ActiveProfile as PhaseProfiles>::FORWARD,
             Phase::Backward => <cobre_solver::ActiveProfile as PhaseProfiles>::BACKWARD,
             Phase::Simulation => <cobre_solver::ActiveProfile as PhaseProfiles>::SIMULATION,
+        };
+        // Benchmark-only runtime overrides. Inert unless `COBRE_TUNE_*` is set,
+        // so the production path returns the compile-time const profile above
+        // unchanged and stays deterministic.
+        tuning::apply_overrides(base)
+    }
+}
+
+/// Benchmark-only solver-parameter overrides read from `COBRE_TUNE_*`
+/// environment variables.
+///
+/// This is the runtime tuning seam for the local solver-parameter optimization
+/// harness. It is **entirely inert unless an override variable is set**: with no
+/// variables set, `apply_overrides` returns the compile-time per-phase profile
+/// unchanged, so the default/production path and its determinism are untouched.
+/// Overrides are *global* (applied to every phase) and parsed once on first use.
+/// Recognized variables:
+///
+/// - `HiGHS`: `COBRE_TUNE_HIGHS_EDGE_WEIGHT` (i32), `_SCALE` (i32),
+///   `_PRICE` (i32), `_PRIMAL_TOL` (f64), `_DUAL_TOL` (f64),
+///   `_ITER_LIMIT` (u32). (`presolve` is not a profile field; it is tuned via
+///   `COBRE_TUNE_HIGHS_PRESOLVE` inside `cobre-solver`.)
+/// - `CLP`: `COBRE_TUNE_CLP_PERTURBATION` (i32), `_SCALING` (i32),
+///   `_PRICING_MODE` (i32), `_FACTOR_FREQ` (i32), `_PRIMAL_TOL` (f64),
+///   `_DUAL_TOL` (f64), `_ITER_LIMIT` (u32), `_ALGORITHM` (`dual`|`primal`).
+mod tuning {
+    use std::sync::OnceLock;
+
+    /// Parses an integer env var; warns (once) and ignores a present-but-invalid
+    /// value rather than silently running the baseline.
+    fn env_i32(key: &str) -> Option<i32> {
+        parse_env(key)
+    }
+
+    fn env_u32(key: &str) -> Option<u32> {
+        parse_env(key)
+    }
+
+    fn env_f64(key: &str) -> Option<f64> {
+        parse_env(key)
+    }
+
+    fn parse_env<T: std::str::FromStr>(key: &str) -> Option<T> {
+        let raw = std::env::var(key).ok()?;
+        if let Ok(v) = raw.trim().parse::<T>() {
+            Some(v)
+        } else {
+            eprintln!(
+                "[cobre tune] WARNING: {key}={raw:?} is not a valid {ty}; ignoring",
+                ty = std::any::type_name::<T>()
+            );
+            None
         }
+    }
+
+    #[cfg(feature = "highs")]
+    struct HighsOverrides {
+        edge_weight: Option<i32>,
+        scale: Option<i32>,
+        price: Option<i32>,
+        primal_tol: Option<f64>,
+        dual_tol: Option<f64>,
+        iter_limit: Option<u32>,
+    }
+
+    #[cfg(feature = "highs")]
+    impl HighsOverrides {
+        fn any(&self) -> bool {
+            self.edge_weight.is_some()
+                || self.scale.is_some()
+                || self.price.is_some()
+                || self.primal_tol.is_some()
+                || self.dual_tol.is_some()
+                || self.iter_limit.is_some()
+        }
+    }
+
+    #[cfg(feature = "highs")]
+    fn highs_overrides() -> &'static HighsOverrides {
+        static OV: OnceLock<HighsOverrides> = OnceLock::new();
+        OV.get_or_init(|| {
+            let ov = HighsOverrides {
+                edge_weight: env_i32("COBRE_TUNE_HIGHS_EDGE_WEIGHT"),
+                scale: env_i32("COBRE_TUNE_HIGHS_SCALE"),
+                price: env_i32("COBRE_TUNE_HIGHS_PRICE"),
+                primal_tol: env_f64("COBRE_TUNE_HIGHS_PRIMAL_TOL"),
+                dual_tol: env_f64("COBRE_TUNE_HIGHS_DUAL_TOL"),
+                iter_limit: env_u32("COBRE_TUNE_HIGHS_ITER_LIMIT"),
+            };
+            if ov.any() {
+                eprintln!(
+                    "[cobre tune] HiGHS profile overrides active: \
+                     edge_weight={:?} scale={:?} price={:?} primal_tol={:?} \
+                     dual_tol={:?} iter_limit={:?}",
+                    ov.edge_weight, ov.scale, ov.price, ov.primal_tol, ov.dual_tol, ov.iter_limit
+                );
+            }
+            ov
+        })
+    }
+
+    /// Applies the active `HiGHS` overrides to a per-phase profile.
+    #[cfg(feature = "highs")]
+    pub(super) fn apply_overrides(mut p: cobre_solver::HighsProfile) -> cobre_solver::HighsProfile {
+        let ov = highs_overrides();
+        if let Some(v) = ov.edge_weight {
+            p.simplex_dual_edge_weight_strategy = v;
+        }
+        if let Some(v) = ov.scale {
+            p.simplex_scale_strategy = v;
+        }
+        if let Some(v) = ov.price {
+            p.simplex_price_strategy = v;
+        }
+        if let Some(v) = ov.primal_tol {
+            p.primal_feasibility_tolerance = v;
+        }
+        if let Some(v) = ov.dual_tol {
+            p.dual_feasibility_tolerance = v;
+        }
+        if let Some(v) = ov.iter_limit {
+            p.simplex_iteration_limit = v;
+        }
+        p
+    }
+
+    #[cfg(feature = "clp")]
+    struct ClpOverrides {
+        perturbation: Option<i32>,
+        scaling: Option<i32>,
+        pricing_mode: Option<i32>,
+        factor_freq: Option<i32>,
+        primal_tol: Option<f64>,
+        dual_tol: Option<f64>,
+        iter_limit: Option<u32>,
+        algorithm: Option<cobre_solver::ClpAlgorithm>,
+    }
+
+    #[cfg(feature = "clp")]
+    impl ClpOverrides {
+        fn any(&self) -> bool {
+            self.perturbation.is_some()
+                || self.scaling.is_some()
+                || self.pricing_mode.is_some()
+                || self.factor_freq.is_some()
+                || self.primal_tol.is_some()
+                || self.dual_tol.is_some()
+                || self.iter_limit.is_some()
+                || self.algorithm.is_some()
+        }
+    }
+
+    #[cfg(feature = "clp")]
+    fn env_clp_algorithm(key: &str) -> Option<cobre_solver::ClpAlgorithm> {
+        let raw = std::env::var(key).ok()?;
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "dual" => Some(cobre_solver::ClpAlgorithm::Dual),
+            "primal" => Some(cobre_solver::ClpAlgorithm::Primal),
+            other => {
+                eprintln!("[cobre tune] WARNING: {key}={other:?} is not dual|primal; ignoring");
+                None
+            }
+        }
+    }
+
+    #[cfg(feature = "clp")]
+    fn clp_overrides() -> &'static ClpOverrides {
+        static OV: OnceLock<ClpOverrides> = OnceLock::new();
+        OV.get_or_init(|| {
+            let ov = ClpOverrides {
+                perturbation: env_i32("COBRE_TUNE_CLP_PERTURBATION"),
+                scaling: env_i32("COBRE_TUNE_CLP_SCALING"),
+                pricing_mode: env_i32("COBRE_TUNE_CLP_PRICING_MODE"),
+                factor_freq: env_i32("COBRE_TUNE_CLP_FACTOR_FREQ"),
+                primal_tol: env_f64("COBRE_TUNE_CLP_PRIMAL_TOL"),
+                dual_tol: env_f64("COBRE_TUNE_CLP_DUAL_TOL"),
+                iter_limit: env_u32("COBRE_TUNE_CLP_ITER_LIMIT"),
+                algorithm: env_clp_algorithm("COBRE_TUNE_CLP_ALGORITHM"),
+            };
+            if ov.any() {
+                eprintln!(
+                    "[cobre tune] CLP profile overrides active: \
+                     perturbation={:?} scaling={:?} pricing_mode={:?} \
+                     factor_freq={:?} primal_tol={:?} dual_tol={:?} \
+                     iter_limit={:?} algorithm={:?}",
+                    ov.perturbation,
+                    ov.scaling,
+                    ov.pricing_mode,
+                    ov.factor_freq,
+                    ov.primal_tol,
+                    ov.dual_tol,
+                    ov.iter_limit,
+                    ov.algorithm
+                );
+            }
+            ov
+        })
+    }
+
+    /// Applies the active `CLP` overrides to a per-phase profile.
+    #[cfg(feature = "clp")]
+    pub(super) fn apply_overrides(mut p: cobre_solver::ClpProfile) -> cobre_solver::ClpProfile {
+        let ov = clp_overrides();
+        if let Some(v) = ov.perturbation {
+            p.perturbation = v;
+        }
+        if let Some(v) = ov.scaling {
+            p.scaling = v;
+        }
+        if let Some(v) = ov.pricing_mode {
+            p.dual_pricing_mode = v;
+        }
+        if let Some(v) = ov.factor_freq {
+            p.factorization_frequency = v;
+        }
+        if let Some(v) = ov.primal_tol {
+            p.primal_feasibility_tolerance = v;
+        }
+        if let Some(v) = ov.dual_tol {
+            p.dual_feasibility_tolerance = v;
+        }
+        if let Some(v) = ov.iter_limit {
+            p.simplex_iteration_limit = v;
+        }
+        if let Some(v) = ov.algorithm {
+            p.algorithm = v;
+        }
+        p
     }
 }
 
