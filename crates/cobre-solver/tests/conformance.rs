@@ -30,7 +30,10 @@ use cobre_solver::{HighsSolver, SolutionView, SolverError};
 #[cfg(feature = "clp")]
 use cobre_solver::ClpSolver;
 
-#[cfg(feature = "test-support")]
+// `test_support` is consumed only by the HiGHS option-poking tests below, which
+// are gated `#[cfg(all(feature = "highs", feature = "test-support"))]`. Gate the
+// import identically so the clp+test-support build does not see an unused import.
+#[cfg(all(feature = "test-support", feature = "highs"))]
 use cobre_solver::test_support;
 
 fn make_fixture_stage_template() -> StageTemplate {

@@ -75,7 +75,7 @@ fn version_exits_0_and_contains_version_string() {
         .assert()
         .success()
         .stdout(predicate::str::contains(version))
-        .stdout(predicate::str::contains("HiGHS"));
+        .stdout(predicate::str::contains(cobre_solver::active_solver_name()));
 }
 
 #[test]
@@ -88,12 +88,13 @@ fn version_exits_0_and_stdout_contains_cobre_prefix() {
 }
 
 #[test]
-fn version_stdout_contains_solver_highs() {
+fn version_stdout_contains_active_solver() {
+    let expected = format!("solver: {}", cobre_solver::active_solver_name());
     cobre()
         .arg("version")
         .assert()
         .success()
-        .stdout(predicate::str::contains("solver: HiGHS"));
+        .stdout(predicate::str::contains(expected));
 }
 
 #[test]

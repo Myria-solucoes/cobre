@@ -32,7 +32,7 @@ use super::error::OutputError;
 pub struct OutputContext {
     /// Hostname of the machine that produced this output.
     pub hostname: String,
-    /// LP solver backend name (e.g. `"highs"`).
+    /// LP solver backend name (e.g. `"highs"` or `"clp"`).
     pub solver: String,
     /// LP solver version string (e.g. `"1.8.0"`), if known.
     pub solver_version: Option<String>,
@@ -284,7 +284,7 @@ pub struct TrainingMetadata {
     pub cobre_version: String,
     /// Hostname of the machine that ran training.
     pub hostname: String,
-    /// LP solver backend name (e.g. `"highs"`).
+    /// LP solver backend name (e.g. `"highs"` or `"clp"`).
     pub solver: String,
     /// LP solver version string (e.g. `"1.8.0"`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -328,7 +328,7 @@ pub struct SimulationMetadata {
     pub cobre_version: String,
     /// Hostname of the machine that ran simulation.
     pub hostname: String,
-    /// LP solver backend name (e.g. `"highs"`).
+    /// LP solver backend name (e.g. `"highs"` or `"clp"`).
     pub solver: String,
     /// LP solver version string (e.g. `"1.8.0"`).
     #[serde(skip_serializing_if = "Option::is_none")]

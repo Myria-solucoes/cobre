@@ -29,7 +29,7 @@ use cobre_sddp::{
     build_hydro_model_summary, prepare_hydro_models, prepare_stochastic,
     setup::{ConstructionConfig, build_ncs_factor_entries, load_load_factors_for_stochastic},
 };
-use cobre_solver::HighsSolver;
+use cobre_solver::ActiveSolver;
 use cobre_stochastic::{
     OpeningTreeInputs, build_stochastic_context, context::OpeningTree,
     provenance::ComponentProvenance,
@@ -276,7 +276,7 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
             })?;
             let training_ctx = cobre_io::OutputContext {
                 hostname: hostname.clone(),
-                solver: "highs".to_string(),
+                solver: cobre_solver::active_solver_metadata_id().to_string(),
                 solver_version: Some(ctx.solver_version.clone()),
                 started_at: training_started_at,
                 completed_at: training_completed_at,
@@ -604,7 +604,7 @@ fn setup_communicator(args: &RunArgs) -> Result<RunContext<impl Communicator>, C
         });
     }
 
-    let solver_version = cobre_solver::highs_version();
+    let solver_version = cobre_solver::active_solver_version();
 
     if !quiet {
         crate::banner::print_banner(&stderr);
@@ -612,7 +612,7 @@ fn setup_communicator(args: &RunArgs) -> Result<RunContext<impl Communicator>, C
             &stderr,
             &topology,
             actual_threads,
-            "HiGHS",
+            cobre_solver::active_solver_name(),
             Some(&solver_version),
         );
     }
@@ -1047,10 +1047,13 @@ fn run_training_phase(
     ctx: &RunContext<impl Communicator>,
     setup: &mut StudySetup,
 ) -> Result<TrainingPhaseResult, CliError> {
-    let solver_factory = || HighsSolver::new();
+    let solver_factory = ActiveSolver::new;
 
-    let mut solver = HighsSolver::new().map_err(|e| CliError::Solver {
-        message: format!("HiGHS initialisation failed: {e}"),
+    let mut solver = ActiveSolver::new().map_err(|e| CliError::Solver {
+        message: format!(
+            "{} initialisation failed: {e}",
+            cobre_solver::active_solver_name()
+        ),
     })?;
 
     let (event_tx, event_rx) = mpsc::channel::<TrainingEvent>();
@@ -1326,14 +1329,17 @@ fn run_simulation_phase(
     training_result: &cobre_sddp::TrainingResult,
     hostname: &str,
 ) -> Result<(), CliError> {
-    let solver_factory = || HighsSolver::new();
+    let solver_factory = ActiveSolver::new;
     let n_scenarios = setup.simulation_config.n_scenarios;
     let sim_config = setup.simulation_config();
 
     let mut sim_pool = setup
         .create_workspace_pool(&ctx.comm, ctx.n_threads, solver_factory)
         .map_err(|e| CliError::Solver {
-            message: format!("HiGHS initialisation failed for simulation pool: {e}"),
+            message: format!(
+                "{} initialisation failed for simulation pool: {e}",
+                cobre_solver::active_solver_name()
+            ),
         })?;
 
     let (sim_event_tx, sim_event_rx) = mpsc::channel::<TrainingEvent>();
@@ -1486,7 +1492,7 @@ fn write_sim_outputs_on_root(
     let mpi_world_size = u32::try_from(ctx.topology.world_size).unwrap_or(u32::MAX);
     let sim_ctx = cobre_io::OutputContext {
         hostname: hostname.to_string(),
-        solver: "highs".to_string(),
+        solver: cobre_solver::active_solver_metadata_id().to_string(),
         solver_version: None,
         started_at: sim_started_at,
         completed_at: cobre_io::now_iso8601(),

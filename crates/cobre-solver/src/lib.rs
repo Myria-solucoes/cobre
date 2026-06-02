@@ -181,6 +181,30 @@ pub fn active_solver_name() -> &'static str {
     "HiGHS"
 }
 
+/// Returns the canonical lowercase backend id used in persisted output metadata
+/// (`OutputContext.solver`).
+///
+/// Unlike [`active_solver_name`] (the mixed-case display name `"CLP"`/`"HiGHS"`),
+/// this is the stable lowercase id recorded in output manifests. Resolved with
+/// the same precedence as [`ActiveSolver`] (**`clp` overrides `highs`**).
+#[cfg(feature = "clp")]
+#[must_use]
+pub fn active_solver_metadata_id() -> &'static str {
+    "clp"
+}
+
+/// Returns the canonical lowercase backend id used in persisted output metadata
+/// (`OutputContext.solver`).
+///
+/// Unlike [`active_solver_name`] (the mixed-case display name `"CLP"`/`"HiGHS"`),
+/// this is the stable lowercase id recorded in output manifests. Resolved with
+/// the same precedence as [`ActiveSolver`] (**`clp` overrides `highs`**).
+#[cfg(all(feature = "highs", not(feature = "clp")))]
+#[must_use]
+pub fn active_solver_metadata_id() -> &'static str {
+    "highs"
+}
+
 #[cfg(feature = "test-support")]
 pub mod test_support {
     //! Test-only utilities for configuring solver options from integration tests.
@@ -197,7 +221,8 @@ pub mod test_support {
 #[cfg(all(test, any(feature = "highs", feature = "clp")))]
 mod active_alias_tests {
     use crate::{
-        ActiveProfile, ActiveSolver, SolverInterface, active_solver_name, active_solver_version,
+        ActiveProfile, ActiveSolver, SolverInterface, active_solver_metadata_id,
+        active_solver_name, active_solver_version,
     };
 
     /// `ActiveProfile` must be exactly the profile of the active solver.
@@ -240,6 +265,7 @@ mod active_alias_tests {
     #[test]
     fn active_backend_is_highs_when_only_highs_enabled() {
         assert_eq!(active_solver_name(), "HiGHS");
+        assert_eq!(active_solver_metadata_id(), "highs");
     }
 
     /// CLP build (`--no-default-features --features clp`): the active backend
@@ -248,5 +274,6 @@ mod active_alias_tests {
     #[test]
     fn active_backend_is_clp_when_clp_enabled() {
         assert_eq!(active_solver_name(), "CLP");
+        assert_eq!(active_solver_metadata_id(), "clp");
     }
 }

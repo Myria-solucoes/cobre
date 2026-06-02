@@ -15,7 +15,11 @@ use crate::error::CliError;
 pub fn execute() -> Result<(), CliError> {
     let version = env!("CARGO_PKG_VERSION");
     println!("cobre   v{version}");
-    println!("solver: HiGHS {}", cobre_solver::highs_version());
+    println!(
+        "solver: {} {}",
+        cobre_solver::active_solver_name(),
+        cobre_solver::active_solver_version()
+    );
     if cfg!(feature = "mpi") {
         println!("comm:   mpi");
     } else {
