@@ -171,7 +171,7 @@ pub trait SolverInterface: Send {
     /// either call `load_model` (which resets topology) or pass an explicit
     /// `Basis` via `solve(Some(&b))`.
     ///
-    /// [`crate::HighsSolver`] retains its internal simplex basis and
+    /// `HighsSolver` retains its internal simplex basis and
     /// factorization across consecutive `solve` calls as a warm-start
     /// optimization. This is the primary warm-start mechanism for backward-pass
     /// workloads where the LP shape is constant across trial points at the same

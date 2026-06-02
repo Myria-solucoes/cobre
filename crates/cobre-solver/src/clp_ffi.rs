@@ -27,23 +27,11 @@ pub const CLP_STATUS_STOPPED: i32 = 3;
 /// `Clp_status` == 4 — stopped due to errors.
 pub const CLP_STATUS_ERRORS: i32 = 4;
 
-// ============================================================
-// CLP per-element basis status constants
-// (Clp_getColumnStatus / Clp_getRowStatus, per ClpSimplex.hpp)
-// ============================================================
-
-/// Variable/slack is free.
-pub const CLP_BASIS_FREE: i32 = 0;
-/// Variable/slack is basic.
-pub const CLP_BASIS_BASIC: i32 = 1;
-/// Variable/slack is at its upper bound.
-pub const CLP_BASIS_AT_UPPER: i32 = 2;
-/// Variable/slack is at its lower bound.
-pub const CLP_BASIS_AT_LOWER: i32 = 3;
-/// Variable/slack is superbasic.
-pub const CLP_BASIS_SUPER_BASIC: i32 = 4;
-/// Variable/slack is fixed.
-pub const CLP_BASIS_FIXED: i32 = 5;
+// Per-element basis status codes (`Clp_getColumnStatus` / `Clp_getRowStatus`,
+// per `ClpSimplex.hpp`): 0 free, 1 basic, 2 at-upper, 3 at-lower, 4 superbasic,
+// 5 fixed. These are round-tripped verbatim as raw `i32` (see `ClpSolver`'s
+// basis capture/install paths) and never compared against named constants, so
+// no symbolic definitions are kept here.
 
 unsafe extern "C" {
     // ============================================================

@@ -14,7 +14,7 @@
 //! # Configuration
 //!
 //! Configuration is wired through [`ClpProfile`] and the profile-setter FFI
-//! calls. The profile defaults mirror [`crate::HighsProfile`] where the options
+//! calls. The profile defaults mirror `HighsProfile` where the options
 //! overlap (tight feasibility tolerances, scaling off because the cobre
 //! prescaler already conditions the matrix), and use CLP-native values
 //! otherwise (perturbation off, iteration limit deferred to the per-call
@@ -54,7 +54,7 @@ pub enum ClpAlgorithm {
 /// The field defaults are tuned for deterministic, warm-started repeated
 /// re-solves: perturbation is off (`102`, not CLP's own `100`=auto default),
 /// scaling is off (the cobre prescaler conditions the matrix), and the
-/// feasibility tolerances match [`crate::HighsProfile`] bit-for-bit.
+/// feasibility tolerances match `HighsProfile` bit-for-bit.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ClpProfile {
     /// CLP perturbation mode (`Clp_setPerturbation`). `102` disables
@@ -160,8 +160,6 @@ pub struct ClpSolver {
     col_lower: Vec<f64>,
     /// Retained column upper bounds (length `num_cols`). Forwarded verbatim.
     col_upper: Vec<f64>,
-    /// Retained objective coefficients (length `num_cols`).
-    objective: Vec<f64>,
     /// Retained row lower bounds (length `num_rows`). Forwarded verbatim.
     row_lower: Vec<f64>,
     /// Retained row upper bounds (length `num_rows`). Forwarded verbatim.
@@ -247,7 +245,6 @@ impl ClpSolver {
             values: Vec::new(),
             col_lower: Vec::new(),
             col_upper: Vec::new(),
-            objective: Vec::new(),
             row_lower: Vec::new(),
             row_upper: Vec::new(),
             num_nz: 0,
@@ -779,8 +776,6 @@ impl SolverInterface for ClpSolver {
         self.col_lower.extend_from_slice(&template.col_lower);
         self.col_upper.clear();
         self.col_upper.extend_from_slice(&template.col_upper);
-        self.objective.clear();
-        self.objective.extend_from_slice(&template.objective);
         self.row_lower.clear();
         self.row_lower.extend_from_slice(&template.row_lower);
         self.row_upper.clear();

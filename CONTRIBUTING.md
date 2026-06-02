@@ -25,8 +25,8 @@ cd cobre
 # Build all crates
 cargo build --workspace
 
-# Run the full test suite (with all features enabled)
-cargo test --workspace --all-features
+# Run the test suite (default HiGHS backend)
+cargo test --workspace
 
 # Run tests for a specific crate
 cargo test -p cobre-sddp
@@ -34,6 +34,41 @@ cargo test -p cobre-sddp
 # Build Rust API documentation
 cargo doc --workspace --no-deps --open
 ```
+
+### Solver Backend Selection
+
+`cobre-solver` ships two LP backends behind **mutually exclusive** Cargo features:
+**HiGHS** (`highs`, on by default) and **CLP/CoinUtils** (`clp`, off by default).
+Exactly one may be enabled per build — enabling both (including via
+`--all-features`) is rejected at compile time. Any command that compiles
+`cobre-solver` (the whole workspace, or `-p cobre-solver`/`-p cobre-sddp`/`-p
+cobre-cli`) must therefore select a single backend instead of passing
+`--all-features`:
+
+```bash
+# Default HiGHS backend
+cargo test --workspace
+
+# CLP backend (requires the Clp and CoinUtils submodules)
+cargo test --workspace --no-default-features --features clp
+```
+
+To exercise the same surface CI does — every non-solver optional feature, run
+once per backend — add the non-solver feature set explicitly (this needs MPICH
+and `flatc` installed, just as `--all-features` previously did):
+
+```bash
+# HiGHS (default) backend
+cargo test --workspace --features "mpi numa shared-memory serde schema slow-tests flatc-conformance test-support"
+
+# CLP backend
+cargo test --workspace --no-default-features \
+  --features "clp mpi numa shared-memory serde schema slow-tests flatc-conformance test-support"
+```
+
+The same backend split applies to `cargo clippy` and `cargo build`. Crates that
+do not depend on `cobre-solver` (e.g. `cobre-core`, `cobre-io`) are unaffected
+and may still use `--all-features`.
 
 ### Testing cobre-core
 
@@ -62,16 +97,23 @@ from the integration test.
 
 ### Testing cobre-solver
 
-Initialize the HiGHS submodule first:
+Initialize the solver submodules first:
 
 ```bash
 git submodule update --init --recursive
-cargo test -p cobre-solver --all-features
+
+# Default HiGHS backend (add `test-support` for the FFI option-setting tests)
+cargo test -p cobre-solver --features test-support
+
+# CLP backend
+cargo test -p cobre-solver --no-default-features --features "clp test-support"
 ```
 
-The `highs` feature triggers cmake-based HiGHS compilation (requires cmake >= 3.15).
-The conformance suite validates the `SolverInterface` contract against hand-computed
-LP fixtures.
+The `highs` feature triggers cmake-based HiGHS compilation (requires cmake >= 3.15);
+the `clp` feature builds the vendored CLP/CoinUtils superbuild. The two backends are
+mutually exclusive — see [Solver Backend Selection](#solver-backend-selection). The
+conformance suite validates the `SolverInterface` contract against hand-computed LP
+fixtures for whichever backend is active.
 
 ### Testing cobre-comm
 
@@ -107,10 +149,17 @@ Initialize the HiGHS submodule first:
 
 ```bash
 git submodule update --init --recursive
-cargo test -p cobre-sddp --all-features
+
+# Default HiGHS backend (`slow-tests` un-ignores the D-case parity sweep)
+cargo test -p cobre-sddp --features slow-tests
+
+# CLP backend
+cargo test -p cobre-sddp --no-default-features --features "clp slow-tests"
 ```
 
-The test suite includes unit tests (forward/backward pass, cut management, simulation),
+Pass exactly one backend — `--all-features` enables both and fails to compile (see
+[Solver Backend Selection](#solver-backend-selection)). The test suite includes unit
+tests (forward/backward pass, cut management, simulation),
 conformance tests (algorithm contracts against hand-computed fixtures), and integration
 tests (end-to-end pipelines, Parquet output validation). The genericity gate asserts
 no algorithm-specific references in infrastructure crates.
@@ -118,10 +167,17 @@ no algorithm-specific references in infrastructure crates.
 ### Testing cobre-cli
 
 ```bash
-cargo test -p cobre-cli --all-features
+# Default HiGHS backend
+cargo test -p cobre-cli
+
+# CLP backend
+cargo test -p cobre-cli --no-default-features --features clp
 ```
 
-Integration tests exercise the binary via `assert_cmd`, organized by subcommand
+The CLI forwards the active backend to both `cobre-solver` and `cobre-sddp`, so it
+takes one backend at a time — not `--all-features` (see
+[Solver Backend Selection](#solver-backend-selection)). Integration tests exercise
+the binary via `assert_cmd`, organized by subcommand
 (`tests/cli_run.rs`, `tests/cli_validate.rs`, `tests/cli_report.rs`,
 `tests/cli_version.rs`). Each verifies exit codes, output, and file creation.
 
@@ -181,8 +237,8 @@ For algorithmic enhancements, a reference to the relevant paper or implementatio
 1. **Fork** the repository
 2. **Create a branch** from `main`: `git checkout -b feat/my-feature`
 3. **Make your changes** — see coding guidelines below
-4. **Test**: `cargo test --workspace --all-features`
-5. **Lint**: `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+4. **Test**: `cargo test --workspace` (and the CLP backend — see [Solver Backend Selection](#solver-backend-selection))
+5. **Lint**: `cargo clippy --workspace --all-targets -- -D warnings`
 6. **Format**: `cargo fmt --all`
 7. **Push** and open a pull request
 
@@ -237,11 +293,13 @@ The methodology specification corpus lives in the separate
 
 ### General
 
-- **Run the full check before pushing:**
+- **Run the full check before pushing** (default HiGHS backend; repeat the
+  clippy/test steps with `--no-default-features --features clp` to cover CLP —
+  see [Solver Backend Selection](#solver-backend-selection)):
   ```bash
   cargo fmt --all
-  cargo clippy --workspace --all-targets --all-features -- -D warnings
-  cargo test --workspace --all-features
+  cargo clippy --workspace --all-targets -- -D warnings
+  cargo test --workspace
   ```
 - **No `unsafe` without justification.** If you need `unsafe`, add a `// SAFETY:` comment explaining the invariants.
 - **No `unwrap()` in library code.** Use `Result` or `Option` with proper error types. `unwrap()` is acceptable in tests and examples.
@@ -355,7 +413,10 @@ Before tagging a new release:
    python3 scripts/check_book_version.py
    python3 scripts/check_python_parity.py --max 0
    ```
-4. Run `cargo fmt --all && cargo clippy --workspace --all-targets --all-features -- -D warnings`
+4. Run `cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings`,
+   then repeat clippy for the CLP backend:
+   `cargo clippy --workspace --all-targets --no-default-features --features clp -- -D warnings`
+   (the two backends are mutually exclusive — see [Solver Backend Selection](#solver-backend-selection))
 5. Tag: `git tag v<version>`
 
 ## License

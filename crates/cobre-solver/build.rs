@@ -34,10 +34,10 @@ fn main() {
     let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
 
     // ---------------------------------------------------------------------
-    // HiGHS backend (gated behind the `highs` feature, which is on by
-    // default). Gating the build behind CARGO_FEATURE_HIGHS lets a future
-    // `--no-default-features --features clp` build skip HiGHS entirely; for
-    // now the two backends coexist (both features may be enabled together).
+    // HiGHS backend, gated behind the `highs` feature (on by default).
+    // Exactly one LP backend is built: a `--no-default-features --features clp`
+    // build skips this block entirely, and enabling both `highs` and `clp` is
+    // rejected at compile time (see the `compile_error!` in `lib.rs`).
     // ---------------------------------------------------------------------
     if env::var("CARGO_FEATURE_HIGHS").is_ok() {
         println!("cargo:rerun-if-changed=csrc/highs_wrapper.c");

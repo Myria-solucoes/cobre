@@ -9,9 +9,9 @@
 //!   and dual/basis extraction.
 //! - **`HiGHS` backend** (`highs` feature, on by default): production-grade
 //!   open-source solver, well-suited for iterative LP solving in power system
-//!   optimization; exposed as [`HighsSolver`] and [`HighsProfile`].
+//!   optimization; exposed as `HighsSolver` and `HighsProfile`.
 //! - **`CLP` backend** (`clp` feature, off by default): optional CLP/`CoinUtils`
-//!   backend exposed as [`ClpSolver`] and [`ClpProfile`]; conformance-validated
+//!   backend exposed as `ClpSolver` and `ClpProfile`; conformance-validated
 //!   as a drop-in implementing the same [`SolverInterface`]. Requires the Clp
 //!   and `CoinUtils` submodules to be initialized (`git submodule update --init
 //!   --recursive`) before the first build with `--features clp`.
@@ -93,16 +93,17 @@ pub use clp::ClpSolver;
 pub use clp::clp_version;
 
 // Active backend selection (compile-time type alias). Per-item docs below carry
-// the feature-precedence and "no alias when neither feature is enabled" rules.
+// the mutual-exclusivity and "no alias when neither feature is enabled" rules.
 
 /// The compile-time-selected active LP solver backend.
 ///
 /// Downstream crates reference this alias instead of a concrete backend type,
 /// so a single binary is bound to exactly one solver with zero runtime
-/// dispatch. Resolution is governed by Cargo features with the precedence
-/// **`clp` overrides `highs`**: enabling `clp` selects CLP even if `highs` is
-/// also enabled. When only `highs` is enabled, this resolves to
-/// [`HighsSolver`]. When neither feature is enabled, this alias is not defined.
+/// dispatch. Exactly one LP backend is enabled at a time — enabling both
+/// `highs` and `clp` is rejected at compile time (see the `compile_error!` in
+/// this module). This resolves to `ClpSolver` under `--features clp` and to
+/// `HighsSolver` under the default `highs` feature. When neither feature is
+/// enabled, this alias is not defined.
 #[cfg(feature = "clp")]
 pub type ActiveSolver = ClpSolver;
 
@@ -110,39 +111,40 @@ pub type ActiveSolver = ClpSolver;
 ///
 /// Downstream crates reference this alias instead of a concrete backend type,
 /// so a single binary is bound to exactly one solver with zero runtime
-/// dispatch. Resolution is governed by Cargo features with the precedence
-/// **`clp` overrides `highs`**: enabling `clp` selects CLP even if `highs` is
-/// also enabled. When only `highs` is enabled, this resolves to
-/// [`HighsSolver`]. When neither feature is enabled, this alias is not defined.
+/// dispatch. Exactly one LP backend is enabled at a time — enabling both
+/// `highs` and `clp` is rejected at compile time (see the `compile_error!` in
+/// this module). This resolves to `ClpSolver` under `--features clp` and to
+/// `HighsSolver` under the default `highs` feature. When neither feature is
+/// enabled, this alias is not defined.
 #[cfg(all(feature = "highs", not(feature = "clp")))]
 pub type ActiveSolver = HighsSolver;
 
 /// The solver profile type of the compile-time-selected active backend.
 ///
-/// Resolved with the same precedence as [`ActiveSolver`] (**`clp` overrides
-/// `highs`**): this is [`ClpProfile`] when `clp` is enabled, otherwise
-/// [`HighsProfile`] when only `highs` is enabled. When neither feature is
-/// enabled, this alias is not defined. It is the same type as
-/// `<ActiveSolver as SolverInterface>::Profile`.
+/// Resolved under the same mutually-exclusive backend contract as
+/// [`ActiveSolver`] (enabling both backends is a compile error): this is
+/// `ClpProfile` under `--features clp`, otherwise `HighsProfile` under the
+/// default `highs` feature. When neither feature is enabled, this alias is not
+/// defined. It is the same type as `<ActiveSolver as SolverInterface>::Profile`.
 #[cfg(feature = "clp")]
 pub type ActiveProfile = ClpProfile;
 
 /// The solver profile type of the compile-time-selected active backend.
 ///
-/// Resolved with the same precedence as [`ActiveSolver`] (**`clp` overrides
-/// `highs`**): this is [`ClpProfile`] when `clp` is enabled, otherwise
-/// [`HighsProfile`] when only `highs` is enabled. When neither feature is
-/// enabled, this alias is not defined. It is the same type as
-/// `<ActiveSolver as SolverInterface>::Profile`.
+/// Resolved under the same mutually-exclusive backend contract as
+/// [`ActiveSolver`] (enabling both backends is a compile error): this is
+/// `ClpProfile` under `--features clp`, otherwise `HighsProfile` under the
+/// default `highs` feature. When neither feature is enabled, this alias is not
+/// defined. It is the same type as `<ActiveSolver as SolverInterface>::Profile`.
 #[cfg(all(feature = "highs", not(feature = "clp")))]
 pub type ActiveProfile = HighsProfile;
 
 /// Returns the version string of the compile-time-selected active backend.
 ///
-/// A single backend-agnostic entry point for metadata wiring. Resolved with
-/// the same precedence as [`ActiveSolver`] (**`clp` overrides `highs`**):
-/// returns [`clp_version`]'s value when CLP is active, [`highs_version`]'s
-/// value when `HiGHS` is active.
+/// A single backend-agnostic entry point for metadata wiring. Resolved under
+/// the same mutually-exclusive backend contract as [`ActiveSolver`]: returns
+/// `clp_version`'s value when CLP is active, `highs_version`'s value when
+/// `HiGHS` is active.
 #[cfg(feature = "clp")]
 #[must_use]
 pub fn active_solver_version() -> String {
@@ -151,10 +153,10 @@ pub fn active_solver_version() -> String {
 
 /// Returns the version string of the compile-time-selected active backend.
 ///
-/// A single backend-agnostic entry point for metadata wiring. Resolved with
-/// the same precedence as [`ActiveSolver`] (**`clp` overrides `highs`**):
-/// returns [`clp_version`]'s value when CLP is active, [`highs_version`]'s
-/// value when `HiGHS` is active.
+/// A single backend-agnostic entry point for metadata wiring. Resolved under
+/// the same mutually-exclusive backend contract as [`ActiveSolver`]: returns
+/// `clp_version`'s value when CLP is active, `highs_version`'s value when
+/// `HiGHS` is active.
 #[cfg(all(feature = "highs", not(feature = "clp")))]
 #[must_use]
 pub fn active_solver_version() -> String {
@@ -164,8 +166,8 @@ pub fn active_solver_version() -> String {
 /// Returns the display name of the compile-time-selected active backend.
 ///
 /// This is the same string the active backend's [`SolverInterface::name`]
-/// returns (`"CLP"` or `"HiGHS"`). Resolved with the same precedence as
-/// [`ActiveSolver`] (**`clp` overrides `highs`**).
+/// returns (`"CLP"` or `"HiGHS"`). Resolved under the same mutually-exclusive
+/// backend contract as [`ActiveSolver`].
 #[cfg(feature = "clp")]
 #[must_use]
 pub fn active_solver_name() -> &'static str {
@@ -175,8 +177,8 @@ pub fn active_solver_name() -> &'static str {
 /// Returns the display name of the compile-time-selected active backend.
 ///
 /// This is the same string the active backend's [`SolverInterface::name`]
-/// returns (`"CLP"` or `"HiGHS"`). Resolved with the same precedence as
-/// [`ActiveSolver`] (**`clp` overrides `highs`**).
+/// returns (`"CLP"` or `"HiGHS"`). Resolved under the same mutually-exclusive
+/// backend contract as [`ActiveSolver`].
 #[cfg(all(feature = "highs", not(feature = "clp")))]
 #[must_use]
 pub fn active_solver_name() -> &'static str {
@@ -187,8 +189,8 @@ pub fn active_solver_name() -> &'static str {
 /// (`OutputContext.solver`).
 ///
 /// Unlike [`active_solver_name`] (the mixed-case display name `"CLP"`/`"HiGHS"`),
-/// this is the stable lowercase id recorded in output manifests. Resolved with
-/// the same precedence as [`ActiveSolver`] (**`clp` overrides `highs`**).
+/// this is the stable lowercase id recorded in output manifests. Resolved under
+/// the same mutually-exclusive backend contract as [`ActiveSolver`].
 #[cfg(feature = "clp")]
 #[must_use]
 pub fn active_solver_metadata_id() -> &'static str {
@@ -199,8 +201,8 @@ pub fn active_solver_metadata_id() -> &'static str {
 /// (`OutputContext.solver`).
 ///
 /// Unlike [`active_solver_name`] (the mixed-case display name `"CLP"`/`"HiGHS"`),
-/// this is the stable lowercase id recorded in output manifests. Resolved with
-/// the same precedence as [`ActiveSolver`] (**`clp` overrides `highs`**).
+/// this is the stable lowercase id recorded in output manifests. Resolved under
+/// the same mutually-exclusive backend contract as [`ActiveSolver`].
 #[cfg(all(feature = "highs", not(feature = "clp")))]
 #[must_use]
 pub fn active_solver_metadata_id() -> &'static str {
@@ -246,8 +248,8 @@ mod active_alias_tests {
             "active version `{version}` should contain a `.`"
         );
 
-        // `clp` overrides `highs`: when `clp` is enabled the active backend is
-        // CLP regardless of whether `highs` is also enabled.
+        // Exactly one backend is active (both-enabled is a compile error): the
+        // active backend is CLP under `--features clp`, else HiGHS by default.
         #[cfg(feature = "clp")]
         assert_eq!(name, "CLP");
         #[cfg(all(feature = "highs", not(feature = "clp")))]
