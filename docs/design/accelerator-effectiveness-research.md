@@ -7,8 +7,10 @@ companion:
   [
     "docs/design/solver-parameter-tuning.md",
     "docs/design/solver-tuning-benchmark-case.md",
+    "docs/design/dynamic-cut-selection-design.md",
   ]
-references: ["ideas/cut-selection.pdf", "ideas/newave-cut-selection.pdf"]
+references:
+  ["ideas/cut-selection.pdf", "ideas/newave-cut-selection.pdf", "~/git/SPTcpp"]
 ---
 
 # Accelerator effectiveness research
@@ -117,20 +119,81 @@ From a read of the cut-selection and warm-start code:
   near-future implementation in `dynamic-cut-selection-design.md` — a new in-solve
   lazy-row-generation loop interacting with the rebake and warm-start.
 
+## 3a. Cut-residency strategies (the design space)
+
+"How many cuts are resident in the solved LP, and how is that managed" is a
+spectrum. Each point trades LP size against mutation and warm-start complexity:
+
+| Strategy                     | Resident cut rows               | LP mutation                                           | Warm-start need                                        | Status                      |
+| ---------------------------- | ------------------------------- | ----------------------------------------------------- | ------------------------------------------------------ | --------------------------- |
+| **Shrink-bake** (current)    | active only                     | rows added/removed/reordered across iters             | slot-identity reconstruction (`full`) to survive churn | implemented                 |
+| **Shrink-bake + core / off** | active only                     | same                                                  | core-only / none (`core`, `off`)                       | implemented (toggle)        |
+| **Static loose-RHS**         | **all** (inactive at ±∞ RHS)    | **none** structurally (append-only; only RHS toggles) | trivial / length-keyed (rows never move)               | **proposed (this section)** |
+| **Dynamic (NEWAVE SC)**      | minimal, grown lazily per solve | rows _added_ within a solve                           | indispensable, across inner adds                       | designed, deferred          |
+
+### Static loose-RHS LP (the alternative to mutating the LP)
+
+Instead of shrinking the baked template to active cuts, **bake every populated
+cut as a row and "deselect" a cut by setting its row bound/RHS to a loose value
+(±∞ sentinel)** so it is trivially satisfied and never binds. The LP structure is
+then **static** (append-only as cuts are built; rows are never removed or
+reordered), which has a real upside and a real cost:
+
+- **Upside**: warm-start becomes trivial — the stored basis aligns by position
+  (length-keyed), so the slot-identity reconstruction machinery is **unnecessary
+  by construction**. No churn, no slot bookkeeping. This is the cleanest possible
+  answer to "is the complex reconstruction worth it?": if static loose-RHS is
+  competitive, the reconstruction can be retired.
+- **Cost**: the LP is **always large** (carries every cut, active or not), so the
+  solver must efficiently **ignore the many loose, slack-basic rows**. This is
+  pricing-strategy- and presolve-sensitive: a solver that prices over all rows
+  pays for the loose ones every iteration.
+
+Cobre's pool already represents an inactive cut with a ±∞ sentinel RHS
+(`.claude/rules/sddp.md`), but the per-solve **bake currently excludes inactive
+cuts** (`active_cuts()`), so the solved LP shrinks. The static variant would bake
+**all** populated cuts (inactive ones at the sentinel RHS) — a change to the
+cut-row-batch build / bake path, after which length-keyed warm-start suffices.
+
+**Coupling to solver parameters (the key link).** Past experience: a static
+loose-RHS LP was tried, and **HiGHS struggled to handle the many loose rows
+efficiently with the solver parameters in use at the time**. This makes the
+strategy's viability a **joint** question with the solver-parameter study — the
+price strategy (row vs column, hyper-sparse), presolve, and how the backend
+treats trivially-satisfied rows likely decide whether static loose-RHS is
+competitive. It must therefore be evaluated **crossed with the solver-param
+grid**, not in isolation.
+
+**Reference — SPTcpp** (`~/git/SPTcpp`). Investigated as a possible precedent.
+What the read actually found (to be confirmed): it uses **CLP**, pre-allocates
+cut rows as RHS=0 skeletons and activates them by setting the RHS, but
+**deselects cuts by physically deleting rows** (`deleteRows()`) and **cold-starts
+every solve** (`initialSolve`, no basis reuse). That is closer to row-mutation +
+cold-start than to a clean static-loose-RHS + warm-start design, so SPTcpp does
+not cleanly confirm the recollection — flagged for confirmation. The static
+loose-RHS strategy is worth evaluating on its own merits regardless.
+
 ## 4. Experiment design
 
 Three accelerator axes, crossed, on the deep-pool Mode-C probe (primary) with
 Mode-A correctness gating throughout:
 
-| Axis              | Levels                                                                 |
-| ----------------- | ---------------------------------------------------------------------- |
-| **Warm-start**    | `full` (slot-identity) · `core` (core-only, cuts BASIC) · `off` (cold) |
-| **Cut selection** | none (append-only) · Level1 · Dominated · DCS (deferred — see design)  |
-| **Solver params** | the per-backend grid from `solver-parameter-tuning.md`                 |
+| Axis              | Levels                                                                            |
+| ----------------- | --------------------------------------------------------------------------------- |
+| **Cut residency** | shrink-bake (current) · **static loose-RHS** (all cuts resident) · DCS (deferred) |
+| **Warm-start**    | `full` (slot-identity) · `core` (core-only, cuts BASIC) · `off` (cold)            |
+| **Cut selection** | none (append-only) · Level1 · Dominated                                           |
+| **Solver params** | the per-backend grid from `solver-parameter-tuning.md`                            |
 
 The `core` warm-start level is the direct test of the user's hypothesis: if
 `core` ≈ `full` under cut-set churn, the slot-identity reconstruction complexity
 is not paying off and can be replaced by the far simpler core-only warm-start.
+The **static loose-RHS** residency level is the complementary test: it removes
+churn entirely (so length-keyed warm-start suffices and reconstruction is
+unnecessary) at the cost of a permanently large LP — and is **only meaningful
+crossed with the solver-param grid**, since its viability hinges on how the
+backend prices over many loose, slack-basic rows (the regime where HiGHS
+previously struggled).
 
 The decisive sub-experiment is the **warm-start × cut-selection 2×N interaction**:
 
@@ -170,7 +233,16 @@ Readout:
    correctness-neutral on a deterministic case.
 2. **Cut-selection variants** — no code needed; driven by `training.cut_selection`
    config, templated by the harness.
-3. **Dynamic Cut Selection (NEWAVE SC)** — **deferred, designed separately** in
+3. **Static loose-RHS residency** — **proposed, not yet built**. A bake-path mode
+   that bakes **all** populated cuts (inactive ones at the ±∞ sentinel RHS) so the
+   solved LP is structurally static and warm-start is length-keyed. Seam: the
+   cut-row-batch build / bake path (iterate all populated cuts instead of
+   `active_cuts()`; set inactive rows loose), plus a length-keyed (or `core`)
+   warm-start since slot-identity reconstruction is then moot. Mid-complexity —
+   smaller than DCS, larger than the basis toggle; gate behind a
+   `COBRE_TUNE_CUT_RESIDENCY=shrink|static` env toggle to mirror the existing
+   seams. Must be evaluated crossed with the solver-param grid.
+4. **Dynamic Cut Selection (NEWAVE SC)** — **deferred, designed separately** in
    `dynamic-cut-selection-design.md`. It has real hyperparameters and tricks
    (initial-set window, candidate scoring, `nadic`, basis-recovery dependence,
    incremental row addition) and is not a spike; it will be implemented in the
@@ -178,6 +250,13 @@ Readout:
 
 ## 6. Open decisions
 
+- **Static loose-RHS toggle**: build the `COBRE_TUNE_CUT_RESIDENCY=static` bake
+  mode now (so the cut-residency axis runs alongside warm-start × selection), or
+  defer until the warm-start × selection results are in? It is the cleanest test
+  of whether the slot-identity reconstruction can be retired outright.
+- **Confirm SPTcpp**: verify what `~/git/SPTcpp` actually does (row deletion +
+  cold-start vs static loose-RHS + warm-start) — the investigation suggested the
+  former, contradicting the recollection.
 - **DCS**: design first (done — see `dynamic-cut-selection-design.md`), implement
   in a near-future dedicated effort. The warm-start × existing-selection
   interaction already answers the basis-reconstruction question and runs now.
