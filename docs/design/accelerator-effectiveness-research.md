@@ -217,13 +217,13 @@ quality); watch `solve_stats.retried`.
 **Diagnostic for the warm-start comparison (from `ideas/research-report.md`).**
 The decisive question — does the slot-identity reconstruction earn its
 complexity? — is best read not from wall-clock alone but from **pivots-per-resolve**
-and the **non-alien basis-rejection rate**. A healthy warm start re-solves in tens
-of pivots with few rejections; if `core`/`off` show many more pivots or `full`
-shows many alien rejections (forced INVERTs), that _explains_ the wall-clock
-result. Both are tracked in `SolverStatistics` but not yet surfaced in
-`training/metadata.json` — surfacing them (see `solver-parameter-tuning.md` §7) is
-the highest-value instrumentation for this study, because it turns the
-full/core/off comparison from "which is faster" into "why."
+and the **basis-rejection rate**. A healthy warm start re-solves in tens of
+pivots with few rejections; if `core`/`off` show many more pivots, or `full`
+shows many basis rejections (forced INVERTs), that _explains_ the wall-clock
+result. Both come straight from `training/solver/iterations.parquet`
+(`simplex_iterations`, `lp_solves`, `basis_offered`, `basis_consistency_failures`,
+per phase) — the harness reads them per cell (`run_cell.py`), so the full/core/off
+comparison answers "which is faster" **and** "why" with no extra instrumentation.
 
 ## 5. Instruments
 

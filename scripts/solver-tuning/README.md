@@ -36,7 +36,13 @@ the winning solver env.
 | `prep_cases.sh`   | Copy the base case once per cut-selection method and patch each                       |
 | `run_cell.py`     | Run one manifest line: set env, `cobre run`, write `tune_params.json` + `result.json` |
 | `sweep.sbatch`    | SLURM array wrapper (1 node, 96 cpus, `--exclusive`) calling `run_cell.py`            |
+| `run_local.sh`    | SLURM-free: run every manifest cell sequentially (local testing)                      |
 | `aggregate.py`    | Collect cells → `results.csv` + ranked summary + correctness gate + suggested winner  |
+
+`run_cell.py` / `aggregate.py` are stdlib-only; the richer per-phase
+diagnostics (pivots-per-resolve, basis-rejection rate, per-iteration bounds) are
+read from the training parquets **optionally** via `pandas`/`pyarrow` — if
+neither is importable the harness still runs on `metadata.json` alone.
 
 ## Runbook (example: HiGHS)
 
@@ -77,6 +83,26 @@ python3 aggregate.py --runs runs --backend highs --stage 2
 
 For CLP: rebuild the binary `--no-default-features --features clp`, then repeat
 with `--backend clp` and `TUNE_CASES=cases/clp`.
+
+## Local testing (no SLURM)
+
+To check the harness works before submitting the real sweep, run a small case
+locally with `run_local.sh` (loops the manifest sequentially, no `sbatch`):
+
+```bash
+cargo build --release -p cobre-cli            # at the repo root
+cd scripts/solver-tuning
+BIN=$(cd ../.. && pwd)/target/release/cobre
+
+./prep_cases.sh ../../examples/4ree cases/local         # any small case works
+python3 grid.py --backend highs --stage 1 > m.s1.jsonl
+./run_local.sh m.s1.jsonl cases/local runs "$BIN" 4     # 4 threads locally
+python3 aggregate.py --runs runs --backend highs --stage 1
+```
+
+Same flow as the SLURM path (`prep → grid → run → aggregate`), just sequential
+and with a low `--threads`. A deterministic case (e.g. `examples/deterministic/`)
+makes the `LB ≤ UB` gate and ranking easy to eyeball.
 
 ## Outputs per cell
 

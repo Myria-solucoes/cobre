@@ -85,24 +85,34 @@ def main() -> int:
     for cell, reps in cells.items():
         bwd_min, bwd_med = agg(reps, "backward_solve_seconds")
         dur_min, dur_med = agg(reps, "duration_seconds")
-        lb = _first_num(reps, "final_lower_bound")
-        ub = _first_num(reps, "final_upper_bound")
-        # Convergence gap computed from the bounds (robust to metadata layout).
+        # Prefer the convergence-parquet bounds (per-iteration, authoritative)
+        # over the metadata summary; fall back when the parquet is unavailable.
+        lb = _first_num(reps, "conv_final_lower_bound") or _first_num(
+            reps, "final_lower_bound"
+        )
+        ub = _first_num(reps, "conv_final_upper_bound") or _first_num(
+            reps, "final_upper_bound"
+        )
         gap = (
             None
             if (lb is None or ub is None)
             else 100.0 * (ub - lb) / max(1.0, abs(ub))
         )
+        # Per-phase diagnostics (parquet): pivots-per-resolve & basis-reject rate.
+        pivots = _first_num(reps, "bwd_pivots_per_solve")
+        reject = _first_num(reps, "bwd_basis_reject_rate")
         ok_exit = all(r.get("exit_status") == 0 for r in reps)
         ok_fail = all((r.get("failed") in (0, None)) for r in reps)
-        # Cut-validity gate: at convergence LB <= UB (gap >= 0). LB exceeding UB
-        # beyond tolerance means a cut sliced off the true optimum (perturbation
-        # or loose dual tolerance) — the report's primary correctness failure.
-        invalid_cut = (
-            lb is not None
-            and ub is not None
-            and lb - ub > args.ref_tol * max(1.0, abs(ub))
-        )
+        # Cut-validity gate: at convergence LB <= UB. The worst LB-UB across ALL
+        # iterations (conv_max_lb_minus_ub, from the parquet) is the strongest
+        # check; fall back to the final-bounds difference. LB exceeding UB beyond
+        # tolerance means a cut sliced off the optimum (perturbation / loose dual
+        # tolerance) — the report's primary correctness failure.
+        worst_viol = _first_num(reps, "conv_max_lb_minus_ub")
+        if worst_viol is None and lb is not None and ub is not None:
+            worst_viol = lb - ub
+        tol_abs = args.ref_tol * max(1.0, abs(ub)) if ub is not None else args.ref_tol
+        invalid_cut = worst_viol is not None and worst_viol > tol_abs
         if invalid_cut:
             correctness = "INVALID"
         elif not (ok_exit and ok_fail):
@@ -126,6 +136,8 @@ def main() -> int:
                 "duration_s_min": dur_min,
                 "duration_s_med": dur_med,
                 "delta_pct_vs_baseline": delta,
+                "bwd_pivots_per_solve": pivots,
+                "bwd_basis_reject_rate": reject,
                 "final_lower_bound": lb,
                 "final_gap_percent": gap,
                 "correctness": correctness,
@@ -152,18 +164,28 @@ def main() -> int:
         f"\n{args.backend} stage {args.stage}  (ref LB = {_fmt(ref_lb, 4)}, tol = {args.ref_tol})\n"
     )
     hdr = (
-        f"{'cell':28} {'bwd_min':>9} {'Δ% base':>8} {'dur_min':>9} "
-        f"{'gap%':>7} {'verdict':>8}"
+        f"{'cell':28} {'bwd_min':>9} {'Δ% base':>8} {'piv/slv':>8} "
+        f"{'rej%':>6} {'gap%':>7} {'verdict':>8}"
     )
     print(hdr)
     print("-" * len(hdr))
     for r in rows:
+        reject_pct = (
+            None
+            if r["bwd_basis_reject_rate"] is None
+            else 100.0 * r["bwd_basis_reject_rate"]
+        )
         print(
             f"{r['cell']:28} {_fmt(r['backward_solve_s_min']):>9} "
-            f"{_fmt(r['delta_pct_vs_baseline'], 1):>8} {_fmt(r['duration_s_min']):>9} "
-            f"{_fmt(r['final_gap_percent'], 3):>7} {r['correctness']:>8}"
+            f"{_fmt(r['delta_pct_vs_baseline'], 1):>8} {_fmt(r['bwd_pivots_per_solve'], 1):>8} "
+            f"{_fmt(reject_pct, 1):>6} {_fmt(r['final_gap_percent'], 3):>7} "
+            f"{r['correctness']:>8}"
         )
     print(f"\nwrote {csv_path}")
+    print(
+        "cols: bwd_min=backward solve s (min over reps) · piv/slv=backward "
+        "pivots-per-resolve · rej%=basis-rejection rate · verdict PASS/FAIL/INVALID"
+    )
     print(
         "verdict: PASS ok · FAIL exit/solve error · INVALID LB>UB (cut sliced the optimum)"
     )

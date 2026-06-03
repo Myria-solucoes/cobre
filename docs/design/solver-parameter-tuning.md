@@ -188,7 +188,16 @@ _result_; reps only quantify 96-thread timing noise — take the **min**).
 - `solve_stats.backward_solve_seconds` — primary (dominant, variance-heavy phase)
 - `solve_stats.forward_solve_seconds`, `duration_seconds` — secondary
 - `solve_stats.{retried, failed}` — a config that raises retries is suspect
-- `bounds.{final_lower_bound, final_upper_bound}` — for the cut-validity gate
+- `bounds.{final_lower_bound, final_upper_bound}` — fallback for the gate
+
+**Diagnostics** (from the training parquets, parsed optionally by `run_cell.py`):
+
+- `training/solver/iterations.parquet` → backward **pivots-per-resolve**
+  (`simplex_iterations/lp_solves`) and **basis-rejection rate**
+  (`basis_consistency_failures/basis_offered`) — the report's interpretive
+  levers (high pivots / many rejections ⇒ the warm start is failing).
+- `training/convergence.parquet` → per-iteration `lower_bound`/`upper_bound_mean`
+  (the gate's authoritative source) and `cuts_active` (pool growth).
 
 **Correctness gate** (per cell, in `aggregate.py`):
 
@@ -225,12 +234,16 @@ Cells are resumable (skip if `result.json` exists); each writes
 
 - ✅ HiGHS `simplex_price_strategy` enum **confirmed** from vendored source
   (0 Col / 1 Row / 2 RowSwitch / 3 RowSwitchColSwitch).
-- **Surface the two key diagnostics in `training/metadata.json`** — the
-  highest-value instrumentation: `simplex_iterations` (→ pivots-per-resolve) and
-  the non-alien basis-rejection count (→ forced INVERTs). Both are tracked
-  internally (`SolverStatistics`) but not emitted; surfacing them needs a field
-  on `MetadataTrainingSolveStats` + the training summary + Python parity. Without
-  them the sweep measures wall-clock but cannot _diagnose_ a failing warm start.
+- ✅ The two key diagnostics — **pivots-per-resolve** and the **basis-rejection
+  rate** — are already in the training parquets; **no metadata change needed**.
+  `run_cell.py` reads them (optionally, via `pandas`/`pyarrow`; falls back to
+  metadata if absent):
+  - `training/solver/iterations.parquet` (`SolverStatsRow`): `simplex_iterations`,
+    `lp_solves`, `basis_offered`, `basis_consistency_failures` per
+    phase/stage/worker → backward pivots-per-resolve and basis-reject rate.
+  - `training/convergence.parquet` (`IterationRecord`): per-iteration
+    `lower_bound`, `upper_bound_mean`, `cuts_active` → the cut-validity gate runs
+    over _every_ iteration (worst `LB − UB`), not just the final bounds.
 - Confirm the HiGHS `simplex_scale_strategy` equilibration index; and CLP
   `domination_epsilon` (placeholder in `patch_config.py`).
 - Build the benchmark case to `solver-tuning-benchmark-case.md`.

@@ -83,6 +83,72 @@ def extract_metrics(out_dir: Path) -> dict[str, Any]:
     }
 
 
+def extract_parquet_diagnostics(out_dir: Path) -> dict[str, Any]:
+    """Richer per-phase diagnostics from the training parquets (optional).
+
+    Reads ``training/solver/iterations.parquet`` (per-phase pivot counts and
+    basis-rejection counters) and ``training/convergence.parquet`` (per-iteration
+    bounds and cut-pool size). Returns ``{}`` if no parquet reader is available or
+    a file is missing/unreadable, so the harness still works on the metadata path
+    alone. Never raises on a handled read error.
+    """
+    try:
+        import pandas as pd
+    except ImportError:
+        return {}
+
+    diag: dict[str, Any] = {}
+
+    solver_pq = out_dir / "training" / "solver" / "iterations.parquet"
+    if solver_pq.exists():
+        try:
+            df = pd.read_parquet(solver_pq)
+        except (OSError, ValueError):
+            df = None
+        if df is not None and "phase" in df.columns:
+            for phase, tag in (("backward", "bwd"), ("forward", "fwd")):
+                sub = df[df["phase"] == phase]
+                solves = float(sub["lp_solves"].sum()) if "lp_solves" in sub else 0.0
+                iters = (
+                    float(sub["simplex_iterations"].sum())
+                    if "simplex_iterations" in sub
+                    else 0.0
+                )
+                offered = (
+                    float(sub["basis_offered"].sum()) if "basis_offered" in sub else 0.0
+                )
+                rejected = (
+                    float(sub["basis_consistency_failures"].sum())
+                    if "basis_consistency_failures" in sub
+                    else 0.0
+                )
+                diag[f"{tag}_lp_solves"] = solves
+                diag[f"{tag}_simplex_iterations"] = iters
+                diag[f"{tag}_pivots_per_solve"] = (iters / solves) if solves else None
+                diag[f"{tag}_basis_reject_rate"] = (
+                    (rejected / offered) if offered else None
+                )
+
+    conv_pq = out_dir / "training" / "convergence.parquet"
+    if conv_pq.exists():
+        try:
+            cv = pd.read_parquet(conv_pq)
+        except (OSError, ValueError):
+            cv = None
+        if cv is not None and len(cv) and "lower_bound" in cv.columns:
+            last = cv.iloc[-1]
+            diag["conv_final_lower_bound"] = float(last["lower_bound"])
+            if "upper_bound_mean" in cv.columns:
+                diag["conv_final_upper_bound"] = float(last["upper_bound_mean"])
+                # Worst LB-UB across ALL iterations → cut-validity over the run.
+                diag["conv_max_lb_minus_ub"] = float(
+                    (cv["lower_bound"] - cv["upper_bound_mean"]).max()
+                )
+            if "cuts_active" in cv.columns:
+                diag["conv_final_cuts_active"] = int(last["cuts_active"])
+    return diag
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -175,9 +241,14 @@ def main() -> int:
         "ended_at": ended,
     }
     result.update(extract_metrics(out_dir))
-    (cell_out / "result.json").write_text(
-        json.dumps(result, indent=2, sort_keys=True) + "\n"
-    )
+    # Write the core result first so the cell counts as complete even if the
+    # (optional) parquet enrichment below hits trouble, then enrich in place.
+    result_path = cell_out / "result.json"
+    result_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    diagnostics = extract_parquet_diagnostics(out_dir)
+    if diagnostics:
+        result.update(diagnostics)
+        result_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
 
     print(
         f"[done] {cell['run_id']} exit={proc.returncode} "
