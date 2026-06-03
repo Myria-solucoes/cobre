@@ -164,14 +164,33 @@ treats trivially-satisfied rows likely decide whether static loose-RHS is
 competitive. It must therefore be evaluated **crossed with the solver-param
 grid**, not in isolation.
 
-**Reference — SPTcpp** (`~/git/SPTcpp`). Investigated as a possible precedent.
-What the read actually found (to be confirmed): it uses **CLP**, pre-allocates
-cut rows as RHS=0 skeletons and activates them by setting the RHS, but
-**deselects cuts by physically deleting rows** (`deleteRows()`) and **cold-starts
-every solve** (`initialSolve`, no basis reuse). That is closer to row-mutation +
-cold-start than to a clean static-loose-RHS + warm-start design, so SPTcpp does
-not cleanly confirm the recollection — flagged for confirmation. The static
-loose-RHS strategy is worth evaluating on its own merits regardless.
+**Reference — SPTcpp** (`~/git/SPTcpp`) — investigated and **settled** (read of
+`C_Solver.h` and the cut-management paths). It is **not** a static-loose-RHS +
+warm-start precedent; it is the **opposite** design:
+
+- LP solver is **CLP** (`ClpSimplex` / `OsiClpSolverInterface`; optional Gurobi
+  via `#ifdef GRB`).
+- **No warm-start of any kind.** Every solve is a cold `initialSolve` /
+  `initialDualSolve` (`C_Solver.h:1732`), with `setPerturbation(50)` (perturbation
+  on) and scaling on. A full-tree search of `src` finds no
+  `CoinWarmStart`/`setBasis`/`getWarmStart`/`resolve` — there is no basis-reuse
+  machinery at all.
+- Cut **deselection physically deletes the row** (`remRestricao` → CLP
+  `deleteRows`, `C_Solver.h:2959`), shrinking the LP. `setRHSRestricao`
+  (`:2745`) only sets a row's one-sided bound (the ±`COIN_DBL_MAX` is the
+  natural unbounded side of an inequality, **not** a loosening trick). Rich
+  selection exists (dominance level 0–10, selected/deselected sets, NEWAVE-window
+  flag).
+
+So SPTcpp's strategy is **"no warm-start + aggressive physical deletion → a small,
+cold-solved LP."** Crucially, that maps directly onto the **warm-start `off` ×
+cut-selection on** cell of the matrix below — and SPTcpp reportedly performs
+well, a real-world data point that **that cell may be competitive**, which is
+exactly the suspicion driving this study. (It also explains the design logic:
+once you don't warm-start, structural stability is worthless, so deleting
+deselected rows to keep the LP small is the right move.) The static-loose-RHS
+strategy remains a valid design to evaluate on its own merits — but it is _our_
+idea, not SPTcpp's.
 
 ## 4. Experiment design
 
@@ -254,9 +273,9 @@ Readout:
   mode now (so the cut-residency axis runs alongside warm-start × selection), or
   defer until the warm-start × selection results are in? It is the cleanest test
   of whether the slot-identity reconstruction can be retired outright.
-- **Confirm SPTcpp**: verify what `~/git/SPTcpp` actually does (row deletion +
-  cold-start vs static loose-RHS + warm-start) — the investigation suggested the
-  former, contradicting the recollection.
+- **SPTcpp — settled** (see §3a): it does **row deletion + cold-start, no
+  warm-start** (CLP `initialSolve` + `deleteRows`), i.e. the warm-start `off` ×
+  selection-on cell — not static loose-RHS + warm-start. No further action.
 - **DCS**: design first (done — see `dynamic-cut-selection-design.md`), implement
   in a near-future dedicated effort. The warm-start × existing-selection
   interaction already answers the basis-reconstruction question and runs now.
