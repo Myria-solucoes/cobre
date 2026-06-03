@@ -72,9 +72,12 @@ def extract_metrics(out_dir: Path) -> dict[str, Any]:
         "total_lp_solves": solve.get("total_lp_solves"),
         "retried": solve.get("retried"),
         "failed": solve.get("failed"),
-        # final_lower_bound has lived both at top level and under "bounds".
+        # bounds have lived both at top level and under "bounds".
         "final_lower_bound": bounds.get(
             "final_lower_bound", training.get("final_lower_bound")
+        ),
+        "final_upper_bound": bounds.get(
+            "final_upper_bound", training.get("final_upper_bound")
         ),
         "simulation_duration_seconds": sim.get("duration_seconds"),
     }
@@ -165,6 +168,7 @@ def main() -> int:
         "label": cell["label"],
         "warmstart": cell["warmstart"],
         "cut_sel": cell["cut_sel"],
+        "reference": cell.get("reference", False),
         "env": cell["env"],
         "exit_status": proc.returncode,
         "started_at": started,

@@ -95,13 +95,19 @@ re-submitted array only fills gaps.
 - `--reps N` (default 1) emits N repeats per cell; run finalists with `--reps 3`
   and take the **min** (least-contended) — full runs are deterministic in
   _result_, so repeats only quantify 96-thread timing noise.
-- `aggregate.py --ref-tol` is the relative final-LB tolerance for the correctness
-  gate vs the `baseline` cell (different solver/accelerator configs may reach
-  alternate optima → small LB drift; tune the tolerance from observed drift).
+- **Correctness gate** (`aggregate.py`): a cell is `INVALID` when `LB > UB` (a cut
+  sliced off the optimum — perturbation / loose dual tolerance), `FAIL` on run
+  error, else `PASS`. `--ref-tol` is the relative `LB ≤ UB` tolerance. Cross-config
+  LB drift (alternate optima) is expected and reported as gap%, not failed.
+- Stage 1 is OFAT: the reference cell is the **correctness floor** (HiGHS
+  `presolve=off`; CLP defaults already meet it), one cell confirms `presolve=on`,
+  and the rest each move one pure-speed lever. See `grid.py` and
+  `docs/design/solver-parameter-tuning.md` §1a.
 - `TUNE_THREADS` overrides 96; `OMP_NUM_THREADS` is pinned to match.
-- **Confirm before trusting:** the HiGHS `simplex_scale_strategy` /
-  `simplex_price_strategy` enum values used in `grid.py` (the ideas doc and a
-  code comment disagreed on the equilibration index); and `domination_epsilon`
-  in `patch_config.py` (placeholder).
+- **Confirmed** from vendored HiGHS source: `simplex_price_strategy` =
+  0 Col/1 Row/2 RowSwitch/3 RowSwitchColSwitch; `simplex_dual_edge_weight_strategy`
+  = -1 Choose/0 Dantzig/1 Devex/2 SteepestEdge. **Still confirm:** the HiGHS
+  `simplex_scale_strategy` equilibration index; and `domination_epsilon` in
+  `patch_config.py` (placeholder).
 - The `off`/`core` warm-start modes still _capture_ unused bases (small fixed
   overhead that slightly flatters `full`).

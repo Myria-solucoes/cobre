@@ -36,6 +36,10 @@ def _fmt(x: float | None, places: int = 2) -> str:
     return "n/a" if x is None else f"{x:.{places}f}"
 
 
+def _first_num(reps: list[dict[str, Any]], key: str) -> float | None:
+    return next((r[key] for r in reps if isinstance(r.get(key), (int, float))), None)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -69,43 +73,42 @@ def main() -> int:
             return None, None
         return min(vals), statistics.median(vals)
 
-    # Baseline reference (the cell labelled "baseline").
-    baseline = next(
-        (c for c, reps in cells.items() if reps[0]["label"] == "baseline"), None
-    )
+    # Reference cell, flagged by grid.py (stage-1 "floor"; stage-2 "ws-full.sel-none").
+    baseline = next((c for c, reps in cells.items() if reps[0].get("reference")), None)
     ref_lb: float | None = None
     base_bwd_min: float | None = None
     if baseline is not None:
-        ref_lb = next(
-            (
-                r["final_lower_bound"]
-                for r in cells[baseline]
-                if isinstance(r.get("final_lower_bound"), (int, float))
-            ),
-            None,
-        )
+        ref_lb = _first_num(cells[baseline], "final_lower_bound")
         base_bwd_min, _ = agg(cells[baseline], "backward_solve_seconds")
 
     rows: list[dict[str, Any]] = []
     for cell, reps in cells.items():
         bwd_min, bwd_med = agg(reps, "backward_solve_seconds")
         dur_min, dur_med = agg(reps, "duration_seconds")
-        lb = next(
-            (
-                r["final_lower_bound"]
-                for r in reps
-                if isinstance(r.get("final_lower_bound"), (int, float))
-            ),
-            None,
+        lb = _first_num(reps, "final_lower_bound")
+        ub = _first_num(reps, "final_upper_bound")
+        # Convergence gap computed from the bounds (robust to metadata layout).
+        gap = (
+            None
+            if (lb is None or ub is None)
+            else 100.0 * (ub - lb) / max(1.0, abs(ub))
         )
         ok_exit = all(r.get("exit_status") == 0 for r in reps)
         ok_fail = all((r.get("failed") in (0, None)) for r in reps)
-        lb_ok = (
-            ref_lb is None
-            or lb is None
-            or abs(lb - ref_lb) <= args.ref_tol * max(1.0, abs(ref_lb))
+        # Cut-validity gate: at convergence LB <= UB (gap >= 0). LB exceeding UB
+        # beyond tolerance means a cut sliced off the true optimum (perturbation
+        # or loose dual tolerance) — the report's primary correctness failure.
+        invalid_cut = (
+            lb is not None
+            and ub is not None
+            and lb - ub > args.ref_tol * max(1.0, abs(ub))
         )
-        correctness = "PASS" if (ok_exit and ok_fail and lb_ok) else "FAIL"
+        if invalid_cut:
+            correctness = "INVALID"
+        elif not (ok_exit and ok_fail):
+            correctness = "FAIL"
+        else:
+            correctness = "PASS"
         delta = (
             None
             if (bwd_min is None or not base_bwd_min)
@@ -124,6 +127,7 @@ def main() -> int:
                 "duration_s_med": dur_med,
                 "delta_pct_vs_baseline": delta,
                 "final_lower_bound": lb,
+                "final_gap_percent": gap,
                 "correctness": correctness,
                 "env": json.dumps(reps[0]["env"], sort_keys=True),
             }
@@ -147,16 +151,22 @@ def main() -> int:
     print(
         f"\n{args.backend} stage {args.stage}  (ref LB = {_fmt(ref_lb, 4)}, tol = {args.ref_tol})\n"
     )
-    hdr = f"{'cell':28} {'bwd_min':>9} {'Δ% base':>8} {'dur_min':>9} {'ok':>4}"
+    hdr = (
+        f"{'cell':28} {'bwd_min':>9} {'Δ% base':>8} {'dur_min':>9} "
+        f"{'gap%':>7} {'verdict':>8}"
+    )
     print(hdr)
     print("-" * len(hdr))
     for r in rows:
         print(
             f"{r['cell']:28} {_fmt(r['backward_solve_s_min']):>9} "
             f"{_fmt(r['delta_pct_vs_baseline'], 1):>8} {_fmt(r['duration_s_min']):>9} "
-            f"{r['correctness']:>4}"
+            f"{_fmt(r['final_gap_percent'], 3):>7} {r['correctness']:>8}"
         )
     print(f"\nwrote {csv_path}")
+    print(
+        "verdict: PASS ok · FAIL exit/solve error · INVALID LB>UB (cut sliced the optimum)"
+    )
 
     # Stage 1: suggest the fastest correctness-passing cell's env (the user makes
     # the final call at the manual gate).

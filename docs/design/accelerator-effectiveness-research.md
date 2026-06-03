@@ -209,11 +209,21 @@ Readout:
   cold-start is fine, basis reconstruction may be unnecessary; if DCS + warm-start
   wins (NEWAVE's result), reconstruction is vindicated.
 
-**Metrics & guard**: as in `solver-parameter-tuning.md` — `backward_solve_seconds`
+**Metrics & guard**: as in `solver-parameter-tuning.md` —
+`backward_solve_seconds` primary; the cut-validity gate (`LB ≤ UB`) is the
+correctness check (selection/DCS and the warm-start modes must preserve policy
+quality); watch `solve_stats.retried`.
 
-- per-iteration `backward_wall_ms` primary; final LB + first-stage cost within
-  tolerance as the correctness gate (selection and DCS must preserve policy
-  quality, per NEWAVE §4.4); watch `solve_stats.retried`.
+**Diagnostic for the warm-start comparison (from `ideas/research-report.md`).**
+The decisive question — does the slot-identity reconstruction earn its
+complexity? — is best read not from wall-clock alone but from **pivots-per-resolve**
+and the **non-alien basis-rejection rate**. A healthy warm start re-solves in tens
+of pivots with few rejections; if `core`/`off` show many more pivots or `full`
+shows many alien rejections (forced INVERTs), that _explains_ the wall-clock
+result. Both are tracked in `SolverStatistics` but not yet surfaced in
+`training/metadata.json` — surfacing them (see `solver-parameter-tuning.md` §7) is
+the highest-value instrumentation for this study, because it turns the
+full/core/off comparison from "which is faster" into "why."
 
 ## 5. Instruments
 
