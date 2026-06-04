@@ -135,6 +135,11 @@ re-submitted array only fills gaps.
   and the rest each move one pure-speed lever. See `grid.py` and
   `docs/design/solver-parameter-tuning.md` §1a.
 - `TUNE_THREADS` overrides 96; `OMP_NUM_THREADS` is pinned to match.
+- **Cluster-specific `#SBATCH` directives** (`--partition`, `--time`) are baked
+  into `sweep.sbatch` for the c7a cluster (`decomp-c7a-48x`, 8h). Edit them for
+  another site, or override at submit time (`sbatch --partition=… --time=…`
+  takes precedence). The tuning binary is the **no-MPI** `cobre` build (single
+  node, run directly — no `srun`/MPICH env), distinct from the MPI `cobre-mpi`.
 - **Confirmed** from vendored HiGHS source: `simplex_price_strategy` =
   0 Col/1 Row/2 RowSwitch/3 RowSwitchColSwitch; `simplex_dual_edge_weight_strategy`
   = -1 Choose/0 Dantzig/1 Devex/2 SteepestEdge. **Still confirm:** the HiGHS

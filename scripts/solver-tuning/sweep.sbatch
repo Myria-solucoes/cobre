@@ -16,8 +16,14 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=96
 #SBATCH --exclusive
-#SBATCH --time=12:00:00
 #SBATCH --output=cobre-tune-%A_%a.out
+#SBATCH --error=cobre-tune-%A_%a.err
+# --- Cluster-specific: edit per site (a submit-time --partition/--time wins) ---
+# Partition + walltime match the c7a cluster (decomp-c7a-48x, 8h cap). A single
+# 10-iter tuning cell finishes well under 8h; raise --time only if a deeper case
+# needs it, and stay within the partition's MaxTime.
+#SBATCH --partition=decomp-c7a-48x
+#SBATCH --time=08:00:00
 
 set -euo pipefail
 
