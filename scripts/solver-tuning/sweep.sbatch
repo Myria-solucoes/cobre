@@ -3,13 +3,16 @@
 # SLURM array job: run one tuning cell per array task, one full node each,
 # 96 worker threads, no MPI.
 #
-# Submit (after prep_cases.sh + grid.py):
+# Submit FROM the harness dir (the one holding run_cell.py) so SLURM_SUBMIT_DIR
+# can locate it (see HERE below). After prep_cases.sh + grid.py:
+#   cd /path/to/solver-tuning
 #   N=$(wc -l < manifests/highs.s1.jsonl)
 #   TUNE_MANIFEST=manifests/highs.s1.jsonl \
 #   TUNE_CASES=cases/highs TUNE_RUNS=runs TUNE_BIN=/path/to/cobre \
-#   sbatch --array=0-$((N-1)) scripts/solver-tuning/sweep.sbatch
+#   sbatch --array=0-$((N-1)) sweep.sbatch
 #
-# Optional env: TUNE_THREADS (default 96), TUNE_REPO (cobre repo for git commit).
+# Optional env: TUNE_THREADS (default 96), TUNE_REPO (cobre repo for git commit),
+# TUNE_HARNESS_DIR (dir with run_cell.py; defaults to the sbatch submit dir).
 #
 #SBATCH --job-name=cobre-tune
 #SBATCH --nodes=1
@@ -27,7 +30,17 @@
 
 set -euo pipefail
 
-readonly HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# SLURM copies the batch script to a spool dir and runs it from there, so
+# ${BASH_SOURCE[0]} / $0 point at the spooled copy, NOT this file's real
+# location. Resolve the harness dir from TUNE_HARNESS_DIR, else the submit dir
+# (correct when you sbatch from the harness dir), else this script's dir (local
+# / non-SLURM execution).
+readonly HERE="${TUNE_HARNESS_DIR:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}}"
+if [[ ! -f "$HERE/run_cell.py" ]]; then
+    echo "sweep.sbatch: run_cell.py not found in '$HERE'." >&2
+    echo "  Submit from the harness dir, or set TUNE_HARNESS_DIR=/path/to/solver-tuning." >&2
+    exit 1
+fi
 : "${TUNE_MANIFEST:?set TUNE_MANIFEST}"
 : "${TUNE_CASES:?set TUNE_CASES}"
 : "${TUNE_RUNS:?set TUNE_RUNS}"
