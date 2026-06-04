@@ -63,6 +63,21 @@ def extract_metrics(out_dir: Path) -> dict[str, Any]:
         else {}
     )
     bounds = training.get("bounds") if isinstance(training.get("bounds"), dict) else {}
+    iters = (
+        training.get("iterations")
+        if isinstance(training.get("iterations"), dict)
+        else {}
+    )
+    conv = (
+        training.get("convergence")
+        if isinstance(training.get("convergence"), dict)
+        else {}
+    )
+    config = (
+        training.get("configuration")
+        if isinstance(training.get("configuration"), dict)
+        else {}
+    )
     sim = _load_json(out_dir / "simulation" / "metadata.json") or {}
 
     return {
@@ -79,6 +94,13 @@ def extract_metrics(out_dir: Path) -> dict[str, Any]:
         "final_upper_bound": bounds.get(
             "final_upper_bound", training.get("final_upper_bound")
         ),
+        # Iteration progress: a run that errors mid-training completes fewer than
+        # max_iterations, which makes its absolute timing/LB *incomparable* to a
+        # full run. aggregate.py surfaces this so a partial run can't masquerade
+        # as the fastest cell.
+        "iterations_completed": iters.get("completed"),
+        "max_iterations": config.get("max_iterations"),
+        "termination_reason": conv.get("termination_reason"),
         "simulation_duration_seconds": sim.get("duration_seconds"),
     }
 
@@ -149,6 +171,63 @@ def extract_parquet_diagnostics(out_dir: Path) -> dict[str, Any]:
     return diag
 
 
+def _write_result(
+    result: dict[str, Any], out_dir: Path, result_path: Path
+) -> dict[str, Any]:
+    """Fill ``result`` with the extracted metrics and write ``result.json``.
+
+    Writes the core metadata-derived metrics first so the cell counts as complete
+    even if the (optional) parquet enrichment hits trouble, then enriches in place.
+    """
+    result.update(extract_metrics(out_dir))
+    result_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    diagnostics = extract_parquet_diagnostics(out_dir)
+    if diagnostics:
+        result.update(diagnostics)
+        result_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    return result
+
+
+def _reextract(cell: dict[str, Any], cell_out: Path) -> int:
+    """Refresh an existing cell's ``result.json`` from its output dir, without
+    re-running cobre. Preserves the run-level facts that aren't re-derivable from
+    the output (``exit_status`` and the timestamps); everything else is recomputed
+    by the current extractor. Idempotent; a no-op (logged) if the cell has no
+    prior result or output to read.
+    """
+    result_path = cell_out / "result.json"
+    out_dir = cell_out / "output"
+    old = _load_json(result_path)
+    if old is None:
+        print(f"[reextract] {cell['run_id']}: no result.json to refresh; skipping")
+        return 0
+    if not out_dir.is_dir():
+        print(f"[reextract] {cell['run_id']}: missing output dir; skipping")
+        return 0
+    result: dict[str, Any] = {
+        "run_id": cell["run_id"],
+        "cell": cell["cell"],
+        "stage": cell["stage"],
+        "backend": cell["backend"],
+        "rep": cell["rep"],
+        "label": cell["label"],
+        "warmstart": cell["warmstart"],
+        "cut_sel": cell["cut_sel"],
+        "reference": cell.get("reference", False),
+        "env": cell["env"],
+        # Not re-derivable from the output dir — carry over from the prior result.
+        "exit_status": old.get("exit_status"),
+        "started_at": old.get("started_at"),
+        "ended_at": old.get("ended_at"),
+    }
+    _write_result(result, out_dir, result_path)
+    print(
+        f"[reextract] {cell['run_id']} exit={result.get('exit_status')} "
+        f"iters={result.get('iterations_completed')}/{result.get('max_iterations')}"
+    )
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -156,11 +235,11 @@ def main() -> int:
     ap.add_argument("--manifest", required=True, type=Path)
     ap.add_argument("--index", required=True, type=int)
     ap.add_argument(
-        "--cases", required=True, type=Path, help="dir with per-method case copies"
+        "--cases", type=Path, help="dir with per-method case copies (not --reextract)"
     )
     ap.add_argument("--runs", required=True, type=Path, help="output root for cells")
     ap.add_argument(
-        "--binary", required=True, type=Path, help="path to the cobre binary"
+        "--binary", type=Path, help="path to the cobre binary (not --reextract)"
     )
     ap.add_argument(
         "--threads",
@@ -168,6 +247,13 @@ def main() -> int:
         default=int(os.environ.get("COBRE_BENCH_THREADS", "96")),
     )
     ap.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[2])
+    ap.add_argument(
+        "--reextract",
+        action="store_true",
+        help="Rebuild result.json from the existing output dir without re-running "
+        "cobre (preserves exit_status + timestamps). Use after changing the metric "
+        "extractor; --cases/--binary are not needed.",
+    )
     args = ap.parse_args()
 
     lines = [ln for ln in args.manifest.read_text().splitlines() if ln.strip()]
@@ -177,6 +263,17 @@ def main() -> int:
     cell = json.loads(lines[args.index])
 
     cell_out = args.runs / cell["backend"] / f"s{cell['stage']}" / cell["run_id"]
+
+    if args.reextract:
+        return _reextract(cell, cell_out)
+
+    if args.cases is None or args.binary is None:
+        print(
+            "--cases and --binary are required (omit only with --reextract)",
+            file=sys.stderr,
+        )
+        return 2
+
     if (cell_out / "result.json").exists():
         print(f"[skip] {cell['run_id']} already complete")
         return 0
@@ -240,15 +337,7 @@ def main() -> int:
         "started_at": started,
         "ended_at": ended,
     }
-    result.update(extract_metrics(out_dir))
-    # Write the core result first so the cell counts as complete even if the
-    # (optional) parquet enrichment below hits trouble, then enrich in place.
-    result_path = cell_out / "result.json"
-    result_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
-    diagnostics = extract_parquet_diagnostics(out_dir)
-    if diagnostics:
-        result.update(diagnostics)
-        result_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    result = _write_result(result, out_dir, cell_out / "result.json")
 
     print(
         f"[done] {cell['run_id']} exit={proc.returncode} "

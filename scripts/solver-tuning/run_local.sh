@@ -13,7 +13,9 @@
 #   ./run_local.sh m.s1.jsonl cases/local runs $PWD/target/release/cobre 4
 #   python3 aggregate.py --runs runs --backend highs --stage 1
 #
-# Cells are resumable: a cell whose result.json exists is skipped.
+# Cells are resumable (a cell whose result.json exists is skipped) and failures
+# are non-fatal: a cell that errors is logged and the run continues to the next
+# cell; the script exits non-zero at the end if any cell failed.
 
 set -euo pipefail
 
@@ -26,13 +28,31 @@ readonly THREADS="${5:-4}"
 
 n="$(grep -c . "$MANIFEST")"
 echo "Running $n cell(s) locally (threads=$THREADS) ..."
+
+# Continue-on-failure: a single cell that errors (e.g. an infeasible subproblem
+# under an aggressive solver profile) must not abort the remaining cells. Capture
+# each cell's exit code without tripping `set -e` (the `|| rc=$?` idiom), log it,
+# and keep going; exit non-zero at the end if any cell failed.
+declare -a failed=()
 for ((i = 0; i < n; i++)); do
+    rc=0
     python3 "$HERE/run_cell.py" \
         --manifest "$MANIFEST" \
         --index "$i" \
         --cases "$CASES" \
         --runs "$RUNS" \
         --binary "$BIN" \
-        --threads "$THREADS"
+        --threads "$THREADS" || rc=$?
+    if ((rc != 0)); then
+        echo "[warn] cell index $i exited $rc (continuing)"
+        failed+=("$i")
+    fi
 done
-echo "Done. Aggregate with: python3 $HERE/aggregate.py --runs $RUNS --backend <b> --stage <n>"
+
+readonly AGG="python3 $HERE/aggregate.py --runs $RUNS --backend <b> --stage <n>"
+if ((${#failed[@]} > 0)); then
+    echo "Done with ${#failed[@]}/$n cell(s) failed at index(es): ${failed[*]} — re-run to retry (completed cells skip)."
+    echo "Aggregate with: $AGG"
+    exit 1
+fi
+echo "Done. Aggregate with: $AGG"

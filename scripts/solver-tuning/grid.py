@@ -76,6 +76,36 @@ STAGE1: dict[str, list[tuple[str, dict[str, str], bool]]] = {
             {"COBRE_TUNE_HIGHS_PRESOLVE": "off", "COBRE_TUNE_HIGHS_PRICE": "3"},
             False,
         ),
+        # --- price=3 safe-retry probes -------------------------------------------
+        # `price-rsc` (price=3 + presolve off) falsely reported an infeasible
+        # subproblem mid-training — a HiGHS numerical-robustness failure, not a real
+        # model infeasibility (every other profile solved the same case + cuts). These
+        # three isolate one stabilizer on top of price=3: does presolve, matrix
+        # scaling, or a looser PRIMAL feasibility tolerance keep it feasible? The dual
+        # tolerance stays at the compiled 1e-9 floor, so cut validity is NOT relaxed.
+        (
+            "price-rsc.presolve-on",
+            {"COBRE_TUNE_HIGHS_PRESOLVE": "on", "COBRE_TUNE_HIGHS_PRICE": "3"},
+            False,
+        ),
+        (
+            "price-rsc.scale",
+            {
+                "COBRE_TUNE_HIGHS_PRESOLVE": "off",
+                "COBRE_TUNE_HIGHS_PRICE": "3",
+                "COBRE_TUNE_HIGHS_SCALE": "2",
+            },
+            False,
+        ),
+        (
+            "price-rsc.primal-tol",
+            {
+                "COBRE_TUNE_HIGHS_PRESOLVE": "off",
+                "COBRE_TUNE_HIGHS_PRICE": "3",
+                "COBRE_TUNE_HIGHS_PRIMAL_TOL": "1e-7",
+            },
+            False,
+        ),
     ],
     "clp": [
         # cobre's CLP compiled defaults already meet the floor (perturbation 102,

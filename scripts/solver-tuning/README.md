@@ -104,6 +104,11 @@ Same flow as the SLURM path (`prep → grid → run → aggregate`), just sequen
 and with a low `--threads`. A deterministic case (e.g. `examples/deterministic/`)
 makes the `LB ≤ UB` gate and ranking easy to eyeball.
 
+`run_local.sh` is **continue-on-failure**: a cell that errors (e.g. an infeasible
+subproblem under an aggressive solver profile) is logged and the run proceeds to
+the next cell; the script exits non-zero at the end if any cell failed. Re-run to
+retry just the failures (completed cells skip).
+
 ## Outputs per cell
 
 ```

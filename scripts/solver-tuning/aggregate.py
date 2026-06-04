@@ -6,11 +6,16 @@ cell's correctness against the stage baseline.
 
 Reads every ``runs/<backend>/s<stage>/*/result.json``, groups repeats by cell,
 reports min/median ``backward_solve_seconds`` and ``duration_seconds`` with the
-percent delta vs the ``baseline`` cell, and marks a cell ``correctness=PASS``
-when it exited 0, had no failed solves, and its ``final_lower_bound`` is within
-``--ref-tol`` (relative) of the baseline's. Writes ``results.csv`` in the stage
-dir. For stage 1 it also writes ``suggested_winner.json`` (the env of the
-fastest correctness-passing cell) to feed ``grid.py --stage 2 --winner``.
+percent delta vs the ``baseline`` cell, and applies the **cut-validity** gate:
+a cell is ``INVALID`` when its worst per-iteration ``LB - UB`` exceeds
+``--ref-tol`` (relative) — a cut sliced off the optimum — ``FAIL`` when the run
+errored or reported failed solves, else ``PASS``. (Cross-config LB *drift* via
+alternate optima is expected and reported as gap%, not failed; it is NOT compared
+against the baseline's LB.) A run that errored before ``max_iterations`` is sorted
+below the passing cells and flagged, so a partial run can't masquerade as fastest.
+Writes ``results.csv`` in the stage dir. For stage 1 it also writes
+``suggested_winner.json`` (the env of the fastest correctness-passing cell) to
+feed ``grid.py --stage 2 --winner``.
 
 Metrics-only; it never runs cobre.
 """
@@ -48,7 +53,10 @@ def main() -> int:
     ap.add_argument("--backend", required=True, choices=("highs", "clp"))
     ap.add_argument("--stage", required=True, type=int, choices=(1, 2))
     ap.add_argument(
-        "--ref-tol", type=float, default=1e-6, help="relative LB tolerance vs baseline"
+        "--ref-tol",
+        type=float,
+        default=1e-6,
+        help="relative LB>UB tolerance for the cut-validity gate",
     )
     args = ap.parse_args()
 
@@ -124,6 +132,15 @@ def main() -> int:
             if (bwd_min is None or not base_bwd_min)
             else 100.0 * (bwd_min - base_bwd_min) / base_bwd_min
         )
+        # Iteration progress. A cell that errored mid-training stops short of
+        # max_iterations, so its absolute timing/LB are NOT comparable to a full
+        # run — they only look "fast" because less work was done. Surface this and
+        # de-rank non-PASS rows so a partial run can't masquerade as the fastest.
+        iters_done = _first_num(reps, "iterations_completed")
+        iters_max = _first_num(reps, "max_iterations")
+        partial = (
+            iters_done is not None and iters_max is not None and iters_done < iters_max
+        )
         rows.append(
             {
                 "cell": cell,
@@ -140,13 +157,19 @@ def main() -> int:
                 "bwd_basis_reject_rate": reject,
                 "final_lower_bound": lb,
                 "final_gap_percent": gap,
+                "iterations_completed": iters_done,
+                "max_iterations": iters_max,
+                "partial": partial,
                 "correctness": correctness,
                 "env": json.dumps(reps[0]["env"], sort_keys=True),
             }
         )
 
+    # PASS cells first (ranked by speed), then FAIL/INVALID — a partial run that
+    # exits with an error must never sort above a complete one on raw timing.
     rows.sort(
         key=lambda r: (
+            r["correctness"] != "PASS",
             r["backward_solve_s_min"] is None,
             r["backward_solve_s_min"] or 0.0,
         )
@@ -165,7 +188,7 @@ def main() -> int:
     )
     hdr = (
         f"{'cell':28} {'bwd_min':>9} {'Δ% base':>8} {'piv/slv':>8} "
-        f"{'rej%':>6} {'gap%':>7} {'verdict':>8}"
+        f"{'rej%':>6} {'gap%':>7} {'iters':>7} {'verdict':>8}"
     )
     print(hdr)
     print("-" * len(hdr))
@@ -175,19 +198,30 @@ def main() -> int:
             if r["bwd_basis_reject_rate"] is None
             else 100.0 * r["bwd_basis_reject_rate"]
         )
+        if r["iterations_completed"] is None:
+            iters_str = "n/a"
+        elif r["max_iterations"] is None:
+            iters_str = str(int(r["iterations_completed"]))
+        else:
+            iters_str = f"{int(r['iterations_completed'])}/{int(r['max_iterations'])}"
+        # Flag partial runs: their timing/LB are not comparable to full runs.
+        verdict = f"{r['correctness']}*" if r["partial"] else r["correctness"]
         print(
             f"{r['cell']:28} {_fmt(r['backward_solve_s_min']):>9} "
             f"{_fmt(r['delta_pct_vs_baseline'], 1):>8} {_fmt(r['bwd_pivots_per_solve'], 1):>8} "
             f"{_fmt(reject_pct, 1):>6} {_fmt(r['final_gap_percent'], 3):>7} "
-            f"{r['correctness']:>8}"
+            f"{iters_str:>7} {verdict:>8}"
         )
     print(f"\nwrote {csv_path}")
     print(
         "cols: bwd_min=backward solve s (min over reps) · piv/slv=backward "
-        "pivots-per-resolve · rej%=basis-rejection rate · verdict PASS/FAIL/INVALID"
+        "pivots-per-resolve · rej%=basis-rejection rate · iters=completed/max · "
+        "verdict PASS/FAIL/INVALID"
     )
     print(
-        "verdict: PASS ok · FAIL exit/solve error · INVALID LB>UB (cut sliced the optimum)"
+        "verdict: PASS ok · FAIL exit/solve error · INVALID LB>UB (cut sliced the "
+        "optimum) · * partial run (errored before max_iterations; timing/LB not "
+        "comparable)"
     )
 
     # Stage 1: suggest the fastest correctness-passing cell's env (the user makes
