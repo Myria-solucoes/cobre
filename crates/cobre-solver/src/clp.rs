@@ -28,6 +28,48 @@ use crate::{
     types::{Basis, RowBatch, SolutionView, SolverError, SolverStatistics, StageTemplate},
 };
 
+/// CLP basis status code for a column resting at its lower bound (nonbasic).
+///
+/// Status codes follow `ClpSimplex.hpp`: `0 = free, 1 = basic, 2 = atUpper,
+/// 3 = atLower, 4 = superbasic, 5 = fixed`. Used by the cold-basis reset in the
+/// escalation ladder to drive all structural columns nonbasic.
+const CLP_BASIS_AT_LOWER: i32 = 3;
+
+/// CLP basis status code for a basic variable.
+///
+/// See [`CLP_BASIS_AT_LOWER`] for the full enum. Used by the cold-basis reset to
+/// make every row slack basic, yielding a well-defined all-slack starting basis.
+const CLP_BASIS_BASIC: i32 = 1;
+
+/// Number of re-solve rungs in [`ClpSolver::escalate_solve`].
+///
+/// The ladder runs (1) primal simplex, (2) perturbation-on dual then primal,
+/// (3) scaling-on dual then primal — five re-solves total. `solve` charges this
+/// many attempts to `retry_count` when the ladder is exhausted; the recovered
+/// path charges only the rungs that actually ran (`EscalationOutcome::attempts`).
+/// Typed `usize` so it can size the `RUNGS` array without a fallible cast; the
+/// `retry_count` use-sites widen it to `u64`.
+const LADDER_RUNGS: usize = 5;
+
+/// Outcome of a recovered [`ClpSolver::escalate_solve`] run.
+///
+/// Returned by value (not a borrow) so the caller can finish updating
+/// `self.stats` before constructing the `SolutionView` that borrows the owned
+/// solution buffers, keeping the aliasing discipline identical to the happy
+/// path. The solution itself is already copied into `col_value` / `col_dual` /
+/// `row_dual` by `escalate_solve` on the rung that returned OPTIMAL.
+#[derive(Debug, Clone, Copy)]
+struct EscalationOutcome {
+    /// Objective value of the recovered optimal solution (minimize sense).
+    objective: f64,
+    /// Simplex iterations reported by the recovering rung.
+    iterations: u64,
+    /// Wall-clock seconds spent across all rungs that ran.
+    solve_time: f64,
+    /// Number of re-solve rungs that actually executed (1..=`LADDER_RUNGS`).
+    attempts: u64,
+}
+
 /// Simplex algorithm selection for [`ClpProfile`].
 ///
 /// Selects which simplex algorithm `solve` runs: the **dual** simplex
@@ -373,6 +415,161 @@ impl ClpSolver {
             }
         }
         self.stats.total_basis_set_time_seconds += basis_set_start.elapsed().as_secs_f64();
+    }
+
+    /// Resets the CLP model to a clean all-slack (cold) starting basis.
+    ///
+    /// After a failed `Clp_dual`, the model retains CLP's failed / infeasible
+    /// internal basis. Re-solving on that leftover basis can inherit the bad
+    /// state, so each escalation rung first drives the model to a well-defined
+    /// all-slack basis: every structural column nonbasic at its lower bound
+    /// ([`CLP_BASIS_AT_LOWER`]) and every row slack basic ([`CLP_BASIS_BASIC`]).
+    /// This is the per-element analogue of CLP's own `createStatus()` cold
+    /// basis, built from the same setters [`Self::install_basis`] uses. It is
+    /// fully deterministic — the same status codes are written every time — so
+    /// it cannot perturb bit-for-bit reproducibility.
+    fn reset_cold_basis(&mut self) {
+        // Loop indices are bounded by `num_cols`/`num_rows`, both asserted to
+        // fit in i32 by `load_model`; the casts cannot truncate or wrap.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        for c in 0..self.num_cols {
+            // SAFETY: `self.handle` is a valid, non-null CLP pointer with a model
+            // loaded (asserted via `has_model` in `solve`); `c` is in
+            // `0..num_cols`, a valid column sequence index, and fits in i32. The
+            // setter writes a single status byte; no aliasing.
+            unsafe {
+                clp_ffi::cobre_clp_set_column_status(self.handle, c as i32, CLP_BASIS_AT_LOWER);
+            }
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        for r in 0..self.num_rows {
+            // SAFETY: `self.handle` is a valid, non-null CLP pointer with a model
+            // loaded; `r` is in `0..num_rows`, a valid row sequence index, and
+            // fits in i32. The setter writes a single status byte; no aliasing.
+            unsafe {
+                clp_ffi::cobre_clp_set_row_status(self.handle, r as i32, CLP_BASIS_BASIC);
+            }
+        }
+    }
+
+    /// Runs one escalation rung's re-solve from a clean cold basis.
+    ///
+    /// Resets the model to the all-slack cold basis (see
+    /// [`Self::reset_cold_basis`]) and then runs the requested simplex variant.
+    /// Returns the CLP solve status int (`0 = optimal`). The cold reset before
+    /// every rung removes the inherited-bad-basis risk: each rung starts from a
+    /// well-defined basis rather than the failed basis left by `Clp_dual`.
+    fn escalate_run(&mut self, algorithm: ClpAlgorithm) -> i32 {
+        self.reset_cold_basis();
+        match algorithm {
+            ClpAlgorithm::Dual => {
+                // SAFETY: `self.handle` is a valid, non-null CLP pointer with a
+                // model loaded (asserted via `has_model` in `solve`). The cold
+                // basis was just installed via the per-element setters.
+                // `if_values_pass = 0` requests a cold solve. The returned int is
+                // the CLP solve status.
+                unsafe { clp_ffi::cobre_clp_dual(self.handle, 0) }
+            }
+            ClpAlgorithm::Primal => {
+                // SAFETY: as the dual arm — valid handle, model loaded, cold
+                // basis installed. `if_values_pass = 0` requests a cold solve.
+                unsafe { clp_ffi::cobre_clp_primal(self.handle, 0) }
+            }
+        }
+    }
+
+    /// Cold-solve escalation ladder run when the initial dual simplex falsely
+    /// declares a feasible LP `PRIMAL_INFEASIBLE` (or stops short).
+    ///
+    /// CLP's bare dual simplex can spuriously report `PRIMAL_INFEASIBLE` on
+    /// numerically delicate deep-stage LPs that are in fact feasible (proven:
+    /// the failing stage moves with tolerances, disappears under the primal
+    /// simplex, and the identical LP solves cleanly in `HiGHS`). This ladder
+    /// re-solves the SAME already-loaded model (bounds plus any warm-start basis
+    /// already installed) with progressively stronger settings, stopping at the
+    /// first rung that returns OPTIMAL:
+    ///
+    /// 1. **Primal simplex** — the primal path alone clears the documented
+    ///    repro.
+    /// 2. **Perturbation on** (`cobre_clp_set_perturbation(50)`), then dual,
+    ///    then primal — anti-cycling for degenerate vertices.
+    /// 3. **Scaling on** (`cobre_clp_scaling(1)`), then dual, then primal —
+    ///    rescales an ill-conditioned matrix.
+    ///
+    /// Every rung first resets to a clean all-slack cold basis
+    /// ([`Self::escalate_run`]) so no rung inherits the failed basis from the
+    /// initial dual solve. On OPTIMAL the solution is copied into the owned
+    /// buffers (`copy_solution`) and an [`EscalationOutcome`] is returned by
+    /// value so the caller can finish stats bookkeeping before borrowing those
+    /// buffers. On exhaustion, `None` is returned and the caller surfaces the
+    /// original error.
+    ///
+    /// The caller ([`SolverInterface::solve`]) is responsible for restoring the
+    /// floor (deterministic) settings afterward by re-applying
+    /// `current_profile`, regardless of outcome — perturbation and scaling are
+    /// turned on here only for the duration of the ladder. The ladder is
+    /// deterministic per-LP (fixed rung order, no randomness, no time-dependent
+    /// branching), so results stay bit-for-bit identical across thread / rank
+    /// counts within the CLP backend.
+    fn escalate_solve(&mut self) -> Option<EscalationOutcome> {
+        // Rung order: (perturbation, scaling, algorithm). Perturbation `102`
+        // disables CLP auto-perturbation (the deterministic floor); `50` turns
+        // it on. Scaling `0` off, `1` on. The first OPTIMAL wins. This is a
+        // fixed, allocation-free sequence (`LADDER_RUNGS` entries). Declared
+        // first so no statements precede it (clippy::items_after_statements).
+        const RUNGS: [(i32, i32, ClpAlgorithm); LADDER_RUNGS] = [
+            // 1. Primal simplex (perturbation/scaling stay at the floor).
+            (102, 0, ClpAlgorithm::Primal),
+            // 2. Perturbation on, dual then primal.
+            (50, 0, ClpAlgorithm::Dual),
+            (50, 0, ClpAlgorithm::Primal),
+            // 3. Scaling on (perturbation kept on from rung 2), dual then primal.
+            (50, 1, ClpAlgorithm::Dual),
+            (50, 1, ClpAlgorithm::Primal),
+        ];
+
+        let t0 = Instant::now();
+
+        for (idx, &(perturbation, scaling, algorithm)) in RUNGS.iter().enumerate() {
+            // SAFETY: `self.handle` is a valid, non-null CLP pointer with a model
+            // loaded (asserted via `has_model` in `solve`). Both setters accept
+            // any i32, retain no pointer, and cannot fail on a valid handle.
+            unsafe {
+                clp_ffi::cobre_clp_set_perturbation(self.handle, perturbation);
+                clp_ffi::cobre_clp_scaling(self.handle, scaling);
+            }
+
+            let status = self.escalate_run(algorithm);
+
+            if status == clp_ffi::CLP_STATUS_OPTIMAL {
+                // SAFETY: `self.handle` is a valid, non-null CLP pointer that has
+                // just been solved; iteration count is non-negative so the cast
+                // is safe.
+                #[allow(clippy::cast_sign_loss)]
+                let iterations =
+                    unsafe { clp_ffi::cobre_clp_number_iterations(self.handle) } as u64;
+                // SAFETY: `self.handle` is a valid, non-null CLP pointer just
+                // solved to optimality; objective is in minimize sense.
+                let objective = unsafe { clp_ffi::cobre_clp_objective_value(self.handle) };
+
+                // Copy the CLP-owned solution pointers into the owned buffers
+                // immediately, before any further CLP call (pointers are valid
+                // only until the next solve). Reuses the same buffers as the
+                // happy path — no allocation.
+                self.copy_solution();
+
+                return Some(EscalationOutcome {
+                    objective,
+                    iterations,
+                    solve_time: t0.elapsed().as_secs_f64(),
+                    // `idx` is in `0..LADDER_RUNGS` (<= 5); `+1` cannot overflow
+                    // and the widening to u64 is lossless.
+                    attempts: idx as u64 + 1,
+                });
+            }
+        }
+
+        None
     }
 
     /// Resolves the per-attempt simplex iteration cap for `apply_profile`.
@@ -1048,13 +1245,27 @@ impl SolverInterface for ClpSolver {
     /// Solves the loaded LP via the dual simplex and returns the optimal
     /// solution as a [`SolutionView`] borrowing the solver's owned buffers.
     ///
-    /// Runs a single cold `cobre_clp_dual` call (no retry escalation ladder and
-    /// no per-solve wall-clock budget). On
-    /// `CLP_STATUS_OPTIMAL` the three CLP-owned solution pointers are copied
-    /// **immediately** into `col_value`/`col_dual`/`row_dual` (they are valid
-    /// only until the next solve), the row duals are normalized via
+    /// Runs a single cold `cobre_clp_dual` call (no per-solve wall-clock
+    /// budget). On `CLP_STATUS_OPTIMAL` the three CLP-owned solution pointers
+    /// are copied **immediately** into `col_value`/`col_dual`/`row_dual` (they
+    /// are valid only until the next solve), the row duals are normalized via
     /// `normalize_row_dual`, and a `SolutionView` borrowing those buffers is
-    /// returned. Non-optimal statuses map to a [`SolverError`].
+    /// returned. This first-solve happy path is byte-identical to a build with
+    /// no escalation ladder.
+    ///
+    /// # Escalation ladder
+    ///
+    /// CLP's bare dual simplex can spuriously report `PRIMAL_INFEASIBLE` on
+    /// numerically delicate feasible LPs. On `PRIMAL_INFEASIBLE` or `STOPPED`
+    /// the failure path runs [`Self::escalate_solve`] — re-solving the same
+    /// already-loaded model (bounds plus any installed basis) with primal
+    /// simplex, then perturbation, then scaling — before surfacing the error. A
+    /// solve recovered by the ladder returns `Ok` and counts as a retried
+    /// success (`success_count` + `retry_count`, never `first_try_successes`).
+    /// `DUAL_INFEASIBLE`, `ERRORS`, and unexpected statuses stay terminal. The
+    /// floor (deterministic) settings are re-applied after the ladder runs
+    /// regardless of outcome, so the next `solve` starts from the clean config.
+    /// Non-recovered statuses map to a [`SolverError`].
     ///
     /// # Warm-start basis
     ///
@@ -1067,11 +1278,11 @@ impl SolverInterface for ClpSolver {
     ///
     /// # Errors
     ///
-    /// Returns `Err(SolverError::Infeasible)` on `PRIMAL_INFEASIBLE`,
-    /// `Err(SolverError::Unbounded)` on `DUAL_INFEASIBLE`,
-    /// `Err(SolverError::IterationLimit { .. })` on `STOPPED`, and
-    /// `Err(SolverError::InternalError { .. })` on `ERRORS` or any unexpected
-    /// status int.
+    /// Returns `Err(SolverError::Infeasible)` on `PRIMAL_INFEASIBLE` that the
+    /// escalation ladder could not recover, `Err(SolverError::Unbounded)` on
+    /// `DUAL_INFEASIBLE`, `Err(SolverError::IterationLimit { .. })` on `STOPPED`
+    /// the ladder could not recover, and `Err(SolverError::InternalError { .. })`
+    /// on `ERRORS` or any unexpected status int.
     ///
     /// # Panics
     ///
@@ -1147,21 +1358,77 @@ impl SolverInterface for ClpSolver {
             });
         }
 
+        // Failure path. `PRIMAL_INFEASIBLE` (the confirmed false-infeasible from
+        // CLP's bare dual simplex) and `STOPPED` (iteration/time stop, which a
+        // different algorithm may converge through) are routed through the
+        // escalation ladder before surfacing the error. `DUAL_INFEASIBLE`,
+        // `ERRORS`, and any unexpected status int stay terminal (a genuine
+        // unbounded/error is not retry-recoverable), mirroring how the `HiGHS`
+        // backend treats a genuine `INFEASIBLE` as terminal.
+        //
+        // `failure_count` is deliberately NOT incremented before the ladder
+        // runs: a solve recovered by escalation counts only as a (retried)
+        // success, never as a failure. It is incremented on the terminal paths
+        // below and on ladder exhaustion (mirrors `HiGHS` `solve_inner`, where
+        // `failure_count` rises only on the early terminal return or the
+        // escalation `Err` arm).
+        if status == clp_ffi::CLP_STATUS_PRIMAL_INFEASIBLE || status == clp_ffi::CLP_STATUS_STOPPED
+        {
+            let outcome = self.escalate_solve();
+
+            // Restore the floor (deterministic) settings unconditionally —
+            // success OR exhaustion — so the NEXT `solve` starts from the clean
+            // config the happy path depends on. Re-applying `current_profile`
+            // resets perturbation (-> profile value, 102/off by default),
+            // scaling (-> off), and both feasibility tolerances in one pass via
+            // `apply_profile`. `apply_profile` reassigns `self.current_profile`
+            // to the same value it already holds (no behavioral change), so the
+            // floor is byte-identical to a build that never escalated. Mirrors
+            // the unconditional `restore_default_settings()` in `HiGHS`
+            // `retry_escalation`.
+            let profile = self.current_profile;
+            self.apply_profile(&profile);
+
+            if let Some(escalation) = outcome {
+                // Recovered. The solution was copied into the owned buffers by
+                // `escalate_solve` on the rung that returned OPTIMAL. Count it
+                // as a retried success: bump `success_count` and `retry_count`,
+                // but NOT `first_try_successes` (the dual first solve failed).
+                self.stats.success_count += 1;
+                self.stats.retry_count += escalation.attempts;
+                self.stats.total_iterations += escalation.iterations;
+                self.stats.total_solve_time_seconds += escalation.solve_time;
+
+                return Ok(SolutionView {
+                    objective: escalation.objective,
+                    primal: &self.col_value[..self.num_cols],
+                    dual: &self.row_dual[..self.num_rows],
+                    reduced_costs: &self.col_dual[..self.num_cols],
+                    iterations: escalation.iterations,
+                    solve_time_seconds: escalation.solve_time,
+                });
+            }
+
+            // Ladder exhausted: surface the ORIGINAL error, exactly as today.
+            // Count the attempted rungs and the final failure. `LADDER_RUNGS`
+            // (<= 5) widens losslessly to the `u64` `retry_count`.
+            self.stats.retry_count += LADDER_RUNGS as u64;
+            self.stats.failure_count += 1;
+            if status == clp_ffi::CLP_STATUS_PRIMAL_INFEASIBLE {
+                return Err(SolverError::Infeasible);
+            }
+            // STOPPED: map to IterationLimit using the last solve's iteration
+            // count (mirrors the terminal branch below).
+            // SAFETY: `self.handle` is a valid, non-null CLP pointer; iteration
+            // count is non-negative so the cast is safe.
+            #[allow(clippy::cast_sign_loss)]
+            let iterations = unsafe { clp_ffi::cobre_clp_number_iterations(self.handle) } as u64;
+            return Err(SolverError::IterationLimit { iterations });
+        }
+
         self.stats.failure_count += 1;
         match status {
-            clp_ffi::CLP_STATUS_PRIMAL_INFEASIBLE => Err(SolverError::Infeasible),
             clp_ffi::CLP_STATUS_DUAL_INFEASIBLE => Err(SolverError::Unbounded),
-            clp_ffi::CLP_STATUS_STOPPED => {
-                // NOTE: CLP status 3 covers both iteration and time stop; mapped
-                // to IterationLimit. CLP's status int does not distinguish the
-                // two, and no per-solve time budget is derived.
-                // SAFETY: `self.handle` is a valid, non-null CLP pointer;
-                // iteration count is non-negative so the cast is safe.
-                #[allow(clippy::cast_sign_loss)]
-                let iterations =
-                    unsafe { clp_ffi::cobre_clp_number_iterations(self.handle) } as u64;
-                Err(SolverError::IterationLimit { iterations })
-            }
             clp_ffi::CLP_STATUS_ERRORS => Err(SolverError::InternalError {
                 message: "CLP solve failed (simplex returned ERRORS status)".to_string(),
                 error_code: Some(4),
@@ -1343,7 +1610,7 @@ pub fn clp_version() -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::clp::{ClpAlgorithm, ClpProfile, ClpSolver, clp_version};
+    use crate::clp::{ClpAlgorithm, ClpProfile, ClpSolver, LADDER_RUNGS, clp_version};
     use crate::profile::DEFAULT_PROFILE_HEURISTIC_SENTINEL;
     use crate::types::{Basis, RowBatch, SolutionView, SolverError, StageTemplate};
     use crate::{ProfiledSolver, SolverInterface};
@@ -1721,6 +1988,66 @@ mod tests {
             matches!(result, Err(SolverError::Infeasible)),
             "expected Err(Infeasible), got {result:?}"
         );
+
+        // A genuinely infeasible LP is routed through the escalation ladder
+        // (PRIMAL_INFEASIBLE), which cannot recover it, so the ORIGINAL
+        // `Infeasible` is surfaced. Stats must reconcile: the failed solve is
+        // counted exactly once as a failure (not double-counted), every rung is
+        // charged to `retry_count`, and neither `success_count` nor
+        // `first_try_successes` moves.
+        assert_eq!(solver.stats.solve_count, 1);
+        assert_eq!(solver.stats.failure_count, 1);
+        assert_eq!(solver.stats.success_count, 0);
+        assert_eq!(solver.stats.first_try_successes, 0);
+        assert_eq!(solver.stats.retry_count, LADDER_RUNGS as u64);
+    }
+
+    #[test]
+    fn test_clp_escalation_restores_floor_after_exhaustion() {
+        let mut solver = ClpSolver::new().expect("CLP solver creation failed");
+        solver.load_model(&make_fixture_stage_template());
+
+        // Snapshot the floor (deterministic) profile applied at construction.
+        let floor_perturbation = solver.current_profile.perturbation;
+        let floor_scaling = solver.current_profile.scaling;
+
+        // Force an infeasible solve: pin x0 = 100 (violates row0 equality
+        // x0 = 6). This runs the escalation ladder (which turns perturbation and
+        // scaling ON on its inner rungs) and exhausts it.
+        solver.set_col_bounds(&[0], &[100.0], &[100.0]);
+        let infeasible = solver.solve(None);
+        assert!(
+            matches!(infeasible, Err(SolverError::Infeasible)),
+            "expected Err(Infeasible), got {infeasible:?}"
+        );
+
+        // The ladder must have restored the floor settings: `current_profile`
+        // perturbation/scaling are back at their floor values, so the NEXT solve
+        // starts from the clean deterministic config.
+        assert_eq!(solver.current_profile.perturbation, floor_perturbation);
+        assert_eq!(solver.current_profile.scaling, floor_scaling);
+
+        // Relax the bound back to feasibility and re-solve. With the floor
+        // restored, this is a clean first-try win — the escalation ladder does
+        // NOT fire again (retry_count unchanged from the exhausted run).
+        solver.set_col_bounds(&[0], &[0.0], &[f64::INFINITY]);
+        let view = solver
+            .solve(None)
+            .expect("feasible re-solve after floor restore should be optimal");
+        assert!(
+            (view.objective - 100.0).abs() < 1e-8,
+            "objective {} not within 1e-8 of 100.0",
+            view.objective
+        );
+
+        // First solve failed (no first-try success); second solve is a first-try
+        // win. The ladder ran only once (during the exhausted first solve), so
+        // retry_count stays at exactly one ladder's worth of rungs.
+        assert_eq!(solver.stats.solve_count, 2);
+        assert_eq!(solver.stats.success_count, 1);
+        assert_eq!(solver.stats.first_try_successes, 1);
+        assert_eq!(solver.stats.failure_count, 1);
+        assert_eq!(solver.stats.retry_count, LADDER_RUNGS as u64);
     }
 
     #[test]
@@ -1755,6 +2082,13 @@ mod tests {
             matches!(result, Err(SolverError::Unbounded)),
             "expected Err(Unbounded), got {result:?}"
         );
+
+        // DUAL_INFEASIBLE (unbounded) stays terminal: the escalation ladder is
+        // NOT run for it (a genuine unbounded LP is not retry-recoverable), so
+        // no retries are charged and the solve is counted once as a failure.
+        assert_eq!(solver.stats.failure_count, 1);
+        assert_eq!(solver.stats.retry_count, 0);
+        assert_eq!(solver.stats.success_count, 0);
     }
 
     #[test]
@@ -1769,6 +2103,11 @@ mod tests {
 
         assert_eq!(solver.stats.solve_count, 2);
         assert_eq!(solver.stats.success_count, 2);
+        // Happy path: both solves are first-try wins, the escalation ladder
+        // never runs, so no retries are charged.
+        assert_eq!(solver.stats.first_try_successes, 2);
+        assert_eq!(solver.stats.retry_count, 0);
+        assert_eq!(solver.stats.failure_count, 0);
     }
 
     #[test]
