@@ -85,8 +85,16 @@ def main() -> int:
         "--ref-tol",
         type=float,
         default=1e-6,
-        help="relative tolerance for the cut-validity gate (LB>UB risk-neutral, "
-        "LB-monotonicity risk-averse)",
+        help="relative tolerance for the LB>UB cut-validity check (risk-neutral)",
+    )
+    ap.add_argument(
+        "--lb-mono-tol",
+        type=float,
+        default=1e-4,
+        help="relative tolerance for the LB-monotonicity check. Looser than "
+        "--ref-tol: a real invalid cut drops the LB by >=1e-2 relative, while LP "
+        "re-solve noise on ill-conditioned large models reaches ~1e-5; default 1e-4 "
+        "separates them.",
     )
     ap.add_argument(
         "--cases",
@@ -155,7 +163,9 @@ def main() -> int:
         # parquet) is the worst per-iteration drop, and a value beyond tolerance
         # means an invalid cut. Holds for BOTH risk-neutral and risk-averse runs.
         lb_decrease = _first_num(reps, "conv_max_lb_decrease")
-        mono_tol = args.ref_tol * max(1.0, abs(lb)) if lb is not None else args.ref_tol
+        mono_tol = (
+            args.lb_mono_tol * max(1.0, abs(lb)) if lb is not None else args.lb_mono_tol
+        )
         bad_monotonic = lb_decrease is not None and lb_decrease > mono_tol
         # Cut-validity, signal 2 — LB <= UB, but ONLY for risk-NEUTRAL runs. Under
         # a CVaR objective the LB converges to the risk-adjusted optimum while the

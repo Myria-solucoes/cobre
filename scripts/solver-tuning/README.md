@@ -130,7 +130,10 @@ re-submitted array only fills gaps.
   error, else `PASS`. The invalid-cut test is **risk-aware** (the risk measure is
   read from each cell's `stages.json`):
   - _risk-neutral_: `LB > UB` beyond `--ref-tol` (a cut sliced the optimum) **and**
-    a non-monotone (decreasing) lower bound across iterations.
+    a non-monotone (decreasing) lower bound across iterations (beyond `--lb-mono-tol`,
+    default `1e-4` relative — looser than `--ref-tol` because LP re-solve noise on
+    ill-conditioned large models reaches ~`1e-5`, while a real invalid cut drops the
+    LB by ≥`1e-2`).
   - _risk-averse (CVaR)_: `LB > UB` is **expected** (the forward-pass mean-cost UB
     isn't a valid bound for a CVaR objective), so only the LB-monotonicity check
     applies; without `convergence.parquet` (needs `pandas`/`pyarrow`) it can't run
