@@ -163,12 +163,56 @@ def extract_parquet_diagnostics(out_dir: Path) -> dict[str, Any]:
             if "upper_bound_mean" in cv.columns:
                 diag["conv_final_upper_bound"] = float(last["upper_bound_mean"])
                 # Worst LB-UB across ALL iterations → cut-validity over the run.
+                # (Valid only for risk-NEUTRAL runs; under CVaR, LB > UB legitimately.)
                 diag["conv_max_lb_minus_ub"] = float(
                     (cv["lower_bound"] - cv["upper_bound_mean"]).max()
                 )
             if "cuts_active" in cv.columns:
                 diag["conv_final_cuts_active"] = int(last["cuts_active"])
+            # Worst per-iteration LB *decrease* (monotonicity). The SDDP lower
+            # bound is non-decreasing as cuts accumulate; a drop beyond tolerance
+            # signals an invalid cut. This is the cut-validity signal that holds
+            # under BOTH risk-neutral and risk-averse (CVaR) objectives, where the
+            # LB ≤ UB check does not. 0.0 means monotone non-decreasing.
+            deltas = cv["lower_bound"].diff().dropna()
+            diag["conv_max_lb_decrease"] = (
+                float(max(0.0, -deltas.min())) if len(deltas) else 0.0
+            )
     return diag
+
+
+def detect_risk_averse(case_dir: Path) -> dict[str, Any]:
+    """Read the case's ``stages.json`` and report whether the run is risk-averse.
+
+    A run is risk-averse when any stage's ``risk_measure`` is a CVaR object
+    (``{"cvar": {"alpha": ..., "lambda": ...}}``) with ``lambda > 0`` (λ=0
+    normalizes to expectation). ``cvar_alpha``/``cvar_lambda`` come from the first
+    such stage. Defaults to risk-neutral (``risk_averse=False``) when stages.json
+    is missing/unreadable or all stages are ``"expectation"`` — never raises.
+    """
+    info: dict[str, Any] = {
+        "risk_averse": False,
+        "cvar_alpha": None,
+        "cvar_lambda": None,
+    }
+    data = _load_json(case_dir / "stages.json")
+    stages = data.get("stages") if isinstance(data, dict) else None
+    if not isinstance(stages, list):
+        return info
+    for stage in stages:
+        if not isinstance(stage, dict):
+            continue
+        rm = stage.get("risk_measure")
+        cvar = rm.get("cvar") if isinstance(rm, dict) else None
+        if not isinstance(cvar, dict):
+            continue
+        lam = cvar.get("lambda")
+        if isinstance(lam, (int, float)) and lam > 0:
+            info["risk_averse"] = True
+            info["cvar_alpha"] = cvar.get("alpha")
+            info["cvar_lambda"] = lam
+            return info
+    return info
 
 
 def _write_result(
@@ -188,12 +232,14 @@ def _write_result(
     return result
 
 
-def _reextract(cell: dict[str, Any], cell_out: Path) -> int:
+def _reextract(cell: dict[str, Any], cell_out: Path, case_dir: Path | None) -> int:
     """Refresh an existing cell's ``result.json`` from its output dir, without
     re-running cobre. Preserves the run-level facts that aren't re-derivable from
     the output (``exit_status`` and the timestamps); everything else is recomputed
-    by the current extractor. Idempotent; a no-op (logged) if the cell has no
-    prior result or output to read.
+    by the current extractor. When ``case_dir`` is given (``--cases``), the
+    risk-averse flag is recomputed from the case's ``stages.json``; otherwise it is
+    carried over from the prior result. Idempotent; a no-op (logged) if the cell
+    has no prior result or output to read.
     """
     result_path = cell_out / "result.json"
     out_dir = cell_out / "output"
@@ -204,6 +250,10 @@ def _reextract(cell: dict[str, Any], cell_out: Path) -> int:
     if not out_dir.is_dir():
         print(f"[reextract] {cell['run_id']}: missing output dir; skipping")
         return 0
+    if case_dir is not None and case_dir.is_dir():
+        risk = detect_risk_averse(case_dir)
+    else:
+        risk = {k: old.get(k) for k in ("risk_averse", "cvar_alpha", "cvar_lambda")}
     result: dict[str, Any] = {
         "run_id": cell["run_id"],
         "cell": cell["cell"],
@@ -215,6 +265,7 @@ def _reextract(cell: dict[str, Any], cell_out: Path) -> int:
         "cut_sel": cell["cut_sel"],
         "reference": cell.get("reference", False),
         "env": cell["env"],
+        **risk,
         # Not re-derivable from the output dir — carry over from the prior result.
         "exit_status": old.get("exit_status"),
         "started_at": old.get("started_at"),
@@ -223,7 +274,8 @@ def _reextract(cell: dict[str, Any], cell_out: Path) -> int:
     _write_result(result, out_dir, result_path)
     print(
         f"[reextract] {cell['run_id']} exit={result.get('exit_status')} "
-        f"iters={result.get('iterations_completed')}/{result.get('max_iterations')}"
+        f"iters={result.get('iterations_completed')}/{result.get('max_iterations')} "
+        f"risk_averse={result.get('risk_averse')}"
     )
     return 0
 
@@ -252,7 +304,8 @@ def main() -> int:
         action="store_true",
         help="Rebuild result.json from the existing output dir without re-running "
         "cobre (preserves exit_status + timestamps). Use after changing the metric "
-        "extractor; --cases/--binary are not needed.",
+        "extractor; --binary is not needed. Pass --cases to also recompute "
+        "risk_averse from the case's stages.json (else it is carried over).",
     )
     args = ap.parse_args()
 
@@ -265,7 +318,8 @@ def main() -> int:
     cell_out = args.runs / cell["backend"] / f"s{cell['stage']}" / cell["run_id"]
 
     if args.reextract:
-        return _reextract(cell, cell_out)
+        reextract_case = args.cases / cell["cut_sel"] if args.cases else None
+        return _reextract(cell, cell_out, reextract_case)
 
     if args.cases is None or args.binary is None:
         print(
@@ -333,6 +387,9 @@ def main() -> int:
         "cut_sel": cell["cut_sel"],
         "reference": cell.get("reference", False),
         "env": cell["env"],
+        # Risk measure from the case (stages.json) — gates the LB≤UB vs
+        # LB-monotonicity correctness check in aggregate.py.
+        **detect_risk_averse(case_dir),
         "exit_status": proc.returncode,
         "started_at": started,
         "ended_at": ended,

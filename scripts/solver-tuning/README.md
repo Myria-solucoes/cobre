@@ -126,10 +126,19 @@ re-submitted array only fills gaps.
 - `--reps N` (default 1) emits N repeats per cell; run finalists with `--reps 3`
   and take the **min** (least-contended) — full runs are deterministic in
   _result_, so repeats only quantify 96-thread timing noise.
-- **Correctness gate** (`aggregate.py`): a cell is `INVALID` when `LB > UB` (a cut
-  sliced off the optimum — perturbation / loose dual tolerance), `FAIL` on run
-  error, else `PASS`. `--ref-tol` is the relative `LB ≤ UB` tolerance. Cross-config
-  LB drift (alternate optima) is expected and reported as gap%, not failed.
+- **Correctness gate** (`aggregate.py`): `INVALID` on an invalid cut, `FAIL` on run
+  error, else `PASS`. The invalid-cut test is **risk-aware** (the risk measure is
+  read from each cell's `stages.json`):
+  - _risk-neutral_: `LB > UB` beyond `--ref-tol` (a cut sliced the optimum) **and**
+    a non-monotone (decreasing) lower bound across iterations.
+  - _risk-averse (CVaR)_: `LB > UB` is **expected** (the forward-pass mean-cost UB
+    isn't a valid bound for a CVaR objective), so only the LB-monotonicity check
+    applies; without `convergence.parquet` (needs `pandas`/`pyarrow`) it can't run
+    and the cell reads `PASS?` (cut-validity _unchecked_).
+  - `--cases <dir>` lets `aggregate.py` read `stages.json` to detect risk-aversion
+    for runs whose `result.json` predates the `risk_averse` field (e.g. re-aggregate
+    an old cluster run with `--cases cases/highs` — no re-run needed).
+  - Cross-config LB drift (alternate optima) is expected and reported as gap%.
 - Stage 1 is OFAT: the reference cell is the **correctness floor** (HiGHS
   `presolve=off`; CLP defaults already meet it), one cell confirms `presolve=on`,
   and the rest each move one pure-speed lever. See `grid.py` and

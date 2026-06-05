@@ -2,19 +2,27 @@
 """Aggregate tuning cells into a CSV + a ranked console summary, and flag each
 cell's correctness against the stage baseline.
 
-  aggregate.py --runs runs --backend highs --stage 1 [--ref-tol 1e-6]
+  aggregate.py --runs runs --backend highs --stage 1 [--ref-tol 1e-6] [--cases DIR]
 
 Reads every ``runs/<backend>/s<stage>/*/result.json``, groups repeats by cell,
 reports min/median ``backward_solve_seconds`` and ``duration_seconds`` with the
-percent delta vs the ``baseline`` cell, and applies the **cut-validity** gate:
-a cell is ``INVALID`` when its worst per-iteration ``LB - UB`` exceeds
-``--ref-tol`` (relative) — a cut sliced off the optimum — ``FAIL`` when the run
-errored or reported failed solves, else ``PASS``. (Cross-config LB *drift* via
-alternate optima is expected and reported as gap%, not failed; it is NOT compared
-against the baseline's LB.) A run that errored before ``max_iterations`` is sorted
-below the passing cells and flagged, so a partial run can't masquerade as fastest.
-Writes ``results.csv`` in the stage dir. For stage 1 it also writes
-``suggested_winner.json`` (the env of the fastest correctness-passing cell) to
+percent delta vs the ``baseline`` cell, and applies a **risk-aware cut-validity**
+gate. A cell is ``INVALID`` on an invalid cut, ``FAIL`` when the run errored or
+reported failed solves, else ``PASS``.
+
+Detecting an invalid cut depends on the risk measure (read from result.json's
+``risk_averse`` field, or from each cell's ``stages.json`` under ``--cases``):
+  * risk-neutral: ``LB > UB`` beyond ``--ref-tol`` (a cut sliced the optimum),
+    AND a non-monotone (decreasing) per-iteration lower bound.
+  * risk-averse (CVaR): ``LB > UB`` is EXPECTED (the forward-pass mean-cost "UB"
+    is not a valid upper bound for a CVaR objective), so only the LB-monotonicity
+    check applies. Without ``convergence.parquet`` (needs pandas/pyarrow) that
+    check can't run, so the cell is reported ``PASS?`` (cut-validity *unchecked*).
+
+(Cross-config LB *drift* via alternate optima is expected, reported as gap%, not
+failed.) A run that errored before ``max_iterations`` is sorted below the passing
+cells and flagged ``*``. Writes ``results.csv`` in the stage dir. For stage 1 it
+also writes ``suggested_winner.json`` (the env of the fastest passing cell) to
 feed ``grid.py --stage 2 --winner``.
 
 Metrics-only; it never runs cobre.
@@ -29,12 +37,33 @@ import statistics
 from pathlib import Path
 from typing import Any
 
+try:
+    # Sibling module (same dir is on sys.path[0] when this script is invoked).
+    # Reused so the stages.json risk-measure schema has a single source of truth.
+    from run_cell import detect_risk_averse
+except ImportError:  # pragma: no cover - defensive; result.json path still works
+    detect_risk_averse = None  # type: ignore[assignment]
+
 
 def _load(path: Path) -> dict[str, Any] | None:
     try:
         return json.loads(path.read_text())
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def _cell_risk_averse(
+    reps: list[dict[str, Any]], cases: Path | None, cut_sel: str
+) -> bool:
+    """True if the cell is a risk-averse (CVaR) run. Prefer the ``risk_averse``
+    field recorded in result.json; fall back to reading the case's stages.json
+    under ``--cases`` (so runs that predate risk-averse detection still work)."""
+    for r in reps:
+        if isinstance(r.get("risk_averse"), bool):
+            return r["risk_averse"]
+    if cases is not None and detect_risk_averse is not None:
+        return bool(detect_risk_averse(cases / cut_sel).get("risk_averse"))
+    return False
 
 
 def _fmt(x: float | None, places: int = 2) -> str:
@@ -56,7 +85,16 @@ def main() -> int:
         "--ref-tol",
         type=float,
         default=1e-6,
-        help="relative LB>UB tolerance for the cut-validity gate",
+        help="relative tolerance for the cut-validity gate (LB>UB risk-neutral, "
+        "LB-monotonicity risk-averse)",
+    )
+    ap.add_argument(
+        "--cases",
+        type=Path,
+        default=None,
+        help="per-method case dir (e.g. cases/highs). Used to read each cell's "
+        "stages.json and detect a risk-averse (CVaR) run when result.json predates "
+        "risk-averse detection. Without it, risk-aversion is read from result.json.",
     )
     args = ap.parse_args()
 
@@ -111,17 +149,34 @@ def main() -> int:
         reject = _first_num(reps, "bwd_basis_reject_rate")
         ok_exit = all(r.get("exit_status") == 0 for r in reps)
         ok_fail = all((r.get("failed") in (0, None)) for r in reps)
-        # Cut-validity gate: at convergence LB <= UB. The worst LB-UB across ALL
-        # iterations (conv_max_lb_minus_ub, from the parquet) is the strongest
-        # check; fall back to the final-bounds difference. LB exceeding UB beyond
-        # tolerance means a cut sliced off the optimum (perturbation / loose dual
-        # tolerance) — the report's primary correctness failure.
+        risk_averse = _cell_risk_averse(reps, args.cases, reps[0]["cut_sel"])
+        # Cut-validity, signal 1 — LB monotonicity. The SDDP lower bound is
+        # non-decreasing as cuts accumulate; conv_max_lb_decrease (from the
+        # parquet) is the worst per-iteration drop, and a value beyond tolerance
+        # means an invalid cut. Holds for BOTH risk-neutral and risk-averse runs.
+        lb_decrease = _first_num(reps, "conv_max_lb_decrease")
+        mono_tol = args.ref_tol * max(1.0, abs(lb)) if lb is not None else args.ref_tol
+        bad_monotonic = lb_decrease is not None and lb_decrease > mono_tol
+        # Cut-validity, signal 2 — LB <= UB, but ONLY for risk-NEUTRAL runs. Under
+        # a CVaR objective the LB converges to the risk-adjusted optimum while the
+        # forward-pass "UB" estimates the mean cost, so LB > UB is EXPECTED and is
+        # NOT a failure. Disabling this check for risk-averse runs is the whole
+        # point of detecting the risk measure.
         worst_viol = _first_num(reps, "conv_max_lb_minus_ub")
         if worst_viol is None and lb is not None and ub is not None:
             worst_viol = lb - ub
         tol_abs = args.ref_tol * max(1.0, abs(ub)) if ub is not None else args.ref_tol
-        invalid_cut = worst_viol is not None and worst_viol > tol_abs
-        if invalid_cut:
+        bad_lb_ub = (
+            (not risk_averse) and worst_viol is not None and worst_viol > tol_abs
+        )
+        # Which validity signal actually applied — surfaced so a risk-averse run
+        # with no convergence parquet (LB<=UB invalid here, monotonicity needs
+        # pyarrow) reads as "unchecked", never a silent PASS.
+        if risk_averse:
+            cut_check = "monotonic" if lb_decrease is not None else "unchecked"
+        else:
+            cut_check = "lb<=ub+mono"
+        if bad_lb_ub or bad_monotonic:
             correctness = "INVALID"
         elif not (ok_exit and ok_fail):
             correctness = "FAIL"
@@ -160,6 +215,8 @@ def main() -> int:
                 "iterations_completed": iters_done,
                 "max_iterations": iters_max,
                 "partial": partial,
+                "risk_averse": risk_averse,
+                "cut_check": cut_check,
                 "correctness": correctness,
                 "env": json.dumps(reps[0]["env"], sort_keys=True),
             }
@@ -204,13 +261,18 @@ def main() -> int:
             iters_str = str(int(r["iterations_completed"]))
         else:
             iters_str = f"{int(r['iterations_completed'])}/{int(r['max_iterations'])}"
-        # Flag partial runs: their timing/LB are not comparable to full runs.
-        verdict = f"{r['correctness']}*" if r["partial"] else r["correctness"]
+        # Verdict markers: `*` partial run (timing/LB not comparable); `?`
+        # risk-averse cell whose cut-validity could not be checked (no parquet).
+        verdict = r["correctness"]
+        if r["partial"]:
+            verdict += "*"
+        if r["cut_check"] == "unchecked":
+            verdict += "?"
         print(
             f"{r['cell']:28} {_fmt(r['backward_solve_s_min']):>9} "
             f"{_fmt(r['delta_pct_vs_baseline'], 1):>8} {_fmt(r['bwd_pivots_per_solve'], 1):>8} "
             f"{_fmt(reject_pct, 1):>6} {_fmt(r['final_gap_percent'], 3):>7} "
-            f"{iters_str:>7} {verdict:>8}"
+            f"{iters_str:>7} {verdict:>9}"
         )
     print(f"\nwrote {csv_path}")
     print(
@@ -219,10 +281,24 @@ def main() -> int:
         "verdict PASS/FAIL/INVALID"
     )
     print(
-        "verdict: PASS ok · FAIL exit/solve error · INVALID LB>UB (cut sliced the "
-        "optimum) · * partial run (errored before max_iterations; timing/LB not "
-        "comparable)"
+        "verdict: PASS ok · FAIL exit/solve error · INVALID invalid cut (LB>UB "
+        "[risk-neutral] or LB decreased across iterations) · * partial run · "
+        "? risk-averse, cut-validity unchecked"
     )
+    n_risk = sum(1 for r in rows if r["risk_averse"])
+    if n_risk:
+        n_unchecked = sum(1 for r in rows if r["cut_check"] == "unchecked")
+        note = (
+            f"NOTE: {n_risk}/{len(rows)} cell(s) risk-averse (CVaR) → LB≤UB check "
+            "OFF (LB>UB is EXPECTED under CVaR); cut-validity via LB-monotonicity. "
+            "gap% here is LB-vs-mean-cost, not a convergence gap."
+        )
+        if n_unchecked:
+            note += (
+                f" {n_unchecked} UNCHECKED — install pandas+pyarrow and re-run "
+                "aggregate to read convergence.parquet and enable the check."
+            )
+        print(note)
 
     # Stage 1: suggest the fastest correctness-passing cell's env (the user makes
     # the final call at the manual gate).
