@@ -355,9 +355,8 @@ impl BackwardPassState {
         // the per-stage loop begins.  In v1 all named profiles equal
         // `HighsProfile::default()`, so this is a no-op (delta tracking skips all
         // FFI calls), preserving bit-identical parity with the pre-profile branch.
-        // Resolved once (it may carry benchmark-only `COBRE_TUNE_*` overrides,
-        // so it is not necessarily the `BACKWARD` const); the assert verifies
-        // `set_profile` stored exactly the profile we passed.
+        // Resolved once; it is the compile-time `BACKWARD` const. The assert
+        // verifies `set_profile` stored exactly the profile we passed.
         let backward_profile = Phase::Backward.profile();
         for ws in inputs.workspaces.iter_mut() {
             ws.solver.set_profile(&backward_profile);

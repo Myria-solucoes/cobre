@@ -129,8 +129,8 @@ solver-bound). All exposed as `training.cut_selection` config (a new
   no-violation. Gate behind `training.cut_selection.method = "dynamic"`. Validate
   exactness (same optimum as all-cuts) on deterministic cases.
 - **Phase 2 — hyperparameters + tuning.** Add `k2` window history; expose
-  `k2`/`nadic`; sweep on the benchmark (`solver-tuning-benchmark-case.md`) against
-  all-cuts and Level1/Dominated, crossed with the warm-start modes.
+  `k2`/`nadic`; sweep on a production-scale benchmark case against all-cuts and
+  Level1/Dominated (cf. `solver-tuning-results.md`).
 - **Phase 3 — forward pass + (if warranted) cross-worker initial-set sharing.**
 
 ## 6. Open questions

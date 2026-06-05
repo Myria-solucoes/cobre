@@ -1,9 +1,0 @@
-# Generated benchmark artifacts — never commit. `runs/` alone is hundreds of MB
-# of LP bases + parquets per sweep. All regenerable via prep_cases.sh (cases),
-# grid.py (manifests), and run_local.sh / sweep.sbatch (runs).
-runs/
-cases/
-manifests/
-m.*.jsonl
-winner.json
-__pycache__/

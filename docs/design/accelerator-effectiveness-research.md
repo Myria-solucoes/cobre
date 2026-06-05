@@ -5,8 +5,7 @@ status: design
 tags: [cobre, sddp, cut-selection, basis-reconstruction, warm-start, benchmark]
 companion:
   [
-    "docs/design/solver-parameter-tuning.md",
-    "docs/design/solver-tuning-benchmark-case.md",
+    "docs/design/solver-tuning-results.md",
     "docs/design/dynamic-cut-selection-design.md",
   ]
 references:
@@ -15,12 +14,18 @@ references:
 
 # Accelerator effectiveness research
 
-Extends the solver-parameter tuning (see `solver-parameter-tuning.md`) to a
-second, higher-leverage question: **do our algorithmic performance accelerators
-actually earn their complexity?** The two accelerators under study are **cut
-selection** and **basis reconstruction / warm-start**. Both are evaluated on the
-same benchmark case (`solver-tuning-benchmark-case.md`), per backend, local
-threads, no MPI.
+> **Status (concluded).** The campaign ran; outcomes are in
+> `solver-tuning-results.md`. The benchmark-only `COBRE_TUNE_*` seam, the
+> `COBRE_TUNE_WARMSTART` toggle, and the evaluation-only warm-start `core`/`off`
+> modes referenced below were **removed** afterward (see git history). Outcome:
+> warm-start `full` is kept (the default); cut-selection is kept and effective
+> (~20–25%) but remains **off by default** as a recommended per-case opt-in. The
+> mechanism mentions below are retained as the historical research rationale.
+
+This studied a higher-leverage question than raw solver parameters: **do our
+algorithmic performance accelerators actually earn their complexity?** The two
+accelerators under study are **cut selection** and **basis reconstruction /
+warm-start**, evaluated per backend, local threads, no MPI.
 
 ## 1. What the references say
 
