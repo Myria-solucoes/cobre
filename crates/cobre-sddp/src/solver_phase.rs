@@ -2,14 +2,21 @@
 //! the per-phase named solver-profile constants.
 //!
 //! Each [`Phase`] variant maps to a backend profile that configures the LP
-//! solver for that phase. For the `HiGHS` backend, [`FORWARD_PROFILE`] and
-//! [`SIMULATION_PROFILE`] match [`HighsProfile::default()`] field-for-field.
-//! [`BACKWARD_PROFILE`] overrides one option — `simplex_price_strategy`
-//! (`RowHyperSparse`, value `2`) — to exploit sparse cut subgradient rows
-//! that dominate the backward LP row count. Edge-weight strategy stays at
-//! Devex (the [`HighsProfile::default`] value) after empirical sweeps
-//! showed Dantzig and `SteepestEdge` alternatives net worse on wall time
-//! and tail latency respectively.
+//! solver for that phase. All three phases share one tuned deep-cut-pool
+//! profile: forward, backward, and simulation all solve the same cut-laden LPs
+//! (the forward and backward passes build the cut pool; simulation evaluates
+//! the converged policy against the full pool), so they want the same solver
+//! behaviour. For the `HiGHS` backend, [`FORWARD_PROFILE`], [`BACKWARD_PROFILE`],
+//! and [`SIMULATION_PROFILE`] are therefore identical: each overrides one option
+//! relative to [`HighsProfile::default()`] — `simplex_price_strategy`
+//! (`RowHyperSparse`, value `2`) — to exploit the sparse cut-subgradient rows
+//! that dominate these LPs' row count. Edge-weight strategy stays at Devex (the
+//! [`HighsProfile::default`] value) after empirical sweeps showed Dantzig and
+//! `SteepestEdge` alternatives net worse on wall time and tail latency
+//! respectively. The CLP backend mirrors this: all three phases pin full dual
+//! steepest-edge pricing (`dual_pricing_mode = 1`) and the tuned refactorization
+//! cadence (`factorization_frequency = 200`). See
+//! `docs/design/solver-tuning-results.md` for the empirical sweep.
 //!
 //! Compile-time assertions at the bottom of this module catch any future drift
 //! between the named `HiGHS` constants and the documented field values.
@@ -83,11 +90,13 @@ pub trait PhaseProfiles: Sized {
 /// Per-phase `HighsProfile` selection.
 ///
 /// Reproduces the SDDP-tuned [`FORWARD_PROFILE`]/[`BACKWARD_PROFILE`]/
-/// [`SIMULATION_PROFILE`] constants of this module bit-for-bit:
-/// `FORWARD` and `SIMULATION` equal [`HighsProfile::default()`]; `BACKWARD`
-/// overrides only `simplex_price_strategy` to `2` (`RowHyperSparse`). The full
-/// field literals are written out because associated constants cannot use the
-/// `..HighsProfile::default()` struct-update spread in const context.
+/// [`SIMULATION_PROFILE`] constants of this module bit-for-bit. All three
+/// phases share the tuned deep-cut-pool profile: `FORWARD`, `BACKWARD`, and
+/// `SIMULATION` are identical, each overriding only `simplex_price_strategy` to
+/// `2` (`RowHyperSparse`) relative to [`HighsProfile::default()`], because every
+/// phase solves the same cut-laden LPs. The full field literals are written out
+/// because associated constants cannot use the `..HighsProfile::default()`
+/// struct-update spread in const context.
 #[cfg(feature = "highs")]
 impl PhaseProfiles for HighsProfile {
     const FORWARD: Self = HighsProfile {
@@ -95,9 +104,9 @@ impl PhaseProfiles for HighsProfile {
         dual_feasibility_tolerance: 1e-9,
         simplex_iteration_limit: DEFAULT_PROFILE_HEURISTIC_SENTINEL,
         ipm_iteration_limit: 10_000,
-        simplex_dual_edge_weight_strategy: 1, // Devex (default)
-        simplex_scale_strategy: 0, // Off (default; cobre prescaler conditions the matrix)
-        simplex_price_strategy: 1, // Row (default)
+        simplex_dual_edge_weight_strategy: 1, // Devex (matches default)
+        simplex_scale_strategy: 0, // Off (matches default; cobre prescaler conditions the matrix)
+        simplex_price_strategy: 2, // RowHyperSparse (tuned deep-cut-pool profile)
     };
     const BACKWARD: Self = HighsProfile {
         primal_feasibility_tolerance: 1e-9,
@@ -113,24 +122,25 @@ impl PhaseProfiles for HighsProfile {
         dual_feasibility_tolerance: 1e-9,
         simplex_iteration_limit: DEFAULT_PROFILE_HEURISTIC_SENTINEL,
         ipm_iteration_limit: 10_000,
-        simplex_dual_edge_weight_strategy: 1, // Devex (default)
-        simplex_scale_strategy: 0, // Off (default; cobre prescaler conditions the matrix)
-        simplex_price_strategy: 1, // Row (default)
+        simplex_dual_edge_weight_strategy: 1, // Devex (matches default)
+        simplex_scale_strategy: 0, // Off (matches default; cobre prescaler conditions the matrix)
+        simplex_price_strategy: 2, // RowHyperSparse (tuned deep-cut-pool profile)
     };
 }
 
 /// Per-phase `ClpProfile` selection.
 ///
-/// `FORWARD` and `SIMULATION` equal [`ClpProfile::default()`]'s field set.
-/// `BACKWARD` is tuned for the backward pass: it pins full dual steepest-edge
-/// pricing (`dual_pricing_mode = 1`) and sets an SDDP-tuned refactorization
-/// cadence (`factorization_frequency = 200`), leaving every other field at the
-/// default. This is the CLP-native analog of the `HiGHS` backward override of
-/// `simplex_price_strategy`. These are CLP-native values, independently chosen
-/// for CLP's own option surface — they are **not** a translation of the `HiGHS`
-/// per-phase profiles. `algorithm` stays [`ClpAlgorithm::Dual`] in all three
-/// phases (no phase selects the primal simplex). The full field literals are
-/// written out because associated constants cannot use the
+/// All three phases share the tuned deep-cut-pool profile: `FORWARD`,
+/// `BACKWARD`, and `SIMULATION` are identical. Each pins full dual
+/// steepest-edge pricing (`dual_pricing_mode = 1`) and an SDDP-tuned
+/// refactorization cadence (`factorization_frequency = 200`), leaving every
+/// other field at [`ClpProfile::default()`], because every phase solves the
+/// same cut-laden LPs. This is the CLP-native analog of the `HiGHS`
+/// `simplex_price_strategy` override; these are CLP-native values, independently
+/// chosen for CLP's own option surface — they are **not** a translation of the
+/// `HiGHS` per-phase profiles. `algorithm` stays [`ClpAlgorithm::Dual`] in all
+/// three phases (no phase selects the primal simplex). The full field literals
+/// are written out because associated constants cannot use the
 /// `..ClpProfile::default()` struct-update spread in const context.
 #[cfg(feature = "clp")]
 impl PhaseProfiles for ClpProfile {
@@ -141,8 +151,8 @@ impl PhaseProfiles for ClpProfile {
         dual_feasibility_tolerance: 1e-9,
         simplex_iteration_limit: cobre_solver::DEFAULT_PROFILE_HEURISTIC_SENTINEL,
         algorithm: ClpAlgorithm::Dual,
-        dual_pricing_mode: 3,       // CLP steepest-edge ctor default
-        factorization_frequency: 0, // CLP internal default (sentinel)
+        dual_pricing_mode: 1, // full DSE pinned (tuned deep-cut-pool profile)
+        factorization_frequency: 200, // tuned refactor cadence (tuned deep-cut-pool profile)
     };
     const BACKWARD: Self = ClpProfile {
         perturbation: 102,
@@ -151,8 +161,8 @@ impl PhaseProfiles for ClpProfile {
         dual_feasibility_tolerance: 1e-9,
         simplex_iteration_limit: cobre_solver::DEFAULT_PROFILE_HEURISTIC_SENTINEL,
         algorithm: ClpAlgorithm::Dual,
-        dual_pricing_mode: 1,         // full DSE pinned (backward-pass override)
-        factorization_frequency: 200, // tuned refactor cadence (backward-pass override)
+        dual_pricing_mode: 1, // full DSE pinned (tuned deep-cut-pool profile)
+        factorization_frequency: 200, // tuned refactor cadence (tuned deep-cut-pool profile)
     };
     const SIMULATION: Self = ClpProfile {
         perturbation: 102,
@@ -161,36 +171,43 @@ impl PhaseProfiles for ClpProfile {
         dual_feasibility_tolerance: 1e-9,
         simplex_iteration_limit: cobre_solver::DEFAULT_PROFILE_HEURISTIC_SENTINEL,
         algorithm: ClpAlgorithm::Dual,
-        dual_pricing_mode: 3,       // CLP steepest-edge ctor default
-        factorization_frequency: 0, // CLP internal default (sentinel)
+        dual_pricing_mode: 1, // full DSE pinned (tuned deep-cut-pool profile)
+        factorization_frequency: 200, // tuned refactor cadence (tuned deep-cut-pool profile)
     };
 }
 
 /// Solver profile applied during the SDDP forward pass.
 ///
-/// All fields equal [`HighsProfile::default()`], which uses the tightened
-/// `1e-9` primal/dual feasibility tolerances.
+/// Identical to [`BACKWARD_PROFILE`] and [`SIMULATION_PROFILE`]: all three
+/// phases share the tuned deep-cut-pool profile. It overrides one field
+/// relative to [`HighsProfile::default()`] — `simplex_price_strategy` to `2`
+/// (`RowHyperSparse`) — because the forward pass solves the same cut-laden LPs
+/// as the backward pass, where sparse cut-subgradient rows dominate the row
+/// count. The tightened `1e-9` primal/dual feasibility tolerances match the
+/// default.
 #[cfg(feature = "highs")]
 pub const FORWARD_PROFILE: HighsProfile = HighsProfile {
     primal_feasibility_tolerance: 1e-9,
     dual_feasibility_tolerance: 1e-9,
     simplex_iteration_limit: DEFAULT_PROFILE_HEURISTIC_SENTINEL,
     ipm_iteration_limit: 10_000,
-    simplex_dual_edge_weight_strategy: 1, // Devex (default)
-    simplex_scale_strategy: 0,            // Off (default; cobre prescaler conditions the matrix)
-    simplex_price_strategy: 1,            // Row (default)
+    simplex_dual_edge_weight_strategy: 1, // Devex (matches default)
+    simplex_scale_strategy: 0, // Off (matches default; cobre prescaler conditions the matrix)
+    simplex_price_strategy: 2, // RowHyperSparse (tuned deep-cut-pool profile)
 };
 
 /// Solver profile applied during the SDDP backward pass.
 ///
-/// Overrides one field relative to [`HighsProfile::default()`]:
+/// The tuned deep-cut-pool profile, shared bit-for-bit with [`FORWARD_PROFILE`]
+/// and [`SIMULATION_PROFILE`]. It overrides one field relative to
+/// [`HighsProfile::default()`]:
 ///
-/// | Field                      | Default | Backward | Rationale                                          |
-/// |----------------------------|---------|----------|----------------------------------------------------|
-/// | `simplex_price_strategy`   | `1`     | `2`      | `RowHyperSparse`: exploits sparsity on backward LPs |
+/// | Field                      | Default | Tuned | Rationale                                          |
+/// |----------------------------|---------|-------|----------------------------------------------------|
+/// | `simplex_price_strategy`   | `1`     | `2`   | `RowHyperSparse`: exploits sparsity on cut-laden LPs |
 ///
-/// See `docs/design/highs-backward-pass-tuning.md` for the empirical
-/// sweep that selected this minimal override.
+/// See `docs/design/solver-tuning-results.md` for the empirical sweep that
+/// selected this minimal override.
 #[cfg(feature = "highs")]
 pub const BACKWARD_PROFILE: HighsProfile = HighsProfile {
     primal_feasibility_tolerance: 1e-9,
@@ -204,17 +221,22 @@ pub const BACKWARD_PROFILE: HighsProfile = HighsProfile {
 
 /// Solver profile applied during policy simulation.
 ///
-/// All fields equal [`HighsProfile::default()`], which uses the tightened
-/// `1e-9` primal/dual feasibility tolerances.
+/// Identical to [`FORWARD_PROFILE`] and [`BACKWARD_PROFILE`]: all three phases
+/// share the tuned deep-cut-pool profile. It overrides one field relative to
+/// [`HighsProfile::default()`] — `simplex_price_strategy` to `2`
+/// (`RowHyperSparse`) — because simulation evaluates the converged policy
+/// against the full cut pool, so it solves the same cut-laden LPs as the
+/// backward pass. The tightened `1e-9` primal/dual feasibility tolerances match
+/// the default.
 #[cfg(feature = "highs")]
 pub const SIMULATION_PROFILE: HighsProfile = HighsProfile {
     primal_feasibility_tolerance: 1e-9,
     dual_feasibility_tolerance: 1e-9,
     simplex_iteration_limit: DEFAULT_PROFILE_HEURISTIC_SENTINEL,
     ipm_iteration_limit: 10_000,
-    simplex_dual_edge_weight_strategy: 1, // Devex (default)
-    simplex_scale_strategy: 0,            // Off (default; cobre prescaler conditions the matrix)
-    simplex_price_strategy: 1,            // Row (default)
+    simplex_dual_edge_weight_strategy: 1, // Devex (matches default)
+    simplex_scale_strategy: 0, // Off (matches default; cobre prescaler conditions the matrix)
+    simplex_price_strategy: 2, // RowHyperSparse (tuned deep-cut-pool profile)
 };
 
 impl Phase {
@@ -250,14 +272,14 @@ impl Phase {
 
 #[cfg(feature = "highs")]
 const _: () = {
-    // FORWARD_PROFILE — all fields equal HighsProfile::default()
+    // FORWARD_PROFILE — price=2 (RowHyperSparse), other fields equal default
     assert!(FORWARD_PROFILE.primal_feasibility_tolerance == 1e-9);
     assert!(FORWARD_PROFILE.dual_feasibility_tolerance == 1e-9);
     assert!(FORWARD_PROFILE.simplex_iteration_limit == DEFAULT_PROFILE_HEURISTIC_SENTINEL);
     assert!(FORWARD_PROFILE.ipm_iteration_limit == 10_000);
     assert!(FORWARD_PROFILE.simplex_dual_edge_weight_strategy == 1);
     assert!(FORWARD_PROFILE.simplex_scale_strategy == 0);
-    assert!(FORWARD_PROFILE.simplex_price_strategy == 1);
+    assert!(FORWARD_PROFILE.simplex_price_strategy == 2);
 
     // BACKWARD_PROFILE — price=2 (RowHyperSparse), other fields equal default
     assert!(BACKWARD_PROFILE.primal_feasibility_tolerance == 1e-9);
@@ -268,20 +290,20 @@ const _: () = {
     assert!(BACKWARD_PROFILE.simplex_scale_strategy == 0);
     assert!(BACKWARD_PROFILE.simplex_price_strategy == 2);
 
-    // SIMULATION_PROFILE — all fields equal HighsProfile::default()
+    // SIMULATION_PROFILE — price=2 (RowHyperSparse), other fields equal default
     assert!(SIMULATION_PROFILE.primal_feasibility_tolerance == 1e-9);
     assert!(SIMULATION_PROFILE.dual_feasibility_tolerance == 1e-9);
     assert!(SIMULATION_PROFILE.simplex_iteration_limit == DEFAULT_PROFILE_HEURISTIC_SENTINEL);
     assert!(SIMULATION_PROFILE.ipm_iteration_limit == 10_000);
     assert!(SIMULATION_PROFILE.simplex_dual_edge_weight_strategy == 1);
     assert!(SIMULATION_PROFILE.simplex_scale_strategy == 0);
-    assert!(SIMULATION_PROFILE.simplex_price_strategy == 1);
+    assert!(SIMULATION_PROFILE.simplex_price_strategy == 2);
 
     // PhaseProfiles for HighsProfile — bit-for-bit identical to the named
     // constants above, proving numeric inertness of the trait abstraction.
     assert!(matches!(
         <HighsProfile as PhaseProfiles>::FORWARD.simplex_price_strategy,
-        1
+        2
     ));
     assert!(matches!(
         <HighsProfile as PhaseProfiles>::BACKWARD.simplex_price_strategy,
@@ -289,7 +311,7 @@ const _: () = {
     ));
     assert!(matches!(
         <HighsProfile as PhaseProfiles>::SIMULATION.simplex_price_strategy,
-        1
+        2
     ));
 };
 
@@ -307,12 +329,25 @@ mod highs_tests {
         assert_eq!(Phase::Simulation.profile(), SIMULATION_PROFILE);
     }
 
-    /// Forward and simulation named constants equal [`HighsProfile::default()`].
+    /// Forward and simulation named constants equal the tuned deep-cut-pool
+    /// profile (`BACKWARD_PROFILE`) and differ from [`HighsProfile::default()`]
+    /// only in `simplex_price_strategy` (`2`, `RowHyperSparse`).
     #[test]
-    fn forward_and_simulation_equal_default() {
+    fn forward_simulation_equal_tuned_profile() {
         let default = HighsProfile::default();
-        assert_eq!(FORWARD_PROFILE, default);
-        assert_eq!(SIMULATION_PROFILE, default);
+        // All three named constants are now identical (the tuned profile).
+        assert_eq!(FORWARD_PROFILE, BACKWARD_PROFILE);
+        assert_eq!(SIMULATION_PROFILE, BACKWARD_PROFILE);
+        // They differ from the default only in the tuned price strategy.
+        assert_ne!(FORWARD_PROFILE, default);
+        assert_ne!(SIMULATION_PROFILE, default);
+        assert_eq!(FORWARD_PROFILE.simplex_price_strategy, 2);
+        assert_eq!(SIMULATION_PROFILE.simplex_price_strategy, 2);
+        assert_eq!(default.simplex_price_strategy, 1);
+        // Pinning the price strategy back to the default recovers the default.
+        let mut forward_relaxed = FORWARD_PROFILE;
+        forward_relaxed.simplex_price_strategy = default.simplex_price_strategy;
+        assert_eq!(forward_relaxed, default);
     }
 
     #[test]
@@ -347,12 +382,24 @@ mod highs_tests {
         );
     }
 
-    /// The `PhaseProfiles` impl's `FORWARD`/`SIMULATION` equal the default.
+    /// The `PhaseProfiles` impl's `FORWARD`/`SIMULATION` equal the tuned
+    /// deep-cut-pool profile (`BACKWARD`) and differ from the default only in
+    /// `simplex_price_strategy` (`2`, `RowHyperSparse`).
     #[test]
-    fn phase_profiles_forward_simulation_equal_default() {
+    fn phase_profiles_forward_simulation_equal_tuned_profile() {
         let default = HighsProfile::default();
-        assert_eq!(<HighsProfile as PhaseProfiles>::FORWARD, default);
-        assert_eq!(<HighsProfile as PhaseProfiles>::SIMULATION, default);
+        let forward = <HighsProfile as PhaseProfiles>::FORWARD;
+        let simulation = <HighsProfile as PhaseProfiles>::SIMULATION;
+        let backward = <HighsProfile as PhaseProfiles>::BACKWARD;
+        // All three per-phase profiles are now identical (the tuned profile).
+        assert_eq!(forward, backward);
+        assert_eq!(simulation, backward);
+        // They differ from the default only in the tuned price strategy.
+        assert_ne!(forward, default);
+        assert_ne!(simulation, default);
+        assert_eq!(forward.simplex_price_strategy, 2);
+        assert_eq!(simulation.simplex_price_strategy, 2);
+        assert_eq!(default.simplex_price_strategy, 1);
     }
 
     /// The `PhaseProfiles` impl's `BACKWARD` overrides only
@@ -405,13 +452,28 @@ mod clp_tests {
 
     use super::{Phase, PhaseProfiles};
 
-    /// The CLP `FORWARD`/`SIMULATION` per-phase profiles equal
-    /// [`ClpProfile::default()`].
+    /// The CLP `FORWARD`/`SIMULATION` per-phase profiles equal the tuned
+    /// deep-cut-pool profile (`BACKWARD`) and differ from [`ClpProfile::default()`]
+    /// only in `dual_pricing_mode` (`1`, full DSE) and `factorization_frequency`
+    /// (`200`).
     #[test]
-    fn clp_phase_profiles_forward_simulation_equal_default() {
+    fn clp_phase_profiles_forward_simulation_equal_tuned_profile() {
         let default = ClpProfile::default();
-        assert_eq!(<ClpProfile as PhaseProfiles>::FORWARD, default);
-        assert_eq!(<ClpProfile as PhaseProfiles>::SIMULATION, default);
+        let forward = <ClpProfile as PhaseProfiles>::FORWARD;
+        let simulation = <ClpProfile as PhaseProfiles>::SIMULATION;
+        let backward = <ClpProfile as PhaseProfiles>::BACKWARD;
+        // All three per-phase profiles are now identical (the tuned profile).
+        assert_eq!(forward, backward);
+        assert_eq!(simulation, backward);
+        // They differ from the default only in the tuned fields.
+        assert_ne!(forward, default);
+        assert_ne!(simulation, default);
+        assert_eq!(forward.dual_pricing_mode, 1);
+        assert_eq!(forward.factorization_frequency, 200);
+        assert_eq!(simulation.dual_pricing_mode, 1);
+        assert_eq!(simulation.factorization_frequency, 200);
+        assert_eq!(default.dual_pricing_mode, 3);
+        assert_eq!(default.factorization_frequency, 0);
     }
 
     /// The CLP `BACKWARD` profile overrides only `dual_pricing_mode` (to `1`,

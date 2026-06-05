@@ -122,18 +122,27 @@ Reference = `ws-full.sel-none`.
 
 ## Recommendations
 
-The campaign confirmed that cobre's shipped defaults are already at (or near) the
-optimum, so **no compiled default was changed**:
+The campaign confirmed that cobre's shipped solver-parameter defaults are already at
+(or near) the optimum, so **no swept solver value was retuned**:
 
 1. **Default backend: HiGHS** — faster and more robust, equal correctness. Already
    cobre's default feature; CLP remains the opt-in alternative. _(No change.)_
-2. **HiGHS solver defaults: no change** — `presolve=on` is best at scale; do not
+2. **HiGHS solver defaults: no retune** — `presolve=on` is best at scale; do not
    enable HiGHS scaling; edge/price levers are within noise.
-3. **CLP solver defaults: no change** — `scaling=1` looked marginally faster (−8.4%,
+3. **CLP solver defaults: no retune** — `scaling=1` looked marginally faster (−8.4%,
    single-rep) but is not worth flipping a default for the non-default backend;
    **never use `pricing_mode=0`** (fails at scale).
 4. **Warm-start: `full`** — already the default and clearly best (cold solves are
    worst: HiGHS +13%, CLP +28%). The evaluation-only `core`/`off` modes were removed.
+5. **Per-phase profile consistency (implemented follow-up).** The backward pass was
+   measured directly; the forward and simulation passes solve the _same_ cut-laden
+   LPs (simulation evaluates the converged policy against the full cut pool), so all
+   three per-phase profiles were unified onto the backward-tuned profile — HiGHS
+   `simplex_price_strategy=2` (RowHyperSparse) and CLP `dual_pricing_mode=1` +
+   `factorization_frequency=200`. Pivoting strategy doesn't change the LP optimum, so
+   results are unchanged (full test suites pass on both backends); the forward/sim
+   speedup is an extrapolation from the backward measurement — confirm with a
+   production re-run.
 
 The one **opt-in** worth adopting per case:
 

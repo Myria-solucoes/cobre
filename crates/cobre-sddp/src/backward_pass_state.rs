@@ -352,9 +352,10 @@ impl BackwardPassState {
             .sum();
 
         // Apply the backward-phase solver profile to every worker workspace before
-        // the per-stage loop begins.  In v1 all named profiles equal
-        // `HighsProfile::default()`, so this is a no-op (delta tracking skips all
-        // FFI calls), preserving bit-identical parity with the pre-profile branch.
+        // the per-stage loop begins.  The profile is applied via delta-tracked
+        // FFI: `set_profile` issues solver-option calls only for the fields that
+        // differ from each solver's current state (the tuned deep-cut-pool profile
+        // sets `simplex_price_strategy = 2` relative to the HiGHS default).
         // Resolved once; it is the compile-time `BACKWARD` const. The assert
         // verifies `set_profile` stored exactly the profile we passed.
         let backward_profile = Phase::Backward.profile();

@@ -408,9 +408,10 @@ impl ForwardPassState {
             .extend(inputs.workspaces.iter().map(|ws| ws.solver.statistics()));
 
         // Apply the forward-phase solver profile to every worker workspace before
-        // the parallel region begins.  In v1 all named profiles equal
-        // `HighsProfile::default()`, so this is a no-op (delta tracking skips all
-        // FFI calls), preserving bit-identical parity with the pre-profile branch.
+        // the parallel region begins.  The profile is applied via delta-tracked
+        // FFI: `set_profile` issues solver-option calls only for the fields that
+        // differ from each solver's current state (the tuned deep-cut-pool profile
+        // sets `simplex_price_strategy = 2` relative to the HiGHS default).
         // Resolved once; it is the compile-time `FORWARD` const. The assert
         // verifies `set_profile` stored exactly the profile we passed.
         let forward_profile = Phase::Forward.profile();
