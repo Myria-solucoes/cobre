@@ -16,6 +16,8 @@
 //! This module defines the value type only — wiring it into a context struct or
 //! a pass is the responsibility of later DCS work.
 
+use std::time::Instant;
+
 use cobre_solver::{
     Basis, ProfiledSolver, RowBatch, SolutionView, SolverError, SolverInterface, StageTemplate,
 };
@@ -360,6 +362,14 @@ pub struct DcsSolveScratch {
     /// Copy of the most recent solve's primal vector, so the `SolutionView`
     /// borrow of the solver can end before the next `&mut` solver call.
     pub primal_buf: Vec<f64>,
+    /// Cumulative wall time, in seconds, spent inside candidate-scoring
+    /// (`score_violated_candidates`) across every [`lazy_solve_preloaded`] call
+    /// that used this scratch. Grows monotonically and is never reset by the
+    /// solve loop, so a per-worker accumulator survives across all (stage,
+    /// solve) pairs. Read by instrumentation after a run to compute the
+    /// scoring-versus-solve split; pure measurement, off the steady-state hot
+    /// path when no observer reads it.
+    pub scoring_time_seconds: f64,
 }
 
 impl Default for DcsSolveScratch {
@@ -377,6 +387,7 @@ impl Default for DcsSolveScratch {
             out_selected: Vec::new(),
             recon_basis: Basis::new(0, 0),
             primal_buf: Vec::new(),
+            scoring_time_seconds: 0.0,
         }
     }
 }
@@ -528,6 +539,11 @@ pub fn lazy_solve_preloaded<'ws, S: SolverInterface>(
     // (no violation → exact) or adds the top-`nadic` violated slots and
     // re-solves warm.
     for _ in 0..params.max_inner_iterations {
+        // Cumulative scoring-time instrumentation: `scratch.scoring` (the inner
+        // scoring buffers) is borrowed during the call; the `+=` on
+        // `scratch.scoring_time_seconds` runs only after the call returns and
+        // touches a distinct field, so there is no borrow conflict.
+        let t0 = Instant::now();
         let violated = score_violated_candidates(
             pool,
             indexer,
@@ -539,6 +555,7 @@ pub fn lazy_solve_preloaded<'ws, S: SolverInterface>(
             &mut scratch.scoring,
             &mut scratch.out_selected,
         );
+        scratch.scoring_time_seconds += t0.elapsed().as_secs_f64();
 
         if violated == 0 {
             // Exact: the current resident subset reproduces the all-cuts
@@ -570,6 +587,8 @@ pub fn lazy_solve_preloaded<'ws, S: SolverInterface>(
     // (stage, solve) but preserves exactness.
     let mut all_params = *params;
     all_params.nadic = u32::MAX;
+    // Same cumulative-scoring instrumentation as the inner loop above.
+    let t0 = Instant::now();
     let remaining = score_violated_candidates(
         pool,
         indexer,
@@ -581,6 +600,7 @@ pub fn lazy_solve_preloaded<'ws, S: SolverInterface>(
         &mut scratch.scoring,
         &mut scratch.out_selected,
     );
+    scratch.scoring_time_seconds += t0.elapsed().as_secs_f64();
     if remaining > 0 {
         append_slots_to_lp(
             solver,
@@ -1344,6 +1364,98 @@ mod tests {
         assert_eq!(
             view.primal[LAZY_THETA_COL], 5.0,
             "final theta must reflect the added binding cut"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // scoring-time instrumentation tests
+    // -----------------------------------------------------------------------
+
+    /// A freshly-constructed scratch starts with a zero scoring-time accumulator.
+    #[test]
+    fn scoring_time_default_is_zero() {
+        let scratch = DcsSolveScratch::default();
+        assert_eq!(scratch.scoring_time_seconds, 0.0);
+    }
+
+    /// A solve whose seed omits the binding cut runs the inner loop (>= 2 scoring
+    /// passes) and strictly increases the cumulative scoring accumulator.
+    #[test]
+    fn scoring_time_increases_when_inner_loop_runs() {
+        let indexer = lazy_indexer();
+        let pool = make_three_cut_pool();
+        let mut solver = active_profiled();
+        let core = core_template();
+        let mut scratch = DcsSolveScratch::default();
+        let params = lazy_params(10, 50);
+
+        let before = scratch.scoring_time_seconds;
+        solver.load_model(&core);
+        let _view = lazy_solve_preloaded(
+            &mut solver,
+            &core,
+            &pool,
+            &indexer,
+            &[],
+            None,
+            &[0, 1], // omit binding slot 2 → inner loop runs
+            &params,
+            &mut scratch,
+            ctx(),
+        )
+        .expect("lazy_solve_preloaded must succeed");
+
+        assert!(
+            scratch.scoring_time_seconds > before,
+            "scoring accumulator {} must exceed its pre-call value {before}",
+            scratch.scoring_time_seconds
+        );
+    }
+
+    /// A solve whose seed already contains the binding cut performs exactly one
+    /// scoring pass (no growth): the accumulator increases by that single pass
+    /// and the objective/theta result is unchanged from the pre-instrumentation
+    /// behavior (still the binding-cut optimum).
+    #[test]
+    fn scoring_time_single_pass_result_unchanged() {
+        let indexer = lazy_indexer();
+        let pool = make_three_cut_pool();
+        let mut solver = active_profiled();
+        let core = core_template();
+        let mut scratch = DcsSolveScratch::default();
+        let params = lazy_params(10, 50);
+
+        let before = scratch.scoring_time_seconds;
+        solver.load_model(&core);
+        let view = lazy_solve_preloaded(
+            &mut solver,
+            &core,
+            &pool,
+            &indexer,
+            &[],
+            None,
+            &[0, 1, 2], // binding cut already resident → single scoring pass, no growth
+            &params,
+            &mut scratch,
+            ctx(),
+        )
+        .expect("lazy_solve_preloaded must succeed");
+
+        // Single scoring pass still advances the accumulator.
+        assert!(
+            scratch.scoring_time_seconds >= before,
+            "scoring accumulator must not decrease"
+        );
+        // Result identical to the pre-instrumentation single-pass behavior: the
+        // binding-cut floor, no inner growth.
+        assert_eq!(
+            view.primal[LAZY_THETA_COL], 5.0,
+            "single-pass optimum must be the binding-cut floor"
+        );
+        assert_eq!(view.objective, 5.0);
+        assert!(
+            scratch.out_selected.is_empty(),
+            "no violation → no slots selected for growth"
         );
     }
 

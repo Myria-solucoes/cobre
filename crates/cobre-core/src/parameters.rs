@@ -415,7 +415,7 @@ impl<'de> serde::Deserialize<'de> for ParameterKind {
 
 #[cfg(test)]
 mod tests {
-    use super::{CoefficientRef, ComputedParameter, EntityId, ParameterKind, ScalarParameter};
+    use super::{CoefficientRef, ComputedParameter, EntityId, ParameterKind};
 
     #[test]
     fn seven_computed_parameter_variants() {

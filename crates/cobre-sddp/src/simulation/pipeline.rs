@@ -15,6 +15,7 @@ use cobre_stochastic::{ClassSampleRequest, ForwardSampler, SampleRequest};
 use crate::{
     FutureCostFunction,
     context::{StageContext, TrainingContext},
+    dcs::{DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
     lp_builder::COST_SCALE_FACTOR,
     noise::{NcsNoiseOffsets, transform_inflow_noise, transform_load_noise, transform_ncs_noise},
     simulation::{
@@ -319,6 +320,69 @@ fn apply_ncs_col_bounds<S: SolverInterface>(
     );
 }
 
+/// Map a stage-solve [`SddpError`](crate::error::SddpError) to a
+/// [`SimulationError`], carrying the scenario/stage ids. Shared by the baked
+/// `run_stage_solve` path and the DCS `lazy_solve_preloaded` path so both report
+/// failures identically.
+fn map_sim_solver_error(e: crate::error::SddpError, ids: &SimStageIds) -> SimulationError {
+    match e {
+        crate::error::SddpError::Infeasible {
+            stage, scenario, ..
+        } => {
+            #[allow(clippy::cast_possible_truncation)]
+            let scenario_id = scenario as u32;
+            #[allow(clippy::cast_possible_truncation)]
+            let stage_id = stage as u32;
+            SimulationError::LpInfeasible {
+                scenario_id,
+                stage_id,
+                solver_message: "LP infeasible".to_string(),
+            }
+        }
+        crate::error::SddpError::Solver(other) => SimulationError::SolverError {
+            scenario_id: ids.scenario_id,
+            stage_id: ids.stage_id_u32,
+            solver_message: other.to_string(),
+        },
+        other => SimulationError::SolverError {
+            scenario_id: ids.scenario_id,
+            stage_id: ids.stage_id_u32,
+            solver_message: format!("{other}"),
+        },
+    }
+}
+
+/// Unscale a primal vector into `out`: `x_original[i] = col_scale[i] *
+/// x_scaled[i]` (or the raw values when `col_scale` is empty). `out` retains its
+/// pre-warmed capacity (`clear` + `extend`).
+fn fill_unscaled(out: &mut Vec<f64>, scaled: &[f64], col_scale: &[f64]) {
+    out.clear();
+    if col_scale.is_empty() {
+        out.extend_from_slice(scaled);
+    } else {
+        out.extend(scaled.iter().zip(col_scale.iter()).map(|(&xp, &d)| d * xp));
+    }
+}
+
+/// Unscale a dual vector into `out`: `dual_original[i] = row_scale[i] *
+/// dual_scaled[i]` for structural rows; rows beyond the template length (cut
+/// rows) have implicit `row_scale = 1.0`. Empty `row_scale` means no scaling.
+fn fill_unscaled_dual(out: &mut Vec<f64>, scaled: &[f64], row_scale: &[f64]) {
+    out.clear();
+    if row_scale.is_empty() {
+        out.extend_from_slice(scaled);
+    } else {
+        out.extend(scaled.iter().enumerate().map(|(i, &d)| {
+            let scale = if i < row_scale.len() {
+                row_scale[i]
+            } else {
+                1.0
+            };
+            d * scale
+        }));
+    }
+}
+
 /// Solve one stage for one simulation scenario, updating workspace in-place.
 ///
 /// Patches the LP for stage `t`, solves it, extracts inflow/row-lower data,
@@ -328,9 +392,11 @@ fn apply_ncs_col_bounds<S: SolverInterface>(
 /// warm-start basis is a read-only, per-stage artifact from training, so
 /// determinism is preserved.
 ///
-/// `load_model(baked_template)` is always used — the cut rows are already
-/// structural rows in the baked template; no `add_rows` call is needed.
-/// When `baked_templates` was `None` on `simulate` entry, the startup re-bake
+/// Under the dynamic cut-selection method the stage is instead solved lazily
+/// against the cut pool from the cut-free base template (the baked template's
+/// embedded cut rows are not used); the realized primal is identical at the
+/// optimum by exactness. When `baked_templates` was `None` on `simulate` entry,
+/// the startup re-bake
 /// already produced a local `Vec<StageTemplate>` before this function is reached.
 ///
 /// `lookups` carries pre-built study-invariant reverse-lookup tables that are
@@ -357,12 +423,23 @@ fn solve_simulation_stage<S: SolverInterface>(
     let TrainingContext {
         indexer,
         stochastic,
+        dcs,
         ..
     } = training_ctx;
+    let dcs = *dcs;
     let t = ids.t;
-    // The baked template already embeds all active cut rows as structural rows.
-    // No add_rows call is needed.
-    ws.solver.load_model(load_spec.baked_template);
+    // Choose the load target. On the baked path the baked template already
+    // embeds all active cut rows as structural rows (no add_rows needed). On the
+    // DCS path the cut-free base `ctx.templates[t]` is loaded instead, so the
+    // lazy loop's fresh CutRowMap owns the resident cut subset; loading the
+    // baked template would double-append the embedded cut rows. The shared patch
+    // block below references `ctx.templates[t]` scales and indexer columns, so it
+    // is load-target-agnostic.
+    if dcs.is_some() {
+        ws.solver.load_model(&ctx.templates[t]);
+    } else {
+        ws.solver.load_model(load_spec.baked_template);
+    }
     // The anticipated-state ring buffer must advance once per stage in the
     // simulation forward walk, mirroring `run_forward_stage` in `forward.rs`.
     // The incoming slice is snapshotted into `ws.scratch.anticipated_state_buf`
@@ -429,83 +506,71 @@ fn solve_simulation_stage<S: SolverInterface>(
     let mut unscaled_primal: Vec<f64> = std::mem::take(&mut ws.scratch.unscaled_primal);
     let mut unscaled_dual: Vec<f64> = std::mem::take(&mut ws.scratch.unscaled_dual);
 
-    let inputs = crate::stage_solve::StageInputs {
-        stage_context: ctx,
-        pool: &fcf.pools[t],
-        stored_basis: load_spec.warm_basis,
-        stage_index: t,
-        scenario_index: ids.scenario_id as usize,
-        iteration: None, // simulation has no iteration counter
-    };
-
-    let view = crate::stage_solve::run_stage_solve(ws, &inputs).map_err(|e| match e {
-        crate::error::SddpError::Infeasible {
-            stage, scenario, ..
-        } => {
-            #[allow(clippy::cast_possible_truncation)]
-            let scenario_id = scenario as u32;
-            #[allow(clippy::cast_possible_truncation)]
-            let stage_id = stage as u32;
-            SimulationError::LpInfeasible {
-                scenario_id,
-                stage_id,
-                solver_message: "LP infeasible".to_string(),
-            }
-        }
-        crate::error::SddpError::Solver(other) => SimulationError::SolverError {
-            scenario_id: ids.scenario_id,
-            stage_id: ids.stage_id_u32,
-            solver_message: other.to_string(),
-        },
-        other => SimulationError::SolverError {
-            scenario_id: ids.scenario_id,
-            stage_id: ids.stage_id_u32,
-            solver_message: format!("{other}"),
-        },
-    })?;
-
-    // Extract scaling slices and objective scalar before filling unscaled buffers.
-    // `view` borrows from `ws` (via run_stage_solve), so we must finish all reads
-    // of `view` before the view borrow ends.
     let col_scale = &ctx.templates[ids.t].col_scale;
     let row_scale = &ctx.templates[ids.t].row_scale;
-    let view_objective = view.objective;
 
-    // Fill the taken-out unscaled buffers from view.primal/view.dual. The locals
-    // already carry the pre-warmed capacity; clear() + extend reuses it.
-    unscaled_primal.clear();
-    if col_scale.is_empty() {
-        unscaled_primal.extend_from_slice(view.primal);
-    } else {
-        unscaled_primal.extend(
-            view.primal
-                .iter()
-                .zip(col_scale.iter())
-                .map(|(&xp, &d)| d * xp),
+    // Solve and fill the unscaled primal/dual buffers, then end the view borrow.
+    // The DCS branch solves the cut pool lazily from the cut-free base loaded
+    // above (mirroring the forward DCS branch / `solve_opening_dcs`, extracting
+    // the primal); the baked branch solves the already-loaded all-cuts LP via
+    // `run_stage_solve`. Each branch reads `view` (tied to `ws`) into the
+    // taken-out buffers and computes `view_objective` before the borrow ends.
+    let view_objective: f64 = if let Some(params) = dcs {
+        // Metadata-seeded initial resident subset. Simulation has no iteration
+        // counter; seed with `current_iteration = 0` (combined with `k2`).
+        build_initial_resident_set(
+            &fcf.pools[t],
+            0,
+            params.k2,
+            &mut ws.backward_accum.dcs_initial_resident,
         );
-    }
-
-    // `dual_original[i] = row_scale[i] * dual_scaled[i]`.
-    // Structural rows use row_scale[i]; rows beyond the template length
-    // (cut rows) have implicit row_scale = 1.0.
-    unscaled_dual.clear();
-    if row_scale.is_empty() {
-        unscaled_dual.extend_from_slice(view.dual);
+        let dcs_ctx = DcsSolveContext {
+            stage_index: t,
+            scenario_index: ids.scenario_id as usize,
+            iteration: None, // disables the k1 window → every cut a candidate
+        };
+        // Disjoint borrows of `ws`: `solver`, `backward_accum.dcs_initial_resident`
+        // (shared), and `backward_accum.dcs_solve` (mut) are distinct fields.
+        let view = lazy_solve_preloaded(
+            &mut ws.solver,
+            &ctx.templates[t],
+            &fcf.pools[t],
+            indexer,
+            col_scale,
+            None,
+            &ws.backward_accum.dcs_initial_resident,
+            &params,
+            &mut ws.backward_accum.dcs_solve,
+            dcs_ctx,
+        )
+        .map_err(|e| map_sim_solver_error(e, ids))?;
+        let objective = view.objective;
+        fill_unscaled(&mut unscaled_primal, view.primal, col_scale);
+        fill_unscaled_dual(&mut unscaled_dual, view.dual, row_scale);
+        let _ = view;
+        objective
     } else {
-        unscaled_dual.extend(view.dual.iter().enumerate().map(|(i, &d)| {
-            let scale = if i < row_scale.len() {
-                row_scale[i]
-            } else {
-                1.0
-            };
-            d * scale
-        }));
-    }
+        let inputs = crate::stage_solve::StageInputs {
+            stage_context: ctx,
+            pool: &fcf.pools[t],
+            stored_basis: load_spec.warm_basis,
+            stage_index: t,
+            scenario_index: ids.scenario_id as usize,
+            iteration: None, // simulation has no iteration counter
+        };
 
-    // End the `view` borrow of `ws` before mutating ws further.
-    // `SolutionView` is Copy so `drop(view)` would be a no-op; `let _` is idiomatic.
+        let view = crate::stage_solve::run_stage_solve(ws, &inputs)
+            .map_err(|e| map_sim_solver_error(e, ids))?;
+
+        // `view` borrows from `ws`; finish all reads before the borrow ends.
+        let objective = view.objective;
+        fill_unscaled(&mut unscaled_primal, view.primal, col_scale);
+        fill_unscaled_dual(&mut unscaled_dual, view.dual, row_scale);
+        let _ = view;
+        objective
+    };
+
     // Restore scratch buffers so the next stage reuses the warmed allocations.
-    let _ = view;
     ws.scratch.unscaled_primal = unscaled_primal;
     ws.scratch.unscaled_dual = unscaled_dual;
 
@@ -2670,5 +2735,398 @@ mod tests {
             "with None method, noise_buf[0] must be negative (raw eta applied), got {}",
             workspaces[0].scratch.noise_buf[0]
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Simulation DCS integration tests (real ActiveSolver)
+    // -----------------------------------------------------------------------
+    //
+    // Exercise the simulation DCS branch in `solve_simulation_stage`: load the
+    // cut-free base, patch the pinned incoming state, solve the cut pool lazily,
+    // and extract the primal. The LP shapes mirror the forward/backward DCS
+    // fixtures (a coupling row ties storage_out col0 to the pinned storage_in
+    // col2, and cuts constrain theta against col0). The theta-sensitive
+    // observable is `SimulationStageResult.future_cost = primal[theta] * SCALE`,
+    // which distinguishes the converged theta and so catches a wrong (baked)
+    // template load.
+    mod dcs_simulation {
+        use std::collections::HashMap;
+        use std::sync::mpsc;
+
+        use cobre_solver::{ActiveSolver, StageTemplate};
+
+        use super::super::{
+            SimLookups, SimStageIds, SimStageLoadSpec, SimulationOutputSpec, solve_simulation_stage,
+        };
+        use crate::context::{StageContext, TrainingContext};
+        use crate::cut::FutureCostFunction;
+        use crate::cut_selection::CutMetadata;
+        use crate::dcs::DcsParams;
+        use crate::energy_conversion::{EnergyConversion, EnergyConversionSet};
+        use crate::horizon_mode::HorizonMode;
+        use crate::indexer::StageIndexer;
+        use crate::inflow_method::InflowNonNegativityMethod;
+        use crate::lp_builder::PatchBuffer;
+        use crate::simulation::extraction::EntityCounts;
+        use crate::simulation::types::SimulationStageResult;
+        use crate::workspace::{SolverWorkspace, WorkspaceSizing};
+
+        const X_HAT: f64 = 2.0;
+
+        /// Cut-free base: cols `[storage_out=0, z_inflow=1, storage_in=2,
+        /// theta=3]`, one coupling row `storage_out - storage_in = 0`, minimise
+        /// `theta`. `storage_in` is pinned to `x_hat`; cuts constrain `theta`
+        /// against `storage_out` (col 0).
+        fn sim_core_template() -> StageTemplate {
+            StageTemplate {
+                num_cols: 4,
+                num_rows: 1,
+                num_nz: 2,
+                col_starts: vec![0_i32, 1, 1, 2, 2],
+                row_indices: vec![0_i32, 0],
+                values: vec![1.0, -1.0],
+                col_lower: vec![0.0, 0.0, 0.0, -1.0e6],
+                col_upper: vec![f64::INFINITY, f64::INFINITY, f64::INFINITY, 1.0e6],
+                objective: vec![0.0, 0.0, 0.0, 1.0],
+                row_lower: vec![0.0],
+                row_upper: vec![0.0],
+                n_state: 1,
+                n_transfer: 0,
+                n_dual_relevant: 1,
+                n_hydro: 1,
+                max_par_order: 0,
+                col_scale: Vec::new(),
+                row_scale: Vec::new(),
+            }
+        }
+
+        /// All-cuts baked template: cut-free base + the three pool cuts baked as
+        /// structural rows 1..4 (slot order). `num_rows = 4`.
+        fn sim_all_cuts_baked() -> StageTemplate {
+            StageTemplate {
+                num_cols: 4,
+                num_rows: 4,
+                num_nz: 6,
+                col_starts: vec![0_i32, 2, 2, 3, 6],
+                row_indices: vec![0_i32, 2, 0, 1, 2, 3],
+                values: vec![1.0, -2.0, -1.0, 1.0, 1.0, 1.0],
+                col_lower: vec![0.0, 0.0, 0.0, -1.0e6],
+                col_upper: vec![f64::INFINITY, f64::INFINITY, f64::INFINITY, 1.0e6],
+                objective: vec![0.0, 0.0, 0.0, 1.0],
+                row_lower: vec![0.0, 1.0, 0.0, 3.0],
+                row_upper: vec![0.0, f64::INFINITY, f64::INFINITY, f64::INFINITY],
+                n_state: 1,
+                n_transfer: 0,
+                n_dual_relevant: 1,
+                n_hydro: 1,
+                max_par_order: 0,
+                col_scale: Vec::new(),
+                row_scale: Vec::new(),
+            }
+        }
+
+        /// Baked template carrying a single DOMINATING spurious cut
+        /// (`-5*col0 + theta >= 0`, floor 10 at `x_hat = 2`, NOT in the pool).
+        fn sim_baked_dominating_cut() -> StageTemplate {
+            StageTemplate {
+                num_cols: 4,
+                num_rows: 2,
+                num_nz: 4,
+                col_starts: vec![0_i32, 2, 2, 3, 4],
+                row_indices: vec![0_i32, 1, 0, 1],
+                values: vec![1.0, -5.0, -1.0, 1.0],
+                col_lower: vec![0.0, 0.0, 0.0, -1.0e6],
+                col_upper: vec![f64::INFINITY, f64::INFINITY, f64::INFINITY, 1.0e6],
+                objective: vec![0.0, 0.0, 0.0, 1.0],
+                row_lower: vec![0.0, 0.0],
+                row_upper: vec![0.0, f64::INFINITY],
+                n_state: 1,
+                n_transfer: 0,
+                n_dual_relevant: 1,
+                n_hydro: 1,
+                max_par_order: 0,
+                col_scale: Vec::new(),
+                row_scale: Vec::new(),
+            }
+        }
+
+        /// Pool of three cuts on incoming storage; seeded so the DCS initial set
+        /// omits the binding slot 1 (stale `last_active_iter`).
+        fn sim_pool() -> FutureCostFunction {
+            let mut fcf = FutureCostFunction::new(1, 1, 8, 10, &[0]);
+            fcf.add_cut(0, 0, 0, 1.0, &[0.0]);
+            fcf.add_cut(0, 0, 1, 0.0, &[2.0]); // binding: floor 2*x_hat = 4
+            fcf.add_cut(0, 0, 2, 3.0, &[0.0]);
+            let meta = |generated: u64, last: u64| CutMetadata {
+                iteration_generated: generated,
+                forward_pass_index: 0,
+                active_count: 0,
+                last_active_iter: last,
+            };
+            fcf.pools[0].metadata[0] = meta(1, 5);
+            fcf.pools[0].metadata[1] = meta(1, 1);
+            fcf.pools[0].metadata[2] = meta(1, 5);
+            fcf
+        }
+
+        fn sim_active_workspace() -> SolverWorkspace<ActiveSolver> {
+            let sizing = WorkspaceSizing {
+                hydro_count: 1,
+                max_par_order: 0,
+                n_load_buses: 0,
+                max_blocks: 0,
+                downstream_par_order: 0,
+                max_openings: 1,
+                initial_pool_capacity: 16,
+                n_state: 1,
+                max_local_fwd: 1,
+                total_forward_passes: 1,
+                noise_dim: 1,
+                n_anticipated: 0,
+                k_max: 0,
+            };
+            let solver = ActiveSolver::new().expect("ActiveSolver::new()");
+            SolverWorkspace::new(0, 0, solver, PatchBuffer::new(1, 0, 0, 0, 0, 0), 1, sizing)
+        }
+
+        fn dcs_params() -> DcsParams {
+            DcsParams {
+                k1: None,
+                k2: 2,
+                nadic: 10,
+                epsilon_viol: 1e-10,
+                start_iteration: 2,
+                max_inner_iterations: 50,
+            }
+        }
+
+        /// Solve one simulation stage with the given `dcs` option and `baked`
+        /// template, returning `(immediate_cost, SimulationStageResult)`.
+        #[allow(clippy::too_many_lines)]
+        fn run_one_sim_stage(
+            dcs: Option<DcsParams>,
+            baked: &StageTemplate,
+        ) -> (f64, SimulationStageResult) {
+            let indexer = StageIndexer::new(1, 0);
+            let core = sim_core_template();
+            let templates = vec![core.clone()];
+            let base_rows = vec![0_usize];
+            let stochastic = super::make_stochastic_context(1);
+            let horizon = HorizonMode::Finite { num_stages: 1 };
+            let fcf = sim_pool();
+            let entity_counts = EntityCounts {
+                hydro_ids: vec![1],
+                hydro_productivities: vec![1.0],
+                thermal_ids: vec![],
+                line_ids: vec![],
+                bus_ids: vec![],
+                pumping_station_ids: vec![],
+                contract_ids: vec![],
+                non_controllable_ids: vec![],
+            };
+            let hprod = vec![vec![1.0]];
+            let zero_ec = EnergyConversion {
+                equivalent_productivity_mw_per_m3s: 0.0,
+                reference_volume_hm3: 0.0,
+                reference_outflow_m3s: 0.0,
+            };
+            let ec = EnergyConversionSet::new(vec![vec![zero_ec; 1]], vec![vec![0.0_f64; 1]], 1, 1);
+
+            let mut ws = sim_active_workspace();
+            ws.current_state.clear();
+            ws.current_state.push(X_HAT);
+            // Pre-fill the noise/load/z-inflow scratch the patch reads (empty for
+            // a zero-noise single-hydro fixture, mirroring the caller's setup).
+            ws.scratch.noise_buf.clear();
+            ws.scratch.load_rhs_buf.clear();
+            ws.scratch.z_inflow_rhs_buf.clear();
+            ws.scratch.ncs_col_upper_buf.clear();
+            ws.scratch.inflow_m3s_buf.clear();
+            ws.scratch.inflow_m3s_buf.push(0.0);
+
+            let ctx = StageContext {
+                templates: &templates,
+                base_rows: &base_rows,
+                noise_scale: &[1.0],
+                n_hydros: 1,
+                n_load_buses: 0,
+                load_balance_row_starts: &[],
+                load_bus_indices: &[],
+                block_counts_per_stage: &[1usize],
+                ncs_max_gen: &[],
+                ncs_allow_curtailment: &[],
+                discount_factors: &[],
+                cumulative_discount_factors: &[],
+                stage_lag_transitions: &[],
+                noise_group_ids: &[],
+                downstream_par_order: 0,
+            };
+            let training_ctx = TrainingContext {
+                horizon: &horizon,
+                indexer: &indexer,
+                inflow_method: &InflowNonNegativityMethod::None,
+                stochastic: &stochastic,
+                initial_state: &[],
+                inflow_scheme: cobre_core::scenario::SamplingScheme::InSample,
+                load_scheme: cobre_core::scenario::SamplingScheme::InSample,
+                ncs_scheme: cobre_core::scenario::SamplingScheme::InSample,
+                stages: &[],
+                historical_library: None,
+                external_inflow_library: None,
+                external_load_library: None,
+                external_ncs_library: None,
+                recent_accum_seed: &[],
+                recent_weight_seed: 0.0,
+                dcs,
+            };
+
+            let (tx, _rx) = mpsc::sync_channel(4);
+            let diversion: HashMap<cobre_core::EntityId, Vec<usize>> = HashMap::new();
+            let output = SimulationOutputSpec {
+                result_tx: &tx,
+                zeta_per_stage: &[1.0],
+                block_hours_per_stage: &[vec![1.0]],
+                entity_counts: &entity_counts,
+                generic_constraint_row_entries: &[],
+                ncs_col_starts: &[],
+                n_ncs_per_stage: &[],
+                ncs_entity_ids_per_stage: &[],
+                diversion_upstream: &diversion,
+                hydro_productivities_per_stage: &hprod,
+                energy_conversion: &ec,
+                hydro_min_storage_hm3: &[0.0],
+                event_sender: None,
+            };
+            let ids = SimStageIds {
+                t: 0,
+                stage_id_u32: 0,
+                scenario_id: 0,
+            };
+            let load_spec = SimStageLoadSpec {
+                baked_template: baked,
+                warm_basis: None,
+            };
+            let lookups = SimLookups::build(&indexer, 0, 1);
+
+            let (immediate, result) = solve_simulation_stage(
+                &mut ws,
+                &ctx,
+                &fcf,
+                &training_ctx,
+                &load_spec,
+                &output,
+                &ids,
+                &lookups,
+            )
+            .expect("simulation stage solve must succeed");
+            (immediate, result)
+        }
+
+        /// The stage-level cost record (block 0) carrying total/immediate/future.
+        fn stage_cost(
+            result: &SimulationStageResult,
+        ) -> &crate::simulation::types::SimulationCostResult {
+            result
+                .costs
+                .first()
+                .expect("simulation stage result must carry a cost record")
+        }
+
+        /// AC1: the DCS branch (binding cut omitted from the seed) yields the
+        /// same immediate cost and primal-derived fields as the baked all-cuts
+        /// path within 1e-9.
+        #[test]
+        fn sim_dcs_exact_matches_all_cuts() {
+            let all_cuts = sim_all_cuts_baked();
+            let (baked_imm, baked) = run_one_sim_stage(None, &all_cuts);
+            let (dcs_imm, dcs) = run_one_sim_stage(Some(dcs_params()), &all_cuts);
+
+            // Returned immediate cost (the f64) must match within 1e-9.
+            assert!(
+                (baked_imm - dcs_imm).abs() < 1e-9,
+                "immediate cost: baked {baked_imm} vs DCS {dcs_imm}"
+            );
+            let bc = stage_cost(&baked);
+            let dc = stage_cost(&dcs);
+            assert!(
+                (bc.immediate_cost - dc.immediate_cost).abs() < 1e-9,
+                "record immediate_cost: baked {} vs DCS {}",
+                bc.immediate_cost,
+                dc.immediate_cost
+            );
+            // future_cost = theta * SCALE; the binding cut floor is 4 at x_hat=2.
+            assert!(
+                (bc.future_cost - dc.future_cost).abs() < 1e-9,
+                "future_cost: baked {} vs DCS {}",
+                bc.future_cost,
+                dc.future_cost
+            );
+            assert!(
+                (bc.total_cost - dc.total_cost).abs() < 1e-9,
+                "total_cost: baked {} vs DCS {}",
+                bc.total_cost,
+                dc.total_cost
+            );
+            assert!(
+                (dc.future_cost - 4.0 * super::super::COST_SCALE_FACTOR).abs() < 1e-3,
+                "DCS future_cost must reflect the binding cut theta=4, got {}",
+                dc.future_cost
+            );
+        }
+
+        /// AC2: a baked template embedding a DOMINATING cut (floor 10, NOT in the
+        /// pool) must NOT change the DCS result — proving the cut-free
+        /// `ctx.templates[t]` is loaded, not `load_spec.baked_template`. A wrong
+        /// load surfaces as `future_cost` reflecting `theta = 10`.
+        #[test]
+        fn sim_dcs_baked_cuts_present_uses_cut_free_core() {
+            let all_cuts_template = sim_all_cuts_baked();
+            let dominating = sim_baked_dominating_cut();
+            let (_, baked) = run_one_sim_stage(None, &all_cuts_template);
+            // DCS is handed the dominating baked template but must ignore it and
+            // load the cut-free base, recovering the all-cuts (theta=4) result.
+            let (_, dcs) = run_one_sim_stage(Some(dcs_params()), &dominating);
+
+            let ac = stage_cost(&baked);
+            let dc = stage_cost(&dcs);
+            assert!(
+                (ac.future_cost - dc.future_cost).abs() < 1e-9,
+                "future_cost: all-cuts {} vs DCS {} (DCS must ignore the dominating \
+                 baked cut and load the cut-free base)",
+                ac.future_cost,
+                dc.future_cost
+            );
+            assert!(
+                (ac.immediate_cost - dc.immediate_cost).abs() < 1e-9,
+                "immediate_cost: all-cuts {} vs DCS {}",
+                ac.immediate_cost,
+                dc.immediate_cost
+            );
+        }
+
+        /// Complementary unit check of the `DcsParams::from_strategy` mapping
+        /// that `simulation_ctx()` applies (the end-to-end `simulation_ctx()`
+        /// wiring is covered by `simulation_ctx_propagates_dynamic_dcs_from_setup`
+        /// in `setup/mod.rs`): a dynamic strategy yields `Some`, any other
+        /// variant yields `None`.
+        #[test]
+        fn from_strategy_gates_dynamic_dcs() {
+            use crate::cut_selection::CutSelectionStrategy;
+            let dynamic = CutSelectionStrategy::Dynamic {
+                k1: None,
+                k2: 5,
+                nadic: 10,
+                epsilon_viol: 1e-10,
+                start_iteration: 2,
+            };
+            let params = DcsParams::from_strategy(&dynamic)
+                .expect("dynamic strategy must map to Some(DcsParams)");
+            assert_eq!(params.k2, 5);
+            let dominated = CutSelectionStrategy::Dominated {
+                threshold: 1e-6,
+                check_frequency: 10,
+            };
+            assert!(DcsParams::from_strategy(&dominated).is_none());
+        }
     }
 }

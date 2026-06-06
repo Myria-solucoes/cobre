@@ -26,6 +26,7 @@ use crate::{
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
     cut::pool::CutPool,
+    dcs::{DcsParams, DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
     error::SddpError,
     indexer::StageIndexer,
     lp_builder::COST_SCALE_FACTOR,
@@ -851,6 +852,12 @@ pub(crate) struct StageKey<'a> {
     /// `write_capture_metadata` to record slot identities for the next
     /// iteration's warm-start, and forwarded into `StageInputs`.
     pub(crate) pool: &'a CutPool,
+    /// Dynamic Cut Selection hyperparameters for this stage solve, `Some` only
+    /// when the dynamic method is configured AND active at this iteration
+    /// (`iteration >= start_iteration`). When `Some`, the stage is solved
+    /// lazily against the cut pool from the cut-free base template; when `None`,
+    /// the baked all-cuts path is used unchanged.
+    pub(crate) dcs: Option<DcsParams>,
 }
 
 /// Populate `CapturedBasis` metadata after a stage solve.
@@ -924,12 +931,22 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         basis_row_capacity,
         terminal_has_boundary_cuts,
         pool,
+        dcs,
     } = *key;
     let n_hydros = ctx.n_hydros;
     let n_load_buses = ctx.n_load_buses;
     let indexer = training_ctx.indexer;
     let stochastic = training_ctx.stochastic;
     let horizon = training_ctx.horizon;
+
+    // On the DCS path, load the cut-free base structural template here (the
+    // caller skips its baked load), so the bounds patch below applies to the
+    // cut-free LP that `lazy_solve_preloaded` then grows with the resident cut
+    // subset. Loading the baked template would make the lazy loop's fresh
+    // CutRowMap double-append the embedded cut rows.
+    if dcs.is_some() {
+        ws.solver.load_model(&ctx.templates[t]);
+    }
 
     // Split borrows: current_state and scratch are distinct fields of ws.
     let (state_ref, scratch) = (&ws.current_state[..], &mut ws.scratch);
@@ -1034,44 +1051,88 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         ws.solver.set_col_bounds(&[indexer.theta], &[0.0], &[0.0]);
     }
 
-    let inputs = crate::stage_solve::StageInputs {
-        stage_context: ctx,
-        pool,
-        stored_basis: basis_slice.get_mut(m, t).as_ref(),
-        stage_index: t,
-        scenario_index: m,
-        iteration: Some(iteration),
-    };
-
-    let view = crate::stage_solve::run_stage_solve(ws, &inputs).map_err(|e| {
-        // Preserve today's behavior: invalidate the stored basis on
-        // Infeasible so the next warm-start attempt cold-solves.
-        if matches!(e, SddpError::Infeasible { .. }) {
-            *basis_slice.get_mut(m, t) = None;
-        }
-        e
-    })?;
-
-    // Unscale primal values and capture the objective before the ws borrow
-    // held by `view` ends its overlap with subsequent ws.scratch accesses.
-    // `SolutionView` is `Copy`, so view data is extracted here via .to_vec() /
-    // .collect() into a local, then `view` goes out of use before the next
-    // mutable borrow of ws fields.
     let col_scale = &ctx.templates[t].col_scale;
-    let view_objective = view.objective;
-    let unscaled_primal: Vec<f64> = if col_scale.is_empty() {
-        view.primal.to_vec()
-    } else {
-        view.primal
-            .iter()
-            .zip(col_scale)
-            .map(|(&xp, &d)| d * xp)
-            .collect()
-    };
 
-    // `view` is Copy, so use `let _ =` to end its borrow of ws for 'ws before
-    // the subsequent mutable borrows of ws.scratch below.
-    let _ = view;
+    // Solve and extract the primal. The DCS branch solves the cut pool lazily
+    // from the cut-free base loaded above (mirroring `solve_opening_dcs`, but
+    // extracting the primal rather than the dual); the baked branch solves the
+    // already-loaded all-cuts LP via `run_stage_solve`. Both copy the primal
+    // into a local and end the view borrow before the subsequent `&mut ws`
+    // accesses (`SolutionView` is `Copy`).
+    let (view_objective, unscaled_primal): (f64, Vec<f64>) = if let Some(params) = dcs {
+        // Metadata-seeded initial resident subset (deterministic, rank-invariant).
+        build_initial_resident_set(
+            pool,
+            iteration,
+            params.k2,
+            &mut ws.backward_accum.dcs_initial_resident,
+        );
+        let dcs_ctx = DcsSolveContext {
+            stage_index: t,
+            scenario_index: m,
+            iteration: Some(iteration),
+        };
+        // Disjoint borrows of `ws`: `solver`, `backward_accum.dcs_initial_resident`
+        // (shared), and `backward_accum.dcs_solve` (mut) are distinct fields.
+        let view = lazy_solve_preloaded(
+            &mut ws.solver,
+            &ctx.templates[t],
+            pool,
+            indexer,
+            col_scale,
+            None,
+            &ws.backward_accum.dcs_initial_resident,
+            &params,
+            &mut ws.backward_accum.dcs_solve,
+            dcs_ctx,
+        )?;
+        let objective = view.objective;
+        let unscaled: Vec<f64> = if col_scale.is_empty() {
+            view.primal.to_vec()
+        } else {
+            view.primal
+                .iter()
+                .zip(col_scale)
+                .map(|(&xp, &d)| d * xp)
+                .collect()
+        };
+        let _ = view;
+        (objective, unscaled)
+    } else {
+        let inputs = crate::stage_solve::StageInputs {
+            stage_context: ctx,
+            pool,
+            stored_basis: basis_slice.get_mut(m, t).as_ref(),
+            stage_index: t,
+            scenario_index: m,
+            iteration: Some(iteration),
+        };
+
+        let view = crate::stage_solve::run_stage_solve(ws, &inputs).map_err(|e| {
+            // Preserve today's behavior: invalidate the stored basis on
+            // Infeasible so the next warm-start attempt cold-solves.
+            if matches!(e, SddpError::Infeasible { .. }) {
+                *basis_slice.get_mut(m, t) = None;
+            }
+            e
+        })?;
+
+        // Unscale primal values and capture the objective before the ws borrow
+        // held by `view` ends its overlap with subsequent ws.scratch accesses.
+        let objective = view.objective;
+        let unscaled: Vec<f64> = if col_scale.is_empty() {
+            view.primal.to_vec()
+        } else {
+            view.primal
+                .iter()
+                .zip(col_scale)
+                .map(|(&xp, &d)| d * xp)
+                .collect()
+        };
+        // `view` is Copy, so end its borrow of ws before the mutable borrows below.
+        let _ = view;
+        (objective, unscaled)
+    };
 
     let d_t = ctx.discount_factors.get(t).copied().unwrap_or(1.0);
     let stage_cost = (view_objective - d_t * unscaled_primal[indexer.theta]) * COST_SCALE_FACTOR;
@@ -1150,33 +1211,40 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
     );
     rec.state.clear();
     rec.state.extend_from_slice(&ws.current_state);
-    let cut_row_count = basis_row_capacity.saturating_sub(ctx.templates[t].num_rows);
-    if let Some(captured) = basis_slice.get_mut(m, t) {
-        ws.solver.get_basis(&mut captured.basis);
-        write_capture_metadata(
-            captured,
-            pool,
-            ctx.templates[t].num_rows,
-            cut_row_count,
-            &ws.current_state[..indexer.n_state],
-        );
-    } else {
-        let mut captured = CapturedBasis::new(
-            ctx.templates[t].num_cols,
-            basis_row_capacity,
-            ctx.templates[t].num_rows,
-            cut_row_count,
-            indexer.n_state,
-        );
-        ws.solver.get_basis(&mut captured.basis);
-        write_capture_metadata(
-            &mut captured,
-            pool,
-            ctx.templates[t].num_rows,
-            cut_row_count,
-            &ws.current_state[..indexer.n_state],
-        );
-        *basis_slice.get_mut(m, t) = Some(captured);
+    // Capture the post-solve basis for the next iteration's warm start — baked
+    // path only. A DCS-solve basis describes the lazy resident-subset row
+    // layout, not the baked layout the warm-start reconstruction expects, so
+    // the DCS path leaves the (m, t) slot untouched (mirrors the backward-pass
+    // decision; DCS basis capture is deferred).
+    if dcs.is_none() {
+        let cut_row_count = basis_row_capacity.saturating_sub(ctx.templates[t].num_rows);
+        if let Some(captured) = basis_slice.get_mut(m, t) {
+            ws.solver.get_basis(&mut captured.basis);
+            write_capture_metadata(
+                captured,
+                pool,
+                ctx.templates[t].num_rows,
+                cut_row_count,
+                &ws.current_state[..indexer.n_state],
+            );
+        } else {
+            let mut captured = CapturedBasis::new(
+                ctx.templates[t].num_cols,
+                basis_row_capacity,
+                ctx.templates[t].num_rows,
+                cut_row_count,
+                indexer.n_state,
+            );
+            ws.solver.get_basis(&mut captured.basis);
+            write_capture_metadata(
+                &mut captured,
+                pool,
+                ctx.templates[t].num_rows,
+                cut_row_count,
+                &ws.current_state[..indexer.n_state],
+            );
+            *basis_slice.get_mut(m, t) = Some(captured);
+        }
     }
     Ok(stage_cost)
 }
@@ -4856,5 +4924,342 @@ mod tests {
         // Warm-start slot must be excluded; only the iteration-1 cut appears.
         assert_eq!(batch.num_rows, 1);
         assert_eq!(batch.row_lower[0], 7.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Forward DCS integration tests (real ActiveSolver)
+    // -----------------------------------------------------------------------
+    //
+    // These exercise the forward DCS branch in `run_forward_stage`: load the
+    // cut-free base, patch the pinned incoming state, solve the cut pool lazily,
+    // and extract the primal. The LP shapes mirror the backward DCS fixture
+    // (a coupling row ties outgoing storage col0 to the pinned incoming storage
+    // col2, and cuts constrain theta against col0), so the primal/objective are
+    // determinate at the pinned state.
+    mod dcs_forward {
+        use cobre_solver::{ActiveSolver, SolverInterface, StageTemplate};
+
+        use super::super::{StageKey, run_forward_stage};
+        use crate::context::{StageContext, TrainingContext};
+        use crate::cut::FutureCostFunction;
+        use crate::cut_selection::CutMetadata;
+        use crate::dcs::DcsParams;
+        use crate::horizon_mode::HorizonMode;
+        use crate::indexer::StageIndexer;
+        use crate::inflow_method::InflowNonNegativityMethod;
+        use crate::lp_builder::{COST_SCALE_FACTOR, PatchBuffer};
+        use crate::trajectory::TrajectoryRecord;
+        use crate::workspace::{BasisStore, SolverWorkspace, WorkspaceSizing};
+
+        const X_HAT: f64 = 2.0;
+
+        /// Cut-free base template for `StageIndexer::new(1, 0)`:
+        /// cols `[storage_out=0, z_inflow=1, storage_in=2, theta=3]`, one coupling
+        /// row `storage_out - storage_in = 0`. Minimise theta. The incoming
+        /// state (col 2) is pinned to `x_hat` by the patch; the coupling row ties
+        /// col0 to it; cuts constrain theta against col0.
+        fn fwd_core_template() -> StageTemplate {
+            StageTemplate {
+                num_cols: 4,
+                num_rows: 1,
+                num_nz: 2,
+                col_starts: vec![0_i32, 1, 1, 2, 2],
+                row_indices: vec![0_i32, 0],
+                values: vec![1.0, -1.0],
+                col_lower: vec![0.0, 0.0, 0.0, -1.0e6],
+                col_upper: vec![f64::INFINITY, f64::INFINITY, f64::INFINITY, 1.0e6],
+                objective: vec![0.0, 0.0, 0.0, 1.0],
+                row_lower: vec![0.0],
+                row_upper: vec![0.0],
+                n_state: 1,
+                n_transfer: 0,
+                n_dual_relevant: 1,
+                n_hydro: 1,
+                max_par_order: 0,
+                col_scale: Vec::new(),
+                row_scale: Vec::new(),
+            }
+        }
+
+        /// All-cuts baked template: the cut-free base plus the three pool cuts
+        /// baked as structural rows (rows 1..4), in pool slot order:
+        ///   slot 0: -0*col0 + theta >= 1 ; slot 1: -2*col0 + theta >= 0 ;
+        ///   slot 2: -0*col0 + theta >= 3.
+        /// `num_rows = 4 = template_num_rows(1) + 3 cuts`.
+        fn fwd_all_cuts_baked() -> StageTemplate {
+            // CSC by column. col0 entries: coupling (row0,+1), slot1 cut (row2,-2).
+            // col3 (theta): rows 1,2,3 each +1. col2: coupling (row0,-1).
+            StageTemplate {
+                num_cols: 4,
+                num_rows: 4,
+                num_nz: 6,
+                // col0: rows [0,2] vals [1,-2]; col1: none; col2: row[0] val[-1];
+                // col3: rows [1,2,3] vals [1,1,1].
+                col_starts: vec![0_i32, 2, 2, 3, 6],
+                row_indices: vec![0_i32, 2, 0, 1, 2, 3],
+                values: vec![1.0, -2.0, -1.0, 1.0, 1.0, 1.0],
+                col_lower: vec![0.0, 0.0, 0.0, -1.0e6],
+                col_upper: vec![f64::INFINITY, f64::INFINITY, f64::INFINITY, 1.0e6],
+                objective: vec![0.0, 0.0, 0.0, 1.0],
+                // row0 coupling (=0); rows1..3 cuts (>= intercept).
+                row_lower: vec![0.0, 1.0, 0.0, 3.0],
+                row_upper: vec![0.0, f64::INFINITY, f64::INFINITY, f64::INFINITY],
+                n_state: 1,
+                n_transfer: 0,
+                n_dual_relevant: 1,
+                n_hydro: 1,
+                max_par_order: 0,
+                col_scale: Vec::new(),
+                row_scale: Vec::new(),
+            }
+        }
+
+        /// Baked template carrying a single DOMINATING spurious cut
+        /// (`-5*col0 + theta >= 0`, floor 10 at `x_hat = 2`, NOT in the pool),
+        /// used to prove the DCS path loads the cut-free base and ignores this
+        /// row.
+        fn fwd_baked_dominating_cut() -> StageTemplate {
+            StageTemplate {
+                num_cols: 4,
+                num_rows: 2,
+                num_nz: 4,
+                col_starts: vec![0_i32, 2, 2, 3, 4],
+                row_indices: vec![0_i32, 1, 0, 1],
+                values: vec![1.0, -5.0, -1.0, 1.0],
+                col_lower: vec![0.0, 0.0, 0.0, -1.0e6],
+                col_upper: vec![f64::INFINITY, f64::INFINITY, f64::INFINITY, 1.0e6],
+                objective: vec![0.0, 0.0, 0.0, 1.0],
+                row_lower: vec![0.0, 0.0],
+                row_upper: vec![0.0, f64::INFINITY],
+                n_state: 1,
+                n_transfer: 0,
+                n_dual_relevant: 1,
+                n_hydro: 1,
+                max_par_order: 0,
+                col_scale: Vec::new(),
+                row_scale: Vec::new(),
+            }
+        }
+
+        /// Pool of three cuts on the incoming-storage state, seeded so the DCS
+        /// initial set omits the binding slot 1 (stale `last_active_iter`).
+        fn fwd_pool() -> FutureCostFunction {
+            let mut fcf = FutureCostFunction::new(1, 1, 8, 10, &[0]);
+            fcf.add_cut(0, 0, 0, 1.0, &[0.0]);
+            fcf.add_cut(0, 0, 1, 0.0, &[2.0]); // binding: floor 2*x_hat = 4
+            fcf.add_cut(0, 0, 2, 3.0, &[0.0]);
+            let meta = |generated: u64, last: u64| CutMetadata {
+                iteration_generated: generated,
+                forward_pass_index: 0,
+                active_count: 0,
+                last_active_iter: last,
+            };
+            fcf.pools[0].metadata[0] = meta(1, 5);
+            fcf.pools[0].metadata[1] = meta(1, 1); // stale → outside k2=2 window at iter 5
+            fcf.pools[0].metadata[2] = meta(1, 5);
+            fcf
+        }
+
+        fn fwd_active_workspace() -> SolverWorkspace<ActiveSolver> {
+            let sizing = WorkspaceSizing {
+                hydro_count: 1,
+                max_par_order: 0,
+                n_load_buses: 0,
+                max_blocks: 0,
+                downstream_par_order: 0,
+                max_openings: 1,
+                initial_pool_capacity: 16,
+                n_state: 1,
+                max_local_fwd: 1,
+                total_forward_passes: 1,
+                noise_dim: 1,
+                n_anticipated: 0,
+                k_max: 0,
+            };
+            let solver = ActiveSolver::new().expect("ActiveSolver::new()");
+            SolverWorkspace::new(0, 0, solver, PatchBuffer::new(1, 0, 0, 0, 0, 0), 1, sizing)
+        }
+
+        fn dcs_params(start_iteration: u64) -> DcsParams {
+            DcsParams {
+                k1: None,
+                k2: 2,
+                nadic: 10,
+                epsilon_viol: 1e-10,
+                start_iteration,
+                max_inner_iterations: 50,
+            }
+        }
+
+        /// Run one forward stage (stage 0 of a 2-stage horizon, so theta is not
+        /// terminal-zeroed) with the given `dcs` option and `baked` template,
+        /// returning `(stage_cost, advanced_state)`. The cut-free base is
+        /// `ctx.templates[0]`; on the baked path the caller-equivalent
+        /// `load_model(baked)` is performed here (mirroring `run_forward_worker`).
+        fn run_one_forward_stage(
+            dcs: Option<DcsParams>,
+            baked: &StageTemplate,
+            iteration: u64,
+        ) -> (f64, Vec<f64>) {
+            let indexer = StageIndexer::new(1, 0);
+            let core = fwd_core_template();
+            let templates = vec![core.clone(), core.clone()];
+            let base_rows = vec![0_usize, 0_usize];
+            let stochastic = super::make_stochastic_context_1_hydro_3_stages();
+            let horizon = HorizonMode::Finite { num_stages: 2 };
+            let fcf = fwd_pool();
+
+            let mut ws = fwd_active_workspace();
+            ws.current_state.clear();
+            ws.current_state.push(X_HAT);
+            let mut basis_store = BasisStore::new(1, 2);
+
+            // Discount factor 0 at this stage makes stage_cost = objective * SCALE
+            // = theta * SCALE (no other objective term), so the observable is
+            // directly sensitive to the converged theta — letting the
+            // dominating-baked-cut test distinguish theta=4 (correct) from
+            // theta=10 (a wrong baked load).
+            let discount_factors = [0.0_f64, 0.0];
+            let ctx = StageContext {
+                templates: &templates,
+                base_rows: &base_rows,
+                noise_scale: &[],
+                n_hydros: 0,
+                n_load_buses: 0,
+                load_balance_row_starts: &[],
+                load_bus_indices: &[],
+                block_counts_per_stage: &[1usize, 1],
+                ncs_max_gen: &[],
+                ncs_allow_curtailment: &[],
+                discount_factors: &discount_factors,
+                cumulative_discount_factors: &[],
+                stage_lag_transitions: &[],
+                noise_group_ids: &[],
+                downstream_par_order: 0,
+            };
+            let training_ctx = TrainingContext {
+                horizon: &horizon,
+                indexer: &indexer,
+                inflow_method: &InflowNonNegativityMethod::None,
+                stochastic: &stochastic,
+                initial_state: &[],
+                inflow_scheme: cobre_core::scenario::SamplingScheme::InSample,
+                load_scheme: cobre_core::scenario::SamplingScheme::InSample,
+                ncs_scheme: cobre_core::scenario::SamplingScheme::InSample,
+                stages: &[],
+                historical_library: None,
+                external_inflow_library: None,
+                external_load_library: None,
+                external_ncs_library: None,
+                recent_accum_seed: &[],
+                recent_weight_seed: 0.0,
+                dcs,
+            };
+
+            // Baked path: mirror run_forward_worker's per-scenario baked load.
+            // DCS path: run_forward_stage loads the cut-free base itself.
+            if dcs.is_none() {
+                ws.solver.load_model(baked);
+            }
+
+            let mut records = vec![TrajectoryRecord {
+                primal: Vec::new(),
+                dual: Vec::new(),
+                stage_cost: 0.0,
+                state: Vec::new(),
+            }];
+            let key = StageKey {
+                t: 0,
+                m: 0,
+                local_m: 0,
+                num_stages: 2,
+                iteration,
+                raw_noise: &[],
+                basis_row_capacity: baked.num_rows,
+                terminal_has_boundary_cuts: false,
+                pool: &fcf.pools[0],
+                dcs,
+            };
+            let mut slices = basis_store.split_workers_mut(1);
+            let stage_cost = run_forward_stage(
+                &mut ws,
+                &mut slices[0],
+                &ctx,
+                &training_ctx,
+                &key,
+                &mut records,
+            )
+            .expect("forward stage solve must succeed");
+            (stage_cost, records[0].state.clone())
+        }
+
+        /// AC1: DCS branch (binding cut omitted from the seed) yields the same
+        /// stage cost and advanced state as the baked all-cuts path within 1e-9.
+        #[test]
+        fn forward_dcs_exact_matches_all_cuts() {
+            let all_cuts = fwd_all_cuts_baked();
+            let (baked_cost, baked_state) = run_one_forward_stage(None, &all_cuts, 5);
+            let (dcs_cost, dcs_state) = run_one_forward_stage(Some(dcs_params(2)), &all_cuts, 5);
+
+            assert!(
+                (baked_cost - dcs_cost).abs() < 1e-9,
+                "stage cost: baked {baked_cost} vs DCS {dcs_cost}"
+            );
+            // The binding cut floor is 4 at x_hat=2; minimise-theta gives theta=4.
+            // With discount 0, stage_cost = objective * SCALE = theta * SCALE, so
+            // both paths land on 4 * COST_SCALE_FACTOR.
+            assert!((dcs_cost - 4.0 * COST_SCALE_FACTOR).abs() < 1e-3);
+            assert_eq!(baked_state.len(), dcs_state.len());
+            for (b, d) in baked_state.iter().zip(&dcs_state) {
+                assert!((b - d).abs() < 1e-9, "state: baked {b} vs DCS {d}");
+            }
+            // Sanity: advanced storage state equals the pinned x_hat (coupling
+            // row forces storage_out = storage_in = x_hat).
+            assert!((dcs_state[0] - X_HAT).abs() < 1e-9);
+        }
+
+        /// AC2: a baked template with a DOMINATING embedded cut (floor 10,
+        /// gradient 5, NOT in the pool) must NOT change the DCS result — proving
+        /// the cut-free `ctx.templates[t]` is loaded, not `params.baked[t]`. If
+        /// the DCS path erroneously loaded the dominating baked template, the
+        /// advanced state / cost would reflect theta=10, diverging from all-cuts.
+        #[test]
+        fn forward_dcs_baked_cuts_present_uses_cut_free_core() {
+            let all_cuts = fwd_all_cuts_baked();
+            let dominating = fwd_baked_dominating_cut();
+            let (allcuts_cost, allcuts_state) = run_one_forward_stage(None, &all_cuts, 5);
+            // DCS path is handed the dominating baked template, but must ignore it
+            // and load the cut-free base, recovering the all-cuts result.
+            let (dcs_cost, dcs_state) = run_one_forward_stage(Some(dcs_params(2)), &dominating, 5);
+
+            assert!(
+                (allcuts_cost - dcs_cost).abs() < 1e-9,
+                "stage cost: all-cuts {allcuts_cost} vs DCS {dcs_cost} (DCS must \
+                 ignore the dominating baked cut)"
+            );
+            assert_eq!(allcuts_state.len(), dcs_state.len());
+            for (a, d) in allcuts_state.iter().zip(&dcs_state) {
+                assert!(
+                    (a - d).abs() < 1e-9,
+                    "state: all-cuts {a} vs DCS {d} (DCS must load the cut-free base)"
+                );
+            }
+        }
+
+        /// AC3: `dcs = Some` but `iteration < start_iteration` takes the baked
+        /// path, so the result equals the baked all-cuts run with `dcs = None`.
+        #[test]
+        fn forward_dcs_inactive_before_start_iteration() {
+            let all_cuts = fwd_all_cuts_baked();
+            // start_iteration = 4, iteration = 1 → inactive → baked path.
+            let (baked_cost, baked_state) = run_one_forward_stage(None, &all_cuts, 1);
+            let (early_cost, early_state) =
+                run_one_forward_stage(Some(dcs_params(4)), &all_cuts, 1);
+            assert_eq!(baked_cost.to_bits(), early_cost.to_bits());
+            assert_eq!(baked_state.len(), early_state.len());
+            for (b, e) in baked_state.iter().zip(&early_state) {
+                assert_eq!(b.to_bits(), e.to_bits());
+            }
+        }
     }
 }

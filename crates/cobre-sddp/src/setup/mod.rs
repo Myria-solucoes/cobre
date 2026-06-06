@@ -2003,6 +2003,60 @@ mod tests {
         );
     }
 
+    #[test]
+    fn simulation_ctx_propagates_dynamic_dcs_from_setup() {
+        let n_stages = 3;
+        let system = minimal_system(n_stages);
+        let mut config = minimal_config(2, 10);
+        // Configure the dynamic cut-selection method so `parse_cut_selection_config`
+        // yields a `Dynamic` strategy and `simulation_ctx()` populates `dcs`.
+        config.training.cut_selection = RowSelectionConfig {
+            enabled: Some(true),
+            method: Some("dynamic".to_string()),
+            ..RowSelectionConfig::default()
+        };
+        let stochastic = build_stochastic_context(
+            &system,
+            42,
+            None,
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::InSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .expect("stochastic context");
+
+        let setup = StudySetup::new(
+            &system,
+            &config,
+            stochastic,
+            PrepareHydroModelsResult::default_from_system(&system),
+        )
+        .expect("setup");
+        let ctx = setup.simulation_ctx();
+
+        // The dynamic method with default fields maps to the spec defaults
+        // (k1 = None, k2 = 5, nadic = 10, epsilon_viol = 1e-10, start_iteration = 2).
+        let expected = crate::dcs::DcsParams {
+            k1: None,
+            k2: 5,
+            nadic: 10,
+            epsilon_viol: 1e-10,
+            start_iteration: 2,
+            max_inner_iterations: crate::dcs::DcsParams::default().max_inner_iterations,
+        };
+        assert_eq!(
+            ctx.dcs,
+            Some(expected),
+            "simulation_ctx().dcs must carry the configured dynamic DcsParams, got {:?}",
+            ctx.dcs
+        );
+    }
+
     /// Given a 1-hydro, 1-thermal, 1-bus, 2-stage system with an iteration
     /// limit of 3, when `train()` is called, then it completes successfully
     /// with `result.iterations <= 3`.

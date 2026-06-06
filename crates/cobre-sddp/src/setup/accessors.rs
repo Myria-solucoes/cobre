@@ -200,9 +200,14 @@ impl StudySetup {
             external_ncs_library,
             recent_accum_seed: &self.recent_observation_seed.accum_seed,
             recent_weight_seed: self.recent_observation_seed.weight_seed,
-            // Simulation always uses the baked all-cuts path; DCS is a
-            // backward-pass mechanism and never activates here.
-            dcs: None,
+            // When the dynamic cut-selection method is configured, simulation
+            // solves each stage lazily against the cut pool (`Some` only for the
+            // dynamic variant); otherwise it uses the baked all-cuts path.
+            dcs: self
+                .cut_management
+                .cut_selection
+                .as_ref()
+                .and_then(crate::dcs::DcsParams::from_strategy),
         }
     }
 }

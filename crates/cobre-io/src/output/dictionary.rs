@@ -434,6 +434,7 @@ fn unit_for(file: &str, column: &str) -> &'static str {
         | "fwd_load_imbalance_ms"
         | "fwd_scheduling_overhead_ms"
         | "overhead_ms"
+        | "lazy_scoring_ms"
         | "forward_time_ms"
         | "backward_time_ms"
         | "communication_time_ms"
@@ -635,7 +636,7 @@ fn description_for(file: &str, column: &str) -> &'static str {
              mpi_allreduce, cut_sync, lower_bound, state_exchange, cut_batch_build, \
              load_imbalance / scheduling_overhead, overhead). Set on per-worker \
              rows that carry parallel-region timings (forward_wall, backward_wall, \
-             fwd_setup, bwd_setup)."
+             fwd_setup, bwd_setup, lazy_scoring)."
         }
         ("iteration_timing", "forward_wall_ms") => "Forward pass wall-clock time",
         ("iteration_timing", "backward_wall_ms") => "Backward pass wall-clock time",
@@ -661,6 +662,11 @@ fn description_for(file: &str, column: &str) -> &'static str {
         }
         ("iteration_timing", "overhead_ms") => {
             "Residual iteration time not attributed to any phase"
+        }
+        ("iteration_timing", "lazy_scoring_ms") => {
+            "Per-worker time spent in lazy candidate scoring inside the \
+             lazy-selection solve; 0 when that solve path is not used. A \
+             sub-component of the forward/backward phases."
         }
         // ── rank_timing ────────────────────────────────────────────────────
         ("rank_timing", "iteration") => "Iteration number (1-based)",
@@ -1506,8 +1512,8 @@ mod tests {
 
         let row_count = rdr.records().count();
         assert_eq!(
-            row_count, 206,
-            "variables.csv must have exactly 206 data rows (one per column across all schemas)"
+            row_count, 207,
+            "variables.csv must have exactly 207 data rows (one per column across all schemas)"
         );
     }
 

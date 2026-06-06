@@ -675,6 +675,12 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
     params: &ForwardWorkerParams<'_>,
 ) -> Result<ForwardWorkerResult, SddpError> {
     let worker_wall_start = Instant::now();
+    // Snapshot the cumulative lazy-scoring accumulator at the forward-region
+    // start; the delta at region end attributes scoring done during this
+    // forward pass to the forward phase (the accumulator is never reset, so a
+    // snapshot-delta is the only correct attribution). Stays zero on the baked
+    // path, which never enters the lazy solve.
+    let scoring_seconds_before = ws.backward_accum.dcs_solve.scoring_time_seconds;
     let (start_m, end_m) = partition(params.forward_passes, params.n_workers, w);
     let n_local = end_m - start_m;
 
@@ -695,6 +701,14 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
     #[allow(clippy::cast_possible_truncation)]
     let total_scenarios_u32 = params.total_forward_passes as u32;
 
+    // Dynamic Cut Selection decision for this forward pass: `Some` only when the
+    // dynamic method is configured AND active at this iteration. Constant across
+    // stages and scenarios, mirroring the backward pass's per-call gate.
+    let dcs_params = params
+        .training_ctx
+        .dcs
+        .filter(|p| p.is_active(params.iteration));
+
     for t in 0..params.num_stages {
         let cum_d = params
             .ctx
@@ -705,8 +719,13 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
 
         for (local_m, m) in (start_m..end_m).enumerate() {
             // Reload model per scenario to ensure deterministic LP state across
-            // thread assignments.
-            ws.solver.load_model(&params.baked[t]);
+            // thread assignments. The baked all-cuts template is loaded here for
+            // the baked path; on the DCS path `run_forward_stage` instead loads
+            // the cut-free base template (loading baked would double-append the
+            // embedded cut rows), so the baked load is skipped.
+            if dcs_params.is_none() {
+                ws.solver.load_model(&params.baked[t]);
+            }
             ws.current_state.clear();
             let src: &[f64] = if t == 0 {
                 params.initial_state
@@ -778,6 +797,7 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
                 basis_row_capacity: params.baked[t].num_rows,
                 terminal_has_boundary_cuts: params.terminal_has_boundary_cuts,
                 pool: &params.fcf.pools[t],
+                dcs: dcs_params,
             };
             // Snapshot solver statistics before the stage solve so the
             // per-stage delta can be accumulated without hot-path allocation.
@@ -803,6 +823,10 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
 
     let local_solves = ws.solver.statistics().solve_count - local_solve_count_before;
     ws.worker_timing_buf.forward_wall_ms += worker_wall_start.elapsed().as_secs_f64() * 1_000.0;
+    // Fold the forward-region lazy-scoring delta into the timing buffer (ms),
+    // mirroring the `forward_wall_ms` fold above. Zero on the baked path.
+    ws.worker_timing_buf.scoring_ms +=
+        (ws.backward_accum.dcs_solve.scoring_time_seconds - scoring_seconds_before) * 1_000.0;
     Ok(ForwardWorkerResult {
         // R5: take the pre-allocated buffer out of ws; ForwardResult reassembles
         // the pieces, and post_process_worker_results later returns it via

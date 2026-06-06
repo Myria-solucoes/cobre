@@ -1228,6 +1228,10 @@ mod tests {
             max_active_per_stage: Some(100),
             basis_activity_window: Some(7),
             tie_tolerance: None,
+            start_iteration: None,
+            candidate_window: None,
+            nadic: None,
+            violation_tolerance: None,
         };
         let json = serde_json::to_string(&original).unwrap();
         let roundtripped: RowSelectionConfig = serde_json::from_str(&json).unwrap();

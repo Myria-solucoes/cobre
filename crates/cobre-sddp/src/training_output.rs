@@ -430,12 +430,12 @@ fn build_worker_timing_records(
 ) -> Vec<cobre_io::WorkerTimingRecord> {
     use cobre_core::{
         WORKER_TIMING_SLOT_BWD_SETUP, WORKER_TIMING_SLOT_BWD_WALL, WORKER_TIMING_SLOT_COUNT,
-        WORKER_TIMING_SLOT_FWD_SETUP, WORKER_TIMING_SLOT_FWD_WALL,
+        WORKER_TIMING_SLOT_FWD_SETUP, WORKER_TIMING_SLOT_FWD_WALL, WORKER_TIMING_SLOT_SCORING,
     };
 
     // Per-(iteration, rank, worker_id) merged timings for the per-worker rows.
-    // The BTreeMap value is the 16-wide writer record that bridges the four named
-    // WorkerPhaseTimings fields and the unchanged Parquet schema.
+    // The BTreeMap value is the 16-wide writer record that bridges the named
+    // WorkerPhaseTimings fields and the Parquet schema.
     let mut per_worker: BTreeMap<(u32, i32, i32), [u64; WORKER_TIMING_SLOT_COUNT]> =
         BTreeMap::new();
     for event in events {
@@ -452,11 +452,14 @@ fn build_worker_timing_records(
             let entry = per_worker
                 .entry((iter_u32, *rank, *worker_id))
                 .or_insert([0_u64; WORKER_TIMING_SLOT_COUNT]);
-            // Map the four named fields into the corresponding writer-record slots.
+            // Map the named fields into the corresponding writer-record slots.
             // Forward fills FWD_WALL/FWD_SETUP (both 0 on Backward events).
             // Backward fills BWD_WALL/BWD_SETUP (both 0 on Forward events).
+            // SCORING (slot 15) is filled by whichever phase scored; summing
+            // across both phases' events recovers the per-iteration total.
             // All other slots remain 0 on per-worker rows; rank-aggregated rows
-            // carry the rank-only columns.
+            // carry the rank-only columns. The f64-ms → u64 conversion matches
+            // the wall/setup fields (clamp negatives to 0, round, saturating-add).
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             {
                 entry[WORKER_TIMING_SLOT_FWD_WALL] = entry[WORKER_TIMING_SLOT_FWD_WALL]
@@ -467,6 +470,8 @@ fn build_worker_timing_records(
                     .saturating_add(timings.bwd_setup_ms.max(0.0).round() as u64);
                 entry[WORKER_TIMING_SLOT_FWD_SETUP] = entry[WORKER_TIMING_SLOT_FWD_SETUP]
                     .saturating_add(timings.fwd_setup_ms.max(0.0).round() as u64);
+                entry[WORKER_TIMING_SLOT_SCORING] = entry[WORKER_TIMING_SLOT_SCORING]
+                    .saturating_add(timings.scoring_ms.max(0.0).round() as u64);
             }
         }
     }

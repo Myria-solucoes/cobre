@@ -80,21 +80,32 @@ pub const WORKER_TIMING_SLOT_BWD_SETUP: usize = 8;
 /// into slot 11 of `cobre_io::WorkerTimingRecord`.
 pub const WORKER_TIMING_SLOT_FWD_SETUP: usize = 11;
 
+/// Writer-record slot index for `scoring_ms`.
+///
+/// Used in `training_output.rs` to map [`WorkerPhaseTimings::scoring_ms`]
+/// into slot 15 of `cobre_io::WorkerTimingRecord` — the previously-reserved
+/// trailing slot, now surfaced as a written timing column.
+pub const WORKER_TIMING_SLOT_SCORING: usize = 15;
+
 /// Per-worker timing payload for [`TrainingEvent::WorkerTiming`].
 ///
-/// Names the four populated values explicitly. Replaces the previous
-/// `[f64; 16]` payload where 12 of 16 slots were always zero on per-worker
-/// events. `WorkerPhaseTimings` is `4 × f64 = 32 bytes`; the previous
-/// payload was 128 bytes (75% waste).
+/// Names the five populated values explicitly. Replaces the previous
+/// `[f64; 16]` payload where most slots were always zero on per-worker
+/// events. `WorkerPhaseTimings` is `5 × f64 = 40 bytes`; the previous
+/// `[f64; 16]` payload was 128 bytes.
 ///
 /// On `Forward`-phase events, `forward_wall_ms` and `fwd_setup_ms` are
 /// populated; the backward fields are 0. On `Backward`-phase events,
 /// `backward_wall_ms` and `bwd_setup_ms` are populated; the forward fields
-/// are 0.
+/// are 0. `scoring_ms` is populated on whichever phase performed lazy
+/// candidate scoring (the forward emission carries the forward-region delta,
+/// the backward emission the backward-region delta); it is 0 on phases and
+/// runs that did no lazy scoring.
 ///
-/// The writer adapter in `training_output.rs` maps these four fields into the
-/// unchanged 16-wide `cobre_io::WorkerTimingRecord` via the
-/// `WORKER_TIMING_SLOT_*` constants, preserving the Parquet output schema.
+/// The writer adapter in `training_output.rs` maps these fields into the
+/// 16-wide `cobre_io::WorkerTimingRecord` via the `WORKER_TIMING_SLOT_*`
+/// constants. The record stays `[u64; 16]`; `scoring_ms` occupies the
+/// previously-reserved slot 15.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WorkerPhaseTimings {
     /// Forward-pass wall time in ms (populated on Forward; 0 on Backward).
@@ -105,6 +116,12 @@ pub struct WorkerPhaseTimings {
     pub fwd_setup_ms: f64,
     /// Backward setup time in ms (populated on Backward; 0 on Forward).
     pub bwd_setup_ms: f64,
+    /// Lazy candidate-scoring time in ms for this worker and phase.
+    ///
+    /// Populated on whichever phase performed lazy scoring (forward emission
+    /// carries the forward-region delta; backward emission the backward-region
+    /// delta); 0 when no lazy scoring ran. Pure measurement.
+    pub scoring_ms: f64,
 }
 
 /// Result of evaluating a single stopping rule at a given iteration.
@@ -535,13 +552,15 @@ pub enum TrainingEvent {
     /// | `backward_wall_ms` | Backward  | yes — populated on Backward; 0 on Forward |
     /// | `fwd_setup_ms`     | Forward   | yes — populated on Forward; 0 on Backward |
     /// | `bwd_setup_ms`     | Backward  | yes — populated on Backward; 0 on Forward |
+    /// | `scoring_ms`       | either    | yes — populated on whichever phase scored |
     ///
-    /// The writer adapter (`training_output.rs`) maps these four fields into
+    /// The writer adapter (`training_output.rs`) maps these fields into
     /// the 16-wide `cobre_io::WorkerTimingRecord` via [`WORKER_TIMING_SLOT_FWD_WALL`],
     /// [`WORKER_TIMING_SLOT_BWD_WALL`], [`WORKER_TIMING_SLOT_BWD_SETUP`],
-    /// [`WORKER_TIMING_SLOT_FWD_SETUP`]. The rank-only slots (2–7, 9–10,
-    /// 12–15) are populated by the rank-aggregated `IterationSummary` rows
-    /// rather than per-worker events.
+    /// [`WORKER_TIMING_SLOT_FWD_SETUP`], and [`WORKER_TIMING_SLOT_SCORING`]
+    /// (the previously-reserved slot 15). The remaining rank-only slots
+    /// (2–7, 9–10, 12–14) are populated by the rank-aggregated
+    /// `IterationSummary` rows rather than per-worker events.
     ///
     /// ## Recovery invariant
     ///
@@ -931,6 +950,7 @@ mod tests {
             backward_wall_ms: 0.0,
             fwd_setup_ms: 2.5,
             bwd_setup_ms: 0.0,
+            scoring_ms: 1.25,
         };
         let event = TrainingEvent::WorkerTiming {
             rank: 2,
@@ -958,6 +978,7 @@ mod tests {
         );
         assert!((t.forward_wall_ms - 10.0).abs() < f64::EPSILON);
         assert!((t.fwd_setup_ms - 2.5).abs() < f64::EPSILON);
+        assert!((t.scoring_ms - 1.25).abs() < f64::EPSILON);
         assert_eq!(t.backward_wall_ms, 0.0);
         assert_eq!(t.bwd_setup_ms, 0.0);
         // Verify Backward variant debug is also non-empty.

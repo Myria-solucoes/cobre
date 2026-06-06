@@ -236,6 +236,7 @@ fn build_iteration_timing_batch(
     let mut fwd_load_imbalance_ms = Int64Builder::with_capacity(n);
     let mut fwd_scheduling_overhead_ms = Int64Builder::with_capacity(n);
     let mut overhead_ms = Int64Builder::with_capacity(n);
+    let mut lazy_scoring_ms = Int64Builder::with_capacity(n);
 
     for rec in records {
         iteration.append_value(rec.iteration as i32);
@@ -247,7 +248,7 @@ fn build_iteration_timing_batch(
         //   6: state_exchange_ms 7: cut_batch_build_ms 8: bwd_setup_ms
         //   9: bwd_load_imbalance_ms  10: bwd_scheduling_overhead_ms
         //  11: fwd_setup_ms  12: fwd_load_imbalance_ms  13: fwd_scheduling_overhead_ms
-        //  14: overhead_ms   15: reserved
+        //  14: overhead_ms   15: lazy_scoring_ms
         forward_wall_ms.append_value(rec.timings[0] as i64);
         backward_wall_ms.append_value(rec.timings[1] as i64);
         cut_selection_ms.append_value(rec.timings[2] as i64);
@@ -263,6 +264,7 @@ fn build_iteration_timing_batch(
         fwd_load_imbalance_ms.append_value(rec.timings[12] as i64);
         fwd_scheduling_overhead_ms.append_value(rec.timings[13] as i64);
         overhead_ms.append_value(rec.timings[14] as i64);
+        lazy_scoring_ms.append_value(rec.timings[15] as i64);
     }
 
     RecordBatch::try_new(
@@ -286,6 +288,7 @@ fn build_iteration_timing_batch(
             Arc::new(fwd_load_imbalance_ms.finish()),
             Arc::new(fwd_scheduling_overhead_ms.finish()),
             Arc::new(overhead_ms.finish()),
+            Arc::new(lazy_scoring_ms.finish()),
         ],
     )
     .map_err(|e| OutputError::serialization("iteration_timing", e.to_string()))
@@ -529,8 +532,8 @@ mod tests {
         assert_eq!(batch.num_rows(), 3, "3 records yield 3 rows");
         assert_eq!(
             batch.num_columns(),
-            18,
-            "iteration_timing schema has 18 columns (16 timings + iteration + rank + worker_id)"
+            19,
+            "iteration_timing schema has 19 columns (16 timings + iteration + rank + worker_id)"
         );
 
         let expected_schema = iteration_timing_schema();
@@ -631,7 +634,7 @@ mod tests {
         let batch = reader.next().expect("must have rows").expect("batch Ok");
 
         assert_eq!(batch.num_rows(), 3);
-        assert_eq!(batch.num_columns(), 18);
+        assert_eq!(batch.num_columns(), 19);
 
         // Old column names should not be present.
         assert!(batch.column_by_name("bwd_rayon_overhead_ms").is_none());
@@ -863,7 +866,7 @@ mod tests {
             .expect("reader");
         let batch = reader.next().expect("must have rows").expect("batch Ok");
         assert_eq!(batch.num_rows(), 5);
-        assert_eq!(batch.num_columns(), 18, "timing schema has 18 columns");
+        assert_eq!(batch.num_columns(), 19, "timing schema has 19 columns");
     }
 
     #[test]

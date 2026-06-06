@@ -247,7 +247,7 @@ pub struct RowSelectionRecord {
 ///   timing columns (`worker_id = None`). Per-worker slots are `0` on this row.
 /// - One **per-worker** row per `(iteration, rank, worker_id)` carrying
 ///   per-worker slots (`forward_wall_ms`, `backward_wall_ms`, `bwd_setup_ms`,
-///   `fwd_setup_ms`). Rank-only slots are `0` on these rows.
+///   `fwd_setup_ms`, `lazy_scoring_ms`). Rank-only slots are `0` on these rows.
 ///
 /// `SUM(col) GROUP BY iteration` across all rows recovers the
 /// single-row-per-iteration value for each of the 16 timing columns.

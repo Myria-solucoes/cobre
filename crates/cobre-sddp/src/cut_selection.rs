@@ -621,8 +621,10 @@ fn apply_column_rule(
 ///
 /// The `threshold` and `memory_window` fields on `RowSelectionConfig` are
 /// silently ignored for `method = "level1" | "lml1" | "domination"`. For
-/// `method = "dynamic"` they are used: `threshold` maps to `nadic` and
-/// `memory_window` maps to `k1` (see the `"dynamic"` arm).
+/// `method = "dynamic"` they act as fallbacks for `nadic` and `k1` when the
+/// first-class fields (`nadic`, `candidate_window`) are absent; the dynamic
+/// arm also reads `violation_tolerance` (fallback `tie_tolerance`) and
+/// `start_iteration` (see the `"dynamic"` arm for the full precedence).
 ///
 /// # Errors
 ///
@@ -670,39 +672,75 @@ pub fn parse_cut_selection_config(
             }))
         }
         "dynamic" => {
-            // DCS reuses existing config fields where present:
-            //   k1           ← memory_window  (default None = ∞; Some(n) must be >= 1)
-            //   k2           ← check_frequency (default 5)
-            //   nadic        ← threshold       (default 10, must be >= 1)
-            //   epsilon_viol ← tie_tolerance   (default 1e-10, must be > 0)
-            // start_iteration has no config field → fixed default of 2.
+            // DCS hyperparameters source each value from an explicit first-class
+            // field when present, falling back to the reused field, then to the
+            // documented default:
+            //   k1              ← candidate_window, else memory_window
+            //                       (default None = ∞; Some(n) must be >= 1)
+            //   k2              ← check_frequency (default 5; no alias)
+            //   nadic           ← nadic, else threshold (default 10, must be >= 1)
+            //   epsilon_viol    ← violation_tolerance, else tie_tolerance
+            //                       (default 1e-10, must be > 0)
+            //   start_iteration ← start_iteration (default 2, must be >= 1)
+            // Validation messages name the field that actually supplied the value.
             const DEFAULT_K2: u32 = 5;
             const DEFAULT_NADIC: u32 = 10;
-            const DEFAULT_START_ITERATION: u64 = 2;
+            const DEFAULT_START_ITERATION_U32: u32 = 2;
 
-            // k1 passes through verbatim: absent/None ⇒ ∞ (exactness-preserving).
-            let k1 = config.memory_window;
-            if k1 == Some(0) {
+            // start_iteration is 1-based; the lazy loop never runs at iteration 0
+            // (no cuts exist yet), so Some(0) is rejected.
+            if config.start_iteration == Some(0) {
                 return Err(
-                    "cut_selection.memory_window (k1) must be >= 1 for method='dynamic' (use absent for k1=∞)"
-                        .to_string(),
+                    "cut_selection.start_iteration must be >= 1 for method='dynamic'".to_string(),
                 );
+            }
+            let start_iteration = u64::from(
+                config
+                    .start_iteration
+                    .unwrap_or(DEFAULT_START_ITERATION_U32),
+            );
+
+            // k1: explicit candidate_window takes precedence over memory_window.
+            // absent/None ⇒ ∞ (exactness-preserving).
+            let k1 = config.candidate_window.or(config.memory_window);
+            if k1 == Some(0) {
+                let field = if config.candidate_window.is_some() {
+                    "candidate_window"
+                } else {
+                    "memory_window"
+                };
+                return Err(format!(
+                    "cut_selection.{field} (k1) must be >= 1 for method='dynamic' (use absent for k1=∞)"
+                ));
             }
 
             let k2 = config.check_frequency.unwrap_or(DEFAULT_K2);
 
-            let nadic = config.threshold.unwrap_or(DEFAULT_NADIC);
+            let nadic = config.nadic.or(config.threshold).unwrap_or(DEFAULT_NADIC);
             if nadic == 0 {
-                return Err(
-                    "cut_selection.threshold (nadic) must be >= 1 for method='dynamic'".to_string(),
-                );
+                let field = if config.nadic.is_some() {
+                    "nadic"
+                } else {
+                    "threshold"
+                };
+                return Err(format!(
+                    "cut_selection.{field} (nadic) must be >= 1 for method='dynamic'"
+                ));
             }
 
-            let epsilon_viol = config.tie_tolerance.unwrap_or(DEFAULT_TIE_TOLERANCE);
+            let epsilon_viol = config
+                .violation_tolerance
+                .or(config.tie_tolerance)
+                .unwrap_or(DEFAULT_TIE_TOLERANCE);
             if epsilon_viol <= 0.0 {
-                return Err(
-                    "cut_selection.tie_tolerance must be > 0 for method='dynamic'".to_string(),
-                );
+                let field = if config.violation_tolerance.is_some() {
+                    "violation_tolerance"
+                } else {
+                    "tie_tolerance"
+                };
+                return Err(format!(
+                    "cut_selection.{field} must be > 0 for method='dynamic'"
+                ));
             }
 
             Ok(Some(CutSelectionStrategy::Dynamic {
@@ -710,7 +748,7 @@ pub fn parse_cut_selection_config(
                 k2,
                 nadic,
                 epsilon_viol,
-                start_iteration: DEFAULT_START_ITERATION,
+                start_iteration,
             }))
         }
         other => Err(format!("unknown cut_selection.method: \"{other}\"")),
@@ -2469,6 +2507,169 @@ mod tests {
         assert!(
             msg.contains("memory_window (k1) must be >= 1"),
             "error must mention the k1 constraint, got: {msg}"
+        );
+    }
+
+    /// The first-class explicit fields (`start_iteration`, `candidate_window`,
+    /// `nadic`, `violation_tolerance`, `check_frequency`) flow into the
+    /// `Dynamic` variant.
+    #[test]
+    fn parse_dynamic_explicit_fields() {
+        let cfg = RowSelectionConfig {
+            enabled: Some(true),
+            method: Some("dynamic".to_string()),
+            start_iteration: Some(5),
+            candidate_window: Some(20),
+            nadic: Some(3),
+            violation_tolerance: Some(1e-9),
+            check_frequency: Some(7),
+            ..RowSelectionConfig::default()
+        };
+        let strategy = parse_cut_selection_config(&cfg)
+            .expect("dynamic with explicit fields must parse")
+            .expect("must produce Some for enabled dynamic");
+        assert!(
+            matches!(
+                strategy,
+                CutSelectionStrategy::Dynamic {
+                    k1: Some(20),
+                    k2: 7,
+                    nadic: 3,
+                    epsilon_viol,
+                    start_iteration: 5,
+                } if (epsilon_viol - 1e-9).abs() < f64::EPSILON
+            ),
+            "unexpected variant or explicit fields: {strategy:?}"
+        );
+    }
+
+    /// Backward-compat: with only the reused fields set (no explicit aliases,
+    /// no `start_iteration`), `start_iteration` defaults to 2 and the reused
+    /// fields supply `k1`/`nadic`/`epsilon_viol`.
+    #[test]
+    fn parse_dynamic_reused_fields_default_start_iteration() {
+        let cfg = RowSelectionConfig {
+            enabled: Some(true),
+            method: Some("dynamic".to_string()),
+            memory_window: Some(20),
+            threshold: Some(3),
+            tie_tolerance: Some(1e-9),
+            check_frequency: Some(7),
+            ..RowSelectionConfig::default()
+        };
+        let strategy = parse_cut_selection_config(&cfg)
+            .expect("dynamic with reused fields must parse")
+            .expect("must produce Some for enabled dynamic");
+        assert!(
+            matches!(
+                strategy,
+                CutSelectionStrategy::Dynamic {
+                    k1: Some(20),
+                    k2: 7,
+                    nadic: 3,
+                    epsilon_viol,
+                    start_iteration: 2,
+                } if (epsilon_viol - 1e-9).abs() < f64::EPSILON
+            ),
+            "unexpected variant: {strategy:?}"
+        );
+    }
+
+    /// `start_iteration = Some(0)` is rejected with a message naming the field
+    /// and the `>= 1` constraint.
+    #[test]
+    fn parse_dynamic_rejects_zero_start_iteration() {
+        let cfg = RowSelectionConfig {
+            enabled: Some(true),
+            method: Some("dynamic".to_string()),
+            start_iteration: Some(0),
+            ..RowSelectionConfig::default()
+        };
+        let msg = parse_cut_selection_config(&cfg)
+            .expect_err("zero start_iteration must be rejected for dynamic");
+        assert!(
+            msg.contains("start_iteration") && msg.contains(">= 1"),
+            "error must mention start_iteration and '>= 1', got: {msg}"
+        );
+    }
+
+    /// Fallback precedence: when the explicit aliases are absent and the reused
+    /// fields are present with values DIFFERENT from the defaults, the reused
+    /// values are used (explicit-absent ⇒ fall back to reused).
+    #[test]
+    fn parse_dynamic_fallback_precedence_uses_reused_when_explicit_absent() {
+        let cfg = RowSelectionConfig {
+            enabled: Some(true),
+            method: Some("dynamic".to_string()),
+            // explicit aliases absent; reused fields present with non-default values.
+            memory_window: Some(42),
+            threshold: Some(9),
+            tie_tolerance: Some(5e-8),
+            ..RowSelectionConfig::default()
+        };
+        let strategy = parse_cut_selection_config(&cfg)
+            .expect("dynamic with reused fallbacks must parse")
+            .expect("must produce Some for enabled dynamic");
+        assert!(
+            matches!(
+                strategy,
+                CutSelectionStrategy::Dynamic {
+                    k1: Some(42),
+                    nadic: 9,
+                    epsilon_viol,
+                    ..
+                } if (epsilon_viol - 5e-8).abs() < f64::EPSILON
+            ),
+            "reused fields must supply the values when explicit aliases are absent: {strategy:?}"
+        );
+    }
+
+    /// Explicit aliases take precedence over the reused fields when both are set.
+    #[test]
+    fn parse_dynamic_explicit_overrides_reused() {
+        let cfg = RowSelectionConfig {
+            enabled: Some(true),
+            method: Some("dynamic".to_string()),
+            // both explicit and reused set with conflicting values.
+            candidate_window: Some(11),
+            memory_window: Some(99),
+            nadic: Some(4),
+            threshold: Some(88),
+            violation_tolerance: Some(2e-9),
+            tie_tolerance: Some(7e-9),
+            ..RowSelectionConfig::default()
+        };
+        let strategy = parse_cut_selection_config(&cfg)
+            .expect("dynamic with explicit+reused must parse")
+            .expect("must produce Some for enabled dynamic");
+        assert!(
+            matches!(
+                strategy,
+                CutSelectionStrategy::Dynamic {
+                    k1: Some(11),
+                    nadic: 4,
+                    epsilon_viol,
+                    ..
+                } if (epsilon_viol - 2e-9).abs() < f64::EPSILON
+            ),
+            "explicit aliases must win over reused fields: {strategy:?}"
+        );
+    }
+
+    /// A zero explicit `nadic` is rejected with a message naming `nadic`.
+    #[test]
+    fn parse_dynamic_rejects_zero_explicit_nadic() {
+        let cfg = RowSelectionConfig {
+            enabled: Some(true),
+            method: Some("dynamic".to_string()),
+            nadic: Some(0),
+            ..RowSelectionConfig::default()
+        };
+        let msg = parse_cut_selection_config(&cfg)
+            .expect_err("zero explicit nadic must be rejected for dynamic");
+        assert!(
+            msg.contains("nadic") && msg.contains(">= 1"),
+            "error must name nadic and '>= 1', got: {msg}"
         );
     }
 

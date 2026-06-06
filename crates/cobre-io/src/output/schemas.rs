@@ -250,11 +250,11 @@ pub(crate) fn convergence_schema() -> Schema {
 
 /// Schema for `training/timing/iterations.parquet` — per-iteration timing breakdown.
 ///
-/// 18 fields. Row semantics: one row per `(iteration, rank)` for
+/// 19 fields. Row semantics: one row per `(iteration, rank)` for
 /// rank-only sequential values (`worker_id = NULL`), and one row per
 /// `(iteration, rank, worker_id)` for per-worker parallel-region values.
 /// `SUM(col) GROUP BY iteration` recovers the single-row-per-iteration
-/// value for each of the 15 timing columns.
+/// value for each of the 16 timing columns.
 ///
 /// Top-level non-overlapping phases: `forward_wall_ms`,
 /// `backward_wall_ms`, `cut_selection_ms`, `mpi_allreduce_ms`,
@@ -262,7 +262,11 @@ pub(crate) fn convergence_schema() -> Schema {
 /// `state_exchange_ms`, `cut_batch_build_ms`, `bwd_setup_ms`,
 /// `bwd_load_imbalance_ms`, `bwd_scheduling_overhead_ms`.
 /// Sub-components of forward: `fwd_setup_ms`, `fwd_load_imbalance_ms`,
-/// `fwd_scheduling_overhead_ms`. Residual: `overhead_ms`.
+/// `fwd_scheduling_overhead_ms`. Residual: `overhead_ms`. The trailing
+/// `lazy_scoring_ms` column is the per-worker time spent in lazy
+/// candidate scoring inside the lazy-selection solve (0 when that solve
+/// path is not used); it is a sub-component of the forward/backward
+/// phases, not a top-level addend.
 pub(crate) fn iteration_timing_schema() -> Schema {
     Schema::new(vec![
         Field::new("iteration", DataType::Int32, false),
@@ -283,6 +287,7 @@ pub(crate) fn iteration_timing_schema() -> Schema {
         Field::new("fwd_load_imbalance_ms", DataType::Int64, false),
         Field::new("fwd_scheduling_overhead_ms", DataType::Int64, false),
         Field::new("overhead_ms", DataType::Int64, false),
+        Field::new("lazy_scoring_ms", DataType::Int64, false),
     ])
 }
 
@@ -778,8 +783,8 @@ mod tests {
         let schema = iteration_timing_schema();
         assert_eq!(
             schema.fields().len(),
-            18,
-            "iteration_timing schema must have 18 fields"
+            19,
+            "iteration_timing schema must have 19 fields"
         );
     }
 
@@ -795,7 +800,7 @@ mod tests {
             .field_with_name("worker_id")
             .expect("worker_id field must exist");
         assert!(worker_id_field.is_nullable(), "worker_id must be nullable");
-        // All other 16 timing columns must be non-nullable.
+        // All other 17 timing columns must be non-nullable.
         for field in schema.fields() {
             if field.name() != "rank" && field.name() != "worker_id" {
                 assert!(
@@ -976,7 +981,7 @@ mod tests {
             ("inflow_lags", 4),
             ("generic_violations", 5),
             ("convergence", 13),
-            ("iteration_timing", 18),
+            ("iteration_timing", 19),
             ("rank_timing", 8),
             ("cut_selection", 10),
             ("solver_iterations", 18),

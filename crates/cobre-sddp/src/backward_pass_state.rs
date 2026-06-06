@@ -1034,6 +1034,12 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
             // first stage of the first iteration.
             ws.backward_accum.staged_cuts_buf.clear();
             let worker_stage_wall_start = Instant::now();
+            // Snapshot the cumulative lazy-scoring accumulator at this stage's
+            // backward-region start; the delta below attributes scoring done in
+            // this stage to the backward phase (the accumulator is never reset,
+            // so a snapshot-delta is the only correct attribution). Stays zero
+            // on the baked path, which never enters the lazy solve.
+            let scoring_seconds_before = ws.backward_accum.dcs_solve.scoring_time_seconds;
 
             for m in start_m..end_m {
                 // Reload LP per trial point to reset HiGHS's internal simplex
@@ -1061,6 +1067,14 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
             // Accumulate per-worker elapsed into the iteration-level timing buffer.
             ws.worker_timing_buf.backward_wall_ms +=
                 worker_stage_wall_start.elapsed().as_secs_f64() * 1_000.0;
+            // Fold the backward-region lazy-scoring delta into the timing buffer
+            // (ms), mirroring the `backward_wall_ms` fold above. Zero on the
+            // baked path. The forward and backward folds write the same physical
+            // `scoring_ms` field on disjoint phase emissions, so the per-iteration
+            // total is recovered by summing across both phases' events.
+            ws.worker_timing_buf.scoring_ms += (ws.backward_accum.dcs_solve.scoring_time_seconds
+                - scoring_seconds_before)
+                * 1_000.0;
 
             // Drain the buffer into an owned Vec to cross the rayon closure
             // boundary.  `drain(..)` leaves `staged_cuts_buf` empty with its
