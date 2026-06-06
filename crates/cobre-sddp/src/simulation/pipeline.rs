@@ -546,6 +546,19 @@ fn solve_simulation_stage<S: SolverInterface>(
         .map_err(|e| map_sim_solver_error(e, ids))?;
         let objective = view.objective;
         fill_unscaled(&mut unscaled_primal, view.primal, col_scale);
+        // INVARIANT: on the DCS path `view.dual` is LONGER than the structural
+        // template — the lazy loop appends resident cut rows after the structural
+        // rows, so the dual vector carries cut-row duals at indices
+        // `>= template_num_rows` (the structural row count of `ctx.templates[t]`).
+        // This is harmless because the downstream reader,
+        // `extract_stage_result_with_lookups`, reads duals ONLY at structural-row
+        // indices (`< template_num_rows`, derived from `indexer.*_rows`) and
+        // always via `.get(idx).unwrap_or(0.0)` / a `row_idx < dual.len()` guard,
+        // never at cut-row indices. The trailing cut-row entries are therefore
+        // ignored. Do NOT truncate this slice or add a length check that assumes
+        // `dual.len() == template_num_rows`: that assumption holds on the baked
+        // path but NOT here, and enforcing it would drop the structural duals the
+        // reader needs.
         fill_unscaled_dual(&mut unscaled_dual, view.dual, row_scale);
         let _ = view;
         objective

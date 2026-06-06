@@ -5093,14 +5093,29 @@ mod tests {
 
         /// Run one forward stage (stage 0 of a 2-stage horizon, so theta is not
         /// terminal-zeroed) with the given `dcs` option and `baked` template,
-        /// returning `(stage_cost, advanced_state)`. The cut-free base is
-        /// `ctx.templates[0]`; on the baked path the caller-equivalent
-        /// `load_model(baked)` is performed here (mirroring `run_forward_worker`).
+        /// returning `(stage_cost, advanced_state, scoring_time_seconds)`. The
+        /// cut-free base is `ctx.templates[0]`; on the baked path the
+        /// caller-equivalent `load_model(baked)` is performed here (mirroring
+        /// `run_forward_worker`).
+        ///
+        /// The production `run_forward_worker` filter is reproduced verbatim:
+        /// `dcs.filter(|p| p.is_active(iteration))`. When `iteration <
+        /// start_iteration` this collapses `dcs` to `None`, so the baked path is
+        /// taken — exactly as the worker does. The returned
+        /// `scoring_time_seconds` (read from the workspace's lazy-solve scratch)
+        /// is `0.0` iff the lazy path was never entered, giving callers a faithful
+        /// witness for which branch ran.
         fn run_one_forward_stage(
             dcs: Option<DcsParams>,
             baked: &StageTemplate,
             iteration: u64,
-        ) -> (f64, Vec<f64>) {
+        ) -> (f64, Vec<f64>, f64) {
+            // Mirror run_forward_worker's per-pass gate: DCS is `Some` only when
+            // configured AND active at this iteration. This is the production
+            // suppression site; reproducing it here (rather than passing `dcs`
+            // straight through) is what makes the inactive-iteration assertion a
+            // real witness instead of a coincidence.
+            let dcs = dcs.filter(|p| p.is_active(iteration));
             let indexer = StageIndexer::new(1, 0);
             let core = fwd_core_template();
             let templates = vec![core.clone(), core.clone()];
@@ -5190,7 +5205,11 @@ mod tests {
                 &mut records,
             )
             .expect("forward stage solve must succeed");
-            (stage_cost, records[0].state.clone())
+            // The lazy-solve scratch accumulates scoring wall time only when
+            // `lazy_solve_preloaded` runs (the DCS branch). It stays exactly
+            // `0.0` on the baked path, so it witnesses which branch executed.
+            let scoring_time_seconds = ws.backward_accum.dcs_solve.scoring_time_seconds;
+            (stage_cost, records[0].state.clone(), scoring_time_seconds)
         }
 
         /// AC1: DCS branch (binding cut omitted from the seed) yields the same
@@ -5198,8 +5217,21 @@ mod tests {
         #[test]
         fn forward_dcs_exact_matches_all_cuts() {
             let all_cuts = fwd_all_cuts_baked();
-            let (baked_cost, baked_state) = run_one_forward_stage(None, &all_cuts, 5);
-            let (dcs_cost, dcs_state) = run_one_forward_stage(Some(dcs_params(2)), &all_cuts, 5);
+            // iteration 5 >= start_iteration 2 → DCS active; the filter is a pass-through.
+            let (baked_cost, baked_state, baked_scoring) =
+                run_one_forward_stage(None, &all_cuts, 5);
+            let (dcs_cost, dcs_state, dcs_scoring) =
+                run_one_forward_stage(Some(dcs_params(2)), &all_cuts, 5);
+
+            // Baked path never scores; the active DCS path does at least one pass.
+            assert_eq!(
+                baked_scoring, 0.0,
+                "baked path must not enter the lazy solve"
+            );
+            assert!(
+                dcs_scoring > 0.0,
+                "active DCS path must enter the lazy solve (scoring time accumulated)"
+            );
 
             assert!(
                 (baked_cost - dcs_cost).abs() < 1e-9,
@@ -5227,10 +5259,11 @@ mod tests {
         fn forward_dcs_baked_cuts_present_uses_cut_free_core() {
             let all_cuts = fwd_all_cuts_baked();
             let dominating = fwd_baked_dominating_cut();
-            let (allcuts_cost, allcuts_state) = run_one_forward_stage(None, &all_cuts, 5);
+            let (allcuts_cost, allcuts_state, _) = run_one_forward_stage(None, &all_cuts, 5);
             // DCS path is handed the dominating baked template, but must ignore it
             // and load the cut-free base, recovering the all-cuts result.
-            let (dcs_cost, dcs_state) = run_one_forward_stage(Some(dcs_params(2)), &dominating, 5);
+            let (dcs_cost, dcs_state, _) =
+                run_one_forward_stage(Some(dcs_params(2)), &dominating, 5);
 
             assert!(
                 (allcuts_cost - dcs_cost).abs() < 1e-9,
@@ -5246,20 +5279,69 @@ mod tests {
             }
         }
 
-        /// AC3: `dcs = Some` but `iteration < start_iteration` takes the baked
-        /// path, so the result equals the baked all-cuts run with `dcs = None`.
+        /// AC3: the `run_forward_worker` `is_active` filter actually suppresses
+        /// DCS before `start_iteration` and lets it through at/after it.
+        ///
+        /// This is a real witness, not a coincidence: the suppression is observed
+        /// directly via the `scoring_time_seconds` counter, which is `0.0` iff the
+        /// lazy solve was never entered. `run_one_forward_stage` reproduces the
+        /// production filter (`dcs.filter(|p| p.is_active(iteration))`) verbatim.
+        ///
+        /// - `start_iteration = 4`, `iteration = 1` (inactive): the filter
+        ///   collapses `dcs` to `None`, so the baked path runs — proven by
+        ///   `scoring_time_seconds == 0.0` AND a bit-for-bit match with the
+        ///   `dcs = None` baked run.
+        /// - `iteration = 4` (active): the filter lets DCS through — proven by
+        ///   `scoring_time_seconds > 0.0`.
+        ///
+        /// The `DcsParams::is_active` boundary is also asserted directly so the
+        /// filter's flip point is pinned independently of the stage solve.
         #[test]
         fn forward_dcs_inactive_before_start_iteration() {
+            // Boundary semantics of the filter predicate itself.
+            let params = dcs_params(4);
+            assert!(
+                !params.is_active(1),
+                "iteration 1 < start_iteration 4 must be inactive"
+            );
+            assert!(
+                params.is_active(4),
+                "iteration 4 == start_iteration 4 must be active"
+            );
+
             let all_cuts = fwd_all_cuts_baked();
-            // start_iteration = 4, iteration = 1 → inactive → baked path.
-            let (baked_cost, baked_state) = run_one_forward_stage(None, &all_cuts, 1);
-            let (early_cost, early_state) =
+
+            // Inactive iteration: filter suppresses DCS → baked path. The
+            // scoring counter must be exactly 0.0 (lazy solve never entered),
+            // and the result must match the dcs=None baked run bit-for-bit.
+            let (baked_cost, baked_state, baked_scoring) =
+                run_one_forward_stage(None, &all_cuts, 1);
+            let (early_cost, early_state, early_scoring) =
                 run_one_forward_stage(Some(dcs_params(4)), &all_cuts, 1);
+            assert_eq!(
+                baked_scoring, 0.0,
+                "dcs=None baked run must not score (sanity)"
+            );
+            assert_eq!(
+                early_scoring, 0.0,
+                "iteration 1 < start_iteration 4: filter must suppress DCS, so \
+                 the baked path runs and no lazy scoring occurs"
+            );
             assert_eq!(baked_cost.to_bits(), early_cost.to_bits());
             assert_eq!(baked_state.len(), early_state.len());
             for (b, e) in baked_state.iter().zip(&early_state) {
                 assert_eq!(b.to_bits(), e.to_bits());
             }
+
+            // Active iteration (== start_iteration): filter lets DCS through, so
+            // the lazy solve runs and accumulates scoring time.
+            let (_active_cost, _active_state, active_scoring) =
+                run_one_forward_stage(Some(dcs_params(4)), &all_cuts, 4);
+            assert!(
+                active_scoring > 0.0,
+                "iteration 4 >= start_iteration 4: filter must let DCS through, \
+                 so the lazy solve runs and scoring time accumulates"
+            );
         }
     }
 }
