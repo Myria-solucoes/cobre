@@ -29,6 +29,19 @@
 //! `LOWER` would break the equality and force a compensating demotion
 //! elsewhere.
 //!
+//! ## DCS path: uniform-BASIC, slot-identity-free
+//!
+//! [`reconstruct_basis_uniform_basic`] is the Dynamic Cut Selection (DCS)
+//! variant used for the initial solve of each (stage, solve). It copies the
+//! column block and template rows exactly as the baked path does, but assigns
+//! **every** resident cut row [`HIGHS_BASIS_STATUS_BASIC`] without consulting
+//! slot identity: it takes no `slot_lookup` and reads none of
+//! [`CapturedBasis::cut_row_slots`]. DCS adds its cut rows fresh each solve and
+//! does not guess which will bind, so slot alignment is unnecessary. As on the
+//! forward path, the uniform-BASIC seeding can leave an excess of basics when
+//! the captured solve had bound cuts; the caller pairs the helper with
+//! [`enforce_basic_count_invariant`] to restore the invariant.
+//!
 //! ## Forward-path basic-count invariant
 //!
 //! On the forward path, cut selection may drop cuts whose stored row status
@@ -181,6 +194,67 @@ where
     }
 
     stats
+}
+
+// ---------------------------------------------------------------------------
+// reconstruct_basis_uniform_basic (DCS path)
+// ---------------------------------------------------------------------------
+
+/// Reconstruct a [`Basis`] for the **Dynamic Cut Selection (DCS)** initial
+/// solve, assigning every cut row a uniform [`HIGHS_BASIS_STATUS_BASIC`].
+///
+/// Unlike [`reconstruct_basis`], this path is **slot-identity-free**: it takes
+/// no `slot_lookup` and consults none of [`CapturedBasis::cut_row_slots`].
+/// Under DCS the cut rows resident at the initial solve are freshly added with
+/// `add_rows`, and DCS does not guess which cuts will bind — so each cut row is
+/// seeded `BASIC` (slack basic = non-binding) rather than aligned by slot. The
+/// column block and the first `target.base_row_count` template rows are copied
+/// from `stored` (reusing the same private helpers as the baked path).
+///
+/// Because each `BASIC` cut row adds one to `row_basic`, the freshly seeded
+/// basis may carry `col_basic + row_basic > num_row` when the captured solve
+/// had bound cuts. This helper does **not** repair that: the caller pairs it
+/// with [`enforce_basic_count_invariant`]`(out, target.base_row_count +
+/// cut_row_count, target.base_row_count)` to restore the
+/// `col_basic + row_basic == num_row` invariant `HiGHS` requires.
+///
+/// ## Parameters
+///
+/// - `stored` — read-only previous-iteration basis (only the column block and
+///   the first `base_row_count` template rows are consulted).
+/// - `target` — dimensions of the current DCS LP at the initial solve.
+/// - `cut_row_count` — number of cut rows currently resident in the DCS LP.
+/// - `out` — caller-owned destination basis, cleared and refilled in place.
+///
+/// ## Allocation contract
+///
+/// Allocation-free beyond `out`'s existing capacity: the column and row buffers
+/// are cleared then re-extended/resized, never reallocated when already sized by
+/// a previous call.
+pub fn reconstruct_basis_uniform_basic(
+    stored: &CapturedBasis,
+    target: ReconstructionTarget,
+    cut_row_count: usize,
+    out: &mut Basis,
+) {
+    reconstruct_col_statuses(stored, target, out);
+    reconstruct_template_row_statuses(stored, target, out);
+
+    // Precondition: the template-row pass must leave exactly `base_row_count`
+    // entries so the resize below appends exactly `cut_row_count` cut rows.
+    debug_assert_eq!(
+        out.row_status.len(),
+        target.base_row_count,
+        "reconstruct_template_row_statuses must leave exactly base_row_count entries before \
+         cut-row seeding"
+    );
+
+    // Seed every resident cut row BASIC. The caller repairs the basic-count
+    // invariant afterward via `enforce_basic_count_invariant`.
+    out.row_status.resize(
+        target.base_row_count + cut_row_count,
+        HIGHS_BASIS_STATUS_BASIC,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -365,7 +439,8 @@ mod tests {
 
     use super::{
         HIGHS_BASIS_STATUS_BASIC as B, HIGHS_BASIS_STATUS_LOWER as L, ReconstructionStats,
-        ReconstructionTarget, reconstruct_basis,
+        ReconstructionTarget, enforce_basic_count_invariant, reconstruct_basis,
+        reconstruct_basis_uniform_basic,
     };
     use crate::workspace::CapturedBasis;
 
@@ -561,5 +636,120 @@ mod tests {
             out.row_status.iter().all(|&s| s == B),
             "template rows must be copied verbatim (all BASIC in this fixture)",
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // reconstruct_basis_uniform_basic (DCS path) — unit tests
+    // -----------------------------------------------------------------------
+
+    /// AC1: `base_row_count = 2`, column block `[B, B, L]`, 2 template rows
+    /// `[L, L]`, 4 cut rows. All 4 cut rows are seeded BASIC; the column block
+    /// and template rows are copied verbatim.
+    #[test]
+    fn uniform_basic_appends_all_basic_cut_rows() {
+        // Template rows must be LOWER here, so build the CapturedBasis directly
+        // rather than via make_stored_basis (which forces template rows BASIC).
+        let mut stored = CapturedBasis::new(3, 2, 2, 0, 0);
+        stored.basis.col_status.clear();
+        stored.basis.col_status.extend_from_slice(&[B, B, L]);
+        stored.basis.row_status.clear();
+        stored.basis.row_status.extend_from_slice(&[L, L]);
+
+        let target = ReconstructionTarget {
+            base_row_count: 2,
+            num_cols: 3,
+        };
+        let mut out = Basis::new(0, 0);
+
+        reconstruct_basis_uniform_basic(&stored, target, 4, &mut out);
+
+        assert_eq!(out.col_status, vec![B, B, L]);
+        assert_eq!(out.row_status.len(), 6);
+        assert_eq!(&out.row_status[0..2], &[L, L]);
+        assert_eq!(&out.row_status[2..6], &[B, B, B, B]);
+    }
+
+    /// AC2 (corrected): chaining the helper with `enforce_basic_count_invariant`
+    /// balances the basic-count invariant. Start from the AC1 fill but with an
+    /// all-BASIC column block (`col_basic = 3`) and template rows `[L, L]`
+    /// (`row_basic` from cut rows = 4) → `total_basic = 7 > num_row = 6`. The
+    /// repair demotes exactly one trailing BASIC cut row to LOWER (returns 1),
+    /// and `col_basic + row_basic == 6` afterward.
+    #[test]
+    fn uniform_basic_then_invariant_repair_balances() {
+        let mut stored = CapturedBasis::new(3, 2, 2, 0, 0);
+        stored.basis.col_status.clear();
+        stored.basis.col_status.extend_from_slice(&[B, B, B]); // col_basic = 3
+        stored.basis.row_status.clear();
+        stored.basis.row_status.extend_from_slice(&[L, L]); // template rows LOWER
+
+        let target = ReconstructionTarget {
+            base_row_count: 2,
+            num_cols: 3,
+        };
+        let mut out = Basis::new(0, 0);
+
+        reconstruct_basis_uniform_basic(&stored, target, 4, &mut out);
+        // Pre-repair: col_status = [B, B, B], row_status = [L, L, B, B, B, B].
+        assert_eq!(out.col_status, vec![B, B, B]);
+        assert_eq!(out.row_status, vec![L, L, B, B, B, B]);
+
+        let num_row = target.base_row_count + 4; // 6
+        let demotions = enforce_basic_count_invariant(&mut out, num_row, target.base_row_count);
+        assert_eq!(demotions, 1, "exactly one excess BASIC cut row demoted");
+
+        let col_basic = out.col_status.iter().filter(|&&s| s == B).count();
+        let row_basic = out.row_status.iter().filter(|&&s| s == B).count();
+        assert_eq!(
+            col_basic + row_basic,
+            num_row,
+            "col_basic + row_basic must equal num_row after repair"
+        );
+    }
+
+    /// AC3: the helper consults none of `stored.cut_row_slots`. The result with
+    /// a non-empty slot list must be identical to the same call with the slots
+    /// cleared.
+    #[test]
+    fn uniform_basic_ignores_cut_row_slots() {
+        let target = ReconstructionTarget {
+            base_row_count: 1,
+            num_cols: 2,
+        };
+
+        // Stored with a populated (but to-be-ignored) cut_row_slots list.
+        let with_slots = make_stored_basis(1, 2, &[10, 20, 30], &[B, L, B], &[1.0]);
+        assert!(
+            !with_slots.cut_row_slots.is_empty(),
+            "fixture must have non-empty cut_row_slots to make the test meaningful"
+        );
+        let mut out_with = Basis::new(0, 0);
+        reconstruct_basis_uniform_basic(&with_slots, target, 3, &mut out_with);
+
+        // Same stored basis with the slots cleared.
+        let mut without_slots = make_stored_basis(1, 2, &[10, 20, 30], &[B, L, B], &[1.0]);
+        without_slots.cut_row_slots.clear();
+        let mut out_without = Basis::new(0, 0);
+        reconstruct_basis_uniform_basic(&without_slots, target, 3, &mut out_without);
+
+        assert_eq!(out_with.col_status, out_without.col_status);
+        assert_eq!(out_with.row_status, out_without.row_status);
+    }
+
+    /// AC4: `cut_row_count = 0` appends no cut rows; only the template rows
+    /// remain.
+    #[test]
+    fn uniform_basic_zero_cut_rows() {
+        let stored = make_stored_basis(3, 2, &[10, 20], &[B, L], &[1.0]);
+        let target = ReconstructionTarget {
+            base_row_count: 3,
+            num_cols: 2,
+        };
+        let mut out = Basis::new(0, 0);
+
+        reconstruct_basis_uniform_basic(&stored, target, 0, &mut out);
+
+        assert_eq!(out.row_status.len(), 3);
+        assert_eq!(out.col_status.len(), 2);
     }
 }

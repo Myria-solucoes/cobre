@@ -39,6 +39,7 @@ pub(crate) mod conversion;
 pub mod cut;
 pub mod cut_selection;
 pub mod cut_sync;
+pub mod dcs;
 pub mod energy_conversion;
 pub mod error;
 pub mod estimation;

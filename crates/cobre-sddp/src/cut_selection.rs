@@ -238,6 +238,51 @@ pub enum CutSelectionStrategy {
         /// Number of iterations between selection runs. Must be > 0.
         check_frequency: u64,
     },
+
+    /// Dynamic Cut Selection (DCS): a per-solve lazy selection loop, NOT a
+    /// pool-level deactivation pass.
+    ///
+    /// Unlike [`Level1`](CutSelectionStrategy::Level1),
+    /// [`Lml1`](CutSelectionStrategy::Lml1), and
+    /// [`Dominated`](CutSelectionStrategy::Dominated), DCS never deactivates or
+    /// reactivates cuts at the pool level: [`should_run`] always returns
+    /// `false` and [`select_for_stage`] always returns empty
+    /// [`CutActivityUpdates`]. Instead, DCS operates lazily within each LP solve
+    /// (wired by later DCS work), treating every pool cut as a candidate when
+    /// `k1 = None` (∞). Because exactness rests on that `∞` default, DCS is
+    /// mutually exclusive with the value-based pool passes — selecting `dynamic`
+    /// guarantees Level1/Lml1/Dominated do not run.
+    ///
+    /// [`should_run`]: CutSelectionStrategy::should_run
+    /// [`select_for_stage`]: CutSelectionStrategy::select_for_stage
+    Dynamic {
+        /// Candidate-recency window.
+        ///
+        /// `None` means `∞`: every pool cut is a candidate. This is the
+        /// exactness-preserving default — when `k1 = None` every pool cut is
+        /// always a candidate, so no cut can be silently excluded from the lazy
+        /// loop.
+        ///
+        /// `Some(n)` restricts candidates to cuts whose `iteration_generated`
+        /// is within the last `n` SDDP iterations (the paper's windowed
+        /// behavior). This mode is deliberately NOT exact: cuts older than the
+        /// window are never added, even when violated.
+        k1: Option<u32>,
+
+        /// Maximum number of cuts added per lazy-solve round.
+        k2: u32,
+
+        /// Number of most-violated candidate cuts considered per round (the
+        /// `n`-adic candidate count). Must be `>= 1`.
+        nadic: u32,
+
+        /// Absolute violation tolerance for accepting a candidate cut. Must be
+        /// `> 0`.
+        epsilon_viol: f64,
+
+        /// First training iteration at which the lazy loop becomes active.
+        start_iteration: u64,
+    },
 }
 
 impl CutSelectionStrategy {
@@ -270,6 +315,9 @@ impl CutSelectionStrategy {
             | Self::Dominated {
                 check_frequency, ..
             } => *check_frequency,
+            // DCS is a per-solve lazy loop, not a periodic pool-level pass, so
+            // it never runs as a pool selection scan.
+            Self::Dynamic { .. } => return false,
         };
         iteration > 0 && iteration.is_multiple_of(freq)
     }
@@ -357,6 +405,16 @@ impl CutSelectionStrategy {
         current_iteration: u64,
         stage_index: u32,
     ) -> CutActivityUpdates {
+        // DCS performs no pool-level deactivation/reactivation — it selects
+        // lazily within each LP solve. Return an empty update set immediately.
+        if let CutSelectionStrategy::Dynamic { .. } = self {
+            return CutActivityUpdates {
+                stage_index,
+                updates: vec![],
+                reactivations: vec![],
+            };
+        }
+
         let populated = pool.populated_count;
         let n_state = pool.state_dimension;
         let warm_start = pool.warm_start_count as usize;
@@ -540,6 +598,12 @@ fn apply_column_rule(
                 }
             }
         }
+        // Unreachable: `select_for_stage` short-circuits the `Dynamic` variant
+        // with an empty update set before the kernel is ever entered, so
+        // `apply_column_rule` is never called for DCS.
+        CutSelectionStrategy::Dynamic { .. } => {
+            unreachable!("Dynamic cut selection does not run the value-evaluation kernel")
+        }
     }
 }
 
@@ -556,8 +620,9 @@ fn apply_column_rule(
 /// `tie_tolerance = 1e-10`.
 ///
 /// The `threshold` and `memory_window` fields on `RowSelectionConfig` are
-/// silently ignored — they are retained in the config struct for backward
-/// compatibility with existing config files only.
+/// silently ignored for `method = "level1" | "lml1" | "domination"`. For
+/// `method = "dynamic"` they are used: `threshold` maps to `nadic` and
+/// `memory_window` maps to `k1` (see the `"dynamic"` arm).
 ///
 /// # Errors
 ///
@@ -602,6 +667,50 @@ pub fn parse_cut_selection_config(
             Ok(Some(CutSelectionStrategy::Dominated {
                 threshold: epsilon,
                 check_frequency: u64::from(check_frequency),
+            }))
+        }
+        "dynamic" => {
+            // DCS reuses existing config fields where present:
+            //   k1           ← memory_window  (default None = ∞; Some(n) must be >= 1)
+            //   k2           ← check_frequency (default 5)
+            //   nadic        ← threshold       (default 10, must be >= 1)
+            //   epsilon_viol ← tie_tolerance   (default 1e-10, must be > 0)
+            // start_iteration has no config field → fixed default of 2.
+            const DEFAULT_K2: u32 = 5;
+            const DEFAULT_NADIC: u32 = 10;
+            const DEFAULT_START_ITERATION: u64 = 2;
+
+            // k1 passes through verbatim: absent/None ⇒ ∞ (exactness-preserving).
+            let k1 = config.memory_window;
+            if k1 == Some(0) {
+                return Err(
+                    "cut_selection.memory_window (k1) must be >= 1 for method='dynamic' (use absent for k1=∞)"
+                        .to_string(),
+                );
+            }
+
+            let k2 = config.check_frequency.unwrap_or(DEFAULT_K2);
+
+            let nadic = config.threshold.unwrap_or(DEFAULT_NADIC);
+            if nadic == 0 {
+                return Err(
+                    "cut_selection.threshold (nadic) must be >= 1 for method='dynamic'".to_string(),
+                );
+            }
+
+            let epsilon_viol = config.tie_tolerance.unwrap_or(DEFAULT_TIE_TOLERANCE);
+            if epsilon_viol <= 0.0 {
+                return Err(
+                    "cut_selection.tie_tolerance must be > 0 for method='dynamic'".to_string(),
+                );
+            }
+
+            Ok(Some(CutSelectionStrategy::Dynamic {
+                k1,
+                k2,
+                nadic,
+                epsilon_viol,
+                start_iteration: DEFAULT_START_ITERATION,
             }))
         }
         other => Err(format!("unknown cut_selection.method: \"{other}\"")),
@@ -2247,5 +2356,169 @@ mod tests {
             r1, r8,
             "select_for_stage must be byte-identical across thread counts"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Dynamic (DCS) variant tests
+    // -----------------------------------------------------------------------
+
+    /// `method = "dynamic"` with no overrides maps to the documented defaults.
+    #[test]
+    fn parse_dynamic_defaults() {
+        let cfg = RowSelectionConfig {
+            enabled: Some(true),
+            method: Some("dynamic".to_string()),
+            ..RowSelectionConfig::default()
+        };
+        let strategy = parse_cut_selection_config(&cfg)
+            .expect("dynamic with defaults must parse")
+            .expect("must produce Some for enabled dynamic");
+        assert!(
+            matches!(
+                strategy,
+                CutSelectionStrategy::Dynamic {
+                    k1: None,
+                    k2: 5,
+                    nadic: 10,
+                    epsilon_viol,
+                    start_iteration: 2,
+                } if (epsilon_viol - 1e-10).abs() < 1e-20
+            ),
+            "unexpected variant or defaults: {strategy:?}"
+        );
+    }
+
+    /// `memory_window`/`check_frequency`/`threshold`/`tie_tolerance` overrides
+    /// flow into `k1`/`k2`/`nadic`/`epsilon_viol`; `start_iteration` keeps its
+    /// default.
+    #[test]
+    fn parse_dynamic_overrides() {
+        let cfg = RowSelectionConfig {
+            enabled: Some(true),
+            method: Some("dynamic".to_string()),
+            memory_window: Some(20),
+            check_frequency: Some(7),
+            threshold: Some(3),
+            tie_tolerance: Some(1e-9),
+            ..RowSelectionConfig::default()
+        };
+        let strategy = parse_cut_selection_config(&cfg)
+            .expect("dynamic with overrides must parse")
+            .expect("must produce Some for enabled dynamic");
+        assert!(
+            matches!(
+                strategy,
+                CutSelectionStrategy::Dynamic {
+                    k1: Some(20),
+                    k2: 7,
+                    nadic: 3,
+                    epsilon_viol,
+                    start_iteration: 2,
+                } if (epsilon_viol - 1e-9).abs() < f64::EPSILON
+            ),
+            "unexpected variant or overrides: {strategy:?}"
+        );
+    }
+
+    /// A non-positive `tie_tolerance` is rejected for `method = "dynamic"`.
+    #[test]
+    fn parse_dynamic_rejects_nonpositive_epsilon() {
+        let cfg = RowSelectionConfig {
+            enabled: Some(true),
+            method: Some("dynamic".to_string()),
+            tie_tolerance: Some(-1.0),
+            ..RowSelectionConfig::default()
+        };
+        let msg = parse_cut_selection_config(&cfg)
+            .expect_err("non-positive tie_tolerance must be rejected for dynamic");
+        assert!(
+            msg.contains("tie_tolerance must be > 0"),
+            "error must mention the tie_tolerance constraint, got: {msg}"
+        );
+    }
+
+    /// A zero `threshold` (nadic) is rejected for `method = "dynamic"`.
+    #[test]
+    fn parse_dynamic_rejects_zero_nadic() {
+        let cfg = RowSelectionConfig {
+            enabled: Some(true),
+            method: Some("dynamic".to_string()),
+            threshold: Some(0),
+            ..RowSelectionConfig::default()
+        };
+        let msg = parse_cut_selection_config(&cfg)
+            .expect_err("zero threshold (nadic) must be rejected for dynamic");
+        assert!(
+            msg.contains("nadic"),
+            "error must mention the nadic constraint, got: {msg}"
+        );
+    }
+
+    /// A zero `memory_window` (k1) is rejected for `method = "dynamic"`.
+    /// (Absent/`None` is valid and means ∞; only `Some(0)` is an error.)
+    #[test]
+    fn parse_dynamic_rejects_zero_k1() {
+        let cfg = RowSelectionConfig {
+            enabled: Some(true),
+            method: Some("dynamic".to_string()),
+            memory_window: Some(0),
+            ..RowSelectionConfig::default()
+        };
+        let msg = parse_cut_selection_config(&cfg)
+            .expect_err("zero memory_window (k1) must be rejected for dynamic");
+        assert!(
+            msg.contains("memory_window (k1) must be >= 1"),
+            "error must mention the k1 constraint, got: {msg}"
+        );
+    }
+
+    /// `should_run` returns `false` for `Dynamic` at every iteration.
+    #[test]
+    fn dynamic_should_run_always_false() {
+        let strategy = CutSelectionStrategy::Dynamic {
+            k1: None,
+            k2: 5,
+            nadic: 10,
+            epsilon_viol: 1e-10,
+            start_iteration: 2,
+        };
+        for iteration in [0_u64, 1, 2, 5, 100] {
+            assert!(
+                !strategy.should_run(iteration),
+                "Dynamic must never run as a pool-level pass (iteration {iteration})"
+            );
+        }
+    }
+
+    /// `select_for_stage` returns empty updates for `Dynamic`, regardless of a
+    /// non-empty pool and visited states.
+    #[test]
+    fn dynamic_select_returns_empty() {
+        let strategy = CutSelectionStrategy::Dynamic {
+            k1: None,
+            k2: 5,
+            nadic: 10,
+            epsilon_viol: 1e-10,
+            start_iteration: 2,
+        };
+        let mut pool = CutPool::new(3, 1, 1, 0);
+        pool.add_cut(0, 0, 1.0, &[0.0]);
+        pool.add_cut(1, 0, 5.0, &[0.0]);
+        pool.add_cut(2, 0, 3.0, &[0.0]);
+
+        let result = strategy.select_for_stage(&pool, &[0.0], 10, 4);
+        assert!(
+            result.updates.is_empty(),
+            "Dynamic must produce no deactivations"
+        );
+        assert!(
+            result.reactivations.is_empty(),
+            "Dynamic must produce no reactivations"
+        );
+
+        // `select` delegates to `select_for_stage` with stage 0.
+        let via_select = strategy.select(&pool, &[0.0], 10);
+        assert!(via_select.updates.is_empty());
+        assert!(via_select.reactivations.is_empty());
     }
 }

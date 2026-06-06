@@ -197,9 +197,7 @@ pub fn sync_forward<C: Communicator>(
     }
     let mean = welford.mean();
     let (std_dev, ci_95) = if global_n > 1 {
-        let sd = welford.sample_std_dev();
-        let ci = welford.sample_ci_95_half_width();
-        (sd, ci)
+        (welford.sample_std_dev(), welford.sample_ci_95_half_width())
     } else {
         (0.0_f64, 0.0_f64)
     };
@@ -215,47 +213,10 @@ pub fn sync_forward<C: Communicator>(
     })
 }
 
-/// Construct a [`RowBatch`] from the active cuts at the given stage.
-///
-/// Each active cut `(slot, intercept, coefficients)` from [`FutureCostFunction::active_cuts`]
-/// becomes one row in the batch. The cut constraint
-///
-/// ```text
-/// theta >= intercept + sum_i(coefficients[i] * state[i])
-/// ```
-///
-/// is reformulated in standard row form as:
-///
-/// ```text
-/// -coefficients[0] * x[0] - ... - coefficients[n-1] * x[n-1] + theta >= intercept
-/// ```
-///
-/// so the row has:
-/// - `col_indices` = `[0, 1, ..., n_state-1, theta_col]`
-/// - `values` = `[-coefficients[0], ..., -coefficients[n-1], 1.0]`
-/// - `row_lower` = `intercept`
-/// - `row_upper` = `f64::INFINITY`
-///
-/// Returns an empty [`RowBatch`] (with `num_rows = 0`) when there are no
-/// active cuts at the stage.
-///
-/// # Arguments
-///
-/// - `fcf` — Future Cost Function containing the cut pools.
-/// - `stage` — 0-based stage index.
-/// - `indexer` — LP layout map; provides `n_state` and `theta`.
-///
-/// # Panics
-///
-/// Panics if the total number of non-zeros in the cut batch exceeds `i32::MAX`,
-/// which would exceed the `HiGHS` API index limit. In practice this cannot occur
-/// for any realistic problem size.
-
 /// Push one negated, scaled coefficient entry into the cut row batch.
 ///
 /// Shared by the sparse and dense paths in [`build_cut_row_batch_into`] to
 /// prevent the two branches from drifting apart during maintenance.
-#[allow(clippy::empty_line_after_doc_comments)]
 #[inline]
 fn push_scaled_coefficient(batch: &mut RowBatch, j: usize, coeff: f64, col_scale: &[f64]) {
     debug_assert!(
@@ -270,6 +231,73 @@ fn push_scaled_coefficient(batch: &mut RowBatch, j: usize, coeff: f64, col_scale
         col_scale[j]
     };
     batch.values.push(-coeff * d);
+}
+
+/// Append one Benders cut row to `batch` in CSR form.
+///
+/// Emits the negated-scaled state coefficients (via [`push_scaled_coefficient`],
+/// sparse over `indexer.nonzero_state_indices` when non-empty, else dense over
+/// all state indices), the positive scaled `theta` column entry, and the row
+/// bounds `row_lower = intercept`, `row_upper = +INFINITY` — exactly the layout
+/// [`build_cut_row_batch_into`] and [`append_new_cuts_to_lp`] use.
+///
+/// The caller pushes the `row_starts` offset for this row before calling (and
+/// the final terminator / `num_rows` / `add_rows` afterward); this helper only
+/// appends the row's non-zeros and bounds. Shared by `append_new_cuts_to_lp`
+/// ("all not-yet-resident" cuts) and the DCS `append_slots_to_lp` (an explicit
+/// slot set) so the two cannot drift apart.
+#[inline]
+pub(crate) fn push_cut_row(
+    batch: &mut RowBatch,
+    intercept: f64,
+    coefficients: &[f64],
+    indexer: &StageIndexer,
+    col_scale: &[f64],
+) {
+    let theta_col = indexer.theta;
+    let mask = &indexer.nonzero_state_indices;
+
+    if mask.is_empty() {
+        for (j, &c) in coefficients.iter().enumerate() {
+            let lp_col = indexer.state_to_lp_column(j);
+            // Padding-slot invariant: when state_to_lp_column returns j unchanged
+            // and j falls inside the anticipated-state block, the slot is a padding
+            // slot (slot >= k_p for its plant). The INVARIANT comment in
+            // state_to_lp_column explains the 5-step chain that guarantees the
+            // corresponding cut coefficient is 0.0. Assert this in debug builds.
+            debug_assert!(
+                !(lp_col == j
+                    && indexer.n_anticipated > 0
+                    && j >= indexer.anticipated_state.start
+                    && j < indexer.anticipated_state.start + indexer.n_anticipated * indexer.k_max)
+                    || c == 0.0,
+                "padding-slot j={j} has non-zero cut coefficient {c}; \
+                 shift_anticipated_state must have seeded a non-zero into a padding slot"
+            );
+            push_scaled_coefficient(batch, lp_col, c, col_scale);
+        }
+    } else {
+        for &j in mask {
+            let lp_col = indexer.state_to_lp_column(j);
+            push_scaled_coefficient(batch, lp_col, coefficients[j], col_scale);
+        }
+    }
+
+    debug_assert!(
+        i32::try_from(theta_col).is_ok(),
+        "theta_col={theta_col} exceeds i32::MAX"
+    );
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    batch.col_indices.push(theta_col as i32);
+    let d_theta = if col_scale.is_empty() {
+        1.0
+    } else {
+        col_scale[theta_col]
+    };
+    batch.values.push(d_theta);
+
+    batch.row_lower.push(intercept);
+    batch.row_upper.push(f64::INFINITY);
 }
 
 /// Fill a pre-allocated [`RowBatch`] with Benders cut rows from the FCF.
@@ -599,7 +627,6 @@ pub fn append_new_cuts_to_lp<S: SolverInterface>(
     batch_buf.clear();
 
     let n_state = indexer.n_state;
-    let theta_col = indexer.theta;
     let mask = &indexer.nonzero_state_indices;
     let is_sparse = !mask.is_empty();
     let nnz_per_cut = if is_sparse {
@@ -625,38 +652,104 @@ pub fn append_new_cuts_to_lp<S: SolverInterface>(
             expected = n_state,
         );
 
-        // Build the row using the same transformation as build_cut_row_batch_into.
-        // Sparse path iterates only nonzero state indices; dense path iterates
-        // all. Both use state_to_lp_column to remap outgoing-state indices to
-        // LP columns.
+        // Build the row using the shared cut-row constructor (negated-scaled
+        // state coefficients + positive theta column + row bounds), the same
+        // transformation as build_cut_row_batch_into.
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         batch_buf.row_starts.push(nz_offset as i32);
 
-        if is_sparse {
-            for &j in mask {
-                let lp_col = indexer.state_to_lp_column(j);
-                push_scaled_coefficient(batch_buf, lp_col, coefficients[j], col_scale);
-            }
-        } else {
-            for (j, &c) in coefficients.iter().enumerate() {
-                let lp_col = indexer.state_to_lp_column(j);
-                push_scaled_coefficient(batch_buf, lp_col, c, col_scale);
-            }
-        }
-
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-        batch_buf.col_indices.push(theta_col as i32);
-        let d_theta = if col_scale.is_empty() {
-            1.0
-        } else {
-            col_scale[theta_col]
-        };
-        batch_buf.values.push(d_theta);
-
-        batch_buf.row_lower.push(intercept);
-        batch_buf.row_upper.push(f64::INFINITY);
+        push_cut_row(batch_buf, intercept, coefficients, indexer, col_scale);
 
         row_map.insert(slot);
+        new_count += 1;
+        nz_offset += nnz_per_cut;
+    }
+
+    if new_count > 0 {
+        let total_nnz = new_count * nnz_per_cut;
+        #[allow(clippy::expect_used)]
+        batch_buf.row_starts.push(
+            i32::try_from(total_nnz)
+                .expect("total_nnz exceeds i32::MAX; LP exceeds HiGHS API limit"),
+        );
+        batch_buf.num_rows = new_count;
+        solver.add_rows(batch_buf);
+    }
+
+    new_count
+}
+
+/// Append an explicit set of cut slots from a [`CutPool`] to a live solver.
+///
+/// The DCS analogue of [`append_new_cuts_to_lp`]: instead of "all active cuts
+/// not yet resident", it adds exactly the slots in `slots`, skipping any that
+/// are inactive or already resident in `row_map`. Each added row is built with
+/// the shared [`push_cut_row`] constructor (identical layout to
+/// [`append_new_cuts_to_lp`]) and recorded in `row_map`.
+///
+/// Returns the number of cut rows actually appended (`0` if none — `slots` was
+/// empty or every slot was inactive/already resident, in which case no
+/// `add_rows` call is made).
+///
+/// # Parameters
+///
+/// - `solver`: live LP solver with a loaded model.
+/// - `pool`: the cut pool to read intercepts/coefficients/active flags from.
+/// - `slots`: the slot ids to append, in caller order (the LP row order follows
+///   this order for the appended subset).
+/// - `indexer`: provides `n_state`, `theta`, and the state→column mapping.
+/// - `col_scale`: column scaling factors (empty slice ⇒ no scaling).
+/// - `row_map`: per-(stage, solve) [`CutRowMap`] to update.
+/// - `batch_buf`: reusable [`RowBatch`] buffer.
+///
+/// # Panics
+///
+/// Panics if the total non-zero count exceeds `i32::MAX` (the `HiGHS` API
+/// limit), matching [`append_new_cuts_to_lp`].
+pub fn append_slots_to_lp<S: SolverInterface>(
+    solver: &mut S,
+    pool: &crate::cut::CutPool,
+    slots: &[u32],
+    indexer: &StageIndexer,
+    col_scale: &[f64],
+    row_map: &mut crate::cut::CutRowMap,
+    batch_buf: &mut RowBatch,
+) -> usize {
+    batch_buf.clear();
+
+    let n_state = indexer.n_state;
+    let mask = &indexer.nonzero_state_indices;
+    let is_sparse = !mask.is_empty();
+    let nnz_per_cut = if is_sparse {
+        mask.len() + 1
+    } else {
+        n_state + 1
+    };
+
+    let mut new_count = 0usize;
+    let mut nz_offset = 0usize;
+
+    for &slot in slots {
+        let slot_usize = slot as usize;
+
+        // Skip inactive cuts and cuts already resident in the LP.
+        if slot_usize >= pool.populated_count
+            || !pool.active[slot_usize]
+            || row_map.lp_row_for_slot(slot_usize).is_some()
+        {
+            continue;
+        }
+
+        let intercept = pool.intercepts[slot_usize];
+        let start = slot_usize * n_state;
+        let coefficients = &pool.coefficients[start..start + n_state];
+
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        batch_buf.row_starts.push(nz_offset as i32);
+
+        push_cut_row(batch_buf, intercept, coefficients, indexer, col_scale);
+
+        row_map.insert(slot_usize);
         new_count += 1;
         nz_offset += nnz_per_cut;
     }
@@ -744,8 +837,8 @@ pub(crate) struct StageKey<'a> {
     /// (the baked template absorbs all active cut rows as structural
     /// rows). Used to pre-allocate basis storage and avoid
     /// per-scenario heap reallocation. Consumed by
-    /// `run_forward_stage` (line 849), the captured-basis metadata
-    /// computation (line 1072), and `CapturedBasis::new` (line 1085).
+    /// `run_forward_stage`, the captured-basis metadata computation, and
+    /// `CapturedBasis::new`.
     pub(crate) basis_row_capacity: usize,
     /// True when the last study stage (`T-1`) has at least one warm-start
     /// (boundary) cut.  When true, the theta column at the terminal stage is

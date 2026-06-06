@@ -942,6 +942,11 @@ where
                         check_frequency,
                         ..
                     } => *check_frequency,
+                    crate::cut_selection::CutSelectionStrategy::Dynamic { .. } => {
+                        unreachable!(
+                            "DCS never runs as a periodic pool pass; should_run is always false"
+                        )
+                    }
                 };
                 archive.trim_to_window(check_freq);
             }
