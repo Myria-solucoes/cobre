@@ -7,6 +7,9 @@
 use cobre_solver::{Basis, ProfiledSolver, SolverInterface};
 
 use crate::backward::StagedCut;
+use crate::dcs::DcsSolveScratch;
+use crate::lp_builder::PatchBuffer;
+use crate::risk_measure::{BackwardOutcome, RiskMeasureScratch};
 
 // ---------------------------------------------------------------------------
 // CapturedBasis
@@ -303,9 +306,6 @@ impl CapturedBasis {
     }
 }
 
-use crate::lp_builder::PatchBuffer;
-use crate::risk_measure::{BackwardOutcome, RiskMeasureScratch};
-
 /// Sizing parameters shared by [`SolverWorkspace`], [`WorkspacePool`], and
 /// `ScratchBuffers` constructors.
 ///
@@ -443,6 +443,14 @@ pub(crate) struct BackwardAccumulators {
     /// to `n_openings` on the first `CVaR` call and are reused thereafter.
     /// For `RiskMeasure::Expectation` these buffers are never accessed.
     pub(crate) risk_scratch: RiskMeasureScratch,
+    /// Reusable scratch for the dynamic-cut-selection lazy solve. Only touched
+    /// when the dynamic cut-selection method is active; its internal buffers
+    /// grow monotonically and are reused across openings and trial points.
+    pub(crate) dcs_solve: DcsSolveScratch,
+    /// Metadata-seeded initial resident-cut set for the dynamic-cut-selection
+    /// lazy solve. Cleared and refilled per (trial point, opening); capacity
+    /// grows to the cut-pool size and is then reused.
+    pub(crate) dcs_initial_resident: Vec<u32>,
 }
 
 impl BackwardAccumulators {
@@ -459,6 +467,8 @@ impl BackwardAccumulators {
                 objective_value: 0.0,
             })
             .collect();
+        let mut dcs_solve = DcsSolveScratch::default();
+        dcs_solve.reserve(n_state, initial_pool_capacity);
         Self {
             outcomes,
             slot_increments: vec![0u64; initial_pool_capacity],
@@ -469,6 +479,8 @@ impl BackwardAccumulators {
             cut_duals_buf: Vec::new(),
             staged_cuts_buf: Vec::new(),
             risk_scratch: RiskMeasureScratch::new(),
+            dcs_solve,
+            dcs_initial_resident: Vec::with_capacity(initial_pool_capacity),
         }
     }
 }

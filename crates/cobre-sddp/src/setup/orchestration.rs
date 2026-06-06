@@ -11,6 +11,7 @@ use cobre_solver::{SolverError, SolverInterface};
 use crate::{
     config::{CutManagementConfig, EventConfig, LoopConfig, TrainingConfig},
     context::{StageContext, TrainingContext},
+    dcs::DcsParams,
     error::SddpError,
     simulation::{
         SimulationOutputSpec, error::SimulationError, pipeline::SimulationRunResult,
@@ -106,6 +107,13 @@ impl StudySetup {
             external_ncs_library: tr.external_ncs.as_ref(),
             recent_accum_seed: &self.recent_observation_seed.accum_seed,
             recent_weight_seed: self.recent_observation_seed.weight_seed,
+            // DCS params reach the backward hot path via this context field.
+            // `Some` only for the dynamic cut-selection method; `None` otherwise.
+            dcs: self
+                .cut_management
+                .cut_selection
+                .as_ref()
+                .and_then(DcsParams::from_strategy),
         };
 
         // Hand the warm-start basis cache (if any) to the training session so

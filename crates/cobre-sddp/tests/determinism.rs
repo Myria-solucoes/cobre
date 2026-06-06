@@ -577,6 +577,7 @@ fn run_training(
                     stages: &[],
                     recent_accum_seed: &[],
                     recent_weight_seed: 0.0,
+                    dcs: None,
                 },
                 &comm,
                 || Ok(MockSolver3H::new(100.0)),
@@ -704,6 +705,7 @@ fn run_simulation(
                     stages: &[],
                     recent_accum_seed: &[],
                     recent_weight_seed: 0.0,
+                    dcs: None,
                 },
                 &sim_config,
                 SimulationOutputSpec {

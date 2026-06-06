@@ -1604,6 +1604,7 @@ mod tests {
             external_ncs_library: None,
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
+            dcs: None,
         };
 
         // Allocate BackwardPassState sized for this minimal study.
@@ -1729,6 +1730,7 @@ mod tests {
             external_ncs_library: None,
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
+            dcs: None,
         };
 
         let bwd_max_openings = n_openings;
@@ -1842,6 +1844,7 @@ mod tests {
             external_ncs_library: None,
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
+            dcs: None,
         };
 
         let bwd_max_openings = n_openings;

@@ -2146,6 +2146,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             &ForwardPassBatch {
                 local_forward_passes: config.loop_config.forward_passes as usize,
@@ -2269,6 +2270,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             &ForwardPassBatch {
                 local_forward_passes: config.loop_config.forward_passes as usize,
@@ -2398,6 +2400,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             &ForwardPassBatch {
                 local_forward_passes: config.loop_config.forward_passes as usize,
@@ -2844,6 +2847,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             &ForwardPassBatch {
                 local_forward_passes: config.loop_config.forward_passes as usize,
@@ -3014,6 +3018,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             &ForwardPassBatch {
                 local_forward_passes: n_scenarios,
@@ -3054,6 +3059,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             &ForwardPassBatch {
                 local_forward_passes: n_scenarios,
@@ -3162,6 +3168,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             &ForwardPassBatch {
                 local_forward_passes: n_scenarios,
@@ -3476,6 +3483,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             &ForwardPassBatch {
                 local_forward_passes: 1,
@@ -3668,6 +3676,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             &ForwardPassBatch {
                 local_forward_passes: config.loop_config.forward_passes as usize,
@@ -3913,6 +3922,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             &ForwardPassBatch {
                 local_forward_passes: n_scenarios,
@@ -4063,6 +4073,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             &ForwardPassBatch {
                 local_forward_passes: 1,
@@ -4208,6 +4219,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             &ForwardPassBatch {
                 local_forward_passes: 1,
@@ -4307,6 +4319,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             &ForwardPassBatch {
                 local_forward_passes: 1,

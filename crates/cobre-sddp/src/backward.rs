@@ -117,6 +117,7 @@ use crate::{
     SddpError,
     context::{StageContext, TrainingContext},
     cut::pool::CutPool,
+    dcs::{DcsParams, DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
     forward::write_capture_metadata,
     indexer::StageIndexer,
     noise::{NcsNoiseOffsets, transform_inflow_noise, transform_load_noise, transform_ncs_noise},
@@ -334,7 +335,6 @@ fn patch_opening_bounds<S: SolverInterface + Send>(
     // opening at a fixed trial point produced by the forward sampler. The
     // ring-buffer advance happens once in the forward pass; the backward
     // and simulation paths reuse those slot values without re-shifting.
-    //
     ws.patch_buf
         .fill_col_state_patches(training_ctx.indexer, x_hat, &ctx.templates[s].col_scale);
     ws.patch_buf.fill_forward_patches(
@@ -473,6 +473,52 @@ fn extract_duals_from_view(
     objective
 }
 
+/// Extract only the cut gradient (state-fixing-column reduced costs) and return
+/// the objective, for the lazy-solve path.
+///
+/// Identical to the state-dual half of [`extract_duals_from_view`]: it fills
+/// `state_duals[j] = rc_scaled[col] / col_scale[col]` (raw reduced costs when
+/// `col_scale` is empty) at the incoming-state column for each state index `j`,
+/// where the negation into the `−∇·x + θ ≥ intercept` row happens later in
+/// cut-row construction. The Benders gradient and intercept come solely from
+/// these structural state columns, which are identical in the all-cuts LP and
+/// the lazy-solve LP, so the resulting cut matches the all-cuts cut by
+/// exactness.
+///
+/// Unlike [`extract_duals_from_view`], it does NOT read cut-row duals: under the
+/// lazy-solve path the resident cut rows are a subset in row-map insertion
+/// order, so the all-cuts cut-row→slot mapping does not apply. Binding-count
+/// metadata and basis capture for that layout are handled separately and are
+/// not driven from this function.
+fn extract_state_duals_only(
+    view: &SolutionView<'_>,
+    n_state: usize,
+    indexer: &StageIndexer,
+    col_scale: &[f64],
+    state_duals: &mut Vec<f64>,
+) -> f64 {
+    let objective = view.objective;
+
+    state_duals.clear();
+    for j in 0..n_state {
+        let col = indexer.state_to_lp_incoming_column(j);
+        let rc = view.reduced_costs[col];
+        let unscaled = if col_scale.is_empty() {
+            rc
+        } else {
+            rc / col_scale[col]
+        };
+        state_duals.push(unscaled);
+    }
+    debug_assert_eq!(
+        state_duals.len(),
+        n_state,
+        "state_duals must contain exactly n_state entries after fill"
+    );
+
+    objective
+}
+
 /// Accumulate one opening's solve result into the workspace accumulators.
 ///
 /// Called after `view` is dropped (so `ws` is freely borrowable). Writes:
@@ -482,6 +528,37 @@ fn extract_duals_from_view(
 fn accumulate_opening_outcome<S: SolverInterface + Send>(
     ws: &mut SolverWorkspace<S>,
     succ: &SuccessorSpec<'_>,
+    omega: usize,
+    objective: f64,
+    x_hat: &[f64],
+    stats_before: &SolverStatistics,
+    stats_after: &SolverStatistics,
+) {
+    write_opening_outcome(ws, omega, objective, x_hat, stats_before, stats_after);
+
+    // Update binding-cut slot increments from cut duals.
+    for (cut_idx, &slot) in succ.successor_active_slots.iter().enumerate() {
+        if ws
+            .backward_accum
+            .cut_duals_buf
+            .get(cut_idx)
+            .is_some_and(|&d| d > succ.cut_activity_tolerance)
+        {
+            ws.backward_accum.slot_increments[slot] += 1;
+        }
+    }
+}
+
+/// Write one opening's stats delta and outcome (coefficients + intercept) into
+/// the workspace accumulators, without touching binding-count metadata.
+///
+/// Shared by the all-cuts path ([`accumulate_opening_outcome`], which adds the
+/// cut-dual→`slot_increments` update) and the lazy-solve path (which skips that
+/// update because its resident cut rows are a row-map-ordered subset whose
+/// cut-row→slot mapping differs from the all-cuts layout). The cut gradient and
+/// intercept come from the state duals and are identical either way.
+fn write_opening_outcome<S: SolverInterface + Send>(
+    ws: &mut SolverWorkspace<S>,
     omega: usize,
     objective: f64,
     x_hat: &[f64],
@@ -511,18 +588,6 @@ fn accumulate_opening_outcome<S: SolverInterface + Send>(
             .zip(x_hat)
             .map(|(pi, x)| pi * x)
             .sum::<f64>();
-
-    // Update binding-cut slot increments from cut duals.
-    for (cut_idx, &slot) in succ.successor_active_slots.iter().enumerate() {
-        if ws
-            .backward_accum
-            .cut_duals_buf
-            .get(cut_idx)
-            .is_some_and(|&d| d > succ.cut_activity_tolerance)
-        {
-            ws.backward_accum.slot_increments[slot] += 1;
-        }
-    }
 }
 
 /// Capture the post-solve basis at ω=0 into `basis_slice[m, s]`.
@@ -575,6 +640,205 @@ fn save_basis_at_omega_zero<S: SolverInterface + Send>(
     }
 }
 
+/// Solve one backward opening on the baked all-cuts LP and accumulate its
+/// outcome. This is the unchanged pre-DCS per-opening path: patch the opening
+/// bounds on the already-loaded baked/delta LP, reconstruct + solve via
+/// `run_stage_solve`, extract both state and cut duals, accumulate the outcome
+/// (including the binding-count `slot_increments` update), and capture the ω=0
+/// basis.
+// Rationale: the args are disjoint borrows (ws, ctx, training_ctx, succ,
+// basis_slice) and per-opening scalars (raw_noise, x_hat, s, scenario,
+// iteration, m, omega); no natural grouping reduces caller-side borrows.
+#[allow(clippy::too_many_arguments)]
+fn solve_opening_baked<S: SolverInterface + Send>(
+    ws: &mut SolverWorkspace<S>,
+    ctx: &StageContext<'_>,
+    training_ctx: &TrainingContext<'_>,
+    succ: &SuccessorSpec<'_>,
+    basis_slice: &mut BasisStoreSliceMut<'_>,
+    raw_noise: &[f64],
+    x_hat: &[f64],
+    s: usize,
+    scenario: usize,
+    iteration: u64,
+    m: usize,
+    omega: usize,
+) -> Result<(), SddpError> {
+    let indexer = training_ctx.indexer;
+    patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s);
+
+    // Scratch buffers are moved out before the solve to avoid borrow conflicts
+    // with `view`'s lifetime. Pre-warmed capacity is reused across openings.
+    let mut state_duals = std::mem::take(&mut ws.backward_accum.state_duals_buf);
+    let mut cut_duals = std::mem::take(&mut ws.backward_accum.cut_duals_buf);
+
+    let stats_before_omega = ws.solver.statistics();
+
+    let stored_basis = if omega == 0 {
+        resolve_backward_basis(basis_slice, m, s)
+    } else {
+        None
+    };
+    let inputs = crate::stage_solve::StageInputs {
+        stage_context: ctx,
+        pool: succ.successor_pool,
+        stored_basis,
+        stage_index: s,
+        scenario_index: scenario,
+        iteration: Some(iteration),
+    };
+
+    let view = crate::stage_solve::run_stage_solve(ws, &inputs)?;
+
+    // Extract duals from view (which borrows ws for 'ws).
+    // Statistics must be captured after view is dropped.
+    let objective = extract_duals_from_view(
+        &view,
+        indexer.n_state,
+        indexer,
+        &ctx.templates[s].col_scale,
+        succ,
+        &mut state_duals,
+        &mut cut_duals,
+    );
+    let _ = view;
+
+    ws.backward_accum.state_duals_buf = state_duals;
+    ws.backward_accum.cut_duals_buf = cut_duals;
+
+    let stats_after_omega = ws.solver.statistics();
+
+    accumulate_opening_outcome(
+        ws,
+        succ,
+        omega,
+        objective,
+        x_hat,
+        &stats_before_omega,
+        &stats_after_omega,
+    );
+
+    if omega == 0 {
+        save_basis_at_omega_zero(ws, succ, basis_slice, m, x_hat);
+    }
+
+    Ok(())
+}
+
+/// Solve one backward opening under Dynamic Cut Selection and accumulate its
+/// outcome.
+///
+/// The caller owns the load + bounds patch: this loads the cut-free core,
+/// applies the opening's state-pin + noise patch, seeds the metadata-derived
+/// initial resident-cut subset, then runs the lazy loop via
+/// [`lazy_solve_preloaded`]. The Benders cut gradient and intercept are read
+/// from the final all-satisfied LP via [`extract_state_duals_only`].
+///
+/// Two pieces of the baked path are intentionally NOT performed here:
+///
+/// - **Binding-count metadata** (`cut_duals` → `slot_increments`): under DCS the
+///   resident cut rows are a row-map-ordered subset, so the all-cuts
+///   cut-row→slot mapping does not apply; the per-slot binding counts are left
+///   at their values from the rest of the pass. The initial resident set still
+///   seeds deterministically from `last_active_iter`/`iteration_generated`
+///   (rank-invariant), and the lazy loop adds any missing binding cut
+///   regardless of the seed, so exactness is unaffected.
+/// - **ω=0 basis capture**: a captured basis would describe the baked layout,
+///   not the DCS resident subset, so it is skipped; the next DCS solve
+///   cold-starts its initial solve, which [`lazy_solve_preloaded`] supports with
+///   `stored_basis = None`.
+// Rationale: the args are disjoint borrows (ws, ctx, training_ctx, succ) and
+// per-opening scalars (params, raw_noise, x_hat, s, scenario, iteration, omega);
+// no natural grouping reduces caller-side borrows.
+#[allow(clippy::too_many_arguments)]
+fn solve_opening_dcs<S: SolverInterface + Send>(
+    ws: &mut SolverWorkspace<S>,
+    ctx: &StageContext<'_>,
+    training_ctx: &TrainingContext<'_>,
+    succ: &SuccessorSpec<'_>,
+    params: DcsParams,
+    raw_noise: &[f64],
+    x_hat: &[f64],
+    s: usize,
+    scenario: usize,
+    iteration: u64,
+    omega: usize,
+) -> Result<(), SddpError> {
+    let indexer = training_ctx.indexer;
+    // The DCS LP must start from the cut-free base structural template, NOT
+    // `succ.baked_template`: when baking is active the baked template already
+    // carries the active cut rows, and loading it would make the lazy loop's
+    // fresh CutRowMap treat those baked slots as non-resident and append them a
+    // second time (duplicate rows, broken laziness). `ctx.templates[s]` is the
+    // cut-free base (its `num_rows` equals `succ.template_num_rows`), so the
+    // CutRowMap's base offset matches and the lazy loop exclusively owns the
+    // cut rows.
+    let core = &ctx.templates[s];
+    let col_scale = &ctx.templates[s].col_scale;
+
+    // Load the cut-free base structural template, then apply the opening's
+    // state-pin + noise patch. `lazy_solve_preloaded` appends cut rows to this
+    // loaded, patched LP and never reloads, so the patch survives the whole
+    // lazy loop.
+    ws.solver.load_model(core);
+    patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s);
+
+    // Metadata-seeded initial resident subset (deterministic, rank-invariant).
+    build_initial_resident_set(
+        succ.successor_pool,
+        iteration,
+        params.k2,
+        &mut ws.backward_accum.dcs_initial_resident,
+    );
+
+    let stats_before_omega = ws.solver.statistics();
+
+    // Scratch moved out before the solve to avoid borrow conflicts with the
+    // returned view's lifetime.
+    let mut state_duals = std::mem::take(&mut ws.backward_accum.state_duals_buf);
+
+    let dcs_ctx = DcsSolveContext {
+        stage_index: s,
+        scenario_index: scenario,
+        iteration: Some(iteration),
+    };
+    // Disjoint borrows of `ws`: `solver`, `backward_accum.dcs_initial_resident`
+    // (shared), and `backward_accum.dcs_solve` (mut) are distinct fields.
+    let view = lazy_solve_preloaded(
+        &mut ws.solver,
+        core,
+        succ.successor_pool,
+        indexer,
+        col_scale,
+        None,
+        &ws.backward_accum.dcs_initial_resident,
+        &params,
+        &mut ws.backward_accum.dcs_solve,
+        dcs_ctx,
+    )?;
+
+    // Cut gradient + intercept from the final all-satisfied LP only.
+    let objective =
+        extract_state_duals_only(&view, indexer.n_state, indexer, col_scale, &mut state_duals);
+    let _ = view;
+
+    ws.backward_accum.state_duals_buf = state_duals;
+
+    let stats_after_omega = ws.solver.statistics();
+
+    // Outcome only — no cut-dual/`slot_increments` update, no ω=0 basis capture.
+    write_opening_outcome(
+        ws,
+        omega,
+        objective,
+        x_hat,
+        &stats_before_omega,
+        &stats_after_omega,
+    );
+
+    Ok(())
+}
+
 /// Process one trial point `m` in the backward pass, iterating over all openings.
 ///
 /// Solves at each (scenario, opening) and accumulates duals into `per_opening_stats`.
@@ -597,7 +861,6 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
     basis_slice: &mut BasisStoreSliceMut<'_>,
     m: usize,
 ) -> Result<StagedCut, SddpError> {
-    let indexer = training_ctx.indexer;
     let tree_view = training_ctx.stochastic.tree_view();
     let x_hat = exchange.state_at(succ.my_rank, m);
     let scenario = fwd_offset + m;
@@ -609,63 +872,45 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
         "per_opening_stats must be initialised to n_openings before each stage's trial-point loop"
     );
 
+    // Dynamic Cut Selection params for this solve, `Some` only when configured
+    // and the current iteration is at or past its start. The decision is
+    // constant across openings and trial points for a given iteration.
+    let dcs_params = training_ctx
+        .dcs
+        .filter(|params| params.is_active(iteration));
+
     for omega in 0..succ.probabilities.len() {
         let raw_noise = tree_view.opening(s, omega);
-        patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s);
 
-        // Scratch buffers are moved out before the solve to avoid borrow conflicts
-        // with `view`'s lifetime. Pre-warmed capacity is reused across openings.
-        let mut state_duals = std::mem::take(&mut ws.backward_accum.state_duals_buf);
-        let mut cut_duals = std::mem::take(&mut ws.backward_accum.cut_duals_buf);
-
-        let stats_before_omega = ws.solver.statistics();
-
-        let stored_basis = if omega == 0 {
-            resolve_backward_basis(basis_slice, m, s)
+        if let Some(params) = dcs_params {
+            solve_opening_dcs(
+                ws,
+                ctx,
+                training_ctx,
+                succ,
+                params,
+                raw_noise,
+                x_hat,
+                s,
+                scenario,
+                iteration,
+                omega,
+            )?;
         } else {
-            None
-        };
-        let inputs = crate::stage_solve::StageInputs {
-            stage_context: ctx,
-            pool: succ.successor_pool,
-            stored_basis,
-            stage_index: s,
-            scenario_index: scenario,
-            iteration: Some(iteration),
-        };
-
-        let view = crate::stage_solve::run_stage_solve(ws, &inputs)?;
-
-        // Extract duals from view (which borrows ws for 'ws).
-        // Statistics must be captured after view is dropped.
-        let objective = extract_duals_from_view(
-            &view,
-            indexer.n_state,
-            indexer,
-            &ctx.templates[s].col_scale,
-            succ,
-            &mut state_duals,
-            &mut cut_duals,
-        );
-        let _ = view;
-
-        ws.backward_accum.state_duals_buf = state_duals;
-        ws.backward_accum.cut_duals_buf = cut_duals;
-
-        let stats_after_omega = ws.solver.statistics();
-
-        accumulate_opening_outcome(
-            ws,
-            succ,
-            omega,
-            objective,
-            x_hat,
-            &stats_before_omega,
-            &stats_after_omega,
-        );
-
-        if omega == 0 {
-            save_basis_at_omega_zero(ws, succ, basis_slice, m, x_hat);
+            solve_opening_baked(
+                ws,
+                ctx,
+                training_ctx,
+                succ,
+                basis_slice,
+                raw_noise,
+                x_hat,
+                s,
+                scenario,
+                iteration,
+                m,
+                omega,
+            )?;
         }
     }
 
@@ -1408,6 +1653,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             comm: &comm,
             records: &[],
@@ -1502,6 +1748,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             comm: &comm,
             records: &[],
@@ -1596,6 +1843,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             comm: &comm,
             records: &[],
@@ -1686,6 +1934,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             comm: &comm,
             records: &[],
@@ -1776,6 +2025,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             comm: &comm,
             records: &[],
@@ -1864,6 +2114,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             comm: &comm,
             records: &[],
@@ -1997,6 +2248,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             comm: &comm,
             records: &[],
@@ -2108,6 +2360,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             comm: &comm,
             records: &[],
@@ -2224,6 +2477,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             comm: &comm,
             records: &[],
@@ -2326,6 +2580,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             comm: &comm,
             records: &[],
@@ -2438,6 +2693,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             comm: &comm,
             records: &[],
@@ -2545,6 +2801,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             comm: &comm,
             records: &[],
@@ -2645,6 +2902,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             comm: &comm,
             records: &[],
@@ -2753,6 +3011,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             comm: &comm,
             records: &[],
@@ -2904,6 +3163,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             comm: &comm,
             records: &[],
@@ -2989,6 +3249,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             comm: &comm,
             records: &[],
@@ -3368,6 +3629,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             comm: &comm,
             records: &[],
@@ -3532,6 +3794,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             comm: &comm,
             records: &[],
@@ -3701,6 +3964,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             comm: &comm,
             records: &[],
@@ -3819,6 +4083,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             comm: &comm,
             records: &[],
@@ -3946,6 +4211,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             comm: &comm,
             records: &[],
@@ -4126,6 +4392,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             comm: &comm,
             records: &[],
@@ -4489,6 +4756,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             comm: &StubComm,
             records: &[],
@@ -4712,6 +4980,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             comm: &DualRankStubComm,
             records: &[],
@@ -4832,6 +5101,7 @@ mod tests {
             external_ncs_library: None,
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
+            dcs: None,
         };
 
         let iteration: u64 = 1;
@@ -5145,6 +5415,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             comm: &comm,
             records: &[],
@@ -5303,6 +5574,7 @@ mod tests {
                 external_ncs_library: None,
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
+                dcs: None,
             },
             comm: &comm,
             records: &[],
@@ -5411,5 +5683,724 @@ mod tests {
             "expected batch.values[pos]=-7.5 for lp_col={lp_col}, got {}",
             batch.values[pos]
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // DCS backward-integration tests
+    // -----------------------------------------------------------------------
+
+    use crate::cut_selection::{CutMetadata, CutSelectionStrategy};
+    use crate::dcs::DcsParams;
+    use crate::lp_builder::PatchBuffer;
+    use crate::workspace::WorkspaceSizing;
+    use cobre_solver::ActiveSolver;
+
+    /// Cut-free successor core for `StageIndexer::new(1, 0)`:
+    /// columns `[storage_out=0, z_inflow=1, storage_in=2, theta=3]`.
+    /// Minimize `theta`. `patch_opening_bounds` pins `storage_in` (col 2, the
+    /// incoming-state column) to `x_hat`. A single coupling row
+    /// `storage_out - storage_in = 0` ties the outgoing-state column (col 0,
+    /// which the cuts reference) to the pinned incoming state, so the cut floor
+    /// is evaluated at `x_hat` and the cut subgradient flows back to the pinned
+    /// column — the minimal structure that makes the backward dual a real
+    /// subgradient with respect to the incoming state.
+    fn dcs_core_template() -> StageTemplate {
+        StageTemplate {
+            num_cols: 4,
+            num_rows: 1,
+            num_nz: 2,
+            // CSC by column: col0 → (row0, +1), col2 → (row0, -1); cols 1,3 empty.
+            col_starts: vec![0_i32, 1, 1, 2, 2],
+            row_indices: vec![0_i32, 0],
+            values: vec![1.0, -1.0],
+            col_lower: vec![0.0, 0.0, 0.0, -1.0e6],
+            col_upper: vec![f64::INFINITY, f64::INFINITY, f64::INFINITY, 1.0e6],
+            objective: vec![0.0, 0.0, 0.0, 1.0],
+            // Coupling equality: storage_out - storage_in = 0.
+            row_lower: vec![0.0],
+            row_upper: vec![0.0],
+            n_state: 1,
+            n_transfer: 0,
+            n_dual_relevant: 1,
+            n_hydro: 1,
+            max_par_order: 0,
+            col_scale: Vec::new(),
+            row_scale: Vec::new(),
+        }
+    }
+
+    /// Build a two-stage `FutureCostFunction` whose successor (stage 1) pool
+    /// carries three cuts on the incoming-storage state (index 0):
+    ///   slot 0: intercept 1, coeff [0]   → floor 1.0 at `x_hat` = 2
+    ///   slot 1: intercept 0, coeff [2]   → floor 4.0  (the binding cut)
+    ///   slot 2: intercept 3, coeff [0]   → floor 3.0
+    /// Metadata is set so that the metadata-seeded initial set omits the
+    /// binding slot 1 (its `last_active_iter` is stale) — the lazy loop must
+    /// add it.
+    fn dcs_two_stage_fcf() -> FutureCostFunction {
+        let n_stages = 2;
+        let mut fcf = FutureCostFunction::new(n_stages, 1, 8, 10, &vec![0; n_stages]);
+        fcf.add_cut(1, 0, 0, 1.0, &[0.0]);
+        fcf.add_cut(1, 0, 1, 0.0, &[2.0]);
+        fcf.add_cut(1, 0, 2, 3.0, &[0.0]);
+        // Seed metadata: slots 0 and 2 are "recently active"; the binding slot 1
+        // is stale so the k2 window excludes it (forcing the lazy add). All were
+        // generated before the current iteration so none is current-iteration
+        // protected.
+        let meta = |generated: u64, last: u64| CutMetadata {
+            iteration_generated: generated,
+            forward_pass_index: 0,
+            active_count: 0,
+            last_active_iter: last,
+        };
+        fcf.pools[1].metadata[0] = meta(1, 5);
+        fcf.pools[1].metadata[1] = meta(1, 1); // stale → outside k2=2 window at iter 5
+        fcf.pools[1].metadata[2] = meta(1, 5);
+        fcf
+    }
+
+    /// Single real-solver (`ActiveSolver`) workspace sized for `n_state = 1`.
+    fn dcs_active_workspace() -> Vec<SolverWorkspace<ActiveSolver>> {
+        let sizing = WorkspaceSizing {
+            hydro_count: 1,
+            max_par_order: 0,
+            n_load_buses: 0,
+            max_blocks: 0,
+            downstream_par_order: 0,
+            max_openings: 1,
+            initial_pool_capacity: 16,
+            n_state: 1,
+            max_local_fwd: 1,
+            total_forward_passes: 1,
+            noise_dim: 1,
+            n_anticipated: 0,
+            k_max: 0,
+        };
+        let solver = ActiveSolver::new().expect("ActiveSolver::new()");
+        vec![SolverWorkspace::new(
+            0,
+            0,
+            solver,
+            PatchBuffer::new(1, 0, 0, 0, 0, 0),
+            1,
+            sizing,
+        )]
+    }
+
+    /// Run one backward trial point at the successor stage with the real solver
+    /// and return the produced [`StagedCut`] plus the post-call per-slot
+    /// `metadata_sync_contribution` snapshot. `dcs` toggles the path. The
+    /// incoming state is pinned to `x_hat = 2.0`.
+    fn run_dcs_backward_trial_point(
+        dcs: Option<DcsParams>,
+        iteration: u64,
+    ) -> (super::StagedCut, Vec<u64>) {
+        run_dcs_backward_trial_point_at(dcs, iteration, 2.0)
+    }
+
+    /// `run_dcs_backward_trial_point` with the incoming-state pin `x_hat`
+    /// parameterized, so a sweep can vary the pinned state (which cut binds).
+    fn run_dcs_backward_trial_point_at(
+        dcs: Option<DcsParams>,
+        iteration: u64,
+        x_hat: f64,
+    ) -> (super::StagedCut, Vec<u64>) {
+        let indexer = StageIndexer::new(1, 0);
+        let n_state = indexer.n_state;
+        let core = dcs_core_template();
+        let templates = vec![core.clone(), core.clone()];
+        let base_rows = vec![0_usize, 0_usize];
+        let stochastic = make_stochastic_context(2, 1);
+        let horizon = HorizonMode::Finite { num_stages: 2 };
+        let risk_measures = vec![RiskMeasure::Expectation; 2];
+
+        let mut fcf = dcs_two_stage_fcf();
+        // All-cuts batch for the baked path (delta == all cuts here).
+        let cut_batch = crate::forward::build_cut_row_batch(&fcf, 1, &indexer, &[]);
+        let successor_active_slots: Vec<usize> = (0..fcf.pools[1].populated_count).collect();
+        let num_cuts = successor_active_slots.len();
+
+        let mut exchange = exchange_with_states(n_state, vec![vec![x_hat]]);
+        let mut workspaces = dcs_active_workspace();
+        let mut basis_store = empty_basis_store(exchange.local_count(), 2);
+
+        let ctx = StageContext {
+            templates: &templates,
+            base_rows: &base_rows,
+            noise_scale: &[],
+            n_hydros: 0,
+            n_load_buses: 0,
+            load_balance_row_starts: &[],
+            load_bus_indices: &[],
+            block_counts_per_stage: &[],
+            ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
+            discount_factors: &[],
+            cumulative_discount_factors: &[],
+            stage_lag_transitions: &[],
+            noise_group_ids: &[],
+            downstream_par_order: 0,
+        };
+        let training_ctx = TrainingContext {
+            horizon: &horizon,
+            indexer: &indexer,
+            inflow_method: &InflowNonNegativityMethod::None,
+            stochastic: &stochastic,
+            initial_state: &[],
+            inflow_scheme: SamplingScheme::InSample,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
+            stages: &[],
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+            recent_accum_seed: &[],
+            recent_weight_seed: 0.0,
+            dcs,
+        };
+
+        let probabilities = vec![1.0_f64];
+        let succ = super::SuccessorSpec {
+            t: 0,
+            successor: 1,
+            my_rank: 0,
+            probabilities: &probabilities,
+            cut_batch: &cut_batch,
+            num_cuts_at_successor: num_cuts,
+            template_num_rows: core.num_rows,
+            baked_template: &core,
+            successor_active_slots: &successor_active_slots,
+            cut_activity_tolerance: 0.0,
+            successor_populated_count: fcf.pools[1].populated_count,
+            successor_pool: &fcf.pools[1],
+        };
+
+        let mut basis_slices = basis_store.split_workers_mut(1);
+        let ws = &mut workspaces[0];
+        // Initialise the per-opening accumulator buffers the trial-point helper
+        // expects (mirrors process_stage_backward's per-stage setup).
+        super::load_backward_lp(ws, &succ);
+        let n_openings = succ.probabilities.len();
+        while ws.backward_accum.outcomes.len() < n_openings {
+            ws.backward_accum
+                .outcomes
+                .push(crate::risk_measure::BackwardOutcome {
+                    intercept: 0.0,
+                    coefficients: vec![0.0_f64; n_state],
+                    objective_value: 0.0,
+                });
+        }
+        let pop = succ.successor_populated_count;
+        if ws.backward_accum.slot_increments.len() < pop {
+            ws.backward_accum.slot_increments.resize(pop, 0);
+        }
+        ws.backward_accum.slot_increments[..pop].fill(0);
+        if ws.backward_accum.agg_coefficients.len() < n_state {
+            ws.backward_accum.agg_coefficients.resize(n_state, 0.0);
+        }
+        if ws.backward_accum.metadata_sync_contribution.len() < pop {
+            ws.backward_accum.metadata_sync_contribution.resize(pop, 0);
+        }
+        ws.backward_accum.metadata_sync_contribution[..pop].fill(0);
+        ws.backward_accum
+            .per_opening_stats
+            .resize_with(n_openings, SolverStatsDelta::default);
+        for slot in &mut ws.backward_accum.per_opening_stats[..n_openings] {
+            *slot = SolverStatsDelta::default();
+        }
+
+        let cut = super::process_trial_point_backward(
+            ws,
+            &ctx,
+            &training_ctx,
+            &exchange,
+            0,
+            iteration,
+            &risk_measures,
+            &succ,
+            &mut basis_slices[0],
+            0,
+        )
+        .expect("backward trial-point solve must succeed");
+
+        let meta_sync = ws.backward_accum.metadata_sync_contribution[..pop].to_vec();
+        // Touch fcf/exchange so the borrows live to here.
+        let _ = (&mut fcf, &mut exchange);
+        (cut, meta_sync)
+    }
+
+    fn dcs_params(start_iteration: u64) -> DcsParams {
+        DcsParams {
+            k1: None,
+            k2: 2,
+            nadic: 10,
+            epsilon_viol: 1e-10,
+            start_iteration,
+            max_inner_iterations: 50,
+        }
+    }
+
+    /// AC3 (exactness, real solver, both backends via the active solver): the
+    /// DCS-built cut equals the all-cuts cut (intercept + every coefficient
+    /// within 1e-9). DCS seeds an initial set that omits the binding cut; the
+    /// lazy loop must add it and reach the same dual.
+    #[test]
+    fn backward_dcs_cut_equals_all_cuts_cut() {
+        let iteration = 5;
+        let (baked_cut, _) = run_dcs_backward_trial_point(None, iteration);
+        let (dcs_cut, _) = run_dcs_backward_trial_point(Some(dcs_params(2)), iteration);
+
+        assert!(
+            (baked_cut.intercept - dcs_cut.intercept).abs() < 1e-9,
+            "intercept: baked {} vs DCS {}",
+            baked_cut.intercept,
+            dcs_cut.intercept
+        );
+        assert_eq!(baked_cut.coefficients.len(), dcs_cut.coefficients.len());
+        for (i, (b, d)) in baked_cut
+            .coefficients
+            .iter()
+            .zip(&dcs_cut.coefficients)
+            .enumerate()
+        {
+            assert!(
+                (b - d).abs() < 1e-9,
+                "coefficient[{i}]: baked {b} vs DCS {d}"
+            );
+        }
+        // The binding cut has gradient 2.0 on the incoming storage; both paths
+        // must recover it.
+        assert!(
+            (baked_cut.coefficients[0] - 2.0).abs() < 1e-9,
+            "baked gradient must be the binding cut's 2.0, got {}",
+            baked_cut.coefficients[0]
+        );
+    }
+
+    /// `dcs = None` ⇒ the baked all-cuts path is taken and the cut is identical
+    /// to the pre-DCS baseline (same fixture run with `None`).
+    #[test]
+    fn backward_dcs_off_is_identical_to_baseline() {
+        let (cut_a, _) = run_dcs_backward_trial_point(None, 5);
+        let (cut_b, _) = run_dcs_backward_trial_point(None, 5);
+        assert_eq!(cut_a.intercept, cut_b.intercept);
+        assert_eq!(cut_a.coefficients, cut_b.coefficients);
+        // Baseline binding gradient.
+        assert!((cut_a.coefficients[0] - 2.0).abs() < 1e-9);
+    }
+
+    /// `dcs = Some` but `iteration < start_iteration` ⇒ the baked path is used
+    /// (DCS not yet active), so the cut equals the baked cut.
+    #[test]
+    fn backward_dcs_inactive_before_start_iteration() {
+        // start_iteration = 4, iteration = 1 → inactive.
+        let (baked_cut, baked_meta) = run_dcs_backward_trial_point(None, 1);
+        let (early_cut, early_meta) = run_dcs_backward_trial_point(Some(dcs_params(4)), 1);
+        assert_eq!(baked_cut.intercept, early_cut.intercept);
+        assert_eq!(baked_cut.coefficients, early_cut.coefficients);
+        // Baked path updates binding-count metadata; the inactive-DCS run takes
+        // the baked path, so its metadata contribution matches the baked run.
+        assert_eq!(baked_meta, early_meta);
+    }
+
+    /// The DCS path extracts the dual only from the final returned LP and never
+    /// bumps the binding-count metadata by cut-row index (no corruption of
+    /// `active_count`/`slot_increments`). The baked path DOES bump it; this
+    /// asserts the DCS path leaves the per-slot contribution all-zero.
+    #[test]
+    fn backward_dcs_dual_from_final_lp_only_and_no_metadata_corruption() {
+        let (_, baked_meta) = run_dcs_backward_trial_point(None, 5);
+        let (_, dcs_meta) = run_dcs_backward_trial_point(Some(dcs_params(2)), 5);
+
+        // Baked path bumps at least one slot's binding count.
+        assert!(
+            baked_meta.iter().any(|&c| c > 0),
+            "baked path must record binding-count metadata, got {baked_meta:?}"
+        );
+        // DCS path records no binding-count contribution (the cut-dual →
+        // slot_increments update is intentionally skipped under DCS).
+        assert!(
+            dcs_meta.iter().all(|&c| c == 0),
+            "DCS path must not bump binding-count metadata, got {dcs_meta:?}"
+        );
+    }
+
+    /// `parse_cut_selection_config` for `method = "dynamic"` flows into
+    /// `DcsParams::from_strategy`, so the backward context's `dcs` is `Some`
+    /// for the dynamic variant and `None` otherwise.
+    #[test]
+    fn from_strategy_gates_the_backward_dcs_field() {
+        let dynamic = CutSelectionStrategy::Dynamic {
+            k1: None,
+            k2: 5,
+            nadic: 10,
+            epsilon_viol: 1e-10,
+            start_iteration: 2,
+        };
+        assert!(DcsParams::from_strategy(&dynamic).is_some());
+        let level1 = CutSelectionStrategy::Level1 {
+            check_frequency: 5,
+            tie_tolerance: 1e-10,
+        };
+        assert!(DcsParams::from_strategy(&level1).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // DCS backward validation gates (exactness / finite-k1 / determinism /
+    // slow sweep). Default `k1 = None` (∞) — exactness holds only when every
+    // pool cut is a candidate.
+    // -----------------------------------------------------------------------
+
+    /// `DcsParams` with an explicit finite `k1` candidate-recency window.
+    fn dcs_params_k1(start_iteration: u64, k1: Option<u32>) -> DcsParams {
+        DcsParams {
+            k1,
+            k2: 2,
+            nadic: 10,
+            epsilon_viol: 1e-10,
+            start_iteration,
+            max_inner_iterations: 50,
+        }
+    }
+
+    /// Exactness + "never spins": with `k1 = None` the DCS backward cut equals
+    /// the all-cuts cut (intercept + every coefficient within 1e-9), and the
+    /// lazy loop terminates — even with `max_inner_iterations = 1`, which forces
+    /// the bounded TC-fallback branch — so it can never spin unbounded.
+    #[test]
+    fn backward_dcs_exactness_and_terminates() {
+        let iteration = 5;
+        let (baked, _) = run_dcs_backward_trial_point(None, iteration);
+
+        // Default-cap DCS reaches the no-violation stop and matches all-cuts.
+        let (dcs, _) = run_dcs_backward_trial_point(Some(dcs_params(2)), iteration);
+        assert!((baked.intercept - dcs.intercept).abs() < 1e-9);
+        for (b, d) in baked.coefficients.iter().zip(&dcs.coefficients) {
+            assert!((b - d).abs() < 1e-9, "coeff mismatch baked {b} vs DCS {d}");
+        }
+
+        // A 1-iteration cap forces the bounded TC fallback; the call must still
+        // return (no spin) and land on the exact all-cuts cut.
+        let tight = DcsParams {
+            max_inner_iterations: 1,
+            ..dcs_params(2)
+        };
+        let (dcs_tc, _) = run_dcs_backward_trial_point(Some(tight), iteration);
+        assert!((baked.intercept - dcs_tc.intercept).abs() < 1e-9);
+        for (b, d) in baked.coefficients.iter().zip(&dcs_tc.coefficients) {
+            assert!(
+                (b - d).abs() < 1e-9,
+                "TC-fallback coeff mismatch baked {b} vs DCS {d}"
+            );
+        }
+    }
+
+    /// A finite `k1` window demonstrably takes effect (guards against `k1`
+    /// being silently ignored): with `k1 = Some(1)` at iteration 5, the binding
+    /// cut (slot 1, generated at iteration 1 → age 4 ≥ 1) is windowed out of
+    /// candidacy and is also outside the `k2 = 2` initial-set window, so it is
+    /// never added. The DCS optimum then differs from the all-cuts optimum —
+    /// the deliberately-non-exact windowed mode.
+    #[test]
+    fn backward_dcs_finite_k1_window_takes_effect() {
+        let iteration = 5;
+        let (baked, _) = run_dcs_backward_trial_point(None, iteration);
+        // Sanity: the all-cuts (and k1=None DCS) gradient is the binding cut's 2.0.
+        assert!((baked.coefficients[0] - 2.0).abs() < 1e-9);
+
+        let (windowed, _) =
+            run_dcs_backward_trial_point(Some(dcs_params_k1(2, Some(1))), iteration);
+        // The binding cut is windowed out, so the windowed optimum differs:
+        // the surviving cuts (slots 0,2, both gradient 0) give a 0 gradient and
+        // a different intercept than the all-cuts cut.
+        assert!(
+            (windowed.coefficients[0] - baked.coefficients[0]).abs() > 1e-6
+                || (windowed.intercept - baked.intercept).abs() > 1e-6,
+            "finite k1 must change the cut vs all-cuts (windowed coeff {} intercept {}; \
+             all-cuts coeff {} intercept {})",
+            windowed.coefficients[0],
+            windowed.intercept,
+            baked.coefficients[0],
+            baked.intercept,
+        );
+    }
+
+    /// Determinism: running the integrated DCS backward trial point twice on
+    /// identical inputs yields bit-identical cuts AND bit-identical
+    /// binding-count metadata. A non-deterministic inner-loop insert order on
+    /// identical deterministic inputs would perturb the converged cut or the
+    /// metadata, so cut + metadata bit-identity is the determinism surface.
+    #[test]
+    fn backward_dcs_run_to_run_determinism() {
+        let (cut_a, meta_a) = run_dcs_backward_trial_point(Some(dcs_params(2)), 5);
+        let (cut_b, meta_b) = run_dcs_backward_trial_point(Some(dcs_params(2)), 5);
+        assert_eq!(
+            cut_a.intercept.to_bits(),
+            cut_b.intercept.to_bits(),
+            "intercept must be bit-identical run-to-run"
+        );
+        assert_eq!(cut_a.coefficients.len(), cut_b.coefficients.len());
+        for (a, b) in cut_a.coefficients.iter().zip(&cut_b.coefficients) {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "coefficient must be bit-identical run-to-run"
+            );
+        }
+        assert_eq!(
+            meta_a, meta_b,
+            "binding-count metadata must be bit-identical run-to-run"
+        );
+    }
+
+    /// Slow exactness sweep: across a handful of pinned incoming states (which
+    /// vary the binding cut), the `k1 = None` DCS backward cut equals the
+    /// all-cuts cut within 1e-9 at every point. Gated behind `slow-tests`.
+    #[test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow DCS exactness sweep")]
+    fn backward_dcs_exactness_sweep() {
+        // x_hat values span the regimes where different cuts bind:
+        //   slot0 floor = 1, slot1 floor = 2*x_hat, slot2 floor = 3.
+        // x_hat < 1.5 → slot2 binds (3); x_hat > 1.5 → slot1 binds (2*x_hat).
+        let x_hats = [0.0_f64, 0.5, 1.0, 1.5, 2.0, 3.0, 5.0];
+        let iterations = [3_u64, 5, 7];
+        for &iteration in &iterations {
+            for &x in &x_hats {
+                let (baked, _) = run_dcs_backward_trial_point_at(None, iteration, x);
+                let (dcs, _) = run_dcs_backward_trial_point_at(Some(dcs_params(2)), iteration, x);
+                assert!(
+                    (baked.intercept - dcs.intercept).abs() < 1e-9,
+                    "sweep iter {iteration} x_hat {x}: intercept baked {} vs DCS {}",
+                    baked.intercept,
+                    dcs.intercept
+                );
+                for (i, (b, d)) in baked.coefficients.iter().zip(&dcs.coefficients).enumerate() {
+                    assert!(
+                        (b - d).abs() < 1e-9,
+                        "sweep iter {iteration} x_hat {x}: coeff[{i}] baked {b} vs DCS {d}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Baked successor template for the regression fixture: the cut-free base
+    /// (`dcs_core_template`, the coupling row `col0 - col2 = 0`) PLUS the binding
+    /// cut (`-2*col0 + theta >= 0`) baked as a second structural row. This
+    /// mimics baking being active (`baked_template.num_rows = 2 >
+    /// template_num_rows = 1`), so the all-cuts/baked successor LP already
+    /// carries a cut row that the DCS path must NOT re-append.
+    ///
+    /// CSC by column (4 cols, 2 rows):
+    ///   col0 -> (row0, +1), (row1, -5);  col2 -> (row0, -1);  col3 -> (row1, +1)
+    ///
+    /// The baked cut intentionally DOMINATES the pool's true binding cut: it is
+    /// `-5*col0 + theta >= 0`, i.e. `theta >= 5*col0`, giving floor `10` at the
+    /// pinned `x_hat = 2` versus the pool's true optimum floor `4` (gradient 2).
+    /// This is a cut that is NOT in the DCS resident pool (the pool's cuts have
+    /// gradients 0 and 2, never 5). If the DCS path erroneously loaded this
+    /// baked template as its core, the LP would carry the spurious floor-10
+    /// constraint and the produced cut would be `theta = 10, gradient = 5` —
+    /// observably different from the correct all-cuts cut. Loading the cut-free
+    /// base (the fix) ignores this baked row, so the DCS cut matches all-cuts.
+    fn dcs_baked_template_with_one_cut() -> StageTemplate {
+        StageTemplate {
+            num_cols: 4,
+            num_rows: 2,
+            num_nz: 4,
+            col_starts: vec![0_i32, 2, 2, 3, 4],
+            row_indices: vec![0_i32, 1, 0, 1],
+            values: vec![1.0, -5.0, -1.0, 1.0],
+            col_lower: vec![0.0, 0.0, 0.0, -1.0e6],
+            col_upper: vec![f64::INFINITY, f64::INFINITY, f64::INFINITY, 1.0e6],
+            objective: vec![0.0, 0.0, 0.0, 1.0],
+            // row0: coupling equality (=0); row1: spurious baked cut
+            // -5*col0 + theta >= 0 (NOT a DCS pool cut).
+            row_lower: vec![0.0, 0.0],
+            row_upper: vec![0.0, f64::INFINITY],
+            n_state: 1,
+            n_transfer: 0,
+            n_dual_relevant: 1,
+            n_hydro: 1,
+            max_par_order: 0,
+            col_scale: Vec::new(),
+            row_scale: Vec::new(),
+        }
+    }
+
+    /// Regression for the baked-template-as-core bug: when baking is active
+    /// (`baked_template.num_rows > template_num_rows`), the DCS path must load
+    /// the cut-free base `ctx.templates[s]` — NOT `succ.baked_template`, which
+    /// already carries the active cut rows. Loading the baked template would
+    /// leave its baked cut rows resident in the LP even though the lazy loop's
+    /// fresh `CutRowMap` does not own them, so DCS would solve against cut rows
+    /// it never selected.
+    ///
+    /// Here `succ.baked_template` carries one baked cut row
+    /// (`dcs_baked_template_with_one_cut`, `num_rows = 2`) that is a spurious
+    /// floor-10 / gradient-5 constraint NOT present in the DCS pool, while
+    /// `ctx.templates[s]` is the cut-free base (`num_rows = 1`). With the fix
+    /// the DCS cut equals the all-cuts cut (gradient 2) within 1e-9. Against the
+    /// old `core = succ.baked_template`, the spurious baked cut dominates the
+    /// solve and DCS returns gradient 5 — observably wrong — failing this
+    /// assertion. (Verified: this test fails on the buggy code, passes on the
+    /// fix.)
+    #[test]
+    fn backward_dcs_baked_cuts_present_no_duplicate_rows() {
+        let iteration = 5;
+        let indexer = StageIndexer::new(1, 0);
+        let n_state = indexer.n_state;
+
+        // Cut-free base (loaded by the DCS path) and the baked successor
+        // template that carries the binding cut as a structural row.
+        let base = dcs_core_template();
+        let baked = dcs_baked_template_with_one_cut();
+        // ctx.templates carries the cut-free base for the successor stage.
+        let templates = vec![base.clone(), base.clone()];
+        let base_rows = vec![0_usize, 0_usize];
+        let stochastic = make_stochastic_context(2, 1);
+        let horizon = HorizonMode::Finite { num_stages: 2 };
+        let risk_measures = vec![RiskMeasure::Expectation; 2];
+
+        let mut fcf = dcs_two_stage_fcf();
+        // All-cuts batch (delta) for the baked path; with baked carrying the
+        // binding cut, the delta is the remaining (non-baked) cuts. For the DCS
+        // exactness comparison we only need the all-cuts reference, computed
+        // from the full pool against the cut-free base below.
+        let cut_batch = crate::forward::build_cut_row_batch(&fcf, 1, &indexer, &[]);
+        let successor_active_slots: Vec<usize> = (0..fcf.pools[1].populated_count).collect();
+        let num_cuts = successor_active_slots.len();
+
+        let mut exchange = exchange_with_states(n_state, vec![vec![2.0]]);
+        let mut workspaces = dcs_active_workspace();
+        let mut basis_store = empty_basis_store(exchange.local_count(), 2);
+
+        let ctx = StageContext {
+            templates: &templates,
+            base_rows: &base_rows,
+            noise_scale: &[],
+            n_hydros: 0,
+            n_load_buses: 0,
+            load_balance_row_starts: &[],
+            load_bus_indices: &[],
+            block_counts_per_stage: &[],
+            ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
+            discount_factors: &[],
+            cumulative_discount_factors: &[],
+            stage_lag_transitions: &[],
+            noise_group_ids: &[],
+            downstream_par_order: 0,
+        };
+        let training_ctx = TrainingContext {
+            horizon: &horizon,
+            indexer: &indexer,
+            inflow_method: &InflowNonNegativityMethod::None,
+            stochastic: &stochastic,
+            initial_state: &[],
+            inflow_scheme: SamplingScheme::InSample,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
+            stages: &[],
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+            recent_accum_seed: &[],
+            recent_weight_seed: 0.0,
+            dcs: Some(dcs_params(2)),
+        };
+
+        let probabilities = vec![1.0_f64];
+        // `baked_template` carries a baked cut row (num_rows = 2); the cut-free
+        // base has template_num_rows = 1. This is the baking-active shape that
+        // exposed the bug.
+        let succ = super::SuccessorSpec {
+            t: 0,
+            successor: 1,
+            my_rank: 0,
+            probabilities: &probabilities,
+            cut_batch: &cut_batch,
+            num_cuts_at_successor: num_cuts,
+            template_num_rows: base.num_rows,
+            baked_template: &baked,
+            successor_active_slots: &successor_active_slots,
+            cut_activity_tolerance: 0.0,
+            successor_populated_count: fcf.pools[1].populated_count,
+            successor_pool: &fcf.pools[1],
+        };
+
+        let mut basis_slices = basis_store.split_workers_mut(1);
+        let ws = &mut workspaces[0];
+        super::load_backward_lp(ws, &succ);
+        let n_openings = succ.probabilities.len();
+        while ws.backward_accum.outcomes.len() < n_openings {
+            ws.backward_accum
+                .outcomes
+                .push(crate::risk_measure::BackwardOutcome {
+                    intercept: 0.0,
+                    coefficients: vec![0.0_f64; n_state],
+                    objective_value: 0.0,
+                });
+        }
+        let pop = succ.successor_populated_count;
+        if ws.backward_accum.slot_increments.len() < pop {
+            ws.backward_accum.slot_increments.resize(pop, 0);
+        }
+        ws.backward_accum.slot_increments[..pop].fill(0);
+        if ws.backward_accum.agg_coefficients.len() < n_state {
+            ws.backward_accum.agg_coefficients.resize(n_state, 0.0);
+        }
+        if ws.backward_accum.metadata_sync_contribution.len() < pop {
+            ws.backward_accum.metadata_sync_contribution.resize(pop, 0);
+        }
+        ws.backward_accum.metadata_sync_contribution[..pop].fill(0);
+        ws.backward_accum
+            .per_opening_stats
+            .resize_with(n_openings, SolverStatsDelta::default);
+        for slot in &mut ws.backward_accum.per_opening_stats[..n_openings] {
+            *slot = SolverStatsDelta::default();
+        }
+
+        let dcs_cut = super::process_trial_point_backward(
+            ws,
+            &ctx,
+            &training_ctx,
+            &exchange,
+            0,
+            iteration,
+            &risk_measures,
+            &succ,
+            &mut basis_slices[0],
+            0,
+        )
+        .expect("DCS backward solve with baked cuts present must succeed");
+        let _ = (&mut fcf, &mut exchange);
+
+        // The all-cuts reference cut (cut-free base + full pool, no DCS).
+        let (allcuts, _) = run_dcs_backward_trial_point(None, iteration);
+
+        // With the fix (core = cut-free ctx.templates[s]), the binding cut is
+        // added exactly once and the DCS cut matches the all-cuts cut. With the
+        // bug (core = baked_template), the baked cut is double-added and the
+        // solve/extraction is malformed, so this fails.
+        assert!(
+            (dcs_cut.intercept - allcuts.intercept).abs() < 1e-9,
+            "intercept: DCS {} vs all-cuts {}",
+            dcs_cut.intercept,
+            allcuts.intercept
+        );
+        assert_eq!(dcs_cut.coefficients.len(), allcuts.coefficients.len());
+        for (i, (d, a)) in dcs_cut
+            .coefficients
+            .iter()
+            .zip(&allcuts.coefficients)
+            .enumerate()
+        {
+            assert!((d - a).abs() < 1e-9, "coeff[{i}]: DCS {d} vs all-cuts {a}");
+        }
+        // The binding gradient (2.0) must be recovered.
+        assert!((dcs_cut.coefficients[0] - 2.0).abs() < 1e-9);
     }
 }

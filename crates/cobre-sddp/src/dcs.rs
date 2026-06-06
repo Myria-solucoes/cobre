@@ -324,7 +324,7 @@ pub fn score_violated_candidates(
 // DcsSolveContext
 // ---------------------------------------------------------------------------
 
-/// Per-(stage, solve) context for [`lazy_solve`], mirroring the error-context
+/// Per-(stage, solve) context for [`lazy_solve_preloaded`], mirroring the error-context
 /// fields `run_stage_solve` uses.
 #[derive(Clone, Copy, Debug)]
 pub struct DcsSolveContext {
@@ -343,11 +343,11 @@ pub struct DcsSolveContext {
 // DcsSolveScratch
 // ---------------------------------------------------------------------------
 
-/// Reusable buffers for [`lazy_solve`], held across solves so the steady-state
-/// hot path allocates nothing.
+/// Reusable buffers for [`lazy_solve_preloaded`], held across solves so the
+/// steady-state hot path allocates nothing.
 ///
-/// These buffers are held outside `SolverWorkspace` so `lazy_solve` is testable
-/// in isolation.
+/// These buffers are held outside `SolverWorkspace` so `lazy_solve_preloaded`
+/// is testable in isolation.
 pub struct DcsSolveScratch {
     /// Add-row construction buffer for `add_rows`.
     pub batch: RowBatch,
@@ -394,7 +394,7 @@ impl DcsSolveScratch {
 }
 
 // ---------------------------------------------------------------------------
-// lazy_solve
+// lazy_solve_preloaded
 // ---------------------------------------------------------------------------
 
 /// Map a [`SolverError`] to an [`SddpError`] with stage/scenario/iteration
@@ -411,16 +411,29 @@ fn map_solver_error(e: SolverError, ctx: DcsSolveContext) -> SddpError {
     }
 }
 
-/// Solve one (stage, solve) lazily under Dynamic Cut Selection.
+/// Solve one (stage, solve) lazily under Dynamic Cut Selection, given an
+/// already-loaded core LP.
 ///
-/// Pass-agnostic: it builds the LP incrementally and runs the lazy inner loop,
-/// returning the final [`SolutionView`]. Post-solve extraction (backward =
-/// dual, forward/simulation = primal) is the caller's job and is NOT done here.
+/// **The caller owns the model load and any bounds patch.** Before calling,
+/// the caller must have run `solver.load_model(core)` (the cut-free core LP)
+/// and applied every per-solve bound (state pinning, opening noise, etc.) on
+/// that loaded model. This routine does NOT call `load_model`; it only appends
+/// cut rows and solves. `core` is consulted for dimensions only
+/// (`num_rows` → cut-row offset and reconstruction `base_row_count`;
+/// `num_cols` → reconstruction `num_cols`). Because every cut row is appended
+/// to the loaded, already-patched LP and every inner re-solve is a warm
+/// `solve(None)` (never another `load_model`), the caller's bound patch
+/// survives the entire loop.
+///
+/// Pass-agnostic: it builds the cut set incrementally and runs the lazy inner
+/// loop, returning the final [`SolutionView`]. Post-solve extraction (backward
+/// = dual, forward/simulation = primal) is the caller's job and is NOT done
+/// here.
 ///
 /// # Algorithm
 ///
-/// 1. `load_model(core)` (cut-free base) and build a fresh
-///    `CutRowMap::new(pool.populated_count, core.num_rows)`.
+/// 1. Build a fresh `CutRowMap::new(pool.populated_count, core.num_rows)` for
+///    the already-loaded core.
 /// 2. Append `initial_resident` (active, not-yet-resident slots) via
 ///    [`append_slots_to_lp`].
 /// 3. Seed the warm basis: if `stored_basis` is `Some`, reconstruct it
@@ -454,7 +467,7 @@ fn map_solver_error(e: SolverError, ctx: DcsSolveContext) -> SddpError {
 // read-only input or scratch buffer with no natural grouping (the context-struct
 // rule already bundles the per-(stage, solve) scalars into `ctx`/`params`).
 #[allow(clippy::too_many_arguments)]
-pub fn lazy_solve<'ws, S: SolverInterface>(
+pub fn lazy_solve_preloaded<'ws, S: SolverInterface>(
     solver: &'ws mut ProfiledSolver<S>,
     core: &StageTemplate,
     pool: &CutPool,
@@ -468,8 +481,9 @@ pub fn lazy_solve<'ws, S: SolverInterface>(
 ) -> Result<SolutionView<'ws>, SddpError> {
     let current_iteration = ctx.iteration.unwrap_or(0);
 
-    // Step 1: load the cut-free core and build a fresh row map.
-    solver.load_model(core);
+    // Step 1: build a fresh row map for the already-loaded core. The caller has
+    // already run `load_model(core)` and applied any bounds patch; this routine
+    // must NOT reload (that would discard the patch).
     let mut row_map = CutRowMap::new(pool.populated_count, core.num_rows);
 
     // Step 2: append the initial resident subset (active, not-yet-resident).
@@ -590,6 +604,68 @@ fn copy_primal(view: &SolutionView<'_>, buf: &mut Vec<f64>) {
     buf.extend_from_slice(view.primal);
 }
 
+// ---------------------------------------------------------------------------
+// build_initial_resident_set
+// ---------------------------------------------------------------------------
+
+/// Build the DCS initial resident-cut set from synchronized pool metadata.
+///
+/// The initial resident set is the warm-start hint [`lazy_solve_preloaded`] consumes as
+/// `initial_resident`. By exactness the converged optimum is independent of it,
+/// but the seed must be a deterministic function of the pool's per-slot
+/// metadata only — never of any solve trace, worker id, or MPI rank — so that
+/// results are invariant to the rank count. It reads only `last_active_iter`
+/// and `iteration_generated`, both maintained deterministically each iteration
+/// from the MPI-gathered visited states, so seeding from them preserves that
+/// invariance.
+///
+/// Clears `out`, then for each populated slot `s` in ascending order
+/// (`0..pool.populated_count`) includes `s` iff `pool.active[s]` AND either:
+///
+/// - the slot was active within the last `k2` iterations
+///   (`current_iteration.saturating_sub(pool.metadata[s].last_active_iter) <= k2`),
+///   or
+/// - the slot was generated in the current iteration
+///   (`pool.metadata[s].iteration_generated == current_iteration`) — these cuts
+///   have not been tested yet and are always seeded (mirroring the
+///   current-iteration protection in `cut_selection`).
+///
+/// `saturating_sub` is required because `last_active_iter` can exceed
+/// `current_iteration` for current-iteration cuts; plain subtraction would
+/// underflow.
+///
+/// Ascending slot order makes the result deterministic and declaration-order
+/// invariant. Allocates nothing beyond growth of `out` (the caller pre-reserves
+/// to `pool.populated_count`).
+pub fn build_initial_resident_set(
+    pool: &CutPool,
+    current_iteration: u64,
+    k2: u32,
+    out: &mut Vec<u32>,
+) {
+    debug_assert!(
+        pool.metadata.len() >= pool.populated_count,
+        "build_initial_resident_set: metadata.len() {} < populated_count {}",
+        pool.metadata.len(),
+        pool.populated_count,
+    );
+
+    out.clear();
+    let window = u64::from(k2);
+    #[allow(clippy::cast_possible_truncation)]
+    for s in 0..pool.populated_count {
+        if !pool.active[s] {
+            continue;
+        }
+        let meta = &pool.metadata[s];
+        let within_window = current_iteration.saturating_sub(meta.last_active_iter) <= window;
+        let is_current_iter = meta.iteration_generated == current_iteration;
+        if within_window || is_current_iter {
+            out.push(s as u32);
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::doc_markdown)]
 mod tests {
@@ -599,11 +675,11 @@ mod tests {
     };
 
     use super::{
-        DcsParams, DcsScoringScratch, DcsSolveContext, DcsSolveScratch, lazy_solve,
-        score_violated_candidates,
+        DcsParams, DcsScoringScratch, DcsSolveContext, DcsSolveScratch, build_initial_resident_set,
+        lazy_solve_preloaded, score_violated_candidates,
     };
     use crate::cut::{CutPool, CutRowMap};
-    use crate::cut_selection::CutSelectionStrategy;
+    use crate::cut_selection::{CutMetadata, CutSelectionStrategy};
     use crate::indexer::StageIndexer;
 
     #[test]
@@ -1175,7 +1251,9 @@ mod tests {
         let mut scratch = DcsSolveScratch::default();
         let params = lazy_params(10, 50);
 
-        let view = lazy_solve(
+        // Caller owns the model load (and, in production, any bounds patch).
+        solver.load_model(&core);
+        let view = lazy_solve_preloaded(
             &mut solver,
             &core,
             &pool,
@@ -1187,7 +1265,7 @@ mod tests {
             &mut scratch,
             ctx(),
         )
-        .expect("lazy_solve must succeed");
+        .expect("lazy_solve_preloaded must succeed");
 
         assert!(
             (view.objective - all_obj).abs() < 1e-9,
@@ -1216,7 +1294,8 @@ mod tests {
         let params = lazy_params(10, 50);
 
         // Initial subset includes the binding slot 2.
-        let view = lazy_solve(
+        solver.load_model(&core);
+        let view = lazy_solve_preloaded(
             &mut solver,
             &core,
             &pool,
@@ -1228,7 +1307,7 @@ mod tests {
             &mut scratch,
             ctx(),
         )
-        .expect("lazy_solve must succeed");
+        .expect("lazy_solve_preloaded must succeed");
 
         // The optimum is the binding cut floor; no growth needed.
         assert_eq!(view.primal[LAZY_THETA_COL], 5.0);
@@ -1247,7 +1326,8 @@ mod tests {
         let mut scratch = DcsSolveScratch::default();
         let params = lazy_params(10, 50);
 
-        let view = lazy_solve(
+        solver.load_model(&core);
+        let view = lazy_solve_preloaded(
             &mut solver,
             &core,
             &pool,
@@ -1259,7 +1339,7 @@ mod tests {
             &mut scratch,
             ctx(),
         )
-        .expect("lazy_solve must succeed");
+        .expect("lazy_solve_preloaded must succeed");
 
         assert_eq!(
             view.primal[LAZY_THETA_COL], 5.0,
@@ -1282,7 +1362,8 @@ mod tests {
         // fires, then the TC fallback adds the rest.
         let params = lazy_params(1, 1);
 
-        let view = lazy_solve(
+        solver.load_model(&core);
+        let view = lazy_solve_preloaded(
             &mut solver,
             &core,
             &pool,
@@ -1294,7 +1375,7 @@ mod tests {
             &mut scratch,
             ctx(),
         )
-        .expect("lazy_solve TC fallback must succeed");
+        .expect("lazy_solve_preloaded TC fallback must succeed");
 
         assert!((view.objective - all_obj).abs() < 1e-9);
         assert!((view.primal[LAZY_THETA_COL] - all_theta).abs() < 1e-9);
@@ -1311,7 +1392,8 @@ mod tests {
         let run = || {
             let mut solver = active_profiled();
             let mut scratch = DcsSolveScratch::default();
-            let view = lazy_solve(
+            solver.load_model(&core);
+            let view = lazy_solve_preloaded(
                 &mut solver,
                 &core,
                 &pool,
@@ -1323,7 +1405,7 @@ mod tests {
                 &mut scratch,
                 ctx(),
             )
-            .expect("lazy_solve must succeed");
+            .expect("lazy_solve_preloaded must succeed");
             view.objective
         };
 
@@ -1426,7 +1508,8 @@ mod tests {
         let mut scratch = DcsSolveScratch::default();
         let params = lazy_params(10, 50);
 
-        let view = lazy_solve(
+        solver.load_model(&core);
+        let view = lazy_solve_preloaded(
             &mut solver,
             &core,
             &pool,
@@ -1438,11 +1521,121 @@ mod tests {
             &mut scratch,
             ctx(),
         )
-        .expect("lazy_solve must tolerate a cold mid-loop re-solve");
+        .expect("lazy_solve_preloaded must tolerate a cold mid-loop re-solve");
 
         assert_eq!(
             view.primal[LAZY_THETA_COL], 5.0,
             "loop reaches the no-violation stop on the second (cold) solve"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // build_initial_resident_set fixtures
+    // -----------------------------------------------------------------------
+
+    /// Build a pool of `n` populated, state_dim-1 cuts with explicit per-slot
+    /// `(active, iteration_generated, last_active_iter)` metadata. Local copy of
+    /// the `cut_selection` test-helper pattern (kept private to this module).
+    #[allow(clippy::cast_possible_truncation)]
+    fn seed_pool(specs: &[(bool, u64, u64)]) -> CutPool {
+        let n = specs.len();
+        let mut pool = CutPool::new(n.max(1), 1, n.max(1) as u32, 0);
+        for (i, &(active, iteration_generated, last_active_iter)) in specs.iter().enumerate() {
+            pool.add_cut(0, i as u32, 0.0, &[0.0]);
+            pool.metadata[i] = CutMetadata {
+                iteration_generated,
+                forward_pass_index: i as u32,
+                active_count: 0,
+                last_active_iter,
+            };
+            pool.active[i] = active;
+        }
+        pool.cached_active_count = specs.iter().filter(|&&(a, _, _)| a).count();
+        pool
+    }
+
+    // -----------------------------------------------------------------------
+    // build_initial_resident_set tests
+    // -----------------------------------------------------------------------
+
+    /// AC1: slots 0..4 with last_active_iter = [10, 8, 3, 10, 6], all active,
+    /// all generated at iter 1, current = 10, k2 = 5. Slot 2 excluded
+    /// (10 - 3 = 7 > 5); the rest are within the window.
+    #[test]
+    fn seeds_within_k2_window() {
+        let pool = seed_pool(&[
+            (true, 1, 10),
+            (true, 1, 8),
+            (true, 1, 3),
+            (true, 1, 10),
+            (true, 1, 6),
+        ]);
+        let mut out = Vec::new();
+        build_initial_resident_set(&pool, 10, 5, &mut out);
+        assert_eq!(out, vec![0, 1, 3, 4]);
+    }
+
+    /// AC2: a current-iteration cut (iteration_generated == current) is always
+    /// seeded even when its last_active_iter is far in the past.
+    #[test]
+    fn always_seeds_current_iteration_cuts() {
+        // Slot 0: out of window (10 - 1 = 9 > 2) but generated this iteration.
+        // Slot 1: in window.
+        let pool = seed_pool(&[(true, 10, 1), (true, 1, 9)]);
+        let mut out = Vec::new();
+        build_initial_resident_set(&pool, 10, 2, &mut out);
+        assert_eq!(
+            out,
+            vec![0, 1],
+            "current-iteration slot 0 seeded despite stale last_active_iter"
+        );
+    }
+
+    /// AC3: an inactive slot within the k2 window is never included.
+    #[test]
+    fn excludes_inactive_slots() {
+        // Slot 0 active in window; slot 1 inactive in window; slot 2 active.
+        let pool = seed_pool(&[(true, 1, 10), (false, 1, 10), (true, 1, 10)]);
+        let mut out = Vec::new();
+        build_initial_resident_set(&pool, 10, 5, &mut out);
+        assert_eq!(out, vec![0, 2], "inactive slot 1 excluded");
+    }
+
+    /// AC4: the result is strictly ascending and deterministic across repeated
+    /// calls on the same metadata (no dependence on iteration order).
+    #[test]
+    fn result_is_ascending_and_deterministic() {
+        let pool = seed_pool(&[
+            (true, 1, 10),
+            (true, 1, 9),
+            (false, 1, 10),
+            (true, 1, 8),
+            (true, 1, 10),
+        ]);
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        build_initial_resident_set(&pool, 10, 5, &mut a);
+        build_initial_resident_set(&pool, 10, 5, &mut b);
+        assert_eq!(a, b, "two calls on identical metadata must match");
+        assert!(
+            a.windows(2).all(|w| w[0] < w[1]),
+            "result must be strictly ascending, got {a:?}"
+        );
+        assert_eq!(a, vec![0, 1, 3, 4]);
+    }
+
+    /// AC: k2 = 0 boundary. Only slots active in the current iteration
+    /// (last_active_iter >= current) plus current-iteration cuts are included.
+    #[test]
+    fn k2_zero_window_boundary() {
+        // current = 10, k2 = 0:
+        //   slot 0: last_active_iter 10 → 10 - 10 = 0 <= 0 → included.
+        //   slot 1: last_active_iter 9  → 10 - 9  = 1 >  0 → excluded (not current-iter).
+        //   slot 2: last_active_iter 11 → saturating_sub → 0 <= 0 → included.
+        //   slot 3: generated this iteration (last_active_iter 2 stale) → included.
+        let pool = seed_pool(&[(true, 1, 10), (true, 1, 9), (true, 1, 11), (true, 10, 2)]);
+        let mut out = Vec::new();
+        build_initial_resident_set(&pool, 10, 0, &mut out);
+        assert_eq!(out, vec![0, 2, 3]);
     }
 }

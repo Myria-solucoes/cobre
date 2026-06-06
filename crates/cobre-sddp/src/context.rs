@@ -5,7 +5,8 @@ use cobre_solver::StageTemplate;
 use cobre_stochastic::{ExternalScenarioLibrary, HistoricalScenarioLibrary, StochasticContext};
 
 use crate::{
-    horizon_mode::HorizonMode, indexer::StageIndexer, inflow_method::InflowNonNegativityMethod,
+    dcs::DcsParams, horizon_mode::HorizonMode, indexer::StageIndexer,
+    inflow_method::InflowNonNegativityMethod,
 };
 
 /// Immutable per-stage LP layout and noise scaling parameters.
@@ -146,4 +147,10 @@ pub struct TrainingContext<'a> {
     /// Set into `ws.scratch.lag_weight_accum` at every trajectory start.
     /// `0.0` when there are no observations.
     pub recent_weight_seed: f64,
+    /// Dynamic Cut Selection hyperparameters, `Some` only when the configured
+    /// cut-selection method is the dynamic variant; `None` for every other
+    /// method (and when cut selection is disabled). When `Some` and the current
+    /// iteration is at or past `start_iteration`, the backward pass solves each
+    /// stage LP lazily; otherwise the baked all-cuts path is used.
+    pub dcs: Option<DcsParams>,
 }

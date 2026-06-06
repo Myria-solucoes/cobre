@@ -1291,6 +1291,7 @@ mod tests {
             external_ncs_library: None,
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
+            dcs: None,
         };
 
         let mut state = ForwardPassState::new(1, fx.n_stages, fx.n_scenarios);
@@ -1356,6 +1357,7 @@ mod tests {
             external_ncs_library: None,
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
+            dcs: None,
         };
 
         let sampler = build_forward_sampler(ForwardSamplerConfig {
@@ -1472,6 +1474,7 @@ mod tests {
             external_ncs_library: None,
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
+            dcs: None,
         };
 
         let mut state = ForwardPassState::new(1, fx.n_stages, fx.n_scenarios);
@@ -1589,6 +1592,7 @@ mod tests {
             external_ncs_library: None,
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
+            dcs: None,
         };
 
         let mut state = ForwardPassState::new(1, fx.n_stages, fx.n_scenarios);

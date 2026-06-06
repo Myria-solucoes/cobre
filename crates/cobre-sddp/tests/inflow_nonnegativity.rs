@@ -584,6 +584,7 @@ fn train_fixture(
             stages: &[],
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
+            dcs: None,
         },
         &comm,
         ActiveSolver::new,
@@ -677,6 +678,7 @@ fn simulate_fixture(
             stages: &[],
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
+            dcs: None,
         },
         &SimulationConfig {
             n_scenarios: 20,
