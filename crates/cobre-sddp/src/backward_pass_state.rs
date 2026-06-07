@@ -992,13 +992,31 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
     let pop = succ.successor_populated_count;
     let n_workers = workspaces.len().max(1);
 
+    // When DCS is active for this iteration, the baked-template loads below are
+    // dead work: `solve_opening_dcs` reloads the cut-free core per opening
+    // (backward.rs), which both (a) is the LP the lazy loop must own and (b)
+    // supplies the HiGHS basis/factorization/RNG reset that `load_backward_lp`
+    // otherwise provides. Skipping them mirrors the forward pass, which already
+    // omits the baked load on the DCS path (forward_pass_state.rs). The decision
+    // depends only on `iteration`, so it is constant across workers and trial
+    // points. Cuts are still synchronized and the baked path is unaffected for
+    // iterations before `start_iteration` (dcs_active == false there).
+    let dcs_active = training_ctx
+        .dcs
+        .is_some_and(|params| params.is_active(iteration));
+
     workspaces
         .par_iter_mut()
         .zip(basis_slices.into_par_iter())
         .enumerate()
         .map(|(w, (ws, mut basis_slice))| {
-            // Load template and pre-allocate per-stage buffers.
-            load_backward_lp(ws, succ);
+            // Load template and pre-allocate per-stage buffers. On the DCS path
+            // the baked load is skipped (solve_opening_dcs loads the cut-free
+            // core per opening); the buffer setup below touches only
+            // `ws.backward_accum`, never `ws.solver`, so it is unaffected.
+            if !dcs_active {
+                load_backward_lp(ws, succ);
+            }
             while ws.backward_accum.outcomes.len() < n_openings {
                 ws.backward_accum
                     .outcomes
@@ -1043,8 +1061,13 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
 
             for m in start_m..end_m {
                 // Reload LP per trial point to reset HiGHS's internal simplex
-                // basis, factorization, and RNG position.
-                load_backward_lp(ws, succ);
+                // basis, factorization, and RNG position. Skipped on the DCS
+                // path: solve_opening_dcs reloads the cut-free core per opening,
+                // which supplies the same reset and is the LP the lazy loop owns
+                // (loading the baked all-cuts template here would be discarded).
+                if !dcs_active {
+                    load_backward_lp(ws, succ);
+                }
                 ws.backward_accum.slot_increments[..pop].fill(0);
                 // Call process_trial_point_backward before the push to avoid a
                 // simultaneous mutable borrow of `ws.backward_accum.staged_cuts_buf`
@@ -1935,5 +1958,78 @@ mod tests {
             "is_inside_backward_enabled must report false after \
              set_inside_backward_enabled(false)"
         );
+    }
+
+    /// AC2 (ticket-017a): a cut generated at iteration `g` that binds at a later
+    /// iteration `i > g` under DCS must have its `last_active_iter` advanced to
+    /// `i` by the (unchanged) per-stage metadata sync, fed by the DCS-maintained
+    /// binding-count contribution.
+    ///
+    /// This drives the real [`BackwardPassState::sync_stage_metadata`] with a
+    /// per-worker `metadata_sync_contribution` shaped exactly as the DCS backward
+    /// path produces it (see `backward::tests::backward_dcs_binding_counts_match_baked`,
+    /// which proves the DCS path bumps exactly the binding slot): slot 1 bound at
+    /// iteration `i`, slot 0 did not. Before the sync `last_active_iter == g` for
+    /// both slots; after, the binding slot 1 advances to `i` (even though its
+    /// `iteration_generated` is the older `g`), while the non-binding slot 0
+    /// stays frozen at `g`. This is the §3.1 clause-1 prerequisite the seed reads.
+    #[test]
+    fn dcs_binding_contribution_advances_last_active_iter() {
+        use crate::cut_selection::CutMetadata;
+
+        let g = 1_u64; // generation iteration
+        let i = 5_u64; // binding (current) iteration, i > g
+        let successor = 1_usize;
+        let n_state = 1_usize;
+        let n_stages = 2_usize;
+        let n_openings = 1_usize;
+
+        // FCF with two cuts at the successor stage, both generated at `g` and
+        // last active at `g` (stale). Slot 1 is the one that will bind at `i`.
+        let mut fcf = FutureCostFunction::new(n_stages, n_state, 8, 10, &vec![0; n_stages]);
+        fcf.add_cut(successor, g, 0, 1.0, &[0.0]);
+        fcf.add_cut(successor, g, 1, 0.0, &[2.0]);
+        let meta = |generated: u64, last: u64| CutMetadata {
+            iteration_generated: generated,
+            forward_pass_index: 0,
+            active_count: 0,
+            last_active_iter: last,
+        };
+        fcf.pools[successor].metadata[0] = meta(g, g);
+        fcf.pools[successor].metadata[1] = meta(g, g);
+        let pop = fcf.pools[successor].populated_count;
+
+        // Pre-state: both slots frozen at generation iteration `g`.
+        assert_eq!(fcf.pools[successor].metadata[0].last_active_iter, g);
+        assert_eq!(fcf.pools[successor].metadata[1].last_active_iter, g);
+
+        // One worker whose DCS binding-count contribution bumps only slot 1 (the
+        // resident binding cut), matching what the DCS path emits at iteration i.
+        let mut workspaces =
+            single_workspace(MockSolver::always_ok(solution_1_0(0.0, 0.0)), n_state);
+        let contrib = &mut workspaces[0].backward_accum.metadata_sync_contribution;
+        contrib.clear();
+        contrib.resize(pop, 0);
+        contrib[1] = 1;
+
+        let comm = StubComm;
+        let mut state = BackwardPassState::new(1, 1, n_openings, n_state);
+
+        state
+            .sync_stage_metadata(successor, i, &workspaces, &mut fcf, &comm)
+            .expect("metadata sync must succeed");
+
+        // Slot 1 bound at `i`: last_active_iter advances from g to i; active_count
+        // accrues the increment. Slot 0 did not bind: it stays frozen at g.
+        assert_eq!(
+            fcf.pools[successor].metadata[1].last_active_iter, i,
+            "binding slot 1 must advance to iteration {i}"
+        );
+        assert_eq!(fcf.pools[successor].metadata[1].active_count, 1);
+        assert_eq!(
+            fcf.pools[successor].metadata[0].last_active_iter, g,
+            "non-binding slot 0 must stay frozen at its generation iteration {g}"
+        );
+        assert_eq!(fcf.pools[successor].metadata[0].active_count, 0);
     }
 }

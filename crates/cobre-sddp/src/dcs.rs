@@ -138,6 +138,24 @@ pub struct DcsScoringScratch {
     /// state index (`indexer.n_state` long after fill).
     pub unscaled_state: Vec<f64>,
 
+    /// Gathered coefficient rows of the eligible candidates for a single scoring
+    /// pass, row-major `k_rows × n_state`. Cleared and re-filled each pass; the
+    /// single batched [`gemm_block`] reads it as the GEMM left operand. Reserved
+    /// to `pool_capacity * n_state` so even an all-eligible pass needs no growth.
+    pub cand_coef_block: Vec<f64>,
+
+    /// Per-candidate activity output of the single batched GEMM, one entry per
+    /// gathered candidate (`alpha[i] = ∇·x*_raw` for candidate `i`, before the
+    /// per-candidate intercept is added). Length tracks the gathered candidate
+    /// count each pass.
+    pub alpha: Vec<f64>,
+
+    /// Slot id of each gathered candidate, parallel to the rows of
+    /// `cand_coef_block` and (after the GEMM) to `alpha`. Lets the post-GEMM
+    /// violation scan recover each activity entry's slot id (and, via
+    /// `pool.intercepts`, its intercept).
+    pub cand_slots: Vec<u32>,
+
     /// `(violation_magnitude, slot)` for each violated candidate, before the
     /// top-`nadic` truncation.
     pub violations: Vec<(f64, u32)>,
@@ -145,12 +163,29 @@ pub struct DcsScoringScratch {
 
 impl DcsScoringScratch {
     /// Grow the scratch buffers to hold `n_state` state entries and up to
-    /// `pool_capacity` candidate violations, without shrinking existing
-    /// capacity (growth-only, mirroring `workspace.rs`).
+    /// `pool_capacity` candidate cuts, without shrinking existing capacity
+    /// (growth-only, mirroring `workspace.rs`).
+    ///
+    /// `cand_coef_block` is reserved to `pool_capacity * n_state` — the worst
+    /// case where every active cut is an eligible (non-resident, in-window)
+    /// candidate — while `alpha`, `cand_slots`, and `violations` are reserved to
+    /// `pool_capacity` entries each.
     pub fn reserve(&mut self, n_state: usize, pool_capacity: usize) {
         if self.unscaled_state.capacity() < n_state {
             self.unscaled_state
                 .reserve(n_state - self.unscaled_state.capacity());
+        }
+        let coef_capacity = pool_capacity * n_state;
+        if self.cand_coef_block.capacity() < coef_capacity {
+            self.cand_coef_block
+                .reserve(coef_capacity - self.cand_coef_block.capacity());
+        }
+        if self.alpha.capacity() < pool_capacity {
+            self.alpha.reserve(pool_capacity - self.alpha.capacity());
+        }
+        if self.cand_slots.capacity() < pool_capacity {
+            self.cand_slots
+                .reserve(pool_capacity - self.cand_slots.capacity());
         }
         if self.violations.capacity() < pool_capacity {
             self.violations
@@ -184,6 +219,19 @@ impl DcsScoringScratch {
 /// [`StageIndexer::state_to_lp_column`], identical to the cut-row builder in
 /// `forward::build_cut_row_batch_into`, so scoring and row construction
 /// reference the same columns.
+///
+/// # Batched scoring
+///
+/// A single pass over [`CutPool::active_cuts`] (ascending-slot order) applies
+/// the filters below and **gathers** each surviving candidate's `coefficients`
+/// slice into the contiguous row-major `scratch.cand_coef_block`
+/// (`k_rows × n_state`), recording its slot in `scratch.cand_slots`. One
+/// [`gemm_block`] then fills `scratch.alpha[0..k_rows]` with every candidate's
+/// `∇·x*_raw` in a single dispatch. Because `gemm_block` computes each output
+/// row's dot product independently, a candidate's activity is **bit-identical**
+/// whether scored alone (`k_rows = 1`) or in a batch (`k_rows = N`); the
+/// per-candidate intercept (`pool.intercepts[slot]`) is added afterward, outside
+/// the GEMM. The violation scan, sort, and `nadic` truncation are unchanged.
 ///
 /// # `k1` candidate-recency window
 ///
@@ -251,6 +299,9 @@ pub fn score_violated_candidates(
 
     out_selected.clear();
     scratch.violations.clear();
+    scratch.cand_coef_block.clear();
+    scratch.cand_slots.clear();
+    scratch.alpha.clear();
 
     // Unscale θ*: scaled space ⇒ raw via col_scale[theta] (empty ⇒ factor 1.0).
     let theta_raw = if col_scale.is_empty() {
@@ -272,9 +323,12 @@ pub fn score_violated_candidates(
         scratch.unscaled_state.push(x_raw);
     }
 
-    // Iterate active cuts; apply the k1 window, skip resident slots, and score
-    // each candidate via a dot product against the unscaled state.
-    for (slot, intercept, coefficients) in pool.active_cuts() {
+    // Gather pass: iterate active cuts in ascending-slot order, apply the k1
+    // window then the resident-skip, and copy each surviving candidate's
+    // coefficient row into the contiguous `cand_coef_block` block (recording its
+    // slot in `cand_slots`). The intercept is recovered later via
+    // `pool.intercepts[slot]`, so it need not be gathered here.
+    for (slot, _intercept, coefficients) in pool.active_cuts() {
         // k1 candidate-recency window (applied first). saturating_sub keeps
         // warm-start cuts (iteration_generated == u64::MAX, age 0) eligible.
         if let Some(k1) = params.k1 {
@@ -289,22 +343,36 @@ pub fn score_violated_candidates(
             continue;
         }
 
-        // alpha = intercept + Σ_j coefficients[j] * unscaled_state[j].
-        // Single trial point (m_len = 1): gemm_block writes one value.
-        let mut dot = [0.0_f64; 1];
-        gemm_block(
-            coefficients,
-            &scratch.unscaled_state,
-            1,
-            n_state,
-            1,
-            &mut dot,
-        );
-        let alpha = intercept + dot[0];
+        scratch.cand_coef_block.extend_from_slice(coefficients);
+        #[allow(clippy::cast_possible_truncation)]
+        scratch.cand_slots.push(slot as u32);
+    }
+
+    let k_rows = scratch.cand_slots.len();
+
+    // One batched GEMM for the whole pass: alpha[i] = ∇_i · x*_raw for each
+    // gathered candidate i (single trial point, m_len = 1). gemm_block computes
+    // each output row independently, so each alpha is bit-identical to the
+    // per-candidate (k_rows = 1) call it replaces. A zero candidate count is a
+    // gemm_block no-op (it returns immediately for k_rows == 0).
+    scratch.alpha.clear();
+    scratch.alpha.resize(k_rows, 0.0);
+    gemm_block(
+        &scratch.cand_coef_block,
+        &scratch.unscaled_state,
+        k_rows,
+        n_state,
+        1,
+        &mut scratch.alpha,
+    );
+
+    // Violation scan over the batched activities: v = (intercept + ∇·x*_raw) −
+    // θ_raw, with the intercept recovered per candidate from `pool.intercepts`.
+    for (i, &slot) in scratch.cand_slots.iter().enumerate() {
+        let alpha = pool.intercepts[slot as usize] + scratch.alpha[i];
         let v = alpha - theta_raw;
         if v > params.epsilon_viol {
-            #[allow(clippy::cast_possible_truncation)]
-            scratch.violations.push((v, slot as u32));
+            scratch.violations.push((v, slot));
         }
     }
 
@@ -339,6 +407,22 @@ pub struct DcsSolveContext {
     /// disables the window: `0.saturating_sub(iteration_generated) == 0 < k1`,
     /// so every cut is eligible.
     pub iteration: Option<u64>,
+
+    /// Continue from a carried LP instead of starting a fresh solve.
+    ///
+    /// `false` (the default for every fresh solve): reset the scratch
+    /// [`CutRowMap`], append `initial_resident`, and run the initial solve
+    /// (warm if a `stored_basis` was supplied, else cold). This is the only mode
+    /// the forward, simulation, and per-opening backward paths use.
+    ///
+    /// `true` (backward opening-reuse path, openings 1..): the solver already
+    /// holds the previous opening's cut rows (tracked in the carried scratch
+    /// `CutRowMap`) and a warm basis; only the opening's noise bounds changed.
+    /// Skip the reset / `initial_resident` append / model reload entirely; just
+    /// warm-`solve(None)` to re-optimize under the new bounds, then run the lazy
+    /// loop, which appends only the cuts this opening additionally violates.
+    /// `initial_resident` and `stored_basis` are ignored in this mode.
+    pub continue_carry: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -359,6 +443,14 @@ pub struct DcsSolveScratch {
     pub out_selected: Vec<u32>,
     /// Destination basis for the initial uniform-BASIC reconstruction.
     pub recon_basis: Basis,
+    /// Slot→LP-row map for the cut rows resident in the loaded LP.
+    ///
+    /// Held in scratch (rather than allocated per call) so the steady-state hot
+    /// path does not allocate a fresh `vec![None; populated_count]` every solve,
+    /// and so the backward opening-reuse path can carry residency across a trial
+    /// point's openings: a fresh solve resets it (see
+    /// [`DcsSolveContext::continue_carry`]), a continued solve leaves it intact.
+    pub row_map: CutRowMap,
     /// Copy of the most recent solve's primal vector, so the `SolutionView`
     /// borrow of the solver can end before the next `&mut` solver call.
     pub primal_buf: Vec<f64>,
@@ -388,6 +480,7 @@ impl Default for DcsSolveScratch {
             recon_basis: Basis::new(0, 0),
             primal_buf: Vec::new(),
             scoring_time_seconds: 0.0,
+            row_map: CutRowMap::new(0, 0),
         }
     }
 }
@@ -401,6 +494,10 @@ impl DcsSolveScratch {
             self.out_selected
                 .reserve(pool_capacity - self.out_selected.capacity());
         }
+        // Pre-size the slot→row map so the first solve does not reallocate; the
+        // `base_row_offset` here is a placeholder (each fresh solve resets it to
+        // the loaded core's row count in `lazy_solve_preloaded`).
+        self.row_map.reset(pool_capacity, 0);
     }
 }
 
@@ -492,25 +589,37 @@ pub fn lazy_solve_preloaded<'ws, S: SolverInterface>(
 ) -> Result<SolutionView<'ws>, SddpError> {
     let current_iteration = ctx.iteration.unwrap_or(0);
 
-    // Step 1: build a fresh row map for the already-loaded core. The caller has
-    // already run `load_model(core)` and applied any bounds patch; this routine
-    // must NOT reload (that would discard the patch).
-    let mut row_map = CutRowMap::new(pool.populated_count, core.num_rows);
+    // Steps 1-3: prepare the LP and run the initial solve, filling
+    // `scratch.primal_buf`. Two modes (see `DcsSolveContext::continue_carry`).
+    if ctx.continue_carry {
+        // CONTINUE (backward opening-reuse, openings 1..): the solver already
+        // holds the previous opening's cut rows (tracked in `scratch.row_map`)
+        // and a warm basis; the caller patched only the new opening's bounds. Do
+        // NOT reset the map, append the seed, or reload — just re-solve warm to
+        // re-optimize under the new bounds and fall through to the lazy loop,
+        // which appends only the cuts this opening additionally violates.
+        // `initial_resident` and `stored_basis` are ignored in this mode.
+        let view = solver.solve(None).map_err(|e| map_solver_error(e, ctx))?;
+        copy_primal(&view, &mut scratch.primal_buf);
+        let _ = view;
+    } else {
+        // FRESH: reset the carried row map for the already-loaded core (the
+        // caller has run `load_model(core)` and applied any bounds patch; this
+        // routine must NOT reload — that would discard the patch), append the
+        // initial resident subset, then run the initial solve (warm uniform-
+        // BASIC if a stored basis exists, else cold).
+        scratch.row_map.reset(pool.populated_count, core.num_rows);
+        append_slots_to_lp(
+            solver,
+            pool,
+            initial_resident,
+            indexer,
+            col_scale,
+            &mut scratch.row_map,
+            &mut scratch.batch,
+        );
 
-    // Step 2: append the initial resident subset (active, not-yet-resident).
-    append_slots_to_lp(
-        solver,
-        pool,
-        initial_resident,
-        indexer,
-        col_scale,
-        &mut row_map,
-        &mut scratch.batch,
-    );
-
-    // Step 3: initial solve. Warm-start uniform-BASIC if a stored basis exists.
-    {
-        let cut_rows = row_map.total_cut_rows();
+        let cut_rows = scratch.row_map.total_cut_rows();
         if let Some(stored) = stored_basis {
             let target = ReconstructionTarget {
                 base_row_count: core.num_rows,
@@ -549,7 +658,7 @@ pub fn lazy_solve_preloaded<'ws, S: SolverInterface>(
             indexer,
             &scratch.primal_buf,
             col_scale,
-            &row_map,
+            &scratch.row_map,
             params,
             current_iteration,
             &mut scratch.scoring,
@@ -573,7 +682,7 @@ pub fn lazy_solve_preloaded<'ws, S: SolverInterface>(
             &scratch.out_selected,
             indexer,
             col_scale,
-            &mut row_map,
+            &mut scratch.row_map,
             &mut scratch.batch,
         );
         let view = solver.solve(None).map_err(|e| map_solver_error(e, ctx))?;
@@ -594,7 +703,7 @@ pub fn lazy_solve_preloaded<'ws, S: SolverInterface>(
         indexer,
         &scratch.primal_buf,
         col_scale,
-        &row_map,
+        &scratch.row_map,
         &all_params,
         current_iteration,
         &mut scratch.scoring,
@@ -608,7 +717,7 @@ pub fn lazy_solve_preloaded<'ws, S: SolverInterface>(
             &scratch.out_selected,
             indexer,
             col_scale,
-            &mut row_map,
+            &mut scratch.row_map,
             &mut scratch.batch,
         );
     }
@@ -1149,6 +1258,412 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Batched-scoring tests (ticket-018): bit-identical vs per-row reference,
+    // single GEMM per pass, growth-only scratch.
+    // -----------------------------------------------------------------------
+
+    use crate::gemm::gemm_block;
+
+    /// Deterministic splitmix64 PRNG (no external rand dep in unit tests), with a
+    /// helper that draws a finite f64 in roughly [-1.5, 0.5). Mirrors the
+    /// `benches/cut_selection_kernel.rs` generator so the randomized fixture is
+    /// reproducible.
+    fn splitmix64(state: &mut u64) -> u64 {
+        *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = *state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    fn draw_f64(state: &mut u64) -> f64 {
+        let r = splitmix64(state);
+        let bits = (r >> 12) & ((1_u64 << 52) - 1);
+        f64::from_bits((1023_u64 << 52) | bits) - 1.5
+    }
+
+    /// Per-row reference for the batched scorer: replays the EXACT filter / gather
+    /// order of `score_violated_candidates`, but scores each surviving candidate
+    /// with its own `gemm_block(coef, x*, 1, n_state, 1, ..)` call (the old
+    /// per-candidate path). Returns `(alpha_bits_in_gather_order, out_selected)`.
+    #[allow(clippy::cast_possible_truncation)]
+    fn per_row_reference(
+        pool: &CutPool,
+        idx: &StageIndexer,
+        primal: &[f64],
+        col_scale: &[f64],
+        resident: &CutRowMap,
+        p: &DcsParams,
+        current_iteration: u64,
+    ) -> (Vec<u64>, Vec<u32>) {
+        let n_state = idx.n_state;
+        let theta = idx.theta;
+        let theta_raw = if col_scale.is_empty() {
+            primal[theta]
+        } else {
+            col_scale[theta] * primal[theta]
+        };
+        let mut unscaled_state = Vec::with_capacity(n_state);
+        for j in 0..n_state {
+            let c = idx.state_to_lp_column(j);
+            let x_raw = if col_scale.is_empty() {
+                primal[c]
+            } else {
+                col_scale[c] * primal[c]
+            };
+            unscaled_state.push(x_raw);
+        }
+
+        let mut alpha_bits = Vec::new();
+        let mut violations: Vec<(f64, u32)> = Vec::new();
+        for (slot, intercept, coefficients) in pool.active_cuts() {
+            if let Some(k1) = p.k1 {
+                let age = current_iteration.saturating_sub(pool.metadata[slot].iteration_generated);
+                if age >= u64::from(k1) {
+                    continue;
+                }
+            }
+            if resident.lp_row_for_slot(slot).is_some() {
+                continue;
+            }
+            let mut dot = [0.0_f64; 1];
+            gemm_block(coefficients, &unscaled_state, 1, n_state, 1, &mut dot);
+            // Record the GEMM's raw activity (∇·x*_raw), matching what the
+            // batched scorer stores in `scratch.alpha` (intercept added after).
+            alpha_bits.push(dot[0].to_bits());
+            let alpha = intercept + dot[0];
+            let v = alpha - theta_raw;
+            if v > p.epsilon_viol {
+                violations.push((v, slot as u32));
+            }
+        }
+        violations.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        let take = (p.nadic as usize).min(violations.len());
+        let out_selected = violations[..take].iter().map(|&(_, s)| s).collect();
+        (alpha_bits, out_selected)
+    }
+
+    /// Build a randomized capacity-`cap`, state-dim-2 pool: every slot active,
+    /// random intercept + coefficients, random `iteration_generated` in
+    /// `[1, 12]`. Deterministic in `seed`.
+    #[allow(clippy::cast_possible_truncation)]
+    fn random_pool(cap: usize, seed: u64) -> CutPool {
+        let mut pool = CutPool::new(cap, N_STATE, cap as u32, 0);
+        let mut state = seed;
+        for slot in 0..cap {
+            let intercept = draw_f64(&mut state);
+            let coeffs = [draw_f64(&mut state), draw_f64(&mut state)];
+            pool.add_cut(0, slot as u32, intercept, &coeffs);
+            // iteration_generated in [1, 12].
+            let gen_iter = 1 + (splitmix64(&mut state) % 12);
+            pool.metadata[slot].iteration_generated = gen_iter;
+        }
+        pool
+    }
+
+    /// AC1: the batched scorer's per-candidate activities (`scratch.alpha`, by
+    /// bits) and its `out_selected` are bit-identical to a per-row reference that
+    /// scores each candidate with an individual `gemm_block(.., 1, n_state, 1, ..)`
+    /// call — over a randomized pool with a non-trivial primal and col_scale, a
+    /// mix of resident / non-resident slots, and a finite k1 window.
+    #[test]
+    fn batched_scoring_bit_identical_to_per_row_reference() {
+        let idx = indexer();
+        let cap = 64;
+        let pool = random_pool(cap, 0x0BAD_F00D_C0FF_EE11);
+
+        // Non-trivial primal: scaled x and theta drawn from the same PRNG stream.
+        let mut prng = 0xDEAD_BEEF_1234_5678_u64;
+        let mut primal = vec![0.0_f64; PRIMAL_LEN];
+        for v in &mut primal {
+            *v = draw_f64(&mut prng);
+        }
+        // Per-column scale covering every column up to theta.
+        let mut col_scale = vec![1.0_f64; PRIMAL_LEN];
+        for v in &mut col_scale {
+            *v = 0.5 + (draw_f64(&mut prng) + 1.5) * 0.5; // strictly positive
+        }
+        // Drive theta_raw strongly negative so most candidates are violated
+        // (v = alpha - theta_raw > 0): this makes the selection/sort/nadic path a
+        // non-vacuous witness, not just the all-empty case. col_scale[theta] > 0,
+        // so a negative scaled theta yields a negative theta_raw.
+        primal[THETA_COL] = -50.0;
+
+        // Mark roughly every third slot resident.
+        let mut resident = CutRowMap::new(cap, 0);
+        for slot in (0..cap).step_by(3) {
+            resident.insert(slot);
+        }
+
+        let current_iteration = 10;
+        // Finite k1 window so the recency filter is exercised alongside residency.
+        let p = params(7, 1e-9, Some(5));
+
+        let (ref_alpha_bits, ref_selected) = per_row_reference(
+            &pool,
+            &idx,
+            &primal,
+            &col_scale,
+            &resident,
+            &p,
+            current_iteration,
+        );
+
+        let mut scratch = DcsScoringScratch::default();
+        let mut out = Vec::new();
+        let count = score_violated_candidates(
+            &pool,
+            &idx,
+            &primal,
+            &col_scale,
+            &resident,
+            &p,
+            current_iteration,
+            &mut scratch,
+            &mut out,
+        );
+
+        // The gathered candidate count must match the reference candidate count.
+        assert_eq!(
+            scratch.alpha.len(),
+            ref_alpha_bits.len(),
+            "batched and per-row reference must gather the same candidate set"
+        );
+        // Activities bit-identical, gather-order for gather-order.
+        let batched_alpha_bits: Vec<u64> = scratch.alpha.iter().map(|a| a.to_bits()).collect();
+        assert_eq!(
+            batched_alpha_bits, ref_alpha_bits,
+            "batched alpha must be bit-identical to the per-row reference"
+        );
+        // Selected slot ids AND order bit-identical.
+        assert_eq!(
+            out, ref_selected,
+            "batched out_selected must match the per-row reference exactly"
+        );
+        assert!(count >= out.len());
+
+        // Witness guard: the fixture must actually exercise the batched path —
+        // multiple candidates gathered, at least one violation selected, and the
+        // nadic cap engaged — so equality is non-vacuous.
+        assert!(
+            scratch.alpha.len() > 1,
+            "fixture must gather >1 candidate (got {})",
+            scratch.alpha.len()
+        );
+        assert!(
+            !out.is_empty(),
+            "fixture must select at least one violation"
+        );
+        assert!(
+            count > out.len(),
+            "fixture must have more violations ({count}) than the nadic cap ({})",
+            out.len()
+        );
+    }
+
+    /// AC2: a scoring pass issues exactly ONE batched GEMM over all `k` eligible
+    /// candidates, not `k` single-row calls. Observed via the gather buffers: all
+    /// `k` candidates are in `cand_slots` / `cand_coef_block` (k_rows × n_state)
+    /// and `alpha` holds exactly `k` activities after the single call.
+    #[test]
+    fn batched_scoring_single_gemm_per_pass() {
+        let idx = indexer();
+        let mut pool = empty_pool();
+        // Three active, non-resident, in-window candidates (k = 3).
+        add(&mut pool, 0, 5.0, &[1.0, 0.0], 10);
+        add(&mut pool, 1, 2.0, &[0.0, 1.0], 10);
+        add(&mut pool, 2, 9.0, &[0.5, 0.5], 10);
+        let primal = vec![0.0_f64; PRIMAL_LEN];
+        let resident = empty_resident();
+        let p = params(10, 1e-10, None);
+        let mut scratch = DcsScoringScratch::default();
+        let mut out = Vec::new();
+
+        let _ = score_violated_candidates(
+            &pool,
+            &idx,
+            &primal,
+            &[],
+            &resident,
+            &p,
+            10,
+            &mut scratch,
+            &mut out,
+        );
+
+        let k = 3;
+        assert_eq!(scratch.cand_slots.len(), k, "all k candidates gathered");
+        assert_eq!(
+            scratch.cand_slots,
+            vec![0, 1, 2],
+            "ascending-slot gather order"
+        );
+        assert_eq!(
+            scratch.cand_coef_block.len(),
+            k * N_STATE,
+            "coef block is exactly k_rows × n_state — one batched GEMM input"
+        );
+        assert_eq!(
+            scratch.alpha.len(),
+            k,
+            "alpha holds exactly k activities from the single batched GEMM"
+        );
+    }
+
+    /// AC2 (filtered): only the eligible (non-resident, in-window) candidates are
+    /// gathered into the single batched GEMM; filtered-out slots never enter the
+    /// gather buffers.
+    #[test]
+    fn batched_scoring_gathers_only_eligible() {
+        let idx = indexer();
+        let mut pool = empty_pool();
+        add(&mut pool, 0, 5.0, &[0.0, 0.0], 8); // age 2 — in window
+        add(&mut pool, 1, 2.0, &[0.0, 0.0], 2); // age 8 — OUT of window (skipped)
+        add(&mut pool, 2, 9.0, &[0.0, 0.0], 9); // age 1 — in window, but resident
+        add(&mut pool, 3, 4.0, &[0.0, 0.0], 9); // age 1 — in window, eligible
+        let primal = vec![0.0_f64; PRIMAL_LEN];
+        let mut resident = empty_resident();
+        resident.insert(2); // slot 2 resident
+        let p = params(10, 1e-10, Some(5)); // k1 = 5
+        let mut scratch = DcsScoringScratch::default();
+        let mut out = Vec::new();
+
+        let _ = score_violated_candidates(
+            &pool,
+            &idx,
+            &primal,
+            &[],
+            &resident,
+            &p,
+            10,
+            &mut scratch,
+            &mut out,
+        );
+
+        // Only slots 0 and 3 survive both filters; the single GEMM scores them.
+        assert_eq!(
+            scratch.cand_slots,
+            vec![0, 3],
+            "out-of-window (1) and resident (2) slots excluded from the gather"
+        );
+        assert_eq!(scratch.alpha.len(), 2);
+    }
+
+    /// AC2 (empty): an empty candidate set produces an empty gather and no
+    /// activities — the single GEMM is a no-op (k_rows = 0).
+    #[test]
+    fn batched_scoring_empty_candidates_no_op() {
+        let idx = indexer();
+        let pool = empty_pool(); // no cuts at all
+        let primal = vec![0.0_f64; PRIMAL_LEN];
+        let resident = empty_resident();
+        let p = params(10, 1e-10, None);
+        let mut scratch = DcsScoringScratch::default();
+        let mut out = Vec::new();
+
+        let count = score_violated_candidates(
+            &pool,
+            &idx,
+            &primal,
+            &[],
+            &resident,
+            &p,
+            10,
+            &mut scratch,
+            &mut out,
+        );
+
+        assert_eq!(count, 0);
+        assert!(scratch.cand_slots.is_empty());
+        assert!(scratch.cand_coef_block.is_empty());
+        assert!(scratch.alpha.is_empty());
+        assert!(out.is_empty());
+    }
+
+    /// AC2 (all-resident): every active cut is resident → nothing is gathered and
+    /// the single GEMM is a no-op, matching the empty-candidate behavior.
+    #[test]
+    fn batched_scoring_all_resident_no_candidates() {
+        let idx = indexer();
+        let mut pool = empty_pool();
+        add(&mut pool, 0, 5.0, &[1.0, 0.0], 10);
+        add(&mut pool, 1, 2.0, &[0.0, 1.0], 10);
+        let primal = vec![0.0_f64; PRIMAL_LEN];
+        let mut resident = empty_resident();
+        resident.insert(0);
+        resident.insert(1);
+        let p = params(10, 1e-10, None);
+        let mut scratch = DcsScoringScratch::default();
+        let mut out = Vec::new();
+
+        let count = score_violated_candidates(
+            &pool,
+            &idx,
+            &primal,
+            &[],
+            &resident,
+            &p,
+            10,
+            &mut scratch,
+            &mut out,
+        );
+
+        assert_eq!(count, 0, "all candidates resident → none scored");
+        assert!(scratch.cand_slots.is_empty(), "all-resident → empty gather");
+        assert!(scratch.alpha.is_empty());
+        assert!(out.is_empty());
+    }
+
+    /// AC3: the new scratch buffers are growth-only. After a `reserve` sized to
+    /// the pool, repeated scoring passes never reallocate — capacities are stable
+    /// and the per-pass `clear()` keeps lengths bounded by the eligible count.
+    #[test]
+    fn batched_scoring_scratch_is_growth_only() {
+        let idx = indexer();
+        let cap = 32;
+        let pool = random_pool(cap, 0x00C0_FFEE_0BAD_CAFE);
+        let primal = vec![0.0_f64; PRIMAL_LEN];
+        let resident = empty_resident();
+        let p = params(10, 1e-10, None);
+        let mut scratch = DcsScoringScratch::default();
+        let mut out = Vec::new();
+
+        // Pre-reserve to the pool worst case.
+        scratch.reserve(N_STATE, cap);
+        let coef_cap = scratch.cand_coef_block.capacity();
+        let alpha_cap = scratch.alpha.capacity();
+        let slots_cap = scratch.cand_slots.capacity();
+        let viol_cap = scratch.violations.capacity();
+        let state_cap = scratch.unscaled_state.capacity();
+        assert!(
+            coef_cap >= cap * N_STATE,
+            "coef block reserved to cap*n_state"
+        );
+        assert!(alpha_cap >= cap);
+        assert!(slots_cap >= cap);
+
+        // Several passes must not grow any capacity (no steady-state allocation).
+        for _ in 0..5 {
+            let _ = score_violated_candidates(
+                &pool,
+                &idx,
+                &primal,
+                &[],
+                &resident,
+                &p,
+                10,
+                &mut scratch,
+                &mut out,
+            );
+            assert_eq!(scratch.cand_coef_block.capacity(), coef_cap);
+            assert_eq!(scratch.alpha.capacity(), alpha_cap);
+            assert_eq!(scratch.cand_slots.capacity(), slots_cap);
+            assert_eq!(scratch.violations.capacity(), viol_cap);
+            assert_eq!(scratch.unscaled_state.capacity(), state_cap);
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // lazy_solve fixtures
     // -----------------------------------------------------------------------
 
@@ -1205,6 +1720,25 @@ mod tests {
         pool
     }
 
+    /// Four cuts (state_dim = 1) whose binding cut depends on x0:
+    ///   slot 0: intercept 1, coeff [0]   → floor 1
+    ///   slot 1: intercept 0, coeff [1]   → floor x0
+    ///   slot 2: intercept 5, coeff [0]   → floor 5
+    ///   slot 3: intercept 0, coeff [2]   → floor 2·x0
+    /// At x0 = 2 the binding cut is slot 2 (floor 5); at x0 = 10 it is slot 3
+    /// (floor 20). Used to exercise the opening-reuse continue path.
+    fn make_four_cut_pool() -> CutPool {
+        let mut pool = CutPool::new(16, 1, 16, 0);
+        pool.add_cut(0, 0, 1.0, &[0.0]);
+        pool.add_cut(0, 1, 0.0, &[1.0]);
+        pool.add_cut(0, 2, 5.0, &[0.0]);
+        pool.add_cut(0, 3, 0.0, &[2.0]);
+        for slot in 0..4 {
+            pool.metadata[slot].iteration_generated = 1;
+        }
+        pool
+    }
+
     fn active_profiled() -> ProfiledSolver<ActiveSolver> {
         ProfiledSolver::new(ActiveSolver::new().expect("ActiveSolver::new()"))
     }
@@ -1214,6 +1748,7 @@ mod tests {
             stage_index: 0,
             scenario_index: 0,
             iteration: Some(10),
+            continue_carry: false,
         }
     }
 
@@ -1364,6 +1899,79 @@ mod tests {
         assert_eq!(
             view.primal[LAZY_THETA_COL], 5.0,
             "final theta must reflect the added binding cut"
+        );
+    }
+
+    /// Opening-reuse continue path: load the cut-free core ONCE, solve a first
+    /// "opening" fresh at x0 = 2, then re-pin x0 = 10 and solve a second opening
+    /// by CONTINUING (`continue_carry = true`) — reusing the loaded LP, the
+    /// carried resident cut rows, and the warm basis from the first solve. Each
+    /// opening must converge to the all-cuts optimum for its own pinned state,
+    /// and the second must add the cut (slot 3) that binds only at x0 = 10 on top
+    /// of the carried residents {0,1,2}. This is the now-mandatory backward
+    /// opening-reuse mechanism (ReuseContinue) exercised in isolation.
+    #[test]
+    fn lazy_solve_continue_carry_exact_across_openings() {
+        let indexer = lazy_indexer();
+        let pool = make_four_cut_pool();
+        let core = core_template();
+        let params = lazy_params(10, 50);
+        let mut solver = active_profiled();
+        // ONE scratch + ONE loaded model shared across the two openings: the
+        // row map and warm basis must persist across the continue call.
+        let mut scratch = DcsSolveScratch::default();
+        solver.load_model(&core);
+
+        // Opening A (x0 = 2, fresh): seed omits the binding slot 2; the lazy loop
+        // discovers and adds it. All-cuts optimum at x0 = 2 is theta = 5.
+        let view_a = lazy_solve_preloaded(
+            &mut solver,
+            &core,
+            &pool,
+            &indexer,
+            &[],
+            None,
+            &[0, 1],
+            &params,
+            &mut scratch,
+            DcsSolveContext {
+                continue_carry: false,
+                ..ctx()
+            },
+        )
+        .expect("opening A (fresh) must solve");
+        assert_eq!(view_a.primal[LAZY_THETA_COL], 5.0, "opening A theta (x0=2)");
+        let _ = view_a;
+
+        // Re-pin the incoming state to x0 = 10 (what `patch_opening_bounds` does
+        // per opening) — only the bounds change; the loaded LP and the carried
+        // resident cut rows persist.
+        solver.set_col_bounds(&[0], &[10.0], &[10.0]);
+
+        // Opening B (x0 = 10, continue): no reload, no re-seed; warm-carry A's LP
+        // and basis. The binding cut at x0 = 10 is slot 3 (floor 20), which is NOT
+        // resident after A, so the continue loop must add it. All-cuts optimum at
+        // x0 = 10 is theta = 20.
+        let view_b = lazy_solve_preloaded(
+            &mut solver,
+            &core,
+            &pool,
+            &indexer,
+            &[],
+            None,
+            &[], // ignored in continue mode
+            &params,
+            &mut scratch,
+            DcsSolveContext {
+                continue_carry: true,
+                ..ctx()
+            },
+        )
+        .expect("opening B (continue) must solve");
+        assert_eq!(
+            view_b.primal[LAZY_THETA_COL], 20.0,
+            "opening B theta (x0=10) must reach the all-cuts optimum via the \
+             carried-LP continue path (slot 3 added on top of the carried set)"
         );
     }
 
@@ -1734,6 +2342,34 @@ mod tests {
             "result must be strictly ascending, got {a:?}"
         );
         assert_eq!(a, vec![0, 1, 3, 4]);
+    }
+
+    /// AC3 (ticket-017a): the seed keys on **binding recency** via
+    /// `last_active_iter`, NOT on generation iteration. A cut generated long ago
+    /// (`iteration_generated` well outside the k2 window) but binding recently
+    /// (`last_active_iter == i`) must be seeded at iteration `i + d` for
+    /// `0 < d <= k2` — the §3.1 clause-1 behavior the binding-count maintenance
+    /// restores. The companion "generated but never re-bound" cut, whose
+    /// `last_active_iter` stayed at its old generation iteration, is correctly
+    /// excluded once it falls outside the window.
+    #[test]
+    fn seeds_old_generation_cut_that_bound_recently() {
+        // current = i + d = 12, k2 = 3 → window covers last_active_iter >= 9.
+        //   slot 0: generated at iter 1 (age 11 ≫ k2), but bound at iter 11
+        //           → 12 - 11 = 1 <= 3 → SEEDED (recently binding, old gen).
+        //   slot 1: generated at iter 1, never re-bound (last_active 1)
+        //           → 12 - 1 = 11 > 3, not current-iter → EXCLUDED.
+        //   slot 2: generated at iter 1, bound at iter 9 (window edge)
+        //           → 12 - 9 = 3 <= 3 → SEEDED.
+        let pool = seed_pool(&[(true, 1, 11), (true, 1, 1), (true, 1, 9)]);
+        let mut out = Vec::new();
+        build_initial_resident_set(&pool, 12, 3, &mut out);
+        assert_eq!(
+            out,
+            vec![0, 2],
+            "old-generation cuts that bound within the last k2 iterations are \
+             seeded by binding recency; the never-re-bound cut is excluded"
+        );
     }
 
     /// AC: k2 = 0 boundary. Only slots active in the current iteration

@@ -1071,6 +1071,9 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
             stage_index: t,
             scenario_index: m,
             iteration: Some(iteration),
+            // Forward pass solves one LP per (stage, scenario): always a fresh
+            // solve, never a carried continuation.
+            continue_carry: false,
         };
         // Disjoint borrows of `ws`: `solver`, `backward_accum.dcs_initial_resident`
         // (shared), and `backward_accum.dcs_solve` (mut) are distinct fields.

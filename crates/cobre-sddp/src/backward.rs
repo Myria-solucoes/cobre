@@ -116,7 +116,7 @@ use cobre_solver::{RowBatch, SolutionView, SolverInterface, SolverStatistics};
 use crate::{
     SddpError,
     context::{StageContext, TrainingContext},
-    cut::pool::CutPool,
+    cut::{CutRowMap, pool::CutPool},
     dcs::{DcsParams, DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
     forward::write_capture_metadata,
     indexer::StageIndexer,
@@ -549,6 +549,56 @@ fn accumulate_opening_outcome<S: SolverInterface + Send>(
     }
 }
 
+/// Accumulate binding-cut slot increments from the DCS lazy solve's final
+/// all-satisfied LP, slot-correct under the resident [`CutRowMap`] layout.
+///
+/// The baked path ([`accumulate_opening_outcome`]) bumps `slot_increments` by
+/// **baked cut-row order** (`successor_active_slots[cut_idx]` ↔
+/// `cut_duals[cut_idx]`). Under DCS the resident cut rows are a row-map-ordered
+/// subset, so that mapping does not apply: a slot's cut row, when resident, lives
+/// at the LP row `row_map.lp_row_for_slot(slot)` (an index `>= base_row_offset =
+/// core.num_rows`), and its dual is `dual[lp_row]`. This routine therefore
+/// iterates the pool's populated slots, and for each slot that is **resident**
+/// at the converged optimum bumps `slot_increments[slot]` when its cut-row dual
+/// exceeds `cut_activity_tolerance` — the *same* binding criterion the baked path
+/// uses (raw dual, not magnitude), applied to the lazy layout.
+///
+/// A non-resident slot did not bind (by exactness it was not violated at the
+/// optimum, else the lazy loop would have added it), so leaving it uncounted is
+/// correct. `dual` must be the FINAL all-satisfied solve's dual vector, read
+/// before the [`SolutionView`] is dropped; `row_map` must be the residency that
+/// produced that solve (the persistent `DcsSolveScratch.row_map` after
+/// `lazy_solve_preloaded` returns). The bump is a deterministic function of the
+/// resident map and the cut-row duals only — no worker id, rank, or trace — so
+/// the order-insensitive metadata allreduce preserves rank-invariance.
+///
+/// `slot_increments` accumulates across the trial point's openings (summed),
+/// matching the baked path's per-(trial-point) accumulation; the per-trial-point
+/// reset of `slot_increments` happens in the stage loop before the openings run.
+fn accumulate_dcs_binding_counts(
+    dual: &[f64],
+    row_map: &CutRowMap,
+    pool: &CutPool,
+    cut_activity_tolerance: f64,
+    slot_increments: &mut [u64],
+) {
+    for (slot, increment) in slot_increments
+        .iter_mut()
+        .enumerate()
+        .take(pool.populated_count)
+    {
+        let Some(lp_row) = row_map.lp_row_for_slot(slot) else {
+            continue;
+        };
+        if dual
+            .get(lp_row)
+            .is_some_and(|&d| d > cut_activity_tolerance)
+        {
+            *increment += 1;
+        }
+    }
+}
+
 /// Write one opening's stats delta and outcome (coefficients + intercept) into
 /// the workspace accumulators, without touching binding-count metadata.
 ///
@@ -728,21 +778,41 @@ fn solve_opening_baked<S: SolverInterface + Send>(
 /// Solve one backward opening under Dynamic Cut Selection and accumulate its
 /// outcome.
 ///
-/// The caller owns the load + bounds patch: this loads the cut-free core,
-/// applies the opening's state-pin + noise patch, seeds the metadata-derived
-/// initial resident-cut subset, then runs the lazy loop via
-/// [`lazy_solve_preloaded`]. The Benders cut gradient and intercept are read
-/// from the final all-satisfied LP via [`extract_state_duals_only`].
+/// All openings of a trial point are processed by one worker in fixed order
+/// `0..n_openings`, sharing the same pinned incoming state `x̂` and differing
+/// only in their noise RHS, so the cut-free core and the metadata seed are
+/// loaded/built ONCE per trial point by the caller
+/// ([`process_trial_point_backward`]) and the LP is reused across the openings.
+/// This routine therefore never reloads or re-seeds; it only patches the
+/// opening's bounds and runs the lazy loop via [`lazy_solve_preloaded`]:
 ///
-/// Two pieces of the baked path are intentionally NOT performed here:
+/// - `continue_carry == false` (the first opening, ω=0): solve fresh — the lazy
+///   loop resets the carried row map, appends the seed, and cold-solves. The
+///   cut produced is identical to the (former) per-opening path.
+/// - `continue_carry == true` (subsequent openings): warm-carry the prior
+///   opening's LP, basis, and (monotonically grown) resident cut set; re-solve
+///   warm under the new noise and add only the cuts this opening additionally
+///   violates. This is what the paper's §3.4 "base recovery" buys, extended
+///   across the trial point's openings.
 ///
-/// - **Binding-count metadata** (`cut_duals` → `slot_increments`): under DCS the
-///   resident cut rows are a row-map-ordered subset, so the all-cuts
-///   cut-row→slot mapping does not apply; the per-slot binding counts are left
-///   at their values from the rest of the pass. The initial resident set still
-///   seeds deterministically from `last_active_iter`/`iteration_generated`
-///   (rank-invariant), and the lazy loop adds any missing binding cut
-///   regardless of the seed, so exactness is unaffected.
+/// The Benders cut gradient and intercept are read from the final all-satisfied
+/// LP via [`extract_state_duals_only`] in both cases.
+///
+/// **Binding-count metadata** (`slot_increments`) IS maintained here, but
+/// slot-correct under the lazy layout: the baked path bumps by baked cut-row
+/// order, whereas [`accumulate_dcs_binding_counts`] maps each resident cut row
+/// back to its pool slot via the final [`CutRowMap`] and bumps
+/// `slot_increments[slot]` for residents whose cut-row dual exceeds
+/// `cut_activity_tolerance` (the same criterion the baked path uses). This feeds
+/// the existing per-stage `metadata_sync_contribution` allreduce, which advances
+/// `last_active_iter` rank-invariantly and so restores the §3.1 clause-1 seed
+/// (cuts **binding** in the last `k2` iterations) — without altering the
+/// extracted gradient/intercept (those come solely from the structural
+/// state-column reduced costs and are identical to the all-cuts cut by
+/// exactness).
+///
+/// One piece of the baked path is intentionally NOT performed here:
+///
 /// - **ω=0 basis capture**: a captured basis would describe the baked layout,
 ///   not the DCS resident subset, so it is skipped; the next DCS solve
 ///   cold-starts its initial solve, which [`lazy_solve_preloaded`] supports with
@@ -763,6 +833,7 @@ fn solve_opening_dcs<S: SolverInterface + Send>(
     scenario: usize,
     iteration: u64,
     omega: usize,
+    continue_carry: bool,
 ) -> Result<(), SddpError> {
     let indexer = training_ctx.indexer;
     // The DCS LP must start from the cut-free base structural template, NOT
@@ -776,20 +847,13 @@ fn solve_opening_dcs<S: SolverInterface + Send>(
     let core = &ctx.templates[s];
     let col_scale = &ctx.templates[s].col_scale;
 
-    // Load the cut-free base structural template, then apply the opening's
-    // state-pin + noise patch. `lazy_solve_preloaded` appends cut rows to this
-    // loaded, patched LP and never reloads, so the patch survives the whole
-    // lazy loop.
-    ws.solver.load_model(core);
+    // The caller ([`process_trial_point_backward`]) has already loaded the
+    // cut-free core and built the metadata seed once for this trial point; here
+    // we only apply this opening's state-pin + noise patch. `lazy_solve_preloaded`
+    // appends cut rows to the loaded, patched LP and never reloads, so the patch
+    // — and, on continued openings, the carried cut rows + warm basis — survive
+    // the whole lazy loop.
     patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s);
-
-    // Metadata-seeded initial resident subset (deterministic, rank-invariant).
-    build_initial_resident_set(
-        succ.successor_pool,
-        iteration,
-        params.k2,
-        &mut ws.backward_accum.dcs_initial_resident,
-    );
 
     let stats_before_omega = ws.solver.statistics();
 
@@ -801,6 +865,9 @@ fn solve_opening_dcs<S: SolverInterface + Send>(
         stage_index: s,
         scenario_index: scenario,
         iteration: Some(iteration),
+        // Warm-carry the prior opening's LP + basis on every opening but the
+        // first; ω=0 runs a fresh (cold, reset + seed) solve.
+        continue_carry,
     };
     // Disjoint borrows of `ws`: `solver`, `backward_accum.dcs_initial_resident`
     // (shared), and `backward_accum.dcs_solve` (mut) are distinct fields.
@@ -817,16 +884,35 @@ fn solve_opening_dcs<S: SolverInterface + Send>(
         dcs_ctx,
     )?;
 
-    // Cut gradient + intercept from the final all-satisfied LP only.
+    // Cut gradient + intercept from the final all-satisfied LP only. The
+    // gradient/intercept come solely from the structural state-column reduced
+    // costs, identical in the all-cuts and lazy-solve LPs — exactness is
+    // unaffected by the binding-count bookkeeping below.
     let objective =
         extract_state_duals_only(&view, indexer.n_state, indexer, col_scale, &mut state_duals);
+
+    // Binding-count metadata, slot-correct under the resident `CutRowMap`. The
+    // final all-satisfied solve's cut-row duals (`view.dual`) are read here,
+    // before `view` is dropped, and mapped slot→row via the persistent row map
+    // that `lazy_solve_preloaded` just finalized. Disjoint borrows of `ws`:
+    // `view` borrows `ws.solver`; `dcs_solve.row_map` (shared) and
+    // `slot_increments` (mut) are distinct fields of `ws.backward_accum`.
+    accumulate_dcs_binding_counts(
+        view.dual,
+        &ws.backward_accum.dcs_solve.row_map,
+        succ.successor_pool,
+        succ.cut_activity_tolerance,
+        &mut ws.backward_accum.slot_increments,
+    );
     let _ = view;
 
     ws.backward_accum.state_duals_buf = state_duals;
 
     let stats_after_omega = ws.solver.statistics();
 
-    // Outcome only — no cut-dual/`slot_increments` update, no ω=0 basis capture.
+    // Outcome only — no ω=0 basis capture (that captured basis would describe
+    // the baked layout, not the DCS resident subset). The binding-count update
+    // is done above, slot-correct under the lazy layout.
     write_opening_outcome(
         ws,
         omega,
@@ -879,6 +965,23 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
         .dcs
         .filter(|params| params.is_active(iteration));
 
+    // Opening-reuse (the DCS backward path): load the cut-free core + build the
+    // metadata seed ONCE here, then reuse the loaded LP across this trial point's
+    // openings — ω=0 solves fresh from the seed, ω>0 warm-carry. The core load
+    // also serves as the per-trial-point HiGHS reset that preserves
+    // rank-invariance: state is reset at every trial-point boundary and never
+    // carried across trial points. (`load_backward_lp` skips its baked load on
+    // the DCS path, so this is the only load.)
+    if let Some(params) = dcs_params {
+        ws.solver.load_model(&ctx.templates[s]);
+        build_initial_resident_set(
+            succ.successor_pool,
+            iteration,
+            params.k2,
+            &mut ws.backward_accum.dcs_initial_resident,
+        );
+    }
+
     for omega in 0..succ.probabilities.len() {
         let raw_noise = tree_view.opening(s, omega);
 
@@ -895,6 +998,8 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
                 scenario,
                 iteration,
                 omega,
+                // ω=0 solves fresh; subsequent openings warm-carry the LP.
+                omega != 0,
             )?;
         } else {
             solve_opening_baked(
@@ -6004,25 +6109,32 @@ mod tests {
         assert_eq!(baked_meta, early_meta);
     }
 
-    /// The DCS path extracts the dual only from the final returned LP and never
-    /// bumps the binding-count metadata by cut-row index (no corruption of
-    /// `active_count`/`slot_increments`). The baked path DOES bump it; this
-    /// asserts the DCS path leaves the per-slot contribution all-zero.
+    /// AC1: the DCS path extracts the cut gradient from the final all-satisfied
+    /// LP AND maintains the binding-count metadata slot-correct under the
+    /// resident `CutRowMap`. For this fixture the only cut that binds at the
+    /// converged optimum (`x_hat` = 2, theta = 4) is the binding slot 1; slots 0
+    /// (floor 1) and 2 (floor 3) are resident from the seed but slack, so their
+    /// cut-row duals are zero. The DCS binding-count contribution must therefore
+    /// equal the baked path's — slot 1 bumped, all others zero — proving the
+    /// slot-correct translation maps the resident binding row back to slot 1 and
+    /// to no other.
     #[test]
-    fn backward_dcs_dual_from_final_lp_only_and_no_metadata_corruption() {
+    fn backward_dcs_binding_counts_match_baked() {
         let (_, baked_meta) = run_dcs_backward_trial_point(None, 5);
         let (_, dcs_meta) = run_dcs_backward_trial_point(Some(dcs_params(2)), 5);
 
-        // Baked path bumps at least one slot's binding count.
-        assert!(
-            baked_meta.iter().any(|&c| c > 0),
-            "baked path must record binding-count metadata, got {baked_meta:?}"
+        // Baked path bumps exactly the binding slot 1 (the floor-4 cut at x=2).
+        assert_eq!(
+            baked_meta,
+            vec![0, 1, 0],
+            "baked path must bump exactly binding slot 1, got {baked_meta:?}"
         );
-        // DCS path records no binding-count contribution (the cut-dual →
-        // slot_increments update is intentionally skipped under DCS).
-        assert!(
-            dcs_meta.iter().all(|&c| c == 0),
-            "DCS path must not bump binding-count metadata, got {dcs_meta:?}"
+        // DCS path records the SAME binding-count contribution: the resident
+        // binding row maps back to slot 1, and to no other slot.
+        assert_eq!(
+            dcs_meta, baked_meta,
+            "DCS binding-count metadata must match baked (slot-correct via the \
+             resident CutRowMap), got DCS {dcs_meta:?} vs baked {baked_meta:?}"
         );
     }
 

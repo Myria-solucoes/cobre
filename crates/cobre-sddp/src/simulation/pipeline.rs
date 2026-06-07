@@ -528,6 +528,8 @@ fn solve_simulation_stage<S: SolverInterface>(
             stage_index: t,
             scenario_index: ids.scenario_id as usize,
             iteration: None, // disables the k1 window → every cut a candidate
+            // Simulation solves one LP per (stage, scenario): always fresh.
+            continue_carry: false,
         };
         // Disjoint borrows of `ws`: `solver`, `backward_accum.dcs_initial_resident`
         // (shared), and `backward_accum.dcs_solve` (mut) are distinct fields.

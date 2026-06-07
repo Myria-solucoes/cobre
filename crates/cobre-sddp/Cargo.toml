@@ -64,6 +64,10 @@ tracing = "0.1"
 arrow = { version = "58", default-features = false, features = ["prettyprint"] }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 criterion = { version = "0.5", default-features = false }
+# Used only by the `dcs_batched_scoring` bench to reproduce the pre-batching
+# per-candidate `dgemm` baseline (the crate's own `gemm_block` wrapper is
+# `pub(crate)` and so unreachable from a bench). Same pin as the normal dep.
+matrixmultiply = { workspace = true }
 parquet = { version = "58", default-features = false, features = ["arrow", "zstd"] }
 rand = "0.10"
 rand_distr = "0.6"
@@ -82,6 +86,10 @@ harness = false
 
 [[bench]]
 name = "cut_selection_kernel"
+harness = false
+
+[[bench]]
+name = "dcs_batched_scoring"
 harness = false
 
 # Override unsafe_code to "allow" for this crate because the cut-selection
