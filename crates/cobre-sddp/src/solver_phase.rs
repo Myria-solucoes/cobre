@@ -130,18 +130,20 @@ impl PhaseProfiles for HighsProfile {
 
 /// Per-phase `ClpProfile` selection.
 ///
-/// All three phases share the tuned deep-cut-pool profile: `FORWARD`,
-/// `BACKWARD`, and `SIMULATION` are identical. Each pins full dual
-/// steepest-edge pricing (`dual_pricing_mode = 1`) and an SDDP-tuned
+/// `FORWARD` and `BACKWARD` share the tuned deep-cut-pool profile: each pins
+/// full dual steepest-edge pricing (`dual_pricing_mode = 1`) and an SDDP-tuned
 /// refactorization cadence (`factorization_frequency = 200`), leaving every
-/// other field at [`ClpProfile::default()`], because every phase solves the
-/// same cut-laden LPs. This is the CLP-native analog of the `HiGHS`
-/// `simplex_price_strategy` override; these are CLP-native values, independently
-/// chosen for CLP's own option surface — they are **not** a translation of the
-/// `HiGHS` per-phase profiles. `algorithm` stays [`ClpAlgorithm::Dual`] in all
-/// three phases (no phase selects the primal simplex). The full field literals
-/// are written out because associated constants cannot use the
-/// `..ClpProfile::default()` struct-update spread in const context.
+/// other field at [`ClpProfile::default()`], because both passes warm-re-solve
+/// the same cut-laden LPs with the dual simplex. This is the CLP-native analog
+/// of the `HiGHS` `simplex_price_strategy` override; these are CLP-native
+/// values, independently chosen for CLP's own option surface — they are **not**
+/// a translation of the `HiGHS` per-phase profiles. `SIMULATION` keeps those
+/// values but selects the **primal** simplex (`algorithm = ClpAlgorithm::Primal`):
+/// CLP's dual simplex falsely declares the warm-started, fully-baked simulation
+/// LPs infeasible (see the const's comment), where the primal simplex solves
+/// them directly and deterministically. The full field literals are written out
+/// because associated constants cannot use the `..ClpProfile::default()`
+/// struct-update spread in const context.
 #[cfg(feature = "clp")]
 impl PhaseProfiles for ClpProfile {
     const FORWARD: Self = ClpProfile {
@@ -164,13 +166,22 @@ impl PhaseProfiles for ClpProfile {
         dual_pricing_mode: 1, // full DSE pinned (tuned deep-cut-pool profile)
         factorization_frequency: 200, // tuned refactor cadence (tuned deep-cut-pool profile)
     };
+    // Simulation runs the PRIMAL simplex (FORWARD/BACKWARD keep dual). CLP's dual
+    // simplex falsely declares these warm-started, fully-baked cut-laden
+    // simulation LPs PRIMAL_INFEASIBLE on ~10% of solves, forcing the cold-restart
+    // escalation ladder; the primal simplex solves them directly with zero
+    // false-infeasibilities (A1 diagnosis 2026-06-07: 390 -> 0 retries, ~33%
+    // faster simulation). Primal is deterministic, so bit-for-bit reproducibility
+    // is preserved. `dual_pricing_mode`/`factorization_frequency` are kept at the
+    // deep-cut-pool values; only the refactor cadence affects the primal simplex
+    // (the dual-row pivot rule is unused by primal).
     const SIMULATION: Self = ClpProfile {
         perturbation: 102,
         scaling: 0,
         primal_feasibility_tolerance: 1e-9,
         dual_feasibility_tolerance: 1e-9,
         simplex_iteration_limit: cobre_solver::DEFAULT_PROFILE_HEURISTIC_SENTINEL,
-        algorithm: ClpAlgorithm::Dual,
+        algorithm: ClpAlgorithm::Primal,
         dual_pricing_mode: 1, // full DSE pinned (tuned deep-cut-pool profile)
         factorization_frequency: 200, // tuned refactor cadence (tuned deep-cut-pool profile)
     };

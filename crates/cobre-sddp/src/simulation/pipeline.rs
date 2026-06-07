@@ -1062,7 +1062,7 @@ pub(crate) fn dispatch_scenario_result(
 /// feasible solution, `Err(SimulationError::SolverError { .. })` for other
 /// terminal LP solver failures, and `Err(SimulationError::ChannelClosed)` when
 /// the channel receiver has been dropped.
-pub fn simulate<S: SolverInterface + Send, C: Communicator>(
+pub fn simulate<S, C: Communicator>(
     workspaces: &mut [SolverWorkspace<S>],
     ctx: &StageContext<'_>,
     fcf: &FutureCostFunction,
@@ -1072,7 +1072,10 @@ pub fn simulate<S: SolverInterface + Send, C: Communicator>(
     baked_templates: Option<&[StageTemplate]>,
     stage_bases: &[Option<CapturedBasis>],
     comm: &C,
-) -> Result<SimulationRunResult, SimulationError> {
+) -> Result<SimulationRunResult, SimulationError>
+where
+    S: SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
+{
     use crate::simulation::state::{SimulationInputs, SimulationState};
     let mut state = SimulationState::new(training_ctx.horizon.num_stages());
     state.run(&mut SimulationInputs::new(
@@ -1123,7 +1126,7 @@ mod tests {
     /// and delegates to `SimulationState::run`. Allows all 24 existing test call
     /// sites to stay unchanged apart from the function name.
     #[allow(clippy::too_many_arguments)]
-    fn run_simulate<S: cobre_solver::SolverInterface + Send, C: cobre_comm::Communicator>(
+    fn run_simulate<S, C: cobre_comm::Communicator>(
         workspaces: &mut [SolverWorkspace<S>],
         ctx: &StageContext<'_>,
         fcf: &crate::FutureCostFunction,
@@ -1133,7 +1136,10 @@ mod tests {
         baked_templates: Option<&[cobre_solver::StageTemplate]>,
         stage_bases: &[Option<CapturedBasis>],
         comm: &C,
-    ) -> Result<super::SimulationRunResult, SimulationError> {
+    ) -> Result<super::SimulationRunResult, SimulationError>
+    where
+        S: cobre_solver::SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
+    {
         let num_stages = training_ctx.horizon.num_stages();
         let mut state = SimulationState::new(num_stages);
         let mut inputs = SimulationInputs {

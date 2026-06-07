@@ -178,10 +178,13 @@ impl SimulationState {
     /// - `inputs.ctx.templates.len() != num_stages`
     /// - `inputs.ctx.base_rows.len() != num_stages`
     /// - `inputs.training_ctx.initial_state.len() != indexer.n_state`
-    pub(crate) fn run<S: SolverInterface + Send, C: Communicator>(
+    pub(crate) fn run<S, C: Communicator>(
         &mut self,
         inputs: &mut SimulationInputs<'_, S, C>,
-    ) -> Result<SimulationRunResult, SimulationError> {
+    ) -> Result<SimulationRunResult, SimulationError>
+    where
+        S: SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
+    {
         let training_ctx = inputs.training_ctx;
         let TrainingContext {
             horizon,
@@ -248,6 +251,17 @@ impl SimulationState {
         }
 
         let sampler = build_sim_sampler(training_ctx)?;
+
+        // Apply the simulation solver profile to every worker workspace before the
+        // parallel region (mirrors `forward_pass_state` / `backward_pass_state`,
+        // which the simulation phase previously omitted — so the solver ran on its
+        // backend-native defaults). For CLP this selects the primal simplex, which
+        // eliminates the dual simplex's false-infeasibility on the warm-started,
+        // fully-baked cut-laden simulation LPs (A1 diagnosis).
+        let simulation_profile = crate::solver_phase::Phase::Simulation.profile();
+        for ws in inputs.workspaces.iter_mut() {
+            ws.solver.set_profile(&simulation_profile);
+        }
 
         let worker_results: Vec<Result<(WorkerCosts, WorkerStats), SimulationError>> = inputs
             .workspaces

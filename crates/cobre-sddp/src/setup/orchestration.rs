@@ -145,7 +145,7 @@ impl StudySetup {
     ///
     /// Returns `SimulationError` on LP infeasibility, solver failure, channel closure,
     /// or if `baked_templates.len() != num_stages`.
-    pub fn simulate<S: SolverInterface + Send, C: Communicator>(
+    pub fn simulate<S, C: Communicator>(
         &self,
         workspaces: &mut [SolverWorkspace<S>],
         comm: &C,
@@ -153,7 +153,10 @@ impl StudySetup {
         event_sender: Option<Sender<TrainingEvent>>,
         baked_templates: Option<&[cobre_solver::StageTemplate]>,
         stage_bases: &[Option<CapturedBasis>],
-    ) -> Result<SimulationRunResult, SimulationError> {
+    ) -> Result<SimulationRunResult, SimulationError>
+    where
+        S: SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
+    {
         let stage_ctx = self.stage_ctx();
         let training_ctx = self.simulation_ctx();
 
