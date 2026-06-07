@@ -648,7 +648,13 @@ pub fn parse_cut_selection_config(
 
     let check_frequency = config.check_frequency.unwrap_or(5);
 
-    if check_frequency == 0 {
+    // `check_frequency` is the periodic-pruning cadence for the level1 / lml1 /
+    // domination methods, where 0 is meaningless and rejected. For "dynamic" the
+    // SAME field is reused as k2 (the active-set seed window), where 0 IS valid:
+    // it seeds only the current iteration's cuts, matching NEWAVE's selcor.dat
+    // `TAMANHO DA JANELA DE CORTES ATIVOS (k2) = 0`. The `> 0` guard must
+    // therefore skip the dynamic method.
+    if check_frequency == 0 && method != "dynamic" {
         return Err("cut_selection.check_frequency must be > 0".to_string());
     }
 
