@@ -857,8 +857,9 @@ fn solve_opening_dcs<S: SolverInterface + Send>(
 
     let stats_before_omega = ws.solver.statistics();
 
-    // Scratch moved out before the solve to avoid borrow conflicts with the
-    // returned view's lifetime.
+    // Move the state-duals buffer out of `ws.backward_accum` so it can be filled
+    // by `extract_state_duals_only` (a `&mut Vec` sink) while `view` holds an
+    // immutable borrow of the sibling `dcs_solve` field; restored at the end.
     let mut state_duals = std::mem::take(&mut ws.backward_accum.state_duals_buf);
 
     let dcs_ctx = DcsSolveContext {
@@ -871,7 +872,9 @@ fn solve_opening_dcs<S: SolverInterface + Send>(
     };
     // Disjoint borrows of `ws`: `solver`, `backward_accum.dcs_initial_resident`
     // (shared), and `backward_accum.dcs_solve` (mut) are distinct fields.
-    let view = lazy_solve_preloaded(
+    // `lazy_solve_preloaded` copies the final solve into `dcs_solve`'s result
+    // buffers and returns `Result<()>`; the zero-cost view is rebuilt below.
+    lazy_solve_preloaded(
         &mut ws.solver,
         core,
         succ.successor_pool,
@@ -883,6 +886,9 @@ fn solve_opening_dcs<S: SolverInterface + Send>(
         &mut ws.backward_accum.dcs_solve,
         dcs_ctx,
     )?;
+    // View over the result buffers (borrows `dcs_solve` immutably; coexists with
+    // the immutable `dcs_solve.row_map` read in `accumulate_dcs_binding_counts`).
+    let view = ws.backward_accum.dcs_solve.result_view();
 
     // Cut gradient + intercept from the final all-satisfied LP only. The
     // gradient/intercept come solely from the structural state-column reduced
@@ -892,11 +898,12 @@ fn solve_opening_dcs<S: SolverInterface + Send>(
         extract_state_duals_only(&view, indexer.n_state, indexer, col_scale, &mut state_duals);
 
     // Binding-count metadata, slot-correct under the resident `CutRowMap`. The
-    // final all-satisfied solve's cut-row duals (`view.dual`) are read here,
-    // before `view` is dropped, and mapped slot→row via the persistent row map
-    // that `lazy_solve_preloaded` just finalized. Disjoint borrows of `ws`:
-    // `view` borrows `ws.solver`; `dcs_solve.row_map` (shared) and
-    // `slot_increments` (mut) are distinct fields of `ws.backward_accum`.
+    // final all-satisfied solve's cut-row duals (`view.dual`, the full dual copied
+    // into `dcs_solve.res_dual`) are read here and mapped slot→row via the
+    // persistent row map that `lazy_solve_preloaded` just finalized. Borrows:
+    // `view` and `dcs_solve.row_map` both borrow `ws.backward_accum.dcs_solve`
+    // immutably (so they coexist); `slot_increments` is a distinct field of
+    // `ws.backward_accum` borrowed mutably.
     accumulate_dcs_binding_counts(
         view.dual,
         &ws.backward_accum.dcs_solve.row_map,

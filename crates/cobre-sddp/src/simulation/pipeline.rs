@@ -533,7 +533,9 @@ fn solve_simulation_stage<S: SolverInterface>(
         };
         // Disjoint borrows of `ws`: `solver`, `backward_accum.dcs_initial_resident`
         // (shared), and `backward_accum.dcs_solve` (mut) are distinct fields.
-        let view = lazy_solve_preloaded(
+        // `lazy_solve_preloaded` copies the final solve into `dcs_solve`'s result
+        // buffers and returns `Result<()>`; the zero-cost view is rebuilt below.
+        lazy_solve_preloaded(
             &mut ws.solver,
             &ctx.templates[t],
             &fcf.pools[t],
@@ -546,6 +548,7 @@ fn solve_simulation_stage<S: SolverInterface>(
             dcs_ctx,
         )
         .map_err(|e| map_sim_solver_error(e, ids))?;
+        let view = ws.backward_accum.dcs_solve.result_view();
         let objective = view.objective;
         fill_unscaled(&mut unscaled_primal, view.primal, col_scale);
         // INVARIANT: on the DCS path `view.dual` is LONGER than the structural

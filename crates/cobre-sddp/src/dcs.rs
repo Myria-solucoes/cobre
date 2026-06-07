@@ -451,9 +451,29 @@ pub struct DcsSolveScratch {
     /// point's openings: a fresh solve resets it (see
     /// [`DcsSolveContext::continue_carry`]), a continued solve leaves it intact.
     pub row_map: CutRowMap,
-    /// Copy of the most recent solve's primal vector, so the `SolutionView`
-    /// borrow of the solver can end before the next `&mut` solver call.
-    pub primal_buf: Vec<f64>,
+    /// Owned copy of the final solve's primal vector (one entry per LP column).
+    ///
+    /// [`lazy_solve_preloaded`] returns `Result<()>` rather than a borrowing
+    /// `SolutionView`: on the terminating path it copies the live solve's
+    /// solution into these caller-owned `res_*` buffers, and the caller rebuilds
+    /// a zero-cost view over them via [`DcsSolveScratch::result_view`]. This
+    /// avoids returning a loan obtained inside the lazy loop (rejected by stable
+    /// NLL) without keeping the redundant exit re-solve.
+    pub res_primal: Vec<f64>,
+    /// Owned copy of the final solve's dual vector. On the DCS path this is the
+    /// FULL dual — structural rows followed by the resident cut rows — and is
+    /// copied verbatim (never truncated): the simulation reader relies on the
+    /// structural-row prefix and ignores the trailing cut-row entries.
+    pub res_dual: Vec<f64>,
+    /// Owned copy of the final solve's reduced-cost vector (one entry per LP
+    /// column).
+    pub res_reduced_costs: Vec<f64>,
+    /// Owned copy of the final solve's objective value.
+    pub res_objective: f64,
+    /// Owned copy of the final solve's simplex iteration count.
+    pub res_iterations: u64,
+    /// Owned copy of the final solve's wall-clock solve time, in seconds.
+    pub res_solve_time_seconds: f64,
     /// Cumulative wall time, in seconds, spent inside candidate-scoring
     /// (`score_violated_candidates`) across every [`lazy_solve_preloaded`] call
     /// that used this scratch. Grows monotonically and is never reset by the
@@ -478,7 +498,12 @@ impl Default for DcsSolveScratch {
             scoring: DcsScoringScratch::default(),
             out_selected: Vec::new(),
             recon_basis: Basis::new(0, 0),
-            primal_buf: Vec::new(),
+            res_primal: Vec::new(),
+            res_dual: Vec::new(),
+            res_reduced_costs: Vec::new(),
+            res_objective: 0.0,
+            res_iterations: 0,
+            res_solve_time_seconds: 0.0,
             scoring_time_seconds: 0.0,
             row_map: CutRowMap::new(0, 0),
         }
@@ -498,6 +523,58 @@ impl DcsSolveScratch {
         // `base_row_offset` here is a placeholder (each fresh solve resets it to
         // the loaded core's row count in `lazy_solve_preloaded`).
         self.row_map.reset(pool_capacity, 0);
+        // Pre-grow the result buffers to a conservative non-zero capacity. Their
+        // exact lengths (num_cols for primal/reduced_costs; structural rows + cut
+        // rows for dual) depend on the loaded LP, not on these arguments, so the
+        // first fill may still grow them; from then on `clear()` + `extend_from_slice`
+        // reuses the warmed capacity (alloc-free steady state).
+        for buf in [
+            &mut self.res_primal,
+            &mut self.res_dual,
+            &mut self.res_reduced_costs,
+        ] {
+            if buf.capacity() < pool_capacity {
+                buf.reserve(pool_capacity - buf.capacity());
+            }
+        }
+    }
+
+    /// Rebuild a zero-copy [`SolutionView`] over the result buffers filled by the
+    /// most recent [`lazy_solve_preloaded`] call.
+    ///
+    /// The view borrows `self` immutably, so it composes with the other immutable
+    /// reads a caller performs after the solve (e.g. the resident `row_map`). It
+    /// is only meaningful immediately after a successful `lazy_solve_preloaded`
+    /// call that filled the buffers; the slices are exactly the final solve's
+    /// solution (the one the redundant exit re-solve used to recompute).
+    #[must_use]
+    pub fn result_view(&self) -> SolutionView<'_> {
+        SolutionView {
+            objective: self.res_objective,
+            primal: &self.res_primal,
+            dual: &self.res_dual,
+            reduced_costs: &self.res_reduced_costs,
+            iterations: self.res_iterations,
+            solve_time_seconds: self.res_solve_time_seconds,
+        }
+    }
+
+    /// Copy a live solve's solution into the reused result buffers.
+    ///
+    /// `clear()` + `extend_from_slice` keeps the steady state allocation-free
+    /// (capacity persists across calls); the full slices are copied verbatim —
+    /// the dual in particular is NOT truncated, so the simulation reader still
+    /// sees the structural-row prefix it depends on.
+    fn store_result(&mut self, view: &SolutionView<'_>) {
+        self.res_objective = view.objective;
+        self.res_iterations = view.iterations;
+        self.res_solve_time_seconds = view.solve_time_seconds;
+        self.res_primal.clear();
+        self.res_primal.extend_from_slice(view.primal);
+        self.res_dual.clear();
+        self.res_dual.extend_from_slice(view.dual);
+        self.res_reduced_costs.clear();
+        self.res_reduced_costs.extend_from_slice(view.reduced_costs);
     }
 }
 
@@ -534,9 +611,14 @@ fn map_solver_error(e: SolverError, ctx: DcsSolveContext) -> SddpError {
 /// survives the entire loop.
 ///
 /// Pass-agnostic: it builds the cut set incrementally and runs the lazy inner
-/// loop, returning the final [`SolutionView`]. Post-solve extraction (backward
-/// = dual, forward/simulation = primal) is the caller's job and is NOT done
-/// here.
+/// loop. On the terminating path it copies the final solve's solution into the
+/// caller-owned result buffers in `scratch` and returns `Ok(())`; the caller
+/// rebuilds a zero-cost [`SolutionView`] over those buffers via
+/// [`DcsSolveScratch::result_view`]. Returning by buffer rather than by borrowing
+/// view is what lets the no-violation arm avoid a redundant exit re-solve without
+/// returning a loan obtained inside the loop (which stable NLL rejects). Post-solve
+/// extraction (backward = dual, forward/simulation = primal) is the caller's job
+/// and is NOT done here.
 ///
 /// # Algorithm
 ///
@@ -549,12 +631,15 @@ fn map_solver_error(e: SolverError, ctx: DcsSolveContext) -> SddpError {
 ///    basic-count invariant ([`enforce_basic_count_invariant`]), and
 ///    `solve(Some(..))`; else `solve(None)` (cold).
 /// 4. Inner loop, up to `params.max_inner_iterations`: score the omitted cuts
-///    at `x*` via [`score_violated_candidates`] (using
-///    `ctx.iteration.unwrap_or(0)` for the `k1` window); stop when none is
-///    violated (the **exact** optimum); else add the top-`nadic` violated slots
-///    and warm-`solve(None)` again.
+///    at the live `view.primal` via [`score_violated_candidates`] (using
+///    `ctx.iteration.unwrap_or(0)` for the `k1` window); when none is violated
+///    (the **exact** optimum) copy the live view into the `res_*` buffers and
+///    return — **no re-solve**; else add the top-`nadic` violated slots, drop the
+///    view, and warm-`solve(None)` again.
 /// 5. **TC fallback**: if the cap is hit with violations remaining, add **all**
-///    remaining violated candidates and solve once, preserving exactness.
+///    remaining violated candidates and solve once (the LP changed, so this final
+///    solve is legitimate), copy that view into the `res_*` buffers, and return —
+///    preserving exactness.
 ///
 /// A cold mid-loop re-solve (a `solve(None)` whose retry ladder discarded the
 /// warm basis) is normal and tolerated — the loop never reads a stale basis
@@ -569,14 +654,15 @@ fn map_solver_error(e: SolverError, ctx: DcsSolveContext) -> SddpError {
 /// # Allocation
 ///
 /// Steady-state allocation-free: all working buffers come from `scratch` (grow
-/// once via [`DcsSolveScratch::reserve`]). The per-call `CutRowMap` allocation
-/// mirrors the per-(stage, solve) reset and is acceptable here.
+/// once via [`DcsSolveScratch::reserve`]); the result copy reuses the `res_*`
+/// buffers via `clear()` + `extend_from_slice`. The per-call `CutRowMap`
+/// allocation mirrors the per-(stage, solve) reset and is acceptable here.
 // The argument list is the spec-mandated signature: each item is a distinct
 // read-only input or scratch buffer with no natural grouping (the context-struct
 // rule already bundles the per-(stage, solve) scalars into `ctx`/`params`).
 #[allow(clippy::too_many_arguments)]
-pub fn lazy_solve_preloaded<'ws, S: SolverInterface>(
-    solver: &'ws mut ProfiledSolver<S>,
+pub fn lazy_solve_preloaded<S: SolverInterface>(
+    solver: &mut ProfiledSolver<S>,
     core: &StageTemplate,
     pool: &CutPool,
     indexer: &StageIndexer,
@@ -586,12 +672,12 @@ pub fn lazy_solve_preloaded<'ws, S: SolverInterface>(
     params: &DcsParams,
     scratch: &mut DcsSolveScratch,
     ctx: DcsSolveContext,
-) -> Result<SolutionView<'ws>, SddpError> {
+) -> Result<(), SddpError> {
     let current_iteration = ctx.iteration.unwrap_or(0);
 
-    // Steps 1-3: prepare the LP and run the initial solve, filling
-    // `scratch.primal_buf`. Two modes (see `DcsSolveContext::continue_carry`).
-    if ctx.continue_carry {
+    // Steps 1-3: prepare the LP and run the initial solve, producing the live
+    // `view` the lazy loop holds. Two modes (see `DcsSolveContext::continue_carry`).
+    let mut view = if ctx.continue_carry {
         // CONTINUE (backward opening-reuse, openings 1..): the solver already
         // holds the previous opening's cut rows (tracked in `scratch.row_map`)
         // and a warm basis; the caller patched only the new opening's bounds. Do
@@ -599,9 +685,7 @@ pub fn lazy_solve_preloaded<'ws, S: SolverInterface>(
         // re-optimize under the new bounds and fall through to the lazy loop,
         // which appends only the cuts this opening additionally violates.
         // `initial_resident` and `stored_basis` are ignored in this mode.
-        let view = solver.solve(None).map_err(|e| map_solver_error(e, ctx))?;
-        copy_primal(&view, &mut scratch.primal_buf);
-        let _ = view;
+        solver.solve(None).map_err(|e| map_solver_error(e, ctx))?
     } else {
         // FRESH: reset the carried row map for the already-loaded core (the
         // caller has run `load_model(core)` and applied any bounds patch; this
@@ -631,32 +715,35 @@ pub fn lazy_solve_preloaded<'ws, S: SolverInterface>(
                 core.num_rows + cut_rows,
                 core.num_rows,
             );
-            let view = solver
+            solver
                 .solve(Some(&scratch.recon_basis))
-                .map_err(|e| map_solver_error(e, ctx))?;
-            copy_primal(&view, &mut scratch.primal_buf);
-            let _ = view;
+                .map_err(|e| map_solver_error(e, ctx))?
         } else {
-            let view = solver.solve(None).map_err(|e| map_solver_error(e, ctx))?;
-            copy_primal(&view, &mut scratch.primal_buf);
-            let _ = view;
+            solver.solve(None).map_err(|e| map_solver_error(e, ctx))?
         }
-    }
+    };
 
     // Step 4/5: bounded lazy inner loop with TC fallback. The loop body scores
-    // the just-solved primal (held in `scratch.primal_buf`), then either stops
-    // (no violation → exact) or adds the top-`nadic` violated slots and
-    // re-solves warm.
+    // the LIVE `view.primal` in place (no copy): `score_violated_candidates`
+    // borrows `scratch.scoring`/`scratch.row_map`, not the solver, so it composes
+    // with the held view. On the no-violation arm it copies the live view into the
+    // `res_*` buffers and returns `Ok(())` — NO redundant re-solve. On the add arm
+    // it drops the view, appends the selected slots, and re-solves to refresh it.
+    //
+    // Because the function returns `Result<()>` (not a borrowing view), `view`
+    // never escapes the loop, so holding it across the iteration is accepted by
+    // stable NLL — the Polonius "return a loan from a loop" gap is sidestepped.
     for _ in 0..params.max_inner_iterations {
         // Cumulative scoring-time instrumentation: `scratch.scoring` (the inner
         // scoring buffers) is borrowed during the call; the `+=` on
         // `scratch.scoring_time_seconds` runs only after the call returns and
-        // touches a distinct field, so there is no borrow conflict.
+        // touches a distinct field, so there is no borrow conflict. `view.primal`
+        // borrows the solver, which `score_violated_candidates` does not touch.
         let t0 = Instant::now();
         let violated = score_violated_candidates(
             pool,
             indexer,
-            &scratch.primal_buf,
+            view.primal,
             col_scale,
             &scratch.row_map,
             params,
@@ -667,15 +754,19 @@ pub fn lazy_solve_preloaded<'ws, S: SolverInterface>(
         scratch.scoring_time_seconds += t0.elapsed().as_secs_f64();
 
         if violated == 0 {
-            // Exact: the current resident subset reproduces the all-cuts
-            // optimum. Re-solve once (warm, basis unchanged) to obtain a view
-            // with the `'ws` lifetime to return.
-            let view = solver.solve(None).map_err(|e| map_solver_error(e, ctx))?;
-            return Ok(view);
+            // Exact: the current resident subset reproduces the all-cuts optimum
+            // and the live view already holds it. Copy it into the result buffers
+            // and return — the LP is unchanged and re-solving would recompute the
+            // same point.
+            scratch.store_result(&view);
+            return Ok(());
         }
 
-        // Add the selected top-`nadic` slots and re-solve (warm; may escalate
-        // to cold — never assume the warm basis survived).
+        // A cut will be added, so the held view is stale: end its solver borrow
+        // here (`SolutionView` is `Copy`, so the borrow lasts only to its last
+        // use), then append the selected top-`nadic` slots and re-solve (warm;
+        // may escalate to cold — never assume the warm basis survived).
+        let _ = view;
         append_slots_to_lp(
             solver,
             pool,
@@ -685,15 +776,13 @@ pub fn lazy_solve_preloaded<'ws, S: SolverInterface>(
             &mut scratch.row_map,
             &mut scratch.batch,
         );
-        let view = solver.solve(None).map_err(|e| map_solver_error(e, ctx))?;
-        copy_primal(&view, &mut scratch.primal_buf);
-        let _ = view;
+        view = solver.solve(None).map_err(|e| map_solver_error(e, ctx))?;
     }
 
     // TC fallback: the cap was hit with violations still present. Collect ALL
-    // remaining violated candidates (effective nadic = ∞), add them, and solve
-    // once. This degrades to a terminating-condition (all-cuts) solve for this
-    // (stage, solve) but preserves exactness.
+    // remaining violated candidates (effective nadic = ∞) from the live primal,
+    // add them, and solve once. This degrades to a terminating-condition
+    // (all-cuts) solve for this (stage, solve) but preserves exactness.
     let mut all_params = *params;
     all_params.nadic = u32::MAX;
     // Same cumulative-scoring instrumentation as the inner loop above.
@@ -701,7 +790,7 @@ pub fn lazy_solve_preloaded<'ws, S: SolverInterface>(
     let remaining = score_violated_candidates(
         pool,
         indexer,
-        &scratch.primal_buf,
+        view.primal,
         col_scale,
         &scratch.row_map,
         &all_params,
@@ -710,6 +799,9 @@ pub fn lazy_solve_preloaded<'ws, S: SolverInterface>(
         &mut scratch.out_selected,
     );
     scratch.scoring_time_seconds += t0.elapsed().as_secs_f64();
+    // The live view's solver borrow must end before the appending re-solve
+    // (`SolutionView` is `Copy`, so the borrow lasts only to this last use).
+    let _ = view;
     if remaining > 0 {
         append_slots_to_lp(
             solver,
@@ -722,15 +814,8 @@ pub fn lazy_solve_preloaded<'ws, S: SolverInterface>(
         );
     }
     let view = solver.solve(None).map_err(|e| map_solver_error(e, ctx))?;
-    Ok(view)
-}
-
-/// Copy a solve's primal vector into a reusable buffer so the `SolutionView`
-/// borrow of the solver can end before the next mutable solver call.
-#[inline]
-fn copy_primal(view: &SolutionView<'_>, buf: &mut Vec<f64>) {
-    buf.clear();
-    buf.extend_from_slice(view.primal);
+    scratch.store_result(&view);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1808,7 +1893,7 @@ mod tests {
 
         // Caller owns the model load (and, in production, any bounds patch).
         solver.load_model(&core);
-        let view = lazy_solve_preloaded(
+        lazy_solve_preloaded(
             &mut solver,
             &core,
             &pool,
@@ -1821,6 +1906,7 @@ mod tests {
             ctx(),
         )
         .expect("lazy_solve_preloaded must succeed");
+        let view = scratch.result_view();
 
         assert!(
             (view.objective - all_obj).abs() < 1e-9,
@@ -1839,6 +1925,11 @@ mod tests {
 
     /// With an initial subset that already contains the binding cut, the loop
     /// adds no further rows and returns after the first solve.
+    ///
+    /// AC1: the no-violation terminating path issues EXACTLY ONE LP solve (the
+    /// initial solve), not two — the redundant exit re-solve is eliminated. The
+    /// resident subset already reproduces the all-cuts optimum, so the live view
+    /// is copied into the result buffers and returned with no re-solve.
     #[test]
     fn lazy_solve_no_violation_stops_immediately() {
         let indexer = lazy_indexer();
@@ -1850,7 +1941,8 @@ mod tests {
 
         // Initial subset includes the binding slot 2.
         solver.load_model(&core);
-        let view = lazy_solve_preloaded(
+        let solves_before = solver.statistics().solve_count;
+        lazy_solve_preloaded(
             &mut solver,
             &core,
             &pool,
@@ -1863,15 +1955,27 @@ mod tests {
             ctx(),
         )
         .expect("lazy_solve_preloaded must succeed");
+        let solve_delta = solver.statistics().solve_count - solves_before;
+        let view = scratch.result_view();
 
         // The optimum is the binding cut floor; no growth needed.
         assert_eq!(view.primal[LAZY_THETA_COL], 5.0);
         // out_selected from the (single) scoring pass that found no violation.
         assert!(scratch.out_selected.is_empty());
+        // AC1: exactly ONE solve (was 2 before the redundant exit re-solve was
+        // removed): the initial solve, then the no-violation copy-and-return.
+        assert_eq!(
+            solve_delta, 1,
+            "no-violation path must issue exactly 1 solve (no redundant exit re-solve)"
+        );
     }
 
     /// Omitting the binding cut forces at least one inner add_rows, and the
     /// final theta reflects the now-resident binding cut.
+    ///
+    /// AC2: the one-addition path issues EXACTLY TWO LP solves (was 3: initial +
+    /// add/resolve + redundant exit) — the initial solve, then the add-and-resolve
+    /// whose rescore finds no violation and copies-and-returns with no third solve.
     #[test]
     fn lazy_solve_grows_to_include_binding_cut() {
         let indexer = lazy_indexer();
@@ -1882,7 +1986,8 @@ mod tests {
         let params = lazy_params(10, 50);
 
         solver.load_model(&core);
-        let view = lazy_solve_preloaded(
+        let solves_before = solver.statistics().solve_count;
+        lazy_solve_preloaded(
             &mut solver,
             &core,
             &pool,
@@ -1895,10 +2000,17 @@ mod tests {
             ctx(),
         )
         .expect("lazy_solve_preloaded must succeed");
+        let solve_delta = solver.statistics().solve_count - solves_before;
+        let view = scratch.result_view();
 
         assert_eq!(
             view.primal[LAZY_THETA_COL], 5.0,
             "final theta must reflect the added binding cut"
+        );
+        // AC2: exactly TWO solves (initial + one add/resolve), no redundant exit.
+        assert_eq!(
+            solve_delta, 2,
+            "one-addition path must issue exactly 2 solves (no redundant exit re-solve)"
         );
     }
 
@@ -1910,6 +2022,10 @@ mod tests {
     /// and the second must add the cut (slot 3) that binds only at x0 = 10 on top
     /// of the carried residents {0,1,2}. This is the now-mandatory backward
     /// opening-reuse mechanism (ReuseContinue) exercised in isolation.
+    ///
+    /// AC3: a third opening C continues at x0 = 2 where the binding cut (slot 2)
+    /// is ALREADY resident from the carried set, so the lazy loop adds nothing and
+    /// must issue EXACTLY ONE solve on the continue-carry no-add path.
     #[test]
     fn lazy_solve_continue_carry_exact_across_openings() {
         let indexer = lazy_indexer();
@@ -1917,14 +2033,14 @@ mod tests {
         let core = core_template();
         let params = lazy_params(10, 50);
         let mut solver = active_profiled();
-        // ONE scratch + ONE loaded model shared across the two openings: the
-        // row map and warm basis must persist across the continue call.
+        // ONE scratch + ONE loaded model shared across the openings: the row map
+        // and warm basis must persist across the continue calls.
         let mut scratch = DcsSolveScratch::default();
         solver.load_model(&core);
 
         // Opening A (x0 = 2, fresh): seed omits the binding slot 2; the lazy loop
         // discovers and adds it. All-cuts optimum at x0 = 2 is theta = 5.
-        let view_a = lazy_solve_preloaded(
+        lazy_solve_preloaded(
             &mut solver,
             &core,
             &pool,
@@ -1940,8 +2056,11 @@ mod tests {
             },
         )
         .expect("opening A (fresh) must solve");
-        assert_eq!(view_a.primal[LAZY_THETA_COL], 5.0, "opening A theta (x0=2)");
-        let _ = view_a;
+        assert_eq!(
+            scratch.result_view().primal[LAZY_THETA_COL],
+            5.0,
+            "opening A theta (x0=2)"
+        );
 
         // Re-pin the incoming state to x0 = 10 (what `patch_opening_bounds` does
         // per opening) — only the bounds change; the loaded LP and the carried
@@ -1952,7 +2071,7 @@ mod tests {
         // and basis. The binding cut at x0 = 10 is slot 3 (floor 20), which is NOT
         // resident after A, so the continue loop must add it. All-cuts optimum at
         // x0 = 10 is theta = 20.
-        let view_b = lazy_solve_preloaded(
+        lazy_solve_preloaded(
             &mut solver,
             &core,
             &pool,
@@ -1969,9 +2088,44 @@ mod tests {
         )
         .expect("opening B (continue) must solve");
         assert_eq!(
-            view_b.primal[LAZY_THETA_COL], 20.0,
+            scratch.result_view().primal[LAZY_THETA_COL],
+            20.0,
             "opening B theta (x0=10) must reach the all-cuts optimum via the \
              carried-LP continue path (slot 3 added on top of the carried set)"
+        );
+
+        // Opening C (x0 = 2 again, continue, NO add): re-pin back to x0 = 2 where
+        // the binding cut (slot 2, floor 5) is already resident from A. The
+        // continue loop finds no violation and must issue EXACTLY ONE solve — the
+        // continue-carry no-add path (AC3).
+        solver.set_col_bounds(&[0], &[2.0], &[2.0]);
+        let solves_before = solver.statistics().solve_count;
+        lazy_solve_preloaded(
+            &mut solver,
+            &core,
+            &pool,
+            &indexer,
+            &[],
+            None,
+            &[], // ignored in continue mode
+            &params,
+            &mut scratch,
+            DcsSolveContext {
+                continue_carry: true,
+                ..ctx()
+            },
+        )
+        .expect("opening C (continue, no add) must solve");
+        let solve_delta = solver.statistics().solve_count - solves_before;
+        assert_eq!(
+            scratch.result_view().primal[LAZY_THETA_COL],
+            5.0,
+            "opening C theta (x0=2) reverts to the carried binding cut (slot 2)"
+        );
+        // AC3: continue-carry no-add path issues exactly ONE solve.
+        assert_eq!(
+            solve_delta, 1,
+            "continue-carry no-add opening must issue exactly 1 solve (no redundant exit re-solve)"
         );
     }
 
@@ -1999,7 +2153,7 @@ mod tests {
 
         let before = scratch.scoring_time_seconds;
         solver.load_model(&core);
-        let _view = lazy_solve_preloaded(
+        lazy_solve_preloaded(
             &mut solver,
             &core,
             &pool,
@@ -2035,7 +2189,7 @@ mod tests {
 
         let before = scratch.scoring_time_seconds;
         solver.load_model(&core);
-        let view = lazy_solve_preloaded(
+        lazy_solve_preloaded(
             &mut solver,
             &core,
             &pool,
@@ -2048,6 +2202,7 @@ mod tests {
             ctx(),
         )
         .expect("lazy_solve_preloaded must succeed");
+        let view = scratch.result_view();
 
         // Single scoring pass still advances the accumulator.
         assert!(
@@ -2069,6 +2224,11 @@ mod tests {
 
     /// max_inner_iterations = 1 forces the TC fallback after one inner add; it
     /// must terminate and still return the all-cuts-equivalent optimum.
+    ///
+    /// AC5: the cap-hit fallback scores the live primal, appends remaining
+    /// violated slots, and solves once to return — preserving the all-cuts
+    /// optimum. Solve count is unchanged from before this ticket on the TC path:
+    /// initial + one capped add/resolve + the final TC solve = 3.
     #[test]
     fn lazy_solve_tc_fallback_terminates() {
         let indexer = lazy_indexer();
@@ -2083,7 +2243,8 @@ mod tests {
         let params = lazy_params(1, 1);
 
         solver.load_model(&core);
-        let view = lazy_solve_preloaded(
+        let solves_before = solver.statistics().solve_count;
+        lazy_solve_preloaded(
             &mut solver,
             &core,
             &pool,
@@ -2096,9 +2257,16 @@ mod tests {
             ctx(),
         )
         .expect("lazy_solve_preloaded TC fallback must succeed");
+        let solve_delta = solver.statistics().solve_count - solves_before;
+        let view = scratch.result_view();
 
         assert!((view.objective - all_obj).abs() < 1e-9);
         assert!((view.primal[LAZY_THETA_COL] - all_theta).abs() < 1e-9);
+        // AC5: TC fallback solve count is preserved (initial + capped add + final).
+        assert_eq!(
+            solve_delta, 3,
+            "TC fallback issues initial + one capped add/resolve + final TC solve = 3"
+        );
     }
 
     /// Determinism: identical inputs → identical objective across two runs.
@@ -2113,7 +2281,7 @@ mod tests {
             let mut solver = active_profiled();
             let mut scratch = DcsSolveScratch::default();
             solver.load_model(&core);
-            let view = lazy_solve_preloaded(
+            lazy_solve_preloaded(
                 &mut solver,
                 &core,
                 &pool,
@@ -2126,10 +2294,88 @@ mod tests {
                 ctx(),
             )
             .expect("lazy_solve_preloaded must succeed");
-            view.objective
+            scratch.result_view().objective
         };
 
         assert_eq!(run(), run(), "objective must be deterministic");
+    }
+
+    /// AC6: the reused `res_*` result buffers are growth-only. Once warmed to the
+    /// LP's solution size, repeated `lazy_solve_preloaded` calls refill them via
+    /// `clear()` + `extend_from_slice` without reallocating — capacities are
+    /// stable (no steady-state heap allocation on the result-copy path). Also
+    /// pins that `result_view()` round-trips the solution faithfully.
+    ///
+    /// Each call reloads the cut-free core first, exactly as the production
+    /// forward/backward/sim paths do per (stage, solve): without the reload the
+    /// solver model would accumulate cut rows across calls and the dual length
+    /// (and thus `res_dual`) would grow — a fixture artifact, not a real leak.
+    #[test]
+    fn lazy_solve_result_buffers_growth_only() {
+        let indexer = lazy_indexer();
+        let pool = make_three_cut_pool();
+        let mut solver = active_profiled();
+        let core = core_template();
+        let mut scratch = DcsSolveScratch::default();
+        let params = lazy_params(10, 50);
+
+        let call = |solver: &mut ProfiledSolver<ActiveSolver>, scratch: &mut DcsSolveScratch| {
+            // Reload the cut-free core so each call starts from a clean row count
+            // (mirrors the caller's per-(stage, solve) `load_model`).
+            solver.load_model(&core);
+            lazy_solve_preloaded(
+                solver,
+                &core,
+                &pool,
+                &indexer,
+                &[],
+                None,
+                &[0, 1], // omit binding slot 2 → at least one add, fills res_* twice
+                &params,
+                scratch,
+                ctx(),
+            )
+            .expect("lazy_solve_preloaded must succeed");
+        };
+
+        // Two warm-up calls so the result buffers reach their steady-state
+        // capacity before we start asserting stability.
+        call(&mut solver, &mut scratch);
+        call(&mut solver, &mut scratch);
+        let primal_cap = scratch.res_primal.capacity();
+        let dual_cap = scratch.res_dual.capacity();
+        let rc_cap = scratch.res_reduced_costs.capacity();
+        assert!(
+            !scratch.res_primal.is_empty(),
+            "result primal must be filled"
+        );
+        assert_eq!(
+            scratch.result_view().primal[LAZY_THETA_COL],
+            5.0,
+            "warmed result must be the binding optimum"
+        );
+
+        // Several more calls must not grow any result-buffer capacity.
+        for _ in 0..3 {
+            call(&mut solver, &mut scratch);
+            assert_eq!(
+                scratch.res_primal.capacity(),
+                primal_cap,
+                "res_primal capacity must be stable (growth-only)"
+            );
+            assert_eq!(
+                scratch.res_dual.capacity(),
+                dual_cap,
+                "res_dual capacity must be stable (growth-only)"
+            );
+            assert_eq!(
+                scratch.res_reduced_costs.capacity(),
+                rc_cap,
+                "res_reduced_costs capacity must be stable (growth-only)"
+            );
+            // result_view() still reflects the same optimum each call.
+            assert_eq!(scratch.result_view().primal[LAZY_THETA_COL], 5.0);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -2229,7 +2475,7 @@ mod tests {
         let params = lazy_params(10, 50);
 
         solver.load_model(&core);
-        let view = lazy_solve_preloaded(
+        lazy_solve_preloaded(
             &mut solver,
             &core,
             &pool,
@@ -2242,6 +2488,7 @@ mod tests {
             ctx(),
         )
         .expect("lazy_solve_preloaded must tolerate a cold mid-loop re-solve");
+        let view = scratch.result_view();
 
         assert_eq!(
             view.primal[LAZY_THETA_COL], 5.0,

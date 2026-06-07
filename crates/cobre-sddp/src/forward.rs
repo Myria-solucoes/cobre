@@ -1077,7 +1077,9 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         };
         // Disjoint borrows of `ws`: `solver`, `backward_accum.dcs_initial_resident`
         // (shared), and `backward_accum.dcs_solve` (mut) are distinct fields.
-        let view = lazy_solve_preloaded(
+        // `lazy_solve_preloaded` copies the final solve into `dcs_solve`'s result
+        // buffers and returns `Result<()>`; the zero-cost view is rebuilt below.
+        lazy_solve_preloaded(
             &mut ws.solver,
             &ctx.templates[t],
             pool,
@@ -1089,6 +1091,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
             &mut ws.backward_accum.dcs_solve,
             dcs_ctx,
         )?;
+        let view = ws.backward_accum.dcs_solve.result_view();
         let objective = view.objective;
         let unscaled: Vec<f64> = if col_scale.is_empty() {
             view.primal.to_vec()
