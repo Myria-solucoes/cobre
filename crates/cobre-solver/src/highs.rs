@@ -1082,7 +1082,21 @@ impl HighsSolver {
         // in edge cases. Retry level 0 (cold restart) recovers from this.
         // Wall-clock > 15s is also retryable — detects stuck initial solves.
         let is_unbounded = model_status == ffi::HIGHS_MODEL_STATUS_UNBOUNDED;
+        // INFEASIBLE from the initial attempt is retryable. A warm-started dual
+        // simplex can FALSELY report INFEASIBLE on numerically difficult LPs --
+        // the same warm-start fragility that surfaces as spurious UNBOUNDED or
+        // ITERATION_LIMIT (retried above). Routing INFEASIBLE through the
+        // escalation runs level 0 first, which clears the warm basis
+        // (`cobre_highs_clear_solver`) and re-solves cold. A *genuinely* infeasible
+        // LP is confirmed by that cold solve and the escalation stops immediately
+        // (INFEASIBLE is terminal inside `retry_escalation`), so a true infeasible
+        // still returns `Err(Infeasible)` -- only one extra cold solve. A
+        // warm-start-only false infeasible is rescued (returns optimal). Without
+        // this, a false INFEASIBLE bypassed the escalation entirely and became a
+        // fatal training error. Mirrors the cold-solve escalation on the CLP path.
+        let is_infeasible = model_status == ffi::HIGHS_MODEL_STATUS_INFEASIBLE;
         let initial_retryable = is_unbounded
+            || is_infeasible
             || model_status == ffi::HIGHS_MODEL_STATUS_ITERATION_LIMIT
             || model_status == ffi::HIGHS_MODEL_STATUS_TIME_LIMIT
             || solve_time > 15.0;
@@ -2930,6 +2944,57 @@ mod research_tests {
         assert!(
             matches!(result_inf, Err(SolverError::Infeasible)),
             "infeasible LP must return Err(SolverError::Infeasible), got {result_inf:?}"
+        );
+    }
+
+    /// A warm-started solve can FALSELY report INFEASIBLE on numerically hard LPs;
+    /// `solve_inner` now treats an initial INFEASIBLE as retryable so the
+    /// escalation's level-0 cold restart re-solves from a cleared basis before the
+    /// verdict is trusted. This test pins both halves of that contract on a
+    /// *genuinely* infeasible LP (the case a cold restart cannot rescue): the
+    /// result is still `Err(Infeasible)`, AND the escalation actually ran
+    /// (`retry_count >= 1`, i.e. a cold-restart confirmation was attempted) rather
+    /// than the verdict being trusted immediately as it was before the fix.
+    #[test]
+    fn infeasible_initial_solve_runs_cold_restart_before_terminating() {
+        use super::super::HighsSolver;
+        use crate::SolverInterface;
+        use crate::types::SolverError;
+        use crate::types::StageTemplate;
+
+        // Genuinely infeasible: x0 == 99 but x0 is bounded to [0, 10]. No basis,
+        // cold or warm, can satisfy this — the cold restart must confirm INFEASIBLE.
+        let infeasible_template = StageTemplate {
+            num_cols: 1,
+            num_rows: 1,
+            num_nz: 1,
+            col_starts: vec![0_i32, 1],
+            row_indices: vec![0_i32],
+            values: vec![1.0],
+            col_lower: vec![0.0],
+            col_upper: vec![10.0],
+            objective: vec![0.0],
+            row_lower: vec![99.0],
+            row_upper: vec![99.0],
+            n_state: 1,
+            n_transfer: 0,
+            n_dual_relevant: 1,
+            n_hydro: 0,
+            max_par_order: 0,
+            col_scale: Vec::new(),
+            row_scale: Vec::new(),
+        };
+        let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
+        solver.load_model(&infeasible_template);
+        let result = solver.solve(None).map(|_| ());
+        assert!(
+            matches!(result, Err(SolverError::Infeasible)),
+            "a genuinely infeasible LP must still return Err(Infeasible), got {result:?}"
+        );
+        assert!(
+            solver.statistics().retry_count >= 1,
+            "INFEASIBLE must now enter the escalation (>= 1 cold-restart attempt); got retry_count {}",
+            solver.statistics().retry_count
         );
     }
 
