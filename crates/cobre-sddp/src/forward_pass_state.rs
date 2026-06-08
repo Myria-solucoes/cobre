@@ -718,16 +718,13 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
             .unwrap_or(1.0);
 
         for (local_m, m) in (start_m..end_m).enumerate() {
-            // Reset the solver's internal simplex state at the per-scenario solve
-            // boundary so this scenario's landed vertex cannot depend on which
-            // scenarios the worker solved before it (determinism across
-            // thread/rank counts), mirroring the simulation reset (A2b). No-op
-            // for HiGHS (`passLp` already rebuilds full state); recreates the
-            // model for CLP, whose `Clp_loadProblem` leaves the rim/pricing state
-            // stale. It must precede the per-scenario `load_model` below so the
-            // fresh CLP handle is the one repopulated — both on the baked path
-            // (load here) and the DCS path (`run_forward_stage` loads the
-            // cut-free base template on the freshly reset handle).
+            // Reset the solver's simplex state at the per-scenario boundary so
+            // this scenario's landed vertex cannot depend on which scenarios the
+            // worker solved before it (determinism across thread/rank counts).
+            // No-op for HiGHS; for CLP recreates the model (`Clp_loadProblem`
+            // leaves rim/pricing state stale). Must precede the per-scenario load
+            // so the fresh CLP handle is the one repopulated — both the baked
+            // `load_model` below and the DCS-path load in `run_forward_stage`.
             ws.solver.reset_solver_state();
 
             // Reload model per scenario to ensure deterministic LP state across

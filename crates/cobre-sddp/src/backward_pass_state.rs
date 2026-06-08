@@ -1060,27 +1060,21 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
             let scoring_seconds_before = ws.backward_accum.dcs_solve.scoring_time_seconds;
 
             for m in start_m..end_m {
-                // Reset the solver's internal simplex state at the per-trial-point
-                // boundary so this trial point's cold-head solve (the first-solved
-                // opening) cannot depend on which trial points the worker solved
-                // before it (determinism across thread/rank counts), mirroring the
-                // forward per-scenario reset (forward_pass_state.rs). No-op for
-                // HiGHS (`load_model`/`passLp` already rebuilds full state);
-                // recreates the model for CLP, whose `Clp_loadProblem` leaves the
-                // rim/pricing/steepest-edge state stale.
+                // Reset the solver's simplex state at the per-trial-point boundary
+                // so this trial point's cold-head solve (the first-solved opening)
+                // cannot depend on which trial points the worker solved before it
+                // (determinism across thread/rank counts). No-op for HiGHS; for CLP
+                // recreates the model (`Clp_loadProblem` leaves rim/pricing/
+                // steepest-edge state stale).
                 //
-                // It MUST precede both per-trial-point loads: the baked
-                // `load_backward_lp` on the next line, and — on the DCS path — the
-                // cut-free core `load_model` inside `process_trial_point_backward`
-                // (which runs later, still after this reset on the same worker for
-                // this trial point). The fresh CLP handle is the one those loads
-                // repopulate.
+                // MUST precede both per-trial-point loads: the baked
+                // `load_backward_lp` on the next line, and the DCS-path cut-free
+                // core load inside `process_trial_point_backward`.
                 //
-                // It fires ONCE PER TRIAL POINT, not per opening: the
-                // within-trial-point warm-start chain across openings (ω > the
-                // first-solved one) is preserved inside
-                // `process_trial_point_backward`, which never resets between
-                // openings. That warm chain is the W1 reorder's benefit.
+                // Fires ONCE PER TRIAL POINT, not per opening: the within-trial-
+                // point warm-start chain across openings (ω > the first-solved one)
+                // is preserved inside `process_trial_point_backward`, which never
+                // resets between openings.
                 ws.solver.reset_solver_state();
 
                 // Reload LP per trial point to reset HiGHS's internal simplex
