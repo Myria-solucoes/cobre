@@ -640,9 +640,11 @@ fn write_opening_outcome<S: SolverInterface + Send>(
             .sum::<f64>();
 }
 
-/// Capture the post-solve basis at ω=0 into `basis_slice[m, s]`.
+/// Capture the post-solve basis at the first-solved opening into `basis_slice[m, s]`.
 ///
-/// Only called when `omega == 0`; writes at ω>0 are forbidden because the
+/// Only called for the first-solved opening of each trial point (identified by
+/// `is_first`, i.e. `solve_order[0]` — which equals canonical ω=0 only under the
+/// identity order); writes after the first solve are forbidden because the
 /// retained LU factorization would be overwritten by subsequent opening solves,
 /// making the stored basis stale and potentially infeasible when reloaded.
 ///
@@ -1092,9 +1094,10 @@ impl StageOpeningSolver {
 /// Process one trial point `m` in the backward pass, iterating over all openings.
 ///
 /// Solves at each (scenario, opening) and accumulates duals into `per_opening_stats`.
-/// At ω=0, writes the post-solve basis into `basis_slice`; writes at ω>0 are
-/// forbidden (retained-LU corruption risk). Infeasibility at ω=0
-/// leaves the slot unchanged
+/// At the first-solved opening (`solve_order[0]`, which equals canonical ω=0 only
+/// under the identity order), writes the post-solve basis into `basis_slice`;
+/// later writes are forbidden (retained-LU corruption risk). Infeasibility at the
+/// first-solved opening leaves the slot unchanged
 // RATIONALE: 11 args required — each is a disjoint borrow (ws, ctx, training_ctx, exchange,
 // succ, basis_slice, opening_solver) or a plain scalar (fwd_offset, iteration, m) or a risk
 // slice. Merging into a struct would add indirection without reducing the caller's borrow count.
