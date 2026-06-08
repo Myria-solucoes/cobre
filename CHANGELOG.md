@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `training.cut_selection.active_window` — a first-class config field for the
+  dynamic cut-selection active-set seed window (`k2`). Applies only when
+  `method = "dynamic"`. Default `5`; `0` is valid and meaningful (seeds only the
+  current iteration's cuts, matching NEWAVE `selcor.dat`). Previously this value
+  had to be supplied through `check_frequency`, which overloaded the
+  periodic-pruning cadence used by the `level1` / `lml1` / `domination` methods.
+
 - Selectable LP backend at build time. A binary is now bound to exactly
   one LP solver backend, chosen via Cargo features:
   - `highs` (enabled by default) — [HiGHS](https://highs.dev) LP solver, MIT-licensed.
@@ -40,6 +47,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Existing builds are unaffected: the default backend remains HiGHS, and
   the CLP backend is strictly opt-in.
+
+### Changed
+
+- `method = "dynamic"` no longer reads `check_frequency` for its `k2` window;
+  use the new `active_window` field instead. A dynamic config that relied on
+  `check_frequency` to set `k2` now falls back to the default `k2 = 5` unless it
+  sets `active_window`. `check_frequency` remains the periodic-pruning cadence
+  for `level1` / `lml1` / `domination`, where `0` is still rejected; under
+  `dynamic` an explicit `check_frequency` is ignored rather than rejected.
+- The deprecated `training.cut_selection.threshold` and `memory_window` fields
+  are now silently ignored for **every** method, including `dynamic`. They were
+  previously consumed as undocumented fallbacks for `nadic` and the
+  candidate-recency window (`k1`) under `dynamic`; that honoring is removed. The
+  fields remain accepted in config files (so existing configs still parse) but
+  no longer affect behavior. Configure `nadic` and `candidate_window` directly.
 
 ## [0.8.0] - 2026-06-01
 

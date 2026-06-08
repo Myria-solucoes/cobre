@@ -70,7 +70,7 @@ pub struct RowSelectionConfig {
     #[serde(default)]
     pub enabled: Option<bool>,
 
-    /// Method: `"level1"`, `"lml1"`, or `"domination"`.
+    /// Method: `"level1"`, `"lml1"`, `"domination"`, or `"dynamic"`.
     #[serde(default)]
     pub method: Option<String>,
 
@@ -108,7 +108,10 @@ pub struct RowSelectionConfig {
     #[serde(default)]
     pub domination_epsilon: Option<f64>,
 
-    /// Iterations between pruning checks.
+    /// Iterations between periodic pruning checks for the `"level1"`, `"lml1"`,
+    /// and `"domination"` methods. Must be `> 0`. Not used by `method =
+    /// "dynamic"`, which uses `active_window` for its `k2` active-set seed
+    /// window.
     #[serde(default)]
     pub check_frequency: Option<u32>,
 
@@ -117,17 +120,24 @@ pub struct RowSelectionConfig {
     #[serde(default)]
     pub start_iteration: Option<u32>,
 
+    /// Active-set seed window (`k2`) for `method = "dynamic"`: the number of
+    /// most recent iterations whose cuts seed the initial active set. `0` is
+    /// valid and meaningful — it seeds only the current iteration's cuts,
+    /// matching NEWAVE's `selcor.dat`
+    /// `TAMANHO DA JANELA DE CORTES ATIVOS (k2) = 0`. Default: `5`. Ignored
+    /// unless `method = "dynamic"`.
+    #[serde(default)]
+    pub active_window: Option<u32>,
+
     /// Candidate-recency window for `method = "dynamic"`: only candidates
     /// generated within the last `candidate_window` iterations are scored.
     /// `None` (the default) means an unbounded window (every pool entry is a
-    /// candidate). When absent, falls back to `memory_window`. Ignored unless
-    /// `method = "dynamic"`.
+    /// candidate). Ignored unless `method = "dynamic"`.
     #[serde(default)]
     pub candidate_window: Option<u32>,
 
     /// Maximum number of cuts added per lazy-solve round for `method =
-    /// "dynamic"` (`>= 1`). When absent, falls back to `threshold`. Default:
-    /// `10`. Ignored unless `method = "dynamic"`.
+    /// "dynamic"` (`>= 1`). Default: `10`. Ignored unless `method = "dynamic"`.
     #[serde(default)]
     pub nadic: Option<u32>,
 

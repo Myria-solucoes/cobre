@@ -416,6 +416,16 @@
       "additionalProperties": false,
       "description": "Row-selection settings (`config.json → training.cut_selection`).",
       "properties": {
+        "active_window": {
+          "default": null,
+          "description": "Active-set seed window (`k2`) for `method = \"dynamic\"`: the number of\nmost recent iterations whose cuts seed the initial active set. `0` is\nvalid and meaningful — it seeds only the current iteration's cuts,\nmatching NEWAVE's `selcor.dat`\n`TAMANHO DA JANELA DE CORTES ATIVOS (k2) = 0`. Default: `5`. Ignored\nunless `method = \"dynamic\"`.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "basis_activity_window": {
           "default": null,
           "deprecated": true,
@@ -427,9 +437,19 @@
             "null"
           ]
         },
+        "candidate_window": {
+          "default": null,
+          "description": "Candidate-recency window for `method = \"dynamic\"`: only candidates\ngenerated within the last `candidate_window` iterations are scored.\n`None` (the default) means an unbounded window (every pool entry is a\ncandidate). Ignored unless `method = \"dynamic\"`.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "check_frequency": {
           "default": null,
-          "description": "Iterations between pruning checks.",
+          "description": "Iterations between periodic pruning checks for the `\"level1\"`, `\"lml1\"`,\nand `\"domination\"` methods. Must be `> 0`. Not used by `method =\n\"dynamic\"`, which uses `active_window` for its `k2` active-set seed\nwindow.",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -485,9 +505,29 @@
         },
         "method": {
           "default": null,
-          "description": "Method: `\"level1\"`, `\"lml1\"`, or `\"domination\"`.",
+          "description": "Method: `\"level1\"`, `\"lml1\"`, `\"domination\"`, or `\"dynamic\"`.",
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "nadic": {
+          "default": null,
+          "description": "Maximum number of cuts added per lazy-solve round for `method =\n\"dynamic\"` (`>= 1`). Default: `10`. Ignored unless `method = \"dynamic\"`.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "start_iteration": {
+          "default": null,
+          "description": "First 1-based training iteration at which the dynamic lazy loop becomes\nactive. Ignored unless `method = \"dynamic\"`. Default: `2`.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
             "null"
           ]
         },
@@ -504,6 +544,15 @@
         "tie_tolerance": {
           "default": null,
           "description": "Tie-tolerance for the `\"level1\"` and `\"lml1\"` value-based row-selection\nmethods.\n\nA row is considered tied at an evaluation point when its value is\nwithin `tie_tolerance` of the best active row value. Default: `1e-10`.\nIgnored by the `\"domination\"` method.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "violation_tolerance": {
+          "default": null,
+          "description": "Violation tolerance for accepting a candidate row under `method =\n\"dynamic\"` (`> 0`). When absent, falls back to `tie_tolerance`. Default:\n`1e-10`. Ignored unless `method = \"dynamic\"`.",
           "format": "double",
           "type": [
             "number",
@@ -674,7 +723,9 @@
         "cut_selection": {
           "$ref": "#/$defs/RowSelectionConfig",
           "default": {
+            "active_window": null,
             "basis_activity_window": null,
+            "candidate_window": null,
             "check_frequency": null,
             "cut_activity_tolerance": null,
             "domination_epsilon": null,
@@ -682,8 +733,11 @@
             "max_active_per_stage": null,
             "memory_window": null,
             "method": null,
+            "nadic": null,
+            "start_iteration": null,
             "threshold": null,
-            "tie_tolerance": null
+            "tie_tolerance": null,
+            "violation_tolerance": null
           },
           "description": "Row-selection settings."
         },
