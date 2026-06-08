@@ -163,6 +163,10 @@ impl<S: SolverInterface> SolverInterface for ProfiledSolver<S> {
         self.inner.record_reconstruction_stats();
     }
 
+    fn reset_solver_state(&mut self) {
+        self.inner.reset_solver_state();
+    }
+
     fn set_primal_feasibility_tolerance(&mut self, value: f64) {
         self.inner.set_primal_feasibility_tolerance(value);
     }

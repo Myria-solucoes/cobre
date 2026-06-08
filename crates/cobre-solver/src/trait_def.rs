@@ -264,6 +264,23 @@ pub trait SolverInterface: Send {
     /// A non-zero count indicates basis reconstruction is active on this solver instance.
     fn record_reconstruction_stats(&mut self) {}
 
+    /// Reset the solver's internal working state to a clean baseline between
+    /// independent solve sequences (e.g. at simulation/forward scenario
+    /// boundaries), discarding any simplex state — factorization and, crucially,
+    /// the pricing/edge-weight reference frame — carried over from prior solves.
+    ///
+    /// This is a **determinism** hook, not a performance one: it ensures a
+    /// scenario's result cannot depend on which scenarios a worker happened to
+    /// process before it, so output stays bit-identical across thread/rank
+    /// counts.
+    ///
+    /// Default: no-op. `HighsSolver` rebuilds its full solver state on every
+    /// `load_model` (`Highs_passLp`), so it is already order-independent. The
+    /// CLP backend overrides this because `Clp_loadProblem` does **not** heal the
+    /// `ClpSimplex` rim/pricing state, leaving stale steepest-edge weights that
+    /// make the landed vertex on alternative-optima LPs order-dependent.
+    fn reset_solver_state(&mut self) {}
+
     /// Set the LP solver's primal feasibility tolerance.
     ///
     /// Implementations MUST configure the underlying solver such that subsequent

@@ -860,6 +860,48 @@ impl SolverInterface for ClpSolver {
         }
     }
 
+    /// Fully reset the CLP simplex state by recreating the underlying model.
+    ///
+    /// `Clp_loadProblem` swaps the model data but does NOT heal the
+    /// `ClpSimplex`-level rim/pricing state, so stale steepest-edge reference
+    /// weights persist across solves and make the landed vertex on
+    /// alternative-optima LPs depend on the order a worker processed prior
+    /// scenarios — breaking thread/rank-count determinism. Recreating the
+    /// `ClpSimplex` (a fresh, empty model) discards that state entirely: the CLP
+    /// analogue of the clean state `HiGHS` gets for free on every `passLp`. The
+    /// next `load_model` repopulates the model; the cached profile is re-applied
+    /// so perturbation/scaling/tolerance/pricing/iteration-cap configuration
+    /// survives the swap.
+    fn reset_solver_state(&mut self) {
+        // SAFETY: `cobre_clp_create` has no preconditions; it allocates a new
+        // empty CLP model or returns null on allocation failure.
+        let new_handle = unsafe { clp_ffi::cobre_clp_create() };
+        if new_handle.is_null() {
+            // Allocating an empty model failed (extremely unlikely). Keep the
+            // existing handle rather than abort; determinism degrades but the
+            // run continues.
+            return;
+        }
+        // Release any hot-start snapshot bound to the OLD handle before it is
+        // destroyed — the `saveStuff` token belongs to the old model.
+        if !self.hot_start_token.is_null() {
+            self.unmark_hot_start();
+        }
+        // SAFETY: `self.handle` is the valid handle from construction (or a prior
+        // reset); `cobre_clp_destroy` frees it. It is immediately replaced by the
+        // freshly created, non-null `new_handle` before any further use.
+        unsafe { clp_ffi::cobre_clp_destroy(self.handle) };
+        self.handle = new_handle;
+        self.has_model = false;
+        // SAFETY: `self.handle` is the just-created non-null model; mirror
+        // `new()` by silencing CLP's per-solve logging.
+        unsafe { clp_ffi::cobre_clp_set_log_level(self.handle, 0) };
+        // Re-apply the cached profile so the fresh model carries the same
+        // configuration the previous one had (ClpProfile is `Copy`).
+        let profile = self.current_profile;
+        self.apply_profile(&profile);
+    }
+
     /// Loads a complete LP into the CLP model from column-major (CSC) data.
     ///
     /// Wraps [`clp_ffi::cobre_clp_load_problem`], which forwards the template's

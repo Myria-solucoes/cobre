@@ -837,6 +837,13 @@ fn reset_scenario_state<S: SolverInterface>(
     inflow_lags_start: usize,
     training_ctx: &TrainingContext<'_>,
 ) {
+    // Reset the solver's internal simplex state at the scenario boundary so this
+    // scenario's result cannot depend on which scenarios the worker processed
+    // before it (determinism across thread/rank counts). No-op for HiGHS
+    // (`passLp` already rebuilds full state); recreates the model for CLP, whose
+    // `Clp_loadProblem` leaves the rim/pricing state stale.
+    ws.solver.reset_solver_state();
+
     let TrainingContext {
         initial_state,
         recent_accum_seed,
