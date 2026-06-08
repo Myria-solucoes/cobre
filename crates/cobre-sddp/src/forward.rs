@@ -1054,7 +1054,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
     let col_scale = &ctx.templates[t].col_scale;
 
     // Solve and extract the primal. The DCS branch solves the cut pool lazily
-    // from the cut-free base loaded above (mirroring `solve_opening_dcs`, but
+    // from the cut-free base loaded above (mirroring `StageOpeningSolver::solve_lazy`, but
     // extracting the primal rather than the dual); the baked branch solves the
     // already-loaded all-cuts LP via `run_stage_solve`. Both copy the primal
     // into a local and end the view borrow before the subsequent `&mut ws`

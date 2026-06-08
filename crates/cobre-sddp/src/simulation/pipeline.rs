@@ -511,7 +511,7 @@ fn solve_simulation_stage<S: SolverInterface>(
 
     // Solve and fill the unscaled primal/dual buffers, then end the view borrow.
     // The DCS branch solves the cut pool lazily from the cut-free base loaded
-    // above (mirroring the forward DCS branch / `solve_opening_dcs`, extracting
+    // above (mirroring the forward DCS branch / `StageOpeningSolver::solve_lazy`, extracting
     // the primal); the baked branch solves the already-loaded all-cuts LP via
     // `run_stage_solve`. Each branch reads `view` (tied to `ws`) into the
     // taken-out buffers and computes `view_objective` before the borrow ends.
