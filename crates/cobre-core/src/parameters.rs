@@ -416,6 +416,9 @@ impl<'de> serde::Deserialize<'de> for ParameterKind {
 #[cfg(test)]
 mod tests {
     use super::{CoefficientRef, ComputedParameter, EntityId, ParameterKind};
+    // `ScalarParameter` is used only by the serde round-trip tests below.
+    #[cfg(feature = "serde")]
+    use super::ScalarParameter;
 
     #[test]
     fn seven_computed_parameter_variants() {
