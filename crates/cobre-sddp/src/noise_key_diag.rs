@@ -75,14 +75,9 @@ impl NoiseKeyDiag {
         if std::env::var_os(DIAG_ENV_VAR).is_none() {
             return Ok(None);
         }
-        Self::build(system, stochastic).map(Some)
-    }
-
-    /// Build the table unconditionally (env gate already checked).
-    fn build(system: &System, stochastic: &StochasticContext) -> Result<Self, SddpError> {
-        Ok(Self {
+        Ok(Some(Self {
             keys: build_noise_key_table(system, stochastic)?,
-        })
+        }))
     }
 
     /// Look up the precomputed noise key for `(stage, omega)`.
