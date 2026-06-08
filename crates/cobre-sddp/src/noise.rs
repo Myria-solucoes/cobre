@@ -1067,6 +1067,7 @@ mod tests {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
+            noise_key_diag: None,
         };
         let mut scratch = make_scratch(1);
 
@@ -1139,6 +1140,7 @@ mod tests {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
+            noise_key_diag: None,
         };
         let mut scratch = make_scratch(1);
 
@@ -1211,6 +1213,7 @@ mod tests {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
+            noise_key_diag: None,
         };
         let mut scratch = make_scratch(1);
 

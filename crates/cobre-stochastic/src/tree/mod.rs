@@ -18,4 +18,4 @@ pub mod qmc_halton;
 pub mod qmc_sobol;
 
 pub use generate::{ClassDimensions, OpeningTreeGenerationInputs, generate_opening_tree};
-pub use opening_tree::{OpeningTree, OpeningTreeView};
+pub use opening_tree::{OpeningTree, OpeningTreeView, SweepDirection};

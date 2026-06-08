@@ -2221,6 +2221,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             &ForwardPassBatch {
                 local_forward_passes: config.loop_config.forward_passes as usize,
@@ -2345,6 +2346,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             &ForwardPassBatch {
                 local_forward_passes: config.loop_config.forward_passes as usize,
@@ -2475,6 +2477,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             &ForwardPassBatch {
                 local_forward_passes: config.loop_config.forward_passes as usize,
@@ -2922,6 +2925,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             &ForwardPassBatch {
                 local_forward_passes: config.loop_config.forward_passes as usize,
@@ -3093,6 +3097,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             &ForwardPassBatch {
                 local_forward_passes: n_scenarios,
@@ -3134,6 +3139,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             &ForwardPassBatch {
                 local_forward_passes: n_scenarios,
@@ -3243,6 +3249,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             &ForwardPassBatch {
                 local_forward_passes: n_scenarios,
@@ -3558,6 +3565,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             &ForwardPassBatch {
                 local_forward_passes: 1,
@@ -3751,6 +3759,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             &ForwardPassBatch {
                 local_forward_passes: config.loop_config.forward_passes as usize,
@@ -3997,6 +4006,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             &ForwardPassBatch {
                 local_forward_passes: n_scenarios,
@@ -4148,6 +4158,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             &ForwardPassBatch {
                 local_forward_passes: 1,
@@ -4294,6 +4305,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             &ForwardPassBatch {
                 local_forward_passes: 1,
@@ -4394,6 +4406,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             &ForwardPassBatch {
                 local_forward_passes: 1,
@@ -5175,6 +5188,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs,
+                noise_key_diag: None,
             };
 
             // Baked path: mirror run_forward_worker's per-scenario baked load.

@@ -694,11 +694,19 @@ fn save_basis_at_omega_zero<S: SolverInterface + Send>(
 /// outcome. This is the unchanged pre-DCS per-opening path: patch the opening
 /// bounds on the already-loaded baked/delta LP, reconstruct + solve via
 /// `run_stage_solve`, extract both state and cut duals, accumulate the outcome
-/// (including the binding-count `slot_increments` update), and capture the ω=0
-/// basis.
+/// (including the binding-count `slot_increments` update), and capture the
+/// first-solved opening's basis.
+///
+/// `is_first` is `true` for the trial point's **first-solved** opening — ω=0 in
+/// canonical order, or the first entry of the solve order when reordering is
+/// enabled. Only that opening loads the per-(m, s) stored basis and captures the
+/// post-solve basis back into the store; the rest pass `None` (warm re-solve on
+/// the retained LU). Decoupling basis identity from the literal ω=0 is what lets
+/// the openings be solved in any order while the per-(m, s) basis store stays
+/// consistent with the actual first solve.
 // Rationale: the args are disjoint borrows (ws, ctx, training_ctx, succ,
 // basis_slice) and per-opening scalars (raw_noise, x_hat, s, scenario,
-// iteration, m, omega); no natural grouping reduces caller-side borrows.
+// iteration, m, omega, is_first); no natural grouping reduces caller-side borrows.
 #[allow(clippy::too_many_arguments)]
 fn solve_opening_baked<S: SolverInterface + Send>(
     ws: &mut SolverWorkspace<S>,
@@ -713,6 +721,7 @@ fn solve_opening_baked<S: SolverInterface + Send>(
     iteration: u64,
     m: usize,
     omega: usize,
+    is_first: bool,
 ) -> Result<(), SddpError> {
     let indexer = training_ctx.indexer;
     patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s);
@@ -724,7 +733,12 @@ fn solve_opening_baked<S: SolverInterface + Send>(
 
     let stats_before_omega = ws.solver.statistics();
 
-    let stored_basis = if omega == 0 {
+    // The per-(m, s) stored basis is loaded for, and captured from, the
+    // FIRST-SOLVED opening of this trial point — not canonical ω=0. When the
+    // openings are solved in canonical order these coincide; when solved in a
+    // warm-start order they differ, and basis identity must follow the actual
+    // first solve. See `process_trial_point_backward`.
+    let stored_basis = if is_first {
         resolve_backward_basis(basis_slice, m, s)
     } else {
         None
@@ -768,7 +782,7 @@ fn solve_opening_baked<S: SolverInterface + Send>(
         &stats_after_omega,
     );
 
-    if omega == 0 {
+    if is_first {
         save_basis_at_omega_zero(ws, succ, basis_slice, m, x_hat);
     }
 
@@ -972,6 +986,13 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
         .dcs
         .filter(|params| params.is_active(iteration));
 
+    // Throwaway, env-gated backward `noise_key` diagnostic. `None` on the
+    // default path (single hoisted boolean check; no key compute, no
+    // allocation). When `Some`, after each opening solve we pair the precomputed
+    // per-(stage, ω) noise key with that opening's just-consumed
+    // `simplex_iterations` and emit one record to stderr.
+    let noise_key_diag = training_ctx.noise_key_diag;
+
     // Opening-reuse (the DCS backward path): load the cut-free core + build the
     // metadata seed ONCE here, then reuse the loaded LP across this trial point's
     // openings — ω=0 solves fresh from the seed, ω>0 warm-carry. The core load
@@ -989,8 +1010,38 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
         );
     }
 
-    for omega in 0..succ.probabilities.len() {
+    // Solve order for this stage's openings. Openings are SOLVED in
+    // `solve_order(s)` — a run-constant, rank-invariant permutation precomputed at
+    // setup (always installed descending; see `StudySetup::from_broadcast_params`).
+    // Per-opening outcomes are written and aggregated by CANONICAL ω below, so the
+    // generated cut is bit-identical regardless of the solve order: the reorder
+    // changes only the warm-start chain, never which cuts are produced.
+    //
+    // `solve_order(s)` defaults to the identity permutation when no order is
+    // installed (e.g. in tests that build the context directly), so the loop
+    // degrades to canonical `0..n` order in that case.
+    let solve_order = tree_view.solve_order_data(s);
+    debug_assert_eq!(
+        solve_order.len(),
+        succ.probabilities.len(),
+        "solve_order(s) must be a permutation of 0..n_openings"
+    );
+    // The FIRST-SOLVED opening of the trial point: it owns the per-(m, s) basis
+    // load/capture (baked path) and the fresh (non-warm-carry) solve (DCS path).
+    // It is the first entry of the solve-order permutation (ω=0 under the identity
+    // default).
+    // `u32 -> usize` is a lossless widening on every supported target.
+    let first = solve_order[0] as usize;
+
+    let mut omega_position = 0usize;
+    while omega_position < succ.probabilities.len() {
+        // Canonical ω for this iteration: index the precomputed solve-order
+        // permutation (the identity `0..n` when no order is installed).
+        let omega = solve_order[omega_position] as usize;
+        omega_position += 1;
+
         let raw_noise = tree_view.opening(s, omega);
+        let is_first = omega == first;
 
         if let Some(params) = dcs_params {
             solve_opening_dcs(
@@ -1005,8 +1056,9 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
                 scenario,
                 iteration,
                 omega,
-                // ω=0 solves fresh; subsequent openings warm-carry the LP.
-                omega != 0,
+                // The first-solved opening solves fresh; subsequent openings
+                // warm-carry the LP.
+                !is_first,
             )?;
         } else {
             solve_opening_baked(
@@ -1022,7 +1074,22 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
                 iteration,
                 m,
                 omega,
+                is_first,
             )?;
+        }
+
+        // Env-gated throwaway emit: one record per backward opening pairing the
+        // precomputed σ-weighted noise key with the opening's just-consumed
+        // simplex iterations (the only live value pulled from the solve). The
+        // outer `if let Some` is the single hoisted boolean check; the default
+        // (`None`) path does nothing.
+        if let Some(diag) = noise_key_diag {
+            let simplex_iterations = ws.backward_accum.per_opening_stats[omega].simplex_iterations;
+            let noise_key = diag.key(s, omega).unwrap_or(f64::NAN);
+            eprintln!(
+                "COBRE_W1_DIAG\tstage={s}\ttrial={scenario}\tomega={omega}\t\
+                 noise_key={noise_key:.17e}\tsimplex_iterations={simplex_iterations}"
+            );
         }
     }
 
@@ -1766,6 +1833,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             comm: &comm,
             records: &[],
@@ -1861,6 +1929,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             comm: &comm,
             records: &[],
@@ -1956,6 +2025,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             comm: &comm,
             records: &[],
@@ -2047,6 +2117,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             comm: &comm,
             records: &[],
@@ -2138,6 +2209,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             comm: &comm,
             records: &[],
@@ -2227,6 +2299,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             comm: &comm,
             records: &[],
@@ -2361,6 +2434,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             comm: &comm,
             records: &[],
@@ -2473,6 +2547,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             comm: &comm,
             records: &[],
@@ -2590,6 +2665,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             comm: &comm,
             records: &[],
@@ -2693,6 +2769,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             comm: &comm,
             records: &[],
@@ -2806,6 +2883,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             comm: &comm,
             records: &[],
@@ -2914,6 +2992,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             comm: &comm,
             records: &[],
@@ -3015,6 +3094,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             comm: &comm,
             records: &[],
@@ -3124,6 +3204,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             comm: &comm,
             records: &[],
@@ -3276,6 +3357,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             comm: &comm,
             records: &[],
@@ -3362,6 +3444,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             comm: &comm,
             records: &[],
@@ -3742,6 +3825,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             comm: &comm,
             records: &[],
@@ -3907,6 +3991,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             comm: &comm,
             records: &[],
@@ -4077,6 +4162,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             comm: &comm,
             records: &[],
@@ -4196,6 +4282,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             comm: &comm,
             records: &[],
@@ -4324,6 +4411,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             comm: &comm,
             records: &[],
@@ -4505,6 +4593,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             comm: &comm,
             records: &[],
@@ -4869,6 +4958,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             comm: &StubComm,
             records: &[],
@@ -5093,6 +5183,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             comm: &DualRankStubComm,
             records: &[],
@@ -5214,6 +5305,7 @@ mod tests {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
+            noise_key_diag: None,
         };
 
         let iteration: u64 = 1;
@@ -5528,6 +5620,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             comm: &comm,
             records: &[],
@@ -5687,6 +5780,7 @@ mod tests {
                 recent_accum_seed: &[],
                 recent_weight_seed: 0.0,
                 dcs: None,
+                noise_key_diag: None,
             },
             comm: &comm,
             records: &[],
@@ -5970,6 +6064,7 @@ mod tests {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs,
+            noise_key_diag: None,
         };
 
         let probabilities = vec![1.0_f64];
@@ -6429,6 +6524,7 @@ mod tests {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: Some(dcs_params(2)),
+            noise_key_diag: None,
         };
 
         let probabilities = vec![1.0_f64];

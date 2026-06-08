@@ -114,6 +114,9 @@ impl StudySetup {
                 .cut_selection
                 .as_ref()
                 .and_then(DcsParams::from_strategy),
+            // Throwaway backward diagnostic; `Some` only when `COBRE_W1_DIAG`
+            // was set at setup, else `None` (byte-identical default path).
+            noise_key_diag: self.noise_key_diag.as_ref(),
         };
 
         // Hand the warm-start basis cache (if any) to the training session so

@@ -79,7 +79,7 @@ use crate::{
     sampling::historical::HistoricalScenarioLibrary,
     tree::{
         generate::{ClassDimensions, OpeningTreeGenerationInputs, generate_opening_tree},
-        opening_tree::OpeningTreeView,
+        opening_tree::{OpeningTreeView, SweepDirection},
     },
 };
 
@@ -265,6 +265,27 @@ impl StochasticContext {
     #[must_use]
     pub fn tree_view(&self) -> OpeningTreeView<'_> {
         self.opening_tree.view()
+    }
+
+    /// Install a per-stage opening solve order on the owned opening tree.
+    ///
+    /// Forwards to [`OpeningTree::set_solve_order`]: `keys[s]` holds one scalar key
+    /// per canonical opening ω of stage `s`, and each stage's openings are sorted
+    /// by that key in `direction` (ties broken by ascending canonical ω). The keys
+    /// are caller-computed from setup-constant data, so the resulting order is
+    /// run-constant and identical across processes handed the same keys.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`StochasticError::InsufficientData`](crate::StochasticError::InsufficientData)
+    /// when the key table's stage count or any stage's key count does not match
+    /// the tree.
+    pub fn set_solve_order(
+        &mut self,
+        keys: &[Vec<f64>],
+        direction: SweepDirection,
+    ) -> Result<(), crate::StochasticError> {
+        self.opening_tree.set_solve_order(keys, direction)
     }
 
     /// Returns the base seed used to generate the opening tree.

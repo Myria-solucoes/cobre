@@ -1642,6 +1642,7 @@ mod tests {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
+            noise_key_diag: None,
         };
 
         // Allocate BackwardPassState sized for this minimal study.
@@ -1768,6 +1769,7 @@ mod tests {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
+            noise_key_diag: None,
         };
 
         let bwd_max_openings = n_openings;
@@ -1882,6 +1884,7 @@ mod tests {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
+            noise_key_diag: None,
         };
 
         let bwd_max_openings = n_openings;

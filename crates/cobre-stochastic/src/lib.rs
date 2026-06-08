@@ -45,7 +45,9 @@ pub use sampling::{
     standardize_external_load, standardize_external_ncs, standardize_historical_windows,
     validate_external_library, validate_historical_library,
 };
-pub use tree::{ClassDimensions, OpeningTree, OpeningTreeView, generate_opening_tree};
+pub use tree::{
+    ClassDimensions, OpeningTree, OpeningTreeView, SweepDirection, generate_opening_tree,
+};
 
 #[cfg(test)]
 #[allow(unused_imports)]

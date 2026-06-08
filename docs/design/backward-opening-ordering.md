@@ -347,6 +347,68 @@ The gain is inflow-structure dependent, so measure before defaulting:
    bit-identical cuts, make ordering the default (it cannot regress correctness,
    only speed). Otherwise keep it flagged and record the measurement.
 
+### 8.6 Measured results — `cobre_tuning` A/B (2026-06-08)
+
+Controlled A/B on the `cobre_tuning` case (HiGHS backend, training only, 5
+forward passes × 10 iterations, DCS active, simulation off, threads=8). Three
+variants identical except the reorder config; backward `simplex_iterations`
+(pivots) is the primary signal — it is a deterministic, work-distribution-invariant
+function of the config, so the differences below are exact, not noise.
+
+| Variant            | Backward total pivots | mean/solve | Δ vs off | bw retries | fwd pivots        | bw wall |
+| ------------------ | --------------------- | ---------- | -------- | ---------- | ----------------- | ------- |
+| off (no reorder)   | 30,092,513            | 256.28     | —        | 19         | 5,789,046         | 662 s   |
+| reorder ascending  | 27,663,119            | 235.59     | −8.1%    | 17         | 5,835,951 (+0.8%) | 615 s   |
+| reorder descending | 27,640,611            | 235.40     | −8.1%    | 14         | 5,788,738 (≈off)  | 616 s   |
+
+All three solve the identical 117,420 backward openings (clean comparison).
+
+**Findings.**
+
+- **Reorder is material**: ~8.1% fewer backward pivots and ~7% less backward wall,
+  either direction.
+- **Sweep direction is first-order symmetric** (§3.2 confirmed): ascending vs
+  descending differ by only 0.08% on backward pivots. The tie breaks toward
+  **descending** on every secondary signal — marginally fewer backward pivots
+  (deterministic, so real), fewest LP retries (14 vs 17), and **forward-neutral**
+  (its marginally-different cuts ripple into the forward pass ≈0%, whereas
+  ascending perturbs forward +0.8%). Cold-head/relax-vs-tighten asymmetry is
+  therefore small and favors descending, matching the blind default.
+- **Decision: `sweep_direction` default = `descending`** (unchanged from the code
+  default). The per-opening signed-step regression (`COBRE_W1_DIAG`) was not
+  separately required — the aggregate near-tie already confirms the predicted
+  first-order symmetry, and the secondary signals decide descending.
+- Note (owner clarification 2026-06-08): the requirement is work-distribution
+  invariance, not bit-identity vs the previous (off) version — reorder-on cuts
+  differ marginally from off by warm-start path, which is why forward pivots shift
+  slightly. The thread/rank-count determinism suites stay green with reorder on
+  (the actual correctness gate).
+
+### 8.7 Made unconditional & descending; config removed (2026-06-08)
+
+On the strength of the §8.6 A/B (material ~8.1% backward-pivot reduction,
+descending best on every secondary signal, forward-neutral), the owner chose to
+make the backward opening reorder **unconditional** in the **descending**
+direction and **remove its configuration options entirely** (clean delete rather
+than keep-as-ignored):
+
+- The `training.reorder_backward_openings` and
+  `training.backward_opening_sweep_direction` config keys, the
+  `OpeningSweepDirection` enum, and the `sweep_direction_from_config` mapping are
+  gone. Setup now always installs the solve order with
+  `SweepDirection::Descending`, and the backward pass always iterates it. The
+  generic `SweepDirection` enum stays in `cobre-stochastic` (always passed
+  `Descending`); the canonical-ω cut aggregation is unchanged, so cuts remain
+  bit-identical across thread/rank counts.
+- The `cobre_tuning` example config was migrated to drop the two now-deleted keys
+  (`deny_unknown_fields` would otherwise reject it).
+- `parity_hash_d01_d15` (HiGHS) was re-baselined under the always-descending path
+  (`COBRE_PARITY_REGEN=1`, owner-approved). The regenerated hashes came out
+  **byte-identical** to the prior canonical-order baselines: the deterministic
+  D-cases are single-opening per stage, so descending equals the identity
+  permutation and the output cannot drift. CLP parity baselines are separately
+  stale and were left untouched (out of scope).
+
 ## 9. Risks & open questions
 
 - **Gain is data-dependent.** For tightly clustered inflows, natural order is

@@ -137,6 +137,7 @@ impl StudySetup {
                 .cut_selection
                 .as_ref()
                 .and_then(crate::dcs::DcsParams::from_strategy),
+            noise_key_diag: None,
         }
     }
 
@@ -208,6 +209,8 @@ impl StudySetup {
                 .cut_selection
                 .as_ref()
                 .and_then(crate::dcs::DcsParams::from_strategy),
+            // The backward `noise_key` diagnostic does not apply to simulation.
+            noise_key_diag: None,
         }
     }
 }

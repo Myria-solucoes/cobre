@@ -54,7 +54,9 @@ use cobre_core::{
     scenario::{SamplingScheme, ScenarioSource},
 };
 use cobre_io::build_hydro_reference_volume_fractions;
-use cobre_stochastic::{ExternalScenarioLibrary, HistoricalScenarioLibrary, StochasticContext};
+use cobre_stochastic::{
+    ExternalScenarioLibrary, HistoricalScenarioLibrary, StochasticContext, SweepDirection,
+};
 
 use crate::{
     config::{CutManagementConfig, EventParams},
@@ -195,6 +197,15 @@ pub struct StudySetup {
     ///
     /// `None` for a fresh start, leaving fresh-mode behavior untouched.
     pub(crate) warm_start_basis_cache: Option<Vec<Option<CapturedBasis>>>,
+
+    /// Throwaway, env-gated backward `noise_key` diagnostic table.
+    ///
+    /// `Some` only when `COBRE_W1_DIAG` was set at setup; `None` otherwise (the
+    /// default), in which case nothing is allocated or computed and the backward
+    /// solve path is byte-identical. Borrowed read-only into the training
+    /// [`TrainingContext`](crate::context::TrainingContext). See
+    /// [`crate::noise_key_diag`].
+    pub(crate) noise_key_diag: Option<crate::noise_key_diag::NoiseKeyDiag>,
 }
 
 impl StudySetup {
@@ -268,7 +279,7 @@ impl StudySetup {
     // fields together in initialization order.
     pub fn from_broadcast_params(
         system: &System,
-        stochastic: StochasticContext,
+        mut stochastic: StochasticContext,
         config: ConstructionConfig,
         hydro_models: PrepareHydroModelsResult,
         training_source: &ScenarioSource,
@@ -288,6 +299,23 @@ impl StudySetup {
             export_states,
             scalar_parameters,
         } = config;
+
+        // Install the per-stage backward opening solve order once, here, where the
+        // inflow models (σ = std_m3s) and the synced opening tree (raw_noise) are
+        // both in scope. The keys are the SAME σ-weighted noise keys the throwaway
+        // `noise_key` diagnostic records (shared via `build_noise_key_table`), so
+        // the solve order and the diagnostic that validates it cannot drift. The
+        // order is run-constant and rank-invariant (a pure function of the synced
+        // tree + fixed σ), so every rank computes the identical permutation. The
+        // backward pass always solves in this order (descending: largest-noise-key
+        // opening first) for warm-start friendliness; the canonical-ω cut
+        // aggregation is unaffected, so cuts stay bit-identical across thread/rank
+        // counts. The σ-vs-noise-dim length mismatch is a hard error (raised inside
+        // `build_noise_key_table` via `noise_key`).
+        let solve_order_keys = crate::noise_key_diag::build_noise_key_table(system, &stochastic)?;
+        stochastic
+            .set_solve_order(&solve_order_keys, SweepDirection::Descending)
+            .map_err(|e| SddpError::Validation(e.to_string()))?;
 
         let EnergyAndTemplates {
             energy_conversion,
@@ -386,6 +414,12 @@ impl StudySetup {
         let hydro_min_storage_hm3: Vec<f64> =
             system.hydros().iter().map(|h| h.min_storage_hm3).collect();
 
+        // Throwaway, env-gated backward diagnostic: built only when
+        // `COBRE_W1_DIAG` is set, here where the inflow models (σ = std_m3s) and
+        // the synced opening tree (raw_noise) are both in scope. `None`
+        // otherwise — zero allocation, zero compute, byte-identical default path.
+        let noise_key_diag = crate::noise_key_diag::NoiseKeyDiag::from_setup(system, &stochastic)?;
+
         Ok(Self {
             stage_data: stage_data::StageData {
                 stage_templates,
@@ -435,6 +469,7 @@ impl StudySetup {
             energy_conversion,
             hydro_min_storage_hm3,
             warm_start_basis_cache: None,
+            noise_key_diag,
         })
     }
 }
