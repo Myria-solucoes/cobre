@@ -415,10 +415,12 @@ impl StudySetup {
             system.hydros().iter().map(|h| h.min_storage_hm3).collect();
 
         // Throwaway, env-gated backward diagnostic: built only when
-        // `COBRE_W1_DIAG` is set, here where the inflow models (σ = std_m3s) and
-        // the synced opening tree (raw_noise) are both in scope. `None`
-        // otherwise — zero allocation, zero compute, byte-identical default path.
-        let noise_key_diag = crate::noise_key_diag::NoiseKeyDiag::from_setup(system, &stochastic)?;
+        // `COBRE_W1_DIAG` is set, reusing the `solve_order_keys` table already
+        // computed above (so the diagnostic and the solve order cannot drift and
+        // the table is not recomputed). `None` otherwise — zero allocation,
+        // byte-identical default path.
+        let noise_key_diag =
+            crate::noise_key_diag::NoiseKeyDiag::from_keys_if_enabled(&solve_order_keys);
 
         Ok(Self {
             stage_data: stage_data::StageData {

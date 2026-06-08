@@ -17,8 +17,9 @@
 //! path only **looks it up** by canonical ω (an indexed read, no compute). σ
 //! never reaches the hot path.
 //!
-//! The table is built **only** when `COBRE_W1_DIAG` is set ([`NoiseKeyDiag::from_setup`]
-//! returns `None` otherwise), so the default path allocates nothing and computes
+//! The table is built **only** when `COBRE_W1_DIAG` is set
+//! ([`NoiseKeyDiag::from_keys_if_enabled`] returns `None` otherwise), so the
+//! default path allocates nothing and computes
 //! nothing new. No infrastructure crate (`cobre-core`, `cobre-stochastic`) is
 //! touched and no parquet column / Arrow schema is added — this is throwaway
 //! instrumentation, mirroring the reverted `COBRE_CLP_DIAG` pattern.
@@ -40,12 +41,12 @@ use crate::error::SddpError;
 
 /// Environment variable that enables the throwaway backward `noise_key`
 /// diagnostic. Presence (any value, including empty) enables it.
-pub(crate) const DIAG_ENV_VAR: &str = "COBRE_W1_DIAG";
+const DIAG_ENV_VAR: &str = "COBRE_W1_DIAG";
 
 /// Precomputed per-(stage, canonical-ω) σ-weighted noise keys for the backward
 /// diagnostic.
 ///
-/// Built once at setup by [`NoiseKeyDiag::from_setup`] and borrowed read-only by
+/// Built once at setup by [`NoiseKeyDiag::from_keys_if_enabled`] and borrowed read-only by
 /// the backward pass via [`TrainingContext`](crate::context::TrainingContext).
 /// `keys[stage][omega]` is `Σ_h std_m3s_{stage,h} · raw_noise_{stage,omega}[h]`
 /// over the `n_hydros` inflow components of the opening noise vector.
@@ -56,28 +57,22 @@ pub struct NoiseKeyDiag {
 }
 
 impl NoiseKeyDiag {
-    /// Build the diagnostic table from setup-constant data **iff** the
-    /// `COBRE_W1_DIAG` environment variable is set; otherwise return `None`.
+    /// Build the diagnostic table from the already-computed solve-order key
+    /// table **iff** the `COBRE_W1_DIAG` environment variable is set; otherwise
+    /// return `None`.
     ///
-    /// When `None` (the default), the backward pass performs zero key
-    /// computation and the default solve path is byte-identical to `main`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SddpError::Validation`] when the σ slice length (the noise
-    /// hydro count) does not match the per-opening noise vector's hydro span —
-    /// the σ-layout mismatch is reported with both lengths and never silently
-    /// truncated or zero-padded.
-    pub fn from_setup(
-        system: &System,
-        stochastic: &StochasticContext,
-    ) -> Result<Option<Self>, SddpError> {
-        if std::env::var_os(DIAG_ENV_VAR).is_none() {
-            return Ok(None);
-        }
-        Ok(Some(Self {
-            keys: build_noise_key_table(system, stochastic)?,
-        }))
+    /// Reuses the caller's precomputed σ-weighted key table (the same table the
+    /// backward solve order sorts by) so the diagnostic and the ordering cannot
+    /// drift, and so the table is built once — not twice — at setup. When `None`
+    /// (the default), the backward pass performs zero key computation and the
+    /// default solve path is byte-identical to `main`.
+    pub(crate) fn from_keys_if_enabled(keys: &[Vec<f64>]) -> Option<Self> {
+        // Enabled only when the env var is present (any value, incl. empty);
+        // absent → `None` (the default, zero-cost path).
+        std::env::var_os(DIAG_ENV_VAR)?;
+        Some(Self {
+            keys: keys.to_vec(),
+        })
     }
 
     /// Look up the precomputed noise key for `(stage, omega)`.
