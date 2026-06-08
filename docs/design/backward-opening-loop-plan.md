@@ -119,11 +119,32 @@ its `continue_carry` flag changes.
   default; CLP recreates the `ClpSimplex` handle + re-applies the cached profile),
   called at the sim scenario boundary; CLP sim is now thread-count invariant
   (threads 1/3/5 bit-identical) at no measurable cost.
-- **W2 gap (open)**: the forward (training) pass shares A2b's root cause. It is
-  **stage-synchronous** (`for t { for m }`, `forward_pass_state.rs:712/720`),
-  per-scenario reset at `:729`; CLP training is therefore _likely_ thread-count
-  variant on large cases — a correctness prerequisite for CLP-as-default, not yet
-  verified or fixed.
+- **W2 gap (CONFIRMED variant, 2026-06-08; ticket-005)**: the forward (training)
+  pass shares A2b's root cause. It is **stage-synchronous**
+  (`for t { for m }`, `forward_pass_state.rs:712/720`) with a per-scenario
+  `load_model` but **no** `reset_solver_state()`. Measured on `cobre_tuning_clp`
+  (training-only, 5 iters, sim off): CLP training is **thread-count VARIANT** —
+  threads 1 vs 5 produce different lower-bound trajectories (LB hashes differ;
+  final LB 27.27e9 vs 27.58e9, max|ΔLB| ≈ 3.0e8, ~1.1%). The **HiGHS** reference
+  on the same case is **invariant** (threads 1 vs 5 byte-identical, max|ΔLB|=0),
+  confirming this is CLP-specific (stale steepest-edge weights persisting across
+  `Clp_loadProblem`).
+- **W2 FIXED (2026-06-08; ticket-006)**: a forward-only `reset_solver_state()`
+  (forward_pass_state.rs:731) proved **insufficient** — the variance begins at
+  iteration 1 (before any cuts affect the forward pass), localizing it to the
+  **backward** pass's CLP cold-head solves (stale weights carried across trial
+  points whose worker-assignment is thread-count-dependent). The complete fix
+  (**Option A**) adds a second `reset_solver_state()` at the **backward
+  trial-point boundary** (backward_pass_state.rs:1084, the caller's per-`m` loop,
+  before both the baked `load_backward_lp` and the DCS core load; fires once per
+  trial point, preserving the within-trial-point opening warm chain). Re-measured
+  on `cobre_tuning_clp`: CLP threads 3 vs 5 are now **bit-identical at every
+  iteration** (LB hash match, max|ΔLB|=0) — thread-invariant. The LB evaluation
+  needs no reset (rank-0, single-threaded, fixed order/cut-set → deterministic
+  once the cuts are). **Cost ≈ +11% total training wall** (backward +8%, forward
+  +55% but forward is ~7% of total) on this case. HiGHS unaffected (no-op
+  default). W2 (CLP training determinism) is the correctness prerequisite for any
+  CLP-as-default decision — its +11% cost is an input to ticket-007/013.
 - **Hot-start surface for W3 (verified present-but-dormant)**: the
   `mark_hot_start` / `solve_from_hot_start` / `unmark_hot_start` trio exists on
   `ClpSolver` (`clp.rs:644-785`) and is **called zero times** in `cobre-sddp`.
