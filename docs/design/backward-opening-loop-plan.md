@@ -145,6 +145,16 @@ its `continue_carry` flag changes.
   +55% but forward is ~7% of total) on this case. HiGHS unaffected (no-op
   default). W2 (CLP training determinism) is the correctness prerequisite for any
   CLP-as-default decision — its +11% cost is an input to ticket-007/013.
+- **Phase C decision — NO-GO (2026-06-08; ticket-007, owner)**: do **not** pursue
+  W3 (CLP hot-start) or CLP-as-default. Rationale: HiGHS is already faster
+  (+11–15%) and more robust (tuning-campaign verdict), W1 (~8%) lands on the
+  HiGHS default directly, and CLP would additionally carry the W2 +11%
+  determinism tax — two additive overheads against an already-faster HiGHS, before
+  any W3 FFI complexity. Consequence: **ticket-013 default backend = HiGHS**;
+  **Epic 04 (W3 hot-start, tickets 009–011) skipped**; **ticket-008
+  (StageOpeningSolver seam) proceeds without the W3 hot-start hook** as a pure
+  maintainability consolidation. W2's reset stays (it's a correctness fix valid
+  for anyone running CLP, no-op for HiGHS).
 - **Hot-start surface for W3 (verified present-but-dormant)**: the
   `mark_hot_start` / `solve_from_hot_start` / `unmark_hot_start` trio exists on
   `ClpSolver` (`clp.rs:644-785`) and is **called zero times** in `cobre-sddp`.

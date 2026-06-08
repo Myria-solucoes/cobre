@@ -16,7 +16,7 @@ use rayon::iter::{
 
 use crate::{
     backward::{
-        BackwardResult, StageWorkerOpeningDelta, StagedCut, SuccessorSpec, load_backward_lp,
+        BackwardResult, StageOpeningSolver, StageWorkerOpeningDelta, StagedCut, SuccessorSpec,
         process_trial_point_backward,
     },
     config::CutManagementConfig,
@@ -992,31 +992,28 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
     let pop = succ.successor_populated_count;
     let n_workers = workspaces.len().max(1);
 
-    // When DCS is active for this iteration, the baked-template loads below are
-    // dead work: `solve_opening_dcs` reloads the cut-free core per opening
-    // (backward.rs), which both (a) is the LP the lazy loop must own and (b)
-    // supplies the HiGHS basis/factorization/RNG reset that `load_backward_lp`
-    // otherwise provides. Skipping them mirrors the forward pass, which already
-    // omits the baked load on the DCS path (forward_pass_state.rs). The decision
-    // depends only on `iteration`, so it is constant across workers and trial
-    // points. Cuts are still synchronized and the baked path is unaffected for
-    // iterations before `start_iteration` (dcs_active == false there).
-    let dcs_active = training_ctx
-        .dcs
-        .is_some_and(|params| params.is_active(iteration));
+    // Per-trial-point opening-solve strategy, chosen once for this stage from the
+    // `is_active`-filtered DCS params. The decision depends only on `iteration`,
+    // so it is constant across workers and trial points. `Lazy` selects the
+    // resident-set (DCS) path, `Baked` the all-cuts path; each variant owns its
+    // own per-trial-point LP load via `StageOpeningSolver::prepare`, so the driver
+    // no longer asks "is DCS active, so should I skip my normal load?" — it issues
+    // one uniform prepare call per trial point regardless of strategy.
+    let opening_solver = StageOpeningSolver::from_dcs_params(
+        training_ctx
+            .dcs
+            .filter(|params| params.is_active(iteration)),
+    );
 
     workspaces
         .par_iter_mut()
         .zip(basis_slices.into_par_iter())
         .enumerate()
         .map(|(w, (ws, mut basis_slice))| {
-            // Load template and pre-allocate per-stage buffers. On the DCS path
-            // the baked load is skipped (solve_opening_dcs loads the cut-free
-            // core per opening); the buffer setup below touches only
-            // `ws.backward_accum`, never `ws.solver`, so it is unaffected.
-            if !dcs_active {
-                load_backward_lp(ws, succ);
-            }
+            // Pre-allocate per-stage buffers. The per-trial-point LP load is now
+            // issued per `m` via `opening_solver.prepare` (after the W2 reset); the
+            // buffer setup below touches only `ws.backward_accum`, never
+            // `ws.solver`, so no stage-level load is needed here.
             while ws.backward_accum.outcomes.len() < n_openings {
                 ws.backward_accum
                     .outcomes
@@ -1067,9 +1064,10 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
                 // recreates the model (`Clp_loadProblem` leaves rim/pricing/
                 // steepest-edge state stale).
                 //
-                // MUST precede both per-trial-point loads: the baked
-                // `load_backward_lp` on the next line, and the DCS-path cut-free
-                // core load inside `process_trial_point_backward`.
+                // MUST precede the per-trial-point LP load: the uniform
+                // `opening_solver.prepare` call on the next line (which loads the
+                // baked all-cuts LP on the `Baked` path, or the cut-free core +
+                // metadata seed on the `Lazy` path).
                 //
                 // Fires ONCE PER TRIAL POINT, not per opening: the within-trial-
                 // point warm-start chain across openings (ω > the first-solved one)
@@ -1077,14 +1075,13 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
                 // resets between openings.
                 ws.solver.reset_solver_state();
 
-                // Reload LP per trial point to reset HiGHS's internal simplex
-                // basis, factorization, and RNG position. Skipped on the DCS
-                // path: solve_opening_dcs reloads the cut-free core per opening,
-                // which supplies the same reset and is the LP the lazy loop owns
-                // (loading the baked all-cuts template here would be discarded).
-                if !dcs_active {
-                    load_backward_lp(ws, succ);
-                }
+                // Per-trial-point LP load, uniform across strategies. The `Baked`
+                // variant loads the baked all-cuts template (resetting HiGHS's
+                // internal simplex basis, factorization, and RNG position); the
+                // `Lazy` variant loads the cut-free core + builds the metadata
+                // seed, which supplies the same reset and is the LP the lazy loop
+                // owns. Replaces the former DCS-gated load skips.
+                opening_solver.prepare(ws, ctx, succ, iteration);
                 ws.backward_accum.slot_increments[..pop].fill(0);
                 // Call process_trial_point_backward before the push to avoid a
                 // simultaneous mutable borrow of `ws.backward_accum.staged_cuts_buf`
@@ -1099,6 +1096,7 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
                     risk_measures,
                     succ,
                     &mut basis_slice,
+                    &opening_solver,
                     m,
                 )?;
                 ws.backward_accum.staged_cuts_buf.push(cut);

@@ -690,260 +690,403 @@ fn save_basis_at_omega_zero<S: SolverInterface + Send>(
     }
 }
 
-/// Solve one backward opening on the baked all-cuts LP and accumulate its
-/// outcome. This is the unchanged pre-DCS per-opening path: patch the opening
-/// bounds on the already-loaded baked/delta LP, reconstruct + solve via
-/// `run_stage_solve`, extract both state and cut duals, accumulate the outcome
-/// (including the binding-count `slot_increments` update), and capture the
-/// first-solved opening's basis.
+/// Per-trial-point opening-solve strategy for the backward pass.
 ///
-/// `is_first` is `true` for the trial point's **first-solved** opening — ω=0 in
-/// canonical order, or the first entry of the solve order when reordering is
-/// enabled. Only that opening loads the per-(m, s) stored basis and captures the
-/// post-solve basis back into the store; the rest pass `None` (warm re-solve on
-/// the retained LU). Decoupling basis identity from the literal ω=0 is what lets
-/// the openings be solved in any order while the per-(m, s) basis store stays
-/// consistent with the actual first solve.
-// Rationale: the args are disjoint borrows (ws, ctx, training_ctx, succ,
-// basis_slice) and per-opening scalars (raw_noise, x_hat, s, scenario,
-// iteration, m, omega, is_first); no natural grouping reduces caller-side borrows.
-#[allow(clippy::too_many_arguments)]
-fn solve_opening_baked<S: SolverInterface + Send>(
-    ws: &mut SolverWorkspace<S>,
-    ctx: &StageContext<'_>,
-    training_ctx: &TrainingContext<'_>,
-    succ: &SuccessorSpec<'_>,
-    basis_slice: &mut BasisStoreSliceMut<'_>,
-    raw_noise: &[f64],
-    x_hat: &[f64],
-    s: usize,
-    scenario: usize,
-    iteration: u64,
-    m: usize,
-    omega: usize,
-    is_first: bool,
-) -> Result<(), SddpError> {
-    let indexer = training_ctx.indexer;
-    patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s);
-
-    // Scratch buffers are moved out before the solve to avoid borrow conflicts
-    // with `view`'s lifetime. Pre-warmed capacity is reused across openings.
-    let mut state_duals = std::mem::take(&mut ws.backward_accum.state_duals_buf);
-    let mut cut_duals = std::mem::take(&mut ws.backward_accum.cut_duals_buf);
-
-    let stats_before_omega = ws.solver.statistics();
-
-    // The per-(m, s) stored basis is loaded for, and captured from, the
-    // FIRST-SOLVED opening of this trial point — not canonical ω=0. When the
-    // openings are solved in canonical order these coincide; when solved in a
-    // warm-start order they differ, and basis identity must follow the actual
-    // first solve. See `process_trial_point_backward`.
-    let stored_basis = if is_first {
-        resolve_backward_basis(basis_slice, m, s)
-    } else {
-        None
-    };
-    let inputs = crate::stage_solve::StageInputs {
-        stage_context: ctx,
-        pool: succ.successor_pool,
-        stored_basis,
-        stage_index: s,
-        scenario_index: scenario,
-        iteration: Some(iteration),
-    };
-
-    let view = crate::stage_solve::run_stage_solve(ws, &inputs)?;
-
-    // Extract duals from view (which borrows ws for 'ws).
-    // Statistics must be captured after view is dropped.
-    let objective = extract_duals_from_view(
-        &view,
-        indexer.n_state,
-        indexer,
-        &ctx.templates[s].col_scale,
-        succ,
-        &mut state_duals,
-        &mut cut_duals,
-    );
-    let _ = view;
-
-    ws.backward_accum.state_duals_buf = state_duals;
-    ws.backward_accum.cut_duals_buf = cut_duals;
-
-    let stats_after_omega = ws.solver.statistics();
-
-    accumulate_opening_outcome(
-        ws,
-        succ,
-        omega,
-        objective,
-        x_hat,
-        &stats_before_omega,
-        &stats_after_omega,
-    );
-
-    if is_first {
-        save_basis_at_omega_zero(ws, succ, basis_slice, m, x_hat);
-    }
-
-    Ok(())
+/// Constructed once per trial point from the Dynamic Cut Selection (DCS)
+/// activation decision and dispatches each opening's solve through one uniform
+/// call site ([`StageOpeningSolver::solve_opening`]), with a per-trial-point LP
+/// load step ([`StageOpeningSolver::prepare`]) issued once before the openings
+/// run. This is a closed two-variant sum type dispatched by `match` — never a
+/// trait object (CLAUDE.md closed-variant-set rule), mirroring the
+/// [`crate::cut_selection::CutSelectionStrategy`] / [`DcsParams::from_strategy`]
+/// pattern already used in the crate.
+///
+/// The two variants are the two pre-existing, drifted per-opening solve paths:
+///
+/// - [`StageOpeningSolver::Baked`]: the baked all-cuts LP. Cross-iteration warm
+///   basis on the first-solved opening, full state+cut dual extraction,
+///   baked-order slot bumps, and first-solved basis capture.
+/// - [`StageOpeningSolver::Lazy`]: the resident-set LP (DCS). A cut-free core is
+///   loaded once per trial point and reused across the openings; the first-solved
+///   opening solves fresh, the rest warm-carry; state-dual-only extraction;
+///   row-map-correct slot bumps; no basis capture.
+pub(crate) enum StageOpeningSolver {
+    /// Baked all-cuts LP path (no DCS). See the type-level docs for the
+    /// five behavioral axes.
+    Baked,
+    /// Lazy resident-set LP path (Dynamic Cut Selection). Carries the active
+    /// [`DcsParams`] so the per-opening call needs no separate `Option` test.
+    Lazy(DcsParams),
 }
 
-/// Solve one backward opening under Dynamic Cut Selection and accumulate its
-/// outcome.
-///
-/// All openings of a trial point are processed by one worker in fixed order
-/// `0..n_openings`, sharing the same pinned incoming state `x̂` and differing
-/// only in their noise RHS, so the cut-free core and the metadata seed are
-/// loaded/built ONCE per trial point by the caller
-/// ([`process_trial_point_backward`]) and the LP is reused across the openings.
-/// This routine therefore never reloads or re-seeds; it only patches the
-/// opening's bounds and runs the lazy loop via [`lazy_solve_preloaded`]:
-///
-/// - `continue_carry == false` (the first opening, ω=0): solve fresh — the lazy
-///   loop resets the carried row map, appends the seed, and cold-solves. The
-///   cut produced is identical to the (former) per-opening path.
-/// - `continue_carry == true` (subsequent openings): warm-carry the prior
-///   opening's LP, basis, and (monotonically grown) resident cut set; re-solve
-///   warm under the new noise and add only the cuts this opening additionally
-///   violates. This is what the paper's §3.4 "base recovery" buys, extended
-///   across the trial point's openings.
-///
-/// The Benders cut gradient and intercept are read from the final all-satisfied
-/// LP via [`extract_state_duals_only`] in both cases.
-///
-/// **Binding-count metadata** (`slot_increments`) IS maintained here, but
-/// slot-correct under the lazy layout: the baked path bumps by baked cut-row
-/// order, whereas [`accumulate_dcs_binding_counts`] maps each resident cut row
-/// back to its pool slot via the final [`CutRowMap`] and bumps
-/// `slot_increments[slot]` for residents whose cut-row dual exceeds
-/// `cut_activity_tolerance` (the same criterion the baked path uses). This feeds
-/// the existing per-stage `metadata_sync_contribution` allreduce, which advances
-/// `last_active_iter` rank-invariantly and so restores the §3.1 clause-1 seed
-/// (cuts **binding** in the last `k2` iterations) — without altering the
-/// extracted gradient/intercept (those come solely from the structural
-/// state-column reduced costs and are identical to the all-cuts cut by
-/// exactness).
-///
-/// One piece of the baked path is intentionally NOT performed here:
-///
-/// - **ω=0 basis capture**: a captured basis would describe the baked layout,
-///   not the DCS resident subset, so it is skipped; the next DCS solve
-///   cold-starts its initial solve, which [`lazy_solve_preloaded`] supports with
-///   `stored_basis = None`.
-// Rationale: the args are disjoint borrows (ws, ctx, training_ctx, succ) and
-// per-opening scalars (params, raw_noise, x_hat, s, scenario, iteration, omega);
-// no natural grouping reduces caller-side borrows.
-#[allow(clippy::too_many_arguments)]
-fn solve_opening_dcs<S: SolverInterface + Send>(
-    ws: &mut SolverWorkspace<S>,
-    ctx: &StageContext<'_>,
-    training_ctx: &TrainingContext<'_>,
-    succ: &SuccessorSpec<'_>,
-    params: DcsParams,
-    raw_noise: &[f64],
-    x_hat: &[f64],
-    s: usize,
-    scenario: usize,
-    iteration: u64,
-    omega: usize,
-    continue_carry: bool,
-) -> Result<(), SddpError> {
-    let indexer = training_ctx.indexer;
-    // The DCS LP must start from the cut-free base structural template, NOT
-    // `succ.baked_template`: when baking is active the baked template already
-    // carries the active cut rows, and loading it would make the lazy loop's
-    // fresh CutRowMap treat those baked slots as non-resident and append them a
-    // second time (duplicate rows, broken laziness). `ctx.templates[s]` is the
-    // cut-free base (its `num_rows` equals `succ.template_num_rows`), so the
-    // CutRowMap's base offset matches and the lazy loop exclusively owns the
-    // cut rows.
-    let core = &ctx.templates[s];
-    let col_scale = &ctx.templates[s].col_scale;
+impl StageOpeningSolver {
+    /// Choose the per-trial-point strategy from the already-`is_active`-filtered
+    /// `dcs_params`: `Some(params)` selects [`StageOpeningSolver::Lazy`], `None`
+    /// selects [`StageOpeningSolver::Baked`]. The decision is constant across a
+    /// stage's trial points and openings for a given iteration.
+    pub(crate) fn from_dcs_params(dcs_params: Option<DcsParams>) -> Self {
+        match dcs_params {
+            Some(params) => StageOpeningSolver::Lazy(params),
+            None => StageOpeningSolver::Baked,
+        }
+    }
 
-    // The caller ([`process_trial_point_backward`]) has already loaded the
-    // cut-free core and built the metadata seed once for this trial point; here
-    // we only apply this opening's state-pin + noise patch. `lazy_solve_preloaded`
-    // appends cut rows to the loaded, patched LP and never reloads, so the patch
-    // — and, on continued openings, the carried cut rows + warm basis — survive
-    // the whole lazy loop.
-    patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s);
+    /// Per-trial-point LP load. Issued once by the driver after
+    /// `reset_solver_state()` and before any opening solve, replacing the former
+    /// `dcs_active`-gated load skips: the driver no longer asks "is DCS active,
+    /// so should I skip my normal load?" — both variants own their own load.
+    ///
+    /// - [`StageOpeningSolver::Baked`]: load the baked all-cuts LP via
+    ///   [`load_backward_lp`] (the former per-trial-point load that paired with
+    ///   the W2 reset).
+    /// - [`StageOpeningSolver::Lazy`]: load the cut-free core and build the
+    ///   metadata seed ONCE here, then reuse the loaded LP across this trial
+    ///   point's openings — the first-solved opening solves fresh from the seed,
+    ///   the rest warm-carry. The core load also serves as the per-trial-point
+    ///   `HiGHS` reset that preserves rank-invariance: state is reset at every
+    ///   trial-point boundary and never carried across trial points.
+    pub(crate) fn prepare<S: SolverInterface + Send>(
+        &self,
+        ws: &mut SolverWorkspace<S>,
+        ctx: &StageContext<'_>,
+        succ: &SuccessorSpec<'_>,
+        iteration: u64,
+    ) {
+        match self {
+            StageOpeningSolver::Baked => {
+                load_backward_lp(ws, succ);
+            }
+            StageOpeningSolver::Lazy(params) => {
+                ws.solver.load_model(&ctx.templates[succ.successor]);
+                build_initial_resident_set(
+                    succ.successor_pool,
+                    iteration,
+                    params.k2,
+                    &mut ws.backward_accum.dcs_initial_resident,
+                );
+            }
+        }
+    }
 
-    let stats_before_omega = ws.solver.statistics();
+    /// Solve one backward opening and accumulate its outcome, dispatching to the
+    /// active variant's path. The variant arms are the two pre-existing
+    /// per-opening solve functions, re-homed verbatim.
+    ///
+    /// `is_first` is `true` for the trial point's **first-solved** opening — ω=0
+    /// in canonical order, or the first entry of the solve order when reordering
+    /// is enabled. The baked path uses it to load the per-(m, s) stored basis and
+    /// capture the post-solve basis back into the store (only on the first-solved
+    /// opening; the rest warm re-solve on the retained LU). The lazy path uses
+    /// `continue_carry == !is_first`: the first-solved opening solves fresh, the
+    /// rest warm-carry the LP. Decoupling basis identity from the literal ω=0 is
+    /// what lets the openings be solved in any order while the per-(m, s) basis
+    /// store stays consistent with the actual first solve.
+    // Rationale: the args are disjoint borrows (ws, ctx, training_ctx, succ,
+    // basis_slice) and per-opening scalars (raw_noise, x_hat, s, scenario,
+    // iteration, m, omega, is_first); no natural grouping reduces caller-side
+    // borrows. Carried over from the two former free functions.
+    #[allow(clippy::too_many_arguments)]
+    fn solve_opening<S: SolverInterface + Send>(
+        &self,
+        ws: &mut SolverWorkspace<S>,
+        ctx: &StageContext<'_>,
+        training_ctx: &TrainingContext<'_>,
+        succ: &SuccessorSpec<'_>,
+        basis_slice: &mut BasisStoreSliceMut<'_>,
+        raw_noise: &[f64],
+        x_hat: &[f64],
+        s: usize,
+        scenario: usize,
+        iteration: u64,
+        m: usize,
+        omega: usize,
+        is_first: bool,
+    ) -> Result<(), SddpError> {
+        match self {
+            StageOpeningSolver::Baked => Self::solve_baked(
+                ws,
+                ctx,
+                training_ctx,
+                succ,
+                basis_slice,
+                raw_noise,
+                x_hat,
+                s,
+                scenario,
+                iteration,
+                m,
+                omega,
+                is_first,
+            ),
+            StageOpeningSolver::Lazy(params) => Self::solve_lazy(
+                ws,
+                ctx,
+                training_ctx,
+                succ,
+                *params,
+                raw_noise,
+                x_hat,
+                s,
+                scenario,
+                iteration,
+                omega,
+                // The first-solved opening solves fresh; subsequent openings
+                // warm-carry the LP.
+                !is_first,
+            ),
+        }
+    }
 
-    // Move the state-duals buffer out of `ws.backward_accum` so it can be filled
-    // by `extract_state_duals_only` (a `&mut Vec` sink) while `view` holds an
-    // immutable borrow of the sibling `dcs_solve` field; restored at the end.
-    let mut state_duals = std::mem::take(&mut ws.backward_accum.state_duals_buf);
+    /// Baked all-cuts per-opening solve. Patch the opening bounds on the
+    /// already-loaded baked/delta LP, reconstruct + solve via `run_stage_solve`,
+    /// extract both state and cut duals, accumulate the outcome (including the
+    /// binding-count `slot_increments` update), and capture the first-solved
+    /// opening's basis. Body re-homed verbatim from the former free function.
+    // Rationale: see [`StageOpeningSolver::solve_opening`]; the disjoint-borrow
+    // argument list is unchanged from the former free function.
+    #[allow(clippy::too_many_arguments)]
+    fn solve_baked<S: SolverInterface + Send>(
+        ws: &mut SolverWorkspace<S>,
+        ctx: &StageContext<'_>,
+        training_ctx: &TrainingContext<'_>,
+        succ: &SuccessorSpec<'_>,
+        basis_slice: &mut BasisStoreSliceMut<'_>,
+        raw_noise: &[f64],
+        x_hat: &[f64],
+        s: usize,
+        scenario: usize,
+        iteration: u64,
+        m: usize,
+        omega: usize,
+        is_first: bool,
+    ) -> Result<(), SddpError> {
+        let indexer = training_ctx.indexer;
+        patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s);
 
-    let dcs_ctx = DcsSolveContext {
-        stage_index: s,
-        scenario_index: scenario,
-        iteration: Some(iteration),
-        // Warm-carry the prior opening's LP + basis on every opening but the
-        // first; ω=0 runs a fresh (cold, reset + seed) solve.
-        continue_carry,
-    };
-    // Disjoint borrows of `ws`: `solver`, `backward_accum.dcs_initial_resident`
-    // (shared), and `backward_accum.dcs_solve` (mut) are distinct fields.
-    // `lazy_solve_preloaded` copies the final solve into `dcs_solve`'s result
-    // buffers and returns `Result<()>`; the zero-cost view is rebuilt below.
-    lazy_solve_preloaded(
-        &mut ws.solver,
-        core,
-        succ.successor_pool,
-        indexer,
-        col_scale,
-        None,
-        &ws.backward_accum.dcs_initial_resident,
-        &params,
-        &mut ws.backward_accum.dcs_solve,
-        dcs_ctx,
-    )?;
-    // View over the result buffers (borrows `dcs_solve` immutably; coexists with
-    // the immutable `dcs_solve.row_map` read in `accumulate_dcs_binding_counts`).
-    let view = ws.backward_accum.dcs_solve.result_view();
+        // Scratch buffers are moved out before the solve to avoid borrow conflicts
+        // with `view`'s lifetime. Pre-warmed capacity is reused across openings.
+        let mut state_duals = std::mem::take(&mut ws.backward_accum.state_duals_buf);
+        let mut cut_duals = std::mem::take(&mut ws.backward_accum.cut_duals_buf);
 
-    // Cut gradient + intercept from the final all-satisfied LP only. The
-    // gradient/intercept come solely from the structural state-column reduced
-    // costs, identical in the all-cuts and lazy-solve LPs — exactness is
-    // unaffected by the binding-count bookkeeping below.
-    let objective =
-        extract_state_duals_only(&view, indexer.n_state, indexer, col_scale, &mut state_duals);
+        let stats_before_omega = ws.solver.statistics();
 
-    // Binding-count metadata, slot-correct under the resident `CutRowMap`. The
-    // final all-satisfied solve's cut-row duals (`view.dual`, the full dual copied
-    // into `dcs_solve.res_dual`) are read here and mapped slot→row via the
-    // persistent row map that `lazy_solve_preloaded` just finalized. Borrows:
-    // `view` and `dcs_solve.row_map` both borrow `ws.backward_accum.dcs_solve`
-    // immutably (so they coexist); `slot_increments` is a distinct field of
-    // `ws.backward_accum` borrowed mutably.
-    accumulate_dcs_binding_counts(
-        view.dual,
-        &ws.backward_accum.dcs_solve.row_map,
-        succ.successor_pool,
-        succ.cut_activity_tolerance,
-        &mut ws.backward_accum.slot_increments,
-    );
-    let _ = view;
+        // The per-(m, s) stored basis is loaded for, and captured from, the
+        // FIRST-SOLVED opening of this trial point — not canonical ω=0. When the
+        // openings are solved in canonical order these coincide; when solved in a
+        // warm-start order they differ, and basis identity must follow the actual
+        // first solve. See `process_trial_point_backward`.
+        let stored_basis = if is_first {
+            resolve_backward_basis(basis_slice, m, s)
+        } else {
+            None
+        };
+        let inputs = crate::stage_solve::StageInputs {
+            stage_context: ctx,
+            pool: succ.successor_pool,
+            stored_basis,
+            stage_index: s,
+            scenario_index: scenario,
+            iteration: Some(iteration),
+        };
 
-    ws.backward_accum.state_duals_buf = state_duals;
+        let view = crate::stage_solve::run_stage_solve(ws, &inputs)?;
 
-    let stats_after_omega = ws.solver.statistics();
+        // Extract duals from view (which borrows ws for 'ws).
+        // Statistics must be captured after view is dropped.
+        let objective = extract_duals_from_view(
+            &view,
+            indexer.n_state,
+            indexer,
+            &ctx.templates[s].col_scale,
+            succ,
+            &mut state_duals,
+            &mut cut_duals,
+        );
+        let _ = view;
 
-    // Outcome only — no ω=0 basis capture (that captured basis would describe
-    // the baked layout, not the DCS resident subset). The binding-count update
-    // is done above, slot-correct under the lazy layout.
-    write_opening_outcome(
-        ws,
-        omega,
-        objective,
-        x_hat,
-        &stats_before_omega,
-        &stats_after_omega,
-    );
+        ws.backward_accum.state_duals_buf = state_duals;
+        ws.backward_accum.cut_duals_buf = cut_duals;
 
-    Ok(())
+        let stats_after_omega = ws.solver.statistics();
+
+        accumulate_opening_outcome(
+            ws,
+            succ,
+            omega,
+            objective,
+            x_hat,
+            &stats_before_omega,
+            &stats_after_omega,
+        );
+
+        if is_first {
+            save_basis_at_omega_zero(ws, succ, basis_slice, m, x_hat);
+        }
+
+        Ok(())
+    }
+
+    /// Lazy resident-set per-opening solve under Dynamic Cut Selection.
+    ///
+    /// All openings of a trial point are processed by one worker, sharing the same
+    /// pinned incoming state `x̂` and differing only in their noise RHS, so the
+    /// cut-free core and the metadata seed are loaded/built ONCE per trial point
+    /// by [`StageOpeningSolver::prepare`] and the LP is reused across the
+    /// openings. This routine therefore never reloads or re-seeds; it only patches
+    /// the opening's bounds and runs the lazy loop via [`lazy_solve_preloaded`]:
+    ///
+    /// - `continue_carry == false` (the first-solved opening): solve fresh — the
+    ///   lazy loop resets the carried row map, appends the seed, and cold-solves.
+    ///   The cut produced is identical to the (former) per-opening path.
+    /// - `continue_carry == true` (subsequent openings): warm-carry the prior
+    ///   opening's LP, basis, and (monotonically grown) resident cut set; re-solve
+    ///   warm under the new noise and add only the cuts this opening additionally
+    ///   violates. This is what the paper's §3.4 "base recovery" buys, extended
+    ///   across the trial point's openings.
+    ///
+    /// The Benders cut gradient and intercept are read from the final
+    /// all-satisfied LP via [`extract_state_duals_only`] in both cases.
+    ///
+    /// **Binding-count metadata** (`slot_increments`) IS maintained here, but
+    /// slot-correct under the lazy layout: the baked path bumps by baked cut-row
+    /// order, whereas [`accumulate_dcs_binding_counts`] maps each resident cut row
+    /// back to its pool slot via the final [`CutRowMap`] and bumps
+    /// `slot_increments[slot]` for residents whose cut-row dual exceeds
+    /// `cut_activity_tolerance` (the same criterion the baked path uses). This
+    /// feeds the existing per-stage `metadata_sync_contribution` allreduce, which
+    /// advances `last_active_iter` rank-invariantly and so restores the §3.1
+    /// clause-1 seed (cuts **binding** in the last `k2` iterations) — without
+    /// altering the extracted gradient/intercept (those come solely from the
+    /// structural state-column reduced costs and are identical to the all-cuts cut
+    /// by exactness).
+    ///
+    /// One piece of the baked path is intentionally NOT performed here:
+    ///
+    /// - **first-solved basis capture**: a captured basis would describe the baked
+    ///   layout, not the DCS resident subset, so it is skipped; the next DCS solve
+    ///   cold-starts its initial solve, which [`lazy_solve_preloaded`] supports
+    ///   with `stored_basis = None`.
+    ///
+    /// Body re-homed verbatim from the former free function.
+    // Rationale: the args are disjoint borrows (ws, ctx, training_ctx, succ) and
+    // per-opening scalars (params, raw_noise, x_hat, s, scenario, iteration,
+    // omega); no natural grouping reduces caller-side borrows. Carried over from
+    // the former free function.
+    #[allow(clippy::too_many_arguments)]
+    fn solve_lazy<S: SolverInterface + Send>(
+        ws: &mut SolverWorkspace<S>,
+        ctx: &StageContext<'_>,
+        training_ctx: &TrainingContext<'_>,
+        succ: &SuccessorSpec<'_>,
+        params: DcsParams,
+        raw_noise: &[f64],
+        x_hat: &[f64],
+        s: usize,
+        scenario: usize,
+        iteration: u64,
+        omega: usize,
+        continue_carry: bool,
+    ) -> Result<(), SddpError> {
+        let indexer = training_ctx.indexer;
+        // The DCS LP must start from the cut-free base structural template, NOT
+        // `succ.baked_template`: when baking is active the baked template already
+        // carries the active cut rows, and loading it would make the lazy loop's
+        // fresh CutRowMap treat those baked slots as non-resident and append them a
+        // second time (duplicate rows, broken laziness). `ctx.templates[s]` is the
+        // cut-free base (its `num_rows` equals `succ.template_num_rows`), so the
+        // CutRowMap's base offset matches and the lazy loop exclusively owns the
+        // cut rows.
+        let core = &ctx.templates[s];
+        let col_scale = &ctx.templates[s].col_scale;
+
+        // [`StageOpeningSolver::prepare`] has already loaded the cut-free core and
+        // built the metadata seed once for this trial point; here we only apply
+        // this opening's state-pin + noise patch. `lazy_solve_preloaded` appends
+        // cut rows to the loaded, patched LP and never reloads, so the patch — and,
+        // on continued openings, the carried cut rows + warm basis — survive the
+        // whole lazy loop.
+        patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s);
+
+        let stats_before_omega = ws.solver.statistics();
+
+        // Move the state-duals buffer out of `ws.backward_accum` so it can be
+        // filled by `extract_state_duals_only` (a `&mut Vec` sink) while `view`
+        // holds an immutable borrow of the sibling `dcs_solve` field; restored at
+        // the end.
+        let mut state_duals = std::mem::take(&mut ws.backward_accum.state_duals_buf);
+
+        let dcs_ctx = DcsSolveContext {
+            stage_index: s,
+            scenario_index: scenario,
+            iteration: Some(iteration),
+            // Warm-carry the prior opening's LP + basis on every opening but the
+            // first; the first-solved opening runs a fresh (cold, reset + seed)
+            // solve.
+            continue_carry,
+        };
+        // Disjoint borrows of `ws`: `solver`, `backward_accum.dcs_initial_resident`
+        // (shared), and `backward_accum.dcs_solve` (mut) are distinct fields.
+        // `lazy_solve_preloaded` copies the final solve into `dcs_solve`'s result
+        // buffers and returns `Result<()>`; the zero-cost view is rebuilt below.
+        lazy_solve_preloaded(
+            &mut ws.solver,
+            core,
+            succ.successor_pool,
+            indexer,
+            col_scale,
+            None,
+            &ws.backward_accum.dcs_initial_resident,
+            &params,
+            &mut ws.backward_accum.dcs_solve,
+            dcs_ctx,
+        )?;
+        // View over the result buffers (borrows `dcs_solve` immutably; coexists
+        // with the immutable `dcs_solve.row_map` read in
+        // `accumulate_dcs_binding_counts`).
+        let view = ws.backward_accum.dcs_solve.result_view();
+
+        // Cut gradient + intercept from the final all-satisfied LP only. The
+        // gradient/intercept come solely from the structural state-column reduced
+        // costs, identical in the all-cuts and lazy-solve LPs — exactness is
+        // unaffected by the binding-count bookkeeping below.
+        let objective =
+            extract_state_duals_only(&view, indexer.n_state, indexer, col_scale, &mut state_duals);
+
+        // Binding-count metadata, slot-correct under the resident `CutRowMap`. The
+        // final all-satisfied solve's cut-row duals (`view.dual`, the full dual
+        // copied into `dcs_solve.res_dual`) are read here and mapped slot→row via
+        // the persistent row map that `lazy_solve_preloaded` just finalized.
+        // Borrows: `view` and `dcs_solve.row_map` both borrow
+        // `ws.backward_accum.dcs_solve` immutably (so they coexist);
+        // `slot_increments` is a distinct field of `ws.backward_accum` borrowed
+        // mutably.
+        accumulate_dcs_binding_counts(
+            view.dual,
+            &ws.backward_accum.dcs_solve.row_map,
+            succ.successor_pool,
+            succ.cut_activity_tolerance,
+            &mut ws.backward_accum.slot_increments,
+        );
+        let _ = view;
+
+        ws.backward_accum.state_duals_buf = state_duals;
+
+        let stats_after_omega = ws.solver.statistics();
+
+        // Outcome only — no first-solved basis capture (that captured basis would
+        // describe the baked layout, not the DCS resident subset). The
+        // binding-count update is done above, slot-correct under the lazy layout.
+        write_opening_outcome(
+            ws,
+            omega,
+            objective,
+            x_hat,
+            &stats_before_omega,
+            &stats_after_omega,
+        );
+
+        Ok(())
+    }
 }
 
 /// Process one trial point `m` in the backward pass, iterating over all openings.
@@ -952,9 +1095,9 @@ fn solve_opening_dcs<S: SolverInterface + Send>(
 /// At ω=0, writes the post-solve basis into `basis_slice`; writes at ω>0 are
 /// forbidden (retained-LU corruption risk). Infeasibility at ω=0
 /// leaves the slot unchanged
-// RATIONALE: 10 args required — each is a disjoint borrow (ws, ctx, training_ctx, exchange,
-// succ, basis_slice) or a plain scalar (fwd_offset, iteration, m) or a risk slice.
-// Merging into a struct would add indirection without reducing the caller's borrow count.
+// RATIONALE: 11 args required — each is a disjoint borrow (ws, ctx, training_ctx, exchange,
+// succ, basis_slice, opening_solver) or a plain scalar (fwd_offset, iteration, m) or a risk
+// slice. Merging into a struct would add indirection without reducing the caller's borrow count.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
     ws: &mut SolverWorkspace<S>,
@@ -966,6 +1109,7 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
     risk_measures: &[RiskMeasure],
     succ: &SuccessorSpec<'_>,
     basis_slice: &mut BasisStoreSliceMut<'_>,
+    opening_solver: &StageOpeningSolver,
     m: usize,
 ) -> Result<StagedCut, SddpError> {
     let tree_view = training_ctx.stochastic.tree_view();
@@ -979,36 +1123,12 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
         "per_opening_stats must be initialised to n_openings before each stage's trial-point loop"
     );
 
-    // Dynamic Cut Selection params for this solve, `Some` only when configured
-    // and the current iteration is at or past its start. The decision is
-    // constant across openings and trial points for a given iteration.
-    let dcs_params = training_ctx
-        .dcs
-        .filter(|params| params.is_active(iteration));
-
     // Throwaway, env-gated backward `noise_key` diagnostic. `None` on the
     // default path (single hoisted boolean check; no key compute, no
     // allocation). When `Some`, after each opening solve we pair the precomputed
     // per-(stage, ω) noise key with that opening's just-consumed
     // `simplex_iterations` and emit one record to stderr.
     let noise_key_diag = training_ctx.noise_key_diag;
-
-    // Opening-reuse (the DCS backward path): load the cut-free core + build the
-    // metadata seed ONCE here, then reuse the loaded LP across this trial point's
-    // openings — ω=0 solves fresh from the seed, ω>0 warm-carry. The core load
-    // also serves as the per-trial-point HiGHS reset that preserves
-    // rank-invariance: state is reset at every trial-point boundary and never
-    // carried across trial points. (`load_backward_lp` skips its baked load on
-    // the DCS path, so this is the only load.)
-    if let Some(params) = dcs_params {
-        ws.solver.load_model(&ctx.templates[s]);
-        build_initial_resident_set(
-            succ.successor_pool,
-            iteration,
-            params.k2,
-            &mut ws.backward_accum.dcs_initial_resident,
-        );
-    }
 
     // Solve order for this stage's openings. Openings are SOLVED in
     // `solve_order(s)` — a run-constant, rank-invariant permutation precomputed at
@@ -1043,40 +1163,21 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
         let raw_noise = tree_view.opening(s, omega);
         let is_first = omega == first;
 
-        if let Some(params) = dcs_params {
-            solve_opening_dcs(
-                ws,
-                ctx,
-                training_ctx,
-                succ,
-                params,
-                raw_noise,
-                x_hat,
-                s,
-                scenario,
-                iteration,
-                omega,
-                // The first-solved opening solves fresh; subsequent openings
-                // warm-carry the LP.
-                !is_first,
-            )?;
-        } else {
-            solve_opening_baked(
-                ws,
-                ctx,
-                training_ctx,
-                succ,
-                basis_slice,
-                raw_noise,
-                x_hat,
-                s,
-                scenario,
-                iteration,
-                m,
-                omega,
-                is_first,
-            )?;
-        }
+        opening_solver.solve_opening(
+            ws,
+            ctx,
+            training_ctx,
+            succ,
+            basis_slice,
+            raw_noise,
+            x_hat,
+            s,
+            scenario,
+            iteration,
+            m,
+            omega,
+            is_first,
+        )?;
 
         // Env-gated throwaway emit: one record per backward opening pairing the
         // precomputed σ-weighted noise key with the opening's just-consumed
@@ -5364,6 +5465,7 @@ mod tests {
             &risk_measures,
             &succ_spec,
             &mut basis_slice,
+            &super::StageOpeningSolver::Baked,
             0,
         )?;
         Ok(workspaces)
@@ -6085,9 +6187,16 @@ mod tests {
 
         let mut basis_slices = basis_store.split_workers_mut(1);
         let ws = &mut workspaces[0];
+        // Choose the opening-solve strategy exactly as the driver does, then issue
+        // the per-trial-point prepare/load (mirrors process_stage_backward's per-`m`
+        // load after the W2 reset). The `Baked` variant loads the baked all-cuts
+        // LP; the `Lazy` variant loads the cut-free core + builds the metadata seed.
+        let opening_solver = super::StageOpeningSolver::from_dcs_params(
+            dcs.filter(|params| params.is_active(iteration)),
+        );
+        opening_solver.prepare(ws, &ctx, &succ, iteration);
         // Initialise the per-opening accumulator buffers the trial-point helper
         // expects (mirrors process_stage_backward's per-stage setup).
-        super::load_backward_lp(ws, &succ);
         let n_openings = succ.probabilities.len();
         while ws.backward_accum.outcomes.len() < n_openings {
             ws.backward_accum
@@ -6127,6 +6236,7 @@ mod tests {
             &risk_measures,
             &succ,
             &mut basis_slices[0],
+            &opening_solver,
             0,
         )
         .expect("backward trial-point solve must succeed");
@@ -6548,7 +6658,16 @@ mod tests {
 
         let mut basis_slices = basis_store.split_workers_mut(1);
         let ws = &mut workspaces[0];
-        super::load_backward_lp(ws, &succ);
+        // Choose the opening-solve strategy as the driver does, then issue the
+        // per-trial-point prepare/load (mirrors process_stage_backward's per-`m`
+        // load). `dcs = Some(dcs_params(2))` with `iteration = 5` selects `Lazy`,
+        // whose prepare loads the cut-free core + builds the metadata seed.
+        let opening_solver = super::StageOpeningSolver::from_dcs_params(
+            training_ctx
+                .dcs
+                .filter(|params| params.is_active(iteration)),
+        );
+        opening_solver.prepare(ws, &ctx, &succ, iteration);
         let n_openings = succ.probabilities.len();
         while ws.backward_accum.outcomes.len() < n_openings {
             ws.backward_accum
@@ -6588,6 +6707,7 @@ mod tests {
             &risk_measures,
             &succ,
             &mut basis_slices[0],
+            &opening_solver,
             0,
         )
         .expect("DCS backward solve with baked cuts present must succeed");
