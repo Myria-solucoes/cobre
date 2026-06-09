@@ -3,7 +3,7 @@
 > **Status:** Design proposal / companion report. Not yet a coding standard and
 > not yet enforced. Read together with
 > [`commenting-philosophy.md`](./commenting-philosophy.md): that doc governs
-> `**/*.rs` comments + rustdoc; **this** doc determines how far its concerns
+> code comments + rustdoc (promotion glob `**/*.rs`); **this** doc determines how far its concerns
 > extend to developer-facing _prose_ docs (CLAUDE.md, README, CONTRIBUTING, the
 > mdBook, governance files) and records the empirical debt that motivates it.
 >
@@ -117,14 +117,21 @@ Each was re-confirmed by the author against the live tree:
    `cuts` object; reality (`manifest.rs:167-296`, confirmed by a live `cobre
 report`) is `cobre_version`, **no** `checksum`, and `row_pool` (not `cuts`).
 6. **The `dynamic` cut-selection method is undocumented.** `configuration.md:288`
-   lists only `level1`/`lml1`/`domination`; `dynamic` is in active use
-   (`training.rs`, drives the lazy-solve loop) with 5 undocumented knobs, and the
+   lists only `level1`/`lml1`/`domination`; `dynamic` is in active use (the
+   lazy-solve loop `lazy_solve_preloaded` in `cobre-sddp/src/dcs.rs`, invoked
+   from `forward.rs`, `backward.rs`, and `simulation/pipeline.rs`) with 5
+   undocumented knobs (`start_iteration`, `active_window`, `candidate_window`,
+   `nadic`, `violation_tolerance` — `cobre-io/src/config/training.rs`), and the
    documented `check_frequency` default (1) is wrong — effective default is 5
-   (`cut_selection.rs:626`, `unwrap_or(5)`).
+   (`cut_selection.rs:626`, `unwrap_or(5)`; it governs the classic methods —
+   `dynamic` never reads it).
 7. **CONTRIBUTING installs the wrong mdBook preprocessor.** `CONTRIBUTING.md:17`
    says `cargo install mdbook mdbook-katex`; the repo uses **`mdbook-mermaid`**
    (`book/book.toml:32`, `.github/workflows/docs.yml:31-32`). `mdbook serve` fails
-   on the missing mermaid command; katex is never used anywhere.
+   on the missing mermaid command; no katex preprocessor is configured and CI
+   never installs one — the only katex references in the repo are dead
+   theme-CSS compatibility rules (`book/theme/css/custom.css`) and strings in
+   the vendored mermaid bundle.
 8. **Dead CLAUDE.md navigation pointers.** `CLAUDE.md:83` cites `write_outputs`
    (gone; real: `write_training_outputs` at `run.rs:1841`, `write_simulation_outputs`
    at `run.rs:1947`); `CLAUDE.md:84` cites `run_inner` (gone — see the
@@ -134,11 +141,16 @@ report`) is `cobre_version`, **no** `checksum`, and `row_pool` (not `cuts`).
    else (Cargo.toml:28, README.md:33, CLAUDE.md:8) says 1.88. The book is the
    sole outlier; the existing `check_book_version.py` passes green because it
    only checks the package banner, not the toolchain string (see §6).
-10. **Stale parquet column counts (×4).** `output-format.md` / `interpreting-results.md`
-    / `performance-accelerators.md` undercount the real Arrow schemas:
+10. **Stale parquet column counts (×5).** `output-format.md` /
+    `performance-accelerators.md` undercount the real Arrow schemas:
     convergence 13 → **14** (missing `mean_rows_in_lp`), iteration_timing 18 → **19**
-    (missing `lazy_scoring_ms`), cut_selection 9 → **10** (missing
-    `cuts_reactivated`). Each contradicts a `schemas.rs` field-count test.
+    (missing `lazy_scoring_ms`; the same file also says "15 timing columns" → **16**),
+    cut_selection 9 → **10** (missing `cuts_reactivated`; stale at both
+    `output-format.md:427` and `performance-accelerators.md:226`). Each
+    contradicts a `schemas.rs` field-count test. (`interpreting-results.md` is
+    current — its convergence table already includes `mean_rows_in_lp`.
+    Code-side twin: the `schemas.rs:383` rustdoc says "11 fields" over the
+    10-field row_selection schema its own test pins.)
 11. **README over-claims a stub feature.** `README.md:28` advertises an
     "MCP server for AI agents"; `cobre-mcp` is a stub that prints "not yet
     implemented" and exits 1, and there is no `mcp` subcommand.
@@ -264,11 +276,53 @@ demonstration of the thesis):
   shipped code for anyone who clones. The only misplaced **tracked** root artifact
   is `allow-attribute-inventory.md`.
 - **`allow-attribute-inventory.md` counts have themselves drifted.** It states
-  "79 too_many_lines / 28 dead_code"; the live tree has ~61 `too_many_lines`
-  `#[allow]`/`#[expect]` sites and ~27 `dead_code` sites. (A naive bare-token grep
-  returns ~148, including doc-comments and the inventory's own prose — not
-  attribute sites.) The fix is **relocation** into `plans/`, not editing the
+  "79 too_many_lines / 28 dead_code"; the live tree has **148** `too_many_lines`
+  suppression attribute sites in `crates/*/src` (79 single-line — the
+  inventory's grep — plus 69 declared inside multi-line `#[allow(...)]` blocks;
+  37 production-scope vs 111 in `#[cfg(test)]` modules) and 28 `dead_code`
+  sites. The fix is **relocation** into `plans/`, not editing the
   numbers; a dated snapshot is not maintainable standing documentation.
+
+### Second-pass re-verification (2026-06-09, after both docs were committed)
+
+A 17-agent adversarial re-check of every concrete claim in this report and in
+`commenting-philosophy.md` (50 claims; every disputed finding independently
+re-verified by a second agent) **confirmed the substance of all 11
+high-severity findings** and corrected both documents in place:
+
+- the fourth stale column count belongs to `output-format.md:427`, not
+  `interpreting-results.md` (whose convergence table is current), and a fifth
+  exists (`output-format.md:300`, 15→16 timing columns);
+- `stochastic-modeling.md` has **2** dead design-doc targets across 4 link
+  instances, not 3;
+- the lazy-solve loop lives in `dcs.rs` (`lazy_solve_preloaded`), not
+  `training.rs`;
+- "katex is never used anywhere" was an overclaim (dead theme CSS exists);
+- the "~61 `too_many_lines` sites" estimate matched **no** counting method —
+  authoritative: 148 attribute sites in `crates/*/src`, 37 production-scope —
+  and the parent doc's "~77 without rationale" descended from the same stale
+  inventory (both replaced);
+- the bare `sddp.md` ledger citations meant `book/src/crates/sddp.md` (the
+  `.claude/rules/sddp.md` meta-rule is accurate) — an ambiguous-basename
+  violation of the parent's own Durability rule;
+- the §10 paraphrase of the plan-structure ban wrongly attributed README to the
+  rule text (it is only in the script's scan set).
+
+Net-new drift found by the same pass, not yet dispositioned in the ledger:
+`overview.md:12` also advertises a non-existent `shm` backend; the γᵥ "must be
+positive" wording repeats at `hydro-plants.md:769` **and** in a shipped comment
+(`cobre-io/src/extensions/fpha_hyperplanes.rs:40`); `deterministic-suite.md:11`
+repeats the stale "27 cases"; `cli-reference.md:366` repeats "solver: HiGHS";
+`book/src/crates/sddp.md:642-644` claims version-1 payloads are rejected by
+version-2 receivers (no version 2 exists); the `schemas.rs:383` rustdoc says
+"11 fields" over its 10-field schema; a committed test references the
+gitignored `plans/lp-consistency-gap/`; and `check-no-plan-leaks.sh` is
+internally inconsistent (its header and failure message omit `README.md` while
+its scan set includes it — the likely seed of this report's §10 error). A
+second stale-grep hazard joins `target/`: old worktree copies under
+`.claude/worktrees/` still carry pre-fix text. The headline drift rate stands —
+the corrections move items between cells rather than removing them, and the
+net-new findings would only raise it.
 
 ---
 
@@ -277,11 +331,15 @@ demonstration of the thesis):
 ### Capture, not stretch
 
 Add a **sibling rule**, not a section bolted onto `commenting-philosophy.md`.
-That doc is scoped to `**/*.rs` and is on a promotion path to a `**/*.rs`-glob
-auto-loading rule; folding prose rules in would break its scope and mis-fire its
-glob. Promote **this report's** §4–§6 into a `## Prose-doc truth integrity` rule
-(or `.claude/rules/doc-integrity.md`) that reuses the five truth-integrity
-principles verbatim, states the §5 adaptation, declares Voice-machinery and
+That doc governs code comments + rustdoc and is on a promotion path to a
+`**/*.rs`-glob auto-loading rule (its N4/E1/E5 already reach `book/` and
+`CHANGELOG` via CI gates rather than the glob); folding prose rules in would
+break its scope and mis-fire its glob. Promote **this report's** §4–§6 into a
+`## Prose-doc truth integrity` rule
+(or `.claude/rules/doc-integrity.md`) that reuses the truth-integrity
+principles verbatim — Durability/anti-drift, present-tense Provenance,
+Contract-mirroring, Single-owner, and the N4 plan-leakage directive — states
+the §5 adaptation, declares Voice-machinery and
 strict-Length out of scope, and lists the six §6 failure modes. Add a CLAUDE.md
 cross-pointer.
 
@@ -290,22 +348,23 @@ cross-pointer.
 The debt is concentrated; ~12 one-line fixes outweigh any gate machinery. Each
 is a concrete edit (re-verify line numbers first — they drift):
 
-| #   | Location                                                                                             | Change                                                                                                                          |
-| --- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | `CLAUDE.md:12`                                                                                       | `cargo test --workspace --all-features` → `cargo test --workspace` (the `--all-features` form does not compile)                 |
-| 2   | `CLAUDE.md:10`                                                                                       | "8 workspace + 6 excluded" → "13 workspace members + the maturin-built `cobre-python`" (state the shape, drop the split number) |
-| 3   | `CLAUDE.md:74`                                                                                       | `lp_builder.rs` → `lp_builder/mod.rs`                                                                                           |
-| 4   | `CLAUDE.md:83`                                                                                       | `write_outputs` → `write_training_outputs` / `write_simulation_outputs`                                                         |
-| 5   | `CLAUDE.md:84`                                                                                       | `run_inner` → the live Python write path (`run_via_study` / `run_training_phase_py`) — `run_inner` is gone                      |
-| 6   | `installation.md:65,78`                                                                              | Rust 1.86 → 1.88                                                                                                                |
-| 7   | book ×5 (`1dtoy`, `cli-reference`, `interpreting-results`, `output-format`, `understanding-results`) | `_manifest.json` → `metadata.json` (+ note the `_SUCCESS` marker)                                                               |
-| 8   | `understanding-results.md:139-181`                                                                   | manifest shape: `version`→`cobre_version`, drop `checksum`, `cuts`→`row_pool`                                                   |
-| 9   | `configuration.md:535-545`                                                                           | trim `exports` table to `states` + `stochastic` (only accepted fields)                                                          |
-| 10  | `configuration.md:288-311`                                                                           | add the `dynamic` method + its knobs; fix `check_frequency` default 1 → 5                                                       |
-| 11  | `CONTRIBUTING.md:17`                                                                                 | `mdbook-katex` → `mdbook-mermaid`; `CONTRIBUTING.md:181-182` `tests/cli_version.rs` → `cli_smoke.rs`                            |
-| 12  | `README.md:28`                                                                                       | qualify the MCP claim ("reserved/experimental"); reconcile the book host to one canonical URL                                   |
-| 13  | `git mv allow-attribute-inventory.md plans/`                                                         | relocate the dated snapshot out of the repo root                                                                                |
-| 14  | book parquet column counts                                                                           | convergence 13→14, iteration_timing 18→19, cut_selection 9→10                                                                   |
+| #   | Location                                                                                             | Change                                                                                                                                                                                                                                                                                                              |
+| --- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `CLAUDE.md:12`                                                                                       | `cargo test --workspace --all-features` → `cargo test --workspace` (the `--all-features` form does not compile)                                                                                                                                                                                                     |
+| 2   | `CLAUDE.md:10`                                                                                       | "8 workspace + 6 excluded" → "13 workspace members + the maturin-built `cobre-python`" (state the shape, drop the split number)                                                                                                                                                                                     |
+| 3   | `CLAUDE.md:74`                                                                                       | `lp_builder.rs` → `lp_builder/mod.rs`                                                                                                                                                                                                                                                                               |
+| 4   | `CLAUDE.md:83`                                                                                       | `write_outputs` → `write_training_outputs` / `write_simulation_outputs`                                                                                                                                                                                                                                             |
+| 5   | `CLAUDE.md:84`                                                                                       | `run_inner` → the live Python write path (`run_via_study` / `run_training_phase_py`) — `run_inner` is gone                                                                                                                                                                                                          |
+| 6   | `book/src/guide/installation.md:65,78`                                                               | Rust 1.86 → 1.88                                                                                                                                                                                                                                                                                                    |
+| 7   | book ×5 (`1dtoy`, `cli-reference`, `interpreting-results`, `output-format`, `understanding-results`) | `_manifest.json` → `metadata.json` (+ note the `_SUCCESS` marker)                                                                                                                                                                                                                                                   |
+| 8   | `understanding-results.md:139-181`                                                                   | manifest shape: `version`→`cobre_version`, drop `checksum`, `cuts`→`row_pool` (a second `cuts` sub-key at `:266`)                                                                                                                                                                                                   |
+| 9   | `configuration.md:535-545`                                                                           | trim `exports` table to `states` + `stochastic` (only accepted fields)                                                                                                                                                                                                                                              |
+| 10  | `configuration.md:288-311`                                                                           | add the `dynamic` method + its knobs; fix `check_frequency` default 1 → 5 (re-derive against the Unreleased CHANGELOG's first-class `active_window` before writing; the default fix concerns the classic methods — `dynamic` never reads `check_frequency`)                                                         |
+| 11  | `CONTRIBUTING.md:17`                                                                                 | `mdbook-katex` → `mdbook-mermaid`; `CONTRIBUTING.md:181-182` `tests/cli_version.rs` → `cli_smoke.rs`                                                                                                                                                                                                                |
+| 12  | `README.md:28`                                                                                       | qualify the MCP claim ("reserved/experimental"); reconcile the book host to one canonical URL                                                                                                                                                                                                                       |
+| 13  | `git mv allow-attribute-inventory.md plans/`                                                         | relocate the dated snapshot out of the repo root (note: `git mv` keeps it _tracked_ inside the gitignored `plans/`; use `git rm --cached` + plain move if it should become untracked like the rest of `plans/`)                                                                                                     |
+| 14  | book parquet column counts                                                                           | convergence 13→14, iteration_timing 18→19 (+ `output-format.md:300` 15→16 timing columns), cut_selection 9→10 at `output-format.md:427` **and** `performance-accelerators.md:226`; land with the Phase-2 `cli_schema.rs` exact-diff guard or restate as "the committed `book/src/schemas/*.json` are authoritative" |
+| 15  | `book/src/crates/sddp.md:626-644`                                                                    | wire-format section: `CUT_WIRE_VERSION` 2 → 1, 24-byte header → 25, drop the phantom Activity-update record and the version-rejection claim (the code-side mirror `cut/mod.rs` "24-byte header" belongs to the commenting-philosophy §7 cleanup pass)                                                               |
 
 ### Phase 2 — worth building (only the guards that pay for themselves)
 
@@ -354,14 +413,15 @@ dead-link-or-path 3, other 3, misplaced-artifact 1, wrong-command 1.
 | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **stale-count**                       | `configuration.md:535` 9 exports fields vs 2 accepted; `output-format.md:273` convergence 13 vs 14 cols; `output-format.md:295` iteration_timing 18 vs 19; `performance-accelerators.md:226` cut_selection 9 vs 10; `CLAUDE.md:10` "8+6" vs 13+1; `understanding-results.md:210` "four entity categories" vs up to 10 emitted; `BRAND-GUIDELINES.md:18` PyPI "cobre/pycobre" vs shipped `cobre-python` |
 | **renamed-key**                       | manifest `version`→`cobre_version`, no `checksum`, `cuts`→`row_pool` (`understanding-results.md:139-181`); FPHA γᵥ "must be positive" vs `≥0` valid (`hydro-plants.md:333`); `architecture-rules.md:36,71` `OpeningTreeInputs`/`SimulationConfig` field drift; `CLAUDE.md:84` `run_inner` dead                                                                                                         |
-| **wrong-number**                      | `sddp.md:628` CUT_WIRE_VERSION 2 vs 1; `sddp.md:633` 24-byte header vs 25; `cli-reference.md:355` "solver: HiGHS" vs "HiGHS 1.13.1"; `configuration.md:293` check_frequency 1 vs 5; `understanding-results.md:268` report `metadata` key absent                                                                                                                                                        |
+| **wrong-number**                      | `book/src/crates/sddp.md:629` CUT_WIRE_VERSION 2 vs 1; `book/src/crates/sddp.md:633` 24-byte header vs 25 (the `.claude/rules/sddp.md` meta-rule is accurate — the basename must be qualified); `cli-reference.md:355` (and `:366`) "solver: HiGHS" vs "HiGHS 1.13.1"; `configuration.md:293` check_frequency 1 vs 5; `understanding-results.md:268` report `metadata` key absent                      |
 | **cross-doc-contradiction**           | `CLAUDE.md:12` vs `CONTRIBUTING.md:40-46` on `--all-features` (CLAUDE side doesn't compile); MSRV 1.86 vs 1.88; `interpreting-results.md:86` lp_solves cumulative vs per-iteration; `overview.md:12` cobre-comm TCP backend (none); `CONTRIBUTING.md:189` 13-dir tree omits the `cobre` umbrella crate                                                                                                 |
 | **missing-subcommand-or-flag**        | `configuration.md:288` omits `dynamic` method + 5 knobs; no `energy` section documented; `CLAUDE.md:83` `write_outputs` dead; `CONTRIBUTING.md:86` `--all-features` omits the flatc-panic note                                                                                                                                                                                                         |
-| **dead-link-or-path**                 | `interpreting-results.md:18,61` `_manifest.json` (→ `metadata.json`); `CONTRIBUTING.md:181` `tests/cli_version.rs` (absent); `README.md:51` `docs.cobre-rs.dev` host inconsistency; book `stochastic-modeling.md` → 3 non-existent `docs/design/` files                                                                                                                                                |
+| **dead-link-or-path**                 | `interpreting-results.md:18,61` `_manifest.json` (→ `metadata.json`); `CONTRIBUTING.md:181` `tests/cli_version.rs` (absent); `README.md:51` `docs.cobre-rs.dev` host inconsistency; book `stochastic-modeling.md` → 2 non-existent `docs/design/` files across 4 link instances (`temporal-resolution-debts.md` ×3, `adr-noise-method-forward-sampler.md` ×1)                                          |
 | **other / misplaced / wrong-command** | `understanding-results.md` thermals cost-segment dimension (none); `README.md:28` MCP stub claim; `CONTRIBUTING.md:17` `mdbook-katex` (→ `mdbook-mermaid`); `allow-attribute-inventory.md` misplaced at root                                                                                                                                                                                           |
 
 **2 "likely" (not full-confidence) items:** the phantom "Activity-update" wire
-record in `sddp.md:636` (source-grep negative, but a future-planned variant can't
+record in `book/src/crates/sddp.md:636` (source-grep negative, but a
+future-planned variant can't
 be excluded from grep alone); the `docs.cobre-rs.dev` host liveness (couldn't be
 tested offline).
 
@@ -375,12 +435,16 @@ contract-mirrors.
 
 ## 10. Relationship to existing rules
 
-- **`commenting-philosophy.md`** — the parent. This report reuses its five
-  truth-integrity principles and its E3 scope bound; it deliberately does _not_
-  reuse its Voice machinery.
-- **CLAUDE.md hard rules** — the plan-structure ban already names CHANGELOG,
-  README, book/, and public rustdoc; `check-no-plan-leaks.sh` enforces it over
-  `crates/`, `book/`, `CHANGELOG`, `README` (note: **CLAUDE.md and CONTRIBUTING
+- **`commenting-philosophy.md`** — the parent. This report reuses its
+  truth-integrity principles (Durability/anti-drift, present-tense Provenance,
+  Contract-mirroring, Single-owner, N4 plan-leakage) and its E3 scope bound; it
+  deliberately does _not_ reuse its Voice machinery.
+- **CLAUDE.md hard rules** — the plan-structure ban names CHANGELOG.md, release
+  notes, book/, public rustdoc, and comments in shipped code (README is covered
+  only by the script's scan set, not by the rule text); `check-no-plan-leaks.sh`
+  enforces it over the `src/` trees of 10 crates (`cobre-flow`/`uc`/`emt` and
+  the umbrella `cobre` crate are unscanned, as are all `tests/` and `benches/`),
+  `book/`, `CHANGELOG.md`, and `README.md` (note: **CLAUDE.md and CONTRIBUTING
   are not in that scan set**, so their compliance is currently unguarded).
 - **Existing doc guards** — `check_book_version.py` (package banner only) and
   `cli_schema.rs` (`len() >= 8`) are the false-confidence guards of §6.6;

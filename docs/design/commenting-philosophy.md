@@ -26,7 +26,9 @@ the whole direction:
 - **Signal-to-noise is uniformly high across every crate.** The audited risk is
   **over-deletion, not bloat.**
 - **Classic AI/boilerplate bloat is nearly absent**: zero commented-out code
-  anywhere; ~3 real `TODO`s in the whole tree; almost no "narrate the next line"
+  anywhere; five `TODO`s in the whole tree — three in `crates/*/src` plus two
+  plan-token `TODO(Epic 01 ticket-003)`s in a test and a bench (themselves §5
+  violations, catalogued in §7); almost no "narrate the next line"
   comments; `SAFETY` comments exist only where `unsafe` is actually allowed.
 - **The dominant comment species is load-bearing**: correctness contracts,
   `SAFETY` justifications, units/sign conventions, determinism invariants, and
@@ -89,9 +91,10 @@ _Why_ a non-obvious choice was made; what regresses if a maintainer "simplifies"
 it. The `X instead of Y` form **is rationale** and is **kept whenever Y is a
 still-plausible wrong simplification** a future editor might reach for.
 
-> _Example (`crates/cobre-sddp/src/forward.rs`):_ "Welford instead of a two-pass
-> mean/variance avoids catastrophic cancellation at large N." Two-pass is a
-> plausible simplification, so the rationale earns its place.
+> _Example (`crates/cobre-sddp/src/forward.rs`):_ "Welford's online algorithm is
+> used instead of the two-pass naive formula to avoid catastrophic cancellation
+> when sum_sq ≈ n \* mean^2." Two-pass is a plausible simplification, so the
+> rationale earns its place.
 
 ### Voice 3 — ~~Narrator~~ (NOT ALLOWED in shipped code)
 
@@ -135,26 +138,35 @@ Operational procedure:
 
 ### Canonical worked example
 
-Engineers split three ways on this real block until the rule existed:
+Engineers split three ways on this real block (quoted verbatim from
+`crates/cobre-sddp/src/forward.rs`) until the rule existed:
 
 ```rust
 // BEFORE
-// All ranks iterate global_costs in the same order, producing bit-identical
-// statistics regardless of thread/rank count (F1-007 fix). Welford instead of
-// a two-pass mean/variance avoids catastrophic cancellation at large N.
+// Canonical-order single-pass statistics. All ranks iterate global_costs in
+// the same order, producing bit-identical statistics regardless of rank count.
+// Welford's online algorithm is used instead of the two-pass naive formula to
+// avoid catastrophic cancellation when sum_sq ≈ n * mean^2 (F1-007 fix).
+// MPI Welford merge is not used here because the full gathered array is
+// already available — a single sequential pass suffices.
 ```
 
-- Clause 1 ("All ranks iterate … bit-identical regardless of thread/rank count")
-  = **Contract (determinism)** → keep.
-- `(F1-007 fix)` = **plan token** → amputate.
-- Clause 3 ("Welford instead of a two-pass mean/variance …") = **Rationale**
-  (two-pass is plausible) → keep.
+- "All ranks iterate … bit-identical … regardless of rank count" =
+  **Contract (determinism)** → keep.
+- "Welford's online algorithm … instead of the two-pass naive formula …" =
+  **Rationale** (two-pass is plausible) → keep; likewise the
+  MPI-merge-not-needed sentence.
+- `(F1-007 fix)` = **plan token**, a trailing tag on the _rationale_ clause →
+  amputate the tag only.
 
 ```rust
 // AFTER
-// All ranks iterate global_costs in the same order, producing bit-identical
-// statistics regardless of thread/rank count. Welford instead of a two-pass
-// mean/variance avoids catastrophic cancellation at large N.
+// Canonical-order single-pass statistics. All ranks iterate global_costs in
+// the same order, producing bit-identical statistics regardless of rank count.
+// Welford's online algorithm is used instead of the two-pass naive formula to
+// avoid catastrophic cancellation when sum_sq ≈ n * mean^2.
+// MPI Welford merge is not used here because the full gathered array is
+// already available — a single sequential pass suffices.
 ```
 
 Other live cases of the same shape: `lower_bound.rs` (keep the NCS-patch
@@ -270,7 +282,8 @@ redundant, regardless of length.
   For a symbol+line hybrid, strip the line and keep the symbol.
 - **N4 — No plan/workstream leakage** in shipped code, `book/`, `CHANGELOG`, or
   **inline test/bench comments**. Ban `Epic`/`ticket`/`T0NN`/`sprint` and the
-  workstream forms `F-NNN`, `F1-NNN`, and `W-N` _in workstream context_. Plan
+  workstream forms `F-NNN`, `FN-NNN` (e.g. `F1-007`, `F2-002`, `F3-004`), and
+  `W-N` _in workstream context_. Plan
   tokens are never durable symbols: when a banned token is a **trailing tag** on
   a contract/rationale line, **amputate only the tag** and preserve the
   invariant/formula — never delete the line. Plan refs in **test names** remain
@@ -307,15 +320,15 @@ backstop, governed by one overriding rule:
 > flags the whole line, and prints a "strip the rot, keep the invariant"
 > instruction** so a hurried fix never amputates a contract.
 
-| Gate   | Detects                                                            | Enforcement                 | Mechanism & false-positive guard                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| ------ | ------------------------------------------------------------------ | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **E1** | Plan/workstream leaks: `F-NNN`/`F1-NNN`, context-anchored `W-N`    | **hard CI gate**            | Extend `scripts/check-no-plan-leaks.sh`. Add patterns `\bF1?-[0-9]{2,}\b` and the context-anchored `\bW[0-9]+ (reset\|rebake\|workstream\|phase)\b`. Add `crates/*/benches` and `crates/*/tests` to scan paths. **Guard:** drop any bare `W-N` pattern (most `W[0-9]` hits are domain _week_ labels or vendored JS); require ≥2 trailing digits on `F1?-NNN` so unit tokens don't collide; exclude `*.min.js`. Report the matched span only; print the amputation instruction. Pilot-run first to allowlist legitimate ticket-encoding **test names**.                        |
-| **E2** | Drift-prone source line refs (`file.rs:NNN`)                       | **warning**                 | Advisory grep `[a-z_]+\.rs:[0-9]+([–—-][0-9]+)?` and comma-chained `:NNN` over `crates/*/src` `//` and `///` lines. **Guard:** warning, not hard — the form is trivially evaded and a hard line-flag risks deleting the paired symbol prose. Do the one-time cleanup (strip `:NNN`, keep the symbol) before enabling. Never match a bare `Symbol` ref or a path without a trailing `:NNN`; report only the `:NNN` span.                                                                                                                                                       |
-| **E3** | Un-rottable-or-delete refs                                         | **hard (a) + advisory (b)** | **(a) HARD:** forbid the literal token `MEMORY.md` and any `.claude/` path in shipped `//`/`///` comments. **(b) ADVISORY:** flag repo-relative dead paths under `docs/` or `artifacts/` that don't resolve. **Guard — critical:** do **NOT** require "every `.md` resolves on disk" — the `cobre-docs` sibling repo is absent in CI, and the external spec references (`output-schemas.md`, etc.) are deliberate contract-mirroring into a declared methodology root, not rot. Advisory (b) fires only on repo-relative prefixes, never on external spec filenames.          |
-| **E4** | Mandated rationale on refactor-decision suppressions               | **hard on git-diff**        | grep/clippy: for each `#[allow(...)]` of a shape/dead-code lint in production code, require a justifying comment within a ≤4-line upward window (skipping doc/attribute-continuation lines) **or** a trailing inline comment. **Guard:** case-insensitive matcher (accepts `// RATIONALE:`); handle multi-line `#[allow(\n ... )]` blocks; `#[cfg(test)]` allows are out of scope. **Enforce on NEW/CHANGED allows only** with a tracked allowlist of pre-existing sites — a tree-wide hard gate would red-flag the ~77 legacy `too_many_lines` allows that lack a rationale. |
-| **E5** | Placeholder text in user-facing docs                               | **hard CI gate**            | grep `\bTBD\b` (word-boundary) and "to be inserted" in `book/src` and rustdoc. **Guard:** exclude vendored `book/*.min.js` (the mermaid engine contains literal `Error("TBD")`). **Prerequisite:** fill the one real live placeholder (a pending benchmark value in the SDDP book chapter) _before_ wiring, so the gate's first action isn't to red-flag protected prose.                                                                                                                                                                                                     |
-| **E6** | Missing round-trip / version-byte test on a dual-owned wire format | **judgment-only checklist** | Not a bespoke script. comments.md lists each dual-owned format (`cut/wire.rs`, `policy/codec.rs`, `workspace.rs` `CapturedBasis`, `cut_sync`, `resolved_parameters`); each must have **both** a round-trip and a reject-old-version `#[test]`. Most already exist; add only the missing ones. Enforced by `cargo test` + review.                                                                                                                                                                                                                                              |
-| **E7** | Intra-function box-drawing banners                                 | **warning**                 | grep for box-drawing glyphs `U+2500..U+257F` in `//`/`///` comments in `crates/*/src`, excluding `#[cfg(test)]` tail blocks and `extern "C"` blocks (mirroring N5). **Guard:** comment lines only (not TUI/output string literals); the exact glyph range leaves ASCII `---` and prose en-dashes untouched. Pilot before hardening.                                                                                                                                                                                                                                           |
+| Gate   | Detects                                                                           | Enforcement                 | Mechanism & false-positive guard                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ------ | --------------------------------------------------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **E1** | Plan/workstream leaks: `F-NNN`/`FN-NNN` (`F1`/`F2`/`F3`…), context-anchored `W-N` | **hard CI gate**            | Extend `scripts/check-no-plan-leaks.sh`. Add patterns `\bF[0-9]?-[0-9]{2,}\b` (the live debt is dominated by `F2-NNN`/`F3-NNN` tokens, not just `F1-NNN`) and the context-anchored `\bW[0-9]+ (reset\|rebake\|workstream\|phase)\b`. Add `crates/*/benches` and `crates/*/tests` to scan paths (and the unscanned `cobre-flow`/`uc`/`emt` + umbrella `cobre` src dirs). **Guard:** drop any bare `W-N` pattern (most `W[0-9]` hits are domain _week_ labels or vendored JS); require ≥2 trailing digits on `F[0-9]?-NNN` so unit tokens don't collide; exclude `*.min.js`. Report the matched span only; print the amputation instruction. Pilot-run first to allowlist legitimate ticket-encoding **test names**. |
+| **E2** | Drift-prone source line refs (`file.rs:NNN`)                                      | **warning**                 | Advisory grep `[a-z_]+\.rs:[0-9]+([–—-][0-9]+)?` and comma-chained `:NNN` over `crates/*/src` `//` and `///` lines. **Guard:** warning, not hard — the form is trivially evaded and a hard line-flag risks deleting the paired symbol prose. Do the one-time cleanup (strip `:NNN`, keep the symbol) before enabling. Never match a bare `Symbol` ref or a path without a trailing `:NNN`; report only the `:NNN` span.                                                                                                                                                                                                                                                                                            |
+| **E3** | Un-rottable-or-delete refs                                                        | **hard (a) + advisory (b)** | **(a) HARD:** forbid the literal token `MEMORY.md` and any `.claude/` path in shipped `//`/`///` comments. **(b) ADVISORY:** flag repo-relative dead paths under `docs/`, `artifacts/`, or `plans/` (gitignored — dead for any cloner) that don't resolve. **Guard — critical:** do **NOT** require "every `.md` resolves on disk" — the `cobre-docs` sibling repo is absent in CI, and the external spec references (`output-schemas.md`, etc.) are deliberate contract-mirroring into a declared methodology root, not rot. Advisory (b) fires only on repo-relative prefixes, never on external spec filenames.                                                                                                 |
+| **E4** | Mandated rationale on refactor-decision suppressions                              | **hard on git-diff**        | grep/clippy: for each `#[allow(...)]` of a shape/dead-code lint in production code, require a justifying comment within a ≤4-line upward window (skipping doc/attribute-continuation lines) **or** a trailing inline comment. **Guard:** case-insensitive matcher (accepts `// RATIONALE:`); handle multi-line `#[allow(\n ... )]` blocks; `#[cfg(test)]` allows are out of scope. **Enforce on NEW/CHANGED allows only** with a tracked allowlist of pre-existing sites — a tree-wide hard gate would red-flag the legacy `too_many_lines` allows lacking a rationale (18–32 of the 37 production-scope sites, strictness-dependent; see §7).                                                                     |
+| **E5** | Placeholder text in user-facing docs                                              | **hard CI gate**            | grep `\bTBD\b` (word-boundary) and "to be inserted" in `book/src` and rustdoc. **Guard:** exclude vendored `book/*.min.js` (the mermaid engine contains literal `Error("TBD")`). **Prerequisite:** fill the one real live placeholder (a pending benchmark value in the SDDP book chapter) _before_ wiring, so the gate's first action isn't to red-flag protected prose.                                                                                                                                                                                                                                                                                                                                          |
+| **E6** | Missing round-trip / version-byte test on a dual-owned wire format                | **judgment-only checklist** | Not a bespoke script. comments.md lists each dual-owned format (`cut/wire.rs`, `policy/codec.rs`, `workspace.rs` `CapturedBasis`, `cut_sync`, `resolved_parameters`); each must have **both** a round-trip and a reject-old-version `#[test]`. Most already exist; add only the missing ones. Enforced by `cargo test` + review.                                                                                                                                                                                                                                                                                                                                                                                   |
+| **E7** | Intra-function box-drawing banners                                                | **warning**                 | grep for box-drawing glyphs `U+2500..U+257F` in `//`/`///` comments in `crates/*/src`, excluding `#[cfg(test)]` tail blocks and `extern "C"` blocks (mirroring N5). **Guard:** comment lines only (not TUI/output string literals); the exact glyph range leaves ASCII `---` and prose en-dashes untouched. Pilot result: ~500 production hits remain even after both exclusions — almost all legitimate between-top-level-item dividers N5 allows, which no grep can separate from intra-function banners; stays advisory pending a sharper heuristic (e.g. indented `//` lines only).                                                                                                                            |
 
 ---
 
@@ -325,11 +338,18 @@ For the record, since the philosophy is also meant to _characterise_ the
 codebase: the debt is **not** "too many comments." It is three concentrated,
 low-severity patterns plus a thin tail.
 
-1. **Drift-prone references** — a handful of `file.rs:NNN` (at least one already
-   drifted to the wrong line), one dead-file pointer (`artifacts/layout-decision.md`),
-   and two private-memory citations (`MEMORY.md`).
-2. **Plan-structure leakage** — ~9 sites of `F1-007` / `F-019` / `W2 reset`
-   tokens the current plan-leak gate's pattern misses.
+1. **Drift-prone references** — 8 `file.rs:NNN` comment refs, at least three
+   already drifted (an `indexer.rs:1555` fact fanned into three files, a stale
+   `training.rs` range in `workspace.rs`, stale `matrix.rs` anchors in
+   `extraction.rs`), one dead-file pointer (`artifacts/layout-decision.md`),
+   a dead `plans/lp-consistency-gap/` pointer in a committed test, and two
+   private-memory citations (`MEMORY.md`).
+2. **Plan-structure leakage** — 13 comment lines across 10 production files in
+   `crates/*/src`, plus one in `book/src/crates/sddp.md`, carry `F-NNN` /
+   `F1-NNN` / `F2-NNN` / `F3-NNN` / `W2 reset` tokens the current plan-leak
+   gate's pattern misses; ~36 more sit in `#[cfg(test)]` modules,
+   `crates/*/tests`, and `benches/` (including two `TODO(Epic 01 ticket-003)`s
+   the existing pattern would already catch if those paths were scanned).
 3. **Story-tails welded onto live contracts** — the Intra-Comment Surgery class
    (§3): keep the contract, amputate the tail.
 
@@ -345,7 +365,10 @@ cut-sign/scaling/determinism contracts) and the stochastic PAR/quantile math.
 
 ### Residual risks to accept knowingly
 
-- **E4 backlog:** ~77 pre-existing `too_many_lines` allows carry no rationale.
+- **E4 backlog:** 18–32 of the 37 production-scope `too_many_lines` suppression
+  sites carry no rationale (strictness-dependent; the other 111 of the 148 raw
+  attribute sites in `crates/*/src` sit in `#[cfg(test)]` modules E4 excludes —
+  the inventory's oft-quoted 79 is a single-line-only grep over a mixed scope).
   The git-diff + allowlist approach defers them; the allowlist must be actively
   burned down or it becomes a permanent escape hatch.
 - **E1 `W-N` anchor is heuristic:** a future comment using a different verb
@@ -372,15 +395,21 @@ in force:
 - **`.claude/architecture-rules.md`** — mandates the `// Rationale:` comment above
   any unavoidable `#[allow(clippy::too_many_arguments)]`. D4 reinforces this;
   treat suppression rationales as **required**, not bloat.
-- **`CLAUDE.md` hard rules** — infra-crate genericity (no `sddp`/`SDDP`/`Benders`/
-  singular `cut` vocab in `cobre-core`/`io`/`solver`/`stochastic`/`comm`),
-  declaration-order bit-determinism, and the existing plan-structure ban
+- **`CLAUDE.md` hard rules** — infra-crate genericity (no `sddp`/`SDDP`/`Benders`
+  vocab in `cobre-core`/`io`/`solver`/`stochastic`/`comm` per the rule text; the
+  enforcing `check-infra-genericity.sh` gate additionally bans standalone `cut`
+  vocabulary), declaration-order bit-determinism, and the existing
+  plan-structure ban
   (git commit messages are the allowed home for plan history). N4 **extends** the
   plan-structure ban's pattern coverage (`F-NNN`/`W-N`); it does not relax it.
 - **The three CI gate scripts** (`check-infra-genericity.sh`,
   `check-cut-selection-determinism.sh`, `check-no-plan-leaks.sh`) — the new gates
-  (§6) sit beside them and reuse their conventions (the `EXCLUDED_FILES`
-  mechanism, the `#[cfg(test)]` tail-block exclusion).
+  (§6) sit beside them and reuse the conventions established by
+  `check-infra-genericity.sh` (its `EXCLUDED_FILES` array and `#[cfg(test)]`
+  tail-block exclusion; the other two gates are plain pattern scans without
+  those mechanisms, and `check-no-plan-leaks.sh` scans only 10 crates' `src/`
+  trees — `cobre-flow`/`uc`/`emt`, the umbrella `cobre` crate, `tests/`, and
+  `benches/` are unscanned).
 
 ---
 
