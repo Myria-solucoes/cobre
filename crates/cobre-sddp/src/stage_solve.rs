@@ -15,10 +15,6 @@ use crate::{
     workspace::{CapturedBasis, SolverWorkspace},
 };
 
-// ---------------------------------------------------------------------------
-// StageInputs
-// ---------------------------------------------------------------------------
-
 /// Read-only inputs for one LP solve at stage `t`, scenario `m`.
 ///
 /// All fields are borrows or `Copy` primitives — no owned allocation. The
@@ -47,10 +43,6 @@ pub struct StageInputs<'a> {
     /// the caller having to re-wrap the error.
     pub iteration: Option<u64>,
 }
-
-// ---------------------------------------------------------------------------
-// run_stage_solve
-// ---------------------------------------------------------------------------
 
 /// Execute one LP solve at stage `t` for scenario `m`.
 ///
@@ -162,10 +154,6 @@ pub fn run_stage_solve<'ws, S: SolverInterface>(
     Ok(view)
 }
 
-// ---------------------------------------------------------------------------
-// Private helpers
-// ---------------------------------------------------------------------------
-
 /// Map a [`SolverError`] to a [`SddpError`] with stage/scenario context.
 ///
 /// `Infeasible` is wrapped with the full context fields so the caller can
@@ -184,6 +172,56 @@ fn map_solver_error(
             scenario,
         },
         other => SddpError::Solver(other),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unscale helpers (shared by forward and simulation drivers)
+// ---------------------------------------------------------------------------
+
+/// Unscale a primal vector into `out`: `x_original[i] = col_scale[i] *
+/// x_scaled[i]` (or the raw values when `col_scale` is empty). `out` retains its
+/// pre-warmed capacity (`clear` + `extend`).
+pub(crate) fn fill_unscaled(out: &mut Vec<f64>, scaled: &[f64], col_scale: &[f64]) {
+    debug_assert!(
+        col_scale.is_empty() || col_scale.len() == scaled.len(),
+        "col_scale length {} != primal length {}",
+        col_scale.len(),
+        scaled.len()
+    );
+    out.clear();
+    if col_scale.is_empty() {
+        out.extend_from_slice(scaled);
+    } else {
+        out.extend(scaled.iter().zip(col_scale.iter()).map(|(&xp, &d)| d * xp));
+    }
+}
+
+/// Unscale a dual vector into `out`: `dual_original[i] = row_scale[i] *
+/// dual_scaled[i]` for structural rows; rows beyond the template length (cut
+/// rows) have implicit `row_scale = 1.0`. Empty `row_scale` means no scaling.
+pub(crate) fn fill_unscaled_dual(out: &mut Vec<f64>, scaled: &[f64], row_scale: &[f64]) {
+    // Unlike `fill_unscaled`, `scaled` may be *longer* than `row_scale`: cut
+    // rows extend past the template-row count and take an implicit scale of
+    // 1.0. The invariant is therefore `<=`, not `==`.
+    debug_assert!(
+        row_scale.len() <= scaled.len(),
+        "row_scale length {} exceeds dual length {}",
+        row_scale.len(),
+        scaled.len()
+    );
+    out.clear();
+    if row_scale.is_empty() {
+        out.extend_from_slice(scaled);
+    } else {
+        out.extend(scaled.iter().enumerate().map(|(i, &d)| {
+            let scale = if i < row_scale.len() {
+                row_scale[i]
+            } else {
+                1.0
+            };
+            d * scale
+        }));
     }
 }
 

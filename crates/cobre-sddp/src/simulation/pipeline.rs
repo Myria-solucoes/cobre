@@ -348,37 +348,6 @@ fn map_sim_solver_error(e: crate::error::SddpError, ids: &SimStageIds) -> Simula
     }
 }
 
-/// Unscale a primal vector into `out`: `x_original[i] = col_scale[i] *
-/// x_scaled[i]` (or the raw values when `col_scale` is empty). `out` retains its
-/// pre-warmed capacity (`clear` + `extend`).
-fn fill_unscaled(out: &mut Vec<f64>, scaled: &[f64], col_scale: &[f64]) {
-    out.clear();
-    if col_scale.is_empty() {
-        out.extend_from_slice(scaled);
-    } else {
-        out.extend(scaled.iter().zip(col_scale.iter()).map(|(&xp, &d)| d * xp));
-    }
-}
-
-/// Unscale a dual vector into `out`: `dual_original[i] = row_scale[i] *
-/// dual_scaled[i]` for structural rows; rows beyond the template length (cut
-/// rows) have implicit `row_scale = 1.0`. Empty `row_scale` means no scaling.
-fn fill_unscaled_dual(out: &mut Vec<f64>, scaled: &[f64], row_scale: &[f64]) {
-    out.clear();
-    if row_scale.is_empty() {
-        out.extend_from_slice(scaled);
-    } else {
-        out.extend(scaled.iter().enumerate().map(|(i, &d)| {
-            let scale = if i < row_scale.len() {
-                row_scale[i]
-            } else {
-                1.0
-            };
-            d * scale
-        }));
-    }
-}
-
 /// Solve one stage for one simulation scenario, updating workspace in-place.
 ///
 /// Patches the LP for stage `t`, solves it, extracts inflow/row-lower data,
@@ -546,7 +515,7 @@ fn solve_simulation_stage<S: SolverInterface>(
         .map_err(|e| map_sim_solver_error(e, ids))?;
         let view = ws.backward_accum.dcs_solve.result_view();
         let objective = view.objective;
-        fill_unscaled(&mut unscaled_primal, view.primal, col_scale);
+        crate::stage_solve::fill_unscaled(&mut unscaled_primal, view.primal, col_scale);
         // INVARIANT: on the DCS path `view.dual` is LONGER than the structural
         // template — the lazy loop appends resident cut rows after the structural
         // rows, so the dual vector carries cut-row duals at indices
@@ -560,7 +529,7 @@ fn solve_simulation_stage<S: SolverInterface>(
         // `dual.len() == template_num_rows`: that assumption holds on the baked
         // path but NOT here, and enforcing it would drop the structural duals the
         // reader needs.
-        fill_unscaled_dual(&mut unscaled_dual, view.dual, row_scale);
+        crate::stage_solve::fill_unscaled_dual(&mut unscaled_dual, view.dual, row_scale);
         let _ = view;
         objective
     } else {
@@ -578,8 +547,8 @@ fn solve_simulation_stage<S: SolverInterface>(
 
         // `view` borrows from `ws`; finish all reads before the borrow ends.
         let objective = view.objective;
-        fill_unscaled(&mut unscaled_primal, view.primal, col_scale);
-        fill_unscaled_dual(&mut unscaled_dual, view.dual, row_scale);
+        crate::stage_solve::fill_unscaled(&mut unscaled_primal, view.primal, col_scale);
+        crate::stage_solve::fill_unscaled_dual(&mut unscaled_dual, view.dual, row_scale);
         let _ = view;
         objective
     };

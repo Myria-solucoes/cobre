@@ -7,9 +7,10 @@
 //!
 //! The per-scenario hot loop lives in
 //! `forward_pass_state::ForwardPassState::run`. All scratch is owned by the
-//! workspace and reused across scenarios, except for the `unscaled_primal`
-//! `Vec<f64>` allocated per stage inside `run_forward_stage` (a borrow-checker
-//! lifetime constraint prevents reusing `ws.scratch.unscaled_primal` there).
+//! workspace and reused across scenarios; `run_forward_stage` reuses the
+//! `ws.scratch.unscaled_primal` buffer via `mem::take`/restore (taken out before
+//! the solve so it can be filled while the `view` borrow of `ws` is live, then
+//! restored after the last read), the same pattern as `simulation/pipeline.rs`.
 
 use std::sync::mpsc::Sender;
 use std::time::Instant;
@@ -1044,13 +1045,21 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
 
     let col_scale = &ctx.templates[t].col_scale;
 
-    // Solve and extract the primal. The DCS branch solves the cut pool lazily
-    // from the cut-free base loaded above (mirroring `StageOpeningSolver::solve_lazy`, but
-    // extracting the primal rather than the dual); the baked branch solves the
-    // already-loaded all-cuts LP via `run_stage_solve`. Both copy the primal
-    // into a local and end the view borrow before the subsequent `&mut ws`
-    // accesses (`SolutionView` is `Copy`).
-    let (view_objective, unscaled_primal): (f64, Vec<f64>) = if let Some(params) = dcs {
+    // Take the reusable scratch buffer out of ws before the solve borrows ws.
+    // The `mem::take` pattern (capacity retained, empty vec left in field) lets
+    // us fill unscaled_primal from `view` slices that are still tied to 'ws
+    // while `&mut ws` is also live. Restored to ws.scratch after the last read
+    // so the next stage reuses the warmed allocation (mirrors pipeline.rs).
+    let mut unscaled_primal: Vec<f64> = std::mem::take(&mut ws.scratch.unscaled_primal);
+
+    // Solve and fill the unscaled primal buffer. The DCS branch solves the cut
+    // pool lazily from the cut-free base loaded above (mirroring
+    // `StageOpeningSolver::solve_lazy`, but extracting the primal rather than the
+    // dual); the baked branch solves the already-loaded all-cuts LP via
+    // `run_stage_solve`. Each branch fills `unscaled_primal` from `view` (tied to
+    // `ws`) and captures the objective before ending the view borrow
+    // (`SolutionView` is `Copy`).
+    let view_objective: f64 = if let Some(params) = dcs {
         // Metadata-seeded initial resident subset (deterministic, rank-invariant).
         build_initial_resident_set(
             pool,
@@ -1084,17 +1093,9 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         )?;
         let view = ws.backward_accum.dcs_solve.result_view();
         let objective = view.objective;
-        let unscaled: Vec<f64> = if col_scale.is_empty() {
-            view.primal.to_vec()
-        } else {
-            view.primal
-                .iter()
-                .zip(col_scale)
-                .map(|(&xp, &d)| d * xp)
-                .collect()
-        };
+        crate::stage_solve::fill_unscaled(&mut unscaled_primal, view.primal, col_scale);
         let _ = view;
-        (objective, unscaled)
+        objective
     } else {
         let inputs = crate::stage_solve::StageInputs {
             stage_context: ctx,
@@ -1117,18 +1118,10 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         // Unscale primal values and capture the objective before the ws borrow
         // held by `view` ends its overlap with subsequent ws.scratch accesses.
         let objective = view.objective;
-        let unscaled: Vec<f64> = if col_scale.is_empty() {
-            view.primal.to_vec()
-        } else {
-            view.primal
-                .iter()
-                .zip(col_scale)
-                .map(|(&xp, &d)| d * xp)
-                .collect()
-        };
+        crate::stage_solve::fill_unscaled(&mut unscaled_primal, view.primal, col_scale);
         // `view` is Copy, so end its borrow of ws before the mutable borrows below.
         let _ = view;
-        (objective, unscaled)
+        objective
     };
 
     let d_t = ctx.discount_factors.get(t).copied().unwrap_or(1.0);
@@ -1206,6 +1199,9 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         &unscaled_primal,
         indexer,
     );
+    // Restore the scratch buffer so the next stage reuses the warmed allocation.
+    // This is the last read of `unscaled_primal`.
+    ws.scratch.unscaled_primal = unscaled_primal;
     rec.state.clear();
     rec.state.extend_from_slice(&ws.current_state);
     // Cross-iteration forward warm-start applies to the baked arm only: it
