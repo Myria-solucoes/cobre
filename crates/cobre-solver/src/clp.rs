@@ -358,17 +358,27 @@ impl ClpSolver {
     /// pair of per-element loops — no `copy_from_slice`. The raw `CLP_BASIS_*`
     /// `i32` codes carried in `b` are written back verbatim (no translation).
     ///
-    /// Rows are reinstalled only up to `min(b.row_status.len(), num_rows)` so a
-    /// basis captured before `add_rows` grew the LP is tolerated: the trailing
-    /// rows keep whatever status CLP currently holds and `Clp_dual` repairs the
-    /// basis as needed (mirrors the `HiGHS` `copy_len` guard).
+    /// A basis with **more** row entries than the LP has rows is tolerated:
+    /// rows are reinstalled only up to `min(b.row_status.len(), num_rows)`, so a
+    /// basis captured before a later `add_rows` is fine — the trailing entries
+    /// are ignored. A basis with **fewer** row entries than the LP has rows
+    /// (e.g. one captured before `add_rows` grew the LP) cannot be padded
+    /// soundly and is rejected with `Err(SolverError::BasisRowCountMismatch)`;
+    /// the caller should fall back to a cold solve.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(SolverError::BasisRowCountMismatch { lp_rows, basis_rows })`
+    /// when `b.row_status.len() < self.num_rows`. On that path
+    /// `basis_consistency_failures` is incremented and the basis is not offered
+    /// to the solver.
     ///
     /// # Panics
     ///
     /// Panics if `b.col_status.len() != self.num_cols` (mirrors the `HiGHS`
-    /// warm-start contract). `b.row_status.len() >= self.num_rows` is checked
-    /// with `debug_assert!`.
-    fn install_basis(&mut self, b: &crate::Basis) {
+    /// warm-start contract); the LP column count is fixed at `load_model` and
+    /// never grows mid-life, so a column mismatch is a genuine shape bug.
+    fn install_basis(&mut self, b: &crate::Basis) -> Result<(), SolverError> {
         // NOTE: CLP set_*Status does not run isBasisConsistent; no BasisInconsistent path.
         // CLP's per-element setters silently accept an inconsistent offered basis
         // and `Clp_dual` repairs it, so — unlike `HighsSolver::solve` — there is no
@@ -379,13 +389,19 @@ impl ClpSolver {
             b.col_status.len(),
             self.num_cols
         );
-        debug_assert!(
-            b.row_status.len() >= self.num_rows,
-            "solve(Some(&basis)): basis.row_status.len() ({}) < self.num_rows ({}); \
-             callers introducing new rows must reconcile the basis before calling solve",
-            b.row_status.len(),
-            self.num_rows
-        );
+        // An undersized row basis (fewer entries than the LP has rows, e.g.
+        // captured before `add_rows` grew the LP) cannot be padded soundly: the
+        // missing tail rows would keep whatever (wrong) status CLP currently
+        // holds. Reject it as a recoverable warm-start failure so the caller can
+        // fall back to a cold solve. This runs *before* `basis_offered` is
+        // incremented — a rejected basis was never offered to the solver.
+        if b.row_status.len() < self.num_rows {
+            self.stats.basis_consistency_failures += 1;
+            return Err(SolverError::BasisRowCountMismatch {
+                lp_rows: self.num_rows,
+                basis_rows: b.row_status.len(),
+            });
+        }
 
         // Track every warm-start call as a basis offer for diagnostics.
         self.stats.basis_offered += 1;
@@ -415,6 +431,7 @@ impl ClpSolver {
             }
         }
         self.stats.total_basis_set_time_seconds += basis_set_start.elapsed().as_secs_f64();
+        Ok(())
     }
 
     /// Resets the CLP model to a clean all-slack (cold) starting basis.
@@ -1033,9 +1050,16 @@ impl SolverInterface for ClpSolver {
     /// buffers the canonical mirror), then appends the rows into CLP **natively**
     /// via `cobre_clp_add_rows` — which takes the CSR batch directly, so the
     /// CSC transpose feeds only the retained mirror, not the FFI call. The
-    /// native append preserves CLP's factorization/basis (no full rebuild). The
-    /// retained `row_lower`/`row_upper` are extended, `num_rows`/`num_nz` are
-    /// bumped, and `row_dual` is resized.
+    /// native append preserves CLP's persistent simplex basis across the append
+    /// (no full rebuild). The retained `row_lower`/`row_upper` are extended,
+    /// `num_rows`/`num_nz` are bumped, and `row_dual` is resized.
+    ///
+    /// A non-empty append does, however, **release any captured hot-start
+    /// snapshot**: the snapshot's saveStuff pins the pre-append factorization/rim
+    /// and is stale once the row dimension changes. This mirrors the self-heal
+    /// guard in [`Self::load_model`]; release is performed via
+    /// [`Self::unmark_hot_start`]. An empty batch (`num_rows == 0`) makes no
+    /// structural change and leaves an active snapshot intact.
     ///
     /// # Panics
     ///
@@ -1063,6 +1087,13 @@ impl SolverInterface for ClpSolver {
                 "malformed RowBatch: num_rows is 0 but col_indices has {new_nz} entries"
             );
             return;
+        }
+
+        // A non-empty add_rows changes the row dimension, so any captured hot-start
+        // snapshot (which pins the pre-append factorization/rim) is now stale. Release
+        // it before mutating — mirrors the self-heal guard in `load_model`.
+        if !self.hot_start_token.is_null() {
+            self.unmark_hot_start();
         }
 
         // Transpose-append the CSR batch into the retained CSC.
@@ -1316,7 +1347,11 @@ impl SolverInterface for ClpSolver {
     /// `None` and `Some(&b)` then run the same cold `cobre_clp_dual` path (CLP
     /// retains its internal basis across consecutive solves). Unlike the `HiGHS`
     /// backend, CLP's per-element status setters do not validate global basis
-    /// consistency, so there is no `BasisInconsistent` error path here.
+    /// consistency, so there is no `BasisInconsistent` error path here. An
+    /// undersized row basis (`b.row_status.len() < self.num_rows`) is rejected
+    /// by `install_basis` with `Err(SolverError::BasisRowCountMismatch)` rather
+    /// than being silently short-copied; the caller should fall back to a cold
+    /// solve.
     ///
     /// # Errors
     ///
@@ -1324,7 +1359,9 @@ impl SolverInterface for ClpSolver {
     /// escalation ladder could not recover, `Err(SolverError::Unbounded)` on
     /// `DUAL_INFEASIBLE`, `Err(SolverError::IterationLimit { .. })` on `STOPPED`
     /// the ladder could not recover, and `Err(SolverError::InternalError { .. })`
-    /// on `ERRORS` or any unexpected status int.
+    /// on `ERRORS` or any unexpected status int. Returns
+    /// `Err(SolverError::BasisRowCountMismatch { .. })` when an offered warm-start
+    /// basis has fewer row entries than the LP has rows.
     ///
     /// # Panics
     ///
@@ -1337,7 +1374,7 @@ impl SolverInterface for ClpSolver {
             // CLP retains its internal basis across consecutive simplex calls,
             // so both `None` (warm from prior solve) and `Some` (warm from the
             // reinstalled basis) fall through to the same cold solve below.
-            self.install_basis(b);
+            self.install_basis(b)?;
         }
 
         let t0 = Instant::now();
@@ -2205,6 +2242,71 @@ mod tests {
         );
     }
 
+    /// When the offered basis has fewer rows than the current LP (2 vs 4 after
+    /// `add_rows`), `solve(Some(&basis))` (via `install_basis`) rejects it with
+    /// `Err(SolverError::BasisRowCountMismatch)` rather than silently
+    /// short-copying. The rejection increments `basis_consistency_failures` and
+    /// leaves `basis_offered` untouched (a rejected basis was never offered to
+    /// the solver).
+    #[test]
+    fn test_clp_solve_rejects_undersized_row_basis() {
+        let mut solver = ClpSolver::new().expect("CLP solver creation failed");
+        solver.load_model(&make_fixture_stage_template());
+        let _ = solver.solve(None).expect("first solve should be optimal");
+
+        // Capture the 2-row optimal basis.
+        let mut captured = Basis::new(0, 0);
+        solver.get_basis(&mut captured);
+        assert_eq!(
+            captured.row_status.len(),
+            2,
+            "captured basis must have 2 row statuses"
+        );
+
+        // Reload and add 2 cuts to get a 4-row LP; the 2-row basis is now
+        // undersized (basis_rows = 2 < lp_rows = 4).
+        solver.load_model(&make_fixture_stage_template());
+        solver.add_rows(&make_fixture_row_batch());
+        assert_eq!(solver.num_rows, 4, "LP must have 4 rows after add_rows");
+
+        let offered_before = solver.stats.basis_offered;
+        let failures_before = solver.stats.basis_consistency_failures;
+
+        let err_variant: Result<(), SolverError> = solver.solve(Some(&captured)).map(|_| ());
+
+        assert_eq!(
+            solver.stats.basis_consistency_failures - failures_before,
+            1,
+            "basis_consistency_failures must increment by 1 for an undersized row basis"
+        );
+        assert_eq!(
+            solver.stats.basis_offered, offered_before,
+            "basis_offered must NOT change when the basis is rejected before being offered"
+        );
+
+        match err_variant {
+            Err(SolverError::BasisRowCountMismatch {
+                lp_rows,
+                basis_rows,
+            }) => {
+                assert_eq!(lp_rows, 4, "lp_rows must equal the current LP row count");
+                assert_eq!(
+                    basis_rows, 2,
+                    "basis_rows must equal the offered basis length"
+                );
+                assert_eq!(
+                    basis_rows,
+                    lp_rows - 2,
+                    "the undersized basis is 2 rows short of the LP"
+                );
+            }
+            other => panic!(
+                "expected Err(SolverError::BasisRowCountMismatch {{ lp_rows: 4, basis_rows: 2 }}), \
+                 got {other:?}"
+            ),
+        }
+    }
+
     #[test]
     #[should_panic(expected = "loaded model")]
     fn test_clp_get_basis_without_model_panics() {
@@ -2350,6 +2452,73 @@ mod tests {
             "load_model must null the hot-start token after releasing it"
         );
         // Drop here must NOT re-unmark a stale token (the guard already nulled it).
+        drop(solver);
+    }
+
+    #[test]
+    fn test_clp_add_rows_releases_live_hot_start_token() {
+        // A non-empty add_rows is a structural change (it bumps the row
+        // dimension), so it must release a live hot-start snapshot just like
+        // load_model: the saveStuff token pins the pre-append factorization/rim
+        // and is stale once rows are appended. With the guard, the token is
+        // released and nulled at append time, so Drop is safe.
+        //
+        // Path: load_model -> solve -> mark_hot_start -> add_rows (live token)
+        // -> Drop. Must not crash. (A `solve` AFTER the append is deliberately
+        // NOT exercised here: vendored CLP's `unmarkHotStart` leaves the model's
+        // own `factorization_` member dangling, so a solve after a
+        // release-following-a-hot-start dereferences freed memory inside CLP.
+        // That residual CLP defect is out of this guard's scope; the guard fixes
+        // the Drop hazard it is responsible for.)
+        let mut solver = ClpSolver::new().expect("CLP solver creation failed");
+        solver.load_model(&make_fixture_stage_template());
+        let _ = solver
+            .solve(None)
+            .expect("first cold solve must be optimal");
+        solver.mark_hot_start();
+        // The guard inside add_rows releases the live token before mutating.
+        solver.add_rows(&make_fixture_row_batch());
+        assert!(
+            solver.hot_start_token.is_null(),
+            "add_rows must null the hot-start token after releasing it"
+        );
+        // Drop here must NOT re-unmark a stale token (the guard already nulled it).
+        drop(solver);
+    }
+
+    #[test]
+    fn test_clp_add_rows_empty_batch_preserves_hot_start_token() {
+        // An empty add_rows (num_rows == 0) makes no structural change and hits
+        // the early return before the release guard, so a live hot-start snapshot
+        // must survive untouched.
+        //
+        // Path: load_model -> solve -> mark_hot_start -> add_rows(empty) -> assert
+        // token still live -> unmark_hot_start -> Drop.
+        let mut solver = ClpSolver::new().expect("CLP solver creation failed");
+        solver.load_model(&make_fixture_stage_template());
+        let _ = solver
+            .solve(None)
+            .expect("first cold solve must be optimal");
+        solver.mark_hot_start();
+        assert!(
+            !solver.hot_start_token.is_null(),
+            "mark_hot_start must capture a non-null token"
+        );
+        let empty_batch = RowBatch {
+            num_rows: 0,
+            row_starts: vec![0_i32],
+            col_indices: Vec::new(),
+            values: Vec::new(),
+            row_lower: Vec::new(),
+            row_upper: Vec::new(),
+        };
+        solver.add_rows(&empty_batch);
+        assert!(
+            !solver.hot_start_token.is_null(),
+            "an empty add_rows must preserve the live hot-start token"
+        );
+        // Explicitly release the still-live token, then Drop must be a clean no-op.
+        solver.unmark_hot_start();
         drop(solver);
     }
 

@@ -483,6 +483,17 @@ pub enum SolverError {
         /// Number of basic rows in the offered basis.
         row_basic: i64,
     },
+
+    /// The offered warm-start basis has fewer row entries than the loaded LP
+    /// has rows. The basis predates an `add_rows` growth and cannot be padded
+    /// soundly (a BASIC pad is wrong for inequality-row slacks), so it is
+    /// rejected; the caller should fall back to a cold solve.
+    BasisRowCountMismatch {
+        /// The LP row count at the point of rejection.
+        lp_rows: usize,
+        /// The row-entry count in the offered basis.
+        basis_rows: usize,
+    },
 }
 
 impl fmt::Display for SolverError {
@@ -515,6 +526,13 @@ impl fmt::Display for SolverError {
             } => write!(
                 f,
                 "basis inconsistent: num_row={num_row}, total_basic={total_basic} (col_basic={col_basic}, row_basic={row_basic})"
+            ),
+            Self::BasisRowCountMismatch {
+                lp_rows,
+                basis_rows,
+            } => write!(
+                f,
+                "basis row count mismatch: lp_rows={lp_rows}, basis_rows={basis_rows}"
             ),
         }
     }
@@ -581,6 +599,10 @@ mod tests {
                 total_basic: 5,
                 col_basic: 3,
                 row_basic: 2,
+            },
+            SolverError::BasisRowCountMismatch {
+                lp_rows: 3,
+                basis_rows: 2,
             },
         ];
 
@@ -719,6 +741,14 @@ mod tests {
                 },
                 "num_row=2",
             ),
+            (
+                "BasisRowCountMismatch",
+                SolverError::BasisRowCountMismatch {
+                    lp_rows: 3,
+                    basis_rows: 2,
+                },
+                "lp_rows=3",
+            ),
         ];
 
         for (name, err, expected_text) in cases {
@@ -756,6 +786,10 @@ mod tests {
                 total_basic: 5,
                 col_basic: 3,
                 row_basic: 2,
+            },
+            SolverError::BasisRowCountMismatch {
+                lp_rows: 3,
+                basis_rows: 2,
             },
         ];
 

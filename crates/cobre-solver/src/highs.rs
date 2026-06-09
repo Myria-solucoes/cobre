@@ -551,13 +551,10 @@ impl HighsSolver {
             } else {
                 // Profile literal value: apply verbatim, clamped for FFI cast.
                 // `.min(i32::MAX as u32)` ensures the value fits; the cast cannot wrap.
-                #[allow(clippy::cast_possible_wrap)]
-                {
-                    (self
-                        .current_profile
-                        .simplex_iteration_limit
-                        .min(i32::MAX as u32)) as i32
-                }
+                (self
+                    .current_profile
+                    .simplex_iteration_limit
+                    .min(i32::MAX as u32)) as i32
             };
 
         // IPM cap: 0 is the "unbounded" sentinel per trait contract; map it to
@@ -1221,6 +1218,80 @@ impl SolverInterface for HighsSolver {
             "num_nz {} overflows i32: LP exceeds HiGHS API limit",
             template.num_nz
         );
+        // Length guards: every slice handed to the HiGHS API must match the dimension
+        // it is keyed by. These are internally-constructed buffers, so a mismatch is a
+        // construction bug, not user input -- guard with debug_assert* (no release panic
+        // boundary). CSC column starts carry one extra trailing offset (`num_cols + 1`).
+        debug_assert_eq!(
+            template.col_starts.len(),
+            template.num_cols + 1,
+            "col_starts len {} != num_cols + 1 ({})",
+            template.col_starts.len(),
+            template.num_cols + 1
+        );
+        debug_assert_eq!(
+            template.row_indices.len(),
+            template.num_nz,
+            "row_indices len {} != num_nz {}",
+            template.row_indices.len(),
+            template.num_nz
+        );
+        debug_assert_eq!(
+            template.values.len(),
+            template.num_nz,
+            "values len {} != num_nz {}",
+            template.values.len(),
+            template.num_nz
+        );
+        debug_assert_eq!(
+            template.col_lower.len(),
+            template.num_cols,
+            "col_lower len {} != num_cols {}",
+            template.col_lower.len(),
+            template.num_cols
+        );
+        debug_assert_eq!(
+            template.col_upper.len(),
+            template.num_cols,
+            "col_upper len {} != num_cols {}",
+            template.col_upper.len(),
+            template.num_cols
+        );
+        debug_assert_eq!(
+            template.objective.len(),
+            template.num_cols,
+            "objective len {} != num_cols {}",
+            template.objective.len(),
+            template.num_cols
+        );
+        debug_assert_eq!(
+            template.row_lower.len(),
+            template.num_rows,
+            "row_lower len {} != num_rows {}",
+            template.row_lower.len(),
+            template.num_rows
+        );
+        debug_assert_eq!(
+            template.row_upper.len(),
+            template.num_rows,
+            "row_upper len {} != num_rows {}",
+            template.row_upper.len(),
+            template.num_rows
+        );
+        // Scale vectors are optional: empty means "no scaling", otherwise they must be
+        // keyed by the matching dimension.
+        debug_assert!(
+            template.col_scale.is_empty() || template.col_scale.len() == template.num_cols,
+            "col_scale len {} != num_cols {} (and is non-empty)",
+            template.col_scale.len(),
+            template.num_cols
+        );
+        debug_assert!(
+            template.row_scale.is_empty() || template.row_scale.len() == template.num_rows,
+            "row_scale len {} != num_rows {} (and is non-empty)",
+            template.row_scale.len(),
+            template.num_rows
+        );
         // SAFETY: All three values have been asserted to fit in i32 above.
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         let num_col = template.num_cols as i32;
@@ -1417,11 +1488,22 @@ impl SolverInterface for HighsSolver {
 
     /// # Preconditions
     ///
-    /// When `basis` is `Some(b)`, the caller must size
-    /// `b.row_status` to exactly `self.num_rows` (the current LP
-    /// row count). Callers that grow the LP by adding rows are
-    /// responsible for reconciling their basis to the new row
-    /// count before invoking this method.
+    /// When `basis` is `Some(b)`, the caller should size `b.row_status` to at
+    /// least `self.num_rows` (the current LP row count). A basis with **fewer**
+    /// row entries than the LP (e.g. one captured before `add_rows` grew the LP)
+    /// cannot be padded soundly — a BASIC pad is wrong for inequality-row slacks
+    /// — so it is rejected with `Err(SolverError::BasisRowCountMismatch)` and
+    /// `basis_consistency_failures` is incremented; the caller should fall back
+    /// to a cold solve. A basis with **more** row entries is tolerated: the
+    /// trailing entries beyond `self.num_rows` are ignored. The column count
+    /// must match exactly (hard `assert!`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(SolverError::BasisRowCountMismatch { lp_rows, basis_rows })`
+    /// when the offered basis has fewer row entries than the LP has rows, and
+    /// `Err(SolverError::BasisInconsistent { .. })` when `HiGHS` rejects the
+    /// offered basis via `isBasisConsistent`.
     fn solve(
         &mut self,
         basis: Option<&crate::types::Basis>,
@@ -1438,15 +1520,20 @@ impl SolverInterface for HighsSolver {
                 basis.col_status.len(),
                 self.num_cols
             );
-            debug_assert!(
-                basis.row_status.len() >= self.num_rows,
-                "solve(Some(&basis)): basis.row_status.len() ({}) < self.num_rows ({}); \
-                 callers introducing new rows must reconcile basis (e.g. extend with \
-                 NONBASIC_AT_LOWER for fresh inequality rows) before calling solve. \
-                 The defensive BASIC padding below is incorrect for inequality slacks.",
-                basis.row_status.len(),
-                self.num_rows
-            );
+            // An undersized row basis (fewer entries than the LP has rows, e.g.
+            // captured before `add_rows` grew the LP) cannot be padded soundly:
+            // a BASIC pad is wrong for newly added inequality rows, whose slacks
+            // should be non-basic at the appropriate bound. Reject it as a
+            // recoverable warm-start failure so the caller can fall back to a
+            // cold solve. This runs *before* `basis_offered` is incremented —
+            // a rejected basis was never offered to the solver.
+            if basis.row_status.len() < self.num_rows {
+                self.stats.basis_consistency_failures += 1;
+                return Err(SolverError::BasisRowCountMismatch {
+                    lp_rows: self.num_rows,
+                    basis_rows: basis.row_status.len(),
+                });
+            }
 
             // Track every warm-start call as a basis offer for diagnostics.
             self.stats.basis_offered += 1;
@@ -1455,28 +1542,15 @@ impl SolverInterface for HighsSolver {
             // translation. Zero-copy warm-start path.
             self.basis_col_i32[..self.num_cols].copy_from_slice(&basis.col_status);
 
-            // Precondition: the caller must size `basis.row_status` to
-            // exactly `self.num_rows`. The production caller reconciles
-            // the basis size to the current row count before invoking
-            // `solve(Some(&basis))`, so `basis_rows == lp_rows` always
-            // holds in practice.
-            //
-            // For defensive robustness if a future caller offers a
-            // mismatched basis:
-            // - `basis_rows < lp_rows`: pad missing tail rows with BASIC.
-            //   This is incorrect for newly added inequality rows, whose
-            //   slacks should be non-basic at the appropriate bound;
-            //   callers introducing new rows must reconcile the basis
-            //   themselves before calling solve.
-            // - `basis_rows > lp_rows`: truncate the trailing entries.
-            //   The solver ignores any basis entry beyond `num_rows`.
+            // The undersized case (`basis_rows < lp_rows`) is rejected above, so
+            // here `basis_rows >= lp_rows` always holds:
+            // - `basis_rows == lp_rows`: an exact copy.
+            // - `basis_rows > lp_rows`: truncate the trailing entries. The solver
+            //   ignores any basis entry beyond `num_rows`.
             let basis_rows = basis.row_status.len();
             let lp_rows = self.num_rows;
             let copy_len = basis_rows.min(lp_rows);
             self.basis_row_i32[..copy_len].copy_from_slice(&basis.row_status[..copy_len]);
-            if lp_rows > basis_rows {
-                self.basis_row_i32[basis_rows..lp_rows].fill(ffi::HIGHS_BASIS_STATUS_BASIC);
-            }
 
             // SAFETY:
             // - `self.handle` is a valid, non-null HiGHS pointer obtained from
@@ -1485,7 +1559,7 @@ impl SolverInterface for HighsSolver {
             //   `add_rows`; the slice written above covers exactly `num_cols` entries.
             // - `basis_row_i32` was sized to `num_rows` in `load_model` and grown in
             //   `add_rows`; the slice written above covers exactly `num_rows` entries
-            //   (with missing rows extended to BASIC).
+            //   (an undersized basis is rejected before reaching this point).
             let basis_set_start = Instant::now();
             let set_status = unsafe {
                 ffi::cobre_highs_set_basis_non_alien(
@@ -1845,6 +1919,46 @@ mod tests {
         );
     }
 
+    // Exercises a `debug_assert*` length guard, which is elided in release
+    // builds; restrict to debug so the panic actually fires.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "col_lower")]
+    fn test_highs_load_model_short_col_lower_panics() {
+        let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
+        let mut template = make_fixture_stage_template();
+        // num_cols == 3 but col_lower only has 2 entries: length guard must fire.
+        template.col_lower = vec![0.0, 0.0];
+
+        solver.load_model(&template);
+    }
+
+    // Exercises a `debug_assert*` length guard, which is elided in release
+    // builds; restrict to debug so the panic actually fires.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "row_scale")]
+    fn test_highs_load_model_oversized_row_scale_panics() {
+        let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
+        let mut template = make_fixture_stage_template();
+        // num_rows == 2 but row_scale is non-empty with 3 entries: length guard must fire.
+        template.row_scale = vec![1.0, 1.0, 1.0];
+
+        solver.load_model(&template);
+    }
+
+    #[test]
+    fn test_highs_load_model_empty_row_scale_loads() {
+        let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
+        let mut template = make_fixture_stage_template();
+        // Empty row_scale means "no scaling" and must pass the optional-length guard.
+        template.row_scale = Vec::new();
+
+        solver.load_model(&template);
+
+        assert_eq!(solver.num_rows, 2, "num_rows must be 2 after load_model");
+    }
+
     #[test]
     fn test_highs_add_rows_updates_dimensions() {
         let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
@@ -2194,18 +2308,17 @@ mod tests {
         );
     }
 
-    /// When the basis has fewer rows than the current LP (2 vs 4 after `add_rows`),
-    /// `solve(Some(&basis))` must extend missing rows as Basic and solve correctly.
-    /// SS1.2 objective with both cuts active is 162.0.
-    ///
-    /// This test exercises the defensive BASIC-padding fallback path,
-    /// which the production caller never hits because it reconciles the
-    /// basis to the LP row count before invoking `solve`. The
-    /// `debug_assert!` in `solve` would fire on this fallback path, so
-    /// the test runs only when `debug_assertions` is disabled.
-    #[cfg(not(debug_assertions))]
+    /// When the offered basis has fewer rows than the current LP (2 vs 4 after
+    /// `add_rows`), `solve(Some(&basis))` rejects it with
+    /// `Err(SolverError::BasisRowCountMismatch)` rather than padding the missing
+    /// tail with BASIC (which would be wrong for inequality-row slacks). The
+    /// rejection increments `basis_consistency_failures` and leaves
+    /// `basis_offered` untouched (a rejected basis was never offered to the
+    /// solver).
     #[test]
-    fn test_solve_warm_start_extends_missing_rows_as_basic() {
+    fn test_highs_solve_rejects_undersized_row_basis() {
+        use crate::types::SolverError;
+
         let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
         let template = make_fixture_stage_template();
         let cuts = make_fixture_row_batch();
@@ -2221,21 +2334,50 @@ mod tests {
             "captured basis must have 2 row statuses"
         );
 
-        // Reload model and add 2 cuts to get a 4-row LP.
+        // Reload model and add 2 cuts to get a 4-row LP; the 2-row basis is now
+        // undersized (basis_rows = 2 < lp_rows = 4).
         solver.load_model(&template);
         solver.add_rows(&cuts);
         assert_eq!(solver.num_rows, 4, "LP must have 4 rows after add_rows");
 
-        // Warm-start with the 2-row basis; extra rows are extended as Basic.
-        let result = solver
-            .solve(Some(&basis))
-            .expect("solve with dimension-mismatched basis must succeed");
+        let before = solver.statistics();
 
-        assert!(
-            (result.objective - 162.0).abs() < 1e-8,
-            "objective with both cuts active must be 162.0, got {}",
-            result.objective
+        // Act — map Ok → () so the mutable borrow from `solve` drops before the
+        // statistics call (the error path holds no solver references).
+        let err_variant: Result<(), SolverError> = solver.solve(Some(&basis)).map(|_| ());
+
+        let after = solver.statistics();
+        assert_eq!(
+            after.basis_consistency_failures - before.basis_consistency_failures,
+            1,
+            "basis_consistency_failures must increment by 1 for an undersized row basis"
         );
+        assert_eq!(
+            after.basis_offered, before.basis_offered,
+            "basis_offered must NOT change when the basis is rejected before being offered"
+        );
+
+        match err_variant {
+            Err(SolverError::BasisRowCountMismatch {
+                lp_rows,
+                basis_rows,
+            }) => {
+                assert_eq!(lp_rows, 4, "lp_rows must equal the current LP row count");
+                assert_eq!(
+                    basis_rows, 2,
+                    "basis_rows must equal the offered basis length"
+                );
+                assert_eq!(
+                    basis_rows,
+                    lp_rows - 2,
+                    "the undersized basis is 2 rows short of the LP"
+                );
+            }
+            other => panic!(
+                "expected Err(SolverError::BasisRowCountMismatch {{ lp_rows: 4, basis_rows: 2 }}), \
+                 got {other:?}"
+            ),
+        }
     }
 
     /// Non-alien path accepts a self-extracted basis: counter must stay at zero.

@@ -197,6 +197,8 @@ pub trait SolverInterface: Send {
     /// - [`SolverError::InternalError`] — FFI layer returned an error.
     /// - [`SolverError::BasisInconsistent`] — ONLY when `basis = Some(&b)` and
     ///   `b` fails the solver's consistency check.
+    /// - [`SolverError::BasisRowCountMismatch`] — ONLY when `basis = Some(&b)`
+    ///   and `b.row_status.len()` is smaller than the current LP's row count.
     ///
     /// # Examples
     ///
