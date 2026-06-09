@@ -1789,6 +1789,9 @@ mod tests {
             fwd_setup_time_ms: 2,
             fwd_load_imbalance_ms: 2,
             fwd_scheduling_overhead_ms: 1,
+            rows_in_lp_sum: 720,
+            rows_in_lp_count: 240,
+            rows_in_lp_max: 24,
         };
 
         Python::attach(|py| {

@@ -57,6 +57,9 @@ use crate::output::schemas::{convergence_schema, iteration_timing_schema};
 ///         total_active: 0,
 ///         peak_active: 0,
 ///         cuts_active: 0,
+///         rows_in_lp_total: 0,
+///         rows_in_lp_solve_count: 0,
+///         rows_in_lp_max: 0,
 ///     },
 ///     cut_selection_records: Vec::new(),
 ///     worker_timing_records: Vec::new(),
@@ -164,6 +167,7 @@ fn build_convergence_batch(records: &[IterationRecord]) -> Result<RecordBatch, O
     let mut time_total_ms = Int64Builder::with_capacity(n);
     let mut forward_passes = Int32Builder::with_capacity(n);
     let mut lp_solves = Int64Builder::with_capacity(n);
+    let mut mean_rows_in_lp = Float64Builder::with_capacity(n);
 
     for rec in records {
         iteration.append_value(rec.iteration as i32);
@@ -179,6 +183,7 @@ fn build_convergence_batch(records: &[IterationRecord]) -> Result<RecordBatch, O
         time_total_ms.append_value(rec.time_total_ms as i64);
         forward_passes.append_value(rec.forward_passes as i32);
         lp_solves.append_value(i64::from(rec.lp_solves));
+        mean_rows_in_lp.append_value(rec.mean_rows_in_lp);
     }
 
     RecordBatch::try_new(
@@ -197,6 +202,7 @@ fn build_convergence_batch(records: &[IterationRecord]) -> Result<RecordBatch, O
             Arc::new(time_total_ms.finish()),
             Arc::new(forward_passes.finish()),
             Arc::new(lp_solves.finish()),
+            Arc::new(mean_rows_in_lp.finish()),
         ],
     )
     .map_err(|e| OutputError::serialization("convergence", e.to_string()))
@@ -441,6 +447,7 @@ mod tests {
             forward_passes: 4,
             lp_solves: 40,
             solve_time_ms: 0.0,
+            mean_rows_in_lp: 0.0,
         }
     }
 
@@ -460,6 +467,9 @@ mod tests {
                 total_active: 80,
                 peak_active: 95,
                 cuts_active: 80,
+                rows_in_lp_total: 0,
+                rows_in_lp_solve_count: 0,
+                rows_in_lp_max: 0,
             },
             cut_selection_records: vec![],
             worker_timing_records: vec![],
@@ -484,7 +494,7 @@ mod tests {
     fn convergence_batch_from_empty_records() {
         let batch = build_convergence_batch(&[]).expect("empty batch must succeed");
         assert_eq!(batch.num_rows(), 0, "empty records yield 0 rows");
-        assert_eq!(batch.num_columns(), 13, "convergence schema has 13 columns");
+        assert_eq!(batch.num_columns(), 14, "convergence schema has 14 columns");
     }
 
     #[test]
@@ -492,7 +502,7 @@ mod tests {
         let records: Vec<IterationRecord> = (1..=3).map(|i| make_record(i, Some(5.0))).collect();
         let batch = build_convergence_batch(&records).expect("batch must be built");
         assert_eq!(batch.num_rows(), 3);
-        assert_eq!(batch.num_columns(), 13);
+        assert_eq!(batch.num_columns(), 14);
 
         let expected_schema = convergence_schema();
         assert_eq!(
@@ -587,6 +597,7 @@ mod tests {
                 forward_passes: 4,
                 lp_solves: 40,
                 solve_time_ms: 0.0,
+                mean_rows_in_lp: 0.0,
             })
             .collect();
 
@@ -856,7 +867,7 @@ mod tests {
             .expect("reader");
         let batch = reader.next().expect("must have rows").expect("batch Ok");
         assert_eq!(batch.num_rows(), 5);
-        assert_eq!(batch.num_columns(), 13);
+        assert_eq!(batch.num_columns(), 14);
 
         let timing_path = tmp.path().join("training/timing/iterations.parquet");
         let file = std::fs::File::open(&timing_path).expect("file must open");

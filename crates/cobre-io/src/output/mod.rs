@@ -187,6 +187,13 @@ pub struct IterationRecord {
 
     /// Cumulative LP solve wall-clock time for this iteration, in milliseconds.
     pub solve_time_ms: f64,
+
+    /// Mean resident row count loaded per lazy-selection LP solve during this
+    /// iteration (reduced across ranks). `0.0` when no lazy selection ran. Maps
+    /// to `mean_rows_in_lp` in `training/convergence.parquet`; it reflects the
+    /// per-solve LP size the lazy selector actually carried, which (unlike the
+    /// pool-level active count) shrinks well below the generated total.
+    pub mean_rows_in_lp: f64,
 }
 
 /// Summary statistics for the row pool at the end of a training run.
@@ -205,6 +212,21 @@ pub struct RowPoolStatistics {
 
     /// Total rows currently active in the LP.
     pub cuts_active: u64,
+
+    /// Sum, over every lazy-selection LP solve in the run, of the resident row
+    /// count loaded into that solve (reduced across ranks). With
+    /// [`Self::rows_in_lp_solve_count`] this gives the mean rows-in-LP per solve.
+    /// Zero when no lazy selection ran (the resident-subset solve path was never
+    /// taken), letting consumers distinguish "not applicable" from "zero rows".
+    pub rows_in_lp_total: u64,
+
+    /// Number of lazy-selection LP solves in the run (reduced across ranks); the
+    /// denominator for the mean rows-in-LP. Zero when no lazy selection ran.
+    pub rows_in_lp_solve_count: u64,
+
+    /// Largest resident row count loaded into any single lazy-selection LP solve
+    /// over the run (reduced across ranks). Zero when no lazy selection ran.
+    pub rows_in_lp_max: u64,
 }
 
 /// One row in `training/cut_selection/iterations.parquet`.
@@ -565,6 +587,9 @@ fn merge_simulation_solve_stats(outputs: &[SimulationOutput]) -> MetadataSimulat
 ///         total_active: 80,
 ///         peak_active: 95,
 ///         cuts_active: 80,
+///         rows_in_lp_total: 0,
+///         rows_in_lp_solve_count: 0,
+///         rows_in_lp_max: 0,
 ///     },
 ///     cut_selection_records: Vec::new(),
 ///     worker_timing_records: Vec::new(),
@@ -617,6 +642,7 @@ mod tests {
                 time_fwd_scheduling_overhead_ms: 0,
                 time_overhead_ms: 0,
                 solve_time_ms: 0.0,
+                mean_rows_in_lp: 0.0,
             })
             .collect();
         let output = TrainingOutput {
@@ -634,6 +660,9 @@ mod tests {
                 total_active: 120,
                 peak_active: 150,
                 cuts_active: 120,
+                rows_in_lp_total: 0,
+                rows_in_lp_solve_count: 0,
+                rows_in_lp_max: 0,
             },
             cut_selection_records: vec![],
             worker_timing_records: vec![],
@@ -687,6 +716,7 @@ mod tests {
             // overhead = 400 - (150 + 250 + 5 + 3 + 4) = 0 (saturating)
             time_overhead_ms: 400u64.saturating_sub(150 + 250 + 5 + 3 + 4),
             solve_time_ms: 0.0,
+            mean_rows_in_lp: 0.0,
         };
 
         assert_eq!(record.iteration, 7);
@@ -739,6 +769,9 @@ mod tests {
             total_active: 200,
             peak_active: 250,
             cuts_active: 200,
+            rows_in_lp_total: 0,
+            rows_in_lp_solve_count: 0,
+            rows_in_lp_max: 0,
         };
 
         assert_eq!(stats.total_generated, 500);
@@ -754,6 +787,9 @@ mod tests {
             total_active: 7,
             peak_active: 9,
             cuts_active: 7,
+            rows_in_lp_total: 30,
+            rows_in_lp_solve_count: 6,
+            rows_in_lp_max: 8,
         };
         let json = serde_json::to_string(&stats).expect("serialization must succeed");
         assert!(
@@ -764,6 +800,13 @@ mod tests {
             json.contains("\"cuts_active\""),
             "JSON must contain cuts_active key"
         );
+        for key in [
+            "\"rows_in_lp_total\"",
+            "\"rows_in_lp_solve_count\"",
+            "\"rows_in_lp_max\"",
+        ] {
+            assert!(json.contains(key), "JSON must contain {key}");
+        }
     }
 
     #[test]

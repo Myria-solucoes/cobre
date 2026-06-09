@@ -376,6 +376,26 @@ pub struct TrainingSummary {
     /// Total number of policy rows generated over the entire training run.
     pub total_rows_generated: u64,
 
+    /// Sum of resident rows-in-LP over every lazy-selection solve (reduced across
+    /// ranks). With [`Self::rows_in_lp_solve_count`], the mean rows-in-LP per
+    /// solve. Zero for pool-deactivating methods (no lazy solves), which the
+    /// renderer uses to gate the line: only Dynamic Cut Selection populates it.
+    pub rows_in_lp_total: u64,
+
+    /// Number of lazy-selection solves (reduced across ranks); the mean
+    /// denominator and the gate for showing the rows-in-LP summary line.
+    pub rows_in_lp_solve_count: u64,
+
+    /// Largest resident rows-in-LP over any single lazy-selection solve (reduced
+    /// across ranks).
+    pub rows_in_lp_max: u64,
+
+    /// Number of stages in the planning horizon. Used to express the pool-level
+    /// `total_rows_active` total on a per-stage basis (`active / num_stages`), so
+    /// it is directly comparable to the per-solve rows-in-LP figures (each solve
+    /// is at a single stage).
+    pub num_stages: u32,
+
     /// Total number of LP solves across all ranks, stages, iterations, and
     /// passes.  Aggregated via `allreduce(Sum)` so that the reported value is
     /// invariant regardless of the parallel configuration.
@@ -584,10 +604,7 @@ pub fn format_summary_string(summary: &RunSummary) -> String {
         fmt_sci(t.upper_bound_std)
     ));
     lines.push(format!("  Gap:          {:.1}%", t.gap_percent));
-    lines.push(format!(
-        "  Policy rows:  {} active / {} generated",
-        t.total_rows_active, t.total_rows_generated
-    ));
+    lines.extend(policy_rows_lines(t));
     lines.push(format!("  LP solves:    {}", t.total_lp_solves));
 
     // Simulation section (optional)
@@ -612,6 +629,45 @@ pub fn format_summary_string(summary: &RunSummary) -> String {
     ));
 
     lines.join("\n")
+}
+
+/// Render the "Policy rows" summary line, plus a "Rows in LP/solve" line for runs
+/// that used lazy per-solve selection (Dynamic Cut Selection).
+///
+/// The pool-level `active / generated` counts are kept — they report pool size /
+/// memory footprint — while the rows-in-LP line surfaces the per-solve LP size
+/// the lazy selector actually carried, which (unlike the pool active count, that
+/// equals `generated` under DCS) is the figure reflecting DCS's work. Both gated
+/// on `rows_in_lp_solve_count > 0`: zero for pool-deactivating methods, so they
+/// appear only when lazy selection ran.
+///
+/// For lazy runs the pool total is also annotated with its per-stage average
+/// (`active / num_stages`), because the pool count sums all stages whereas the
+/// rows-in-LP figures are per-solve (one stage each) — the annotation puts both
+/// on the same per-stage basis for comparison.
+fn policy_rows_lines(t: &TrainingSummary) -> Vec<String> {
+    // Per-stage average of the pool total, shown only for lazy runs so it sits
+    // beside (and on the same basis as) the per-solve rows-in-LP line.
+    let per_stage = if t.rows_in_lp_solve_count > 0 && t.num_stages > 0 {
+        #[allow(clippy::cast_precision_loss)]
+        let avg = t.total_rows_active as f64 / f64::from(t.num_stages);
+        format!("  (mean {avg:.1} active/stage)")
+    } else {
+        String::new()
+    };
+    let mut out = vec![format!(
+        "  Policy rows:  {} active / {} generated{per_stage}",
+        t.total_rows_active, t.total_rows_generated
+    )];
+    if t.rows_in_lp_solve_count > 0 {
+        #[allow(clippy::cast_precision_loss)]
+        let mean = t.rows_in_lp_total as f64 / t.rows_in_lp_solve_count as f64;
+        out.push(format!(
+            "  Rows in LP/solve:  mean {mean:.1}, max {}  (over {} solves)",
+            t.rows_in_lp_max, t.rows_in_lp_solve_count
+        ));
+    }
+    out
 }
 
 /// Print the training completion summary to `stderr`.
@@ -644,10 +700,9 @@ pub fn print_training_summary(stderr: &Term, t: &TrainingSummary) {
     } else {
         let _ = stderr.write_line(&format!("  Gap:          {:.1}%", t.gap_percent));
     }
-    let _ = stderr.write_line(&format!(
-        "  Policy rows:  {} active / {} generated",
-        t.total_rows_active, t.total_rows_generated
-    ));
+    for line in policy_rows_lines(t) {
+        let _ = stderr.write_line(&line);
+    }
     if let (Some(first_try), Some(retried), Some(failed)) =
         (t.total_first_try, t.total_retried, t.total_failed)
     {
@@ -805,7 +860,7 @@ mod tests {
 
     use super::{
         RunSummary, SimulationSummary, TrainingSummary, format_duration, format_summary_string,
-        print_summary,
+        policy_rows_lines, print_summary,
     };
 
     fn make_training_summary() -> TrainingSummary {
@@ -820,6 +875,10 @@ mod tests {
             gap_percent: 4.8,
             total_rows_active: 480,
             total_rows_generated: 1200,
+            rows_in_lp_total: 1_440,
+            rows_in_lp_solve_count: 120,
+            rows_in_lp_max: 18,
+            num_stages: 40,
             total_lp_solves: 36_000,
             total_time_ms: 5_000,
             total_first_try: Some(35_900),
@@ -830,6 +889,52 @@ mod tests {
             parallelism: Some(1),
             initial_gap_percent: Some(28.0),
         }
+    }
+
+    #[test]
+    fn policy_rows_lines_adds_rows_in_lp_only_for_lazy_runs() {
+        let mut t = make_training_summary();
+
+        // Lazy run (solve_count > 0): the pool line is kept AND a rows-in-LP line
+        // is added (mean = 1440/120 = 12.0, max 18, over 120 solves).
+        t.rows_in_lp_total = 1_440;
+        t.rows_in_lp_solve_count = 120;
+        t.rows_in_lp_max = 18;
+        let lines = policy_rows_lines(&t);
+        assert_eq!(lines.len(), 2, "lazy run shows pool line + rows-in-LP line");
+        assert!(lines[0].contains("480 active / 1200 generated"));
+        // Pool total annotated per-stage (480 / 40 stages = 12.0) — same basis as
+        // the per-solve rows-in-LP figures below.
+        assert!(
+            lines[0].contains("mean 12.0 active/stage"),
+            "pool line must carry the per-stage average for lazy runs: {:?}",
+            lines[0]
+        );
+        assert!(
+            lines[1].contains("Rows in LP/solve")
+                && lines[1].contains("mean 12.0")
+                && lines[1].contains("max 18")
+                && lines[1].contains("over 120 solves"),
+            "rows-in-LP line: {:?}",
+            lines[1]
+        );
+
+        // Non-lazy run (solve_count == 0): only the pool line, no rows-in-LP line,
+        // and no per-stage annotation.
+        t.rows_in_lp_total = 0;
+        t.rows_in_lp_solve_count = 0;
+        t.rows_in_lp_max = 0;
+        let lines = policy_rows_lines(&t);
+        assert_eq!(lines.len(), 1, "non-lazy run shows only the pool line");
+        assert!(
+            !lines.iter().any(|l| l.contains("Rows in LP/solve")),
+            "non-lazy run must not show the rows-in-LP line: {lines:?}"
+        );
+        assert!(
+            !lines[0].contains("active/stage"),
+            "non-lazy run must not annotate the pool line per-stage: {:?}",
+            lines[0]
+        );
     }
 
     fn make_run_summary(simulation: Option<SimulationSummary>) -> RunSummary {

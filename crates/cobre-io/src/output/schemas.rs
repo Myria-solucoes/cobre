@@ -229,7 +229,7 @@ pub(crate) fn generic_violations_schema() -> Schema {
 
 /// Schema for `training/convergence.parquet` — iteration-level convergence log.
 ///
-/// 13 fields. See output-schemas.md SS6.1.
+/// 14 fields. See output-schemas.md SS6.1.
 pub(crate) fn convergence_schema() -> Schema {
     Schema::new(vec![
         Field::new("iteration", DataType::Int32, false),
@@ -245,6 +245,7 @@ pub(crate) fn convergence_schema() -> Schema {
         Field::new("time_total_ms", DataType::Int64, false),
         Field::new("forward_passes", DataType::Int32, false),
         Field::new("lp_solves", DataType::Int64, false),
+        Field::new("mean_rows_in_lp", DataType::Float64, false),
     ])
 }
 
@@ -737,8 +738,8 @@ mod tests {
         let schema = convergence_schema();
         assert_eq!(
             schema.fields().len(),
-            13,
-            "convergence schema must have 13 fields"
+            14,
+            "convergence schema must have 14 fields"
         );
         // spot-check types per spec SS6.1
         assert_eq!(field_type(&schema, "iteration"), DataType::Int32);
@@ -980,7 +981,7 @@ mod tests {
             ("non_controllables", 10),
             ("inflow_lags", 4),
             ("generic_violations", 5),
-            ("convergence", 13),
+            ("convergence", 14),
             ("iteration_timing", 19),
             ("rank_timing", 8),
             ("cut_selection", 10),

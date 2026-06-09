@@ -100,6 +100,9 @@ pub fn write_training_results(
             total_active: training_output.cut_stats.total_active,
             peak_active: training_output.cut_stats.peak_active,
             cuts_active: training_output.cut_stats.cuts_active,
+            rows_in_lp_total: training_output.cut_stats.rows_in_lp_total,
+            rows_in_lp_solve_count: training_output.cut_stats.rows_in_lp_solve_count,
+            rows_in_lp_max: training_output.cut_stats.rows_in_lp_max,
         },
         bounds: MetadataBounds {
             final_lower_bound: training_output.final_lower_bound,
@@ -236,6 +239,7 @@ mod tests {
             time_fwd_scheduling_overhead_ms: 0,
             time_overhead_ms: 0,
             solve_time_ms: 0.0,
+            mean_rows_in_lp: 0.0,
         }
     }
 
@@ -256,6 +260,9 @@ mod tests {
                 total_active: 80,
                 peak_active: 95,
                 cuts_active: 0,
+                rows_in_lp_total: 0,
+                rows_in_lp_solve_count: 0,
+                rows_in_lp_max: 0,
             },
             cut_selection_records: vec![],
             worker_timing_records: vec![],
@@ -551,8 +558,8 @@ mod tests {
         assert_eq!(total_rows, 0, "empty training must produce 0 rows");
         assert_eq!(
             schema.fields().len(),
-            13,
-            "convergence schema must have 13 columns"
+            14,
+            "convergence schema must have 14 columns"
         );
 
         assert!(

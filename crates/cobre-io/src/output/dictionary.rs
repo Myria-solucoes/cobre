@@ -624,6 +624,10 @@ fn description_for(file: &str, column: &str) -> &'static str {
         ("convergence", "time_total_ms") => "Total iteration wall-clock time",
         ("convergence", "forward_passes") => "Number of forward-pass scenarios",
         ("convergence", "lp_solves") => "Total LP solves in iteration",
+        ("convergence", "mean_rows_in_lp") => {
+            "Mean resident rows loaded per lazy-selection LP solve this iteration \
+             (0 when no lazy selection ran)"
+        }
         // ── iteration_timing ──────────────────────────────────────────────
         ("iteration_timing", "iteration") => "Iteration number (1-based)",
         ("iteration_timing", "rank") => {
@@ -1512,8 +1516,8 @@ mod tests {
 
         let row_count = rdr.records().count();
         assert_eq!(
-            row_count, 207,
-            "variables.csv must have exactly 207 data rows (one per column across all schemas)"
+            row_count, 208,
+            "variables.csv must have exactly 208 data rows (one per column across all schemas)"
         );
     }
 

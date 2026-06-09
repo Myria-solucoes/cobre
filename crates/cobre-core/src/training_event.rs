@@ -433,6 +433,24 @@ pub enum TrainingEvent {
         /// Scheduling and synchronisation overhead in the forward pass not
         /// attributable to solve work or load imbalance, in milliseconds.
         fwd_scheduling_overhead_ms: u64,
+        /// Sum, over every lazy-selection LP solve in this iteration (across all
+        /// ranks), of the resident row count loaded into that solve. Zero when
+        /// no lazy selection ran. With [`Self::IterationSummary::rows_in_lp_count`]
+        /// this gives the mean rows-in-LP per solve for the iteration.
+        rows_in_lp_sum: u64,
+        /// Number of lazy-selection LP solves in this iteration (across all
+        /// ranks); the denominator for the per-iteration mean. Zero when no lazy
+        /// selection ran.
+        rows_in_lp_count: u64,
+        /// Largest resident row count loaded into any lazy-selection LP solve up
+        /// to and including this iteration (across all ranks). This is a
+        /// *running* peak (cumulative, not per-iteration), so a `max`-fold over
+        /// iterations recovers the run-level peak without a separate finalize
+        /// reduce. Zero when no lazy selection ran. Unlike
+        /// [`Self::IterationSummary::rows_in_lp_sum`]/`rows_in_lp_count`, this is
+        /// not written to the per-iteration convergence log — it feeds only the
+        /// run-level aggregate.
+        rows_in_lp_max: u64,
     },
 
     // ── Lifecycle events (4) ─────────────────────────────────────────────────
@@ -677,6 +695,9 @@ mod tests {
                 fwd_setup_time_ms: 2,
                 fwd_load_imbalance_ms: 2,
                 fwd_scheduling_overhead_ms: 1,
+                rows_in_lp_sum: 720,
+                rows_in_lp_count: 240,
+                rows_in_lp_max: 24,
             },
             TrainingEvent::TrainingStarted {
                 case_name: "test_case".to_string(),

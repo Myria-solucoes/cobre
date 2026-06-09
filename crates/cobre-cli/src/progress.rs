@@ -632,6 +632,9 @@ mod tests {
             fwd_setup_time_ms: 0,
             fwd_load_imbalance_ms: 0,
             fwd_scheduling_overhead_ms: 0,
+            rows_in_lp_sum: 0,
+            rows_in_lp_count: 0,
+            rows_in_lp_max: 0,
         }
     }
 
