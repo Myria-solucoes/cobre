@@ -53,7 +53,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
-use chrono::{Datelike, NaiveDate};
+use chrono::{Datelike, Months, NaiveDate};
 use cobre_core::scenario::AnnualComponent;
 use cobre_core::{EntityId, System};
 use cobre_io::{
@@ -452,14 +452,33 @@ fn run_estimation(
     let hydro_ids: Vec<EntityId> = system.hydros().iter().map(|h| h.id).collect();
 
     // ── Use stages already present in the system (avoids re-parsing stages.json) ──
-    let stages = system.stages();
+    let study_stages = system.stages();
 
     // ── Extract season map for calendar-based date-to-season fallback ────────
     let season_map = system.policy_graph().season_map.as_ref();
+    let max_order = config.estimation.max_order as usize;
+
+    // ── Synthesize pre-study stages for the PAR lag window (partial-year only) ──
+    // For a full-year study this is empty, so `stages == study_stages` and the
+    // estimation is bit-identical to before. For a partial-year study the
+    // out-of-window lag seasons gain stages, so the season-aware estimators
+    // compute their stats and the `*_to_rows` expansions attach them to the
+    // synthetic negative stage_ids that `PrecomputedPar::build` resolves via
+    // Tier-1 lag lookup.
+    let prestudy = synthesize_prestudy_stages(study_stages, max_order, season_map);
+    let stages: Vec<cobre_core::temporal::Stage> = study_stages
+        .iter()
+        .cloned()
+        .chain(prestudy.iter().cloned())
+        .collect();
+    let stages = stages.as_slice();
 
     // ── Step 3b: aggregate observations to season resolution ─────────────────
+    // Aggregation resolves each observation to a season via the season map, so
+    // it uses the study stages only (synthetic pre-study stages would not change
+    // any observation's resolved season).
     let observations = if let Some(sm) = season_map {
-        aggregate_observations_to_season(&observations, stages, sm)?
+        aggregate_observations_to_season(&observations, study_stages, sm)?
     } else {
         observations
     };
@@ -469,7 +488,6 @@ fn run_estimation(
         estimate_seasonal_stats_with_season_map(&observations, stages, &hydro_ids, season_map)?;
 
     // ── Step 5: estimate AR coefficients ────────────────────────────────────
-    let max_order = config.estimation.max_order as usize;
     let (ar_estimates, estimation_report) = estimate_ar_coefficients_with_selection(
         &observations,
         &seasonal_stats,
@@ -532,11 +550,24 @@ fn run_partial_estimation(
     manifest: &FileManifest,
 ) -> Result<(System, EstimationReport), EstimationError> {
     let hydro_ids: Vec<EntityId> = system.hydros().iter().map(|h| h.id).collect();
-    let stages = system.stages();
+    let study_stages = system.stages();
     let season_map = system.policy_graph().season_map.as_ref();
+    let max_order = config.estimation.max_order as usize;
+
+    // ── Synthesize pre-study stages for the PAR lag window (partial-year only) ──
+    // Empty for a full-year study, so `stages == study_stages` and the partial
+    // estimation is bit-identical to before.
+    let prestudy = synthesize_prestudy_stages(study_stages, max_order, season_map);
+    let stages_owned: Vec<cobre_core::temporal::Stage> = study_stages
+        .iter()
+        .cloned()
+        .chain(prestudy.iter().cloned())
+        .collect();
+    let stages = stages_owned.as_slice();
 
     // ── Steps 3-3b: load history and aggregate to season resolution ──────────
-    let observations = load_and_aggregate_observations(case_dir, stages, season_map)?;
+    // Aggregation resolves seasons via the season map, so it uses study stages.
+    let observations = load_and_aggregate_observations(case_dir, study_stages, season_map)?;
 
     // ── Validate that user stats are present in the loaded system ────────────
     if system.inflow_models().is_empty() {
@@ -555,7 +586,6 @@ fn run_partial_estimation(
         estimate_seasonal_stats_with_season_map(&observations, stages, &hydro_ids, season_map)?;
 
     // ── Step 5: estimate AR coefficients using fitting stats ─────────────────
-    let max_order = config.estimation.max_order as usize;
     let (ar_estimates, mut estimation_report) = estimate_ar_coefficients_with_selection(
         &observations,
         &fitting_stats,
@@ -573,8 +603,10 @@ fn run_partial_estimation(
     )?;
 
     // ── Steps 5b-5d: coverage validation and advisory warnings ───────────────
+    // Coverage compares user stats against estimated stats over the study
+    // horizon; the synthetic pre-study stages are not part of that comparison.
     let (white_noise_fallbacks, std_ratio_warnings) =
-        validate_partial_estimation_coverage(&system, &fitting_stats, stages)?;
+        validate_partial_estimation_coverage(&system, &fitting_stats, study_stages)?;
 
     // ── Step 6: estimate or preserve correlation ─────────────────────────────
     let correlation = if manifest.scenarios_correlation_json {
@@ -593,10 +625,16 @@ fn run_partial_estimation(
     // ── Step 7: convert to row types using USER stats, not fitting stats ──────
     // Fitting stats were used only for YW matrix construction above.
     // User stats (mean_m3s, std_m3s from the input system) drive LP assembly.
-    let user_stats_rows = user_stats_to_rows(&system);
+    let mut stats_rows = user_stats_to_rows(&system);
+    // Out-of-window lag seasons (covered only by synthetic pre-study stages)
+    // have no user stat. Source their (mean, std) from the history-fitted
+    // `fitting_stats` so `PrecomputedPar::build` finds a Tier-1 lag hit at the
+    // negative stage_id rather than zeroing the lag. In-window wrap lags are
+    // left to the cycle-correct Tier-2 → user-stat path. Empty for full-year.
+    stats_rows.extend(prestudy_seasonal_rows(&fitting_stats, &prestudy));
     let coeff_rows = ar_estimates_to_rows(&ar_estimates, stages);
     let annual_rows = ar_estimates_to_annual_rows(&ar_estimates, stages);
-    let inflow_models = assemble_inflow_models(user_stats_rows, coeff_rows, annual_rows)?;
+    let inflow_models = assemble_inflow_models(stats_rows, coeff_rows, annual_rows)?;
 
     estimation_report.white_noise_fallbacks = white_noise_fallbacks;
     estimation_report.std_ratio_warnings = std_ratio_warnings;
@@ -2305,6 +2343,137 @@ pub(crate) fn build_estimation_report(
         white_noise_fallbacks: Vec::new(),
         std_ratio_warnings: Vec::new(),
     }
+}
+
+/// Synthesize pre-study stages covering the PAR(p) lag window for a
+/// partial-year study (one whose horizon is narrower than the seasonal cycle).
+///
+/// For a study starting mid-cycle (e.g. a monthly model spanning September–
+/// December, seasons 8–11), the first study stage's AR lags reach back into
+/// months that have no study stage (August, July, …). Without a stage carrying
+/// those seasons, the season-aware estimators have no place to attach the
+/// out-of-window lag statistics, and the precompute silently zeroes them.
+///
+/// This helper emits, for each lag `k = 1..=min(max_order, cycle_len-1)`, a
+/// pre-study [`Stage`] with:
+/// - `id = first_study_stage.id - k` (negative, descending),
+/// - `season_id` = the season `k` calendar positions before the first study
+///   stage's season (modular on `cycle_len`),
+/// - `start_date`/`end_date` = the calendar month `k` positions before the
+///   first study stage's `start_date`.
+///
+/// A pre-study stage is emitted **only** when its `season_id` is not already
+/// among the study stages' seasons. A full-year study therefore synthesizes
+/// nothing (every season already has a study stage), making this a no-op for
+/// the existing in-horizon cases.
+///
+/// Returns an empty `Vec` when `season_map` is `None`, `max_order == 0`, or
+/// the study has no stage with a `season_id`.
+fn synthesize_prestudy_stages(
+    stages: &[cobre_core::temporal::Stage],
+    max_order: usize,
+    season_map: Option<&cobre_core::temporal::SeasonMap>,
+) -> Vec<cobre_core::temporal::Stage> {
+    let Some(sm) = season_map else {
+        return Vec::new();
+    };
+    let cycle_len = sm.seasons.len();
+    if max_order == 0 || cycle_len == 0 {
+        return Vec::new();
+    }
+
+    // First study stage = lowest non-negative id with a season_id.
+    let Some(first) = stages
+        .iter()
+        .filter(|s| s.id >= 0 && s.season_id.is_some())
+        .min_by_key(|s| s.id)
+    else {
+        return Vec::new();
+    };
+    let Some(first_season) = first.season_id else {
+        return Vec::new();
+    };
+
+    // Seasons already covered by study stages: never synthesize these.
+    let study_seasons: HashSet<usize> = stages.iter().filter_map(|s| s.season_id).collect();
+
+    let lag_window = max_order.min(cycle_len - 1);
+    let mut synthetic = Vec::with_capacity(lag_window);
+
+    for k in 1..=lag_window {
+        // Season k calendar positions before the first study stage's season.
+        let season_k = (first_season + cycle_len - (k % cycle_len)) % cycle_len;
+        if study_seasons.contains(&season_k) {
+            // Wrap lags that land back inside the study window are handled by
+            // the cycle-correct Tier-2 lookup / user stats; do not synthesize.
+            continue;
+        }
+
+        // Dates: month k positions before the first study stage's start_date.
+        // `start_k` is the first of that month; `end_k` is the first of the
+        // following month (k-1 positions before), giving a [start, end) span.
+        let (Some(start_k), Some(end_k)) = (
+            first
+                .start_date
+                .checked_sub_months(Months::new(u32::try_from(k).unwrap_or(u32::MAX))),
+            first
+                .start_date
+                .checked_sub_months(Months::new(u32::try_from(k - 1).unwrap_or(u32::MAX))),
+        ) else {
+            continue;
+        };
+
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let id = first.id - k as i32;
+
+        // Clone the first study stage and override only identity, dates, and
+        // season; block/state/risk/scenario config are irrelevant for estimation
+        // (which keys off id + season_id) but copying them keeps the stage valid.
+        let mut stage = first.clone();
+        // `index` is irrelevant for estimation (reassigned during loading).
+        stage.index = 0;
+        stage.id = id;
+        stage.start_date = start_k;
+        stage.end_date = end_k;
+        stage.season_id = Some(season_k);
+        synthetic.push(stage);
+    }
+
+    synthetic
+}
+
+/// Emit history-derived seasonal rows for the synthetic pre-study stages of a
+/// partial-year study.
+///
+/// Each out-of-window lag season is covered by exactly one synthetic pre-study
+/// stage (negative `id`). Because the season-aware fitting keys each season to
+/// its lowest-`start_date` stage, and the synthetic pre-study stages sort
+/// before every study stage, the corresponding [`SeasonalStats`] entry already
+/// carries that negative `stage_id`. This helper selects those entries and
+/// emits one [`InflowSeasonalStatsRow`] per (hydro, pre-study stage), giving
+/// `PrecomputedPar::build` a Tier-1 lag hit at the negative `stage_id`.
+///
+/// Returns an empty `Vec` when `prestudy` is empty (full-year studies).
+fn prestudy_seasonal_rows(
+    fitting_stats: &[SeasonalStats],
+    prestudy: &[cobre_core::temporal::Stage],
+) -> Vec<InflowSeasonalStatsRow> {
+    if prestudy.is_empty() {
+        return Vec::new();
+    }
+    let prestudy_ids: HashSet<i32> = prestudy.iter().map(|s| s.id).collect();
+    let mut rows: Vec<InflowSeasonalStatsRow> = fitting_stats
+        .iter()
+        .filter(|s| prestudy_ids.contains(&s.stage_id))
+        .map(|s| InflowSeasonalStatsRow {
+            hydro_id: s.entity_id,
+            stage_id: s.stage_id,
+            mean_m3s: s.mean,
+            std_m3s: s.std,
+        })
+        .collect();
+    rows.sort_by_key(|r| (r.hydro_id.0, r.stage_id));
+    rows
 }
 
 /// Convert [`SeasonalStats`] to [`InflowSeasonalStatsRow`], expanding
@@ -6119,5 +6288,192 @@ mod tests {
                 est.season_id
             );
         }
+    }
+
+    /// Build a 12-season monthly `SeasonMap` (season id m → calendar month m+1).
+    fn monthly_season_map() -> cobre_core::temporal::SeasonMap {
+        use cobre_core::temporal::{SeasonCycleType, SeasonDefinition, SeasonMap};
+        let seasons = (0..12usize)
+            .map(|m| SeasonDefinition {
+                id: m,
+                label: format!("M{m}"),
+                month_start: u32::try_from(m + 1).unwrap(),
+                day_start: None,
+                month_end: None,
+                day_end: None,
+            })
+            .collect();
+        SeasonMap {
+            cycle_type: SeasonCycleType::Monthly,
+            seasons,
+        }
+    }
+
+    /// Build study stages for a partial-year monthly study spanning seasons
+    /// `[first_season, first_season + n)` starting in calendar year `start_year`.
+    fn partial_year_stages(
+        first_season: usize,
+        n: usize,
+        start_year: i32,
+    ) -> Vec<cobre_core::temporal::Stage> {
+        (0..n)
+            .map(|k| {
+                let season = first_season + k;
+                let m = u32::try_from(season + 1).unwrap();
+                let (ey, em) = if m == 12 {
+                    (start_year + 1, 1u32)
+                } else {
+                    (start_year, m + 1)
+                };
+                cobre_core::temporal::Stage {
+                    index: k,
+                    id: i32::try_from(k).unwrap(),
+                    start_date: NaiveDate::from_ymd_opt(start_year, m, 1).unwrap(),
+                    end_date: NaiveDate::from_ymd_opt(ey, em, 1).unwrap(),
+                    season_id: Some(season),
+                    blocks: vec![Block {
+                        index: 0,
+                        name: "SINGLE".to_string(),
+                        duration_hours: 744.0,
+                    }],
+                    block_mode: BlockMode::Parallel,
+                    state_config: StageStateConfig {
+                        storage: true,
+                        inflow_lags: false,
+                    },
+                    risk_config: StageRiskConfig::Expectation,
+                    scenario_config: ScenarioSourceConfig {
+                        branching_factor: 1,
+                        noise_method: NoiseMethod::Saa,
+                    },
+                }
+            })
+            .collect()
+    }
+
+    /// Full-cycle PAR(2) partial-year fit: a monthly study spanning seasons
+    /// 8–11 (Sep–Dec) with 30 years of full-cycle synthetic history.
+    ///
+    /// Mirrors the `run_estimation` pipeline (synthesize pre-study stages →
+    /// fit on the combined stages → expand rows → assemble models →
+    /// `PrecomputedPar::build`) and asserts:
+    /// (a) no panic during fitting,
+    /// (b) the synthesized pre-study stages produce `InflowModel` entries at
+    ///     negative `stage_id`s,
+    /// (c) the first study stage's `PrecomputedPar` psi for its pre-study lags
+    ///     is non-zero (the lag stats were sourced from history, not zeroed).
+    #[test]
+    fn partial_year_par2_synthesizes_prestudy_lag_models() {
+        let h1 = EntityId(1);
+        let n_years = 30;
+        let max_order = 2usize;
+        let season_map = monthly_season_map();
+
+        // Study spans seasons 8..=11 (Sep–Dec), study stage ids 0..=3.
+        let study_stages = partial_year_stages(8, 4, 2030);
+
+        // Full-cycle history: all 12 months per year so the out-of-window lag
+        // seasons (6 = July, 7 = August) have observations to fit.
+        let obs = synthetic_monthly_obs(h1, n_years, 100.0, 5.0, 1.0);
+
+        // ── Synthesize pre-study stages for the lag window ───────────────────
+        let prestudy = synthesize_prestudy_stages(&study_stages, max_order, Some(&season_map));
+        // max_order=2 → lags into seasons 7 (Aug) and 6 (Jul), neither in study.
+        assert_eq!(
+            prestudy.len(),
+            2,
+            "expected 2 synthetic pre-study stages, got {}",
+            prestudy.len()
+        );
+        // Pre-study ids descend from the first study stage id (0): -1, -2.
+        let mut pre_ids: Vec<i32> = prestudy.iter().map(|s| s.id).collect();
+        pre_ids.sort_unstable();
+        assert_eq!(pre_ids, vec![-2, -1], "pre-study ids must be -1, -2");
+        // Seasons k positions before season 8: -1 → 7 (Aug), -2 → 6 (Jul).
+        let season_of = |id: i32| prestudy.iter().find(|s| s.id == id).unwrap().season_id;
+        assert_eq!(
+            season_of(-1),
+            Some(7),
+            "stage -1 must map to season 7 (Aug)"
+        );
+        assert_eq!(
+            season_of(-2),
+            Some(6),
+            "stage -2 must map to season 6 (Jul)"
+        );
+
+        let stages: Vec<cobre_core::temporal::Stage> = study_stages
+            .iter()
+            .cloned()
+            .chain(prestudy.iter().cloned())
+            .collect();
+
+        // ── Fit seasonal stats + AR(2) on the combined stages ────────────────
+        let seasonal_stats = {
+            use cobre_stochastic::par::fitting::estimate_seasonal_stats_with_season_map;
+            estimate_seasonal_stats_with_season_map(&obs, &stages, &[h1], Some(&season_map))
+                .expect("seasonal stats must fit without panic")
+        };
+
+        let (ar_estimates, _report) = estimate_ar_coefficients_with_selection(
+            &obs,
+            &seasonal_stats,
+            &stages,
+            &[h1],
+            &ArEstimationConfig {
+                max_order,
+                max_coeff_magnitude: None,
+                season_map: Some(&season_map),
+                use_annual_component: false,
+            },
+        )
+        .expect("AR(2) fit must succeed");
+
+        // ── Expand rows onto pre-study stages and assemble inflow models ─────
+        let stats_rows = seasonal_stats_to_rows(&seasonal_stats, &stages);
+        let coeff_rows = ar_estimates_to_rows(&ar_estimates, &stages);
+        let annual_rows = ar_estimates_to_annual_rows(&ar_estimates, &stages);
+        let inflow_models = assemble_inflow_models(stats_rows, coeff_rows, annual_rows)
+            .expect("assembly must succeed with pre-study rows present");
+
+        // (b) Pre-study InflowModel entries exist at negative stage_ids.
+        let neg_models: Vec<&cobre_core::scenario::InflowModel> =
+            inflow_models.iter().filter(|m| m.stage_id < 0).collect();
+        assert!(
+            neg_models.iter().any(|m| m.stage_id == -1)
+                && neg_models.iter().any(|m| m.stage_id == -2),
+            "expected InflowModel entries at stage_id -1 and -2, got {:?}",
+            neg_models.iter().map(|m| m.stage_id).collect::<Vec<_>>()
+        );
+
+        // ── Build PrecomputedPar with the true cycle length (12) ─────────────
+        let par = cobre_stochastic::PrecomputedPar::build(
+            &inflow_models,
+            &study_stages,
+            &[h1],
+            Some(season_map.seasons.len()),
+        )
+        .expect("PrecomputedPar build must succeed");
+
+        // (c) The first study stage (s_idx 0, season 8) has non-zero psi for
+        // its pre-study lags, proving the lag stats came from history rather
+        // than the (0.0, 0.0) season fallback. PACF may select an order ≤
+        // max_order; whatever the stride, at least one lag must be non-zero
+        // and the lag it consumes resolves to a pre-study stage (season 7/6).
+        let par_order = par.max_order();
+        assert!(
+            par_order >= 1 && par_order <= max_order,
+            "selected order {par_order} must be in 1..={max_order}"
+        );
+        let psi0 = par.psi_slice(0, 0);
+        assert_eq!(
+            psi0.len(),
+            par_order,
+            "psi stride must equal selected order"
+        );
+        assert!(
+            psi0.iter().any(|&p| p.abs() > 1e-9),
+            "first study stage psi must be non-zero for pre-study lags, got {psi0:?}"
+        );
     }
 }

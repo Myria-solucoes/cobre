@@ -427,6 +427,7 @@ fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixtur
             .cloned()
             .collect::<Vec<_>>(),
         &system.hydros().iter().map(|h| h.id).collect::<Vec<_>>(),
+        None,
     )
     .unwrap();
 
@@ -928,6 +929,7 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
             .cloned()
             .collect::<Vec<_>>(),
         &system.hydros().iter().map(|h| h.id).collect::<Vec<_>>(),
+        None,
     )
     .unwrap();
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);

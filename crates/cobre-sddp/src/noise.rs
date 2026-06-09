@@ -101,11 +101,15 @@ pub(crate) fn transform_inflow_noise(
 
             scratch.par_inflow_buf.clear();
             scratch.par_inflow_buf.resize(n_hydros, 0.0);
+            // `evaluate_par_batch` operates on the n_hydros PAR series only;
+            // `raw_noise` carries the full noise dimension (hydros + load buses
+            // + NCS). Slice to the hydro prefix to match the contract, exactly
+            // as the sibling `compute_effective_eta` call below does.
             evaluate_par_batch(
                 par_lp,
                 stage,
                 &scratch.lag_matrix_buf,
-                raw_noise,
+                &raw_noise[..n_hydros],
                 &mut scratch.par_inflow_buf,
             );
 

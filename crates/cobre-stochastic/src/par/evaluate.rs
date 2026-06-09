@@ -185,7 +185,7 @@ pub fn evaluate_par_inflow(
 ///     residual_std_ratio: 1.0,
 ///     annual: None,
 /// };
-/// let par_lp = PrecomputedPar::build(&[model], &[stage], &[EntityId(1)]).unwrap();
+/// let par_lp = PrecomputedPar::build(&[model], &[stage], &[EntityId(1)], None).unwrap();
 ///
 /// let lag_matrix: Vec<f64> = vec![]; // no lags for AR(0)
 /// let noise = vec![0.5];
@@ -263,7 +263,7 @@ pub fn evaluate_par_batch(
 ///     residual_std_ratio: 1.0,
 ///     annual: None,
 /// };
-/// let par_lp = PrecomputedPar::build(&[model], &[stage], &[EntityId(1)]).unwrap();
+/// let par_lp = PrecomputedPar::build(&[model], &[stage], &[EntityId(1)], None).unwrap();
 ///
 /// let lag_matrix: Vec<f64> = vec![]; // no lags for AR(0)
 /// let noise = vec![0.5];
@@ -420,7 +420,7 @@ pub fn solve_par_noise(
 ///     residual_std_ratio: 1.0,
 ///     annual: None,
 /// };
-/// let par_lp = PrecomputedPar::build(&[model], &[stage], &[EntityId(1)]).unwrap();
+/// let par_lp = PrecomputedPar::build(&[model], &[stage], &[EntityId(1)], None).unwrap();
 ///
 /// let lag_matrix: Vec<f64> = vec![]; // no lags for AR(0)
 /// let targets = vec![0.0]; // solve for zero output (truncation)
@@ -507,7 +507,7 @@ pub fn solve_par_noise_batch(
 ///     residual_std_ratio: 1.0,
 ///     annual: None,
 /// };
-/// let par_lp = PrecomputedPar::build(&[model], &[stage], &[EntityId(1)]).unwrap();
+/// let par_lp = PrecomputedPar::build(&[model], &[stage], &[EntityId(1)], None).unwrap();
 ///
 /// let lag_matrix: Vec<f64> = vec![]; // no lags for AR(0)
 /// let targets = vec![0.0]; // solve for zero output (truncation)
@@ -693,7 +693,7 @@ mod tests {
         let mut all_models = pre_models;
         all_models.extend(study_models);
 
-        PrecomputedPar::build(&all_models, &stages, &hydro_ids).unwrap()
+        PrecomputedPar::build(&all_models, &stages, &hydro_ids, None).unwrap()
     }
 
     #[test]
@@ -810,10 +810,15 @@ mod tests {
             make_model(3, 0, 100.0, 30.0, vec![], 1.0),
         ];
 
-        let par_canonical = PrecomputedPar::build(&models, &stages, &hydro_ids_canonical).unwrap();
-        let par_reversed =
-            PrecomputedPar::build(&models_reversed, &[stages[0].clone()], &hydro_ids_canonical)
-                .unwrap();
+        let par_canonical =
+            PrecomputedPar::build(&models, &stages, &hydro_ids_canonical, None).unwrap();
+        let par_reversed = PrecomputedPar::build(
+            &models_reversed,
+            &[stages[0].clone()],
+            &hydro_ids_canonical,
+            None,
+        )
+        .unwrap();
 
         // AR(0) for both, so lag_matrix is empty (max_order=0 → no lag entries).
         let lag_matrix: Vec<f64> = vec![];
@@ -991,7 +996,7 @@ mod tests {
             annual: None,
         };
         let par_lp =
-            crate::par::precompute::PrecomputedPar::build(&[model], &[stage], &[EntityId(1)])
+            crate::par::precompute::PrecomputedPar::build(&[model], &[stage], &[EntityId(1)], None)
                 .unwrap();
 
         let lag_matrix: Vec<f64> = vec![];

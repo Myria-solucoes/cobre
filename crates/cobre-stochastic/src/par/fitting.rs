@@ -378,7 +378,13 @@ pub fn estimate_seasonal_stats_with_season_map(
                 ),
             })?;
 
-        let first_stage_id = season_first_stage[&season_id];
+        // Skip observations whose resolved season has no study stage. A season
+        // not present in `season_first_stage` is not lag-reachable for a study
+        // with no pre-study stages, so its stats are never consumed; indexing it
+        // would panic for partial-year studies whose history spans the full cycle.
+        let Some(&first_stage_id) = season_first_stage.get(&season_id) else {
+            continue;
+        };
         let entry = group_map
             .entry((entity_id, season_id))
             .or_insert_with(|| (Vec::new(), first_stage_id));
@@ -577,10 +583,18 @@ struct SeasonLookups<'a> {
 }
 
 /// Build the shared season lookups from observations, seasonal stats, and stages.
+///
+/// `season_map`, when present, supplies the **true** seasonal cycle length
+/// (`season_map.seasons.len()`) used as the modulus for lag-season wrap-around.
+/// A partial-year study (horizon narrower than the cycle) would otherwise infer
+/// the modulus from the in-window seasons only, mapping out-of-window lag months
+/// to the wrong season. For full-year studies the inferred `max(season_id)+1`
+/// already equals the cycle length, so this is a no-op there.
 fn build_season_lookups<'a>(
     observations: &[(EntityId, NaiveDate, f64)],
     seasonal_stats: &'a [SeasonalStats],
     stages: &[Stage],
+    season_map: Option<&SeasonMap>,
 ) -> SeasonLookups<'a> {
     // Step 1: Build date-to-season mapping (stage index sorted by start_date).
     let mut stage_index: Vec<(NaiveDate, NaiveDate, i32, usize)> = stages
@@ -604,12 +618,20 @@ fn build_season_lookups<'a>(
         })
         .collect();
 
-    // Determine the total number of distinct seasons (M).
-    let n_seasons: usize = stage_index
-        .iter()
-        .map(|&(_, _, _, sid)| sid + 1)
-        .max()
-        .unwrap_or(0);
+    // Determine the seasonal cycle length (M). Prefer the true cycle length
+    // from the season map; fall back to the in-window `max(season_id)+1`
+    // inference when no season map is available. For full-year studies the two
+    // agree, so this is a determinism no-op for the existing cases.
+    let n_seasons: usize = season_map.map_or_else(
+        || {
+            stage_index
+                .iter()
+                .map(|&(_, _, _, sid)| sid + 1)
+                .max()
+                .unwrap_or(0)
+        },
+        |sm| sm.seasons.len(),
+    );
 
     // Step 3: Group observations by entity in chronological order.
     let mut entity_obs: HashMap<EntityId, Vec<(NaiveDate, f64)>> = HashMap::new();
@@ -863,7 +885,7 @@ pub fn estimate_correlation_with_season_map(
         });
     }
 
-    let lookups = build_season_lookups(observations, seasonal_stats, stages);
+    let lookups = build_season_lookups(observations, seasonal_stats, stages, season_map);
 
     let ar_lookup: HashMap<(EntityId, usize), &ArCoefficientEstimate> = ar_estimates
         .iter()

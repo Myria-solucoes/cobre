@@ -8808,7 +8808,8 @@ fn max_par_order_uses_par_lp_when_annual_present() {
     let system = two_hydro_par_system(2, inflow_models.clone());
     let stages = system.stages().to_vec();
     let hydro_ids: Vec<EntityId> = system.hydros().iter().map(|h| h.id).collect();
-    let par_lp = PrecomputedPar::build(&inflow_models, &stages, &hydro_ids).expect("par build ok");
+    let par_lp =
+        PrecomputedPar::build(&inflow_models, &stages, &hydro_ids, None).expect("par build ok");
 
     let result = build_stage_templates(
         &system,
@@ -8860,7 +8861,8 @@ fn max_par_order_classical_unchanged() {
     let system = two_hydro_par_system(3, inflow_models.clone());
     let stages = system.stages().to_vec();
     let hydro_ids: Vec<EntityId> = system.hydros().iter().map(|h| h.id).collect();
-    let par_lp = PrecomputedPar::build(&inflow_models, &stages, &hydro_ids).expect("par build ok");
+    let par_lp =
+        PrecomputedPar::build(&inflow_models, &stages, &hydro_ids, None).expect("par build ok");
 
     let result = build_stage_templates(
         &system,
@@ -8920,7 +8922,8 @@ fn max_par_order_z_inflow_row_has_twelve_lag_entries() {
     let system = two_hydro_par_system(2, inflow_models.clone());
     let stages = system.stages().to_vec();
     let hydro_ids: Vec<EntityId> = system.hydros().iter().map(|h| h.id).collect();
-    let par_lp = PrecomputedPar::build(&inflow_models, &stages, &hydro_ids).expect("par build ok");
+    let par_lp =
+        PrecomputedPar::build(&inflow_models, &stages, &hydro_ids, None).expect("par build ok");
 
     let result = build_stage_templates(
         &system,

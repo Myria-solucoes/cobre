@@ -1047,7 +1047,7 @@ mod tests {
             make_inflow_model(1, 0, 100.0, 30.0, vec![]),
             make_inflow_model(1, 1, 100.0, 30.0, vec![]),
         ];
-        let par = PrecomputedPar::build(&models, &stages, &hydro_ids).unwrap();
+        let par = PrecomputedPar::build(&models, &stages, &hydro_ids, None).unwrap();
 
         // 2 stages, 1 scenario, 1 hydro.
         let mut lib = ExternalScenarioLibrary::new(2, 1, 1, "inflow", vec![1, 1]);
@@ -1109,7 +1109,7 @@ mod tests {
             make_inflow_model(1, 0, 160.0, 25.0, vec![0.5]),
             make_inflow_model(1, 1, 160.0, 25.0, vec![0.5]),
         ];
-        let par = PrecomputedPar::build(&models, &stages, &hydro_ids).unwrap();
+        let par = PrecomputedPar::build(&models, &stages, &hydro_ids, None).unwrap();
 
         // Sanity-check precomputed values.
         assert!((par.deterministic_base(0, 0) - 80.0).abs() < 1e-10);
@@ -1205,7 +1205,7 @@ mod tests {
             make_inflow_model(1, 1, 160.0, 25.0, vec![0.5]),
             make_inflow_model(1, 2, 160.0, 25.0, vec![0.5]),
         ];
-        let par = PrecomputedPar::build(&models, &stages, &hydro_ids).unwrap();
+        let par = PrecomputedPar::build(&models, &stages, &hydro_ids, None).unwrap();
 
         // 3 weekly stages within one monthly lag period:
         //   stages 0 and 1: accumulate but do not finalize
@@ -1349,7 +1349,7 @@ mod tests {
             make_inflow_model(1, 0, 160.0, 25.0, vec![0.5]),
             make_inflow_model(1, 1, 160.0, 25.0, vec![0.5]),
         ];
-        let par = PrecomputedPar::build(&models, &stages, &hydro_ids).unwrap();
+        let par = PrecomputedPar::build(&models, &stages, &hydro_ids, None).unwrap();
 
         let transitions = vec![
             StageLagTransition {
@@ -1804,7 +1804,7 @@ mod tests {
         let models: Vec<_> = (0..i32::try_from(N_STAGES).unwrap())
             .map(|stage_id| make_inflow_model(1, stage_id, 500.0, 50.0, vec![0.3]))
             .collect();
-        let par = PrecomputedPar::build(&models, &stages, &hydro_ids).unwrap();
+        let par = PrecomputedPar::build(&models, &stages, &hydro_ids, None).unwrap();
 
         // StageLagTransition weights (hand-computed from date boundaries).
         // April = 30 days = 720 h.  W1 covers only 3 April days; W2/W3/W4 cover 7 each.

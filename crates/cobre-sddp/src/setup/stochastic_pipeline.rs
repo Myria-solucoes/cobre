@@ -180,8 +180,17 @@ fn build_opening_tree_library(
         .cloned()
         .collect();
     let hydro_ids: Vec<EntityId> = system.hydros().iter().map(|h| h.id).collect();
-    let par =
-        cobre_stochastic::PrecomputedPar::build(system.inflow_models(), &study_stages, &hydro_ids)?;
+    let cycle_len = system
+        .policy_graph()
+        .season_map
+        .as_ref()
+        .map(|sm| sm.seasons.len());
+    let par = cobre_stochastic::PrecomputedPar::build(
+        system.inflow_models(),
+        &study_stages,
+        &hydro_ids,
+        cycle_len,
+    )?;
     let max_order = par.max_order();
     let user_pool = training_source.historical_years.as_ref();
     let window_years = cobre_stochastic::discover_historical_windows(

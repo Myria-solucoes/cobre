@@ -370,7 +370,7 @@ fn collect_load_bus_indices(system: &System, bus_pos: &HashMap<EntityId, usize>)
 /// };
 /// let system = SystemBuilder::new().buses(vec![bus]).build().expect("valid");
 /// let method = InflowNonNegativityMethod::None;
-/// let par_lp = PrecomputedPar::build(&[], &[], &[]).expect("empty ok");
+/// let par_lp = PrecomputedPar::build(&[], &[], &[], None).expect("empty ok");
 /// let normal_lp = cobre_stochastic::normal::precompute::PrecomputedNormal::default();
 /// let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
 /// let resolved_parameters = ResolvedParameters::default();

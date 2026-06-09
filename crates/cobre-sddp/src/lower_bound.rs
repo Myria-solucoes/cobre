@@ -367,11 +367,15 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
 
         // Per-opening: evaluate PAR inflows (only when truncation active).
         if let Some(par_lp) = truncation_par {
+            // `evaluate_par_batch` operates on the n_hydros PAR series only;
+            // `raw_noise` carries the full noise dimension (hydros + load buses
+            // + NCS). Slice to the hydro prefix to match the contract, exactly
+            // as the sibling `compute_effective_eta` call below does.
             evaluate_par_batch(
                 par_lp,
                 0,
                 &scratch.lag_matrix_buf,
-                raw_noise,
+                &raw_noise[..n_hydros],
                 &mut scratch.par_inflow_buf,
             );
         }

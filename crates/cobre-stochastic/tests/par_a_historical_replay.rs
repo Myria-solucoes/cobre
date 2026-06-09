@@ -154,7 +154,7 @@ fn par_a_historical_replay_roundtrip() {
         residual_std_ratio: 0.85,
         annual: Some(annual.clone()),
     }));
-    let par = PrecomputedPar::build(&all_models, &stages, &[hydro]).expect("PAR build");
+    let par = PrecomputedPar::build(&all_models, &stages, &[hydro], None).expect("PAR build");
 
     // PAR-A widens psi stride to 12. Confirm we are exercising the buggy code path.
     assert_eq!(
@@ -275,7 +275,7 @@ fn t2_past_inflows_differ_from_window_lags_roundtrip() {
         residual_std_ratio: 0.85,
         annual: Some(annual.clone()),
     }));
-    let par = PrecomputedPar::build(&all_models, &stages, &[hydro]).expect("PAR build");
+    let par = PrecomputedPar::build(&all_models, &stages, &[hydro], None).expect("PAR build");
     let max_order = par.max_order();
     assert_eq!(max_order, 12);
 
@@ -384,7 +384,7 @@ fn t3_ar0_par_a_roundtrip() {
         residual_std_ratio: 1.0,
         annual: Some(annual.clone()),
     }));
-    let par = PrecomputedPar::build(&all_models, &stages, &[hydro]).expect("PAR build");
+    let par = PrecomputedPar::build(&all_models, &stages, &[hydro], None).expect("PAR build");
     let max_order = par.max_order();
     assert_eq!(max_order, 12, "PAR-A must widen max_order to 12");
 
@@ -481,7 +481,7 @@ fn t4_past_inflows_shorter_than_max_order_roundtrip() {
         residual_std_ratio: 0.9,
         annual: None,
     }));
-    let par = PrecomputedPar::build(&all_models, &stages, &[hydro]).expect("PAR build");
+    let par = PrecomputedPar::build(&all_models, &stages, &[hydro], None).expect("PAR build");
     assert_eq!(par.max_order(), 2);
 
     let window_year: i32 = 2000;
@@ -596,7 +596,7 @@ fn t5_two_windows_shared_past_inflows_roundtrip() {
         residual_std_ratio: 0.85,
         annual: Some(annual.clone()),
     }));
-    let par = PrecomputedPar::build(&all_models, &stages, &[hydro]).expect("PAR build");
+    let par = PrecomputedPar::build(&all_models, &stages, &[hydro], None).expect("PAR build");
     let max_order = par.max_order();
     assert_eq!(max_order, 12);
 
@@ -698,7 +698,7 @@ fn t6_non_trivial_transitions_guard_fires() {
             annual: None,
         })
         .collect();
-    let par = PrecomputedPar::build(&models, &stages, &[hydro]).expect("PAR build");
+    let par = PrecomputedPar::build(&models, &stages, &[hydro], None).expect("PAR build");
 
     let history = vec![row(hydro, 2000, 0, 110.0), row(hydro, 2000, 1, 90.0)];
 

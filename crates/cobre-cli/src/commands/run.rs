@@ -772,10 +772,16 @@ fn broadcast_and_build_setup(
                     .collect();
                 let hydro_ids: Vec<cobre_core::EntityId> =
                     system.hydros().iter().map(|h| h.id).collect();
+                let cycle_len = system
+                    .policy_graph()
+                    .season_map
+                    .as_ref()
+                    .map(|sm| sm.seasons.len());
                 let par = cobre_stochastic::PrecomputedPar::build(
                     system.inflow_models(),
                     &study_stages,
                     &hydro_ids,
+                    cycle_len,
                 )
                 .map_err(|e| CliError::Internal {
                     message: format!("PAR build error on non-root rank: {e}"),

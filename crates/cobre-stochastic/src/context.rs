@@ -491,7 +491,13 @@ pub fn build_stochastic_context(
         }
     };
 
-    let par_lp = PrecomputedPar::build(system.inflow_models(), &study_stages, &hydro_ids)?;
+    let cycle_len = system
+        .policy_graph()
+        .season_map
+        .as_ref()
+        .map(|sm| sm.seasons.len());
+    let par_lp =
+        PrecomputedPar::build(system.inflow_models(), &study_stages, &hydro_ids, cycle_len)?;
 
     let correlation = if dim == 0 || system.correlation().profiles.is_empty() {
         DecomposedCorrelation::empty()
