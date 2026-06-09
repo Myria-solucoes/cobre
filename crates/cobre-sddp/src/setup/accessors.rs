@@ -86,6 +86,16 @@ impl StudySetup {
         &self.stage_data.indexer
     }
 
+    /// Number of stages in the planning horizon.
+    ///
+    /// Used by the CLI summary to express the pool-level active-row total on a
+    /// per-stage basis, so it is directly comparable to the per-solve
+    /// rows-in-LP metric reported for Dynamic Cut Selection.
+    #[must_use]
+    pub fn num_stages(&self) -> usize {
+        self.methodology.horizon.num_stages()
+    }
+
     /// Construct a [`StageContext`] borrowing from this setup.
     #[must_use]
     pub fn stage_ctx(&self) -> StageContext<'_> {

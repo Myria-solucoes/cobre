@@ -176,6 +176,18 @@ pub struct MetadataRowPool {
     /// Rows currently active in the LP at termination.
     #[serde(default)]
     pub cuts_active: u64,
+    /// Sum of resident rows-in-LP over every lazy-selection solve in the run
+    /// (reduced across ranks). With `rows_in_lp_solve_count`, the mean per solve.
+    /// Zero when no lazy selection ran. `serde(default)` for old-metadata reads.
+    #[serde(default)]
+    pub rows_in_lp_total: u64,
+    /// Number of lazy-selection solves in the run (reduced across ranks).
+    #[serde(default)]
+    pub rows_in_lp_solve_count: u64,
+    /// Largest resident rows-in-LP over any single lazy-selection solve
+    /// (reduced across ranks). Zero when no lazy selection ran.
+    #[serde(default)]
+    pub rows_in_lp_max: u64,
 }
 
 /// Final objective bounds embedded in [`TrainingMetadata`].
@@ -499,6 +511,9 @@ mod tests {
                 total_active: 980_000,
                 peak_active: 1_100_000,
                 cuts_active: 980_000,
+                rows_in_lp_total: 0,
+                rows_in_lp_solve_count: 0,
+                rows_in_lp_max: 0,
             },
             bounds: MetadataBounds {
                 final_lower_bound: 48_500.0,

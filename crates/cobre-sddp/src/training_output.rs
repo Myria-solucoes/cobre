@@ -81,6 +81,16 @@ struct PartialRecord {
     fwd_load_imbalance_ms: u64,
     /// Forward pass scheduling overhead from [`TrainingEvent::IterationSummary`] (ms).
     fwd_scheduling_overhead_ms: u64,
+    /// Sum of resident rows-in-LP over this iteration's lazy solves (all ranks),
+    /// from [`TrainingEvent::IterationSummary`]. Zero for non-lazy methods.
+    rows_in_lp_sum: u64,
+    /// Count of this iteration's lazy solves (all ranks), from
+    /// [`TrainingEvent::IterationSummary`]. The per-iteration mean denominator.
+    rows_in_lp_count: u64,
+    /// Running peak resident rows-in-LP up to and including this iteration (all
+    /// ranks), from [`TrainingEvent::IterationSummary`]. A `max`-fold over
+    /// iterations yields the run-level peak. Zero for non-lazy methods.
+    rows_in_lp_max: u64,
 }
 
 /// Accumulate per-iteration partial records from the event log.
@@ -110,6 +120,9 @@ fn accumulate_partial_records(events: &[TrainingEvent]) -> (BTreeMap<u64, Partia
                 fwd_setup_time_ms,
                 fwd_load_imbalance_ms,
                 fwd_scheduling_overhead_ms,
+                rows_in_lp_sum,
+                rows_in_lp_count,
+                rows_in_lp_max,
                 ..
             } => {
                 let record = partials.entry(*iteration).or_default();
@@ -125,6 +138,9 @@ fn accumulate_partial_records(events: &[TrainingEvent]) -> (BTreeMap<u64, Partia
                 record.fwd_setup_ms = *fwd_setup_time_ms;
                 record.fwd_load_imbalance_ms = *fwd_load_imbalance_ms;
                 record.fwd_scheduling_overhead_ms = *fwd_scheduling_overhead_ms;
+                record.rows_in_lp_sum = *rows_in_lp_sum;
+                record.rows_in_lp_count = *rows_in_lp_count;
+                record.rows_in_lp_max = *rows_in_lp_max;
             }
 
             TrainingEvent::ForwardSyncComplete {
@@ -229,6 +245,15 @@ fn partial_to_iteration_record(iter: u64, partial: &PartialRecord) -> IterationR
         .saturating_add(partial.lower_bound_eval_ms);
     let overhead_ms = partial.iteration_time_ms.saturating_sub(attributed_ms);
 
+    // Mean resident rows-in-LP per lazy solve this iteration (0.0 when no lazy
+    // solve ran). The sum/count are already reduced across ranks on the event.
+    #[allow(clippy::cast_precision_loss)]
+    let mean_rows_in_lp = if partial.rows_in_lp_count > 0 {
+        partial.rows_in_lp_sum as f64 / partial.rows_in_lp_count as f64
+    } else {
+        0.0
+    };
+
     IterationRecord {
         iteration: iteration_u32,
         lower_bound: partial.lower_bound,
@@ -259,6 +284,7 @@ fn partial_to_iteration_record(iter: u64, partial: &PartialRecord) -> IterationR
         time_fwd_scheduling_overhead_ms: partial.fwd_scheduling_overhead_ms,
         time_overhead_ms: overhead_ms,
         solve_time_ms: partial.solve_time_ms,
+        mean_rows_in_lp,
     }
 }
 
@@ -304,6 +330,9 @@ fn partial_to_iteration_record(iter: u64, partial: &PartialRecord) -> IterationR
 ///     fwd_setup_time_ms: 0,
 ///     fwd_load_imbalance_ms: 0,
 ///     fwd_scheduling_overhead_ms: 0,
+///     rows_in_lp_sum: 0,
+///     rows_in_lp_count: 0,
+///     rows_in_lp_max: 0,
 /// }];
 ///
 /// let fcf = FutureCostFunction::new(2, 1, 4, 1, &[0; 2]);
@@ -332,6 +361,21 @@ pub fn build_training_output(
         })
         .collect();
 
+    // Run-level rows-in-LP aggregate, all from the per-iteration IterationSummary
+    // events (already reduced across ranks): sum/count fold to the run total and
+    // solve count (→ mean per solve), and the running peak max-folds to the
+    // run-level peak. Keeping all three on the one event path avoids a separate
+    // finalize reduce or a TrainingResult conduit. All zero for non-lazy methods,
+    // so the consumer can detect "no lazy selection ran".
+    let (rows_in_lp_total, rows_in_lp_solve_count, rows_in_lp_max) =
+        partials.values().fold((0u64, 0u64, 0u64), |(s, c, m), p| {
+            (
+                s + p.rows_in_lp_sum,
+                c + p.rows_in_lp_count,
+                m.max(p.rows_in_lp_max),
+            )
+        });
+
     let convergence_records: Vec<IterationRecord> = partials
         .into_iter()
         .filter(|(iter, _)| summary_iterations.contains(iter))
@@ -343,6 +387,9 @@ pub fn build_training_output(
         total_active: fcf.total_active_cuts() as u64,
         peak_active,
         cuts_active: fcf.total_active_cuts() as u64,
+        rows_in_lp_total,
+        rows_in_lp_solve_count,
+        rows_in_lp_max,
     };
 
     let converged = result.reason == crate::stopping_rule::RULE_BOUND_STALLING
@@ -556,6 +603,9 @@ mod tests {
             fwd_setup_time_ms: 0,
             fwd_load_imbalance_ms: 0,
             fwd_scheduling_overhead_ms: 0,
+            rows_in_lp_sum: 0,
+            rows_in_lp_count: 0,
+            rows_in_lp_max: 0,
         }
     }
 
@@ -886,6 +936,9 @@ mod tests {
                 fwd_setup_time_ms: 0,
                 fwd_load_imbalance_ms: 0,
                 fwd_scheduling_overhead_ms: 0,
+                rows_in_lp_sum: 0,
+                rows_in_lp_count: 0,
+                rows_in_lp_max: 0,
             },
             TrainingEvent::ForwardSyncComplete {
                 iteration: 1,
@@ -963,6 +1016,9 @@ mod tests {
                 fwd_setup_time_ms: 0,
                 fwd_load_imbalance_ms: 0,
                 fwd_scheduling_overhead_ms: 0,
+                rows_in_lp_sum: 0,
+                rows_in_lp_count: 0,
+                rows_in_lp_max: 0,
             },
             TrainingEvent::ForwardSyncComplete {
                 iteration: 1,
@@ -1020,6 +1076,9 @@ mod tests {
             fwd_setup_time_ms: 0,
             fwd_load_imbalance_ms: 0,
             fwd_scheduling_overhead_ms: 0,
+            rows_in_lp_sum: 0,
+            rows_in_lp_count: 0,
+            rows_in_lp_max: 0,
         }];
         let fcf = make_empty_fcf();
 

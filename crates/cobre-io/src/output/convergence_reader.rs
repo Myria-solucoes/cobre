@@ -262,6 +262,7 @@ mod tests {
             time_fwd_scheduling_overhead_ms: 0,
             time_overhead_ms: 0,
             solve_time_ms: 0.0,
+            mean_rows_in_lp: 0.0,
         }
     }
 
@@ -282,6 +283,9 @@ mod tests {
                 total_active: 80,
                 peak_active: 95,
                 cuts_active: 0,
+                rows_in_lp_total: 0,
+                rows_in_lp_solve_count: 0,
+                rows_in_lp_max: 0,
             },
             cut_selection_records: vec![],
             worker_timing_records: vec![],

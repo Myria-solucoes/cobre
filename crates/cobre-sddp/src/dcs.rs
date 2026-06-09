@@ -482,6 +482,21 @@ pub struct DcsSolveScratch {
     /// scoring-versus-solve split; pure measurement, off the steady-state hot
     /// path when no observer reads it.
     pub scoring_time_seconds: f64,
+    /// Cumulative sum of the resident cut-row count (`row_map.total_cut_rows()`)
+    /// over every solve that used this scratch — one term per
+    /// [`lazy_solve_preloaded`] completion (see [`Self::store_result`]). With
+    /// [`Self::rows_in_lp_count`] this yields the mean rows-in-LP per solve.
+    /// Grows monotonically; never reset by the solve loop (a per-worker
+    /// accumulator surviving across all (stage, solve) pairs, like
+    /// [`Self::scoring_time_seconds`]). Pure measurement, off the steady-state
+    /// hot path.
+    pub rows_in_lp_sum: u64,
+    /// Number of solves folded into [`Self::rows_in_lp_sum`] (one per
+    /// [`Self::store_result`] call). The denominator for the mean.
+    pub rows_in_lp_count: u64,
+    /// Largest resident cut-row count observed across every solve that used this
+    /// scratch.
+    pub rows_in_lp_max: u64,
 }
 
 impl Default for DcsSolveScratch {
@@ -505,6 +520,9 @@ impl Default for DcsSolveScratch {
             res_iterations: 0,
             res_solve_time_seconds: 0.0,
             scoring_time_seconds: 0.0,
+            rows_in_lp_sum: 0,
+            rows_in_lp_count: 0,
+            rows_in_lp_max: 0,
             row_map: CutRowMap::new(0, 0),
         }
     }
@@ -575,6 +593,16 @@ impl DcsSolveScratch {
         self.res_dual.extend_from_slice(view.dual);
         self.res_reduced_costs.clear();
         self.res_reduced_costs.extend_from_slice(view.reduced_costs);
+
+        // Per-solve resident-set size (rows-in-LP): the number of cut rows
+        // resident in the LP at this solve's completion. Folded here because
+        // `store_result` is the single completion point of every lazy solve
+        // (both the exact-optimum and TC-fallback exits). Mirrors the
+        // `scoring_time_seconds` accumulator — cumulative, never reset.
+        let rows_in_lp = self.row_map.total_cut_rows() as u64;
+        self.rows_in_lp_sum += rows_in_lp;
+        self.rows_in_lp_count += 1;
+        self.rows_in_lp_max = self.rows_in_lp_max.max(rows_in_lp);
     }
 }
 
@@ -2171,6 +2199,53 @@ mod tests {
             scratch.scoring_time_seconds > before,
             "scoring accumulator {} must exceed its pre-call value {before}",
             scratch.scoring_time_seconds
+        );
+    }
+
+    /// The rows-in-LP accumulators track the resident cut-row count per solve:
+    /// they start at zero, fold one term per solve (cumulative, never reset
+    /// between solves on the same scratch), and `max` tracks the peak. Seeding
+    /// all three cuts resident gives a resident set of 3 with no growth, so two
+    /// fresh solves on the same scratch yield count == 2, sum == 6, max == 3.
+    #[test]
+    fn rows_in_lp_tracks_resident_set_size_per_solve() {
+        let indexer = lazy_indexer();
+        let pool = make_three_cut_pool();
+        let mut solver = active_profiled();
+        let core = core_template();
+        let mut scratch = DcsSolveScratch::default();
+        let params = lazy_params(10, 50);
+
+        // Defaults are zero before any solve.
+        assert_eq!(scratch.rows_in_lp_sum, 0);
+        assert_eq!(scratch.rows_in_lp_count, 0);
+        assert_eq!(scratch.rows_in_lp_max, 0);
+
+        for _ in 0..2 {
+            solver.load_model(&core);
+            lazy_solve_preloaded(
+                &mut solver,
+                &core,
+                &pool,
+                &indexer,
+                &[],
+                None,
+                &[0, 1, 2], // all three cuts resident from the seed → no growth
+                &params,
+                &mut scratch,
+                ctx(),
+            )
+            .expect("lazy_solve_preloaded must succeed");
+        }
+
+        assert_eq!(scratch.rows_in_lp_count, 2, "one term folded per solve");
+        assert_eq!(
+            scratch.rows_in_lp_sum, 6,
+            "3 resident cut rows per solve, summed over 2 solves"
+        );
+        assert_eq!(
+            scratch.rows_in_lp_max, 3,
+            "peak resident set is the 3 seeded cuts"
         );
     }
 

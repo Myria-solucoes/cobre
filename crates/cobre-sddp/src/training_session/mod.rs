@@ -339,6 +339,29 @@ where
         (self.config.loop_config.start_iteration + 1)..=self.config.loop_config.max_iterations
     }
 
+    /// Sum the cumulative resident-set-size accumulators (`(sum, count)`) across
+    /// this rank's forward-pass workspaces. A per-iteration delta of this gives
+    /// the iteration's rows-in-LP contribution; the final value gives the run
+    /// total. Zero for non-lazy methods (the accumulators are only touched by the
+    /// lazy solve path).
+    fn rows_in_lp_local_totals(&self) -> (u64, u64) {
+        self.fwd_pool.workspaces.iter().fold((0, 0), |(s, c), w| {
+            let d = &w.backward_accum.dcs_solve;
+            (s + d.rows_in_lp_sum, c + d.rows_in_lp_count)
+        })
+    }
+
+    /// Largest resident-set size observed across this rank's forward-pass
+    /// workspaces (zero when the lazy path never ran).
+    fn rows_in_lp_local_max(&self) -> u64 {
+        self.fwd_pool
+            .workspaces
+            .iter()
+            .map(|w| w.backward_accum.dcs_solve.rows_in_lp_max)
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Execute one training iteration.
     ///
     /// Performs: forward pass, forward sync, backward pass, cut selection,
@@ -365,11 +388,47 @@ where
 
         let iter_start = Instant::now();
 
+        // Snapshot the cumulative rows-in-LP accumulators before this iteration's
+        // solves so the post-backward delta isolates this iteration's contribution.
+        let (rows_in_lp_sum_before, rows_in_lp_count_before) = self.rows_in_lp_local_totals();
+
         // ── Forward pass + sync ────────────────────────────────────────────
         let (forward_result, sync_result, fwd_solve_time_ms) = self.run_forward_phase(iteration)?;
 
         // ── Backward pass ──────────────────────────────────────────────────
         let (backward_result, bwd_solve_time_ms) = self.run_backward_phase(iteration)?;
+
+        // Resident-set-size (rows-in-LP) metric, reduced across ranks so every
+        // reported figure is work-distribution invariant. The sum/count are this
+        // iteration's per-rank delta (Sum-reduced) and feed the per-iteration
+        // mean; the running peak is the cumulative max so far (Max-reduced) and
+        // feeds the run-level peak via a max-fold in `build_training_output` — so
+        // all three rows-in-LP aggregates travel the one event path, with no
+        // separate finalize reduce. Forward + backward are the only lazy solves;
+        // LB evaluation is all-cuts.
+        let (rows_in_lp_sum, rows_in_lp_count, rows_in_lp_max) = {
+            let (sum_after, count_after) = self.rows_in_lp_local_totals();
+            let sum_delta = sum_after - rows_in_lp_sum_before;
+            let count_delta = count_after - rows_in_lp_count_before;
+            #[allow(clippy::cast_precision_loss)]
+            let local_sum = [sum_delta as f64, count_delta as f64];
+            let mut global_sum = [0.0_f64; 2];
+            self.comm
+                .allreduce(&local_sum, &mut global_sum, ReduceOp::Sum)
+                .map_err(SddpError::Communication)?;
+            #[allow(clippy::cast_precision_loss)]
+            let local_max = [self.rows_in_lp_local_max() as f64];
+            let mut global_max = [0.0_f64; 1];
+            self.comm
+                .allreduce(&local_max, &mut global_max, ReduceOp::Max)
+                .map_err(SddpError::Communication)?;
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            (
+                global_sum[0].round() as u64,
+                global_sum[1].round() as u64,
+                global_max[0].round() as u64,
+            )
+        };
 
         // ── Cut selection + baking ─────────────────────────────────────────
         self.run_cut_management(iteration);
@@ -419,6 +478,9 @@ where
                 fwd_setup_time_ms: forward_result.setup_time_ms,
                 fwd_load_imbalance_ms: forward_result.load_imbalance_ms,
                 fwd_scheduling_overhead_ms: forward_result.scheduling_overhead_ms,
+                rows_in_lp_sum,
+                rows_in_lp_count,
+                rows_in_lp_max,
             },
         );
 
