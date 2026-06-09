@@ -32,6 +32,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::NaiveDate;
+use rayon::prelude::*;
+
 use cobre_core::{
     EntityId,
     scenario::{
@@ -902,80 +904,88 @@ fn compute_hydro_residuals(
     hydro_ids: &[EntityId],
     season_map: Option<&SeasonMap>,
 ) -> Vec<HashMap<usize, HashMap<NaiveDate, f64>>> {
-    let n_hydros = hydro_ids.len();
-    let mut hydro_residuals: Vec<HashMap<usize, HashMap<NaiveDate, f64>>> =
-        (0..n_hydros).map(|_| HashMap::new()).collect();
+    // Each hydro's residual map is computed independently from immutable shared
+    // inputs, so the outer per-hydro loop is embarrassingly parallel. Each task
+    // owns a local map and `collect()` reassembles results in canonical
+    // `hydro_ids` index order, making thread scheduling irrelevant to the output
+    // ordering (deterministic). The inner per-observation arithmetic — including
+    // the sequential `ar_sum` accumulation over lags — is reproduced verbatim so
+    // every output element is bit-identical to a single-threaded pass.
+    hydro_ids
+        .par_iter()
+        .map(|&hydro_id| {
+            let mut residuals: HashMap<usize, HashMap<NaiveDate, f64>> = HashMap::new();
 
-    for (hidx, &hydro_id) in hydro_ids.iter().enumerate() {
-        let Some(all_obs) = lookups.entity_obs.get(&hydro_id) else {
-            continue;
-        };
-        let Some(date_index) = lookups.entity_date_index.get(&hydro_id) else {
-            continue;
-        };
-
-        for &(date, value) in all_obs {
-            let Some(season_id) = find_season_for_date(&lookups.stage_index, date)
-                .or_else(|| season_map.and_then(|sm| sm.season_for_date(date)))
-            else {
-                continue;
+            let Some(all_obs) = lookups.entity_obs.get(&hydro_id) else {
+                return residuals;
+            };
+            let Some(date_index) = lookups.entity_date_index.get(&hydro_id) else {
+                return residuals;
             };
 
-            let Some(stats_m) = lookups.stats_lookup.get(&(hydro_id, season_id)) else {
-                continue;
-            };
-
-            let z_t = if stats_m.std == 0.0 {
-                0.0
-            } else {
-                (value - stats_m.mean) / stats_m.std
-            };
-
-            let ar_est = ar_lookup.get(&(hydro_id, season_id));
-            let ar_order = ar_est.map_or(0, |e| e.coefficients.len());
-            let ar_coeffs = ar_est.map_or(&[] as &[f64], |e| &e.coefficients);
-
-            let Some(&pos) = date_index.get(&date) else {
-                continue;
-            };
-            if pos < ar_order {
-                continue;
-            }
-
-            let mut ar_sum = 0.0_f64;
-            let mut lag_ok = true;
-
-            for lag in 1..=ar_order {
-                let n_s = lookups.n_seasons.max(1);
-                let lag_season = season_id.wrapping_add(n_s).wrapping_sub(lag % n_s) % n_s;
-
-                let Some(stats_lag) = lookups.stats_lookup.get(&(hydro_id, lag_season)) else {
-                    lag_ok = false;
-                    break;
+            for &(date, value) in all_obs {
+                let Some(season_id) = find_season_for_date(&lookups.stage_index, date)
+                    .or_else(|| season_map.and_then(|sm| sm.season_for_date(date)))
+                else {
+                    continue;
                 };
 
-                let (_, lagged_value) = all_obs[pos - lag];
-                let z_lag = if stats_lag.std == 0.0 {
+                let Some(stats_m) = lookups.stats_lookup.get(&(hydro_id, season_id)) else {
+                    continue;
+                };
+
+                let z_t = if stats_m.std == 0.0 {
                     0.0
                 } else {
-                    (lagged_value - stats_lag.mean) / stats_lag.std
+                    (value - stats_m.mean) / stats_m.std
                 };
-                ar_sum += ar_coeffs[lag - 1] * z_lag;
+
+                let ar_est = ar_lookup.get(&(hydro_id, season_id));
+                let ar_order = ar_est.map_or(0, |e| e.coefficients.len());
+                let ar_coeffs = ar_est.map_or(&[] as &[f64], |e| &e.coefficients);
+
+                let Some(&pos) = date_index.get(&date) else {
+                    continue;
+                };
+                if pos < ar_order {
+                    continue;
+                }
+
+                let mut ar_sum = 0.0_f64;
+                let mut lag_ok = true;
+
+                for lag in 1..=ar_order {
+                    let n_s = lookups.n_seasons.max(1);
+                    let lag_season = season_id.wrapping_add(n_s).wrapping_sub(lag % n_s) % n_s;
+
+                    let Some(stats_lag) = lookups.stats_lookup.get(&(hydro_id, lag_season)) else {
+                        lag_ok = false;
+                        break;
+                    };
+
+                    let (_, lagged_value) = all_obs[pos - lag];
+                    let z_lag = if stats_lag.std == 0.0 {
+                        0.0
+                    } else {
+                        (lagged_value - stats_lag.mean) / stats_lag.std
+                    };
+                    ar_sum += ar_coeffs[lag - 1] * z_lag;
+                }
+
+                if !lag_ok {
+                    continue;
+                }
+
+                let epsilon = z_t - ar_sum;
+                residuals
+                    .entry(season_id)
+                    .or_default()
+                    .insert(date, epsilon);
             }
 
-            if !lag_ok {
-                continue;
-            }
-
-            let epsilon = z_t - ar_sum;
-            hydro_residuals[hidx]
-                .entry(season_id)
-                .or_default()
-                .insert(date, epsilon);
-        }
-    }
-
-    hydro_residuals
+            residuals
+        })
+        .collect()
 }
 
 /// Flatten per-season residuals into a single date-keyed map per hydro.
@@ -1139,7 +1149,15 @@ fn compute_seasonal_matrices(
 ///
 /// For each pair `(i, j)`, collects time steps where both have residuals,
 /// then applies the standard Pearson formula with Bessel correction (N-1).
-/// Pairs are sorted for deterministic iteration across `HashMap` orderings.
+///
+/// Pairs are sorted by their join key (`NaiveDate`) before accumulation. The
+/// date is the unique observation identifier shared by both residual series, so
+/// sorting on it yields an iteration order that is independent of (a) the
+/// nondeterministic `HashMap` traversal order and (b) which of the two series is
+/// the row (`i`) versus the column (`j`). The latter is what makes the result
+/// invariant to the declaration order of the input series: reversing the slice
+/// swaps the row/column roles of every pair but leaves the date-sorted summation
+/// order — and therefore every floating-point partial sum — bit-identical.
 fn compute_pearson_correlation_matrix(hydro_residuals: &[HashMap<NaiveDate, f64>]) -> Vec<f64> {
     let n = hydro_residuals.len();
     // Flat row-major N×N matrix: entry (i, j) is at index i * n + j.
@@ -1152,9 +1170,9 @@ fn compute_pearson_correlation_matrix(hydro_residuals: &[HashMap<NaiveDate, f64>
             let r_i = &hydro_residuals[i];
             let r_j = &hydro_residuals[j];
 
-            let mut pairs: Vec<(f64, f64)> = r_i
+            let mut pairs: Vec<(NaiveDate, f64, f64)> = r_i
                 .iter()
-                .filter_map(|(date, &ei)| r_j.get(date).map(|&ej| (ei, ej)))
+                .filter_map(|(&date, &ei)| r_j.get(&date).map(|&ej| (date, ei, ej)))
                 .collect();
 
             if pairs.len() < 2 {
@@ -1163,18 +1181,21 @@ fn compute_pearson_correlation_matrix(hydro_residuals: &[HashMap<NaiveDate, f64>
                 continue;
             }
 
-            // Sort for deterministic iteration across HashMap orderings.
-            pairs.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)));
+            // Sort by the join key (date) so the accumulation order depends only
+            // on the shared observation dates — never on HashMap traversal order
+            // or on which series is i vs j. Dates are unique within a series, so
+            // this is a total order with no ties.
+            pairs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
             #[allow(clippy::cast_precision_loss)]
             let np = pairs.len() as f64;
-            let mean_i = pairs.iter().map(|(ei, _)| ei).sum::<f64>() / np;
-            let mean_j = pairs.iter().map(|(_, ej)| ej).sum::<f64>() / np;
+            let mean_i = pairs.iter().map(|(_, ei, _)| ei).sum::<f64>() / np;
+            let mean_j = pairs.iter().map(|(_, _, ej)| ej).sum::<f64>() / np;
 
             let mut cov = 0.0_f64;
             let mut var_i = 0.0_f64;
             let mut var_j = 0.0_f64;
-            for (ei, ej) in &pairs {
+            for (_, ei, ej) in &pairs {
                 let di = ei - mean_i;
                 let dj = ej - mean_j;
                 cov += di * dj;
@@ -1828,9 +1849,7 @@ pub fn build_periodic_yw_matrix_into(
     matrix_out.resize(order * order, 0.0_f64);
     // Zero-fill: entries are written below, but the symmetric fill relies on
     // the upper triangle being populated before mirroring.
-    for v in matrix_out.iter_mut() {
-        *v = 0.0;
-    }
+    matrix_out.fill(0.0);
     rhs_out.resize(order, 0.0_f64);
 
     for i in 0..order {
@@ -3837,6 +3856,85 @@ mod tests {
                 "diagonal matrix[{i}][{i}] = {} must be 1.0",
                 matrix[i][i]
             );
+        }
+    }
+
+    #[test]
+    fn estimate_correlation_pooled_matrix_order_invariant() {
+        // The parallel per-hydro residual fit must produce a pooled correlation
+        // matrix that is bit-identical regardless of the declaration order of
+        // `hydro_ids`. Build a multi-hydro, multi-season white-noise (order-0)
+        // baseline, then fit with the ids ascending and reversed; after
+        // re-indexing both pooled matrices to a common entity order, every entry
+        // must match exactly. (`estimate_ar_coefficients` only supports
+        // max_order=0, so coefficients are empty and the residual is the raw
+        // standardized observation; the order invariance under test is the
+        // pooled-matrix assembly, not the lag-sum path.)
+        // A multi-hydro, multi-season study with correlated-but-distinct series
+        // gives nonzero off-diagonals, so a reordering-induced drift would show.
+        let n_seasons = 12;
+        let stages = multi_season_stages(2000, 40, n_seasons);
+        let hydro_ids = vec![EntityId::from(1), EntityId::from(2), EntityId::from(3)];
+
+        let mut seed1: u64 = 0x1234_5678;
+        let mut seed2: u64 = 0x9abc_def0;
+        let mut seed3: u64 = 0x0f0f_0f0f;
+        let mut observations: Vec<(EntityId, NaiveDate, f64)> = Vec::new();
+        for i in 0..stages.len() {
+            let year = 2000 + (i / 12) as i32;
+            let month = (i % 12) as u32 + 1;
+            let date = NaiveDate::from_ymd_opt(year, month, 15).unwrap();
+            // Correlated-but-distinct series so off-diagonals are nonzero.
+            let a = splitmix(&mut seed1);
+            let b = splitmix(&mut seed2);
+            let c = splitmix(&mut seed3);
+            observations.push((EntityId::from(1), date, a));
+            observations.push((EntityId::from(2), date, 0.7 * a + 0.3 * b));
+            observations.push((EntityId::from(3), date, 0.4 * b + 0.6 * c));
+        }
+
+        let stats = estimate_seasonal_stats(&observations, &stages, &hydro_ids).unwrap();
+        let estimates =
+            estimate_ar_coefficients(&observations, &stats, &stages, &hydro_ids, 0).unwrap();
+
+        let mut reversed_ids = hydro_ids.clone();
+        reversed_ids.reverse();
+
+        let corr_fwd =
+            estimate_correlation(&observations, &estimates, &stats, &stages, &hydro_ids).unwrap();
+        let corr_rev =
+            estimate_correlation(&observations, &estimates, &stats, &stages, &reversed_ids)
+                .unwrap();
+
+        // Re-index each pooled matrix by entity id into a common ascending order.
+        let group_fwd = &corr_fwd.profiles["default"].groups[0];
+        let group_rev = &corr_rev.profiles["default"].groups[0];
+        assert_eq!(group_fwd.entities.len(), 3);
+        assert_eq!(group_rev.entities.len(), 3);
+
+        let pos_of = |group: &super::CorrelationGroup, id: EntityId| -> usize {
+            group
+                .entities
+                .iter()
+                .position(|e| e.id == id)
+                .expect("entity present in group")
+        };
+
+        let common = [EntityId::from(1), EntityId::from(2), EntityId::from(3)];
+        for &ri in &common {
+            for &cj in &common {
+                let fi = pos_of(group_fwd, ri);
+                let fj = pos_of(group_fwd, cj);
+                let vi = pos_of(group_rev, ri);
+                let vj = pos_of(group_rev, cj);
+                let v_fwd = group_fwd.matrix[fi][fj];
+                let v_rev = group_rev.matrix[vi][vj];
+                assert!(
+                    v_fwd == v_rev,
+                    "pooled matrix entry for ({ri:?},{cj:?}) differs: \
+                     forward {v_fwd:?} != reversed {v_rev:?} (must be bit-identical)"
+                );
+            }
         }
     }
 

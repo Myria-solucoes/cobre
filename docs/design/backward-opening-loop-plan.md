@@ -1,12 +1,13 @@
 # Backward opening loop — unified performance & CLP-backend plan
 
-> **Status**: Plan / sequencing authority (2026-06-08). This is the **single
-> implementation plan** that unifies three previously-separate design notes plus
-> two findings made while executing them. It owns the **current-state analysis,
-> the workstream interactions, and the sequencing**; each workstream's detailed
-> design continues to live in its source note. Where this plan and a source note
-> disagree on a code fact, **this plan is authoritative** (it was written against
-> a verified read of the tree on 2026-06-08).
+> **Status**: Plan / sequencing authority (2026-06-08; warm-start status updated
+> 2026-06-09). This is the **single implementation plan** that unifies three
+> previously-separate design notes plus two findings made while executing them. It
+> owns the **current-state analysis, the workstream interactions, and the
+> sequencing**; each workstream's detailed design continues to live in its source
+> note. Where this plan and a source note disagree on a code fact, **this plan is
+> authoritative** (it was written against a verified read of the tree on
+> 2026-06-08; the warm-start section reflects a re-verified read on 2026-06-09).
 >
 > **Source notes (each remains the detailed design for its workstream):**
 >
@@ -29,14 +30,14 @@
 Five lines of work all operate on the **same hot path** — the backward pass's
 per-trial-point opening loop and the CLP backend that runs it:
 
-| ID     | Workstream                             | Cuts what                                       | Backend  | Source            | Status            |
-| ------ | -------------------------------------- | ----------------------------------------------- | -------- | ----------------- | ----------------- |
-| **W0** | CLP simulation robustness (A2 + A2b)   | sim retries + sim determinism                   | CLP      | clp-hot-start     | **done**          |
-| **W1** | Warm-start-friendly opening ordering   | **pivots** per warm re-solve (~88% of backward) | **both** | backward-ordering | proposed          |
-| **W2** | CLP forward/training determinism       | thread/rank-count variance in training          | CLP      | this plan (§1.3)  | follow-up         |
-| **W3** | CLP factorization-reuse hot-start      | **refactorizations** per opening                | CLP      | clp-hot-start §4  | proposed          |
-| **W4** | Backward false-infeasibility retries   | 1491 dual retries (100% backward)               | CLP      | this plan (§1.4)  | measure-first     |
-| **R**  | `StageOpeningSolver` seam + DCS config | dual-path comprehension debt                    | n/a      | dcs-debt §7       | enabling refactor |
+| ID     | Workstream                             | Cuts what                                       | Backend  | Source            | Status        |
+| ------ | -------------------------------------- | ----------------------------------------------- | -------- | ----------------- | ------------- |
+| **W0** | CLP simulation robustness (A2 + A2b)   | sim retries + sim determinism                   | CLP      | clp-hot-start     | **done**      |
+| **W1** | Warm-start-friendly opening ordering   | **pivots** per warm re-solve (~88% of backward) | **both** | backward-ordering | proposed      |
+| **W2** | CLP forward/training determinism       | thread/rank-count variance in training          | CLP      | this plan (§1.3)  | follow-up     |
+| **W3** | CLP factorization-reuse hot-start      | **refactorizations** per opening                | CLP      | clp-hot-start §4  | proposed      |
+| **W4** | Backward false-infeasibility retries   | 1491 dual retries (100% backward)               | CLP      | this plan (§1.4)  | measure-first |
+| **R**  | `StageOpeningSolver` seam + DCS config | dual-path comprehension debt                    | n/a      | dcs-debt §7       | **done**      |
 
 They are not independent: W1 and W3 attack different terms of the _same_
 per-opening cost and **stack**; W1 changes the `ω==0` logic that R wants to
@@ -84,22 +85,45 @@ order, yields bit-identical cuts** — _provided the per-opening values are
 unchanged_. They are unchanged only if the three sites below stop keying off
 literal `ω==0`.
 
-**Three `ω==0` couplings (must become "first-solved" for W1):**
+**Three `ω==0` couplings — all converted to "first-solved" (R done):**
 
-1. **Baked basis capture** — `save_basis_at_omega_zero` guarded by `omega == 0`
-   (`backward.rs:771-772`).
-2. **Baked warm-start load** — `resolve_backward_basis` only at `omega == 0`
-   (`backward.rs:727-731`).
-3. **DCS warm-carry** — `continue_carry = (omega != 0)` (`backward.rs:1008`); the
-   `continue_carry == false` branch **resets** `row_map` (`dcs.rs:680-688`), so if
-   the canonical ω=0 is _not_ solved first it would wipe the resident cut set the
-   earlier-solved openings accumulated.
+The seam refactor (R) has landed. All three couplings are now gated on `is_first`
+(the first entry of `solve_order`, which equals canonical ω=0 under the identity
+default):
+
+1. **Baked basis capture** — `save_basis_at_omega_zero` (now `is_first`-gated
+   inside `StageOpeningSolver::solve_baked`, `backward.rs:934`).
+2. **Baked warm-start load** — `resolve_backward_basis` called when `is_first`
+   (`backward.rs:884-888`); returns `None` for all subsequent openings so they
+   warm re-solve on the retained LU.
+3. **DCS warm-carry** — `continue_carry = !is_first` (`backward.rs:838`); the
+   `continue_carry == false` branch on the first-solved opening starts with the
+   `build_initial_resident_set` seed and no carried per-opening basis, while
+   subsequent openings warm-carry the LP.
 
 Because the W1 ordering key is **run-constant** (§1.5), the first-solved opening
 is the same every iteration, so the per-(m,s) basis store (`save`→`resolve`)
-stays self-consistent once these guards key off "first-solved" instead of `ω==0`.
-The DCS path captures **no** ω=0 basis by design (`backward.rs:920-922`), so only
-its `continue_carry` flag changes.
+stays self-consistent with the actual first solve regardless of ordering.
+
+**Forward→backward warm-start status (2026-06-09):**
+
+- **Basis-carry half — implemented.** `resolve_backward_basis` loads the
+  per-(m,s) stored basis at the first-solved opening (`is_first == true`), and
+  `save_basis_at_omega_zero` (now first-solved) captures the post-solve basis
+  back into the store. This is the cross-iteration warm-start for the baked
+  (all-cuts) path. The DCS path carries **no** cross-iteration basis by design
+  (`backward.rs:884-888`); the first-solved opening there reuses the loaded
+  cut-free core with the metadata seed and solves without a carried per-opening
+  basis (not a cold SDDP solve — the resident set is already seeded).
+
+- **Seed-union half — explicitly deferred.** A potential future enhancement would
+  union the `build_initial_resident_set` metadata seed with a carried DCS basis
+  at the per-trial-point load step, providing a cross-iteration warm start for
+  the DCS path analogous to the baked path's basis-carry. This union step is
+  **not implemented**: `StageOpeningSolver::prepare` for the `Lazy` variant calls
+  `build_initial_resident_set` alone (`backward.rs:759-764`), and
+  `simulation/pipeline.rs:517` does the same. There is no design work scheduled
+  for this; it is deferred to future work if profiling identifies it as material.
 
 ### 1.2 Warm-start and solver state across solves
 
@@ -119,7 +143,7 @@ its `continue_carry` flag changes.
   default; CLP recreates the `ClpSimplex` handle + re-applies the cached profile),
   called at the sim scenario boundary; CLP sim is now thread-count invariant
   (threads 1/3/5 bit-identical) at no measurable cost.
-- **W2 gap (CONFIRMED variant, 2026-06-08; ticket-005)**: the forward (training)
+- **W2 gap (CONFIRMED variant, 2026-06-08)**: the forward (training)
   pass shares A2b's root cause. It is **stage-synchronous**
   (`for t { for m }`, `forward_pass_state.rs:712/720`) with a per-scenario
   `load_model` but **no** `reset_solver_state()`. Measured on `cobre_tuning_clp`
@@ -129,7 +153,7 @@ its `continue_carry` flag changes.
   on the same case is **invariant** (threads 1 vs 5 byte-identical, max|ΔLB|=0),
   confirming this is CLP-specific (stale steepest-edge weights persisting across
   `Clp_loadProblem`).
-- **W2 FIXED (2026-06-08; ticket-006)**: a forward-only `reset_solver_state()`
+- **W2 FIXED (2026-06-08)**: a forward-only `reset_solver_state()`
   (forward_pass_state.rs:731) proved **insufficient** — the variance begins at
   iteration 1 (before any cuts affect the forward pass), localizing it to the
   **backward** pass's CLP cold-head solves (stale weights carried across trial
@@ -144,17 +168,16 @@ its `continue_carry` flag changes.
   once the cuts are). **Cost ≈ +11% total training wall** (backward +8%, forward
   +55% but forward is ~7% of total) on this case. HiGHS unaffected (no-op
   default). W2 (CLP training determinism) is the correctness prerequisite for any
-  CLP-as-default decision — its +11% cost is an input to ticket-007/013.
-- **Phase C decision — NO-GO (2026-06-08; ticket-007, owner)**: do **not** pursue
+  CLP-as-default decision — its +11% cost is an input to the Phase C decision.
+- **Phase C decision — NO-GO (2026-06-08)**: do **not** pursue
   W3 (CLP hot-start) or CLP-as-default. Rationale: HiGHS is already faster
   (+11–15%) and more robust (tuning-campaign verdict), W1 (~8%) lands on the
   HiGHS default directly, and CLP would additionally carry the W2 +11%
   determinism tax — two additive overheads against an already-faster HiGHS, before
-  any W3 FFI complexity. Consequence: **ticket-013 default backend = HiGHS**;
-  **Epic 04 (W3 hot-start, tickets 009–011) skipped**; **ticket-008
-  (StageOpeningSolver seam) proceeds without the W3 hot-start hook** as a pure
-  maintainability consolidation. W2's reset stays (it's a correctness fix valid
-  for anyone running CLP, no-op for HiGHS).
+  any W3 FFI complexity. Consequence: default backend = HiGHS; W3 hot-start
+  skipped; the `StageOpeningSolver` seam (R) proceeded without the W3 hot-start
+  hook as a pure maintainability consolidation. W2's reset stays (it's a
+  correctness fix valid for anyone running CLP, no-op for HiGHS).
 - **Hot-start surface for W3 (verified present-but-dormant)**: the
   `mark_hot_start` / `solve_from_hot_start` / `unmark_hot_start` trio exists on
   `ClpSolver` (`clp.rs:644-785`) and is **called zero times** in `cobre-sddp`.
@@ -201,23 +224,22 @@ Two structural facts drive W1 and W4:
 ### 1.6 Architecture debt the perf work must navigate (verified, dcs-debt §2)
 
 DCS was added as a **parallel strategy** rather than behind a seam, leaving
-**≈18 conditionals** and **two drifted opening-solve functions**:
+**≈18 conditionals** and **two drifted opening-solve functions**. The
+`StageOpeningSolver` seam (R) has landed, collapsing those into one
+enum-dispatched call site. The pre-refactor shape is recorded here for context:
 
-| concern              | `solve_opening_baked` (`backward.rs:703`) | `solve_opening_dcs` (`backward.rs:824`)     |
-| -------------------- | ----------------------------------------- | ------------------------------------------- |
-| solve                | `run_stage_solve` (baked all-cuts LP)     | `lazy_solve_preloaded` (lazy resident set)  |
-| warm start (ω=0)     | `resolve_backward_basis` (cross-iter)     | `stored_basis = None` → cold                |
-| dual extraction      | `extract_duals_from_view`                 | `extract_state_duals_only` + binding counts |
-| basis capture (ω=0)  | `save_basis_at_omega_zero`                | none                                        |
-| outcome accumulation | `accumulate_opening_outcome`              | `write_opening_outcome`                     |
+| concern                      | `solve_opening_baked` (pre-R)         | `solve_opening_dcs` (pre-R)                 |
+| ---------------------------- | ------------------------------------- | ------------------------------------------- |
+| solve                        | `run_stage_solve` (baked all-cuts LP) | `lazy_solve_preloaded` (lazy resident set)  |
+| warm start (first-solved)    | `resolve_backward_basis` (cross-iter) | `stored_basis = None` → cold                |
+| dual extraction              | `extract_duals_from_view`             | `extract_state_duals_only` + binding counts |
+| basis capture (first-solved) | `save_basis_at_omega_zero`            | none                                        |
+| outcome accumulation         | `accumulate_opening_outcome`          | `write_opening_outcome`                     |
 
-Plus driver-level `dcs_active` load-skips (`backward_pass_state.rs:1004/1017/1068`).
-**No correctness bug** — but W1 (which edits the `ω==0` logic in _both_ twins) and
-W3 (which adds hot-start to _both_) would each have to touch both drifted paths.
-The debt note's remediation — an enum-dispatched `StageOpeningSolver`
-(`Baked`/`Lazy`) — is the consolidation point, and its §8 explicitly says it is
-"best attempted **after** opening ordering, since the 'first solved vs ω==0'
-change naturally wants the same seam." That ordering is adopted below.
+Post-R: both paths live as variants of `StageOpeningSolver` (`Baked`/`Lazy`),
+the `dcs_active` load-skips are gone, and all `ω==0` guards are `is_first`.
+**No correctness bug** in either shape. W3 (if ever pursued) now has a single
+landing site per variant instead of two drifted free functions.
 
 ### 1.7 Determinism contract (non-negotiable, `.claude/rules/sddp.md`)
 
@@ -245,8 +267,9 @@ implementation shape:
    §3.2), tie-broken by ω. Store on the `OpeningTree`; expose `solve_order(s)`.
    Add the σ-per-noise-component aggregation at setup (§1.5).
 2. **Hot-path** (`process_trial_point_backward`): iterate `solve_order(s)` instead
-   of `0..|Ω|`. Change the three `ω==0` couplings (§1.1) to "first entry of
-   `solve_order(s)`". Keep results written to `outcomes[ω]`/`per_opening_stats[ω]`
+   of `0..|Ω|`. The three `ω==0` couplings (§1.1) are already `is_first`-gated
+   (R done); the hot-path change is only the iteration over `solve_order(s)`.
+   Keep results written to `outcomes[ω]`/`per_opening_stats[ω]`
    by canonical ω and the aggregation loop untouched.
 3. **Diagnostic first** (cheap, predicts the ceiling): per-opening
    `(noise_key, simplex_iterations)` is _already_ logged in
@@ -285,12 +308,11 @@ sim — the backward profile _is_ applied), not by an algorithm switch.
 
 ### R — `StageOpeningSolver` seam (enabling refactor)
 
-Collapse the two drifted `solve_opening_*` functions + the driver `dcs_active`
-skips into one enum-dispatched seam (variants `Baked`/`Lazy`), so the W1
-"first-solved" logic and W3 hot-start lifecycle live in **one** place per variant.
-Sequenced after W1 per dcs-debt §8. The independent config refactor (dcs-debt §7
-item 2: first-class DCS config, stop honoring deprecated `threshold`/
-`memory_window`) can go any time.
+**Done.** The two drifted `solve_opening_*` functions + the driver `dcs_active`
+skips have been collapsed into the enum-dispatched `StageOpeningSolver` seam
+(variants `Baked`/`Lazy`). All `ω==0` guards are now `is_first`. The W1 ordering
+step only needs to wire `solve_order(s)` into the hot path; the seam is already
+in place.
 
 ---
 
@@ -302,11 +324,8 @@ item 2: first-class DCS config, stop honoring deprecated `threshold`/
 - **W1 likely absorbs W4.** Smaller consecutive RHS hops keep the dual near its
   prior optimum, where spurious infeasibility (a large-jump / numerically-delicate
   artifact) is far less likely. Measure W4 _after_ W1.
-- **W1 and W3 both want the seam (R).** Both edit the `ω==0` / opening-solve logic
-  in both drifted twins. Doing W1 first introduces the "first-solved" concept;
-  then R consolidates it and gives W3 a single landing site. Doing R _before_ W1
-  would refactor a moving target; doing W3 _before_ R means touching two drifted
-  paths.
+- **R is done.** W1 now only changes the loop iteration; the `is_first` seam is
+  already in place. W3 has a single landing site per variant.
 - **W2 is independent** of all of the above (it's a per-scenario solver reset, not
   an opening-loop change), but is a prerequisite for trusting any CLP-default
   decision.
@@ -328,7 +347,7 @@ Phase B  W2  CLP forward determinism      ── parallel with A; correctness pr
             [gate: CLP training threads-1-vs-5 bit-identical]
 Phase C  ── RE-BENCHMARK CLP vs HiGHS (train+sim) on the W1 baseline ──
             decides whether W3 is still worth the FFI complexity
-Phase D  R   StageOpeningSolver seam       ── now motivated by W1's first-solved + incoming W3
+Phase D  R   StageOpeningSolver seam       ── DONE; W1 hot-path change is now seam-isolated
 Phase E  W3  CLP hot-start                 ── lands on the seam; baked=markHotStart, DCS=startFinishOptions
             [gate: determinism across rank counts; CLP golden re-baseline]
 Phase F  W4  retry re-measure + decision   ── after W1; param tuning only, no algorithm switch
@@ -338,9 +357,9 @@ Phase G  ── per-case default-backend decision (the owner goal) ──
 
 **Rationale in one line each:** A leads because it is the only change that helps
 the _default_ backend and resets the baseline; B is independent correctness; C is
-the decision gate that prevents over-investing in D/E; D unblocks clean landing of
-E; E is measured against the post-W1 baseline; F is gated on A's side effect; G is
-the owner's objective, made on real post-A/B numbers.
+the decision gate that prevents over-investing in D/E; D is done (R landed before
+W1, sequencing adjusted); E is measured against the post-W1 baseline; F is gated
+on A's side effect; G is the owner's objective, made on real post-A/B numbers.
 
 ---
 
@@ -348,12 +367,12 @@ the owner's objective, made on real post-A/B numbers.
 
 ### Phase A — W1 opening ordering
 
-| Step   | Work                                                                                                                                                                                                                                     | Gate                                                                                                                                                                     |
-| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **A1** | Add `noise_key` (σ-weighted aggregate of `raw_noise`) to `solver/iterations.parquet`; on `cobre_tuning`, regress per-opening `simplex_iterations` on consecutive-opening noise distance (natural vs sorted).                             | Pivots correlate with hop distance; natural-order jumps large → ordering will pay.                                                                                       |
-| **A2** | Setup precompute of `solve_order[s]` on `OpeningTree` (+ σ aggregation); behind a default-off flag, iterate it in `process_trial_point_backward`; change the **three** `ω==0` couplings (§1.1) to "first-solved". Aggregation untouched. | Builds; `determinism.rs` + `parity_hash_d01_d15` **green unchanged** under both backends (cuts bit-identical — the strongest correctness proof the decoupling is right). |
-| **A3** | Run prototype ascending vs descending (and median-anchor if both tails costly); compare backward warm-pivots/wall.                                                                                                                       | Default `sweep_direction` fixed from data.                                                                                                                               |
-| **A4** | Flip default-on if material, robust pivot reduction with bit-identical cuts.                                                                                                                                                             | Backward warm-solve pivots materially < 220; backward wall down.                                                                                                         |
+| Step   | Work                                                                                                                                                                                                                                      | Gate                                                                                                                                                                     |
+| ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **A1** | Add `noise_key` (σ-weighted aggregate of `raw_noise`) to `solver/iterations.parquet`; on `cobre_tuning`, regress per-opening `simplex_iterations` on consecutive-opening noise distance (natural vs sorted).                              | Pivots correlate with hop distance; natural-order jumps large → ordering will pay.                                                                                       |
+| **A2** | Setup precompute of `solve_order[s]` on `OpeningTree` (+ σ aggregation); behind a default-off flag, iterate it in `process_trial_point_backward`. The three `ω==0` couplings (§1.1) are already `is_first`-gated — aggregation untouched. | Builds; `determinism.rs` + `parity_hash_d01_d15` **green unchanged** under both backends (cuts bit-identical — the strongest correctness proof the decoupling is right). |
+| **A3** | Run prototype ascending vs descending (and median-anchor if both tails costly); compare backward warm-pivots/wall.                                                                                                                        | Default `sweep_direction` fixed from data.                                                                                                                               |
+| **A4** | Flip default-on if material, robust pivot reduction with bit-identical cuts.                                                                                                                                                              | Backward warm-solve pivots materially < 220; backward wall down.                                                                                                         |
 
 ### Phase B — W2 CLP forward determinism
 
@@ -364,11 +383,10 @@ the owner's objective, made on real post-A/B numbers.
 
 ### Phase D — R `StageOpeningSolver` seam
 
-Collapse `solve_opening_baked`/`solve_opening_dcs` + `dcs_active` load-skips into
-an enum-dispatched seam (variants own dual extraction, basis capture, outcome
-accumulation, and the W1 "first-solved" logic). **Gate**: zero behavior change —
-determinism + parity green; the ≈18 conditionals reduce to one construction + one
-call site per pass.
+**Done.** The seam has landed: `solve_opening_baked`/`solve_opening_dcs` +
+`dcs_active` load-skips are collapsed into `StageOpeningSolver` (variants own
+dual extraction, basis capture, outcome accumulation, and the `is_first` logic).
+Determinism + parity remain green; the ≈18 conditionals are gone.
 
 ### Phase E — W3 CLP hot-start
 
@@ -422,8 +440,6 @@ switch in backward.**
   bit-reproducible across rank counts (the existing harness covers single-instance
   reuse; an SDDP-level assertion is required). `markHotStart` is incompatible with
   the DCS row-growth path — baked-only.
-- **R timing**: do not start the seam refactor while W1 is mid-flight in the same
-  files (dcs-debt §8); land W1 first.
 - **Aggregation-order regression** is the single highest-consequence W1 risk: the
   entire determinism guarantee rests on keeping aggregation canonical-ω while only
   the solve loop reorders. The green parity suite is the guard.
@@ -437,16 +453,22 @@ In scope: the backward opening loop (W1, W3, W4, R), the CLP solver-state resets
 
 Out of scope (separate, orthogonal efforts): forward/simulation single-solve
 structure beyond the determinism resets; load imbalance / per-worker persistence
-(`backward-node-parallelism.md`); cross-iteration ω-head basis capture; the FCF /
-cut-pool internals; any change to cut construction, sign, or scale.
+(`backward-node-parallelism.md`); cross-iteration DCS seed-union (deferred, see
+§1.1); the FCF / cut-pool internals; any change to cut construction, sign, or
+scale.
 
 ---
 
-## 9. Done so far (W0)
+## 9. Done so far
 
 - **A2** (`a973f720`): CLP simulation uses the primal simplex via an applied
   `SIMULATION` profile — 390→0 sim retries, −32 % sim wall; HiGHS byte-stable.
 - **A2b** (`652fc537`): `SolverInterface::reset_solver_state()` recreates the CLP
   `ClpSimplex` at the sim scenario boundary — CLP sim thread-count invariant, free;
   HiGHS no-op. Establishes the trait-extension pattern W2 and W3 reuse.
-  </content>
+- **R (StageOpeningSolver seam)**: the two drifted `solve_opening_*` free functions
+  and driver `dcs_active` load-skips are collapsed into the `StageOpeningSolver`
+  enum (`Baked`/`Lazy`). All `ω==0` guards are now `is_first`. Basis-carry
+  (`resolve_backward_basis` + `save_basis_at_omega_zero`) is implemented for the
+  baked path on the first-solved opening; the DCS path carries no cross-iteration
+  basis (seed-union deferred, see §1.1). Determinism + parity tests remain green.

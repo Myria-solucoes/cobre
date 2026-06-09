@@ -62,3 +62,4 @@ too_many_arguments = "deny"
 
 [workspace.dependencies]
 matrixmultiply = { version = "= 0.3.10", default-features = false }
+rayon = "1"

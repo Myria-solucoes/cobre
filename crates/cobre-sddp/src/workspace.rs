@@ -602,15 +602,6 @@ pub(crate) struct ScratchBuffers {
     /// Capacity is `n_anticipated * k_max`; when either dimension is zero the
     /// vec starts empty and the anticipated-state path is skipped entirely.
     pub(crate) anticipated_state_buf: Vec<f64>,
-
-    /// Per-stage scratch buffer for `[0, 0]` bound-patch operations on the new
-    /// `anticipated_state_out` columns (one column per anticipated plant per
-    /// stage). Capacity is `n_anticipated`. Mirrors
-    /// [`ScratchBuffers::ncs_col_indices_buf`].
-    ///
-    /// Pre-allocated here; read sites are not yet wired.
-    #[allow(dead_code)]
-    pub(crate) anticipated_state_out_col_indices_buf: Vec<usize>,
 }
 
 /// All per-thread mutable resources required for one LP solve sequence.
@@ -783,7 +774,6 @@ impl ScratchBuffers {
             raw_noise_buf: Vec::with_capacity(noise_dim),
             perm_scratch: Vec::with_capacity(total_forward_passes.max(1)),
             anticipated_state_buf: Vec::with_capacity(n_anticipated * k_max),
-            anticipated_state_out_col_indices_buf: Vec::with_capacity(n_anticipated),
         }
     }
 }

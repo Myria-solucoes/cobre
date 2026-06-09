@@ -263,7 +263,6 @@ where
                 hydros: indexer.hydro_count as u32,
                 thermals: 0,
                 ranks: ranks.num_ranks as u32,
-                #[allow(clippy::cast_possible_truncation)]
                 threads_per_rank: n_threads as u32,
                 timestamp: String::new(),
             },
@@ -535,7 +534,6 @@ where
                 final_lb,
                 final_ub,
                 total_time_ms,
-                #[allow(clippy::cast_possible_truncation)]
                 total_rows: self.fcf.total_active_cuts() as u64,
             },
         );
@@ -1027,6 +1025,15 @@ where
     /// active cuts (a fresh start) every batch is empty and the bake is a
     /// structural copy of the base template — identical to the pre-bake done in
     /// `IterationScratch::new`.
+    ///
+    /// The full per-iteration rebake is deliberately left unoptimized. Its cost
+    /// is quadratic in the active-cut count, but that count only grows
+    /// unboundedly in the no-cut-selection default configuration; production
+    /// runs at scale always enable cut selection, which caps the active set and
+    /// keeps each rebake cheap. An append-only fast path (baking only the cuts
+    /// added since the previous bake) would fire exclusively in that same
+    /// no-selection configuration, so it would add branching and state to this
+    /// hot path for no production benefit. The simpler full rebake is preferred.
     fn bake_active_cuts_into_templates(&mut self) -> u64 {
         let mut total_rows_baked: u64 = 0;
         let indexer = self.training_ctx.indexer;
