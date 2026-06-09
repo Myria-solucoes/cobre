@@ -14,29 +14,29 @@ struct** instead of adding a function parameter.
 
 Available context structs:
 
-| Struct                 | File                                           | Purpose                                         | Mutability             |
-| ---------------------- | ---------------------------------------------- | ----------------------------------------------- | ---------------------- |
-| `StageContext`         | `cobre-sddp/src/context.rs`                    | Per-stage templates, base rows, layout          | Immutable (`&`)        |
-| `TrainingContext`      | `cobre-sddp/src/context.rs`                    | Horizon, indexer, stochastic, initial state     | Immutable (`&`)        |
-| `ScratchBuffers`       | `cobre-sddp/src/workspace.rs`                  | Per-worker noise/patch scratch space            | Mutable (`&mut`)       |
-| `SolverWorkspace`      | `cobre-sddp/src/workspace.rs`                  | Solver + scratch + patch buffer                 | Mutable (`&mut`)       |
-| `TrainingConfig`       | `cobre-sddp/src/config.rs`                     | Forward passes, iteration limit, seed           | Owned (moved in)       |
-| `SimulationConfig`     | `cobre-sddp/src/simulation/config.rs`          | Scenario count, channel capacity, basis window  | Immutable (`&`)        |
-| `ForwardPassBatch`     | `cobre-sddp/src/forward.rs`                    | Local pass count, iteration, offset             | Immutable (`&`)        |
-| `LbEvalSpec`           | `cobre-sddp/src/lower_bound.rs`                | Template, noise scale, opening tree             | Immutable (`&`)        |
-| `TrainingSession`      | `cobre-sddp/src/training_session/mod.rs`       | Owns solver, pools, sub-state structs, scratch  | Owned driver           |
-| `BackwardPassState`    | `cobre-sddp/src/backward_pass_state.rs`        | Owned scratch for backward-pass helpers         | Mutable (`&mut self`)  |
-| `ForwardPassState`     | `cobre-sddp/src/forward_pass_state.rs`         | Owned scratch for forward-pass workers          | Mutable (`&mut self`)  |
-| `SimulationState`      | `cobre-sddp/src/simulation/state.rs`           | Owned scratch for simulation workers            | Mutable (`&mut self`)  |
-| `BackwardPassInputs`   | `cobre-sddp/src/backward_pass_state.rs`        | Borrowed inputs to `BackwardPassState::run`     | Mutable bundle (`&mut`) |
-| `ForwardPassInputs`    | `cobre-sddp/src/forward_pass_state.rs`         | Borrowed inputs to `ForwardPassState::run`      | Mutable bundle (`&mut`) |
-| `SimulationInputs`     | `cobre-sddp/src/simulation/state.rs`           | Borrowed inputs to `SimulationState::run`       | Mutable bundle (`&mut`) |
-| `ForwardWorkerParams`  | `cobre-sddp/src/forward_pass_state.rs`         | Read-only captures for rayon workers            | Immutable bundle (`&`) |
-| `ForwardWorkerResult`  | `cobre-sddp/src/forward_pass_state.rs`         | Return bundle from per-worker forward execution | Owned (moved out)      |
-| `OpeningTreeInputs`    | `cobre-stochastic/src/tree/generate.rs`        | Optional inputs to `generate_opening_tree`      | Immutable bundle (`&`) |
-| `LbEvalScratch`        | `cobre-sddp/src/lower_bound.rs`                | 10 f64/usize scratch vectors reused across `evaluate_lower_bound` phases | Mutable (`&mut`)       |
-| `LbEvalScratchBundle`  | `cobre-sddp/src/lower_bound.rs`                | Bundles `patch_buf`, `lb_cut_batch`, `lb_cut_row_map`, `lb_scratch` for `evaluate_lower_bound` | Mutable bundle (`&mut`) |
-| `RiskMeasureScratch`   | `cobre-sddp/src/risk_measure.rs`               | CVaR weight-computation scratch (`upper_bounds`, `order`, `mu`) | Mutable (`&mut`)       |
+| Struct                | File                                     | Purpose                                                                                        | Mutability              |
+| --------------------- | ---------------------------------------- | ---------------------------------------------------------------------------------------------- | ----------------------- |
+| `StageContext`        | `cobre-sddp/src/context.rs`              | Per-stage templates, base rows, layout                                                         | Immutable (`&`)         |
+| `TrainingContext`     | `cobre-sddp/src/context.rs`              | Horizon, indexer, stochastic, initial state                                                    | Immutable (`&`)         |
+| `ScratchBuffers`      | `cobre-sddp/src/workspace.rs`            | Per-worker noise/patch scratch space                                                           | Mutable (`&mut`)        |
+| `SolverWorkspace`     | `cobre-sddp/src/workspace.rs`            | Solver + scratch + patch buffer                                                                | Mutable (`&mut`)        |
+| `TrainingConfig`      | `cobre-sddp/src/config.rs`               | Forward passes, iteration limit, seed                                                          | Owned (moved in)        |
+| `SimulationConfig`    | `cobre-sddp/src/simulation/config.rs`    | Scenario count, channel capacity                                                               | Immutable (`&`)         |
+| `ForwardPassBatch`    | `cobre-sddp/src/forward.rs`              | Local pass count, iteration, offset                                                            | Immutable (`&`)         |
+| `LbEvalSpec`          | `cobre-sddp/src/lower_bound.rs`          | Template, noise scale, opening tree                                                            | Immutable (`&`)         |
+| `TrainingSession`     | `cobre-sddp/src/training_session/mod.rs` | Owns solver, pools, sub-state structs, scratch                                                 | Owned driver            |
+| `BackwardPassState`   | `cobre-sddp/src/backward_pass_state.rs`  | Owned scratch for backward-pass helpers                                                        | Mutable (`&mut self`)   |
+| `ForwardPassState`    | `cobre-sddp/src/forward_pass_state.rs`   | Owned scratch for forward-pass workers                                                         | Mutable (`&mut self`)   |
+| `SimulationState`     | `cobre-sddp/src/simulation/state.rs`     | Owned scratch for simulation workers                                                           | Mutable (`&mut self`)   |
+| `BackwardPassInputs`  | `cobre-sddp/src/backward_pass_state.rs`  | Borrowed inputs to `BackwardPassState::run`                                                    | Mutable bundle (`&mut`) |
+| `ForwardPassInputs`   | `cobre-sddp/src/forward_pass_state.rs`   | Borrowed inputs to `ForwardPassState::run`                                                     | Mutable bundle (`&mut`) |
+| `SimulationInputs`    | `cobre-sddp/src/simulation/state.rs`     | Borrowed inputs to `SimulationState::run`                                                      | Mutable bundle (`&mut`) |
+| `ForwardWorkerParams` | `cobre-sddp/src/forward_pass_state.rs`   | Read-only captures for rayon workers                                                           | Immutable bundle (`&`)  |
+| `ForwardWorkerResult` | `cobre-sddp/src/forward_pass_state.rs`   | Return bundle from per-worker forward execution                                                | Owned (moved out)       |
+| `OpeningTreeInputs`   | `cobre-stochastic/src/tree/generate.rs`  | Optional inputs to `generate_opening_tree`                                                     | Immutable bundle (`&`)  |
+| `LbEvalScratch`       | `cobre-sddp/src/lower_bound.rs`          | 10 f64/usize scratch vectors reused across `evaluate_lower_bound` phases                       | Mutable (`&mut`)        |
+| `LbEvalScratchBundle` | `cobre-sddp/src/lower_bound.rs`          | Bundles `patch_buf`, `lb_cut_batch`, `lb_cut_row_map`, `lb_scratch` for `evaluate_lower_bound` | Mutable bundle (`&mut`) |
+| `RiskMeasureScratch`  | `cobre-sddp/src/risk_measure.rs`         | CVaR weight-computation scratch (`upper_bounds`, `order`, `mu`)                                | Mutable (`&mut`)        |
 
 **Decision tree when adding new data to the hot path:**
 
@@ -61,16 +61,16 @@ plus a small number of bare residuals. Context constructors (`stage_ctx`,
 
 ### Cohesive sub-structs
 
-| Struct                | File                                             | Purpose                                                                  | Visibility    | Storage form             |
-| --------------------- | ------------------------------------------------ | ------------------------------------------------------------------------ | ------------- | ------------------------ |
-| `StageData`           | `cobre-sddp/src/setup/stage_data.rs`             | All stage-indexed data: templates, indexer, stages, entity counts, blocks, lag transitions, noise groups, scaling report | `pub`         | Aggregated sub-struct    |
-| `ScenarioLibraries`   | `cobre-sddp/src/setup/scenario_library_set.rs`   | Training + simulation `PhaseLibraries` pair                              | `pub`         | Aggregated sub-struct    |
-| `PhaseLibraries`      | `cobre-sddp/src/setup/scenario_library_set.rs`   | Sampling schemes and optional libraries for one phase                    | `pub`         | Aggregated sub-struct    |
-| `MethodologyConfig`   | `cobre-sddp/src/setup/methodology_config.rs`     | `horizon` + `inflow_method` — stochastic numerical methodology            | `pub(crate)`  | Aggregated sub-struct    |
-| `LoopParams`          | `cobre-sddp/src/config.rs`                       | Pure-data projection of `LoopConfig` (excludes runtime-derived fields)    | `pub`         | Projection of `LoopConfig` |
-| `SimulationConfig`    | `cobre-sddp/src/simulation/config.rs`            | `n_scenarios`, `io_channel_capacity`, `basis_activity_window`             | `pub`         | Literal reuse            |
-| `CutManagementConfig` | `cobre-sddp/src/config.rs`                       | Cut selection, budget cap, activity tolerance, basis window, warm-start cuts, per-stage risk measures | `pub(crate)` | Literal reuse            |
-| `EventParams`         | `cobre-sddp/src/config.rs`                       | Output-side event flags; excludes runtime handles                         | `pub(crate)`  | Projection of `EventConfig` |
+| Struct                | File                                           | Purpose                                                                                                                  | Visibility   | Storage form                |
+| --------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | ------------ | --------------------------- |
+| `StageData`           | `cobre-sddp/src/setup/stage_data.rs`           | All stage-indexed data: templates, indexer, stages, entity counts, blocks, lag transitions, noise groups, scaling report | `pub`        | Aggregated sub-struct       |
+| `ScenarioLibraries`   | `cobre-sddp/src/setup/scenario_library_set.rs` | Training + simulation `PhaseLibraries` pair                                                                              | `pub`        | Aggregated sub-struct       |
+| `PhaseLibraries`      | `cobre-sddp/src/setup/scenario_library_set.rs` | Sampling schemes and optional libraries for one phase                                                                    | `pub`        | Aggregated sub-struct       |
+| `MethodologyConfig`   | `cobre-sddp/src/setup/methodology_config.rs`   | `horizon` + `inflow_method` — stochastic numerical methodology                                                           | `pub(crate)` | Aggregated sub-struct       |
+| `LoopParams`          | `cobre-sddp/src/config.rs`                     | Pure-data projection of `LoopConfig` (excludes runtime-derived fields)                                                   | `pub`        | Projection of `LoopConfig`  |
+| `SimulationConfig`    | `cobre-sddp/src/simulation/config.rs`          | `n_scenarios`, `io_channel_capacity`                                                                                     | `pub`        | Literal reuse               |
+| `CutManagementConfig` | `cobre-sddp/src/config.rs`                     | Cut selection, budget cap, activity tolerance, warm-start cuts, per-stage risk measures                                  | `pub(crate)` | Literal reuse               |
+| `EventParams`         | `cobre-sddp/src/config.rs`                     | Output-side event flags; excludes runtime handles                                                                        | `pub(crate)` | Projection of `EventConfig` |
 
 ### Literal reuse vs projection
 
@@ -149,17 +149,17 @@ No bare per-call parameters — everything rides on either `self` or `inputs`.
 
 ## Function Signature Budgets
 
-| Function                          | Max args | Location                                | Notes                                       |
-| --------------------------------- | -------- | --------------------------------------- | ------------------------------------------- |
-| `train`                           | 10       | `training.rs`                           | Public entry point; keep at or below target |
-| `TrainingSession::run_iteration`  | 2        | `training_session/mod.rs`               | `&mut self` + iteration counter             |
-| `BackwardPassState::run`          | 2        | `backward_pass_state.rs`                | `&mut self` + `&mut BackwardPassInputs`     |
-| `ForwardPassState::run`           | 2        | `forward_pass_state.rs`                 | `&mut self` + `&mut ForwardPassInputs`      |
-| `SimulationState::run`            | 2        | `simulation/state.rs`                   | `&mut self` + `&mut SimulationInputs`       |
-| `evaluate_lower_bound`            | 9        | `lower_bound.rs`                        | At the workspace budget ceiling             |
-| `build_row_lower_unscaled`        | 8        | `simulation/pipeline.rs`                |                                             |
-| `run_forward_worker`              | 6        | `forward_pass_state.rs`                 | Free function; accepts `&ForwardWorkerParams` |
-| `generate_opening_tree`           | 7        | `cobre-stochastic/src/tree/generate.rs` | Optional inputs go through `OpeningTreeInputs` |
+| Function                         | Max args | Location                                | Notes                                          |
+| -------------------------------- | -------- | --------------------------------------- | ---------------------------------------------- |
+| `train`                          | 10       | `training.rs`                           | Public entry point; keep at or below target    |
+| `TrainingSession::run_iteration` | 2        | `training_session/mod.rs`               | `&mut self` + iteration counter                |
+| `BackwardPassState::run`         | 2        | `backward_pass_state.rs`                | `&mut self` + `&mut BackwardPassInputs`        |
+| `ForwardPassState::run`          | 2        | `forward_pass_state.rs`                 | `&mut self` + `&mut ForwardPassInputs`         |
+| `SimulationState::run`           | 2        | `simulation/state.rs`                   | `&mut self` + `&mut SimulationInputs`          |
+| `evaluate_lower_bound`           | 9        | `lower_bound.rs`                        | At the workspace budget ceiling                |
+| `build_row_lower_unscaled`       | 8        | `simulation/pipeline.rs`                |                                                |
+| `run_forward_worker`             | 6        | `forward_pass_state.rs`                 | Free function; accepts `&ForwardWorkerParams`  |
+| `generate_opening_tree`          | 7        | `cobre-stochastic/src/tree/generate.rs` | Optional inputs go through `OpeningTreeInputs` |
 
 All four hot-path drivers (train/backward/forward/simulate) must take exactly
 `&mut self` + `&mut *Inputs` at their public `run` boundary. Any function that

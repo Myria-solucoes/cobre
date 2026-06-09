@@ -14,7 +14,7 @@ reader in any language `flatc` supports.
 | `policy/states/stage_NNN.bin` | `StageStates` (only when `exports.states = true`) |
 
 The schema lives at
-[`crates/cobre-io/schemas/policy.fbs`](https://github.com/ONS-Brasil/cobre/blob/main/crates/cobre-io/schemas/policy.fbs)
+[`crates/cobre-io/schemas/policy.fbs`](https://github.com/cobre-rs/cobre/blob/main/crates/cobre-io/schemas/policy.fbs)
 under namespace `Cobre.IO.Policy`. It has no `file_identifier` and no
 `root_type` — pass `--root-type` to `flatc` to select the entry point
 for each file.
@@ -86,7 +86,7 @@ work with all of them.
 ## Field-by-field reference
 
 The authoritative description of every field lives in
-[`policy.fbs`](https://github.com/ONS-Brasil/cobre/blob/main/crates/cobre-io/schemas/policy.fbs)
+[`policy.fbs`](https://github.com/cobre-rs/cobre/blob/main/crates/cobre-io/schemas/policy.fbs)
 itself — every field carries an inline doc comment. The
 [Output Format](./output-format.md) page has a tabular summary suitable
 for reading on the web.
@@ -113,7 +113,7 @@ implementations describe the same wire format:
 - The **schema file** `crates/cobre-io/schemas/policy.fbs`, with
   explicit `(id: N)` attributes on every field.
 - The **hand-rolled writer/reader** in
-  `crates/cobre-io/src/output/policy.rs`, which encodes vtable slots
+  `crates/cobre-io/src/output/policy/codec.rs`, which encodes vtable slots
   via the `*_FIELD_*: u16` constants. The slot offset is
   `(field_id + 2) * 2`.
 
@@ -136,7 +136,7 @@ cargo test -p cobre-io \
 
 If you change either the schema or the slot constants, run the
 conformance test before merging. The CI workflow that has `flatc`
-available runs it on every pull request that touches `policy.rs` or
+available runs it on every pull request that touches `policy/codec.rs` or
 the schema file.
 
 ## Versioning policy

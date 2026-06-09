@@ -17,7 +17,7 @@ For the complete field-by-field schema reference, see
 
 ## Directory Structure
 
-The `1dtoy` case contains 10 input files across three directories:
+The `1dtoy` case contains 11 input files across three directories:
 
 ```
 1dtoy/
@@ -28,6 +28,7 @@ The `1dtoy` case contains 10 input files across three directories:
   system/
     buses.json
     hydros.json
+    hydro_production_models.json
     lines.json
     thermals.json
   scenarios/
@@ -378,6 +379,48 @@ from `system/hydro_production_models.json`. The turbine can pass between 0 and
 
 ---
 
+### `system/hydro_production_models.json`
+
+`hydro_production_models.json` defines how each hydro plant converts turbined
+flow into electrical power. It is an optional system input — when absent, each
+plant falls back to the `model` field in its `generation` block in `hydros.json`.
+When present, it overrides that model on a per-plant, per-stage-range basis,
+enabling different productivity models across seasons or study periods.
+
+The `1dtoy` case uses a constant-productivity model for `UHE1` across all stages:
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/book/src/schemas/production_models.schema.json",
+  "production_models": [
+    {
+      "hydro_id": 0,
+      "selection_mode": "stage_ranges",
+      "stage_ranges": [
+        {
+          "start_stage_id": 0,
+          "end_stage_id": null,
+          "model": "constant_productivity",
+          "productivity_mw_per_m3s": 1.0
+        }
+      ]
+    }
+  ]
+}
+```
+
+The `production_models` array holds one entry per hydro plant that requires an
+override. `selection_mode: "stage_ranges"` means the model is selected by
+stage range: each `stage_ranges` entry applies from `start_stage_id` to
+`end_stage_id` (inclusive; `null` means the last stage). Here a single range
+covers all four stages with `constant_productivity` at 1.0 MW/(m³/s), meaning
+every cubic metre per second of turbined flow yields exactly 1 MW of generation.
+
+For the complete field reference, see
+[Case Format Reference](../reference/case-format.md).
+
+---
+
 ### `system/thermals.json`
 
 Thermal plants are dispatchable generators with a fixed cost per MWh. The
@@ -504,7 +547,7 @@ the system must serve in each scenario and how uncertain that demand is.
 
 ## Additional Files in Production Cases
 
-The 1dtoy example uses 10 input files. Larger cases may include additional files
+The 1dtoy example uses 11 input files. Larger cases may include additional files
 that are not needed for this minimal example:
 
 ```
@@ -518,8 +561,8 @@ my_real_case/
     hydros.json
     lines.json
     thermals.json
+    hydro_production_models.json       Per-plant production model overrides (optional)
     non_controllable_sources.json      NCS plant definitions (wind, solar)
-    hydro_production_models.json       Per-stage productivity overrides
   scenarios/
     inflow_seasonal_stats.parquet      Inflow PAR(p) statistics
     inflow_ar_coefficients.parquet     Pre-computed AR coefficients (optional)

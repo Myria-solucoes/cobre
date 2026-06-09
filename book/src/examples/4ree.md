@@ -16,19 +16,19 @@ meaningful dispatch results (see [Known Limitations](#known-limitations)).
 
 ## System Description
 
-| Element      | Count | Details                                                           |
-| ------------ | ----- | ----------------------------------------------------------------- |
-| Buses        | 4     | SUDESTE (0), SUL (1), NORDESTE (2), NORTE (3)                     |
-| Hydro plants | 4     | One per region, independent cascades, constant productivity       |
-| Thermals     | 126   | All original sddp-lab thermals, remapped to 4 buses               |
-| Lines        | 2     | SUDESTE-SUL (7500/5470 MW) and SUDESTE-NORDESTE (1000/600 MW)     |
-| Stages       | 12    | Monthly, January 2015 – December 2015, 1 block per stage          |
-| Simulation   | 100   | Post-training evaluation over 100 independently sampled scenarios |
+| Element      | Count | Details                                                                         |
+| ------------ | ----- | ------------------------------------------------------------------------------- |
+| Buses        | 5     | SUDESTE (0), SUL (1), NORDESTE (2), NORTE (3), NOFICT1 (4)                      |
+| Hydro plants | 4     | One per real region, independent cascades, constant productivity                |
+| Thermals     | 126   | All original sddp-lab thermals, remapped to 4 real buses                        |
+| Lines        | 5     | SUDESTE-SUL, SUDESTE-NORDESTE, SUDESTE-NOFICT1, NORDESTE-NOFICT1, NORTE-NOFICT1 |
+| Stages       | 12    | Monthly, January 2015 – December 2015, 1 block per stage                        |
+| Simulation   | 100   | Post-training evaluation over 100 independently sampled scenarios               |
 
 The system has four independent hydro cascades, each with a single reservoir
-serving its own region. Transmission is limited to two bidirectional inter-region
-lines, both anchored at SUDESTE. There is no direct connection from NORTE to any
-other region (see [NORTE Isolation](#bus-5-nofict1-exclusion)).
+serving its own real region. NOFICT1 is a fictitious aggregation node with zero
+load that acts as a transit hub connecting NORTE, NORDESTE, and SUDESTE. All five
+transmission lines are bidirectional with asymmetric capacity.
 
 Initial reservoir storage values come directly from the sddp-lab source data:
 
@@ -43,21 +43,31 @@ Initial reservoir storage values come directly from the sddp-lab source data:
 
 ## Network Topology
 
-The four Brazilian regions connect through SUDESTE as the central hub. Only the
-two real-to-real transmission lines survive from the original sddp-lab model after
-excluding the NOFICT1 fictitious node (see [Conversion Decisions](#conversion-decisions)):
+NOFICT1 serves as a hub node through which NORTE, NORDESTE, and SUDESTE exchange
+energy. SUL connects directly to SUDESTE. The topology is:
 
 ```
  SUL ──────────── SUDESTE ──────────── NORDESTE
-                     │
-                  (isolated)
-                   NORTE
+                     │                    │
+                     └────── NOFICT1 ─────┘
+                                 │
+                               NORTE
 ```
 
-The SUDESTE-SUL line has asymmetric capacity: 7500 MW in the SUDESTE→SUL direction
-and 5470 MW in the reverse direction. The SUDESTE-NORDESTE line carries 1000 MW
-direct and 600 MW reverse. NORTE has no transmission connection to the rest of
-the system in this model.
+Line capacities (direct / reverse MW):
+
+| Line             | Source   | Target   | Direct (MW) | Reverse (MW) |
+| ---------------- | -------- | -------- | ----------- | ------------ |
+| SUDESTE_SUL      | SUDESTE  | SUL      | 7500        | 5470         |
+| SUDESTE_NORDESTE | SUDESTE  | NORDESTE | 1000        | 600          |
+| SUDESTE_NOFICT1  | SUDESTE  | NOFICT1  | 4000        | 2940         |
+| NORDESTE_NOFICT1 | NORDESTE | NOFICT1  | 3500        | 3300         |
+| NORTE_NOFICT1    | NORTE    | NOFICT1  | 10000       | 4407         |
+
+The `direct` direction is defined as from the lower bus ID to the higher bus ID
+(e.g., SUDESTE→SUL, SUDESTE→NOFICT1). All five lines are represented as single
+bidirectional entries using Cobre's `capacity.direct_mw` / `capacity.reverse_mw`
+fields.
 
 ---
 
@@ -196,50 +206,39 @@ sddp-lab uses 1-indexed bus IDs; Cobre uses 0-indexed IDs. The mapping is:
 | 2           | SUL           | 1        | SUL        |
 | 3           | NORDESTE      | 2        | NORDESTE   |
 | 4           | NORTE         | 3        | NORTE      |
-| 5           | NOFICT1       | excluded | —          |
+| 5           | NOFICT1       | 4        | NOFICT1    |
 
 All `bus_id` references in hydros, thermals, and lines are remapped accordingly.
 Thermal IDs are also remapped from 1-indexed (sddp-lab) to 0-indexed (Cobre).
 
-### Bus 5 (NOFICT1) exclusion
+### NOFICT1 as a transit hub
 
-sddp-lab includes a fictitious aggregation node NOFICT1 (id=5) with zero load that
-acts as an intermediate hub connecting northern generation to southern load centers.
-Cobre does not model fictitious nodes.
+sddp-lab includes a fictitious aggregation node NOFICT1 (sddp-lab id=5) with zero
+load that acts as an intermediate hub connecting northern generation to southern
+load centers. In this conversion NOFICT1 is retained as bus id=4 because three of
+the five modeled transmission lines use it as an endpoint.
 
 All 126 thermals in sddp-lab connect to real buses 1–4; none were attached to
-bus 5, so no thermal reassignment was needed.
-
-Six of the ten sddp-lab lines involve NOFICT1 as a source or target:
-
-| sddp-lab line    | Direction | Capacity |
-| ---------------- | --------- | -------- |
-| SUDESTE_NOFICT1  | 1 → 5     | 4000 MW  |
-| NORDESTE_NOFICT1 | 3 → 5     | 3500 MW  |
-| NORTE_NOFICT1    | 4 → 5     | 10000 MW |
-| NOFICT1_SUDESTE  | 5 → 1     | 2940 MW  |
-| NOFICT1_NORDESTE | 5 → 3     | 3300 MW  |
-| NOFICT1_NORTE    | 5 → 4     | 4407 MW  |
-
-These six lines are excluded. Converting them to direct inter-region connections
-without knowledge of the actual physical routing would introduce spurious
-transmission paths. The practical consequence is that NORTE generation cannot
-reach SUDESTE or NORDESTE — the NORTE region becomes isolated in this model.
+bus 5, so no thermal reassignment was needed. No hydro plant is assigned to
+NOFICT1 — the four hydro cascades remain tied to the four real regions.
 
 ### Line merging
 
 The original sddp-lab model used paired unidirectional lines to represent
 asymmetric capacity. Cobre's `capacity.direct_mw` and `capacity.reverse_mw` fields
-encode both directions in a single line entry. The two surviving real-to-real
-lines are:
+encode both directions in a single line entry. Ten sddp-lab lines collapse to five
+Cobre lines:
 
 | Cobre line name  | direct_mw | reverse_mw |
 | ---------------- | --------- | ---------- |
 | SUDESTE_SUL      | 7500      | 5470       |
 | SUDESTE_NORDESTE | 1000      | 600        |
+| SUDESTE_NOFICT1  | 4000      | 2940       |
+| NORDESTE_NOFICT1 | 3500      | 3300       |
+| NORTE_NOFICT1    | 10000     | 4407       |
 
 The `direct` direction is defined as from the lower bus ID to the higher bus ID
-(SUDESTE→SUL, SUDESTE→NORDESTE).
+(SUDESTE→SUL, SUDESTE→NORDESTE, SUDESTE→NOFICT1, NORDESTE→NOFICT1, NORTE→NOFICT1).
 
 ### Inflow model
 
@@ -284,10 +283,11 @@ The global spillage penalty in `penalties.json` is set to 1.0 $/hm³ to match.
 values and dispatch patterns incomparable: PAR(p) normal versus lognormal inflow
 distributions (different tail shapes despite moment-matching), default Expectation
 versus CVaR risk measure (configurable — see [Risk measure](#risk-measure)), and
-the excluded NOFICT1 transit lines. Use this case for LP structural validation and
-for verifying that stochastic inflow sampling behaves correctly.
+differences in how the NOFICT1 hub lines are modeled. Use this case for LP
+structural validation and for verifying that stochastic inflow sampling behaves
+correctly.
 
-**NORTE is isolated.** Without the NOFICT1 transit lines, NORTE generation cannot
-reach SUDESTE or NORDESTE. NORTE hydro and thermal output can only serve NORTE's
-own load. This understates inter-regional trade relative to the actual Brazilian
-system.
+**NOFICT1 carries no load and no generation.** As a fictitious hub node, NOFICT1
+has a zero-load balance constraint. Energy may flow through it in transit between
+NORTE, NORDESTE, and SUDESTE, but there is no generator or consumer attached
+directly to it.

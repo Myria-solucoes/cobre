@@ -21,7 +21,7 @@ Training complete in 3.2s (128 iterations, iteration_limit)
   Lower bound:  142.3 $/stage
   Upper bound:  143.1 +/- 1.2 $/stage
   Gap:          0.6%
-  Cuts:         384 active / 387 generated
+  Cuts:         384 active / 384 generated
   LP solves:    512
 
 Simulation complete (100 scenarios)
@@ -40,7 +40,7 @@ slightly.
 | `Lower bound:  142.3 $/stage`                                 | The optimizer's best proven lower bound on the minimum expected cost per stage. As training progresses this value rises and stabilizes.                                            |
 | `Upper bound:  143.1 +/- 1.2 $/stage`                         | A statistical estimate of the true expected cost, computed from the forward-pass scenarios in the final iteration. The `+/- 1.2` is the standard deviation across those scenarios. |
 | `Gap:  0.6%`                                                  | The relative distance between the lower and upper bounds expressed as a percentage. A gap of 0.6% means the policy cost is within 0.6% of the best possible. Smaller is better.    |
-| `Cuts:  384 active / 387 generated`                           | The total number of optimality cuts in the policy pool. 384 are currently active; 3 were deactivated by the cut selection strategy.                                                |
+| `Cuts:  384 active / 384 generated`                           | The total number of optimality cuts in the policy pool. All 384 are currently active; none were deactivated (the 1dtoy config does not enable cut selection).                     |
 | `LP solves:  512`                                             | Total number of linear programs solved across all stages and iterations.                                                                                                           |
 | `Simulation complete (100 scenarios)`                         | The post-training simulation evaluated the trained policy over 100 independently sampled scenarios.                                                                                |
 | `Completed: 100  Failed: 0`                                   | All 100 scenarios completed without solver errors.                                                                                                                                 |
@@ -75,8 +75,7 @@ The 1dtoy run produces:
 ```
 my_first_study/results/
   training/
-    _manifest.json          Completion manifest: status, iteration count, convergence, cut stats
-    metadata.json           Run metadata: configuration snapshot, problem dimensions
+    metadata.json           Run metadata: configuration, convergence, row-pool, bounds, solve stats
     convergence.parquet     Per-iteration convergence metrics (lower bound, upper bound, gap)
     dictionaries/
       codes.json            Integer-to-string code mappings for entity categories
@@ -99,7 +98,7 @@ my_first_study/results/
       stage_003.bin
     metadata.json           Policy metadata: stage count, cut counts per stage
   simulation/
-    _manifest.json          Completion manifest: scenario counts
+    metadata.json           Run metadata: scenario counts, cost statistics, solve stats
     buses/
       scenario_id=0000/data.parquet
       scenario_id=0001/data.parquet
@@ -129,70 +128,104 @@ The three top-level subdirectories have distinct roles:
 
 ## Training Results
 
-### Reading `training/_manifest.json`
+### Reading `training/metadata.json`
 
-The training manifest is the canonical summary of what happened during training.
-The 1dtoy run produces:
+The training metadata file is the canonical record of what happened during
+training. The 1dtoy run produces:
 
 ```json
 {
-  "version": "2.0.0",
+  "cobre_version": "0.8.0",
+  "hostname": "fedora",
+  "solver": "highs",
+  "solver_version": "1.13.1",
+  "started_at": "2026-06-09T14:09:50Z",
+  "completed_at": "2026-06-09T14:09:50Z",
+  "duration_seconds": 0.15,
   "status": "complete",
-  "started_at": null,
-  "completed_at": null,
+  "configuration": {
+    "seed": null,
+    "max_iterations": 128,
+    "forward_passes": 1,
+    "stopping_mode": "any",
+    "policy_mode": "fresh"
+  },
+  "problem_dimensions": {
+    "num_stages": 4,
+    "num_hydros": 1,
+    "num_thermals": 2,
+    "num_buses": 1,
+    "num_lines": 0
+  },
   "iterations": {
-    "max_iterations": null,
     "completed": 128,
     "converged_at": null
   },
   "convergence": {
     "achieved": false,
-    "final_gap_percent": 0.0,
+    "final_gap_percent": -2590.77437875556,
     "termination_reason": "iteration_limit"
   },
-  "cuts": {
-    "total_generated": 387,
+  "row_pool": {
+    "total_generated": 384,
     "total_active": 384,
-    "peak_active": 384
+    "peak_active": 384,
+    "cuts_active": 384
   },
-  "checksum": null,
+  "bounds": {
+    "final_lower_bound": 15595518.381798675,
+    "final_upper_bound": 579592.1986224408,
+    "final_upper_bound_std": 0.0
+  },
+  "solve_stats": {
+    "total_lp_solves": 5632,
+    "first_try": 5632,
+    "retried": 0,
+    "failed": 0,
+    "forward_solve_seconds": 0.016273423999999915,
+    "backward_solve_seconds": 0.07880944500000037,
+    "parallelism": 1
+  },
   "distribution": {
     "backend": "local",
     "world_size": 1,
     "ranks_participated": 1,
     "num_nodes": 1,
-    "threads_per_rank": 1
+    "threads_per_rank": 1,
+    "hosts": [
+      { "hostname": "fedora", "ranks": [0] }
+    ]
   }
 }
 ```
 
-Field-by-field explanation:
+Field-by-field explanation of the key fields:
 
-| Field                            | Meaning                                                                                                                                                                                    |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `status`                         | `"complete"` when the training run finished normally. `"failed"` if a solver error aborted it.                                                                                             |
-| `iterations.completed`           | Number of training iterations that were executed.                                                                                                                                          |
-| `iterations.converged_at`        | If training stopped early due to a convergence criterion, the iteration number where it stopped. `null` for an iteration-limit stop.                                                       |
-| `convergence.achieved`           | `true` if a convergence stopping rule was satisfied, `false` if the iteration limit was reached first.                                                                                     |
-| `convergence.final_gap_percent`  | The gap between lower and upper bounds at the end of training, as a percentage. A value of `0.0` here reflects that the 1dtoy case converged very tightly within its 128-iteration budget. |
-| `convergence.termination_reason` | Machine-readable reason for stopping. Common values: `"iteration_limit"`, `"bound_stalling"`.                                                                                              |
-| `cuts.total_generated`           | Total optimality cuts created across all stages over the entire training run.                                                                                                              |
-| `cuts.total_active`              | Cuts still active in the pool at the end of training (not deactivated by the cut selection strategy).                                                                                      |
-| `cuts.peak_active`               | Maximum number of active cuts at any point during training.                                                                                                                                |
-| `distribution.backend`           | Communication backend: `"local"` for single-process, `"mpi"` for distributed runs.                                                                                                        |
-| `distribution.world_size`        | Number of MPI ranks involved in the run. `1` for single-process runs.                                                                                                                      |
-| `distribution.threads_per_rank`  | Number of rayon worker threads per process.                                                                                                                                                |
+| Field                            | Meaning                                                                                                                                                                                      |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cobre_version`                  | The cobre binary version that produced this output. Useful for auditing results from different releases.                                                                                     |
+| `solver`                         | LP backend used: `"highs"` or `"clp"`.                                                                                                                                                       |
+| `status`                         | `"complete"` when the training run finished normally.                                                                                                                                        |
+| `iterations.completed`           | Number of training iterations that were executed.                                                                                                                                            |
+| `iterations.converged_at`        | If training stopped early due to a convergence criterion, the iteration number where it stopped. `null` for an iteration-limit stop.                                                         |
+| `convergence.achieved`           | `true` if a convergence stopping rule was satisfied, `false` if the iteration limit was reached first.                                                                                       |
+| `convergence.final_gap_percent`  | The gap between lower and upper bounds at the end of training, as a percentage. A large or negative value (as seen in the 1dtoy case) indicates the bounds have not tightened sufficiently. |
+| `convergence.termination_reason` | Machine-readable reason for stopping. Common values: `"iteration_limit"`, `"bound_stalling"`.                                                                                                |
+| `row_pool.total_generated`       | Total optimality cut rows created across all stages over the entire training run.                                                                                                            |
+| `row_pool.total_active`          | Cut rows still active in the pool at the end of training.                                                                                                                                    |
+| `row_pool.cuts_active`           | Cut rows currently active in the LP at termination.                                                                                                                                          |
+| `bounds.final_lower_bound`       | Final proven lower bound on the minimum expected cost at termination.                                                                                                                        |
+| `bounds.final_upper_bound`       | Final upper bound estimate at termination. `null` when upper-bound evaluation is disabled.                                                                                                   |
+| `distribution.backend`           | Communication backend: `"local"` for single-process, `"mpi"` for distributed runs.                                                                                                          |
+| `distribution.world_size`        | Number of processes involved in the run. `1` for single-process runs.                                                                                                                       |
+| `distribution.threads_per_rank`  | Number of rayon worker threads per process.                                                                                                                                                  |
 
 **What "converged" means in practice.** A converged run (`convergence.achieved:
 true`) means a stopping rule determined that continuing would not meaningfully
-improve the policy. For the 1dtoy case, the gap reaches near zero within the
-128-iteration budget even without an explicit convergence rule, which is why
-`final_gap_percent` is `0.0` despite `achieved` being `false` — the run hit
-its iteration limit at a point where the policy was already very tight.
-
-For larger studies, configure a `bound_stalling` or `gap_threshold` stopping
-rule in `config.json` to stop automatically when the gap stabilizes, rather
-than running a fixed number of iterations.
+improve the policy. The 1dtoy case hits its 128-iteration budget before a
+convergence rule fires, so `achieved` is `false`. For larger studies, configure
+a `bound_stalling` or `gap_threshold` stopping rule in `config.json` to stop
+automatically when the gap stabilizes.
 
 ---
 
@@ -249,7 +282,7 @@ dplyr::collect(dplyr::filter(ds, scenario_id == 0))
 
 ## Querying Results with `cobre report`
 
-`cobre report` reads the JSON manifests and prints a structured JSON summary to
+`cobre report` reads the JSON metadata files and prints a structured JSON summary to
 stdout. Use it with `jq` to extract specific metrics in scripts or CI pipelines.
 
 ```bash
@@ -263,9 +296,10 @@ The output has this top-level shape:
 {
   "output_directory": "/abs/path/to/results",
   "status": "complete",
-  "training": { "iterations": {}, "convergence": {}, "cuts": {} },
-  "simulation": { "scenarios": {} },
-  "metadata": { "run_info": {}, "configuration_snapshot": {} }
+  "bounds": { "final_lower_bound": ..., "final_upper_bound": ... },
+  "training": { "iterations": {}, "convergence": {}, "row_pool": {}, "bounds": {}, "configuration": {}, "problem_dimensions": {} },
+  "cost": { "mean_cost": ..., "std_cost": ... } | null,
+  "simulation": { "scenarios": {}, "cost": {} } | null
 }
 ```
 

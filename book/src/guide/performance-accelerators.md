@@ -160,31 +160,39 @@ Stage 2: Budget enforcement        (every iteration)
 
 ### Stage 1: Strategy-Based Selection
 
-Three strategies are available, configured via
+Four strategies are available, configured via
 [`cut_selection`](./configuration.md#cut_selection) in `config.json`:
 
-| Strategy     | Deactivation Condition                                                             | Aggressiveness |
-| ------------ | ---------------------------------------------------------------------------------- | -------------- |
-| `level1`     | Below `tie_tolerance` of the per-state max at every visited state                  | Least          |
-| `lml1`       | Not the oldest eligible cut at the per-state max at any visited state              | Medium         |
-| `domination` | Below `threshold` of the per-state max at every visited state (all populated cuts) | Most           |
+| Strategy     | Selection Mechanism                                                                                                                                                                                                                                        | Aggressiveness |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| `level1`     | Deactivates cuts below `tie_tolerance` of the per-state max at every visited state                                                                                                                                                                         | Least          |
+| `lml1`       | Deactivates cuts that are not the oldest eligible within `tie_tolerance` at any visited state                                                                                                                                                               | Medium         |
+| `domination` | Deactivates cuts below `threshold` of the per-state max at every visited state (all populated cuts)                                                                                                                                                        | Most           |
+| `dynamic`    | Lazy incremental scheme: adds at most `nadic` cuts per inner re-solve round (the inner loop repeats up to `max_inner_iterations` rounds per backward solve) that violate the current LP solution by more than `violation_tolerance`; never deactivates cuts from the pool | Different      |
 
-All strategies respect `check_frequency`: selection runs only at
-iterations that are multiples of `check_frequency`. Stage 0 is always
-exempt (its rows drive the lower bound and are never backward-pass
+`level1`, `lml1`, and `domination` respect `check_frequency`: selection runs
+only at iterations that are multiples of `check_frequency`. Stage 0 is
+always exempt (its rows drive the lower bound and are never backward-pass
 successors). Selection runs in parallel across stages via `rayon`.
 
-All three strategies share a single value-evaluation kernel that
-performs `O(|populated cuts| x |visited states|)` work per stage per
-check. Every populated cut is evaluated at every visited
-forward-pass state (including cuts currently flagged inactive,
-which means a previously deactivated cut can be reactivated when it
-later achieves the maximum at some state). The visited-states
-archive is collected during training for every cut-selection
-variant. The `tie_tolerance` parameter (default `1e-10`) on
-`level1` and `lml1` controls how closely a cut must approach the
-per-state maximum to be retained; `domination` uses the
-`threshold` field for the same purpose.
+`level1`, `lml1`, and `domination` share a single value-evaluation kernel
+that performs `O(|populated cuts| x |visited states|)` work per stage per
+check. Every populated cut is evaluated at every visited forward-pass
+state (including cuts currently flagged inactive, which means a previously
+deactivated cut can be reactivated when it later achieves the maximum at
+some state). The visited-states archive is collected during training for
+these three variants. The `tie_tolerance` parameter (default `1e-10`) on
+`level1` and `lml1` controls how closely a cut must approach the per-state
+maximum to be retained; `domination` uses the `threshold` field for the
+same purpose.
+
+`dynamic` (Dynamic Cut Selection, DCS) operates differently: it is a
+per-solve lazy selection loop that adds cuts on demand rather than
+deactivating from a full pool scan. It never invokes the value-evaluation
+kernel and does not respect `check_frequency`. The initial active set is
+seeded from the `active_window` most recent iterations. See
+[`cut_selection`](./configuration.md#cut_selection) for the full parameter
+reference.
 
 ### Stage 2: Budget Enforcement
 

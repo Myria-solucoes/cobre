@@ -92,7 +92,9 @@ Stochastic artifact export is controlled by `exports.stochastic` in `config.json
 
 The CLI follows a **config-first** design: `config.json` defines _what_ to compute,
 CLI flags define _how_ to run it. A study is fully specified by its case directory —
-the same case produces the same results regardless of which CLI flags are used.
+the same case produces the same results regardless of which CLI flags are used,
+with one exception: `--enable-inside-backward` engages in-backward cut selection
+and **does** change the numerical result.
 
 | Concern                    | Controlled by                                     |
 | -------------------------- | ------------------------------------------------- |

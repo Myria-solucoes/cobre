@@ -66,6 +66,6 @@ The ecosystem delivers a full SDDP training and simulation pipeline:
 - **Python bindings** via PyO3 with Arrow zero-copy result loading (`cobre-python`)
 - **JSON Schema** files for all input types, hosted for `$schema` editor integration
 
-The workspace is verified by over 3,450 tests, including 27 deterministic
-regression cases (D01--D16, D19--D27) and 2 cut selection integration tests
-(D17--D18).
+The workspace is verified by over 3,450 tests, including 29 deterministic
+example regression cases (D01--D17, D19--D30; the D18 index is reserved —
+no example directory exists, though an integration test covers that scenario).

@@ -1,12 +1,12 @@
 # Warm-start-friendly opening ordering in the backward pass
 
-> **Status**: Proposed / design (2026-06-07). Not yet implemented. This note
-> proposes solving each trial point's stochastic openings in an order that
-> minimizes the warm-start distance between consecutive solves, to cut the
-> dominant per-opening re-solve cost in the backward pass. It is a
-> **performance-only** change: by decoupling solve order from cut-aggregation
-> order, the generated cuts stay **bit-identical** to today, so exactness and
-> the cross-rank determinism contract are preserved by construction.
+> **Status**: Implemented (default-on, descending). The backward pass always
+> solves openings in descending noise-key order; configuration options were
+> removed after the A/B measurement confirmed the gain (§8.6–8.7). Wired at
+> `setup/mod.rs:317` (precompute), `opening_tree.rs:152-207`
+> (`set_solve_order`), and `backward.rs:1146-1163` (hot-path iteration).
+> The original proposal text (§1–§7) and validation record (§8) are
+> preserved below as design rationale and measurement history.
 >
 > **Companions:**
 >

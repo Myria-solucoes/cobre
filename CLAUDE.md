@@ -9,7 +9,7 @@ vertical is SDDP-based hydrothermal dispatch.
 - **License**: Apache-2.0
 - **Workspace**: 14 crates (8 workspace + 6 excluded: `cobre-mcp` stub, `cobre-tui` stub, `cobre-flow` stub, `cobre-uc` stub, `cobre-emt` stub, `cobre-python`)
 - **Build**: `cargo build --workspace`
-- **Test**: `cargo test --workspace --all-features`
+- **Test**: `cargo test --workspace --features "mpi numa shared-memory serde schema slow-tests flatc-conformance test-support"`
 - **Format**: `cargo fmt --all` (CI enforces `--check`)
 
 ## Hard Rules
@@ -59,8 +59,17 @@ When modifying hot-path code (`forward.rs`, `backward.rs`, `training.rs`,
 
 When applying a stored basis at any call site, read:
 → `crates/cobre-sddp/src/basis_reconstruct.rs` module docs.
-`reconstruct_basis` is the single hot-path entry point; never
-bypass it.
+Two public entry points exist — use the correct one for the path:
+
+- `reconstruct_basis` — the **baked hot path** (forward pass, simulation, baked
+  backward). Slot-identity-based: matches stored cut-row statuses to the current
+  LP by `CutPool` slot, assigns `BASIC` to new cuts, then calls
+  `enforce_basic_count_invariant`. **Never bypass this on the baked path.**
+- `reconstruct_basis_uniform_basic` — the **DCS path** (`dcs.rs`). Slot-identity-
+  free: copies the column block and template rows, then assigns every resident cut
+  row `BASIC` unconditionally. DCS adds its cut rows fresh each solve and does not
+  track which will bind, so slot alignment is unnecessary. The caller pairs it with
+  `enforce_basic_count_invariant` to restore the invariant.
 
 When changing the MPI basis-cache wire format, read:
 → `crates/cobre-sddp/src/workspace.rs` —

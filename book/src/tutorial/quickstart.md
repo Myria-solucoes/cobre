@@ -17,7 +17,7 @@ If you have not installed Cobre yet, start with [Installation](../guide/installa
 cobre init --template 1dtoy my_first_study
 ```
 
-Cobre writes 10 input files into a new `my_first_study/` directory and prints a
+Cobre writes 11 input files into a new `my_first_study/` directory and prints a
 summary to stderr:
 
 ```
@@ -33,6 +33,7 @@ Created my_first_study case directory from template '1dtoy':
   ✔ stages.json                    Planning horizon definition: policy graph type, discount rate, stage dates, time blocks, and scenario counts
   ✔ system/buses.json              Electrical bus definitions with deficit cost segments
   ✔ system/hydros.json             Hydro plant definitions: reservoir bounds, outflow limits, turbine model, and generation limits
+  ✔ system/hydro_production_models.json  Per-(hydro, stage) production-model configuration carrying the productivity coefficient
   ✔ system/lines.json              Transmission line definitions (empty in this single-bus example)
   ✔ system/thermals.json           Thermal plant definitions with piecewise cost segments and generation bounds
   ✔ scenarios/inflow_seasonal_stats.parquet  Seasonal PAR(p) statistics for hydro inflow scenario generation (mean, std, lag correlations)
@@ -54,6 +55,7 @@ my_first_study/
   system/
     buses.json
     hydros.json
+    hydro_production_models.json
     lines.json
     thermals.json
   scenarios/

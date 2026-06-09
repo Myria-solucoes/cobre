@@ -104,7 +104,7 @@ Verify:
 
 ```bash
 ./target/release/cobre version
-cargo test --workspace --all-features
+cargo test --workspace
 ```
 
 ---
