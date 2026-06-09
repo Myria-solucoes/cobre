@@ -504,6 +504,9 @@ mod tests {
         fn statistics(&self) -> SolverStatistics {
             SolverStatistics::default()
         }
+        fn statistics_into(&self, out: &mut SolverStatistics) {
+            out.copy_from(&SolverStatistics::default());
+        }
         fn name(&self) -> &'static str {
             "SetterCountMock"
         }

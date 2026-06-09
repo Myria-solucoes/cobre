@@ -70,7 +70,7 @@ pub mod profiled;
 pub use profiled::ProfiledSolver;
 
 pub mod baking;
-pub use baking::bake_rows_into_template;
+pub use baking::{BakingScratch, bake_rows_into_template};
 
 #[cfg(feature = "highs")]
 pub mod highs;

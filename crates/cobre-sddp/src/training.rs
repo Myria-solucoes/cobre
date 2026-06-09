@@ -129,9 +129,6 @@ impl TrainingResult {
     /// into a context struct would not reduce the argument count at the call
     /// sites, because each call site constructs the full `TrainingResult` as
     /// the terminal value — there is no shared upstream context to forward.
-    // RATIONALE: 11 args map 1-to-1 to distinct output fields of the training result.
-    // No shared context struct can be forwarded from the call sites; each call site
-    // is the terminal aggregation point that collects all training outputs.
     #[must_use]
     #[allow(clippy::too_many_arguments, clippy::similar_names)]
     pub fn new(
@@ -609,6 +606,10 @@ mod tests {
             SolverStatistics::default()
         }
 
+        fn statistics_into(&self, out: &mut SolverStatistics) {
+            out.copy_from(&SolverStatistics::default());
+        }
+
         fn name(&self) -> &'static str {
             "Mock"
         }
@@ -877,7 +878,11 @@ mod tests {
     #[test]
     fn ac_train_completes_with_iteration_limit() {
         let n_stages = 2;
-        let indexer = StageIndexer::new(1, 0); // N=1, L=0
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        }; // N=1, L=0
         let templates = vec![minimal_template(indexer.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; indexer.n_state];
@@ -976,7 +981,11 @@ mod tests {
     #[test]
     fn ac_train_returns_partial_on_infeasible() {
         let n_stages = 2;
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template(indexer.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; indexer.n_state];
@@ -1092,7 +1101,11 @@ mod tests {
     #[test]
     fn ac_train_emits_correct_event_sequence() {
         let n_stages = 2;
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template(indexer.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; indexer.n_state];
@@ -1293,7 +1306,11 @@ mod tests {
         use cobre_core::WorkerTimingPhase;
 
         let n_stages = 2;
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template(indexer.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; indexer.n_state];
@@ -1465,7 +1482,11 @@ mod tests {
     #[test]
     fn ac_train_result_fields_populated() {
         let n_stages = 2;
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template(indexer.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; indexer.n_state];
@@ -1562,7 +1583,11 @@ mod tests {
     #[test]
     fn ac_train_with_no_event_sender() {
         let n_stages = 2;
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template(indexer.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; indexer.n_state];
@@ -1656,7 +1681,11 @@ mod tests {
     #[test]
     fn ac_total_time_ms_is_non_negative() {
         let n_stages = 2;
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template(indexer.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; indexer.n_state];
@@ -1756,7 +1785,11 @@ mod tests {
     #[test]
     fn cut_selection_none_skips_step() {
         let n_stages = 2;
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template(indexer.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; indexer.n_state];
@@ -1865,7 +1898,11 @@ mod tests {
         use crate::cut_selection::CutSelectionStrategy;
 
         let n_stages = 2;
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template(indexer.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; indexer.n_state];
@@ -1987,7 +2024,11 @@ mod tests {
         use crate::cut_selection::CutSelectionStrategy;
 
         let n_stages = 2;
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template(indexer.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; indexer.n_state];
@@ -2125,7 +2166,11 @@ mod tests {
     #[test]
     fn existing_train_tests_pass_with_none() {
         let n_stages = 2;
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template(indexer.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; indexer.n_state];
@@ -2226,7 +2271,11 @@ mod tests {
     #[test]
     fn ac_train_partial_result_on_mid_iteration_failure() {
         let n_stages = 2;
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template(indexer.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; indexer.n_state];
@@ -2348,7 +2397,11 @@ mod tests {
     #[test]
     fn start_iteration_resumes_from_offset() {
         let n_stages = 2;
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template(indexer.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; indexer.n_state];
@@ -2445,7 +2498,11 @@ mod tests {
     #[test]
     fn start_iteration_at_or_beyond_max_runs_zero_iterations() {
         let n_stages = 2;
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template(indexer.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; indexer.n_state];
@@ -3170,7 +3227,11 @@ mod tests {
     #[test]
     fn template_bake_event_emitted() {
         let n_stages = 2;
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template(indexer.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; indexer.n_state];

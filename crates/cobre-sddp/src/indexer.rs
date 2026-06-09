@@ -773,6 +773,12 @@ pub struct StageIndexer {
     /// nonzero (dense path). Use [`set_nonzero_mask`](Self::set_nonzero_mask) to
     /// populate after construction when per-hydro AR orders are available.
     pub nonzero_state_indices: Vec<usize>,
+
+    /// Precomputed `state_to_lp_column(j)` for every `j ∈ [0, n_state)`.
+    ///
+    /// Built once after the state layout is finalized; read on the
+    /// forward-pass cut-row hot path. Empty until finalized.
+    pub state_to_lp_column_map: Vec<usize>,
 }
 
 /// Equipment counts for constructing a [`StageIndexer`].
@@ -963,6 +969,7 @@ impl StageIndexer {
             z_inflow_rows,
             z_inflow_row_start,
             nonzero_state_indices: Vec::new(),
+            state_to_lp_column_map: Vec::new(),
         }
     }
 
@@ -1323,6 +1330,9 @@ impl StageIndexer {
             z_inflow,
             z_inflow_rows,
             z_inflow_row_start,
+            // Built empty here; filled by `finalize_state_column_map` once the
+            // (shifted) state layout above is final.
+            state_to_lp_column_map: Vec::new(),
             // Remaining state-block fields are unchanged; inherit from base.
             ..base
         }
@@ -1506,6 +1516,37 @@ impl StageIndexer {
         } else {
             n + (lag - 1) * n + h
         }
+    }
+
+    /// Fill [`state_to_lp_column_map`](Self::state_to_lp_column_map) by calling
+    /// [`state_to_lp_column`](Self::state_to_lp_column) for every
+    /// `j ∈ [0, n_state)`.
+    ///
+    /// Call once after the state layout is finalized (e.g. after
+    /// [`set_nonzero_mask`](Self::set_nonzero_mask) in study setup). The map is a
+    /// pure cache of the resolver — it never reimplements the mapping arithmetic.
+    pub fn finalize_state_column_map(&mut self) {
+        self.state_to_lp_column_map.clear();
+        self.state_to_lp_column_map.reserve(self.n_state);
+        for j in 0..self.n_state {
+            self.state_to_lp_column_map.push(self.state_to_lp_column(j));
+        }
+        debug_assert_eq!(self.state_to_lp_column_map.len(), self.n_state);
+    }
+
+    /// Read the precomputed `state_to_lp_column(j)`, falling back to the live
+    /// resolver when the map has not been finalized.
+    ///
+    /// The fallback guarantees correctness for any indexer (e.g. test indexers
+    /// that skip [`finalize_state_column_map`](Self::finalize_state_column_map))
+    /// without editing every construction site.
+    #[inline]
+    #[must_use]
+    pub fn lp_column_for_state(&self, j: usize) -> usize {
+        self.state_to_lp_column_map
+            .get(j)
+            .copied()
+            .unwrap_or_else(|| self.state_to_lp_column(j))
     }
 
     /// Map a state-vector index to the LP column pinned by
@@ -1746,6 +1787,30 @@ impl StageIndexer {
         );
 
         self.nonzero_state_indices = mask;
+    }
+
+    /// Finalize a test-constructed indexer the way production
+    /// [`build_wired_indexer`](crate::setup) does: populate the nonzero-state
+    /// mask, then the `state_to_lp_column` precompute map.
+    ///
+    /// Production studies build their mask from per-hydro
+    /// `PrecomputedPar::effective_lag_count`, but test indexers built via
+    /// [`StageIndexer::new`] / [`StageIndexer::with_equipment_and_evaporation`]
+    /// have no PAR model. This helper uses the full `max_par_order` for every
+    /// hydro (so the mask covers every lag slot — the same coverage the old
+    /// dense path emitted) and the indexer's own `anticipated_lead_stages`. For
+    /// a storage-only indexer this yields mask `[0, n_state)` ascending,
+    /// reproducing the pre-unification dense output byte-for-byte.
+    ///
+    /// Use this at any test site that feeds the indexer into the forward-pass
+    /// cut-row hot path (`build_cut_row_batch_into`), which is mask-driven and
+    /// requires a finalized mask.
+    #[cfg(test)]
+    pub fn finalize_for_test(&mut self) {
+        let lag_counts = vec![self.max_par_order; self.hydro_count];
+        let anticipated_k = self.anticipated_lead_stages.clone();
+        self.set_nonzero_mask(&lag_counts, &anticipated_k);
+        self.finalize_state_column_map();
     }
 }
 
@@ -2779,6 +2844,75 @@ mod tests {
         idx.set_nonzero_mask(&[0, 0, 0], &[]);
         assert_eq!(idx.nonzero_state_indices.len(), 3);
         assert_eq!(&idx.nonzero_state_indices, &[0, 1, 2]);
+    }
+
+    // ── state_to_lp_column precompute tests ─────────────────────────────────
+
+    /// A finalized indexer carrying storage + AR lags + anticipated thermals
+    /// (every `state_to_lp_column` branch) must have
+    /// `lp_column_for_state(j) == state_to_lp_column(j)` for every state index.
+    #[test]
+    fn lp_column_map_matches_resolver_with_lags_and_anticipated() {
+        // hydro_count=3, max_par_order=2, n_anticipated=2 (K = [1, 2], k_max=2).
+        let mut idx = StageIndexer::with_equipment_and_evaporation(
+            &EquipmentCounts {
+                hydro_count: 3,
+                max_par_order: 2,
+                n_thermals: 2,
+                n_lines: 0,
+                n_buses: 1,
+                n_blks: 1,
+                has_inflow_penalty: false,
+                max_deficit_segments: 1,
+                n_anticipated: 2,
+                k_max: 2,
+                anticipated_lead_stages: vec![1, 2],
+                anticipated_thermal_indices: vec![0, 1],
+            },
+            &fpha(vec![], vec![]),
+            &evap(vec![]),
+        );
+        // Finalize both layout-derived caches, as study setup does.
+        let lag_counts = vec![2_usize; idx.hydro_count];
+        let anticipated_k = idx.anticipated_lead_stages.clone();
+        idx.set_nonzero_mask(&lag_counts, &anticipated_k);
+        idx.finalize_state_column_map();
+
+        assert_eq!(idx.state_to_lp_column_map.len(), idx.n_state);
+        for j in 0..idx.n_state {
+            assert_eq!(
+                idx.lp_column_for_state(j),
+                idx.state_to_lp_column(j),
+                "finalized map must match the resolver at j={j}"
+            );
+        }
+
+        // Un-finalized clone: the fallback must still match the resolver.
+        let mut unfinalized = idx.clone();
+        unfinalized.state_to_lp_column_map.clear();
+        for j in 0..unfinalized.n_state {
+            assert_eq!(
+                unfinalized.lp_column_for_state(j),
+                unfinalized.state_to_lp_column(j),
+                "fallback must match the resolver at j={j} when un-finalized"
+            );
+        }
+    }
+
+    /// Storage-only (`max_par_order == 0`, no anticipated): the mask is exactly
+    /// `[0, n_state)` ascending and `lp_column_for_state(j) == j` — the
+    /// dense→sparse bit-identity premise for the unified cut-row loop.
+    #[test]
+    fn lp_column_map_storage_only_mask_is_full_range() {
+        let mut idx = StageIndexer::new(3, 0);
+        idx.set_nonzero_mask(&[0, 0, 0], &[]);
+        idx.finalize_state_column_map();
+
+        assert_eq!(idx.nonzero_state_indices, vec![0, 1, 2]);
+        assert_eq!(idx.nonzero_state_indices.len(), idx.n_state);
+        for j in 0..idx.n_state {
+            assert_eq!(idx.lp_column_for_state(j), j);
+        }
     }
 
     #[test]

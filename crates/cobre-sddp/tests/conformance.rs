@@ -130,6 +130,10 @@ impl SolverInterface for MockSolver {
         SolverStatistics::default()
     }
 
+    fn statistics_into(&self, out: &mut SolverStatistics) {
+        *out = self.statistics();
+    }
+
     fn name(&self) -> &'static str {
         "MockConformance"
     }
@@ -833,7 +837,15 @@ mod lb_conformance {
     /// public-API integration test.
     #[test]
     fn evaluate_lower_bound_monotonicity_with_additional_cuts() {
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            // Finalize as production setup does: full-order mask + state→LP-column map.
+            let lag_counts = vec![ix.max_par_order; ix.hydro_count];
+            let anticipated_k = ix.anticipated_lead_stages.clone();
+            ix.set_nonzero_mask(&lag_counts, &anticipated_k);
+            ix.finalize_state_column_map();
+            ix
+        };
         let template = minimal_template();
         let fcf = make_fcf(2, indexer.n_state);
         let initial_state = vec![0.0_f64; indexer.n_state];

@@ -131,6 +131,10 @@ pub(crate) struct SimulationState {
     ///
     /// Initialized to an empty batch in [`SimulationState::new`].
     bake_batch: RowBatch,
+    /// Reusable scratch for `bake_rows_into_template` (count/emit-pass temporaries).
+    ///
+    /// Reused across the lazy re-bake loop's `for t in 0..num_stages` iterations.
+    baking_scratch: cobre_solver::BakingScratch,
 }
 
 impl SimulationState {
@@ -151,6 +155,7 @@ impl SimulationState {
                 row_lower: Vec::new(),
                 row_upper: Vec::new(),
             },
+            baking_scratch: cobre_solver::BakingScratch::new(),
         }
     }
 
@@ -217,6 +222,7 @@ impl SimulationState {
             inputs.baked_templates,
             &mut self.bake_batch,
             &mut self.owned_baked,
+            &mut self.baking_scratch,
         );
 
         let baked_templates: &[StageTemplate] =
@@ -533,6 +539,7 @@ fn rebake_templates_if_needed(
     caller_baked: Option<&[StageTemplate]>,
     bake_batch: &mut RowBatch,
     owned_baked: &mut Option<Vec<StageTemplate>>,
+    baking_scratch: &mut cobre_solver::BakingScratch,
 ) {
     if caller_baked.is_some() {
         // Caller provided templates — skip re-bake entirely.
@@ -544,7 +551,12 @@ fn rebake_templates_if_needed(
     for t in 0..num_stages {
         build_cut_row_batch_into(bake_batch, fcf, t, indexer, &ctx.templates[t].col_scale);
         let mut baked = StageTemplate::empty();
-        cobre_solver::bake_rows_into_template(&ctx.templates[t], bake_batch, &mut baked);
+        cobre_solver::bake_rows_into_template(
+            &ctx.templates[t],
+            bake_batch,
+            &mut baked,
+            baking_scratch,
+        );
         owned.push(baked);
     }
     *owned_baked = Some(owned);

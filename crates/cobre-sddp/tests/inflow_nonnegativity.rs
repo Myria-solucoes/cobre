@@ -447,7 +447,7 @@ fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixtur
     let first_tmpl = stage_templates.templates.first().expect("at least 1 stage");
     let n_blks = system.stages().first().map_or(1, |s| s.blocks.len().max(1));
     let has_inflow_penalty = inflow_method.has_slack_columns() && first_tmpl.n_hydro > 0;
-    let indexer = StageIndexer::with_equipment(
+    let mut indexer = StageIndexer::with_equipment(
         &cobre_sddp::indexer::EquipmentCounts {
             hydro_count: first_tmpl.n_hydro,
             max_par_order: first_tmpl.max_par_order,
@@ -467,6 +467,13 @@ fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixtur
             planes_per_hydro: vec![],
         },
     );
+    // Finalize as production setup does: full-order mask + state→LP-column map.
+    {
+        let lag_counts = vec![indexer.max_par_order; indexer.hydro_count];
+        let anticipated_k = indexer.anticipated_lead_stages.clone();
+        indexer.set_nonzero_mask(&lag_counts, &anticipated_k);
+        indexer.finalize_state_column_map();
+    }
     // z-inflow column and row ranges are set by StageIndexer::new at
     // fixed offset N*(1+L), no per-stage wiring needed.
 
@@ -942,7 +949,7 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
     // The inflow slack columns are at indexer positions. With 2 hydros, PAR(0),
     // and has_penalty=true, the indexer allocates 2 inflow slack columns.
     let n_blks = 1;
-    let indexer = StageIndexer::with_equipment(
+    let mut indexer = StageIndexer::with_equipment(
         &cobre_sddp::indexer::EquipmentCounts {
             hydro_count: tmpl0.n_hydro,
             max_par_order: tmpl0.max_par_order,
@@ -962,6 +969,13 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
             planes_per_hydro: vec![],
         },
     );
+    // Finalize as production setup does: full-order mask + state→LP-column map.
+    {
+        let lag_counts = vec![indexer.max_par_order; indexer.hydro_count];
+        let anticipated_k = indexer.anticipated_lead_stages.clone();
+        indexer.set_nonzero_mask(&lag_counts, &anticipated_k);
+        indexer.finalize_state_column_map();
+    }
 
     // Inflow slack columns: indexer.inflow_slack.start .. indexer.inflow_slack.end
     assert_eq!(indexer.inflow_slack.len(), N_HYDROS);

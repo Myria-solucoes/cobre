@@ -158,6 +158,10 @@ impl SolverInterface for MockSolver {
         SolverStatistics::default()
     }
 
+    fn statistics_into(&self, out: &mut SolverStatistics) {
+        *out = self.statistics();
+    }
+
     fn name(&self) -> &'static str {
         "MockIntegration"
     }
@@ -355,7 +359,15 @@ const FCF_CAPACITY_ITERATIONS: u64 = 50;
 
 impl Fixture {
     fn new(n_stages: usize) -> Self {
-        let indexer = StageIndexer::new(1, 0); // N=1, L=0
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            // Finalize as production setup does: full-order mask + state→LP-column map.
+            let lag_counts = vec![ix.max_par_order; ix.hydro_count];
+            let anticipated_k = ix.anticipated_lead_stages.clone();
+            ix.set_nonzero_mask(&lag_counts, &anticipated_k);
+            ix.finalize_state_column_map();
+            ix
+        }; // N=1, L=0
         let templates = vec![minimal_template(); n_stages];
         // base_row: the AR-dynamics row offset is 1 (1 dual-relevant row)
         let base_rows = vec![2usize; n_stages];
@@ -1007,6 +1019,10 @@ impl SolverInterface for SizedMockSolver {
         SolverStatistics::default()
     }
 
+    fn statistics_into(&self, out: &mut SolverStatistics) {
+        *out = self.statistics();
+    }
+
     fn name(&self) -> &'static str {
         "SizedMockSolver"
     }
@@ -1276,7 +1292,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
     let t0 = &templates_result.templates[0];
 
     // Build indexer matching the template layout.
-    let indexer = StageIndexer::with_equipment(
+    let mut indexer = StageIndexer::with_equipment(
         &cobre_sddp::indexer::EquipmentCounts {
             hydro_count: 1,
             max_par_order: 0,
@@ -1296,6 +1312,13 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
             planes_per_hydro: vec![],
         },
     );
+    // Finalize as production setup does: full-order mask + state→LP-column map.
+    {
+        let lag_counts = vec![indexer.max_par_order; indexer.hydro_count];
+        let anticipated_k = indexer.anticipated_lead_stages.clone();
+        indexer.set_nonzero_mask(&lag_counts, &anticipated_k);
+        indexer.finalize_state_column_map();
+    }
 
     assert!(indexer.has_operational_violations);
     assert!(!indexer.outflow_below_slack.is_empty());

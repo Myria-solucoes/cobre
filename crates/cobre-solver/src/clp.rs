@@ -1565,6 +1565,10 @@ impl SolverInterface for ClpSolver {
         self.stats.clone()
     }
 
+    fn statistics_into(&self, out: &mut SolverStatistics) {
+        out.copy_from(&self.stats);
+    }
+
     /// Returns a static string identifying the solver backend.
     fn name(&self) -> &'static str {
         "CLP"
@@ -1691,7 +1695,9 @@ pub fn clp_version() -> String {
 mod tests {
     use crate::clp::{ClpAlgorithm, ClpProfile, ClpSolver, LADDER_RUNGS, clp_version};
     use crate::profile::DEFAULT_PROFILE_HEURISTIC_SENTINEL;
-    use crate::types::{Basis, RowBatch, SolutionView, SolverError, StageTemplate};
+    use crate::types::{
+        Basis, RowBatch, SolutionView, SolverError, SolverStatistics, StageTemplate,
+    };
     use crate::{ProfiledSolver, SolverInterface};
 
     fn assert_profile_bounds<P: Copy + PartialEq + Default + Send>() {}
@@ -2187,6 +2193,45 @@ mod tests {
         assert_eq!(solver.stats.first_try_successes, 2);
         assert_eq!(solver.stats.retry_count, 0);
         assert_eq!(solver.stats.failure_count, 0);
+    }
+
+    #[test]
+    fn test_clp_statistics_into_equals_statistics() {
+        let mut solver = ClpSolver::new().expect("CLP solver creation failed");
+        solver.load_model(&make_fixture_stage_template());
+        let _ = solver.solve(None).expect("solve should be optimal");
+
+        let owned = solver.statistics();
+        let mut buf = SolverStatistics::default();
+        solver.statistics_into(&mut buf);
+
+        assert_eq!(buf.solve_count, owned.solve_count);
+        assert_eq!(buf.success_count, owned.success_count);
+        assert_eq!(buf.failure_count, owned.failure_count);
+        assert_eq!(buf.total_iterations, owned.total_iterations);
+        assert_eq!(buf.retry_count, owned.retry_count);
+        assert_eq!(buf.total_solve_time_seconds, owned.total_solve_time_seconds);
+        assert_eq!(
+            buf.basis_consistency_failures,
+            owned.basis_consistency_failures
+        );
+        assert_eq!(buf.first_try_successes, owned.first_try_successes);
+        assert_eq!(buf.basis_offered, owned.basis_offered);
+        assert_eq!(buf.load_model_count, owned.load_model_count);
+        assert_eq!(
+            buf.total_load_model_time_seconds,
+            owned.total_load_model_time_seconds
+        );
+        assert_eq!(
+            buf.total_set_bounds_time_seconds,
+            owned.total_set_bounds_time_seconds
+        );
+        assert_eq!(
+            buf.total_basis_set_time_seconds,
+            owned.total_basis_set_time_seconds
+        );
+        assert_eq!(buf.basis_reconstructions, owned.basis_reconstructions);
+        assert_eq!(buf.retry_level_histogram, owned.retry_level_histogram);
     }
 
     #[test]

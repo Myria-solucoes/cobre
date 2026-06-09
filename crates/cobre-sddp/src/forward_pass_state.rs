@@ -52,7 +52,7 @@ pub(crate) struct ForwardPassInputs<'a, S: SolverInterface + Send> {
     /// Length must equal `local_forward_passes * num_stages`.
     pub records: &'a mut [TrajectoryRecord],
 
-    // ── Per-iteration batch scalars (formerly in `ForwardPassBatch`) ──────
+    // ── Per-iteration batch scalars ──────
     /// Number of forward-pass scenarios assigned to this rank.
     pub local_forward_passes: usize,
     /// Total forward passes across all MPI ranks.
@@ -395,10 +395,11 @@ impl ForwardPassState {
         } else {
             self.worker_stage_stats.clear();
             for _ in 0..n_workers {
-                let stage_vec: Vec<SolverStatsDelta> = (0..num_stages)
-                    .map(|_| SolverStatsDelta::default())
-                    .collect();
-                self.worker_stage_stats.push(stage_vec);
+                self.worker_stage_stats.push(
+                    (0..num_stages)
+                        .map(|_| SolverStatsDelta::default())
+                        .collect(),
+                );
             }
         }
 
@@ -938,6 +939,9 @@ mod tests {
         fn get_basis(&mut self, _out: &mut Basis) {}
         fn statistics(&self) -> SolverStatistics {
             self.stats.clone()
+        }
+        fn statistics_into(&self, out: &mut SolverStatistics) {
+            out.copy_from(&self.stats);
         }
         fn name(&self) -> &'static str {
             "MockSolver"

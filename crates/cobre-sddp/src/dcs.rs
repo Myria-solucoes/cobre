@@ -2444,6 +2444,9 @@ mod tests {
                 ..SolverStatistics::default()
             }
         }
+        fn statistics_into(&self, out: &mut SolverStatistics) {
+            out.copy_from(&self.statistics());
+        }
         fn name(&self) -> &'static str {
             "TwoPhaseMock"
         }

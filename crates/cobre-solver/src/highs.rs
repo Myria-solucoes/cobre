@@ -377,7 +377,7 @@ impl HighsSolver {
         })
     }
 
-    /// Applies the eight performance-tuned `HiGHS` configuration options.
+    /// Applies the thirteen performance-tuned `HiGHS` configuration options.
     ///
     /// Called once during construction. Returns `Ok(())` if all options are set
     /// successfully, or `Err(SolverError::InternalError)` with the failing
@@ -1640,6 +1640,10 @@ impl SolverInterface for HighsSolver {
         self.stats.clone()
     }
 
+    fn statistics_into(&self, out: &mut SolverStatistics) {
+        out.copy_from(&self.stats);
+    }
+
     fn record_reconstruction_stats(&mut self) {
         self.stats.basis_reconstructions += 1;
     }
@@ -1811,7 +1815,7 @@ mod tests {
     use super::HighsSolver;
     use crate::{
         SolverInterface,
-        types::{Basis, RowBatch, StageTemplate},
+        types::{Basis, RowBatch, SolverStatistics, StageTemplate},
     };
 
     // Shared LP fixture from Solver Interface Testing SS1.1:
@@ -2200,6 +2204,46 @@ mod tests {
         assert_eq!(stats.success_count, 1, "success_count must be 1");
         assert_eq!(stats.failure_count, 0, "failure_count must be 0");
         let _ = stats.total_iterations;
+    }
+
+    #[test]
+    fn test_highs_statistics_into_equals_statistics() {
+        let mut solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
+        let template = make_fixture_stage_template();
+        solver.load_model(&template);
+        solver.solve(None).expect("solve must succeed");
+
+        let owned = solver.statistics();
+        let mut buf = SolverStatistics::default();
+        solver.statistics_into(&mut buf);
+
+        assert_eq!(buf.solve_count, owned.solve_count);
+        assert_eq!(buf.success_count, owned.success_count);
+        assert_eq!(buf.failure_count, owned.failure_count);
+        assert_eq!(buf.total_iterations, owned.total_iterations);
+        assert_eq!(buf.retry_count, owned.retry_count);
+        assert_eq!(buf.total_solve_time_seconds, owned.total_solve_time_seconds);
+        assert_eq!(
+            buf.basis_consistency_failures,
+            owned.basis_consistency_failures
+        );
+        assert_eq!(buf.first_try_successes, owned.first_try_successes);
+        assert_eq!(buf.basis_offered, owned.basis_offered);
+        assert_eq!(buf.load_model_count, owned.load_model_count);
+        assert_eq!(
+            buf.total_load_model_time_seconds,
+            owned.total_load_model_time_seconds
+        );
+        assert_eq!(
+            buf.total_set_bounds_time_seconds,
+            owned.total_set_bounds_time_seconds
+        );
+        assert_eq!(
+            buf.total_basis_set_time_seconds,
+            owned.total_basis_set_time_seconds
+        );
+        assert_eq!(buf.basis_reconstructions, owned.basis_reconstructions);
+        assert_eq!(buf.retry_level_histogram, owned.retry_level_histogram);
     }
 
     /// After `load_model` + `solve()`, `get_basis` must return i32 codes

@@ -735,7 +735,11 @@ fn build_wired_indexer(
     // Using `par.order(h)` here would silently truncate the cut row's state
     // coefficients on lag slots that carry the annual `ψ̂/12` term and
     // produce over-estimating cuts (analogue of d0e4a42).
-    if (indexer.max_par_order > 0 && stochastic.par().n_hydros() > 0) || indexer.n_anticipated > 0 {
+    // Populate the cut sparse mask unconditionally so every production study —
+    // including storage-only (mask = [0, n_state) ascending) and pure-thermal
+    // (n_state == 0 → empty mask) — has a mask. The forward-pass cut-row loop is
+    // single-path (mask-driven); it relies on the mask always being populated.
+    {
         let par = stochastic.par();
         let effective_lag_counts: Vec<usize> = if indexer.max_par_order > 0 {
             (0..par.n_hydros())
@@ -749,6 +753,9 @@ fn build_wired_indexer(
         let anticipated_k: Vec<usize> = indexer.anticipated_lead_stages.clone();
         indexer.set_nonzero_mask(&effective_lag_counts, &anticipated_k);
     }
+    // Precompute state_to_lp_column(j) from the now-final state layout, in the
+    // same place as the mask so both layout-derived caches stay in lockstep.
+    indexer.finalize_state_column_map();
 
     indexer
 }

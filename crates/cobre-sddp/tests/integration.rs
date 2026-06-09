@@ -251,6 +251,10 @@ impl SolverInterface for MockSolver {
         SolverStatistics::default()
     }
 
+    fn statistics_into(&self, out: &mut SolverStatistics) {
+        *out = self.statistics();
+    }
+
     fn name(&self) -> &'static str {
         "MockIntegration"
     }
@@ -335,6 +339,10 @@ impl SolverInterface for ExpandingMockSolver {
 
     fn statistics(&self) -> SolverStatistics {
         SolverStatistics::default()
+    }
+
+    fn statistics_into(&self, out: &mut SolverStatistics) {
+        *out = self.statistics();
     }
 
     fn name(&self) -> &'static str {
@@ -545,7 +553,15 @@ const FCF_CAPACITY_ITERATIONS: u64 = 50;
 
 impl Fixture {
     fn new(n_stages: usize) -> Self {
-        let indexer = StageIndexer::new(1, 0); // N=1, L=0
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            // Finalize as production setup does: full-order mask + state→LP-column map.
+            let lag_counts = vec![ix.max_par_order; ix.hydro_count];
+            let anticipated_k = ix.anticipated_lead_stages.clone();
+            ix.set_nonzero_mask(&lag_counts, &anticipated_k);
+            ix.finalize_state_column_map();
+            ix
+        }; // N=1, L=0
         let templates = vec![minimal_template(); n_stages];
         // base_row = n_dual_relevant + n_hydros = 1 + 1 = 2 (z_inflow rows follow state rows)
         let base_rows = vec![2usize; n_stages];

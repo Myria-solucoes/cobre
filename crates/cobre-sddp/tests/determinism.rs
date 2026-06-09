@@ -180,6 +180,10 @@ impl SolverInterface for MockSolver3H {
         SolverStatistics::default()
     }
 
+    fn statistics_into(&self, out: &mut SolverStatistics) {
+        *out = self.statistics();
+    }
+
     fn name(&self) -> &'static str {
         "MockDeterminism3H"
     }
@@ -472,7 +476,15 @@ impl Fixture3H {
     fn with_branching(branching_factor: usize) -> Self {
         let n_stages = 5;
         // N=3 hydros, L=0 PAR order
-        let indexer = StageIndexer::new(3, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(3, 0);
+            // Finalize as production setup does: full-order mask + state→LP-column map.
+            let lag_counts = vec![ix.max_par_order; ix.hydro_count];
+            let anticipated_k = ix.anticipated_lead_stages.clone();
+            ix.set_nonzero_mask(&lag_counts, &anticipated_k);
+            ix.finalize_state_column_map();
+            ix
+        };
         let templates = vec![template_3h(); n_stages];
         // base_row: water-balance rows start at row_water_balance_start = n_state + n_hydros = 3 + 3 = 6.
         let base_rows = vec![6usize; n_stages];

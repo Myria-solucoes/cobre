@@ -214,10 +214,6 @@ fn build_row_lower_unscaled<'a>(
     &scratch_buf[..template_row_lower.len()]
 }
 
-/// Process all stages for one simulation scenario, updating workspace state in place.
-///
-/// Runs the inner stage loop for a single scenario, solving the LP at each stage,
-/// accumulating costs, and populating `stage_results`. Returns `(total_cost, stage_results)`.
 /// Stage identifiers bundled for `solve_simulation_stage`.
 struct SimStageIds {
     /// Stage index (0-based).
@@ -987,14 +983,8 @@ pub(crate) fn process_scenario_stages<S: SolverInterface>(
             .copied()
             .unwrap_or(1.0);
         total_cost += cum_d * cost;
-        // Re-read state update: solve_simulation_stage already called ws.current_state.extend_from_slice.
-        // However, the noise transforms above consumed ws.scratch; we must NOT re-run them.
-        // The state was already advanced inside solve_simulation_stage. ✓
         stage_results.push(result);
-        // State is already updated inside solve_simulation_stage via ws.current_state. ✓
     }
-    // Restore the indexer reference lifetime: indexer is still in scope from the destructure above.
-    let _ = indexer; // suppress unused warning
     Ok((total_cost, stage_results))
 }
 
@@ -1329,6 +1319,9 @@ mod tests {
         }
         fn statistics(&self) -> SolverStatistics {
             SolverStatistics::default()
+        }
+        fn statistics_into(&self, out: &mut SolverStatistics) {
+            out.copy_from(&SolverStatistics::default());
         }
         fn name(&self) -> &'static str {
             "Mock"
@@ -1826,7 +1819,11 @@ mod tests {
 
         let n_load_buses = 1usize;
         let stochastic = make_stochastic_context_1_hydro_1_load_bus_sim(300.0, 30.0);
-        let indexer = StageIndexer::new(1, 0); // N=1, L=0; theta=2
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        }; // N=1, L=0; theta=2
         let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
         let config = SimulationConfig {
             n_scenarios: 1,
@@ -2024,7 +2021,11 @@ mod tests {
         let base_rows = vec![0usize];
 
         let stochastic = make_stochastic_context(n_stages);
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
         let config = SimulationConfig {
             n_scenarios: 1,
@@ -2156,7 +2157,11 @@ mod tests {
 
         let n_load_buses = 1usize;
         let stochastic = make_stochastic_context_1_hydro_1_load_bus_sim(300.0, 30.0);
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
         let config = SimulationConfig {
             n_scenarios: 1,
@@ -2558,7 +2563,11 @@ mod tests {
         let base_rows = vec![0_usize];
         let noise_scale = vec![noise_scale_val];
 
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let fcf = FutureCostFunction::new(n_stages, indexer.n_state, 1, 10, &vec![0; n_stages]);
         let config = SimulationConfig {
             n_scenarios: 4,
@@ -2677,7 +2686,11 @@ mod tests {
         let base_rows = vec![0_usize];
         let noise_scale = vec![noise_scale_val];
 
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let fcf = FutureCostFunction::new(n_stages, indexer.n_state, 1, 10, &vec![0; n_stages]);
         let config = SimulationConfig {
             n_scenarios: 4,
@@ -2943,7 +2956,11 @@ mod tests {
             dcs: Option<DcsParams>,
             baked: &StageTemplate,
         ) -> (f64, SimulationStageResult) {
-            let indexer = StageIndexer::new(1, 0);
+            let indexer = {
+                let mut ix = StageIndexer::new(1, 0);
+                ix.finalize_for_test();
+                ix
+            };
             let core = sim_core_template();
             let templates = vec![core.clone()];
             let base_rows = vec![0_usize];

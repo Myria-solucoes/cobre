@@ -1046,6 +1046,7 @@ where
                 &self.stage_ctx.templates[t],
                 &self.scratch.bake_row_batches[t],
                 &mut self.scratch.baked_templates[t],
+                &mut self.scratch.baking_scratch,
             );
         }
         total_rows_baked
@@ -1286,6 +1287,10 @@ mod tests {
 
         fn statistics(&self) -> SolverStatistics {
             SolverStatistics::default()
+        }
+
+        fn statistics_into(&self, out: &mut SolverStatistics) {
+            out.copy_from(&SolverStatistics::default());
         }
 
         fn name(&self) -> &'static str {
@@ -1624,7 +1629,11 @@ mod tests {
     #[test]
     fn training_session_new_preallocates_all_buffers() {
         let n_stages = 2;
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template(indexer.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; indexer.n_state];
@@ -1686,7 +1695,11 @@ mod tests {
     #[test]
     fn training_session_finalize_emits_training_finished() {
         let n_stages = 2;
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template(indexer.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; indexer.n_state];
@@ -1739,7 +1752,11 @@ mod tests {
     #[test]
     fn training_session_finalize_with_error_emits_training_finished_with_error_reason() {
         let n_stages = 2;
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template(indexer.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; indexer.n_state];
@@ -1797,7 +1814,11 @@ mod tests {
     #[test]
     fn training_session_run_iteration_returns_continue_when_not_converged() {
         let n_stages = 2;
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template(indexer.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; indexer.n_state];
@@ -1842,7 +1863,11 @@ mod tests {
     #[test]
     fn training_session_run_iteration_returns_converged_when_gap_closes() {
         let n_stages = 2;
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template(indexer.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; indexer.n_state];
@@ -1902,7 +1927,11 @@ mod tests {
     #[test]
     fn training_session_run_iteration_emits_correct_event_sequence() {
         let n_stages = 2;
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template(indexer.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; indexer.n_state];

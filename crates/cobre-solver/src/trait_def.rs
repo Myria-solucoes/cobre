@@ -32,7 +32,7 @@ use crate::types::{Basis, RowBatch, SolutionView, SolverError, SolverStatistics,
 /// - Mutating methods (`load_model`, `add_rows`, `set_row_bounds`,
 ///   `set_col_bounds`, `solve`) take `&mut self`.
 /// - Methods that write to internal scratch buffers (`get_basis`) take `&mut self`.
-/// - Read-only query methods (`statistics`, `name`) take `&self`.
+/// - Read-only query methods (`statistics`, `statistics_into`, `name`) take `&self`.
 ///
 /// # Solve-to-solve Contract
 ///
@@ -246,6 +246,15 @@ pub trait SolverInterface: Send {
     /// See Solver Interface Trait SS2.8.
     fn statistics(&self) -> SolverStatistics;
 
+    /// Copy accumulated solve metrics into a caller-owned buffer, reusing its
+    /// `retry_level_histogram` allocation.
+    ///
+    /// Semantically equivalent to `*out = self.statistics()` but performs no
+    /// heap allocation when `out.retry_level_histogram` already has sufficient
+    /// capacity. All scalar fields are overwritten by value; the histogram is
+    /// `resize`d to the live length then `copy_from_slice`d.
+    fn statistics_into(&self, out: &mut SolverStatistics);
+
     /// Returns a static string identifying the solver backend (e.g., `"HiGHS"`).
     ///
     /// Used for logging, diagnostics, and checkpoint metadata.
@@ -359,6 +368,10 @@ mod tests {
 
         fn statistics(&self) -> crate::types::SolverStatistics {
             crate::types::SolverStatistics::default()
+        }
+
+        fn statistics_into(&self, out: &mut crate::types::SolverStatistics) {
+            out.copy_from(&crate::types::SolverStatistics::default());
         }
 
         fn name(&self) -> &'static str {

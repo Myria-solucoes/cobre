@@ -931,6 +931,10 @@ mod tests {
             SolverStatistics::default()
         }
 
+        fn statistics_into(&self, out: &mut SolverStatistics) {
+            out.copy_from(&SolverStatistics::default());
+        }
+
         fn name(&self) -> &'static str {
             "Mock"
         }
@@ -956,7 +960,11 @@ mod tests {
     /// AC1: 1 opening, Expectation — LB equals the single LP objective.
     #[test]
     fn one_opening_expectation_lb_equals_single_objective() {
-        let indexer = StageIndexer::new(1, 0); // n_state=1, hydro_count=1
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        }; // n_state=1, hydro_count=1
         let template = minimal_template();
         let fcf = make_fcf(2, indexer.n_state);
         let initial_state = vec![0.0_f64; indexer.n_state];
@@ -1010,7 +1018,11 @@ mod tests {
     /// AC2: 3 openings, Expectation — LB equals mean of objectives.
     #[test]
     fn three_openings_expectation_lb_equals_mean() {
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let template = minimal_template();
         let fcf = make_fcf(2, indexer.n_state);
         let initial_state = vec![0.0_f64; indexer.n_state];
@@ -1066,7 +1078,11 @@ mod tests {
     /// AC3: 2 openings, CVaR(alpha=0.5, lambda=1.0) — pure `CVaR` selects worst.
     #[test]
     fn two_openings_pure_cvar_alpha_half_lb_equals_worst() {
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let template = minimal_template();
         let fcf = make_fcf(2, indexer.n_state);
         let initial_state = vec![0.0_f64; indexer.n_state];
@@ -1129,7 +1145,11 @@ mod tests {
     /// AC4 (extra): 2 openings, CVaR(alpha=1.0, lambda=1.0) = Expectation.
     #[test]
     fn two_openings_cvar_alpha_one_equals_expectation() {
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let template = minimal_template();
         let fcf = make_fcf(2, indexer.n_state);
         let initial_state = vec![0.0_f64; indexer.n_state];
@@ -1187,7 +1207,11 @@ mod tests {
     /// AC5: solver returns Infeasible for the first opening — must propagate as `SddpError::Infeasible`.
     #[test]
     fn infeasible_solve_maps_to_sddp_infeasible() {
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let template = minimal_template();
         let fcf = make_fcf(2, indexer.n_state);
         let initial_state = vec![0.0_f64; indexer.n_state];
@@ -1240,7 +1264,11 @@ mod tests {
     /// AC6: broadcast failure maps to `SddpError::Communication`.
     #[test]
     fn broadcast_failure_maps_to_communication_error() {
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let template = minimal_template();
         let fcf = make_fcf(2, indexer.n_state);
         let initial_state = vec![0.0_f64; indexer.n_state];
@@ -1299,7 +1327,11 @@ mod tests {
     /// and `RiskMeasure::Expectation`.
     #[test]
     fn integration_two_openings_local_backend_expectation() {
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let template = minimal_template();
         // Start with 0 cuts (empty FCF).
         let fcf = make_fcf(2, indexer.n_state);
@@ -1359,7 +1391,11 @@ mod tests {
     /// must be >= the first.
     #[test]
     fn integration_monotonicity_more_cuts_yields_higher_or_equal_lb() {
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let template = minimal_template();
         let fcf = make_fcf(2, indexer.n_state);
         let initial_state = vec![0.0_f64];
@@ -1440,7 +1476,11 @@ mod tests {
     /// control flow works correctly when no PAR model is present.
     #[test]
     fn test_lb_none_method_unchanged() {
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let template = minimal_template();
         let fcf = make_fcf(2, indexer.n_state);
         let initial_state = vec![0.0_f64; indexer.n_state];
@@ -1499,7 +1539,11 @@ mod tests {
     /// (`needs_truncation` = true, `truncation_par` = `None`) does not panic.
     #[test]
     fn test_lb_truncation_no_crash() {
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let template = minimal_template();
         let fcf = make_fcf(2, indexer.n_state);
         let initial_state = vec![0.0_f64; indexer.n_state];
@@ -1552,7 +1596,11 @@ mod tests {
     /// `TruncationWithPenalty` method does not cause a crash or infeasibility.
     #[test]
     fn test_lb_truncation_with_penalty_no_crash() {
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let template = minimal_template();
         let fcf = make_fcf(2, indexer.n_state);
         let initial_state = vec![0.0_f64; indexer.n_state];
@@ -1771,7 +1819,11 @@ mod tests {
             row_scale: Vec::new(),
         };
 
-        let indexer = StageIndexer::new(0, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(0, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let ncs_max_gen = vec![100.0_f64; n_ncs];
         let ncs_allow_curtailment = vec![true; n_ncs];
 
@@ -1847,7 +1899,11 @@ mod tests {
         // Use n_hydros = 1 so that noise_buf gets populated (capacity grows to 1
         // after the first call). The template must have at least 1 row to avoid
         // index-out-of-bounds in fill_forward_patches when n_hydros = 1.
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let template = minimal_template();
         let fcf = make_fcf(2, indexer.n_state);
         let initial_state = vec![0.0_f64; indexer.n_state];

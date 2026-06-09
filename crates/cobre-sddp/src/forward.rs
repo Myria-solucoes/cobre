@@ -216,8 +216,10 @@ pub fn sync_forward<C: Communicator>(
 
 /// Push one negated, scaled coefficient entry into the cut row batch.
 ///
-/// Shared by the sparse and dense paths in [`build_cut_row_batch_into`] to
-/// prevent the two branches from drifting apart during maintenance.
+/// Shared by the cut-row emitters — the mask path in
+/// [`build_cut_row_batch_into`], [`build_delta_cut_row_batch_into`], and
+/// [`push_cut_row`] — so they all apply the same negate-and-divide-by-scale
+/// rule without drifting apart during maintenance.
 #[inline]
 fn push_scaled_coefficient(batch: &mut RowBatch, j: usize, coeff: f64, col_scale: &[f64]) {
     debug_assert!(
@@ -325,7 +327,16 @@ pub fn build_cut_row_batch_into(
     let n_state = indexer.n_state;
     let theta_col = indexer.theta;
     let mask = &indexer.nonzero_state_indices;
-    let is_sparse = !mask.is_empty();
+
+    // The cut-row loop is mask-driven only. `setup/mod.rs` populates the mask
+    // unconditionally (storage-only → [0, n_state) ascending; pure-thermal →
+    // empty); the precompute map is finalized in the same place. Guard the
+    // missed-finalize regression — correctness is covered by the
+    // `lp_column_for_state` fallback, this catches a setup wiring miss.
+    debug_assert!(
+        !indexer.state_to_lp_column_map.is_empty() || indexer.n_state == 0,
+        "state_to_lp_column_map not finalized before build_cut_row_batch_into"
+    );
 
     let num_cuts: usize = fcf.pools[stage].active_count();
 
@@ -334,13 +345,10 @@ pub fn build_cut_row_batch_into(
         return;
     }
 
-    // Sparse path: NNZ = mask.len() + 1 (nonzero state entries + theta).
-    // Dense path: NNZ = n_state + 1 (all state entries + theta).
-    let nnz_per_cut = if is_sparse {
-        mask.len() + 1
-    } else {
-        n_state + 1
-    };
+    // NNZ per cut = nonzero state entries + theta. For storage-only the mask is
+    // the full [0, n_state) range, so this equals the old dense `n_state + 1`;
+    // for pure-thermal it is `0 + 1`.
+    let nnz_per_cut = mask.len() + 1;
     let total_nnz = num_cuts * nnz_per_cut;
 
     let mut nz_offset = 0;
@@ -357,40 +365,23 @@ pub fn build_cut_row_batch_into(
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         batch.row_starts.push(nz_offset as i32);
 
-        // Unified state coefficient loop: sparse iterates over the nonzero
-        // mask, dense iterates over all state indices. Both yield (col_index,
-        // coefficient) pairs and share the same push logic.
+        // Single mask-driven state coefficient loop. The mask carries the
+        // nonzero state indices in ascending order; `lp_column_for_state`
+        // reads the precomputed `state_to_lp_column(j)`.
         //
         // state_to_lp_column remaps outgoing-state indices to LP columns.
         // For storage (j < N) the mapping is identity. For lag dimensions
         // the outgoing state after shift_lag_state stores z_inflow at lag 0
         // and shifted incoming lags at lag 1+, so the cut must reference the
         // corresponding LP columns (z_inflow and incoming lag l−1).
-        if is_sparse {
-            for &j in mask {
-                let lp_col = indexer.state_to_lp_column(j);
-                push_scaled_coefficient(batch, lp_col, coefficients[j], col_scale);
-            }
-        } else {
-            for (j, &c) in coefficients.iter().enumerate() {
-                let lp_col = indexer.state_to_lp_column(j);
-                // Padding-slot invariant: when state_to_lp_column returns j unchanged
-                // and j falls inside the anticipated-state block, the slot is a padding
-                // slot (slot >= k_p for its plant). The INVARIANT comment in
-                // state_to_lp_column explains the 5-step chain that guarantees the
-                // corresponding cut coefficient is 0.0. Assert this in debug builds.
-                debug_assert!(
-                    !(lp_col == j
-                        && indexer.n_anticipated > 0
-                        && j >= indexer.anticipated_state.start
-                        && j < indexer.anticipated_state.start
-                            + indexer.n_anticipated * indexer.k_max)
-                        || c == 0.0,
-                    "padding-slot j={j} has non-zero cut coefficient {c}; \
-                     shift_anticipated_state must have seeded a non-zero into a padding slot"
-                );
-                push_scaled_coefficient(batch, lp_col, c, col_scale);
-            }
+        //
+        // No padding-slot assert is needed here: the mask omits anticipated
+        // padding slots (`set_nonzero_mask` emits only `slot < k_i`, exactly
+        // the slots where `state_to_lp_column` is non-identity), so this loop
+        // never visits a padding slot.
+        for &j in mask {
+            let lp_col = indexer.lp_column_for_state(j);
+            push_scaled_coefficient(batch, lp_col, coefficients[j], col_scale);
         }
 
         debug_assert!(
@@ -1561,6 +1552,10 @@ mod tests {
             }
         }
 
+        fn statistics_into(&self, out: &mut SolverStatistics) {
+            out.copy_from(&self.statistics());
+        }
+
         fn name(&self) -> &'static str {
             "Mock"
         }
@@ -1984,7 +1979,11 @@ mod tests {
     #[test]
     fn build_cut_row_batch_empty_cuts_returns_empty_batch() {
         let fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let batch = build_cut_row_batch(&fcf, 0, &indexer, &[]);
 
         assert_eq!(batch.num_rows, 0);
@@ -1999,7 +1998,11 @@ mod tests {
     fn build_cut_row_batch_one_cut_correct_structure() {
         let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
         fcf.add_cut(0, 0, 0, 5.0, &[2.0]);
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let batch = build_cut_row_batch(&fcf, 0, &indexer, &[]);
 
         assert_eq!(batch.num_rows, 1);
@@ -2015,7 +2018,11 @@ mod tests {
         let mut fcf = FutureCostFunction::new(2, 2, 1, 10, &[0; 2]);
         fcf.add_cut(1, 0, 0, 10.0, &[1.0, 3.0]);
         fcf.add_cut(1, 1, 0, 20.0, &[2.0, 4.0]);
-        let indexer = StageIndexer::new(1, 1);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 1);
+            ix.finalize_for_test();
+            ix
+        };
         let batch = build_cut_row_batch(&fcf, 1, &indexer, &[]);
 
         assert_eq!(batch.num_rows, 2);
@@ -2041,7 +2048,11 @@ mod tests {
     fn build_cut_row_batch_zero_coefficient_state_variable() {
         let mut fcf = FutureCostFunction::new(1, 2, 1, 5, &[0; 1]);
         fcf.add_cut(0, 0, 0, 3.0, &[0.0, 7.0]);
-        let indexer = StageIndexer::new(1, 1);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 1);
+            ix.finalize_for_test();
+            ix
+        };
         let batch = build_cut_row_batch(&fcf, 0, &indexer, &[]);
 
         assert_eq!(batch.num_rows, 1);
@@ -2138,7 +2149,11 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     fn ac_two_scenarios_three_stages_fixed_solution() {
         // StageIndexer: N=1, L=0 → n_state=1, theta=3, num_cols=4
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let solution = fixed_solution(4, 100.0, indexer.theta, 30.0);
         let solver = MockSolver::always_ok(solution);
         let fcf = FutureCostFunction::new(3, indexer.n_state, 2, 100, &[0; 3]);
@@ -2260,7 +2275,11 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn ac_infeasible_at_stage_1_scenario_0_returns_infeasible_error() {
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let solution = fixed_solution(4, 100.0, indexer.theta, 30.0);
         // Stage-first loop: with 2 scenarios and 3 stages, the solve order is
         // (s0,t0), (s1,t0), (s0,t1), (s1,t1), ... — the 3rd call (index 2)
@@ -2394,7 +2413,11 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn cost_statistics_accumulated_correctly() {
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let solution = fixed_solution(4, 100.0, indexer.theta, 30.0);
         let solver = MockSolver::always_ok(solution);
         let fcf = FutureCostFunction::new(3, indexer.n_state, 2, 100, &[0; 3]);
@@ -2847,7 +2870,11 @@ mod tests {
         ws: &mut SolverWorkspace<MockSolver>,
         basis_store: &mut BasisStore,
     ) -> Result<(), crate::SddpError> {
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let fcf = FutureCostFunction::new(3, indexer.n_state, 1, 100, &[0; 3]);
         let config = TrainingConfig {
             loop_config: LoopConfig {
@@ -2952,7 +2979,11 @@ mod tests {
     /// 3 stages warm-start from the store populated in iteration 1).
     #[test]
     fn warm_start_first_iteration_cold_second_iteration_warm() {
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let solution = fixed_solution(4, 100.0, indexer.theta, 30.0);
         let solver = MockSolver::always_ok(solution);
         // Single workspace and a shared basis store (1 scenario × 3 stages).
@@ -2994,7 +3025,11 @@ mod tests {
     /// - `basis_store.get(0, 0)` is `Some` (stage 0 succeeded in iteration 2).
     #[test]
     fn basis_invalidated_on_solver_error() {
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let solution = fixed_solution(4, 100.0, indexer.theta, 30.0);
         // Call 4 = second iteration, stage 1 (calls 0-2 = first iteration
         // stages 0,1,2; calls 3,4,5 = second iteration stages 0,1,2).
@@ -3041,7 +3076,11 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn test_forward_pass_parallel_cost_agreement() {
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let solution = fixed_solution(4, 100.0, indexer.theta, 30.0);
         let stochastic = make_stochastic_context_1_hydro_3_stages();
         let stages = make_stages_3();
@@ -3190,7 +3229,11 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     #[test]
     fn test_forward_pass_work_distribution() {
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let solution = fixed_solution(4, 100.0, indexer.theta, 30.0);
         let stochastic = make_stochastic_context_1_hydro_3_stages();
         let stages = make_stages_3();
@@ -3492,7 +3535,11 @@ mod tests {
         base_rhs: f64,
         noise_scale_val: f64,
     ) -> Vec<f64> {
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let solution = fixed_solution(4, 0.0, indexer.theta, 0.0);
         let solver = MockSolver::always_ok(solution);
         let fcf = FutureCostFunction::new(1, indexer.n_state, 1, 10, &[0; 1]);
@@ -3677,7 +3724,11 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn none_method_unchanged_with_truncation_code_present() {
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let solution = fixed_solution(4, 100.0, indexer.theta, 30.0);
         let solver = MockSolver::always_ok(solution);
         let fcf = FutureCostFunction::new(3, indexer.n_state, 2, 100, &[0; 3]);
@@ -3936,7 +3987,11 @@ mod tests {
     /// Expected: `SddpError::Infeasible { stage: 0, scenario: 3, .. }`.
     #[test]
     fn test_forward_pass_parallel_infeasibility() {
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let solution = fixed_solution(4, 100.0, indexer.theta, 30.0);
         let stochastic = make_stochastic_context_1_hydro_3_stages();
         let stages = make_stages_3();
@@ -4064,7 +4119,11 @@ mod tests {
     fn forward_pass_load_noise_positive_realization() {
         let n_load_buses = 1usize;
         let stochastic = make_stochastic_context_1_hydro_1_load_bus(300.0, 30.0);
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0);
         let mut ws = SolverWorkspace {
             rank: 0,
@@ -4211,7 +4270,11 @@ mod tests {
     fn forward_pass_load_noise_clamped_to_zero() {
         let n_load_buses = 1usize;
         let stochastic = make_stochastic_context_1_hydro_1_load_bus(-1000.0, 1.0);
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0);
         let mut ws = SolverWorkspace {
             rank: 0,
@@ -4354,7 +4417,11 @@ mod tests {
         // Use the existing 1-hydro-3-stage context that has no load buses.
         let stochastic = make_stochastic_context_1_hydro_3_stages();
         let stages = make_stages_3();
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let solution = fixed_solution(4, 100.0, indexer.theta, 30.0);
         let mut ws = single_workspace(MockSolver::always_ok(solution), &indexer);
 
@@ -4498,6 +4565,10 @@ mod tests {
             SolverStatistics::default()
         }
 
+        fn statistics_into(&self, out: &mut SolverStatistics) {
+            out.copy_from(&SolverStatistics::default());
+        }
+
         fn name(&self) -> &'static str {
             "RecordingMock"
         }
@@ -4528,7 +4599,11 @@ mod tests {
         use crate::cut::CutRowMap;
 
         let fcf = crate::cut::FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
-        let indexer = crate::indexer::StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = crate::indexer::StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let mut row_map = CutRowMap::new(10, 5);
         let mut batch_buf = empty_row_batch();
         let mut solver = RecordingMockSolver::new();
@@ -4555,7 +4630,11 @@ mod tests {
         fcf.add_cut(0, 0, 0, 10.0, &[1.0]); // slot 0
         fcf.add_cut(0, 1, 0, 20.0, &[3.0]); // slot 1
 
-        let indexer = crate::indexer::StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = crate::indexer::StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let mut row_map = CutRowMap::new(10, 5);
         let mut batch_buf = empty_row_batch();
         let mut solver = RecordingMockSolver::new();
@@ -4585,7 +4664,11 @@ mod tests {
         fcf.add_cut(0, 0, 0, 10.0, &[1.0]); // slot 0
         fcf.add_cut(0, 1, 0, 20.0, &[3.0]); // slot 1
 
-        let indexer = crate::indexer::StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = crate::indexer::StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let mut row_map = CutRowMap::new(10, 5);
         // Pre-insert slot 0 as if it was already in the LP.
         row_map.insert(0);
@@ -4618,7 +4701,11 @@ mod tests {
         fcf.add_cut(0, 0, 0, 10.0, &[1.0]); // slot 0
         fcf.add_cut(0, 1, 0, 20.0, &[3.0]); // slot 1
 
-        let indexer = crate::indexer::StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = crate::indexer::StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
 
         // Build via build_cut_row_batch_into.
         let mut expected_batch = empty_row_batch();
@@ -4654,7 +4741,11 @@ mod tests {
         let mut fcf = crate::cut::FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
         fcf.add_cut(0, 0, 0, 10.0, &[1.0]);
 
-        let indexer = crate::indexer::StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = crate::indexer::StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         // col_scale must have at least theta+1 = 4 entries.
         let col_scale = vec![0.5, 2.0, 1.0, 0.1];
 
@@ -4695,7 +4786,11 @@ mod tests {
     fn test_build_delta_empty_pool() {
         // Empty pool → num_rows == 0, row_starts == [0], col_indices empty.
         let fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let mut batch = empty_delta_batch();
 
         build_delta_cut_row_batch_into(&mut batch, &fcf, 0, &indexer, &[], 1);
@@ -4723,7 +4818,11 @@ mod tests {
         // iteration=3, fwd_idx=0: slot = 0 + 3*1 + 0 = 3
         fcf.add_cut(0, 3, 0, 30.0, &[3.0]);
 
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let mut batch = empty_delta_batch();
 
         build_delta_cut_row_batch_into(&mut batch, &fcf, 0, &indexer, &[], 2);
@@ -4748,7 +4847,11 @@ mod tests {
         // Deactivate slot 2 (the first iteration-1 cut).
         fcf.pools[0].deactivate(&[2]);
 
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let mut batch = empty_delta_batch();
 
         build_delta_cut_row_batch_into(&mut batch, &fcf, 0, &indexer, &[], 1);
@@ -4782,7 +4885,11 @@ mod tests {
         let mut fcf = FutureCostFunction::new(2, 1, 2, 10, &[0; 2]);
         fcf.pools[0] = pool;
 
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let mut batch = empty_delta_batch();
 
         build_delta_cut_row_batch_into(&mut batch, &fcf, 0, &indexer, &[], 1);
@@ -4803,7 +4910,11 @@ mod tests {
         // iteration=1, fwd_idx=1: slot = 1*2+1 = 3
         fcf.add_cut(0, 1, 1, 20.0, &[3.0]);
 
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
 
         let mut batch_full = empty_delta_batch();
         super::build_cut_row_batch_into(&mut batch_full, &fcf, 0, &indexer, &[]);
@@ -4837,7 +4948,11 @@ mod tests {
 
         // n_hydro=1, n_lag=1: n_state=2 (vol + lag).
         // nonzero_state_indices should be non-empty (check via indexer).
-        let indexer = StageIndexer::new(1, 1);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 1);
+            ix.finalize_for_test();
+            ix
+        };
         // nonzero_state_indices is the mask for non-trivially-zero state dims.
         let mask_len = indexer.nonzero_state_indices.len();
 
@@ -4866,7 +4981,11 @@ mod tests {
         fcf.add_cut(0, 1, 0, 11.0, &[1.0]);
         fcf.add_cut(0, 2, 0, 22.0, &[2.0]);
 
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let mut batch = empty_delta_batch();
 
         // First call: iteration 1 → should yield the iteration-1 cut.
@@ -4887,7 +5006,11 @@ mod tests {
         let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
         fcf.add_cut(0, 1, 0, 5.0, &[1.0]);
 
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
 
         // Pre-populate batch with garbage.
         let mut batch = RowBatch {
@@ -4932,7 +5055,11 @@ mod tests {
         let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
         fcf.pools[0] = pool;
 
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let mut batch = RowBatch {
             num_rows: 0,
             row_starts: Vec::new(),
@@ -5139,7 +5266,11 @@ mod tests {
             // straight through) is what makes the inactive-iteration assertion a
             // real witness instead of a coincidence.
             let dcs = dcs.filter(|p| p.is_active(iteration));
-            let indexer = StageIndexer::new(1, 0);
+            let indexer = {
+                let mut ix = StageIndexer::new(1, 0);
+                ix.finalize_for_test();
+                ix
+            };
             let core = fwd_core_template();
             let templates = vec![core.clone(), core.clone()];
             let base_rows = vec![0_usize, 0_usize];

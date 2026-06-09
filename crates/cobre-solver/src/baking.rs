@@ -14,9 +14,10 @@
 //!    original base entries from `base.col_starts[j]..base.col_starts[j+1]` followed
 //!    by all CSR entries whose column index equals `j`, in ascending CSR row order.
 //!
-//! The scratch buffer (`Vec<u32>`) is allocated locally on each call. Because
-//! `bake_rows_into_template` runs once per training iteration per stage (outside the
-//! per-scenario hot path), this allocation is acceptable.
+//! The five intermediate buffers used by these passes are caller-owned and
+//! reused via [`BakingScratch`]: the caller constructs one `BakingScratch` and
+//! passes `&mut` to every call, so a steady-state bake performs no temporary
+//! heap allocation once the scratch capacities stabilize.
 //!
 //! # CSC Ordering Convention
 //!
@@ -29,6 +30,50 @@
 
 use crate::types::{RowBatch, StageTemplate};
 
+/// Caller-owned reusable scratch buffers for [`bake_rows_into_template`].
+///
+/// The merge needs five intermediate buffers, all sized from the inputs of the
+/// current call. Constructing one `BakingScratch` and passing `&mut` to every
+/// bake reuses these allocations: each buffer is `clear()`-ed and re-grown at
+/// the start of a call without ever calling `shrink_to_fit`, so at steady state
+/// (once the largest seen template/batch has been processed) a bake allocates
+/// no temporaries.
+///
+/// The fields are private; the struct is an opaque buffer bag. The buffers are,
+/// in element type and per-call length:
+///
+/// - `cut_nz_per_col: Vec<u32>` — length `num_cols`; per-column count of CSR
+///   contributions (count pass).
+/// - `col_list_start: Vec<u32>` — length `num_cols + 1`; prefix-sum column-offset
+///   table into the flat CSR-grouped buffers.
+/// - `col_list_row: Vec<i32>` — length `rows_nnz`; flat row-index buffer grouped
+///   by column.
+/// - `col_list_val: Vec<f64>` — length `rows_nnz`; flat value buffer grouped by
+///   column.
+/// - `write_cursor: Vec<u32>` — length `num_cols`; per-column write offset within
+///   the flat buffers.
+#[derive(Debug, Default)]
+pub struct BakingScratch {
+    /// Per-column count of appended CSR-row contributions (count pass).
+    cut_nz_per_col: Vec<u32>,
+    /// Prefix-sum column-offset table into the flat CSR-grouped buffers.
+    col_list_start: Vec<u32>,
+    /// Flat row-index buffer grouped by column.
+    col_list_row: Vec<i32>,
+    /// Flat value buffer grouped by column.
+    col_list_val: Vec<f64>,
+    /// Per-column write offset within the flat buffers.
+    write_cursor: Vec<u32>,
+}
+
+impl BakingScratch {
+    /// Construct an empty scratch. All buffers grow lazily on first bake.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 /// Merge a CSC base template with a CSR row batch into an output CSC template.
 ///
 /// After return, `out` is a valid [`StageTemplate`] in CSC form with
@@ -39,6 +84,10 @@ use crate::types::{RowBatch, StageTemplate};
 /// `out` is cleared and refilled on every call without calling `shrink_to_fit`.
 /// Passing the same buffer on every iteration reuses allocations with zero
 /// additional allocation at steady state once capacity stabilizes.
+///
+/// The five intermediate buffers are owned by the caller-supplied `scratch`
+/// (see [`BakingScratch`]) and follow the identical `clear()`-then-regrow
+/// discipline: pass the same `BakingScratch` across calls to reuse them.
 ///
 /// # Preconditions
 ///
@@ -53,7 +102,12 @@ use crate::types::{RowBatch, StageTemplate};
 ///
 /// Panics if `base.num_nz + rows_nnz` exceeds `i32::MAX` (`HiGHS` API limit).
 #[allow(clippy::too_many_lines)] // complex data-structure merge; extracting sub-functions would obscure the algorithm
-pub fn bake_rows_into_template(base: &StageTemplate, rows: &RowBatch, out: &mut StageTemplate) {
+pub fn bake_rows_into_template(
+    base: &StageTemplate,
+    rows: &RowBatch,
+    out: &mut StageTemplate,
+    scratch: &mut BakingScratch,
+) {
     // Precondition guards (debug builds only).
     #[allow(clippy::cast_sign_loss)]
     {
@@ -131,10 +185,13 @@ pub fn bake_rows_into_template(base: &StageTemplate, rows: &RowBatch, out: &mut 
     let num_rows = base.num_rows + rows.num_rows;
 
     // Pass 1: count CSR row contributions per column.
-    let mut cut_nz_per_col: Vec<u32> = vec![0u32; num_cols];
+    // clear() then resize(..., 0) guarantees all num_cols entries start at 0,
+    // identical to the old `vec![0u32; num_cols]`.
+    scratch.cut_nz_per_col.clear();
+    scratch.cut_nz_per_col.resize(num_cols, 0u32);
     #[allow(clippy::cast_sign_loss)]
     for &col in &rows.col_indices {
-        cut_nz_per_col[col as usize] += 1;
+        scratch.cut_nz_per_col[col as usize] += 1;
     }
 
     // Clear buffers (no shrink_to_fit — preserve capacity).
@@ -186,18 +243,24 @@ pub fn bake_rows_into_template(base: &StageTemplate, rows: &RowBatch, out: &mut 
 
     // Pass 2: build col_starts, row_indices, values in column order.
     // Compute column start offsets (prefix sum of cut_nz_per_col).
-    let mut col_list_start: Vec<u32> = Vec::with_capacity(num_cols + 1);
+    scratch.col_list_start.clear();
+    scratch.col_list_start.reserve(num_cols + 1);
     let mut running = 0u32;
-    for &count in &cut_nz_per_col {
-        col_list_start.push(running);
+    for &count in &scratch.cut_nz_per_col {
+        scratch.col_list_start.push(running);
         running += count;
     }
-    col_list_start.push(running);
+    scratch.col_list_start.push(running);
 
     // Flat scratch buffers for (row_index, value) pairs grouped by column.
-    let mut col_list_row: Vec<i32> = vec![0i32; rows_nnz];
-    let mut col_list_val: Vec<f64> = vec![0.0f64; rows_nnz];
-    let mut write_cursor: Vec<u32> = vec![0u32; num_cols];
+    // clear() then resize matches the old `vec![0; rows_nnz]` / `vec![0; num_cols]`
+    // exactly; cut_nz_per_col entries above are fully overwritten before read.
+    scratch.col_list_row.clear();
+    scratch.col_list_row.resize(rows_nnz, 0i32);
+    scratch.col_list_val.clear();
+    scratch.col_list_val.resize(rows_nnz, 0.0f64);
+    scratch.write_cursor.clear();
+    scratch.write_cursor.resize(num_cols, 0u32);
 
     // Fill scratch buffers by scanning CSR rows in ascending order.
     #[allow(clippy::cast_sign_loss)]
@@ -208,10 +271,10 @@ pub fn bake_rows_into_template(base: &StageTemplate, rows: &RowBatch, out: &mut 
         let row_i32 = (base.num_rows + r) as i32;
         for k in start..end {
             let j = rows.col_indices[k] as usize;
-            let pos = (col_list_start[j] + write_cursor[j]) as usize;
-            col_list_row[pos] = row_i32;
-            col_list_val[pos] = rows.values[k];
-            write_cursor[j] += 1;
+            let pos = (scratch.col_list_start[j] + scratch.write_cursor[j]) as usize;
+            scratch.col_list_row[pos] = row_i32;
+            scratch.col_list_val[pos] = rows.values[k];
+            scratch.write_cursor[j] += 1;
         }
     }
 
@@ -228,12 +291,12 @@ pub fn bake_rows_into_template(base: &StageTemplate, rows: &RowBatch, out: &mut 
         out.values
             .extend_from_slice(&base.values[base_start..base_end]);
 
-        let list_start = col_list_start[j] as usize;
-        let list_end = col_list_start[j + 1] as usize;
+        let list_start = scratch.col_list_start[j] as usize;
+        let list_end = scratch.col_list_start[j + 1] as usize;
         out.row_indices
-            .extend_from_slice(&col_list_row[list_start..list_end]);
+            .extend_from_slice(&scratch.col_list_row[list_start..list_end]);
         out.values
-            .extend_from_slice(&col_list_val[list_start..list_end]);
+            .extend_from_slice(&scratch.col_list_val[list_start..list_end]);
 
         let col_len = (base_end - base_start) + (list_end - list_start);
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -303,7 +366,7 @@ mod tests {
         let rows = make_empty_row_batch();
         let mut out = StageTemplate::empty();
 
-        bake_rows_into_template(&base, &rows, &mut out);
+        bake_rows_into_template(&base, &rows, &mut out, &mut BakingScratch::default());
 
         assert_eq!(out.num_cols, base.num_cols);
         assert_eq!(out.num_rows, base.num_rows);
@@ -344,7 +407,7 @@ mod tests {
         };
         let mut out = StageTemplate::empty();
 
-        bake_rows_into_template(&base, &rows, &mut out);
+        bake_rows_into_template(&base, &rows, &mut out, &mut BakingScratch::default());
 
         assert_eq!(out.num_rows, 3);
         assert_eq!(out.num_nz, 5);
@@ -386,7 +449,7 @@ mod tests {
         };
         let mut out = StageTemplate::empty();
 
-        bake_rows_into_template(&base, &rows, &mut out);
+        bake_rows_into_template(&base, &rows, &mut out, &mut BakingScratch::default());
 
         assert_eq!(out.row_scale.len(), 3);
         assert_eq!(out.row_scale[0], 1.0);
@@ -404,7 +467,7 @@ mod tests {
         let rows = make_empty_row_batch();
         let mut out = StageTemplate::empty();
 
-        bake_rows_into_template(&base, &rows, &mut out);
+        bake_rows_into_template(&base, &rows, &mut out, &mut BakingScratch::default());
 
         assert!(out.row_scale.is_empty());
         assert_eq!(out.num_rows, base.num_rows);
@@ -440,7 +503,12 @@ mod tests {
         let empty_rows = make_empty_row_batch();
         let mut out = StageTemplate::empty();
 
-        bake_rows_into_template(&big_base, &empty_rows, &mut out);
+        bake_rows_into_template(
+            &big_base,
+            &empty_rows,
+            &mut out,
+            &mut BakingScratch::default(),
+        );
 
         // Capture capacities after the first (larger) call.
         let cap_col_starts = out.col_starts.capacity();
@@ -471,7 +539,12 @@ mod tests {
             row_scale: Vec::new(),
         };
 
-        bake_rows_into_template(&small_base, &empty_rows, &mut out);
+        bake_rows_into_template(
+            &small_base,
+            &empty_rows,
+            &mut out,
+            &mut BakingScratch::default(),
+        );
 
         assert_eq!(out.num_rows, 4);
         assert_eq!(out.num_nz, 8);
@@ -503,8 +576,8 @@ mod tests {
         let mut out1 = StageTemplate::empty();
         let mut out2 = StageTemplate::empty();
 
-        bake_rows_into_template(&base, &rows, &mut out1);
-        bake_rows_into_template(&base, &rows, &mut out2);
+        bake_rows_into_template(&base, &rows, &mut out1, &mut BakingScratch::default());
+        bake_rows_into_template(&base, &rows, &mut out2, &mut BakingScratch::default());
 
         assert_eq!(out1.col_starts, out2.col_starts);
         assert_eq!(out1.row_indices, out2.row_indices);
@@ -560,7 +633,7 @@ mod tests {
         };
 
         let mut out = StageTemplate::empty();
-        bake_rows_into_template(&base, &rows, &mut out);
+        bake_rows_into_template(&base, &rows, &mut out, &mut BakingScratch::default());
 
         assert_eq!(out.num_rows, 6);
         // col 0: 2 base + 2 cut (rows 3, 5) = 4
@@ -643,6 +716,10 @@ mod tests {
             self.stats.clone()
         }
 
+        fn statistics_into(&self, out: &mut SolverStatistics) {
+            out.copy_from(&self.stats);
+        }
+
         fn name(&self) -> &'static str {
             "Mock"
         }
@@ -675,7 +752,7 @@ mod tests {
         };
 
         let mut out = StageTemplate::empty();
-        bake_rows_into_template(&base, &rows, &mut out);
+        bake_rows_into_template(&base, &rows, &mut out, &mut BakingScratch::default());
 
         let expected_rows = base.num_rows + rows.num_rows; // 2 + 3 = 5
 
@@ -705,7 +782,7 @@ mod tests {
         };
         let mut out = StageTemplate::empty();
 
-        bake_rows_into_template(&base, &rows, &mut out);
+        bake_rows_into_template(&base, &rows, &mut out, &mut BakingScratch::default());
 
         // StageTemplate invariant: when non-empty, row_scale.len() == num_rows.
         // base.row_scale was empty but rows.num_rows == 2, so the baked template
@@ -774,6 +851,86 @@ mod tests {
             row_upper: vec![f64::INFINITY],
         };
         let mut out = StageTemplate::empty();
-        bake_rows_into_template(&base, &rows, &mut out);
+        bake_rows_into_template(&base, &rows, &mut out, &mut BakingScratch::default());
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: reusing one scratch across two bakes is bit-identical to a fresh
+    // scratch, and the scratch buffers never realloc downward on reuse.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn bake_twice_same_scratch_is_bit_identical() {
+        // Test 7 multi-column fixture: 4-col base, 3 CSR rows.
+        let base = StageTemplate {
+            num_cols: 4,
+            num_rows: 3,
+            num_nz: 6,
+            col_starts: vec![0_i32, 2, 3, 6, 6],
+            row_indices: vec![0_i32, 1, 2, 0, 1, 2],
+            values: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            col_lower: vec![0.0; 4],
+            col_upper: vec![f64::INFINITY; 4],
+            objective: vec![0.0; 4],
+            row_lower: vec![0.0; 3],
+            row_upper: vec![f64::INFINITY; 3],
+            n_state: 2,
+            n_transfer: 1,
+            n_dual_relevant: 2,
+            n_hydro: 2,
+            max_par_order: 1,
+            col_scale: Vec::new(),
+            row_scale: Vec::new(),
+        };
+        let rows = RowBatch {
+            num_rows: 3,
+            row_starts: vec![0_i32, 2, 4, 7],
+            col_indices: vec![0_i32, 3, 1, 2, 0, 2, 3],
+            values: vec![-1.0, 1.0, -2.0, 2.0, -3.0, 3.0, -4.0],
+            row_lower: vec![10.0, 20.0, 30.0],
+            row_upper: vec![f64::INFINITY; 3],
+        };
+
+        let mut scratch = BakingScratch::default();
+
+        // First reused-scratch bake.
+        let mut out1 = StageTemplate::empty();
+        bake_rows_into_template(&base, &rows, &mut out1, &mut scratch);
+
+        // Capacities after the first bake (must not shrink on reuse).
+        let cap_cut_nz = scratch.cut_nz_per_col.capacity();
+        let cap_col_start = scratch.col_list_start.capacity();
+        let cap_col_row = scratch.col_list_row.capacity();
+        let cap_col_val = scratch.col_list_val.capacity();
+        let cap_write_cursor = scratch.write_cursor.capacity();
+
+        // Second bake of the SAME inputs reusing the SAME scratch.
+        let mut out2 = StageTemplate::empty();
+        bake_rows_into_template(&base, &rows, &mut out2, &mut scratch);
+
+        // Reference bake with a fresh scratch.
+        let mut out_fresh = StageTemplate::empty();
+        bake_rows_into_template(&base, &rows, &mut out_fresh, &mut BakingScratch::default());
+
+        // Bit-identical outputs across reuse and fresh scratch.
+        assert_eq!(out1.col_starts, out2.col_starts);
+        assert_eq!(out1.col_starts, out_fresh.col_starts);
+        assert_eq!(out1.row_indices, out2.row_indices);
+        assert_eq!(out1.row_indices, out_fresh.row_indices);
+        assert_eq!(out1.values, out2.values);
+        assert_eq!(out1.values, out_fresh.values);
+        assert_eq!(out1.row_lower, out2.row_lower);
+        assert_eq!(out1.row_lower, out_fresh.row_lower);
+        assert_eq!(out1.row_upper, out2.row_upper);
+        assert_eq!(out1.row_upper, out_fresh.row_upper);
+        assert_eq!(out1.row_scale, out2.row_scale);
+        assert_eq!(out1.row_scale, out_fresh.row_scale);
+
+        // No downward realloc on the second (reused) bake.
+        assert!(scratch.cut_nz_per_col.capacity() >= cap_cut_nz);
+        assert!(scratch.col_list_start.capacity() >= cap_col_start);
+        assert!(scratch.col_list_row.capacity() >= cap_col_row);
+        assert!(scratch.col_list_val.capacity() >= cap_col_val);
+        assert!(scratch.write_cursor.capacity() >= cap_write_cursor);
     }
 }

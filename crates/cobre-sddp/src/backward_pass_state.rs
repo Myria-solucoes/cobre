@@ -212,10 +212,13 @@ pub struct BackwardPassState {
     pub(crate) bwd_stats_unpack_buf: Vec<SolverStatsDelta>,
 
     // ── Per-iteration scratch (reused across stages within one `run()` call) ──
-    /// Staging buffer for cuts produced by one stage's parallel trial-point loop.
+    /// Staging buffer for cuts produced by one stage's parallel trial-point
+    /// loop, each paired with the index `w` of the worker that produced it.
     ///
-    /// Cleared at the start of each stage and grown monotonically.
-    pub(crate) staged_cuts_buf: Vec<StagedCut>,
+    /// The worker index resolves the cut's `coefficients_range` against
+    /// `workspaces[w].backward_accum.agg_arena` at merge time. Cleared at the
+    /// start of each stage and grown monotonically.
+    pub(crate) staged_cuts_buf: Vec<(usize, StagedCut)>,
 
     /// Per-worker solver statistics snapshot taken **before** the stage's parallel
     /// region. Cleared and repopulated each stage.
@@ -442,6 +445,13 @@ impl BackwardPassState {
     /// Performs one `allreduce(Sum)` over `metadata_sync_contribution` to
     /// accumulate `active_count` and `last_active_iter` across all ranks.
     /// Called once per backward stage after cut insertion.
+    ///
+    /// The reduction is bounded to `populated_count` (the high-water mark of
+    /// cut-bearing slots), not the full pool capacity (`metadata.len()`). Slots
+    /// in `[populated_count, capacity)` are never written by any accumulation
+    /// path, so they are structurally zero on every rank; summing them is a
+    /// no-op. `populated_count` is rank-invariant (cuts are added identically on
+    /// every rank), so all ranks reduce over the same length.
     fn sync_stage_metadata<C: Communicator>(
         &mut self,
         successor: usize,
@@ -450,26 +460,26 @@ impl BackwardPassState {
         fcf: &mut FutureCostFunction,
         comm: &C,
     ) -> Result<(), SddpError> {
-        let pool_size = fcf.pools[successor].metadata.len();
-        if pool_size == 0 {
+        let populated_count = fcf.pools[successor].populated_count;
+        if populated_count == 0 {
             return Ok(());
         }
         // Sum per-worker binding increment contributions into the send buffer.
         self.metadata_sync_buf.clear();
-        self.metadata_sync_buf.resize(pool_size, 0u64);
+        self.metadata_sync_buf.resize(populated_count, 0u64);
         for ws in workspaces {
             for (slot, &inc) in ws
                 .backward_accum
                 .metadata_sync_contribution
                 .iter()
                 .enumerate()
-                .take(pool_size)
+                .take(populated_count)
             {
                 self.metadata_sync_buf[slot] += inc;
             }
         }
         self.global_increments_buf.clear();
-        self.global_increments_buf.resize(pool_size, 0u64);
+        self.global_increments_buf.resize(populated_count, 0u64);
         comm.allreduce(
             &self.metadata_sync_buf,
             &mut self.global_increments_buf,
@@ -788,21 +798,40 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
     #[allow(clippy::cast_possible_truncation)]
     let parallel_wall_ms = process_start.elapsed().as_millis() as u64;
 
-    // Collect cuts and insert into FCF in deterministic order.
+    // Collect cuts and insert into FCF in deterministic order. Each cut is
+    // paired with the index `w` of the worker that produced it so the merge can
+    // resolve its `coefficients_range` against that worker's arena. The
+    // `&mut inputs.workspaces` borrow taken by `process_stage_backward` is
+    // released once it returns, so the per-cut immutable re-borrow below is
+    // legal (disjoint from the `inputs.fcf` mutable borrow in `add_cut`).
     state.staged_cuts_buf.clear();
     for worker_result in worker_staged {
-        state.staged_cuts_buf.extend(worker_result?);
+        let (w, cuts) = worker_result?;
+        state
+            .staged_cuts_buf
+            .extend(cuts.into_iter().map(|cut| (w, cut)));
     }
-    state.staged_cuts_buf.sort_by_key(|cut| cut.trial_point_idx);
+    // `trial_point_idx` is the SOLE sort key, unchanged from HEAD: it is
+    // globally unique across workers (disjoint contiguous partitions), so this
+    // reproduces the identical global merge order regardless of worker index.
+    state
+        .staged_cuts_buf
+        .sort_by_key(|(_, cut)| cut.trial_point_idx);
     debug_assert_eq!(state.staged_cuts_buf.len(), inputs.local_work);
     let cuts_generated = state.staged_cuts_buf.len();
-    for cut in &state.staged_cuts_buf {
+    for (w, cut) in &state.staged_cuts_buf {
+        let range = cut.coefficients_range.clone();
+        let arena = &inputs.workspaces[*w].backward_accum.agg_arena;
+        debug_assert!(
+            range.len() == indexer.n_state && range.end <= arena.len(),
+            "coefficients_range must span exactly n_state and lie within the worker arena"
+        );
         inputs.fcf.add_cut(
             t,
             inputs.iteration,
             cut.forward_pass_index,
             cut.intercept,
-            &cut.coefficients,
+            &arena[range],
         );
     }
 
@@ -871,7 +900,7 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
     risk_measures: &[RiskMeasure],
     succ: &SuccessorSpec<'_>,
     basis_slices: Vec<BasisStoreSliceMut<'_>>,
-) -> Vec<Result<Vec<StagedCut>, SddpError>> {
+) -> Vec<Result<(usize, Vec<StagedCut>), SddpError>> {
     let n_openings = succ.probabilities.len();
     let n_state = training_ctx.indexer.n_state;
     let pop = succ.successor_populated_count;
@@ -929,6 +958,15 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
 
             // Static partition: assign scenarios to worker, matching basis_slice view.
             let (start_m, end_m) = partition(local_work, n_workers, w);
+            // Size the per-worker coefficient arena to hold one `n_state` slot
+            // per owned trial point. Grow-only: capacity is retained across
+            // stages/iterations (like `staged_cuts_buf`), so no heap activity
+            // occurs after the first stage that needs this many slots. Content
+            // is overwritten per trial point before read, so no zero-fill.
+            let arena_len = (end_m - start_m) * n_state;
+            if ws.backward_accum.agg_arena.len() < arena_len {
+                ws.backward_accum.agg_arena.resize(arena_len, 0.0_f64);
+            }
             // Reuse the per-worker staged-cuts buffer; `clear()` preserves the
             // allocation from prior stages so no heap activity occurs after the
             // first stage of the first iteration.
@@ -971,6 +1009,11 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
                 // Call process_trial_point_backward before the push to avoid a
                 // simultaneous mutable borrow of `ws.backward_accum.staged_cuts_buf`
                 // (for the push receiver) and `ws` (for the function argument).
+                // Local arena offset (element units) for this trial point's
+                // `n_state` slot: `local_idx * n_state` with `local_idx = m -
+                // start_m`. Threaded in so the helper need not know the
+                // partition scheme.
+                let arena_offset = (m - start_m) * n_state;
                 let cut = process_trial_point_backward(
                     ws,
                     ctx,
@@ -983,6 +1026,7 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
                     &mut basis_slice,
                     &opening_solver,
                     m,
+                    arena_offset,
                 )?;
                 ws.backward_accum.staged_cuts_buf.push(cut);
             }
@@ -1001,8 +1045,12 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
 
             // Drain the buffer into an owned Vec to cross the rayon closure
             // boundary.  `drain(..)` leaves `staged_cuts_buf` empty with its
-            // capacity intact so the next stage reuses the same allocation.
-            Ok(ws.backward_accum.staged_cuts_buf.drain(..).collect())
+            // capacity intact so the next stage reuses the same allocation. The
+            // worker index `w` rides alongside so the merge can resolve each
+            // cut's `coefficients_range` against `workspaces[w].backward_accum.agg_arena`
+            // after the parallel region returns (the `&mut workspaces` borrow is
+            // released then, allowing an immutable re-borrow per worker).
+            Ok((w, ws.backward_accum.staged_cuts_buf.drain(..).collect()))
         })
         .collect()
 }
@@ -1151,6 +1199,9 @@ mod tests {
         }
         fn statistics(&self) -> SolverStatistics {
             SolverStatistics::default()
+        }
+        fn statistics_into(&self, out: &mut SolverStatistics) {
+            out.copy_from(&SolverStatistics::default());
         }
         fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
         fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}

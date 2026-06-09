@@ -396,9 +396,23 @@ pub(crate) struct BackwardAccumulators {
     /// `.resize(pop, 0)` and zeroed per trial point via `.fill(0)`.
     pub(crate) slot_increments: Vec<u64>,
     /// Scratch buffer for aggregated cut coefficients (`n_state` entries).
-    /// Written by `aggregate_weighted_into` and then copied into the owned
-    /// `Vec<f64>` stored in each [`StagedCut`].
+    /// Written by `aggregate_weighted_into` and then copied into the
+    /// per-worker [`agg_arena`](Self::agg_arena) at the trial point's slot.
     pub(crate) agg_coefficients: Vec<f64>,
+    /// Per-worker flat arena holding every staged cut's coefficient vector for
+    /// the current stage.
+    ///
+    /// Sized lazily in the per-worker stage setup to at least
+    /// `(end_m - start_m) * n_state` `f64`s and **never shrunk** (capacity is
+    /// retained across stages/iterations, like [`staged_cuts_buf`](Self::staged_cuts_buf)).
+    /// Slot `i` of the trial point with local index `local_idx = m - start_m`
+    /// lives at `agg_arena[local_idx * n_state + i]`. Each [`StagedCut`] stores
+    /// a `Range<usize>` into this arena instead of an owned `Vec<f64>`; the FCF
+    /// merge reads the slice after the parallel region returns (the arena is
+    /// exclusive to one rayon worker during the parallel region). The content
+    /// is overwritten per trial point before any read, so no zero-fill is
+    /// required.
+    pub(crate) agg_arena: Vec<f64>,
     /// Per-worker metadata sync contribution, indexed by cut pool slot.
     ///
     /// Accumulates binding increments across all trial points processed by
@@ -456,6 +470,14 @@ pub(crate) struct BackwardAccumulators {
     /// lazy solve. Cleared and refilled per (trial point, opening); capacity
     /// grows to the cut-pool size and is then reused.
     pub(crate) dcs_initial_resident: Vec<u32>,
+    /// Reusable solver-statistics snapshot buffer for the per-opening
+    /// before-solve metrics. Filled via `statistics_into` (reusing the
+    /// histogram allocation) and then diffed against `stats_after_buf`.
+    /// Avoids the per-opening histogram clone of `statistics()`.
+    pub(crate) stats_before_buf: cobre_solver::SolverStatistics,
+    /// Reusable solver-statistics snapshot buffer for the per-opening
+    /// after-solve metrics. Counterpart to `stats_before_buf`.
+    pub(crate) stats_after_buf: cobre_solver::SolverStatistics,
 }
 
 impl BackwardAccumulators {
@@ -478,6 +500,7 @@ impl BackwardAccumulators {
             outcomes,
             slot_increments: vec![0u64; initial_pool_capacity],
             agg_coefficients: vec![0.0_f64; n_state],
+            agg_arena: Vec::new(),
             metadata_sync_contribution: vec![0u64; initial_pool_capacity],
             per_opening_stats: Vec::new(),
             state_duals_buf: Vec::new(),
@@ -486,6 +509,8 @@ impl BackwardAccumulators {
             risk_scratch: RiskMeasureScratch::new(),
             dcs_solve,
             dcs_initial_resident: Vec::with_capacity(initial_pool_capacity),
+            stats_before_buf: cobre_solver::SolverStatistics::default(),
+            stats_after_buf: cobre_solver::SolverStatistics::default(),
         }
     }
 }
@@ -1107,6 +1132,9 @@ mod tests {
         fn get_basis(&mut self, _out: &mut Basis) {}
         fn statistics(&self) -> SolverStatistics {
             SolverStatistics::default()
+        }
+        fn statistics_into(&self, out: &mut SolverStatistics) {
+            out.copy_from(&SolverStatistics::default());
         }
         fn name(&self) -> &'static str {
             "Mock"

@@ -12,6 +12,7 @@
 //! - `num_stages` × `RowBatch` for bake scratch.
 //! - `num_stages` × `StageTemplate` for baked templates.
 //! - One `PatchBuffer`, one `lb_cut_batch`, one `CutRowMap`.
+//! - One `BakingScratch` for `bake_rows_into_template` count/emit-pass temporaries.
 //!
 //! These are amortized across all iterations of a training run.
 
@@ -50,6 +51,8 @@ pub(crate) struct IterationScratch {
     pub lb_cut_row_map: CutRowMap,
     /// Per-evaluation scratch buffers for lower-bound evaluation (reused across iterations).
     pub lb_scratch: LbEvalScratch,
+    /// Reusable scratch buffers for `bake_rows_into_template` (count/emit-pass temporaries).
+    pub(crate) baking_scratch: cobre_solver::BakingScratch,
 }
 
 impl IterationScratch {
@@ -144,6 +147,10 @@ impl IterationScratch {
             })
             .collect();
 
+        // Reusable scratch for the baking count/emit passes (reused across the
+        // pre-bake loop here and every per-iteration rebake).
+        let mut baking_scratch = cobre_solver::BakingScratch::new();
+
         // Pre-bake every stage template with an empty cut batch so that
         // iteration 1's forward and backward passes can use the baked
         // load path. Empty-batch bake is a structural copy of the base
@@ -153,6 +160,7 @@ impl IterationScratch {
                 &stage_ctx.templates[t],
                 &bake_row_batches[t],
                 &mut baked_templates[t],
+                &mut baking_scratch,
             );
         }
 
@@ -173,6 +181,7 @@ impl IterationScratch {
             bake_row_batches,
             lb_cut_row_map,
             lb_scratch,
+            baking_scratch,
         }
     }
 }

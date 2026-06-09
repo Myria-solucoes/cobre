@@ -214,8 +214,12 @@ pub(crate) struct StagedCut {
     /// Aggregated cut intercept (result of `RiskMeasure::aggregate_cut`).
     pub(crate) intercept: f64,
 
-    /// Aggregated cut coefficients (length = `n_state`).
-    pub(crate) coefficients: Vec<f64>,
+    /// Range into the producing worker's `agg_arena` holding this cut's
+    /// aggregated coefficients (length = `n_state`). The arena is owned by the
+    /// rayon worker that produced this cut; the FCF merge resolves the slice
+    /// after the parallel region returns via
+    /// `workspaces[w].backward_accum.agg_arena[coefficients_range]`.
+    pub(crate) coefficients_range: std::ops::Range<usize>,
 
     /// Global forward-pass index (`fwd_offset + m`), stored as `u32` for the
     /// FCF slot formula.
@@ -867,7 +871,10 @@ impl StageOpeningSolver {
         let mut state_duals = std::mem::take(&mut ws.backward_accum.state_duals_buf);
         let mut cut_duals = std::mem::take(&mut ws.backward_accum.cut_duals_buf);
 
-        let stats_before_omega = ws.solver.statistics();
+        // Reuse the per-worker snapshot buffer (histogram allocation is retained
+        // across openings) instead of cloning via `statistics()`.
+        let mut stats_before_omega = std::mem::take(&mut ws.backward_accum.stats_before_buf);
+        ws.solver.statistics_into(&mut stats_before_omega);
 
         // The per-(m, s) stored basis is loaded for, and captured from, the
         // FIRST-SOLVED opening of this trial point — not canonical ω=0. When the
@@ -906,7 +913,8 @@ impl StageOpeningSolver {
         ws.backward_accum.state_duals_buf = state_duals;
         ws.backward_accum.cut_duals_buf = cut_duals;
 
-        let stats_after_omega = ws.solver.statistics();
+        let mut stats_after_omega = std::mem::take(&mut ws.backward_accum.stats_after_buf);
+        ws.solver.statistics_into(&mut stats_after_omega);
 
         accumulate_opening_outcome(
             ws,
@@ -917,6 +925,11 @@ impl StageOpeningSolver {
             &stats_before_omega,
             &stats_after_omega,
         );
+
+        // Restore the snapshot buffers (with their grown histogram capacity) for
+        // the next opening.
+        ws.backward_accum.stats_before_buf = stats_before_omega;
+        ws.backward_accum.stats_after_buf = stats_after_omega;
 
         if is_first {
             save_basis_at_omega_zero(ws, succ, basis_slice, m, x_hat);
@@ -1009,7 +1022,10 @@ impl StageOpeningSolver {
         // whole lazy loop.
         patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s);
 
-        let stats_before_omega = ws.solver.statistics();
+        // Reuse the per-worker snapshot buffer (histogram allocation is retained
+        // across openings) instead of cloning via `statistics()`.
+        let mut stats_before_omega = std::mem::take(&mut ws.backward_accum.stats_before_buf);
+        ws.solver.statistics_into(&mut stats_before_omega);
 
         // Move the state-duals buffer out of `ws.backward_accum` so it can be
         // filled by `extract_state_duals_only` (a `&mut Vec` sink) while `view`
@@ -1075,7 +1091,8 @@ impl StageOpeningSolver {
 
         ws.backward_accum.state_duals_buf = state_duals;
 
-        let stats_after_omega = ws.solver.statistics();
+        let mut stats_after_omega = std::mem::take(&mut ws.backward_accum.stats_after_buf);
+        ws.solver.statistics_into(&mut stats_after_omega);
 
         // Outcome only — no first-solved basis capture (that captured basis would
         // describe the baked layout, not the DCS resident subset). The
@@ -1088,6 +1105,11 @@ impl StageOpeningSolver {
             &stats_before_omega,
             &stats_after_omega,
         );
+
+        // Restore the snapshot buffers (with their grown histogram capacity) for
+        // the next opening.
+        ws.backward_accum.stats_before_buf = stats_before_omega;
+        ws.backward_accum.stats_after_buf = stats_after_omega;
 
         Ok(())
     }
@@ -1102,9 +1124,10 @@ impl StageOpeningSolver {
 /// infeasibility at the first-solved opening leaves the slot unchanged. The DCS arm
 /// skips first-solved basis capture by design — a captured basis would describe the
 /// baked layout, not the DCS resident subset (see [`StageOpeningSolver::solve_lazy`])
-// RATIONALE: 11 args required — each is a disjoint borrow (ws, ctx, training_ctx, exchange,
-// succ, basis_slice, opening_solver) or a plain scalar (fwd_offset, iteration, m) or a risk
-// slice. Merging into a struct would add indirection without reducing the caller's borrow count.
+// RATIONALE: 12 args required — each is a disjoint borrow (ws, ctx, training_ctx, exchange,
+// succ, basis_slice, opening_solver) or a plain scalar (fwd_offset, iteration, m, arena_offset)
+// or a risk slice. Merging into a struct would add indirection without reducing the caller's
+// borrow count.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
     ws: &mut SolverWorkspace<S>,
@@ -1118,6 +1141,7 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
     basis_slice: &mut BasisStoreSliceMut<'_>,
     opening_solver: &StageOpeningSolver,
     m: usize,
+    arena_offset: usize,
 ) -> Result<StagedCut, SddpError> {
     let tree_view = training_ctx.stochastic.tree_view();
     let x_hat = exchange.state_at(succ.my_rank, m);
@@ -1201,8 +1225,10 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
         }
     }
 
-    // One allocation per trial point: copy coefficients out of the scratch
-    // buffer so they outlive the parallel closure (see module-level docs).
+    // Aggregate into the per-worker `agg_coefficients` scratch (unchanged
+    // order/values), then copy the result verbatim into this trial point's slot
+    // of the per-worker arena so the bytes outlive the parallel closure without
+    // a per-cut heap allocation (see module-level docs and `agg_arena`).
     let n_openings = succ.probabilities.len();
     let mut agg_intercept = 0.0_f64;
     risk_measures[succ.t].aggregate_cut_into(
@@ -1212,7 +1238,16 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
         &mut ws.backward_accum.agg_coefficients,
         &mut ws.backward_accum.risk_scratch,
     );
-    let agg_coefficients = ws.backward_accum.agg_coefficients.clone();
+    let n_state = ws.backward_accum.agg_coefficients.len();
+    let coefficients_range = arena_offset..arena_offset + n_state;
+    debug_assert!(
+        coefficients_range.end <= ws.backward_accum.agg_arena.len(),
+        "agg_arena must be sized to cover this trial point's slot before the solve"
+    );
+    // `copy_from_slice` writes exactly the bytes the former `.clone()` produced;
+    // the arena is storage only — no value transform, no reordering.
+    ws.backward_accum.agg_arena[coefficients_range.clone()]
+        .copy_from_slice(&ws.backward_accum.agg_coefficients[..n_state]);
     debug_assert!(
         u32::try_from(scenario).is_ok(),
         "global scenario index overflows u32"
@@ -1230,7 +1265,7 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
     Ok(StagedCut {
         trial_point_idx: m,
         intercept: agg_intercept,
-        coefficients: agg_coefficients,
+        coefficients_range,
         forward_pass_index,
     })
 }
@@ -1479,6 +1514,10 @@ mod tests {
             SolverStatistics::default()
         }
 
+        fn statistics_into(&self, out: &mut SolverStatistics) {
+            out.copy_from(&SolverStatistics::default());
+        }
+
         fn name(&self) -> &'static str {
             "Mock"
         }
@@ -1530,6 +1569,14 @@ mod tests {
             iterations: 0,
             solve_time_seconds: 0.0,
         }
+    }
+
+    /// Resolve a [`StagedCut`]'s coefficient slice from its producing worker's
+    /// arena. Mirrors the production merge's
+    /// `workspaces[w].backward_accum.agg_arena[cut.coefficients_range]` read so
+    /// the in-file backward tests observe the same bytes the FCF receives.
+    fn staged_cut_coefficients<'a>(cut: &super::StagedCut, arena: &'a [f64]) -> &'a [f64] {
+        &arena[cut.coefficients_range.clone()]
     }
 
     /// Wrap a `MockSolver` into a single-element `Vec<SolverWorkspace<MockSolver>>`
@@ -1875,7 +1922,11 @@ mod tests {
         // A 1-stage system has no stages with a successor, so the backward
         // sweep (0..0) is empty — zero cuts are generated.
         let stochastic = make_stochastic_context(1, 2);
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template_1_0()];
         let base_rows = vec![1_usize];
 
@@ -1966,7 +2017,11 @@ mod tests {
         let n_stages = 2_usize;
         let n_openings = 2_usize;
         let stochastic = make_stochastic_context(n_stages, n_openings);
-        let indexer = StageIndexer::new(1, 0); // N=1, L=0
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        }; // N=1, L=0
         let templates = vec![minimal_template_1_0(); n_stages];
         let base_rows = vec![1_usize; n_stages];
 
@@ -2064,7 +2119,11 @@ mod tests {
         let n_stages = 2_usize;
         let n_openings = 2_usize;
         let stochastic = make_stochastic_context(n_stages, n_openings);
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template_1_0(); n_stages];
         let base_rows = vec![1_usize; n_stages];
 
@@ -2157,7 +2216,11 @@ mod tests {
         let n_stages = 5_usize;
         let n_openings = 2_usize;
         let stochastic = make_stochastic_context(n_stages, n_openings);
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template_1_0(); n_stages];
         let base_rows = vec![1_usize; n_stages];
 
@@ -2248,7 +2311,11 @@ mod tests {
     fn elapsed_ms_is_non_negative() {
         let n_stages = 2_usize;
         let stochastic = make_stochastic_context(n_stages, 2);
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template_1_0(); n_stages];
         let base_rows = vec![1_usize; n_stages];
 
@@ -2336,7 +2403,11 @@ mod tests {
         // backward solve → SddpError::Infeasible is returned.
         let n_stages = 2_usize;
         let stochastic = make_stochastic_context(n_stages, 1);
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template_1_0(); n_stages];
         let base_rows = vec![1_usize; n_stages];
 
@@ -2470,7 +2541,11 @@ mod tests {
         //   coefficients = [-3.0]
         let n_stages = 2_usize;
         let stochastic = make_stochastic_context(n_stages, 1);
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template_1_0(); n_stages];
         let base_rows = vec![1_usize; n_stages];
 
@@ -2581,7 +2656,11 @@ mod tests {
         //   (more storage → higher cut value → wrong incentive).
         let n_stages = 2_usize;
         let stochastic = make_stochastic_context(n_stages, 1);
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template_1_0(); n_stages];
         let base_rows = vec![1_usize; n_stages];
 
@@ -2697,7 +2776,11 @@ mod tests {
         // This test verifies the tightness property.
         let n_stages = 2_usize;
         let stochastic = make_stochastic_context(n_stages, 1);
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template_1_0(); n_stages];
         let base_rows = vec![1_usize; n_stages];
 
@@ -2803,7 +2886,11 @@ mod tests {
         let n_stages = 3_usize;
         let n_openings = 2_usize;
         let stochastic = make_stochastic_context(n_stages, n_openings);
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template_1_0(); n_stages];
         let base_rows = vec![1_usize; n_stages];
 
@@ -2904,7 +2991,11 @@ mod tests {
         // The key invariant: forward_pass_index = m = 5.
         let n_stages = 2_usize;
         let stochastic = make_stochastic_context(n_stages, 1);
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template_1_0(); n_stages];
         let base_rows = vec![1_usize; n_stages];
 
@@ -3019,7 +3110,11 @@ mod tests {
         let n_stages = 2_usize;
         let n_openings = 1_usize;
         let stochastic = make_stochastic_context(n_stages, n_openings);
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template_1_0(); n_stages];
         let base_rows = vec![1_usize; n_stages];
 
@@ -3123,7 +3218,11 @@ mod tests {
         let n_stages = 2_usize;
         let n_openings = 3_usize;
         let stochastic = make_stochastic_context(n_stages, n_openings);
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template_1_0(); n_stages];
         let base_rows = vec![1_usize; n_stages];
 
@@ -3229,7 +3328,11 @@ mod tests {
         let n_stages = 2_usize;
         let n_openings = 1_usize;
         let stochastic = make_stochastic_context(n_stages, n_openings);
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template_1_0(); n_stages];
         let base_rows = vec![1_usize; n_stages];
 
@@ -3343,7 +3446,11 @@ mod tests {
         let n_trial_points = 8_usize;
 
         let stochastic = make_stochastic_context(n_stages, n_openings);
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template_1_0(); n_stages];
         let base_rows = vec![1_usize; n_stages];
 
@@ -3778,7 +3885,11 @@ mod tests {
         let n_openings = 2_usize;
         // mean_mw=300 guarantees a positive realization for any reasonable eta draw.
         let stochastic = make_stochastic_context_with_load(n_stages, n_openings, 300.0, 30.0);
-        let indexer = StageIndexer::new(1, 0); // N=1, L=0, n_state=1
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        }; // N=1, L=0, n_state=1
 
         // PatchBuffer: n_hydros=1, max_par_order=0, n_load_buses=1, max_blocks=1.
         let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 1, 1, 0, 0);
@@ -3954,7 +4065,11 @@ mod tests {
         let n_stages = 2_usize;
         let n_openings = 2_usize;
         let stochastic = make_stochastic_context(n_stages, n_openings);
-        let indexer = StageIndexer::new(1, 0); // N=1, L=0
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        }; // N=1, L=0
 
         // PatchBuffer with no load buses: n_load_buses=0, max_blocks=1.
         let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 0, 0, 0, 0);
@@ -4121,7 +4236,11 @@ mod tests {
         let n_stages = 2_usize;
         let n_openings = 2_usize;
         let stochastic = make_stochastic_context_with_load(n_stages, n_openings, 200.0, 20.0);
-        let indexer = StageIndexer::new(1, 0); // N=1, L=0, n_state=1
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        }; // N=1, L=0, n_state=1
 
         let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 1, 1, 0, 0);
 
@@ -4306,7 +4425,11 @@ mod tests {
         let n_stages = 4_usize;
         let n_openings = 2_usize;
         let stochastic = make_stochastic_context(n_stages, n_openings);
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template_1_0(); n_stages];
         let base_rows = vec![1_usize; n_stages];
 
@@ -4430,7 +4553,11 @@ mod tests {
         let n_stages = 3_usize;
         let n_openings = 2_usize;
         let stochastic = make_stochastic_context(n_stages, n_openings);
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template_1_0(); n_stages];
         let base_rows = vec![1_usize; n_stages];
 
@@ -4563,7 +4690,11 @@ mod tests {
         let local_work = 6_usize;
         let n_openings = 2_usize;
         let stochastic = make_stochastic_context(n_stages, n_openings);
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template_1_0(); n_stages];
         let base_rows = vec![1_usize; n_stages];
         let n_state = indexer.n_state; // 1
@@ -4940,7 +5071,11 @@ mod tests {
         let n_workers = 2_usize;
         let local_work = 4_usize;
         let stochastic = make_stochastic_context(n_stages, n_openings);
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template_1_0(); n_stages];
         let base_rows = vec![1_usize; n_stages];
         let n_state = indexer.n_state;
@@ -5164,7 +5299,11 @@ mod tests {
         let n_workers = 1_usize;
         let local_work = 2_usize;
         let stochastic = make_stochastic_context(n_stages, n_openings);
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template_1_0(); n_stages];
         let base_rows = vec![1_usize; n_stages];
         let n_state = indexer.n_state;
@@ -5323,7 +5462,11 @@ mod tests {
         let n_openings = 1_usize;
         let n_state = 1_usize;
         let stochastic = make_stochastic_context(n_stages, n_openings);
-        let indexer = StageIndexer::new(n_state, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(n_state, 0);
+            ix.finalize_for_test();
+            ix
+        };
 
         let solver = MockSolver::always_ok(solution_1_0(100.0, -5.0));
         let mut workspaces = single_workspace(solver, n_state);
@@ -5434,6 +5577,10 @@ mod tests {
         }
         ws.backward_accum.slot_increments.resize(1, 0);
         ws.backward_accum.slot_increments[..1].fill(0);
+        // Size the coefficient arena for the single trial point (offset 0).
+        if ws.backward_accum.agg_arena.len() < n_state {
+            ws.backward_accum.agg_arena.resize(n_state, 0.0_f64);
+        }
 
         super::process_trial_point_backward(
             ws,
@@ -5446,6 +5593,7 @@ mod tests {
             &succ_spec,
             &mut basis_slice,
             &super::StageOpeningSolver::Baked,
+            0,
             0,
         )?;
         Ok(workspaces)
@@ -5601,7 +5749,11 @@ mod tests {
         let n_stages = 1_usize;
         let n_workers = 2_usize;
         let stochastic = make_stochastic_context(n_stages, 1);
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template_1_0()];
         let base_rows = vec![1_usize];
         let n_state = indexer.n_state;
@@ -5801,7 +5953,11 @@ mod tests {
 
         let n_stages = 1_usize;
         let stochastic = make_stochastic_context(n_stages, 1);
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let templates = vec![minimal_template_1_0()];
         let base_rows = vec![1_usize];
         let n_state = indexer.n_state;
@@ -5908,7 +6064,7 @@ mod tests {
         anticipated_lead_stages: Vec<usize>,
     ) -> StageIndexer {
         use crate::indexer::{EquipmentCounts, EvapConfig, FphaColumnLayout};
-        StageIndexer::with_equipment_and_evaporation(
+        let mut indexer = StageIndexer::with_equipment_and_evaporation(
             &EquipmentCounts {
                 hydro_count: 0,
                 max_par_order: 0,
@@ -5930,7 +6086,11 @@ mod tests {
             &EvapConfig {
                 hydro_indices: vec![],
             },
-        )
+        );
+        // Finalize the nonzero-state mask + state_to_lp_column map as production
+        // setup does, so the indexer can drive the mask-only forward cut-row loop.
+        indexer.finalize_for_test();
+        indexer
     }
 
     /// Verify cut sign convention: dual 7.5 → batch -7.5 at correct column.
@@ -6080,18 +6240,26 @@ mod tests {
     fn run_dcs_backward_trial_point(
         dcs: Option<DcsParams>,
         iteration: u64,
-    ) -> (super::StagedCut, Vec<u64>) {
+    ) -> (super::StagedCut, Vec<f64>, Vec<u64>) {
         run_dcs_backward_trial_point_at(dcs, iteration, 2.0)
     }
 
     /// `run_dcs_backward_trial_point` with the incoming-state pin `x_hat`
     /// parameterized, so a sweep can vary the pinned state (which cut binds).
+    ///
+    /// Returns the produced [`StagedCut`], its coefficient slice resolved from
+    /// the worker arena (the bytes the FCF would receive), and the post-call
+    /// `metadata_sync_contribution` snapshot.
     fn run_dcs_backward_trial_point_at(
         dcs: Option<DcsParams>,
         iteration: u64,
         x_hat: f64,
-    ) -> (super::StagedCut, Vec<u64>) {
-        let indexer = StageIndexer::new(1, 0);
+    ) -> (super::StagedCut, Vec<f64>, Vec<u64>) {
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let n_state = indexer.n_state;
         let core = dcs_core_template();
         let templates = vec![core.clone(), core.clone()];
@@ -6193,6 +6361,10 @@ mod tests {
         if ws.backward_accum.agg_coefficients.len() < n_state {
             ws.backward_accum.agg_coefficients.resize(n_state, 0.0);
         }
+        // Size the coefficient arena for the single trial point (offset 0).
+        if ws.backward_accum.agg_arena.len() < n_state {
+            ws.backward_accum.agg_arena.resize(n_state, 0.0);
+        }
         if ws.backward_accum.metadata_sync_contribution.len() < pop {
             ws.backward_accum.metadata_sync_contribution.resize(pop, 0);
         }
@@ -6216,13 +6388,17 @@ mod tests {
             &mut basis_slices[0],
             &opening_solver,
             0,
+            0,
         )
         .expect("backward trial-point solve must succeed");
 
+        // Resolve the coefficient slice from the worker arena while `ws` is
+        // still in scope (the bytes the FCF merge would read).
+        let coefficients = staged_cut_coefficients(&cut, &ws.backward_accum.agg_arena).to_vec();
         let meta_sync = ws.backward_accum.metadata_sync_contribution[..pop].to_vec();
         // Touch fcf/exchange so the borrows live to here.
         let _ = (&mut fcf, &mut exchange);
-        (cut, meta_sync)
+        (cut, coefficients, meta_sync)
     }
 
     fn dcs_params(start_iteration: u64) -> DcsParams {
@@ -6243,8 +6419,9 @@ mod tests {
     #[test]
     fn backward_dcs_cut_equals_all_cuts_cut() {
         let iteration = 5;
-        let (baked_cut, _) = run_dcs_backward_trial_point(None, iteration);
-        let (dcs_cut, _) = run_dcs_backward_trial_point(Some(dcs_params(2)), iteration);
+        let (baked_cut, baked_coefficients, _) = run_dcs_backward_trial_point(None, iteration);
+        let (dcs_cut, dcs_coefficients, _) =
+            run_dcs_backward_trial_point(Some(dcs_params(2)), iteration);
 
         assert!(
             (baked_cut.intercept - dcs_cut.intercept).abs() < 1e-9,
@@ -6252,13 +6429,8 @@ mod tests {
             baked_cut.intercept,
             dcs_cut.intercept
         );
-        assert_eq!(baked_cut.coefficients.len(), dcs_cut.coefficients.len());
-        for (i, (b, d)) in baked_cut
-            .coefficients
-            .iter()
-            .zip(&dcs_cut.coefficients)
-            .enumerate()
-        {
+        assert_eq!(baked_coefficients.len(), dcs_coefficients.len());
+        for (i, (b, d)) in baked_coefficients.iter().zip(&dcs_coefficients).enumerate() {
             assert!(
                 (b - d).abs() < 1e-9,
                 "coefficient[{i}]: baked {b} vs DCS {d}"
@@ -6267,9 +6439,9 @@ mod tests {
         // The binding cut has gradient 2.0 on the incoming storage; both paths
         // must recover it.
         assert!(
-            (baked_cut.coefficients[0] - 2.0).abs() < 1e-9,
+            (baked_coefficients[0] - 2.0).abs() < 1e-9,
             "baked gradient must be the binding cut's 2.0, got {}",
-            baked_cut.coefficients[0]
+            baked_coefficients[0]
         );
     }
 
@@ -6277,12 +6449,12 @@ mod tests {
     /// to the pre-DCS baseline (same fixture run with `None`).
     #[test]
     fn backward_dcs_off_is_identical_to_baseline() {
-        let (cut_a, _) = run_dcs_backward_trial_point(None, 5);
-        let (cut_b, _) = run_dcs_backward_trial_point(None, 5);
+        let (cut_a, coefficients_a, _) = run_dcs_backward_trial_point(None, 5);
+        let (cut_b, coefficients_b, _) = run_dcs_backward_trial_point(None, 5);
         assert_eq!(cut_a.intercept, cut_b.intercept);
-        assert_eq!(cut_a.coefficients, cut_b.coefficients);
+        assert_eq!(coefficients_a, coefficients_b);
         // Baseline binding gradient.
-        assert!((cut_a.coefficients[0] - 2.0).abs() < 1e-9);
+        assert!((coefficients_a[0] - 2.0).abs() < 1e-9);
     }
 
     /// `dcs = Some` but `iteration < start_iteration` ⇒ the baked path is used
@@ -6290,10 +6462,11 @@ mod tests {
     #[test]
     fn backward_dcs_inactive_before_start_iteration() {
         // start_iteration = 4, iteration = 1 → inactive.
-        let (baked_cut, baked_meta) = run_dcs_backward_trial_point(None, 1);
-        let (early_cut, early_meta) = run_dcs_backward_trial_point(Some(dcs_params(4)), 1);
+        let (baked_cut, baked_coefficients, baked_meta) = run_dcs_backward_trial_point(None, 1);
+        let (early_cut, early_coefficients, early_meta) =
+            run_dcs_backward_trial_point(Some(dcs_params(4)), 1);
         assert_eq!(baked_cut.intercept, early_cut.intercept);
-        assert_eq!(baked_cut.coefficients, early_cut.coefficients);
+        assert_eq!(baked_coefficients, early_coefficients);
         // Baked path updates binding-count metadata; the inactive-DCS run takes
         // the baked path, so its metadata contribution matches the baked run.
         assert_eq!(baked_meta, early_meta);
@@ -6310,8 +6483,8 @@ mod tests {
     /// to no other.
     #[test]
     fn backward_dcs_binding_counts_match_baked() {
-        let (_, baked_meta) = run_dcs_backward_trial_point(None, 5);
-        let (_, dcs_meta) = run_dcs_backward_trial_point(Some(dcs_params(2)), 5);
+        let (_, _, baked_meta) = run_dcs_backward_trial_point(None, 5);
+        let (_, _, dcs_meta) = run_dcs_backward_trial_point(Some(dcs_params(2)), 5);
 
         // Baked path bumps exactly the binding slot 1 (the floor-4 cut at x=2).
         assert_eq!(
@@ -6373,12 +6546,13 @@ mod tests {
     #[test]
     fn backward_dcs_exactness_and_terminates() {
         let iteration = 5;
-        let (baked, _) = run_dcs_backward_trial_point(None, iteration);
+        let (baked, baked_coefficients, _) = run_dcs_backward_trial_point(None, iteration);
 
         // Default-cap DCS reaches the no-violation stop and matches all-cuts.
-        let (dcs, _) = run_dcs_backward_trial_point(Some(dcs_params(2)), iteration);
+        let (dcs, dcs_coefficients, _) =
+            run_dcs_backward_trial_point(Some(dcs_params(2)), iteration);
         assert!((baked.intercept - dcs.intercept).abs() < 1e-9);
-        for (b, d) in baked.coefficients.iter().zip(&dcs.coefficients) {
+        for (b, d) in baked_coefficients.iter().zip(&dcs_coefficients) {
             assert!((b - d).abs() < 1e-9, "coeff mismatch baked {b} vs DCS {d}");
         }
 
@@ -6388,9 +6562,9 @@ mod tests {
             max_inner_iterations: 1,
             ..dcs_params(2)
         };
-        let (dcs_tc, _) = run_dcs_backward_trial_point(Some(tight), iteration);
+        let (dcs_tc, dcs_tc_coefficients, _) = run_dcs_backward_trial_point(Some(tight), iteration);
         assert!((baked.intercept - dcs_tc.intercept).abs() < 1e-9);
-        for (b, d) in baked.coefficients.iter().zip(&dcs_tc.coefficients) {
+        for (b, d) in baked_coefficients.iter().zip(&dcs_tc_coefficients) {
             assert!(
                 (b - d).abs() < 1e-9,
                 "TC-fallback coeff mismatch baked {b} vs DCS {d}"
@@ -6407,23 +6581,23 @@ mod tests {
     #[test]
     fn backward_dcs_finite_k1_window_takes_effect() {
         let iteration = 5;
-        let (baked, _) = run_dcs_backward_trial_point(None, iteration);
+        let (baked, baked_coefficients, _) = run_dcs_backward_trial_point(None, iteration);
         // Sanity: the all-cuts (and k1=None DCS) gradient is the binding cut's 2.0.
-        assert!((baked.coefficients[0] - 2.0).abs() < 1e-9);
+        assert!((baked_coefficients[0] - 2.0).abs() < 1e-9);
 
-        let (windowed, _) =
+        let (windowed, windowed_coefficients, _) =
             run_dcs_backward_trial_point(Some(dcs_params_k1(2, Some(1))), iteration);
         // The binding cut is windowed out, so the windowed optimum differs:
         // the surviving cuts (slots 0,2, both gradient 0) give a 0 gradient and
         // a different intercept than the all-cuts cut.
         assert!(
-            (windowed.coefficients[0] - baked.coefficients[0]).abs() > 1e-6
+            (windowed_coefficients[0] - baked_coefficients[0]).abs() > 1e-6
                 || (windowed.intercept - baked.intercept).abs() > 1e-6,
             "finite k1 must change the cut vs all-cuts (windowed coeff {} intercept {}; \
              all-cuts coeff {} intercept {})",
-            windowed.coefficients[0],
+            windowed_coefficients[0],
             windowed.intercept,
-            baked.coefficients[0],
+            baked_coefficients[0],
             baked.intercept,
         );
     }
@@ -6435,15 +6609,15 @@ mod tests {
     /// metadata, so cut + metadata bit-identity is the determinism surface.
     #[test]
     fn backward_dcs_run_to_run_determinism() {
-        let (cut_a, meta_a) = run_dcs_backward_trial_point(Some(dcs_params(2)), 5);
-        let (cut_b, meta_b) = run_dcs_backward_trial_point(Some(dcs_params(2)), 5);
+        let (cut_a, coefficients_a, meta_a) = run_dcs_backward_trial_point(Some(dcs_params(2)), 5);
+        let (cut_b, coefficients_b, meta_b) = run_dcs_backward_trial_point(Some(dcs_params(2)), 5);
         assert_eq!(
             cut_a.intercept.to_bits(),
             cut_b.intercept.to_bits(),
             "intercept must be bit-identical run-to-run"
         );
-        assert_eq!(cut_a.coefficients.len(), cut_b.coefficients.len());
-        for (a, b) in cut_a.coefficients.iter().zip(&cut_b.coefficients) {
+        assert_eq!(coefficients_a.len(), coefficients_b.len());
+        for (a, b) in coefficients_a.iter().zip(&coefficients_b) {
             assert_eq!(
                 a.to_bits(),
                 b.to_bits(),
@@ -6469,15 +6643,17 @@ mod tests {
         let iterations = [3_u64, 5, 7];
         for &iteration in &iterations {
             for &x in &x_hats {
-                let (baked, _) = run_dcs_backward_trial_point_at(None, iteration, x);
-                let (dcs, _) = run_dcs_backward_trial_point_at(Some(dcs_params(2)), iteration, x);
+                let (baked, baked_coefficients, _) =
+                    run_dcs_backward_trial_point_at(None, iteration, x);
+                let (dcs, dcs_coefficients, _) =
+                    run_dcs_backward_trial_point_at(Some(dcs_params(2)), iteration, x);
                 assert!(
                     (baked.intercept - dcs.intercept).abs() < 1e-9,
                     "sweep iter {iteration} x_hat {x}: intercept baked {} vs DCS {}",
                     baked.intercept,
                     dcs.intercept
                 );
-                for (i, (b, d)) in baked.coefficients.iter().zip(&dcs.coefficients).enumerate() {
+                for (i, (b, d)) in baked_coefficients.iter().zip(&dcs_coefficients).enumerate() {
                     assert!(
                         (b - d).abs() < 1e-9,
                         "sweep iter {iteration} x_hat {x}: coeff[{i}] baked {b} vs DCS {d}"
@@ -6551,7 +6727,11 @@ mod tests {
     #[test]
     fn backward_dcs_baked_cuts_present_no_duplicate_rows() {
         let iteration = 5;
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            ix.finalize_for_test();
+            ix
+        };
         let n_state = indexer.n_state;
 
         // Cut-free base (loaded by the DCS path) and the baked successor
@@ -6664,6 +6844,10 @@ mod tests {
         if ws.backward_accum.agg_coefficients.len() < n_state {
             ws.backward_accum.agg_coefficients.resize(n_state, 0.0);
         }
+        // Size the coefficient arena for the single trial point (offset 0).
+        if ws.backward_accum.agg_arena.len() < n_state {
+            ws.backward_accum.agg_arena.resize(n_state, 0.0);
+        }
         if ws.backward_accum.metadata_sync_contribution.len() < pop {
             ws.backward_accum.metadata_sync_contribution.resize(pop, 0);
         }
@@ -6687,12 +6871,17 @@ mod tests {
             &mut basis_slices[0],
             &opening_solver,
             0,
+            0,
         )
         .expect("DCS backward solve with baked cuts present must succeed");
+        // Resolve the DCS coefficient slice from the worker arena while `ws` is
+        // still in scope.
+        let dcs_coefficients =
+            staged_cut_coefficients(&dcs_cut, &ws.backward_accum.agg_arena).to_vec();
         let _ = (&mut fcf, &mut exchange);
 
         // The all-cuts reference cut (cut-free base + full pool, no DCS).
-        let (allcuts, _) = run_dcs_backward_trial_point(None, iteration);
+        let (allcuts, allcuts_coefficients, _) = run_dcs_backward_trial_point(None, iteration);
 
         // With the fix (core = cut-free ctx.templates[s]), the binding cut is
         // added exactly once and the DCS cut matches the all-cuts cut. With the
@@ -6704,16 +6893,15 @@ mod tests {
             dcs_cut.intercept,
             allcuts.intercept
         );
-        assert_eq!(dcs_cut.coefficients.len(), allcuts.coefficients.len());
-        for (i, (d, a)) in dcs_cut
-            .coefficients
+        assert_eq!(dcs_coefficients.len(), allcuts_coefficients.len());
+        for (i, (d, a)) in dcs_coefficients
             .iter()
-            .zip(&allcuts.coefficients)
+            .zip(&allcuts_coefficients)
             .enumerate()
         {
             assert!((d - a).abs() < 1e-9, "coeff[{i}]: DCS {d} vs all-cuts {a}");
         }
         // The binding gradient (2.0) must be recovered.
-        assert!((dcs_cut.coefficients[0] - 2.0).abs() < 1e-9);
+        assert!((dcs_coefficients[0] - 2.0).abs() < 1e-9);
     }
 }

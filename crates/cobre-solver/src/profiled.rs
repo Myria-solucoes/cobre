@@ -151,6 +151,10 @@ impl<S: SolverInterface> SolverInterface for ProfiledSolver<S> {
         self.inner.statistics()
     }
 
+    fn statistics_into(&self, out: &mut SolverStatistics) {
+        self.inner.statistics_into(out);
+    }
+
     fn name(&self) -> &'static str {
         self.inner.name()
     }
@@ -282,6 +286,10 @@ mod tests {
             SolverStatistics::default()
         }
 
+        fn statistics_into(&self, out: &mut SolverStatistics) {
+            out.copy_from(&SolverStatistics::default());
+        }
+
         fn name(&self) -> &'static str {
             "RecordingMock"
         }
@@ -343,8 +351,6 @@ mod tests {
         }
     }
 
-    // ── AC-3 ─────────────────────────────────────────────────────────────────
-
     /// AC-3: `ProfiledSolver::new` must not dispatch any FFI setter calls.
     #[test]
     fn new_issues_no_ffi_calls() {
@@ -356,8 +362,6 @@ mod tests {
             "expected zero calls after ProfiledSolver::new, got: {calls:?}"
         );
     }
-
-    // ── AC-4 ─────────────────────────────────────────────────────────────────
 
     /// AC-4: `set_profile` with a profile equal to `current_profile` issues
     /// zero `apply_profile` calls (noop delta-tracking).
@@ -376,8 +380,6 @@ mod tests {
             "expected zero apply_profile calls when profile unchanged, got: {profile_calls:?}"
         );
     }
-
-    // ── AC-5 ─────────────────────────────────────────────────────────────────
 
     /// AC-5: `set_profile` with any field differing from `current_profile`
     /// dispatches exactly one `apply_profile` call carrying the complete new
@@ -497,8 +499,6 @@ mod tests {
         }
     }
 
-    // ── AC-6 ─────────────────────────────────────────────────────────────────
-
     /// AC-6: When all profile fields differ from the default, `set_profile`
     /// dispatches exactly one `apply_profile` call carrying the complete new
     /// profile.
@@ -527,8 +527,6 @@ mod tests {
             "expected exactly one ApplyProfile call with the complete profile"
         );
     }
-
-    // ── AC-7 ─────────────────────────────────────────────────────────────────
 
     /// AC-7: `ProfiledSolver<S>` forwards `load_model`, `add_rows`,
     /// `set_row_bounds`, `set_col_bounds`, and `solve` transparently to the

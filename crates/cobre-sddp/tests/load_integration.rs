@@ -155,6 +155,10 @@ impl SolverInterface for MockSolver {
         SolverStatistics::default()
     }
 
+    fn statistics_into(&self, out: &mut SolverStatistics) {
+        *out = self.statistics();
+    }
+
     fn name(&self) -> &'static str {
         "MockLoadIntegration"
     }
@@ -408,7 +412,15 @@ fn test_stochastic_load_training_completes() {
         "pre-condition: n_load_buses must be 1"
     );
 
-    let indexer = StageIndexer::new(1, 0); // N=1 hydro, L=0 PAR
+    let indexer = {
+        let mut ix = StageIndexer::new(1, 0);
+        // Finalize as production setup does: full-order mask + state→LP-column map.
+        let lag_counts = vec![ix.max_par_order; ix.hydro_count];
+        let anticipated_k = ix.anticipated_lead_stages.clone();
+        ix.set_nonzero_mask(&lag_counts, &anticipated_k);
+        ix.finalize_state_column_map();
+        ix
+    }; // N=1 hydro, L=0 PAR
     let templates = vec![minimal_template(); n_stages];
     let base_rows = vec![2usize; n_stages];
     let initial_state = vec![0.0_f64; indexer.n_state];
@@ -544,7 +556,15 @@ fn test_deterministic_load_training_matches_baseline() {
         "pre-condition: deterministic load must yield n_load_buses=0"
     );
 
-    let indexer = StageIndexer::new(1, 0);
+    let indexer = {
+        let mut ix = StageIndexer::new(1, 0);
+        // Finalize as production setup does: full-order mask + state→LP-column map.
+        let lag_counts = vec![ix.max_par_order; ix.hydro_count];
+        let anticipated_k = ix.anticipated_lead_stages.clone();
+        ix.set_nonzero_mask(&lag_counts, &anticipated_k);
+        ix.finalize_state_column_map();
+        ix
+    };
     let templates = vec![minimal_template(); n_stages];
     let base_rows = vec![2usize; n_stages];
     let initial_state = vec![0.0_f64; indexer.n_state];
@@ -647,7 +667,15 @@ fn test_stochastic_load_seed_determinism() {
 
     let run_training = || {
         let stochastic = build_context_with_load(n_stages, 500.0, 50.0);
-        let indexer = StageIndexer::new(1, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            // Finalize as production setup does: full-order mask + state→LP-column map.
+            let lag_counts = vec![ix.max_par_order; ix.hydro_count];
+            let anticipated_k = ix.anticipated_lead_stages.clone();
+            ix.set_nonzero_mask(&lag_counts, &anticipated_k);
+            ix.finalize_state_column_map();
+            ix
+        };
         let templates = vec![minimal_template(); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; indexer.n_state];
