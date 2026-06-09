@@ -77,8 +77,11 @@ mod tests {
     fn sentinel_uses_heuristic() {
         let mut solver = make_solver();
         // Default profile has sentinel (0) for simplex_iteration_limit.
-        // Confirm via the trait setter that the profile value is 0.
-        solver.set_simplex_iteration_limit_profile(0);
+        // Confirm via apply_profile that the profile value is 0.
+        solver.apply_profile(&HighsProfile {
+            simplex_iteration_limit: 0,
+            ..Default::default()
+        });
 
         // Level 0 calls set_iteration_limits() internally.
         solver.apply_retry_level_options_for_test(0);
@@ -99,7 +102,10 @@ mod tests {
     #[test]
     fn nonzero_simplex_cap_used_verbatim() {
         let mut solver = make_solver();
-        solver.set_simplex_iteration_limit_profile(42_000);
+        solver.apply_profile(&HighsProfile {
+            simplex_iteration_limit: 42_000,
+            ..Default::default()
+        });
 
         // Level 0 calls set_iteration_limits() internally.
         solver.apply_retry_level_options_for_test(0);
@@ -120,7 +126,10 @@ mod tests {
     #[test]
     fn ipm_profile_value_applied() {
         let mut solver = make_solver();
-        solver.set_ipm_iteration_limit_profile(500);
+        solver.apply_profile(&HighsProfile {
+            ipm_iteration_limit: 500,
+            ..Default::default()
+        });
 
         // Level 0 calls set_iteration_limits() internally.
         solver.apply_retry_level_options_for_test(0);
@@ -137,12 +146,15 @@ mod tests {
 
     // ── AC-8 bonus: default-attempt tolerance setter wires to FFI ────────────
 
-    /// Verify that `set_primal_feasibility_tolerance` writes the value to the
+    /// Verify that `apply_profile` writes the primal tolerance to the
     /// underlying `HiGHS` option immediately (not only at retry time).
     #[test]
     fn primal_setter_propagates_to_ffi() {
         let mut solver = make_solver();
-        solver.set_primal_feasibility_tolerance(3e-8);
+        solver.apply_profile(&HighsProfile {
+            primal_feasibility_tolerance: 3e-8,
+            ..Default::default()
+        });
 
         let tol = solver
             .get_double_option(c"primal_feasibility_tolerance")
@@ -150,7 +162,7 @@ mod tests {
 
         assert!(
             (tol - 3e-8).abs() < 1e-20,
-            "set_primal_feasibility_tolerance must write to FFI; expected 3e-8, got {tol}"
+            "apply_profile must write primal tolerance to FFI; expected 3e-8, got {tol}"
         );
     }
 
@@ -162,8 +174,11 @@ mod tests {
 
     fn make_loose_profile_solver() -> HighsSolver {
         let mut solver = make_solver();
-        solver.set_primal_feasibility_tolerance(1e-5);
-        solver.set_dual_feasibility_tolerance(1e-5);
+        solver.apply_profile(&HighsProfile {
+            primal_feasibility_tolerance: 1e-5,
+            dual_feasibility_tolerance: 1e-5,
+            ..Default::default()
+        });
         solver
     }
 
@@ -271,8 +286,11 @@ mod tests {
 
     fn make_strict_profile_solver() -> HighsSolver {
         let mut solver = make_solver();
-        solver.set_primal_feasibility_tolerance(1e-12);
-        solver.set_dual_feasibility_tolerance(1e-12);
+        solver.apply_profile(&HighsProfile {
+            primal_feasibility_tolerance: 1e-12,
+            dual_feasibility_tolerance: 1e-12,
+            ..Default::default()
+        });
         solver
     }
 
@@ -388,7 +406,10 @@ mod tests {
     #[test]
     fn profile_primal_tolerance_restored_after_retry_finalization() {
         let mut solver = make_solver();
-        solver.set_primal_feasibility_tolerance(3e-8);
+        solver.apply_profile(&HighsProfile {
+            primal_feasibility_tolerance: 3e-8,
+            ..Default::default()
+        });
 
         // Simulate the finalization path: restore defaults then re-apply profile.
         solver.restore_defaults_then_apply_profile_for_test();
@@ -410,7 +431,10 @@ mod tests {
     #[test]
     fn profile_dual_tolerance_restored_after_retry_finalization() {
         let mut solver = make_solver();
-        solver.set_dual_feasibility_tolerance(5e-9);
+        solver.apply_profile(&HighsProfile {
+            dual_feasibility_tolerance: 5e-9,
+            ..Default::default()
+        });
 
         // Simulate the finalization path: restore defaults then re-apply profile.
         solver.restore_defaults_then_apply_profile_for_test();
@@ -440,7 +464,10 @@ mod tests {
     fn ipm_sentinel_zero_maps_to_i32_max() {
         let mut solver = make_solver();
         // 0 is DEFAULT_PROFILE_IPM_UNBOUNDED_SENTINEL — "unbounded".
-        solver.set_ipm_iteration_limit_profile(0);
+        solver.apply_profile(&HighsProfile {
+            ipm_iteration_limit: 0,
+            ..Default::default()
+        });
 
         // Level 0 calls set_iteration_limits() internally.
         solver.apply_retry_level_options_for_test(0);
@@ -513,10 +540,6 @@ mod tests {
         fn solver_name_version(&self) -> String {
             "SetterCountMock 0.0.0".to_string()
         }
-        fn set_primal_feasibility_tolerance(&mut self, _v: f64) {}
-        fn set_dual_feasibility_tolerance(&mut self, _v: f64) {}
-        fn set_simplex_iteration_limit_profile(&mut self, _v: u32) {}
-        fn set_ipm_iteration_limit_profile(&mut self, _v: u32) {}
     }
 
     /// Delta-only dispatch: once a profile is installed via `set_profile`,

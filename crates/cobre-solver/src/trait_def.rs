@@ -291,44 +291,6 @@ pub trait SolverInterface: Send {
     /// `ClpSimplex` rim/pricing state, leaving stale steepest-edge weights that
     /// make the landed vertex on alternative-optima LPs order-dependent.
     fn reset_solver_state(&mut self) {}
-
-    /// Set the LP solver's primal feasibility tolerance.
-    ///
-    /// Implementations MUST configure the underlying solver such that subsequent
-    /// solves (default attempt AND all retry levels that do not override this
-    /// value) use the supplied tolerance.
-    ///
-    /// Called by `ProfiledSolver::set_profile` only when the corresponding
-    /// profile field changes. This is NOT a hot-path method.
-    fn set_primal_feasibility_tolerance(&mut self, value: f64);
-
-    /// Set the LP solver's dual feasibility tolerance.
-    ///
-    /// Same contract as [`Self::set_primal_feasibility_tolerance`].
-    ///
-    /// Called by `ProfiledSolver::set_profile` only when the corresponding
-    /// profile field changes. This is NOT a hot-path method.
-    fn set_dual_feasibility_tolerance(&mut self, value: f64);
-
-    /// Set the per-attempt simplex iteration cap.
-    ///
-    /// A value of [`crate::DEFAULT_PROFILE_HEURISTIC_SENTINEL`] (`0`) MUST
-    /// cause the implementor to fall back to its historical heuristic
-    /// (`num_cols * 50 max 100_000` for `HighsSolver`). Any non-zero value is
-    /// applied verbatim as the cap.
-    ///
-    /// Called by `ProfiledSolver::set_profile` only when the corresponding
-    /// profile field changes. This is NOT a hot-path method.
-    fn set_simplex_iteration_limit_profile(&mut self, value: u32);
-
-    /// Set the per-attempt IPM iteration cap.
-    ///
-    /// Any positive value is applied verbatim; zero is treated as "unbounded".
-    /// Applies to retry levels that invoke the interior-point solver.
-    ///
-    /// Called by `ProfiledSolver::set_profile` only when the corresponding
-    /// profile field changes. This is NOT a hot-path method.
-    fn set_ipm_iteration_limit_profile(&mut self, value: u32);
 }
 
 #[cfg(test)]
@@ -381,14 +343,6 @@ mod tests {
         fn solver_name_version(&self) -> String {
             "NoopSolver 0.0.0".to_string()
         }
-
-        fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
-
-        fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
-
-        fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
-
-        fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
     }
 
     fn assert_send<T: Send>() {}

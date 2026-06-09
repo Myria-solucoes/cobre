@@ -130,11 +130,6 @@ impl SolverInterface for MockSolver {
     fn add_rows(&mut self, _cuts: &RowBatch) {}
     fn set_row_bounds(&mut self, _indices: &[usize], _lower: &[f64], _upper: &[f64]) {}
     fn set_col_bounds(&mut self, _indices: &[usize], _lower: &[f64], _upper: &[f64]) {}
-    fn set_primal_feasibility_tolerance(&mut self, _v: f64) {}
-    fn set_dual_feasibility_tolerance(&mut self, _v: f64) {}
-    fn set_simplex_iteration_limit_profile(&mut self, _v: u32) {}
-    fn set_ipm_iteration_limit_profile(&mut self, _v: u32) {}
-
     fn solve(
         &mut self,
         _basis: Option<&Basis>,
@@ -994,11 +989,6 @@ impl SolverInterface for SizedMockSolver {
 
     fn set_row_bounds(&mut self, _indices: &[usize], _lower: &[f64], _upper: &[f64]) {}
     fn set_col_bounds(&mut self, _indices: &[usize], _lower: &[f64], _upper: &[f64]) {}
-    fn set_primal_feasibility_tolerance(&mut self, _v: f64) {}
-    fn set_dual_feasibility_tolerance(&mut self, _v: f64) {}
-    fn set_simplex_iteration_limit_profile(&mut self, _v: u32) {}
-    fn set_ipm_iteration_limit_profile(&mut self, _v: u32) {}
-
     fn solve(
         &mut self,
         _basis: Option<&Basis>,

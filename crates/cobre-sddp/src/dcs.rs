@@ -2450,10 +2450,6 @@ mod tests {
         fn name(&self) -> &'static str {
             "TwoPhaseMock"
         }
-        fn set_primal_feasibility_tolerance(&mut self, _v: f64) {}
-        fn set_dual_feasibility_tolerance(&mut self, _v: f64) {}
-        fn set_simplex_iteration_limit_profile(&mut self, _v: u32) {}
-        fn set_ipm_iteration_limit_profile(&mut self, _v: u32) {}
     }
 
     /// A mid-loop `solve(None)` that discarded its warm basis (the mock ignores

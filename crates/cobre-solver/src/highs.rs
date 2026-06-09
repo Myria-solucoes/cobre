@@ -1159,10 +1159,30 @@ impl SolverInterface for HighsSolver {
     type Profile = HighsProfile;
 
     fn apply_profile(&mut self, profile: &HighsProfile) {
-        self.set_primal_feasibility_tolerance(profile.primal_feasibility_tolerance);
-        self.set_dual_feasibility_tolerance(profile.dual_feasibility_tolerance);
-        self.set_simplex_iteration_limit_profile(profile.simplex_iteration_limit);
-        self.set_ipm_iteration_limit_profile(profile.ipm_iteration_limit);
+        // SAFETY: `self.handle` is a valid, non-null HiGHS pointer obtained
+        // from `cobre_highs_create()`. The option name is a static C string
+        // literal with no retained pointer after the call returns.
+        unsafe {
+            ffi::cobre_highs_set_double_option(
+                self.handle,
+                c"primal_feasibility_tolerance".as_ptr(),
+                profile.primal_feasibility_tolerance,
+            );
+        }
+        // SAFETY: `self.handle` is a valid, non-null HiGHS pointer obtained
+        // from `cobre_highs_create()`. The option name is a static C string
+        // literal with no retained pointer after the call returns.
+        unsafe {
+            ffi::cobre_highs_set_double_option(
+                self.handle,
+                c"dual_feasibility_tolerance".as_ptr(),
+                profile.dual_feasibility_tolerance,
+            );
+        }
+        // The iteration-limit fields are cache-only (no FFI here); the actual
+        // caps are computed later by `set_iteration_limits`, which reads
+        // `self.current_profile`. The `self.current_profile = *profile` below
+        // covers all field caching.
         // SAFETY: self.handle is a valid HiGHS pointer; ffi setters accept any i32.
         unsafe {
             ffi::cobre_highs_set_int_option(
@@ -1646,76 +1666,6 @@ impl SolverInterface for HighsSolver {
 
     fn record_reconstruction_stats(&mut self) {
         self.stats.basis_reconstructions += 1;
-    }
-
-    /// Configures the primal feasibility tolerance on the underlying `HiGHS`
-    /// instance and caches the value in `current_profile`.
-    ///
-    /// Subsequent solves (default attempt and any retry level that does not
-    /// override this tolerance) use `value` as the primal tolerance until
-    /// another setter call changes it. After retry escalation completes, the
-    /// solver automatically re-applies the profile tolerances via
-    /// `apply_profile_tolerances` — callers do not need to re-call this method.
-    ///
-    /// This is not a hot-path method; it is called by `ProfiledSolver::set_profile`
-    /// only when the corresponding field changes.
-    fn set_primal_feasibility_tolerance(&mut self, value: f64) {
-        // SAFETY: `self.handle` is a valid, non-null HiGHS pointer obtained
-        // from `cobre_highs_create()`. The option name is a static C string
-        // literal with no retained pointer after the call returns.
-        unsafe {
-            ffi::cobre_highs_set_double_option(
-                self.handle,
-                c"primal_feasibility_tolerance".as_ptr(),
-                value,
-            );
-        }
-        self.current_profile.primal_feasibility_tolerance = value;
-    }
-
-    /// Configures the dual feasibility tolerance on the underlying `HiGHS`
-    /// instance and caches the value in `current_profile`.
-    ///
-    /// Symmetric to [`Self::set_primal_feasibility_tolerance`]; see that
-    /// method for the full contract.
-    fn set_dual_feasibility_tolerance(&mut self, value: f64) {
-        // SAFETY: `self.handle` is a valid, non-null HiGHS pointer obtained
-        // from `cobre_highs_create()`. The option name is a static C string
-        // literal with no retained pointer after the call returns.
-        unsafe {
-            ffi::cobre_highs_set_double_option(
-                self.handle,
-                c"dual_feasibility_tolerance".as_ptr(),
-                value,
-            );
-        }
-        self.current_profile.dual_feasibility_tolerance = value;
-    }
-
-    /// Caches the per-attempt simplex iteration cap in `current_profile`.
-    ///
-    /// No FFI call is issued here. The actual cap is applied by
-    /// `set_iteration_limits` before each solve attempt: a value of
-    /// [`DEFAULT_PROFILE_HEURISTIC_SENTINEL`] (`0`) causes the heuristic
-    /// `num_cols × 50 max 100_000` to be used; any non-zero value is applied
-    /// verbatim.
-    ///
-    /// This is not a hot-path method; it is called by `ProfiledSolver::set_profile`
-    /// only when the corresponding field changes.
-    fn set_simplex_iteration_limit_profile(&mut self, value: u32) {
-        self.current_profile.simplex_iteration_limit = value;
-    }
-
-    /// Caches the per-attempt IPM iteration cap in `current_profile`.
-    ///
-    /// No FFI call is issued here. The actual cap is applied by
-    /// `set_iteration_limits` before each solve attempt. Any positive value is
-    /// applied verbatim; zero is treated as "unbounded" (no cap).
-    ///
-    /// This is not a hot-path method; it is called by `ProfiledSolver::set_profile`
-    /// only when the corresponding field changes.
-    fn set_ipm_iteration_limit_profile(&mut self, value: u32) {
-        self.current_profile.ipm_iteration_limit = value;
     }
 }
 

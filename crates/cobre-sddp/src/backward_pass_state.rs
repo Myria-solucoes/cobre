@@ -1203,10 +1203,6 @@ mod tests {
         fn statistics_into(&self, out: &mut SolverStatistics) {
             out.copy_from(&SolverStatistics::default());
         }
-        fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
-        fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
-        fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
-        fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
     }
 
     fn minimal_template_1_0() -> StageTemplate {

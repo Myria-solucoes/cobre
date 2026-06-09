@@ -1296,14 +1296,6 @@ mod tests {
         fn name(&self) -> &'static str {
             "Mock"
         }
-
-        fn set_primal_feasibility_tolerance(&mut self, _tolerance: f64) {}
-
-        fn set_dual_feasibility_tolerance(&mut self, _tolerance: f64) {}
-
-        fn set_simplex_iteration_limit_profile(&mut self, _limit: u32) {}
-
-        fn set_ipm_iteration_limit_profile(&mut self, _limit: u32) {}
     }
 
     struct StubComm;

@@ -1584,53 +1584,6 @@ impl SolverInterface for ClpSolver {
     // NOTE: `record_reconstruction_stats` is intentionally NOT overridden — CLP
     // has no slot-reconciliation basis reconstruction, so the trait's default
     // no-op is correct.
-
-    /// Configures the primal feasibility tolerance on the underlying CLP model
-    /// and caches the value in `current_profile`.
-    fn set_primal_feasibility_tolerance(&mut self, value: f64) {
-        // SAFETY: `self.handle` is a valid, non-null CLP pointer obtained from
-        // `cobre_clp_create()`. The setter accepts any `f64` and retains no
-        // pointer after the call returns; it cannot fail on a valid handle.
-        unsafe {
-            clp_ffi::cobre_clp_set_primal_tolerance(self.handle, value);
-        }
-        self.current_profile.primal_feasibility_tolerance = value;
-    }
-
-    /// Configures the dual feasibility tolerance on the underlying CLP model
-    /// and caches the value in `current_profile`.
-    ///
-    /// Symmetric to [`Self::set_primal_feasibility_tolerance`].
-    fn set_dual_feasibility_tolerance(&mut self, value: f64) {
-        // SAFETY: `self.handle` is a valid, non-null CLP pointer obtained from
-        // `cobre_clp_create()`. The setter accepts any `f64` and retains no
-        // pointer after the call returns; it cannot fail on a valid handle.
-        unsafe {
-            clp_ffi::cobre_clp_set_dual_tolerance(self.handle, value);
-        }
-        self.current_profile.dual_feasibility_tolerance = value;
-    }
-
-    /// Caches the per-attempt simplex iteration cap in `current_profile`.
-    ///
-    /// No FFI call is issued here. The actual cap is applied by
-    /// [`Self::apply_profile`] via `resolve_simplex_cap`: a value of
-    /// [`DEFAULT_PROFILE_HEURISTIC_SENTINEL`] (`0`) selects the heuristic
-    /// `max(100_000, num_cols * 50)`; any non-zero value is applied verbatim.
-    fn set_simplex_iteration_limit_profile(&mut self, value: u32) {
-        self.current_profile.simplex_iteration_limit = value;
-    }
-
-    /// Per-attempt IPM iteration cap — a documented no-op for CLP.
-    fn set_ipm_iteration_limit_profile(&mut self, value: u32) {
-        // NOTE: CLP is simplex-only; IPM cap cached for PartialEq delta-tracking but not applied.
-        //
-        // `ClpProfile` carries no IPM field (CLP has no interior-point solver),
-        // so there is no field to cache and no FFI call to issue. The method
-        // exists solely to satisfy the trait; mirrors how `HighsProfile` carries
-        // the IPM field even when a given path does not use it.
-        let _ = value;
-    }
 }
 
 /// Normalizes a raw CLP row price into cobre's canonical dual-sign convention.
@@ -2569,14 +2522,16 @@ mod tests {
 
     #[test]
     fn test_clp_tolerance_setters_cache_profile() {
-        // AC2: each tolerance setter issues the FFI call and caches the value in
-        // current_profile so ProfiledSolver delta-tracking observes the change.
+        // AC2: apply_profile issues the tolerance FFI calls and caches the values
+        // in current_profile so ProfiledSolver delta-tracking observes the change.
         let mut solver = ClpSolver::new().expect("CLP solver creation failed");
 
-        solver.set_primal_feasibility_tolerance(1e-7);
+        solver.apply_profile(&ClpProfile {
+            primal_feasibility_tolerance: 1e-7,
+            dual_feasibility_tolerance: 1e-7,
+            ..Default::default()
+        });
         assert_eq!(solver.current_profile.primal_feasibility_tolerance, 1e-7);
-
-        solver.set_dual_feasibility_tolerance(1e-7);
         assert_eq!(solver.current_profile.dual_feasibility_tolerance, 1e-7);
     }
 
@@ -2619,10 +2574,16 @@ mod tests {
         let mut solver = ClpSolver::new().expect("CLP solver creation failed");
         solver.load_model(&make_fixture_stage_template());
 
-        solver.set_simplex_iteration_limit_profile(DEFAULT_PROFILE_HEURISTIC_SENTINEL);
+        solver.apply_profile(&ClpProfile {
+            simplex_iteration_limit: DEFAULT_PROFILE_HEURISTIC_SENTINEL,
+            ..Default::default()
+        });
         assert_eq!(solver.resolve_simplex_cap(), 100_000);
 
-        solver.set_simplex_iteration_limit_profile(500);
+        solver.apply_profile(&ClpProfile {
+            simplex_iteration_limit: 500,
+            ..Default::default()
+        });
         assert_eq!(solver.resolve_simplex_cap(), 500);
     }
 }

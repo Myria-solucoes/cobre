@@ -258,14 +258,6 @@ impl SolverInterface for MockSolver {
     fn name(&self) -> &'static str {
         "MockIntegration"
     }
-
-    fn set_primal_feasibility_tolerance(&mut self, _tolerance: f64) {}
-
-    fn set_dual_feasibility_tolerance(&mut self, _tolerance: f64) {}
-
-    fn set_simplex_iteration_limit_profile(&mut self, _limit: u32) {}
-
-    fn set_ipm_iteration_limit_profile(&mut self, _limit: u32) {}
 }
 
 /// Mock solver that returns a zero-filled dual slice matching the current row count.
@@ -348,14 +340,6 @@ impl SolverInterface for ExpandingMockSolver {
     fn name(&self) -> &'static str {
         "ExpandingMock"
     }
-
-    fn set_primal_feasibility_tolerance(&mut self, _tolerance: f64) {}
-
-    fn set_dual_feasibility_tolerance(&mut self, _tolerance: f64) {}
-
-    fn set_simplex_iteration_limit_profile(&mut self, _limit: u32) {}
-
-    fn set_ipm_iteration_limit_profile(&mut self, _limit: u32) {}
 }
 
 /// Build a `StochasticContext` with `n_stages` stages, 1 hydro, and seed 42.

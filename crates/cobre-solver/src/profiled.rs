@@ -170,22 +170,6 @@ impl<S: SolverInterface> SolverInterface for ProfiledSolver<S> {
     fn reset_solver_state(&mut self) {
         self.inner.reset_solver_state();
     }
-
-    fn set_primal_feasibility_tolerance(&mut self, value: f64) {
-        self.inner.set_primal_feasibility_tolerance(value);
-    }
-
-    fn set_dual_feasibility_tolerance(&mut self, value: f64) {
-        self.inner.set_dual_feasibility_tolerance(value);
-    }
-
-    fn set_simplex_iteration_limit_profile(&mut self, value: u32) {
-        self.inner.set_simplex_iteration_limit_profile(value);
-    }
-
-    fn set_ipm_iteration_limit_profile(&mut self, value: u32) {
-        self.inner.set_ipm_iteration_limit_profile(value);
-    }
 }
 
 // This test module uses `HighsProfile` with field values for delta-tracking
@@ -297,14 +281,6 @@ mod tests {
         fn solver_name_version(&self) -> String {
             "RecordingMockSolver 0.0.0".to_string()
         }
-
-        fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
-
-        fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
-
-        fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
-
-        fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
