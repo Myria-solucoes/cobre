@@ -66,13 +66,6 @@ pub struct RunArgs {
     /// (3) default of 1.
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
     pub threads: Option<u32>,
-
-    /// Experimental: enable in-backward cut selection. When set, the runtime
-    /// toggle that controls the per-stage selection hook inside the backward
-    /// sweep is flipped on before training begins. Default behaviour (flag
-    /// absent) keeps the post-backward selection block.
-    #[arg(long)]
-    pub enable_inside_backward: bool,
 }
 
 fn resolve_thread_count(cli_threads: Option<u32>) -> usize {
@@ -217,12 +210,6 @@ struct TrainingPhaseResult {
 /// Returns [`CliError`] when loading, training, simulation, or I/O fails.
 /// The exit code indicates the category of failure.
 pub fn execute(args: &RunArgs) -> Result<(), CliError> {
-    // Flip the in-backward cut-selection toggle BEFORE any training thread is
-    // spawned (rayon workers read this atomic on their first backward sweep).
-    if args.enable_inside_backward {
-        cobre_sddp::set_inside_backward_enabled(true);
-    }
-
     let ctx = setup_communicator(args)?;
     let result = execute_inner(&ctx, args);
     if let Err(ref e) = result
@@ -710,13 +697,9 @@ fn broadcast_and_build_setup(
     } else {
         (None, None, None, None, None, None, None, None, None, None)
     };
-    let root_estimation_report: Option<EstimationReport> = root_estimation_report;
-    let root_estimation_path: Option<cobre_sddp::EstimationPath> = root_estimation_path;
-
     let system_result = broadcast_value(raw_system, &ctx.comm);
     let bcast_config_result = broadcast_value(raw_bcast_config, &ctx.comm);
     let scalar_parameters_result = broadcast_value(raw_scalar_parameters, &ctx.comm);
-    let root_hydro_models: Option<PrepareHydroModelsResult> = root_hydro_models;
 
     let tree_result = broadcast_value(raw_bcast_tree, &ctx.comm);
 
@@ -1401,8 +1384,9 @@ fn run_simulation_phase(
 
     drop(result_tx);
 
-    #[allow(clippy::expect_used)]
-    let (sim_writer, write_failures) = drain_handle.join().expect("drain thread panicked");
+    let (sim_writer, write_failures) = drain_handle.join().map_err(|_| CliError::Internal {
+        message: "simulation drain thread panicked".to_string(),
+    })?;
 
     let sim_run_result = sim_result?;
 

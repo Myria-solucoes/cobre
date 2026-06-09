@@ -92,7 +92,7 @@ pub(crate) struct TrainingSession<'a, S: SolverInterface + Send, C: Communicator
     training_ctx: &'a TrainingContext<'a>,
     comm: &'a C,
 
-    // ── Training configuration (the training configuration for this run) ──
+    // ── Training configuration for this run ───────────────────────────────
     config: TrainingConfig,
 
     // ── Runtime handles (per-invocation hooks; set once in new) ───────────
@@ -125,13 +125,6 @@ where
     S: SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
 {
     /// Allocate all per-training-run scratch and emit the `TrainingStarted` event.
-    ///
-    /// Performs exactly what the 400-712 prelude in the original `train()` did:
-    /// rank math, `fwd_pool` construction and pre-sizing, `basis_store`,
-    /// `patch_buf`, `convergence_monitor`, `exchange_bufs`, `cut_sync_bufs`,
-    /// `visited_archive`, result accumulators, `cut_batches`, `lb_cut_batch`,
-    /// `baked_templates`, `bake_row_batches`, `lb_cut_row_map`,
-    /// `bwd_state` allocation, and the `TrainingStarted` event emission.
     ///
     /// # Errors
     ///
@@ -510,14 +503,12 @@ where
     /// Emit `TrainingFinished` with `reason = "error"` and return a partial
     /// `TrainingOutcome` carrying the original error.
     ///
-    /// Replaces the inline `on_error!` macro. Consumes `self` so the accumulated
-    /// state (solver stats, visited archive, baked templates) is moved — not
-    /// cloned — into the outcome.
+    /// Consumes `self` so the accumulated state (solver stats, visited archive,
+    /// baked templates) is moved — not cloned — into the outcome.
     ///
     /// # Errors
     ///
-    /// Returns `Err(comm_err)` if `broadcast_basis_cache` itself fails (matching
-    /// the original `on_error!` behavior at line 644).
+    /// Returns `Err(comm_err)` if `broadcast_basis_cache` itself fails.
     pub(crate) fn finalize_with_error(self, err: SddpError) -> Result<TrainingOutcome, SddpError> {
         let baked_templates = self.scratch.baked_templates;
         let visited_archive = self.visited_archive;
@@ -731,7 +722,7 @@ where
             &mut self.fwd_pool,
             &mut self.basis_store,
             self.stage_ctx,
-            &mut self.scratch.baked_templates,
+            &self.scratch.baked_templates,
             &mut self.scratch.cut_batches,
             &self.scratch.records,
             self.fcf,
@@ -746,14 +737,6 @@ where
             iteration,
         );
         let backward_result = bwd.run(&mut inputs)?;
-        // `selection_records` length is bounded by `num_stages - 1` (one entry
-        // per stage where the in-backward hook ran). Reading the length here
-        // also keeps the field visible to the dead-code lint until the
-        // rerouting consumer lands.
-        debug_assert!(
-            backward_result.selection_records.len() <= self.ranks.num_stages.saturating_sub(1),
-            "selection_records length must not exceed num_stages - 1"
-        );
 
         let bwd_solve_time_ms = {
             let agg = SolverStatsDelta::aggregate(

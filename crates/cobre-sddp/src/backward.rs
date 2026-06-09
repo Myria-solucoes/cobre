@@ -110,7 +110,6 @@
 
 #[cfg(test)]
 use cobre_comm::Communicator;
-use cobre_core::StageRowSelectionRecord;
 use cobre_solver::{RowBatch, SolutionView, SolverInterface, SolverStatistics};
 
 use crate::{
@@ -198,16 +197,6 @@ pub struct BackwardResult {
     /// Wall-clock time for per-stage cut synchronization (`allgatherv`)
     /// accumulated across all stages, in milliseconds.
     pub cut_sync_time_ms: u64,
-
-    /// Per-stage selection records collected when the in-backward selection
-    /// hook ran. Length is bounded by `num_stages - 1`; stages where the
-    /// hook did not run produce no entry. Sorted by stage index ascending.
-    ///
-    /// Populated only when `IN_BACKWARD_ENABLED` is true (set via
-    /// [`crate::set_inside_backward_enabled`]) AND a cut-selection strategy
-    /// is plumbed into the backward sweep AND the strategy's
-    /// `should_run(iteration)` gate fires. Otherwise this `Vec` is empty.
-    pub selection_records: Vec<StageRowSelectionRecord>,
 }
 
 /// Per-thread staging buffer for one aggregated cut produced at a single trial
@@ -1819,7 +1808,6 @@ mod tests {
             load_imbalance_ms: 0,
             scheduling_overhead_ms: 0,
             cut_sync_time_ms: 0,
-            selection_records: Vec::new(),
         };
         assert_eq!(r.cuts_generated, 6);
         assert_eq!(r.elapsed_ms, 42);
@@ -1830,7 +1818,6 @@ mod tests {
         assert_eq!(r.load_imbalance_ms, 0);
         assert_eq!(r.scheduling_overhead_ms, 0);
         assert_eq!(r.cut_sync_time_ms, 0);
-        assert!(r.selection_records.is_empty());
     }
 
     #[test]
@@ -1846,7 +1833,6 @@ mod tests {
             load_imbalance_ms: 0,
             scheduling_overhead_ms: 0,
             cut_sync_time_ms: 0,
-            selection_records: Vec::new(),
         };
         let c = r.clone();
         assert_eq!(c.cuts_generated, 3);
@@ -1964,7 +1950,6 @@ mod tests {
             cut_activity_tolerance: 0.0,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
-            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -2060,7 +2045,6 @@ mod tests {
             cut_activity_tolerance: 0.0,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
-            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -2156,7 +2140,6 @@ mod tests {
             cut_activity_tolerance: 0.0,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
-            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -2248,7 +2231,6 @@ mod tests {
             cut_activity_tolerance: 0.0,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
-            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -2340,7 +2322,6 @@ mod tests {
             cut_activity_tolerance: 0.0,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
-            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -2430,7 +2411,6 @@ mod tests {
             cut_activity_tolerance: 0.0,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
-            cut_selection: None,
             event_sender: None,
         });
 
@@ -2565,7 +2545,6 @@ mod tests {
             cut_activity_tolerance: 0.0,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
-            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -2678,7 +2657,6 @@ mod tests {
             cut_activity_tolerance: 0.0,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
-            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -2796,7 +2774,6 @@ mod tests {
             cut_activity_tolerance: 0.0,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
-            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -2900,7 +2877,6 @@ mod tests {
             cut_activity_tolerance: 0.0,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
-            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -3014,7 +2990,6 @@ mod tests {
             cut_activity_tolerance: 0.0,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
-            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -3123,7 +3098,6 @@ mod tests {
             cut_activity_tolerance: 0.0,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
-            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -3225,7 +3199,6 @@ mod tests {
             cut_activity_tolerance: 0.0,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
-            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -3335,7 +3308,6 @@ mod tests {
             cut_activity_tolerance: 0.0,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
-            cut_selection: None,
             event_sender: None,
         });
 
@@ -3488,7 +3460,6 @@ mod tests {
             cut_activity_tolerance: 0.0,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
-            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -3575,7 +3546,6 @@ mod tests {
             cut_activity_tolerance: 0.0,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
-            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -3956,7 +3926,6 @@ mod tests {
             cut_activity_tolerance: 0.0,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
-            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -4122,7 +4091,6 @@ mod tests {
             cut_activity_tolerance: 0.0,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
-            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -4293,7 +4261,6 @@ mod tests {
             cut_activity_tolerance: 0.0,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
-            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -4413,7 +4380,6 @@ mod tests {
             cut_activity_tolerance: 0.0,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
-            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -4542,7 +4508,6 @@ mod tests {
             cut_activity_tolerance: 0.0,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
-            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -4724,7 +4689,6 @@ mod tests {
             cut_activity_tolerance: 0.0,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
-            cut_selection: None,
             event_sender: None,
         })
         .unwrap();
@@ -5089,7 +5053,6 @@ mod tests {
             cut_activity_tolerance: 0.0,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
-            cut_selection: None,
             event_sender: None,
         })
         .expect("single-rank 2-worker backward must not error");
@@ -5314,7 +5277,6 @@ mod tests {
             cut_activity_tolerance: 0.0,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
-            cut_selection: None,
             event_sender: None,
         })
         .expect("dual-rank stub backward must not error");
@@ -5752,7 +5714,6 @@ mod tests {
             cut_activity_tolerance: 0.0,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
-            cut_selection: None,
             event_sender: None,
         });
 
@@ -5912,7 +5873,6 @@ mod tests {
             cut_activity_tolerance: 0.0,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
-            cut_selection: None,
             event_sender: None,
         });
 

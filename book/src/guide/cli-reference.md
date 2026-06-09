@@ -81,20 +81,17 @@ Stochastic artifact export is controlled by `exports.stochastic` in `config.json
 
 ### Options
 
-| Option                     | Type    | Default              | Description                                                                                                                                                            |
-| -------------------------- | ------- | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--output <DIR>`           | Path    | `<CASE_DIR>/output/` | Output directory for results                                                                                                                                           |
-| `--threads <N>`            | integer | `1`                  | Number of worker threads per MPI rank. Each thread solves its own LP instances; scenarios are distributed across threads. Resolves: `--threads` > `COBRE_THREADS` > 1. |
-| `--quiet`                  | flag    | off                  | Suppress the banner and progress bars. Errors still go to stderr                                                                                                       |
-| `--enable-inside-backward` | flag    | off                  | **Experimental.** Run cut selection inside the backward pass (in-backward cut selection).                                                                              |
+| Option           | Type    | Default              | Description                                                                                                                                                            |
+| ---------------- | ------- | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--output <DIR>` | Path    | `<CASE_DIR>/output/` | Output directory for results                                                                                                                                           |
+| `--threads <N>`  | integer | `1`                  | Number of worker threads per MPI rank. Each thread solves its own LP instances; scenarios are distributed across threads. Resolves: `--threads` > `COBRE_THREADS` > 1. |
+| `--quiet`        | flag    | off                  | Suppress the banner and progress bars. Errors still go to stderr                                                                                                       |
 
 ### Config-First Principle
 
 The CLI follows a **config-first** design: `config.json` defines _what_ to compute,
 CLI flags define _how_ to run it. A study is fully specified by its case directory —
-the same case produces the same results regardless of which CLI flags are used,
-with one exception: `--enable-inside-backward` engages in-backward cut selection
-and **does** change the numerical result.
+the same case produces the same results regardless of which CLI flags are used.
 
 | Concern                    | Controlled by                                     |
 | -------------------------- | ------------------------------------------------- |

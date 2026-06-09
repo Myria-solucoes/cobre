@@ -164,20 +164,3 @@ pub use state_exchange::ExchangeBuffers;
 pub use trajectory::TrajectoryRecord;
 // ── workspace ─────────────────────────────────────────────────────────────────
 pub use workspace::{BASIS_BROADCAST_WIRE_VERSION, CapturedBasis};
-
-/// Enable or disable the in-backward cut-selection hook.
-///
-/// Default is `false`. The hook installed inside the backward sweep
-/// reads this toggle and skips execution unless enabled. Flip once at
-/// process startup before training begins; the expected usage is a
-/// single flip, not a runtime mode switch. Uses `Ordering::Relaxed`.
-pub fn set_inside_backward_enabled(enabled: bool) {
-    crate::backward_pass_state::IN_BACKWARD_ENABLED
-        .store(enabled, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// Read the current value of the in-backward cut-selection hook toggle.
-#[must_use]
-pub fn is_inside_backward_enabled() -> bool {
-    crate::backward_pass_state::IN_BACKWARD_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
-}

@@ -648,6 +648,7 @@ pub(crate) fn run_simulation_phase_py(
         (writer, failed)
     });
 
+    let sim_start = std::time::Instant::now();
     let sim_result = setup
         .simulate(
             &mut sim_pool.workspaces,
@@ -671,10 +672,13 @@ pub(crate) fn run_simulation_phase_py(
 
     let (sim_writer, write_failures) = drain_handle
         .join()
-        .map_err(|_| "drain thread panicked".to_string())?;
+        .map_err(|_| "simulation drain thread panicked".to_string())?;
     let sim_run_result = sim_result?;
 
-    let mut sim_out = sim_writer.finalize(0);
+    #[allow(clippy::cast_possible_truncation)]
+    let sim_time_ms = sim_start.elapsed().as_millis() as u64;
+
+    let mut sim_out = sim_writer.finalize(sim_time_ms);
     sim_out.failed = write_failures;
 
     // Fold every per-scenario solver delta into one aggregate (single-process:
