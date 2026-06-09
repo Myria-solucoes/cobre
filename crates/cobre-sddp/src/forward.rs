@@ -1217,11 +1217,15 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
     );
     rec.state.clear();
     rec.state.extend_from_slice(&ws.current_state);
-    // Capture the post-solve basis for the next iteration's warm start — baked
-    // path only. A DCS-solve basis describes the lazy resident-subset row
-    // layout, not the baked layout the warm-start reconstruction expects, so
-    // the DCS path leaves the (m, t) slot untouched (mirrors the backward-pass
-    // decision; DCS basis capture is deferred).
+    // Cross-iteration forward warm-start applies to the baked arm only: it
+    // captures the post-solve basis here so the next iteration's forward solve
+    // at this (m, t) slot can warm-start from it. The DCS arm makes no such
+    // capture (it passes `stored_basis = None`) — a DCS-solve basis describes
+    // the lazy resident-subset row layout, not the baked layout the warm-start
+    // reconstruction expects, so the DCS path leaves the (m, t) slot untouched.
+    // A DCS solve never captures a basis at all: every `lazy_solve_preloaded`
+    // call passes `stored_basis = None`, so no DCS solve — forward or
+    // backward — carries a per-opening basis across iterations.
     if dcs.is_none() {
         let cut_row_count = basis_row_capacity.saturating_sub(ctx.templates[t].num_rows);
         if let Some(captured) = basis_slice.get_mut(m, t) {

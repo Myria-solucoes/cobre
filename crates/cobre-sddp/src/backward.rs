@@ -743,10 +743,13 @@ impl StageOpeningSolver {
     ///   the W2 reset).
     /// - [`StageOpeningSolver::Lazy`]: load the cut-free core and build the
     ///   metadata seed ONCE here, then reuse the loaded LP across this trial
-    ///   point's openings — the first-solved opening solves fresh from the seed,
-    ///   the rest warm-carry. The core load also serves as the per-trial-point
-    ///   `HiGHS` reset that preserves rank-invariance: state is reset at every
-    ///   trial-point boundary and never carried across trial points.
+    ///   point's openings — the first-solved opening reuses the loaded cut-free
+    ///   core with the appended seed and solves with no carried per-opening basis
+    ///   (not a cold SDDP solve, it merely lacks a warm per-opening basis to
+    ///   carry); the rest warm-carry. The core load also serves as the
+    ///   per-trial-point `HiGHS` reset that preserves rank-invariance: state is
+    ///   reset at every trial-point boundary and never carried across trial
+    ///   points.
     pub(crate) fn prepare<S: SolverInterface + Send>(
         &self,
         ws: &mut SolverWorkspace<S>,
@@ -779,8 +782,11 @@ impl StageOpeningSolver {
     /// is enabled. The baked path uses it to load the per-(m, s) stored basis and
     /// capture the post-solve basis back into the store (only on the first-solved
     /// opening; the rest warm re-solve on the retained LU). The lazy path uses
-    /// `continue_carry == !is_first`: the first-solved opening solves fresh, the
-    /// rest warm-carry the LP. Decoupling basis identity from the literal ω=0 is
+    /// `continue_carry == !is_first`: the first-solved opening starts with no
+    /// carried per-opening basis — it reuses the loaded cut-free core with the
+    /// appended seed (not a cold SDDP solve, it merely lacks a warm per-opening
+    /// basis to carry) — while the rest warm-carry the LP. Decoupling basis
+    /// identity from the literal ω=0 is
     /// what lets the openings be solved in any order while the per-(m, s) basis
     /// store stays consistent with the actual first solve.
     // Rationale: the args are disjoint borrows (ws, ctx, training_ctx, succ,
@@ -832,8 +838,10 @@ impl StageOpeningSolver {
                 scenario,
                 iteration,
                 omega,
-                // The first-solved opening solves fresh; subsequent openings
-                // warm-carry the LP.
+                // The first-solved opening starts with no carried per-opening
+                // basis (it reuses the loaded cut-free core with the appended
+                // seed — not a cold SDDP solve); subsequent openings warm-carry
+                // the LP.
                 !is_first,
             ),
         }
@@ -937,9 +945,12 @@ impl StageOpeningSolver {
     /// openings. This routine therefore never reloads or re-seeds; it only patches
     /// the opening's bounds and runs the lazy loop via [`lazy_solve_preloaded`]:
     ///
-    /// - `continue_carry == false` (the first-solved opening): solve fresh — the
-    ///   lazy loop resets the carried row map, appends the seed, and cold-solves.
-    ///   The cut produced is identical to the (former) per-opening path.
+    /// - `continue_carry == false` (the first-solved opening): the lazy loop
+    ///   resets the carried row map, appends the seed, and solves with no carried
+    ///   per-opening basis (`stored_basis = None`) — it still reuses the loaded
+    ///   cut-free core, so this is not a cold SDDP solve, it merely lacks a warm
+    ///   per-opening basis to carry. The cut produced is identical to the (former)
+    ///   per-opening path.
     /// - `continue_carry == true` (subsequent openings): warm-carry the prior
     ///   opening's LP, basis, and (monotonically grown) resident cut set; re-solve
     ///   warm under the new noise and add only the cuts this opening additionally
@@ -1021,9 +1032,11 @@ impl StageOpeningSolver {
             stage_index: s,
             scenario_index: scenario,
             iteration: Some(iteration),
-            // Warm-carry the prior opening's LP + basis on every opening but the
-            // first; the first-solved opening runs a fresh (cold, reset + seed)
-            // solve.
+            // The first-solved opening of the trial point starts without a
+            // carried per-opening basis (`stored_basis = None` below): the lazy
+            // loop resets the carried row map and appends the metadata seed
+            // before solving. Every subsequent opening warm-carries the prior
+            // opening's LP, basis, and resident cut set.
             continue_carry,
         };
         // Disjoint borrows of `ws`: `solver`, `backward_accum.dcs_initial_resident`
@@ -1094,10 +1107,12 @@ impl StageOpeningSolver {
 /// Process one trial point `m` in the backward pass, iterating over all openings.
 ///
 /// Solves at each (scenario, opening) and accumulates duals into `per_opening_stats`.
-/// At the first-solved opening (`solve_order[0]`, which equals canonical ω=0 only
-/// under the identity order), writes the post-solve basis into `basis_slice`;
-/// later writes are forbidden (retained-LU corruption risk). Infeasibility at the
-/// first-solved opening leaves the slot unchanged
+/// On the **baked path** only, at the first-solved opening (`solve_order[0]`, which
+/// equals canonical ω=0 only under the identity order), writes the post-solve basis
+/// into `basis_slice`; later writes are forbidden (retained-LU corruption risk), and
+/// infeasibility at the first-solved opening leaves the slot unchanged. The DCS arm
+/// skips first-solved basis capture by design — a captured basis would describe the
+/// baked layout, not the DCS resident subset (see [`StageOpeningSolver::solve_lazy`])
 // RATIONALE: 11 args required — each is a disjoint borrow (ws, ctx, training_ctx, exchange,
 // succ, basis_slice, opening_solver) or a plain scalar (fwd_offset, iteration, m) or a risk
 // slice. Merging into a struct would add indirection without reducing the caller's borrow count.

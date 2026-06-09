@@ -62,11 +62,16 @@ pub struct CapturedBasis {
 /// statuses, `cut_row_slots`, and `state_at_capture`. `cut_row_slots` is
 /// load-bearing on the reconstruction path — `build_slot_lookup` reads
 /// it to bind stored cut-row statuses to target-LP cut rows by slot id.
-/// `state_at_capture` is written by the forward capture and refreshed
-/// by the backward reuse path, but is not consumed by any current
-/// reconstruction reader; it is retained for diagnostic value and to
-/// preserve the option of re-introducing a state-dependent reuse
-/// policy without a wire-format change.
+/// `state_at_capture` carries a real captured state only on the baked
+/// path: there it is written by the forward capture and refreshed by the
+/// backward reuse path. The DCS arm captures no basis by design (a captured
+/// basis would describe the baked layout, not the DCS resident subset — see
+/// `StageOpeningSolver::solve_lazy` in `backward.rs`), so on that arm the
+/// field is diagnostic-only and is never part of a consumed warm-start.
+/// Even on the baked path it is not read by any current reconstruction
+/// reader; it is retained for diagnostic value and to preserve the option
+/// of re-introducing a state-dependent reuse policy without a wire-format
+/// change.
 pub const BASIS_BROADCAST_WIRE_VERSION: i32 = 1;
 
 impl CapturedBasis {
