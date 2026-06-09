@@ -376,6 +376,28 @@ mod tests {
     }
 
     #[test]
+    fn test_noop_solver_statistics_into_initial() {
+        use crate::types::SolverStatistics;
+
+        let mut buf = SolverStatistics {
+            solve_count: 7,
+            success_count: 5,
+            failure_count: 2,
+            total_iterations: 99,
+            retry_count: 3,
+            total_solve_time_seconds: 12.5,
+            ..SolverStatistics::default()
+        };
+        NoopSolver.statistics_into(&mut buf);
+        assert_eq!(buf.solve_count, 0);
+        assert_eq!(buf.success_count, 0);
+        assert_eq!(buf.failure_count, 0);
+        assert_eq!(buf.total_iterations, 0);
+        assert_eq!(buf.retry_count, 0);
+        assert_eq!(buf.total_solve_time_seconds, 0.0);
+    }
+
+    #[test]
     fn test_noop_solver_get_basis_noop() {
         use crate::types::Basis;
 

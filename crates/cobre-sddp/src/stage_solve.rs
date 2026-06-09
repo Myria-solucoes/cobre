@@ -176,7 +176,8 @@ fn map_solver_error(
 }
 
 // ---------------------------------------------------------------------------
-// Unscale helpers (shared by forward and simulation drivers)
+// Unscale helpers. `fill_unscaled` is shared by the forward and simulation
+// drivers; `fill_unscaled_dual` is used by the simulation driver only.
 // ---------------------------------------------------------------------------
 
 /// Unscale a primal vector into `out`: `x_original[i] = col_scale[i] *

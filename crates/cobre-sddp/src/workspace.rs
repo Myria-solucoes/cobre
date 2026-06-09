@@ -198,8 +198,6 @@ impl CapturedBasis {
         f64_buf: &[f64],
         f64_cursor: &mut usize,
     ) -> Result<Option<Self>, crate::SddpError> {
-        // Mirrors the unpack loop at training.rs:284-383.
-
         // Read sentinel.
         if *i32_cursor >= i32_buf.len() {
             return Err(crate::SddpError::Validation(format!(

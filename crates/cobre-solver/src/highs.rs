@@ -2361,11 +2361,6 @@ mod tests {
                     basis_rows, 2,
                     "basis_rows must equal the offered basis length"
                 );
-                assert_eq!(
-                    basis_rows,
-                    lp_rows - 2,
-                    "the undersized basis is 2 rows short of the LP"
-                );
             }
             other => panic!(
                 "expected Err(SolverError::BasisRowCountMismatch {{ lp_rows: 4, basis_rows: 2 }}), \

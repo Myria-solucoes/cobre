@@ -217,10 +217,12 @@ pub fn sync_forward<C: Communicator>(
 
 /// Push one negated, scaled coefficient entry into the cut row batch.
 ///
-/// Shared by the cut-row emitters — the mask path in
-/// [`build_cut_row_batch_into`], [`build_delta_cut_row_batch_into`], and
-/// [`push_cut_row`] — so they all apply the same negate-and-divide-by-scale
-/// rule without drifting apart during maintenance.
+/// Shared per-coefficient emit helper. Used by [`build_cut_row_batch_into`]
+/// (the unified mask-driven path, via [`StageIndexer::lp_column_for_state`]) and
+/// by [`build_delta_cut_row_batch_into`] / [`push_cut_row`] (which retain their
+/// own sparse/dense branching over [`StageIndexer::state_to_lp_column`]). All
+/// three apply the same negate-and-divide-by-scale rule here so it cannot drift
+/// apart during maintenance.
 #[inline]
 fn push_scaled_coefficient(batch: &mut RowBatch, j: usize, coeff: f64, col_scale: &[f64]) {
     debug_assert!(
