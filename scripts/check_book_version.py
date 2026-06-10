@@ -82,19 +82,26 @@ def _is_msrv_context(line: str) -> bool:
     )
 
 
-def scan_book_versions(book_src: Path, expected: str) -> list[tuple[Path, int, str]]:
+def scan_book_versions(
+    book_src: Path, expected: str
+) -> tuple[list[tuple[Path, int, str]], int]:
     """Scan all .md files under book_src for version mismatches.
 
-    Returns a list of (file_path, line_number, found_version) tuples where the
-    found version does not equal expected.  File read errors are printed to
-    stderr and counted as a single mismatch entry with found_version="<unreadable>".
+    Returns ``(mismatches, total_refs)``: the list of
+    (file_path, line_number, found_version) tuples where the found version does
+    not equal expected, and the total count of version references scanned
+    (matching or not). The count is surfaced in the OK message as coverage
+    evidence — a guard that reports "0 mismatches" over 0 references checked is
+    not the same as one that verified many. File read errors are printed to
+    stderr and counted as a single mismatch entry with found="<unreadable>".
     """
     mismatches: list[tuple[Path, int, str]] = []
+    total_refs = 0
 
     md_files = sorted(book_src.rglob("*.md"))
     if not md_files:
         print(f"WARNING: No .md files found under {book_src}", file=sys.stderr)
-        return mismatches
+        return mismatches, total_refs
 
     for md_path in md_files:
         try:
@@ -107,11 +114,12 @@ def scan_book_versions(book_src: Path, expected: str) -> list[tuple[Path, int, s
         for lineno, line in enumerate(lines, start=1):
             for pattern in _PATTERNS:
                 for m in pattern.finditer(line):
+                    total_refs += 1
                     found = m.group(1)
                     if found != expected:
                         mismatches.append((md_path, lineno, found))
 
-    return mismatches
+    return mismatches, total_refs
 
 
 def scan_book_msrv(book_src: Path, expected_msrv: str) -> list[tuple[Path, int, str]]:
@@ -180,23 +188,14 @@ def main() -> None:
         print(f"ERROR: Could not parse rust-version from {cargo_path}", file=sys.stderr)
         sys.exit(1)
 
-    version_mismatches = scan_book_versions(book_src, cargo_version)
+    version_mismatches, version_ref_count = scan_book_versions(book_src, cargo_version)
     msrv_mismatches = scan_book_msrv(book_src, cargo_msrv)
 
     if not version_mismatches and not msrv_mismatches:
-        # Count total matched references to include in the OK message.
-        total = 0
-        if book_src.exists():
-            for md_path in sorted(book_src.rglob("*.md")):
-                try:
-                    text = md_path.read_text(encoding="utf-8")
-                    for pattern in _PATTERNS:
-                        total += len(pattern.findall(text))
-                except OSError:
-                    pass
         print(
-            f"OK: All {total} crate-version references in book/ match Cargo.toml "
-            f"(v{cargo_version}); all MSRV references match rust-version {cargo_msrv}."
+            f"OK: All {version_ref_count} crate-version references in book/ match "
+            f"Cargo.toml (v{cargo_version}); all MSRV references match "
+            f"rust-version {cargo_msrv}."
         )
         sys.exit(0)
 

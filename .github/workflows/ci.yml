@@ -262,6 +262,10 @@ jobs:
         run: bash scripts/check-infra-genericity.sh
       - name: Cut-selection determinism gate
         run: bash scripts/check-cut-selection-determinism.sh
+      - name: cfg(test) boundary drift guard (shared scan lib)
+        # Fails if the holdout gates' cfg(test) boundary desyncs from the shared
+        # scripts/lib/comment_scan.sh definition.
+        run: bash scripts/lib/comment_scan.sh
       - name: Check for plan-structure leaks
         run: bash scripts/check-no-plan-leaks.sh
       - name: Check repo-relative doc paths/links
@@ -288,6 +292,10 @@ jobs:
         run: python3 scripts/check_python_parity.py --max 0
       - name: Check book version references
         run: python3 scripts/check_book_version.py
+      - name: Advisory — code-quality hotspot report
+        # ADVISORY: always exits 0. Prints a ranked "where to act first" table
+        # (churn x size x suppression density x in-body banners) to the job log.
+        run: bash scripts/quality-report.sh
 
   schemas:
     name: Schema Freshness

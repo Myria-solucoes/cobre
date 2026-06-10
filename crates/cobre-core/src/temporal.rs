@@ -179,8 +179,6 @@ pub struct StageStateConfig {
 ///
 /// A `Vec<StageLagTransition>` indexed by stage index is the canonical way
 /// to carry this information alongside the stage vector.
-///
-/// See [Design Doc — Temporal Resolution Debts §6](../docs/design/temporal-resolution-debts.md).
 // Four boolean flags encode orthogonal hot-path conditions; a state machine enum
 // would require 2^4 = 16 variants with no semantic benefit. Each flag is
 // independently set by the precomputation algorithm and tested by separate
