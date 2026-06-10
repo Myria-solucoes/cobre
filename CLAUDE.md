@@ -53,6 +53,10 @@ factors) are codified in `.claude/rules/sddp.md`, which auto-loads when editing
 plausible deviation produces wrong bounds or rejected warm-starts that still
 compile.
 
+Comment & documentation rules for all `.rs` files are codified in `.claude/rules/comments.md`, which auto-loads when editing any `**/*.rs` file. It governs the Earned-Comment Test, the Four Voices, and directives D1–D5 / N1–N6.
+
+Prose documentation integrity rules (scope matrix, the single adaptation, and the six prose-only failure modes) are codified in `.claude/rules/doc-integrity.md`, which auto-loads when editing Markdown files in `book/`, `CONTRIBUTING.md`, `CHANGELOG.md`, and root-level `*.md`.
+
 When modifying hot-path code (`forward.rs`, `backward.rs`, `training.rs`,
 `simulation/pipeline.rs`, `lower_bound.rs`), read:
 → `.claude/architecture-rules.md`
