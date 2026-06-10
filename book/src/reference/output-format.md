@@ -283,7 +283,7 @@ single file. Consumers should check `status` before interpreting other fields.
 
 ### `training/convergence.parquet`
 
-Per-iteration convergence log. One row per training iteration. 13 columns.
+Per-iteration convergence log. One row per training iteration. 14 columns.
 
 | Column             | Type    | Nullable | Description                                                                                                   |
 | ------------------ | ------- | -------- | ------------------------------------------------------------------------------------------------------------- |
@@ -305,12 +305,12 @@ Per-iteration convergence log. One row per training iteration. 13 columns.
 
 ### `training/timing/iterations.parquet`
 
-Per-iteration wall-clock timing breakdown by phase. 18 columns. Emitted as one
+Per-iteration wall-clock timing breakdown by phase. 19 columns. Emitted as one
 row per `(iteration, rank)` for rank-only sequential values (`worker_id` is
 NULL) and one row per `(iteration, rank, worker_id)` for per-worker
 parallel-region values; `SUM(col) GROUP BY iteration` recovers the
 per-iteration total for each timing column. `rank` and `worker_id` are nullable
-Int32; the 15 timing columns are non-nullable.
+Int32; the 16 timing columns are non-nullable.
 
 The top-level non-overlapping phases are: `forward_wall_ms`,
 `backward_wall_ms`, `cut_selection_ms`, `mpi_allreduce_ms`, and
@@ -437,7 +437,7 @@ The JSON is an array of per-stage objects, each containing:
 ### `training/cut_selection/iterations.parquet`
 
 Per-stage cut selection statistics. One row per `(iteration, stage)` pair,
-written only at iterations where selection ran. 9 columns.
+written only at iterations where selection ran. 10 columns.
 
 | Column                | Type    | Nullable | Description                                                                 |
 | --------------------- | ------- | -------- | --------------------------------------------------------------------------- |
@@ -446,6 +446,7 @@ written only at iterations where selection ran. 9 columns.
 | `cuts_populated`      | Int32   | No       | Total cut slots containing cuts (active + inactive).                        |
 | `cuts_active_before`  | Int32   | No       | Active cuts before this iteration's selection pipeline.                     |
 | `cuts_deactivated`    | Int32   | No       | Cuts deactivated by the strategy-based selection (Stage 1).                 |
+| `cuts_reactivated`    | Int32   | No       | Cuts reactivated by the strategy-based selection (Stage 1).                 |
 | `cuts_active_after`   | Int32   | No       | Active cuts after Stage 1 selection.                                        |
 | `selection_time_ms`   | Float64 | No       | Wall-clock time for the full selection pipeline.                            |
 | `budget_evicted`      | Int32   | Yes      | Cuts evicted by budget enforcement (Stage 2). `null` when S2 is disabled.   |

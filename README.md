@@ -25,7 +25,7 @@
 - **Production performance** -- Rust gives C/C++-level speed with memory safety. For software that dispatches national power grids, both matter.
 - **Reproducibility** -- Declaration-order invariance guarantees bit-for-bit identical results regardless of input entity ordering.
 - **Modularity** -- Pick the crates you need. Use `cobre-core` for data modeling alone, or `cobre-sddp` for the full solver.
-- **Interoperability** -- JSON/Parquet input, Python bindings for Jupyter workflows, MCP server for AI agents.
+- **Interoperability** -- JSON/Parquet input, Python bindings for Jupyter workflows, MCP server for AI agents (reserved; not yet implemented).
 
 ## Install
 
@@ -41,7 +41,7 @@ pip install cobre-python
 
 | Resource      | Link                                                                    |
 | ------------- | ----------------------------------------------------------------------- |
-| Software Book | [cobre-rs.github.io/cobre](https://cobre-rs.github.io/cobre/)           |
+| Software Book | [docs.cobre-rs.dev](https://docs.cobre-rs.dev/)           |
 | Methodology   | [cobre-rs.github.io/cobre-docs](https://cobre-rs.github.io/cobre-docs/) |
 | API Docs      | [docs.rs/cobre](https://docs.rs/cobre)                                  |
 | PyPI          | [pypi.org/project/cobre-python](https://pypi.org/project/cobre-python/) |
@@ -49,8 +49,8 @@ pip install cobre-python
 ## Getting Started
 
 - **Coming from other software?** -- See the [cobre-bridge guide](https://docs.cobre-rs.dev/guide/cobre-bridge.html)
-- **New to SDDP?** -- Read [What Cobre Solves](https://cobre-rs.github.io/cobre/tutorial/what-cobre-solves.html)
-- **Python user?** -- Try the [Python Quickstart](https://cobre-rs.github.io/cobre/guide/python-quickstart.html)
+- **New to SDDP?** -- Read [What Cobre Solves](https://docs.cobre-rs.dev/tutorial/what-cobre-solves.html)
+- **Python user?** -- Try the [Python Quickstart](https://docs.cobre-rs.dev/guide/python-quickstart.html)
 
 ## Current Status
 

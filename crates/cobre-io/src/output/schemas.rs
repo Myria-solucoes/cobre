@@ -381,7 +381,7 @@ pub(crate) fn hydro_energy_productivity_schema() -> Schema {
 /// Schema for `training/cut_selection/iterations.parquet` — per-stage
 /// row-selection statistics.
 ///
-/// 11 fields. One row per (iteration, stage) pair. The two nullable Int32
+/// 10 fields. One row per (iteration, stage) pair. The two nullable Int32
 /// columns (`budget_evicted`, `active_after_budget`) are `None` when
 /// budget enforcement is disabled.
 pub(crate) fn row_selection_schema() -> Schema {

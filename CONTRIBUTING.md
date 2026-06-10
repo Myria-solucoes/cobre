@@ -14,7 +14,7 @@ Optional (needed for specific crates):
 
 - **MPICH** (for `cobre-comm` MPI backend): `libmpich-dev` on Debian/Ubuntu
 - **Python 3.12+** and **maturin** (for `cobre-python` builds): `pip install maturin`
-- **mdBook** (for the documentation site): `cargo install mdbook mdbook-katex`
+- **mdBook** (for the documentation site): `cargo install mdbook mdbook-mermaid`
 
 ### Building
 
@@ -179,7 +179,7 @@ takes one backend at a time — not `--all-features` (see
 [Solver Backend Selection](#solver-backend-selection)). Integration tests exercise
 the binary via `assert_cmd`, organized by subcommand
 (`tests/cli_run.rs`, `tests/cli_validate.rs`, `tests/cli_report.rs`,
-`tests/cli_version.rs`). Each verifies exit codes, output, and file creation.
+`tests/cli_smoke.rs`). Each verifies exit codes, output, and file creation.
 
 ### Project Structure
 

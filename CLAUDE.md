@@ -7,7 +7,7 @@ vertical is SDDP-based hydrothermal dispatch.
 
 - **Language**: Rust 2024 edition, MSRV 1.88
 - **License**: Apache-2.0
-- **Workspace**: 14 crates (8 workspace + 6 excluded: `cobre-mcp` stub, `cobre-tui` stub, `cobre-flow` stub, `cobre-uc` stub, `cobre-emt` stub, `cobre-python`)
+- **Workspace**: 13 workspace members (`cobre-mcp`, `cobre-tui`, `cobre-flow`, `cobre-uc`, `cobre-emt` are member stubs) + the maturin-built `cobre-python` (excluded from the workspace so `cargo test --workspace` does not require a Python interpreter)
 - **Build**: `cargo build --workspace`
 - **Test**: `cargo test --workspace --features "mpi numa shared-memory serde schema slow-tests flatc-conformance test-support"`
 - **Format**: `cargo fmt --all` (CI enforces `--check`)
@@ -80,7 +80,7 @@ both methods together; the `broadcast_basis_cache` helper
 in `training.rs` only owns the four MPI broadcast calls.
 
 When adding new LP variables, constraints, or entity types, read:
-→ `crates/cobre-sddp/src/lp_builder.rs` module docs and `crates/cobre-sddp/src/indexer.rs`
+→ `crates/cobre-sddp/src/lp_builder/mod.rs` module docs and `crates/cobre-sddp/src/indexer.rs`
 
 When modifying study setup construction or scenario library building, read:
 → `crates/cobre-sddp/src/setup/mod.rs` — `setup/` is a directory module whose
@@ -89,8 +89,8 @@ layout and which sub-module owns each piece is mapped in
 `.claude/architecture-rules.md` → "StudySetup Sub-Structs".
 
 When adding new output files, check both CLI and Python write paths:
-→ `crates/cobre-cli/src/commands/run.rs` (`write_outputs` function)
-→ `crates/cobre-python/src/run.rs` (`run_inner` function)
+→ `crates/cobre-cli/src/commands/run.rs` (`write_training_outputs` / `write_simulation_outputs` functions)
+→ `crates/cobre-python/src/run.rs` (`run_via_study` / `run_training_phase_py` functions)
 
 ---
 

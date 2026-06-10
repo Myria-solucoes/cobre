@@ -9,7 +9,7 @@ cobre/crates/
 ├── cobre-io/           JSON/Parquet input, FlatBuffers/Parquet output
 ├── cobre-stochastic/   PAR(p) models, scenario generation
 ├── cobre-solver/       LP solver abstraction (HiGHS backend)
-├── cobre-comm/         Communication abstraction (MPI, TCP, shm, local)
+├── cobre-comm/         Communication abstraction (MPI, NUMA, shared-memory placeholder, local)
 ├── cobre-sddp/         SDDP training loop, simulation, cut management
 ├── cobre-cli/          Binary: run/validate/report/init/schema/summary/version
 ├── cobre-mcp/          Binary: MCP server for AI agent integration (reserved)

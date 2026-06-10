@@ -231,7 +231,7 @@ configurations viable.
 ### Observability
 
 The row management pipeline writes per-stage statistics to
-`training/cut_selection/iterations.parquet` with 9 columns:
+`training/cut_selection/iterations.parquet` with 10 columns:
 
 | Column                | Description                                  |
 | --------------------- | -------------------------------------------- |
@@ -240,6 +240,7 @@ The row management pipeline writes per-stage statistics to
 | `cuts_populated`      | Total row slots populated                    |
 | `cuts_active_before`  | Active rows before selection                 |
 | `cuts_deactivated`    | Rows deactivated by Stage 1                  |
+| `cuts_reactivated`    | Rows reactivated by Stage 1                  |
 | `cuts_active_after`   | Active rows after Stage 1                    |
 | `selection_time_ms`   | Wall-clock time for the selection            |
 | `budget_evicted`      | Rows evicted by Stage 2 (null if disabled)   |

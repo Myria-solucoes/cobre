@@ -273,9 +273,9 @@ reserved for machine-readable output (see `cobre report`).
 
 | File                           | Required | Behaviour when absent                                            |
 | ------------------------------ | -------- | ---------------------------------------------------------------- |
-| `training/_manifest.json`      | Yes      | Exits with code 2 (I/O error)                                    |
-| `training/convergence.parquet` | No       | Falls back to zero-valued timing fields; gap comes from manifest |
-| `simulation/_manifest.json`    | No       | Simulation section is omitted from the output                    |
+| `training/metadata.json`      | Yes      | Exits with code 2 (I/O error)                                    |
+| `training/convergence.parquet` | No       | Falls back to zero-valued timing fields; gap comes from metadata.json |
+| `simulation/metadata.json`    | No       | Simulation section is omitted from the output                    |
 
 ### Output format
 
@@ -291,7 +291,7 @@ Simulation complete in 0.0s (200 scenarios)
   Completed: 198  Failed: 2
 ```
 
-The simulation section is omitted when `simulation/_manifest.json` is absent
+The simulation section is omitted when `simulation/metadata.json` is absent
 (e.g., when simulation was disabled in `config.json`).
 
 ### Arguments

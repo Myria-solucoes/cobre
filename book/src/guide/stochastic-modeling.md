@@ -483,8 +483,7 @@ uniform-resolution studies, the downstream accumulation fields are unused and
 the transition is a no-op.
 
 For the full technical background — including the ring buffer design, frozen-lag
-semantics, and the noise group precomputation algorithm — see
-[`docs/design/temporal-resolution-debts.md`](../../docs/design/temporal-resolution-debts.md).
+semantics, and the noise group precomputation algorithm — consult the `temporal-resolution-debts` design document in `docs/design/`.
 
 ---
 
@@ -1428,8 +1427,7 @@ variability and the lag-accumulation complications that arise with four
 independent weekly SDDP stages.
 
 For the full technical background on temporal resolution design, including
-applicability matrices for different study patterns, see
-[`docs/design/temporal-resolution-debts.md`](../../docs/design/temporal-resolution-debts.md).
+applicability matrices for different study patterns, consult the `temporal-resolution-debts` design document in `docs/design/`.
 
 ### Validation Rules
 
@@ -1507,5 +1505,3 @@ parameter estimates. Cobre emits a `BusinessRuleViolation` error.
 - [Anatomy of a Case](../tutorial/anatomy-of-a-case.md) — introductory walkthrough of the `scenarios/` directory and Parquet schemas
 - [Configuration](./configuration.md) — full documentation of `config.json` fields including `tree_seed` and `forward_passes`
 - [cobre-stochastic](../crates/stochastic.md) — internal architecture of the stochastic crate: PAR preprocessing, spectral correlation, opening tree, and seed derivation
-- [ADR: Noise Method Dispatch and Forward Sampler](../../docs/design/adr-noise-method-forward-sampler.md) — design decisions behind the noise method enum, per-stage dispatch, and OutOfSample forward sampler
-- [Temporal Resolution Debts](../../docs/design/temporal-resolution-debts.md) — full technical catalog of temporal resolution design constraints and known debts across study patterns

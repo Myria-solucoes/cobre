@@ -637,23 +637,19 @@ every cut ever generated.
 
 ### Cut wire format
 
-The cut wire format used by `CutSyncBuffers` is at version 2
-(`CUT_WIRE_VERSION = 2`). Each record carries a version byte at offset 0
-(value `2`) and a record-type tag at offset 13 to distinguish two record
-variants:
+The cut wire format used by `CutSyncBuffers` is at version 1
+(`CUT_WIRE_VERSION = 1`). Every record is a cut record. Each record carries
+a version byte at offset 0 and a record-tag byte at offset 13
+(`RECORD_TAG_CUT = 0`, zeroed padding reserved for future tag dispatch):
 
-- **Cut record**: a 24-byte header (slot index, iteration, forward pass
-  index, intercept) followed by `n_state * 8` bytes of coefficients. The
-  total record size is `cut_wire_size(n_state) = 24 + n_state * 8` bytes.
-- **Activity-update record**: a fixed-size payload encoding `(stage, slot,
-ActivityChange)`, where `ActivityChange` is either `Deactivate` (apply
-  the sentinel RHS) or `Reactivate` (restore the original intercept).
-  Activity-update records travel through the same allgatherv channel as
-  new cuts so that RHS toggles propagate to all ranks in the same step.
+- **Cut record**: a 25-byte fixed header (1 version byte + 24 bytes of
+  fields: slot index, iteration, forward pass index, 3 padding bytes,
+  intercept) followed by `n_state * 8` bytes of coefficients. The total
+  record size is `cut_wire_size(n_state) = 25 + n_state * 8` bytes.
 
-Version-1 wire payloads are rejected by version-2 receivers with
-`SddpError::Validation`. Cross-version MPI runs are not a supported
-deployment mode.
+Receivers reject any record whose version byte does not equal
+`CUT_WIRE_VERSION`. No compatibility shim is provided; redeploy all nodes
+when upgrading.
 
 ### Basis cache wire format
 

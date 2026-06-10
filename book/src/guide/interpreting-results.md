@@ -15,7 +15,7 @@ common problems from the output data.
 
 ## Convergence Diagnostics
 
-### Reading the gap from `training/_manifest.json`
+### Reading the gap from `training/metadata.json`
 
 The manifest is the first place to check after any run. The key fields for
 convergence assessment are:
@@ -58,7 +58,7 @@ on the decision being made and the study's time horizon. As rough guidance:
    bound estimate per iteration.
 3. Check `training/convergence.parquet` (see next section) to see whether
    the gap is still decreasing or has plateaued.
-4. Check for solver infeasibilities: if `simulation/_manifest.json` shows
+4. Check for solver infeasibilities: if `simulation/metadata.json` shows
    failed scenarios, the policy may be encountering numerically difficult
    stages.
 

@@ -223,7 +223,7 @@ and stopped at the iteration limit (no convergence-based stopping rule is config
 in `config.json`).
 
 ```
-Training summary (from output/training/_manifest.json):
+Training summary (from output/training/metadata.json):
   Iterations completed:    128
   Termination reason:      iteration_limit
   Convergence achieved:    false
@@ -264,14 +264,13 @@ directory contains three subdirectories:
 ```
 output/
   training/
-    _manifest.json          # Run metadata: status, iterations, convergence, cuts
-    metadata.json           # Problem dimensions, solver version, timing
+    metadata.json           # Run metadata: status, iterations, convergence, cuts, problem dimensions
     convergence.parquet     # Per-iteration lower bound, upper bound, gap
     timing/                 # Per-stage, per-iteration solver timing
     dictionaries/           # Variable and entity dictionaries for output parsing
     _SUCCESS                # Zero-byte sentinel written on clean completion
   simulation/
-    _manifest.json          # Simulation metadata: total/completed/failed scenarios
+    metadata.json           # Simulation metadata: total/completed/failed scenarios
     buses/                  # Bus dispatch results (Hive-partitioned by scenario)
       scenario_id=0000/
         data.parquet
@@ -291,15 +290,14 @@ output/
 
 ### Key files
 
-| File                                           | What it contains                                                           |
-| ---------------------------------------------- | -------------------------------------------------------------------------- |
-| `training/_manifest.json`                      | Run status, iteration count, convergence result, row pool statistics       |
-| `training/metadata.json`                       | Problem dimensions (stages, hydros, thermals, buses), Cobre version        |
-| `training/convergence.parquet`                 | Lower bound, upper bound, gap per iteration — use this to plot convergence |
-| `simulation/buses/scenario_id=N/data.parquet`  | Bus-level demand, generation, deficit per stage for scenario N             |
-| `simulation/hydros/scenario_id=N/data.parquet` | Storage level, turbined flow, spillage per stage for scenario N            |
-| `simulation/costs/scenario_id=N/data.parquet`  | Total cost per stage for scenario N                                        |
-| `policy/cuts/`                                 | Saved Benders cuts — load this with `--policy` to warm-start a future run  |
+| File                                           | What it contains                                                                         |
+| ---------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `training/metadata.json`                       | Run status, convergence result, iteration count, row pool statistics, problem dimensions |
+| `training/convergence.parquet`                 | Lower bound, upper bound, gap per iteration — use this to plot convergence               |
+| `simulation/buses/scenario_id=N/data.parquet`  | Bus-level demand, generation, deficit per stage for scenario N                           |
+| `simulation/hydros/scenario_id=N/data.parquet` | Storage level, turbined flow, spillage per stage for scenario N                          |
+| `simulation/costs/scenario_id=N/data.parquet`  | Total cost per stage for scenario N                                                      |
+| `policy/cuts/`                                 | Saved Benders cuts — load this with `--policy` to warm-start a future run                |
 
 ### Querying results
 
