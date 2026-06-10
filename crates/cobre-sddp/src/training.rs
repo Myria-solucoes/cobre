@@ -130,6 +130,10 @@ impl TrainingResult {
     /// sites, because each call site constructs the full `TrainingResult` as
     /// the terminal value — there is no shared upstream context to forward.
     #[must_use]
+    // Rationale: the 11 arguments are independently sourced outputs of distinct training-loop
+    // phases (convergence metrics, timing, basis cache, solver stats, visited archive, baked
+    // templates); every call site constructs the full `TrainingResult` as the terminal value,
+    // so a context struct would not reduce the arity at any call site.
     #[allow(clippy::too_many_arguments, clippy::similar_names)]
     pub fn new(
         final_lb: f64,

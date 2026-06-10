@@ -128,6 +128,9 @@ pub(crate) struct StageLayout {
     /// inserted between `inflow_lags` and `z_inflow` in the LP column layout.
     /// Zero when `n_anticipated == 0`. Exposed for test introspection; the
     /// helpers iterate via `k_max × n_anticipated` separately.
+    // Rationale: asserted in layout unit tests to verify anticipated-state column shifts;
+    // production matrix helpers derive the same count inline from `n_anticipated * k_max`
+    // rather than reading this field, so the lint fires on the production side.
     #[allow(dead_code)]
     pub(crate) n_ant_state: usize,
     /// Column index of the theta (future-cost) variable.
@@ -180,6 +183,9 @@ pub(crate) struct StageLayout {
     /// (strict gate). Zero when `n_anticipated == 0` or when no plant is
     /// active at this stage. Used by the matrix-fill helpers to drive the
     /// active-row iteration.
+    // Rationale: read by `matrix.rs` debug_assert_eq! guards at three production call
+    // sites; the dead_code lint fires here because the field is defined in this sibling
+    // `layout` module and the lint analyser does not see cross-module field access.
     #[allow(dead_code)]
     pub(crate) n_anticipated_state_out_def_rows: usize,
     /// Start of anticipated-state columns (ring-buffer slots for committed MW).
@@ -285,6 +291,9 @@ pub(crate) struct StageLayout {
     /// (which mirrors `anticipated_state.start = N*(1+L)` numerically).
     /// Zero when `n_anticipated == 0` (empty row range).
     /// Row bounds are placeholder `0 == 0`; the RHS is patched during setup.
+    // Rationale: asserted in layout unit tests to confirm the sentinel is 0 (state pinning
+    // uses column bounds, not rows); production code never reads this field because the
+    // `anticipated_state_fixing` row range is a permanent empty sentinel (`0..0`).
     #[allow(dead_code)]
     pub(crate) row_anticipated_state_fixing_start: usize,
     /// Start of anticipated-fishing constraint rows (after operational violation rows).
@@ -703,6 +712,12 @@ fn enumerate_generic_constraint_rows(
 }
 
 impl StageLayout {
+    // Rationale: single cohesive LP layout constructor; every local binding contributes to
+    // the `Self { .. }` literal that terminates the function.  The eight-phase offset
+    // chain (FPHA → evaporation → operational-slack → NCS → generic → z-inflow → row
+    // regions → struct literal) must remain visible in sequence so that each offset's
+    // derivation from its predecessor is auditable; splitting would scatter the chain
+    // across helpers and obscure layout correctness.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn new(ctx: &TemplateBuildCtx<'_>, stage: &Stage, stage_idx: usize) -> Self {
         let n_blks = stage.blocks.len();

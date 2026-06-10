@@ -32,6 +32,9 @@ use crate::workspace::CapturedBasis;
 /// Currently unused in production code — the active warm-start path consumes
 /// `metadata.warm_start_counts` directly. Retained for the planned
 /// checkpoint-migration tool and is exercised by this module's own tests.
+// Rationale: exercised by this module's unit tests and kept as the public seam for a
+// checkpoint-migration tool that validates per-stage warm_start_counts compatibility;
+// removing it would leave that migration path without a validated entry point.
 #[allow(dead_code)]
 pub(crate) fn resolve_warm_start_counts(
     metadata: &PolicyCheckpointMetadata,

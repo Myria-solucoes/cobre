@@ -500,6 +500,10 @@ pub fn parse_penalty_overrides_line(path: &Path) -> Result<Vec<LinePenaltyOverri
 ///     .expect("valid hydro penalty overrides file");
 /// println!("loaded {} hydro penalty override rows", rows.len());
 /// ```
+// Rationale: all 16 optional penalty columns are extracted from a single Parquet record batch
+// and validated for positivity and finiteness in one sequential pass; splitting would require
+// multiple passes over the batch or would conceal the invariant that every column is validated
+// for every row before any result is returned.
 #[allow(clippy::too_many_lines)]
 pub fn parse_penalty_overrides_hydro(
     path: &Path,

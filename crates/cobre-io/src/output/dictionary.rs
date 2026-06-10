@@ -330,6 +330,10 @@ fn arrow_type_str(dt: &DataType) -> &'static str {
 /// Return the physical unit string for a given (file, column) pair.
 ///
 /// Returns `""` for dimensionless columns or columns without a defined unit.
+// Rationale: the function is the single authoritative mapping from every (file, column) pair
+// in the output catalog to its physical unit string; identical arms are intentional because
+// the same unit may apply to identically named columns across different output schemas, and
+// splitting by schema or collapsing arms would degrade the catalog's clarity as a lookup table.
 #[allow(clippy::too_many_lines, clippy::match_same_arms)]
 fn unit_for(file: &str, column: &str) -> &'static str {
     // Columns whose unit is independent of which file they appear in.
@@ -464,6 +468,10 @@ fn unit_for(file: &str, column: &str) -> &'static str {
 /// Return a short description for a given (file, column) pair.
 ///
 /// Returns `""` for columns without a registered description.
+// Rationale: the function is the single authoritative mapping from every (file, column) pair
+// in the output catalog to its human-readable description string; identical arms are intentional
+// because the same description text may apply to the same column across multiple output schemas,
+// and collapsing arms would make additions and per-schema divergence harder to track.
 #[allow(clippy::too_many_lines, clippy::match_same_arms)]
 fn description_for(file: &str, column: &str) -> &'static str {
     match (file, column) {
@@ -754,6 +762,12 @@ fn description_for(file: &str, column: &str) -> &'static str {
 /// block_id: i32 (nullable), bound_type_code: i8, bound_value: f64`.
 ///
 /// One row per (entity, stage, `bound_type`). `block_id` is always null.
+// Rationale: five distinct entity classes (hydro, thermal, line, pumping station,
+// contract) each contribute different bound types, and all share the same
+// pre-allocated Arrow column builders; splitting into per-entity helpers would
+// require either passing six mutable builders through each helper or rebuilding
+// the builders per class, eliminating the single pre-estimated capacity
+// allocation that makes this function allocation-efficient.
 #[allow(clippy::too_many_lines)]
 fn write_bounds_parquet(
     path: &Path,

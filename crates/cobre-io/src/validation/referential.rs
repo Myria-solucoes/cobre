@@ -345,6 +345,10 @@ fn check_extension_references(
 }
 
 /// Rules 15-20: Scenario data references.
+// Rationale: the function validates six independent scenario data sources against their
+// respective entity registries in a single error-accumulating pass; splitting would require
+// either multiple passes over `ParsedData` or passing a growing set of sub-results between
+// helpers, obscuring that all six checks share one accumulator and one return point.
 #[allow(clippy::too_many_lines)]
 fn check_scenario_references(
     data: &ParsedData,

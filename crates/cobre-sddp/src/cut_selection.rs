@@ -551,6 +551,10 @@ impl CutSelectionStrategy {
 /// The max is computed over ALL populated cuts (active and inactive), matching
 /// the unified kernel semantics. The marking pass walks slot indices in
 /// ascending order so "oldest at max" is deterministic for the Lml1 variant.
+// Rationale: every parameter is a distinct dimension of the GEMM cut-selection kernel
+// (strategy, row-major value block, populated count, stride, column cursor, warm-start
+// fence, eligibility mask, output bitmap); collapsing any pair would obscure the kernel's
+// O(populated × m_len) sweep structure that the inline hint preserves for the GEMM hot path.
 #[allow(clippy::too_many_arguments)]
 #[inline]
 fn apply_column_rule(

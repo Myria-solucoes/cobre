@@ -275,6 +275,10 @@ pub fn build_resolved_parameters(
 // ---------------------------------------------------------------------------
 
 /// Resolve a single [`ParameterKind`] into a `Vec<f64>` of length `n_stages`.
+// Rationale: the parameters carry the energy-conversion, override-table, hydro-slice,
+// and index-map context that every `ParameterKind` variant needs; `resolve_computed`
+// mirrors this arity so the two are interchangeable at the dispatch site, and bundling
+// into a context struct would just move the arity to the struct literal.
 #[allow(clippy::too_many_arguments)]
 fn resolve_kind(
     kind: &ParameterKind,
@@ -333,6 +337,11 @@ fn resolve_kind(
 }
 
 /// Resolve a [`ComputedParameter`] into a `Vec<f64>` of length `n_stages`.
+// Rationale: the signature mirrors `resolve_kind` exactly so the two functions are
+// interchangeable at the `ParameterKind::Computed` dispatch site; the shared arity
+// carries the same energy-conversion, override-table, hydro-slice, and index-map
+// context that the seven `ComputedParameter` variants all require — bundling them
+// into a context struct would just move the arity to the struct literal.
 #[allow(clippy::too_many_arguments)]
 fn resolve_computed(
     cp: ComputedParameter,

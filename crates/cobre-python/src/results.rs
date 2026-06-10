@@ -238,6 +238,13 @@ pub fn load_results(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAny>> 
 /// for row in rows:
 ///     print(row["iteration"], row["lower_bound"], row["upper_bound_mean"])
 /// ```
+// Rationale: the function projects every convergence Parquet column into a
+// Python dict row-by-row inside a single batch loop; each of the 13 columns
+// requires its own typed `get_column_by_name` call and nullable-field handling.
+// Splitting the projection into sub-functions would not reduce overall line
+// count and would require passing the batch, row index, and dict through
+// additional call frames — obscuring the flat one-pass column projection that
+// is the function's entire contract.
 #[pyfunction]
 #[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
 pub fn load_convergence(py: Python<'_>, output_dir: PathBuf) -> PyResult<Py<PyAny>> {

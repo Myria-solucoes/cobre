@@ -142,6 +142,11 @@ pub struct StageTemplates {
 /// the generic constraint row entries for this stage, NCS metadata
 /// (column start, count, and active system indices), and z-inflow
 /// metadata (row start, column start).
+// Rationale: the return tuple exposes seven independently typed outputs — the template,
+// two base-row offsets, generic-constraint metadata, NCS column start/count, and active
+// NCS indices — that the caller destructures immediately into named bindings.  A type alias
+// or wrapper struct would hide the concrete types at the four call sites and force readers
+// to look up the alias to understand the destructure.
 #[allow(clippy::type_complexity)]
 pub(super) fn build_single_stage_template(
     ctx: &TemplateBuildCtx<'_>,

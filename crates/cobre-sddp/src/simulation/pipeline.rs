@@ -665,6 +665,11 @@ fn solve_simulation_stage<S: SolverInterface>(
 ///
 /// `lookups` carries pre-built study-invariant reverse-lookup tables passed down
 /// from [`process_scenario_stages`] to avoid per-stage allocation.
+// Rationale: the arguments are disjoint mutable and immutable borrows into the per-stage
+// scratch buffers; the doc comment above explains that passing individual field borrows
+// (rather than `&mut ScratchBuffers`) is required so Rust can verify that `unscaled_primal`
+// and `unscaled_dual` are read-only while `inflow_m3s_buf` and `row_lower_buf` are mutated
+// — a single `&mut ScratchBuffers` reference would block that split.
 #[allow(clippy::too_many_arguments)]
 fn extract_sim_stage_result(
     inflow_m3s_buf: &mut Vec<f64>,

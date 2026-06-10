@@ -1390,6 +1390,10 @@ fn validate_hyperplane_row(
 /// | Computed `k_evap_v` or `k_evap0` is NaN or infinite             | [`SddpError::Validation`] |
 /// | Stage has no `season_id` (cannot map to a month)                 | [`SddpError::Validation`] |
 /// | I/O failure loading geometry Parquet                             | [`SddpError::Io`]         |
+// Rationale: the return tuple carries three independently typed outputs of the
+// evaporation resolution step — the model set, the per-hydro source provenance,
+// and the per-hydro reference-source provenance; a type alias would obscure the
+// concrete types that callers destructure immediately at every call site.
 #[allow(clippy::type_complexity)]
 pub fn resolve_evaporation_models(
     system: &System,
@@ -1412,6 +1416,11 @@ pub fn resolve_evaporation_models(
 /// # Errors
 ///
 /// Same conditions as [`resolve_evaporation_models`].
+// Rationale: the return tuple names the three independently typed outputs of the
+// evaporation resolution step — the model set, the per-hydro source provenance, and
+// the per-hydro reference-source provenance; a type alias would hide the concrete types
+// that callers destructure immediately, making the three-way split less readable at
+// the call sites.
 #[allow(clippy::type_complexity)]
 pub fn resolve_evaporation_models_from_artifacts(
     system: &System,
@@ -1486,6 +1495,13 @@ pub fn resolve_evaporation_models_from_artifacts(
 /// # Errors
 ///
 /// Same error conditions as [`resolve_evaporation_models`].
+// Rationale: the function produces three independently typed outputs (same
+// three-tuple as [`resolve_evaporation_models`]); a type alias would obscure the
+// concrete types that callers destructure immediately.  The length is necessary
+// because the per-stage linearization loop must handle two interleaved
+// reference-volume paths (user-supplied vs. computed midpoint) together with
+// geometry interpolation, unit-conversion, and finite-value validation; splitting
+// would require threading several computed intermediates across helper boundaries.
 #[allow(clippy::type_complexity, clippy::too_many_lines)]
 fn resolve_evaporation_core(
     hydros: &[cobre_core::entities::hydro::Hydro],

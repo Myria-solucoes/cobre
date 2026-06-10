@@ -358,6 +358,13 @@ impl HistoricalScenarioLibrary {
 /// Panics in debug builds if dimension mismatches between `library`, `par`,
 /// `stages`, or `stage_lag_transitions` are detected. Does not panic for valid
 /// inputs where all windows were pre-validated.
+// Rationale: the function maintains shared mutable lag-state and accumulator
+// buffers that advance through the (window × stage × entity) triple loop; the
+// observation-table build, the past-inflows digest computation, and the
+// lag-accumulation and finalize-and-shift steps within the stage loop all share
+// these structures and must execute in sequence within the same pass, making
+// extraction into helpers impractical without threading multiple mutable buffers
+// across call boundaries.
 #[allow(clippy::too_many_lines)]
 pub fn standardize_historical_windows(
     library: &mut HistoricalScenarioLibrary,

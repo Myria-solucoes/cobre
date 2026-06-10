@@ -785,7 +785,7 @@ impl StageOpeningSolver {
     // Rationale: the args are disjoint borrows (ws, ctx, training_ctx, succ,
     // basis_slice) and per-opening scalars (raw_noise, x_hat, s, scenario,
     // iteration, m, omega, is_first); no natural grouping reduces caller-side
-    // borrows. Carried over from the two former free functions.
+    // borrows.
     #[allow(clippy::too_many_arguments)]
     fn solve_opening<S: SolverInterface + Send>(
         &self,
@@ -985,8 +985,7 @@ impl StageOpeningSolver {
     /// Body re-homed verbatim from the former free function.
     // Rationale: the args are disjoint borrows (ws, ctx, training_ctx, succ) and
     // per-opening scalars (params, raw_noise, x_hat, s, scenario, iteration,
-    // omega); no natural grouping reduces caller-side borrows. Carried over from
-    // the former free function.
+    // omega); no natural grouping reduces caller-side borrows.
     #[allow(clippy::too_many_arguments)]
     fn solve_lazy<S: SolverInterface + Send>(
         ws: &mut SolverWorkspace<S>,

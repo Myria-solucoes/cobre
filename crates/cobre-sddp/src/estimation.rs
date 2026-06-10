@@ -1175,6 +1175,11 @@ fn estimate_ar_with_pacf(
 /// Propagates `StochasticError::InsufficientData` from
 /// [`estimate_annual_seasonal_stats`] when any hydro has fewer than 13
 /// chronological observations (no rolling window can be formed).
+// Rationale: the function encodes a single cohesive PACF estimation pipeline —
+// seasonal stats, stage indexing, Z-score grouping, order reduction, and report
+// assembly — whose six numbered phases share intermediate look-up tables; splitting
+// into sub-functions would require threading those tables as additional arguments
+// and would obscure the sequential data-flow contract of the pipeline.
 #[allow(clippy::too_many_lines)]
 fn estimate_ar_with_pacf_annual(
     observations: &[(EntityId, NaiveDate, f64)],
@@ -1438,6 +1443,10 @@ fn estimate_ar_with_pacf_annual(
 /// the AR portion is what shrinks.
 ///
 /// Returns a map of reductions for report building.
+// Rationale: the function threads four independent paired look-up tables (regular and annual
+// variants of observations and year-start maps) plus three independent stat maps and two
+// scalar controls; bundling them into a struct would just displace the arity to the struct
+// literal at each of the two call sites with no clarity gain.
 #[allow(clippy::too_many_arguments)]
 fn apply_annual_prepass_reductions(
     estimates: &mut [ArCoefficientEstimate],
@@ -1538,6 +1547,12 @@ fn apply_annual_prepass_reductions(
 /// When the ceiling reaches 0 the AR coefficients are dropped (ψ retained
 /// via a final order-0 YW solve so the constant term remains consistent
 /// with the per-season annual stats).
+// Rationale: the arguments are four paired look-up tables (regular/annual
+// observations and year-starts) plus two stat maps, a hydro key, season count,
+// and two scalar controls — all independently sourced by the caller; no context
+// struct spans them. The length reflects a per-entity iterative contribution
+// loop that re-solves Yule-Walker at each ceiling reduction and cannot be
+// decomposed without threading the mutable `estimates` slice across helpers.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn reduce_entity_orders_annual(
     estimates: &mut [ArCoefficientEstimate],

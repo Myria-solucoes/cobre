@@ -178,6 +178,12 @@ pub struct BoundsOverrides<'a> {
 /// assert!((result.hydro_bounds(0, 1).max_storage_hm3 - 200.0).abs() < f64::EPSILON);
 /// assert!((result.hydro_bounds(0, 2).max_storage_hm3 - 200.0).abs() < f64::EPSILON);
 /// ```
+// Rationale: the function applies a shared three-tier override cascade (global → entity →
+// stage-varying) across five entity types using a common stage-index map; keeping all five
+// entity passes in one function makes the shared resolution contract visible and avoids
+// duplicating the stage-index lookup across per-entity helper functions.
+// `implicit_hasher`: the public API accepts the concrete `HashMap` type required by callers;
+// making it generic over `BuildHasher` would complicate call sites with no practical benefit.
 #[must_use]
 #[allow(clippy::too_many_lines, clippy::implicit_hasher)]
 pub fn resolve_bounds(

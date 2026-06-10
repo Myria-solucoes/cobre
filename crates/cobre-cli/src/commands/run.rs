@@ -626,6 +626,11 @@ fn setup_communicator(args: &RunArgs) -> Result<RunContext<impl Communicator>, C
 }
 
 /// Load the case on rank 0, broadcast system/config/tree, and build `StudySetup` on all ranks.
+// Rationale: the function is a single MPI coordination seam — rank 0 loads
+// and serialises, all ranks receive, and every rank builds StudySetup from the
+// shared data. Splitting it would scatter the ordered broadcast-receive-build
+// sequence across multiple callsites and obscure the one-shot coordination
+// contract that the entire startup path depends on.
 #[allow(clippy::too_many_lines)]
 fn broadcast_and_build_setup(
     ctx: &RunContext<impl Communicator>,
@@ -1031,6 +1036,12 @@ fn run_pre_training(
 }
 
 /// Run training and collect results, events, and summary stats.
+// Rationale: training orchestration is inherently sequential — solver init,
+// progress thread launch, the blocking train() call, event collection,
+// MPI allreduces for LP-solve counts and solver stats, summary construction,
+// and output routing all depend on each other's results in order. Splitting
+// would require threading shared mutable state (solver, channel endpoints,
+// allreduce buffers) across function boundaries with no correctness benefit.
 #[allow(clippy::too_many_lines)]
 fn run_training_phase(
     ctx: &RunContext<impl Communicator>,

@@ -406,6 +406,13 @@ impl StochasticContext {
 ///   is not positive-definite.
 ///
 /// [`LoadModel`]: cobre_core::scenario::LoadModel
+// Rationale: this function assembles all stochastic sub-contexts (inflow, load,
+// NCS availability, opening-tree) in a single ordered pass over validated system
+// inputs. The sequencing — PAR validation, stage filtering, entity-ID collection,
+// per-class scenario-count reconciliation, noise-group wiring, and correlation
+// matrix decomposition — is itself the observable contract; extracting sub-steps
+// into helpers would require passing the same partially-built context state through
+// every call, obscuring the dependency order without reducing real complexity.
 #[allow(clippy::too_many_lines)]
 pub fn build_stochastic_context(
     system: &System,

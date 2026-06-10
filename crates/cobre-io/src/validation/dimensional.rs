@@ -41,6 +41,11 @@ use crate::extensions::{ProductionModelConfig, SelectionMode};
 ///
 /// * `data` — fully parsed case data produced by [`super::schema::validate_schema`].
 /// * `ctx`  — mutable validation context that accumulates diagnostics.
+// Rationale: all 7 coverage rules share a single pass over the same parsed data, and
+// all rules must run unconditionally so the caller receives a complete diagnostic set
+// regardless of which rules fire; splitting into one function per rule would require
+// seven separate traversals over the same entity collections or an intermediary
+// structure, with no benefit.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn validate_dimensional_consistency(data: &ParsedData, ctx: &mut ValidationContext) {
     let study_stage_ids: Vec<i32> = data

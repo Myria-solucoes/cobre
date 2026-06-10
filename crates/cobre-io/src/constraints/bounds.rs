@@ -473,6 +473,10 @@ pub fn parse_thermal_bounds(path: &Path) -> Result<Vec<ThermalBoundsRow>, LoadEr
 ///     .expect("valid hydro bounds file");
 /// println!("loaded {} hydro bounds rows", rows.len());
 /// ```
+// Rationale: all 11 optional bound columns are extracted from a single Parquet record batch
+// and validated for finiteness in one sequential pass; splitting into sub-functions would
+// require multiple passes over the batch or would hide the invariant that every column is
+// checked for every row before any result is returned.
 #[allow(clippy::too_many_lines)]
 pub fn parse_hydro_bounds(path: &Path) -> Result<Vec<HydroBoundsRow>, LoadError> {
     let file = File::open(path).map_err(|e| LoadError::io(path, e))?;

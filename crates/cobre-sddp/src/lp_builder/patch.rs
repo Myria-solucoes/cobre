@@ -171,6 +171,10 @@ impl PatchBuffer {
     /// [`fill_forward_patches`]: PatchBuffer::fill_forward_patches
     /// [`fill_load_patches`]: PatchBuffer::fill_load_patches
     #[must_use]
+    // Rationale: each argument sizes an independent buffer region — noise/z-inflow rows
+    // (hydro_count), lag-state column slots (max_par_order), load patches (n_load_buses,
+    // max_blocks), and anticipated-state column slots (n_anticipated, k_max); the capacity
+    // formula for each region is different, so there is no shared sub-struct to collapse them.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         hydro_count: usize,

@@ -1077,6 +1077,10 @@ impl StageIndexer {
     /// When `evap.hydro_indices` is empty this produces the same result as
     /// [`StageIndexer::with_equipment`].
     #[must_use]
+    // Rationale: single cohesive LP column/row layout constructor; every local binding
+    // contributes to the `Self { .. }` literal that closes the function.  Splitting into
+    // sub-helpers would scatter the field-initialization order and obscure the one-shot
+    // build contract where each offset derives directly from the previous.
     #[allow(clippy::too_many_lines)]
     pub fn with_equipment_and_evaporation(
         counts: &EquipmentCounts,

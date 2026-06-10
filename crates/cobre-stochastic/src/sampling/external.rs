@@ -272,6 +272,12 @@ impl ExternalScenarioLibrary {
 /// # Panics
 ///
 /// Panics in debug builds if dimension mismatches are detected.
+// Rationale: the function maintains shared mutable lag-state and accumulator
+// buffers that advance through the (scenario × stage × entity) triple loop; the
+// lag-accumulation step and the finalize-and-shift step for each stage share
+// these buffers and must execute in strict sequence within the same loop body,
+// making extraction into helpers impractical without passing the buffers by
+// mutable reference through multiple call boundaries.
 #[allow(clippy::too_many_lines)]
 pub fn standardize_external_inflow(
     library: &mut ExternalScenarioLibrary,

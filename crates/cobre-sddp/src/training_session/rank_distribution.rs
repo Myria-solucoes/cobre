@@ -17,6 +17,9 @@ use cobre_comm::Communicator;
 pub(crate) struct RankDistribution {
     pub num_stages: usize,
     pub num_ranks: usize,
+    // Rationale: `my_rank` (usize) is read only by rank-distribution unit tests via
+    // `per_rank[rd.my_rank]`; the MPI call sites in this module use `fwd_rank` (i32)
+    // as the actual rank, so the dead_code lint fires on this `usize` variant.
     #[allow(dead_code)]
     pub my_rank: usize,
     pub my_actual_fwd: usize,

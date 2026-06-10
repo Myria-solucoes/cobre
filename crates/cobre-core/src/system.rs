@@ -861,6 +861,13 @@ impl SystemBuilder {
     ///   `entry_stage_id`).
     ///
     /// All errors across all collections are reported together.
+    // Rationale: this is a single-pass, ordered validation and construction of the
+    // complete entity graph — sorting, duplicate checks, cross-reference validation,
+    // cascade-graph cycle detection, and final `System` assembly are all tightly
+    // coupled through the shared `errors` accumulator and the intermediate index
+    // maps. Splitting across helper functions would require threading those maps and
+    // the error vector through every call, obscuring the one-shot build contract and
+    // the fail-fast short-circuit that holds when duplicate IDs are found first.
     #[allow(clippy::too_many_lines)]
     pub fn build(mut self) -> Result<System, Vec<ValidationError>> {
         self.buses.sort_by_key(|e| e.id.0);

@@ -111,6 +111,9 @@ impl<'a, S: SolverInterface + Send, C: Communicator> BackwardPassInputs<'a, S, C
     /// borrows alive simultaneously across the call — Rust NLL cannot split
     /// a single `&mut TrainingSession` borrow when `bwd_state` is also
     /// borrowed mutably.
+    // Rationale: the arguments are disjoint mutable borrows into `TrainingSession` fields that
+    // Rust NLL cannot split from a single `&mut self`; bundling them into a context struct would
+    // just move the arity to the struct literal without resolving the borrow-splitting requirement.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_session_fields(
         fwd_pool: &'a mut WorkspacePool<S>,

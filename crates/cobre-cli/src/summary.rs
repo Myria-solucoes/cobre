@@ -10,6 +10,10 @@
 //! Each function prints its section independently so the caller can display
 //! results at the right point in the execution flow.
 
+// Rationale: the `#[cfg(test)]` blocks in this module import
+// `HydroProductionProvenance`, `InflowProvenance`, and `ProvenanceSource` via
+// `use super::{...}`; this `pub use` is the declaration that puts those names on
+// the module surface so those test imports resolve. Without it they would not.
 #[allow(unused_imports)]
 pub use cobre_sddp::{
     HydroModelSummary, HydroProductionProvenance, InflowProvenance, ModelProvenanceReport,

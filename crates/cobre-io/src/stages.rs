@@ -261,6 +261,10 @@ pub(crate) enum RawRiskMeasure {
     ///
     /// The inner `String` is only used by serde during deserialization;
     /// the actual value is not inspected in `convert_risk_measure`.
+    // Rationale: serde's `#[serde(untagged)]` matches this variant by attempting to deserialize
+    // the JSON value as a `String`; the inner field is structurally required for that match to
+    // succeed. Removing it (e.g. to `Expectation`) changes the variant to a unit that serde
+    // cannot match against a JSON string, breaking deserialization of all expectation configs.
     #[allow(dead_code)]
     Expectation(String),
     /// Object variant: `{"cvar": {"alpha": ..., "lambda": ...}}`.

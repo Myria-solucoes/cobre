@@ -76,6 +76,10 @@ impl IterationScratch {
     /// * `n_anticipated` — number of anticipated thermals (for `PatchBuffer` Category 6).
     /// * `k_max` — maximum anticipated lead-stage horizon (for `PatchBuffer` Category 6).
     /// * `stage_ctx` — stage context providing base templates for the pre-bake loop.
+    // Rationale: each argument sizes one of the seven independent pre-allocated scratch
+    // regions (trajectory records, patch buffer row/col capacity, cut row map, baked
+    // templates) — no two share the same sizing formula, so there is no sub-struct that
+    // naturally groups a subset without just renaming the arity.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         max_local_fwd: usize,

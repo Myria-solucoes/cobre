@@ -57,6 +57,9 @@ pub struct FerrompiBackend {
     /// This field is never read after construction — it is held solely for its
     /// `Drop` side-effect. The suppression is intentional: removing the field
     /// would cause `MPI_Finalize` to be called prematurely.
+    // Rationale: this field is held exclusively for its `Drop` side-effect;
+    // removing it would cause the MPI environment to be finalised prematurely,
+    // before all communicator handles derived from it are released.
     #[allow(dead_code)]
     mpi: ferrompi::Mpi,
 

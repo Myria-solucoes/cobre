@@ -676,6 +676,9 @@ pub(crate) fn evaluate_losses(
 /// term through the production function gradient.
 ///
 /// This function is retained for integration tests and future derivative-based diagnostics.
+// Rationale: used directly in this module's integration tests (`tests::` block) to verify the
+// loss-factor extraction; the production path calls `evaluate_losses` (the full model evaluator)
+// instead, so the dead_code lint fires on the production side.
 #[allow(dead_code)]
 pub(crate) fn evaluate_losses_factor(model: &HydraulicLossesModel) -> f64 {
     match model {
@@ -747,6 +750,9 @@ pub(crate) struct ProductionFunction {
     /// Human-readable plant name for error messages.
     ///
     /// Retained for diagnostic use in integration tests.
+    // Rationale: the field is populated and read in integration tests for diagnostic error
+    // messages; production code constructs `ProductionFunction` with a name but never reads
+    // it back — removing it would eliminate useful context from test failure output.
     #[allow(dead_code)]
     pub(crate) hydro_name: String,
 }
@@ -1214,6 +1220,9 @@ pub(crate) fn eliminate_redundant(
 /// - `bounds` — resolved fitting bounds supplying the volume range and grid counts.
 ///
 /// Retained for integration tests that verify approximation quality.
+// Rationale: exercised only by integration tests that verify FPHA plane-approximation
+// quality against the ground-truth production function; the production fitting path
+// selects planes without re-measuring max error, so the dead_code lint fires here.
 #[allow(dead_code)]
 pub(crate) fn compute_max_approximation_error(
     planes: &[RawHyperplane],

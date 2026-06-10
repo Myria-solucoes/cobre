@@ -74,6 +74,9 @@ pub(crate) struct ParsedData {
     ///
     /// Global defaults are already embedded in entity structs by the parsers;
     /// this field is retained for Layer 5 penalty-ordering checks.
+    // Rationale: the per-entity parsers embed these defaults for resolution, but the
+    // Layer 5 penalty-ordering check needs the original global values; retaining the
+    // parsed field here avoids re-reading `penalties.json` when that check runs.
     #[allow(dead_code)]
     pub(crate) penalties: GlobalPenaltyDefaults,
     /// Parsed `stages.json`.
@@ -111,6 +114,9 @@ pub(crate) struct ParsedData {
     ///
     /// Loaded before `constraints/generic_constraints.json` so that `@name`
     /// sigils in constraint expressions can be resolved during Layer 2.
+    // Rationale: the field is populated by the schema-validation layer for the expression-resolution
+    // step that substitutes `@name` sigils in constraint expressions; removing it would discard
+    // the parsed data and require re-parsing from disk at that step.
     #[allow(dead_code)]
     pub(crate) scalar_parameters: Vec<ScalarParameter>,
 
@@ -154,6 +160,9 @@ pub(crate) struct ParsedData {
     /// Parsed `constraints/exchange_factors.json`. Empty when absent.
     ///
     /// Parsed for schema validation; not yet forwarded to `System`.
+    // Rationale: the field is populated by the schema-validation layer to confirm the file
+    // parses correctly against the schema; dropping the field would silently skip schema
+    // validation for this file when no consumer is present.
     #[allow(dead_code)]
     pub(crate) exchange_factors: Vec<ExchangeFactorEntry>,
     /// Parsed `constraints/generic_constraints.json`. Empty when absent.
@@ -248,6 +257,11 @@ fn map_load_error(err: &LoadError, relative_path: &str, ctx: &mut ValidationCont
 /// * `case_root` — path to the case directory root.
 /// * `manifest`  — output from [`crate::validation::structural::validate_structure`].
 /// * `ctx`        — mutable validation context that accumulates diagnostics.
+// Rationale: every optional file in the manifest must be attempted in a single
+// sequential pass so that all parse and schema errors are collected before the
+// function returns; splitting the file-loading into smaller helpers would either
+// require threading `ctx` through many call boundaries or short-circuit on the
+// first failure, both of which violate the all-errors-collected contract.
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub(crate) fn validate_schema(

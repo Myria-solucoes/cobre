@@ -22,6 +22,10 @@ use cobre_core::TrainingEvent;
 pub(crate) struct RuntimeHandles {
     pub event_sender: Option<Sender<TrainingEvent>>,
     pub shutdown_flag: Option<Arc<AtomicBool>>,
+    // Rationale: production code reads `config.events.export_states` directly rather than
+    // going through `RuntimeHandles`; this field is set in `RuntimeHandles::new` for
+    // structural symmetry with `event_sender` and `shutdown_flag`, and is asserted in
+    // the unit test that validates constructor round-trip behaviour.
     #[allow(dead_code)]
     pub export_states: bool,
 }
