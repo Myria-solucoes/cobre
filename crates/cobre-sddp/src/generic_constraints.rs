@@ -31,7 +31,7 @@
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 
-use cobre_core::{EntityId, VariableRef};
+use cobre_core::{ConstraintExpression, EntityId, VariableRef};
 
 use crate::hydro_models::{ProductionModelSet, ResolvedProductionModel};
 use crate::indexer::StageIndexer;
@@ -223,6 +223,76 @@ pub(crate) fn resolve_variable_ref<S: BuildHasher>(
         | VariableRef::NonControllableGeneration { .. }
         | VariableRef::NonControllableCurtailment { .. } => vec![],
     }
+}
+
+/// Whether a single [`VariableRef`] resolves to the *same* LP column(s)
+/// regardless of the block index passed to [`resolve_variable_ref`].
+///
+/// A variable is **block-independent** ("stock") when its resolver ignores the
+/// `block_idx` argument and returns a per-stage column. Only three kinds qualify,
+/// each verified against its resolver:
+///
+/// - [`VariableRef::HydroStorage`] → `storage.start + pos` (outgoing reservoir level)
+/// - [`VariableRef::HydroEvaporation`] → the stage-level `Q_ev` column
+/// - [`VariableRef::AnticipatedDecision`] → `anticipated_decision.start + local`
+///   (a per-plant per-stage scalar, uniform across blocks)
+///
+/// Every other kind is block-level: it resolves to `col_start + pos * n_blks +
+/// block_idx` (via `resolve_block_variable` / FPHA generation / line / deficit /
+/// excess), so distinct block indices yield distinct columns. The stub kinds
+/// (withdrawal, pumping, contracts, non-controllable) resolve to no columns at
+/// all; they are conservatively treated as block-level here so that only
+/// *provably* stock variables enable the single-row collapse.
+///
+/// The match is deliberately exhaustive (no wildcard arm): a future
+/// [`VariableRef`] variant forces a compile error here, defaulting nothing to
+/// "stock" by omission.
+#[must_use]
+fn variable_ref_is_block_independent(var_ref: &VariableRef) -> bool {
+    match var_ref {
+        VariableRef::HydroStorage { .. }
+        | VariableRef::HydroEvaporation { .. }
+        | VariableRef::AnticipatedDecision { .. } => true,
+        VariableRef::HydroTurbined { .. }
+        | VariableRef::HydroSpillage { .. }
+        | VariableRef::HydroDiversion { .. }
+        | VariableRef::HydroOutflow { .. }
+        | VariableRef::HydroGeneration { .. }
+        | VariableRef::ThermalGeneration { .. }
+        | VariableRef::LineDirect { .. }
+        | VariableRef::LineReverse { .. }
+        | VariableRef::LineExchange { .. }
+        | VariableRef::BusDeficit { .. }
+        | VariableRef::BusExcess { .. }
+        | VariableRef::HydroWithdrawal { .. }
+        | VariableRef::PumpingFlow { .. }
+        | VariableRef::PumpingPower { .. }
+        | VariableRef::ContractImport { .. }
+        | VariableRef::ContractExport { .. }
+        | VariableRef::NonControllableGeneration { .. }
+        | VariableRef::NonControllableCurtailment { .. } => false,
+    }
+}
+
+/// Whether an entire generic-constraint expression is block-independent.
+///
+/// True only when **every** term is block-independent (see
+/// [`variable_ref_is_block_independent`]). A `block_id = None` bound on such an
+/// expression produces the *same* row for every block, so the LP builder may
+/// collapse the per-block replication into a single stage-level row priced by
+/// the stage's total hours — the row's coefficients do not depend on the block.
+///
+/// An **empty** expression (no terms) is vacuously block-independent: it carries
+/// no block-dependent coefficients, so collapsing its replicated rows changes
+/// nothing but the row/slack count.
+///
+/// Any block-level term anywhere forces `false` (keep the per-block path).
+#[must_use]
+pub(crate) fn expression_is_block_independent(expression: &ConstraintExpression) -> bool {
+    expression
+        .terms
+        .iter()
+        .all(|term| variable_ref_is_block_independent(&term.variable))
 }
 
 /// Resolve `HydroStorage` to its stage-level outgoing storage column.

@@ -74,6 +74,9 @@ pub struct CostWriteRecord {
     pub discount_factor: f64,
     /// Thermal generation cost.
     pub thermal_cost: f64,
+    /// Anticipated (forward-committed) thermal generation cost, booked on the
+    /// decision-stage commitment column. Zero when no anticipated thermals exist.
+    pub anticipated_thermal_cost: f64,
     /// Contract energy cost.
     pub contract_cost: f64,
     /// Load deficit cost.
@@ -783,6 +786,7 @@ fn build_costs_batch<'a>(
     let mut future_cost = Float64Builder::with_capacity(n);
     let mut discount_factor = Float64Builder::with_capacity(n);
     let mut thermal_cost = Float64Builder::with_capacity(n);
+    let mut anticipated_thermal_cost = Float64Builder::with_capacity(n);
     let mut contract_cost = Float64Builder::with_capacity(n);
     let mut deficit_cost = Float64Builder::with_capacity(n);
     let mut excess_cost = Float64Builder::with_capacity(n);
@@ -811,6 +815,7 @@ fn build_costs_batch<'a>(
         future_cost.append_value(r.future_cost);
         discount_factor.append_value(r.discount_factor);
         thermal_cost.append_value(r.thermal_cost);
+        anticipated_thermal_cost.append_value(r.anticipated_thermal_cost);
         contract_cost.append_value(r.contract_cost);
         deficit_cost.append_value(r.deficit_cost);
         excess_cost.append_value(r.excess_cost);
@@ -842,6 +847,7 @@ fn build_costs_batch<'a>(
             Arc::new(future_cost.finish()),
             Arc::new(discount_factor.finish()),
             Arc::new(thermal_cost.finish()),
+            Arc::new(anticipated_thermal_cost.finish()),
             Arc::new(contract_cost.finish()),
             Arc::new(deficit_cost.finish()),
             Arc::new(excess_cost.finish()),
@@ -1707,6 +1713,7 @@ mod tests {
             future_cost: 200.0,
             discount_factor: 0.95,
             thermal_cost: 400.0,
+            anticipated_thermal_cost: 0.0,
             contract_cost: 0.0,
             deficit_cost: 100.0,
             excess_cost: 0.0,
@@ -1805,7 +1812,7 @@ mod tests {
             .expect("costs batch must build");
 
         assert_eq!(batch.num_rows(), 2, "must have 2 rows");
-        assert_eq!(batch.num_columns(), 26, "costs schema has 26 columns");
+        assert_eq!(batch.num_columns(), 27, "costs schema has 27 columns");
 
         let expected = costs_schema();
         assert_eq!(
@@ -2128,7 +2135,7 @@ mod tests {
             .expect("must have rows")
             .expect("batch must be Ok");
         assert_eq!(batch.num_rows(), 2, "costs parquet must have 2 rows");
-        assert_eq!(batch.num_columns(), 26, "costs schema has 26 columns");
+        assert_eq!(batch.num_columns(), 27, "costs schema has 27 columns");
     }
 
     #[test]

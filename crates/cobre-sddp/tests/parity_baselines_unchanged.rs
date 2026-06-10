@@ -78,7 +78,7 @@ const EXPECTED_HASHES: &[(&str, &str)] = &[
     ),
     (
         "D11",
-        "cb4f32605bc285e77e396a3f144bb9b9ce33568bf9f724ac9556d2a6f957c46b",
+        "6ac8e25e9fe811c70390c3e148b1f9f1dab897fc2b75389aed40a1628315d943",
     ),
     (
         "D13",

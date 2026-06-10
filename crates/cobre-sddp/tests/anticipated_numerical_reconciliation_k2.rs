@@ -691,4 +691,59 @@ fn lp_total_cost_matches_analytical_optimum_k2_discount_zero() {
         (observed_total - EXPECTED_TOTAL_USD).abs(),
         COST_TOLERANCE_USD,
     );
+
+    // Step 5: cost-breakdown reconciliation (Finding 4).
+    //
+    // The anticipated (GNL) commitment fuel is charged on the decision column at
+    // the decision stage and is now reported as `anticipated_thermal_cost`. With
+    // it included, the named cost categories must sum to `immediate_cost` at every
+    // stage (`immediate_cost = Σ objective·primal − θ`, and each category is its
+    // own objective·primal contribution).
+    //
+    // `hydro_violation_cost` already aggregates its six sub-components (outflow
+    // below/above, turbined, generation, evaporation, withdrawal), so the sum
+    // uses the aggregate, not the parts. `spillage_cost` already includes
+    // diversion. Tolerance is generous relative to the ~$1.1e9 stage costs.
+    const RECONCILE_TOLERANCE_USD: f64 = 1.0;
+    let mut saw_nonzero_anticipated = false;
+    for stage in &scenario.stages {
+        for cost in &stage.costs {
+            let category_sum = cost.thermal_cost
+                + cost.anticipated_thermal_cost
+                + cost.contract_cost
+                + cost.deficit_cost
+                + cost.excess_cost
+                + cost.storage_violation_cost
+                + cost.filling_target_cost
+                + cost.hydro_violation_cost
+                + cost.inflow_penalty_cost
+                + cost.generic_violation_cost
+                + cost.spillage_cost
+                + cost.turbined_cost
+                + cost.curtailment_cost
+                + cost.exchange_cost
+                + cost.pumping_cost;
+            assert!(
+                (category_sum - cost.immediate_cost).abs() < RECONCILE_TOLERANCE_USD,
+                "stage {}: Σ(named cost categories) = {} must equal immediate_cost = {} \
+                 (diff {}); the anticipated commitment fuel must be attributed to \
+                 anticipated_thermal_cost, not left as an unattributed remainder",
+                cost.stage_id,
+                category_sum,
+                cost.immediate_cost,
+                (category_sum - cost.immediate_cost).abs(),
+            );
+            if cost.anticipated_thermal_cost.abs() > RECONCILE_TOLERANCE_USD {
+                saw_nonzero_anticipated = true;
+            }
+        }
+    }
+    // Zone A (decision stages t∈{0,1,2,3}) must book a positive
+    // anticipated_thermal_cost; otherwise the new field is dead and the
+    // reconciliation above would pass trivially.
+    assert!(
+        saw_nonzero_anticipated,
+        "expected a non-zero anticipated_thermal_cost at the decision stages; \
+         got zero everywhere (the GNL fuel was not attributed)",
+    );
 }

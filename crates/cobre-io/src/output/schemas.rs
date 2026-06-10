@@ -15,6 +15,7 @@ pub(crate) fn costs_schema() -> Schema {
         Field::new("future_cost", DataType::Float64, false),
         Field::new("discount_factor", DataType::Float64, false),
         Field::new("thermal_cost", DataType::Float64, false),
+        Field::new("anticipated_thermal_cost", DataType::Float64, false),
         Field::new("contract_cost", DataType::Float64, false),
         Field::new("deficit_cost", DataType::Float64, false),
         Field::new("excess_cost", DataType::Float64, false),
@@ -438,8 +439,8 @@ mod tests {
         let schema = costs_schema();
         assert_eq!(
             schema.fields().len(),
-            26,
-            "costs schema must have 26 fields"
+            27,
+            "costs schema must have 27 fields"
         );
         let names = field_names(&schema);
         assert_eq!(
@@ -452,6 +453,7 @@ mod tests {
                 "future_cost",
                 "discount_factor",
                 "thermal_cost",
+                "anticipated_thermal_cost",
                 "contract_cost",
                 "deficit_cost",
                 "excess_cost",
@@ -491,6 +493,7 @@ mod tests {
             "future_cost",
             "discount_factor",
             "thermal_cost",
+            "anticipated_thermal_cost",
             "contract_cost",
             "deficit_cost",
             "excess_cost",
@@ -971,7 +974,7 @@ mod tests {
             .map(|(s, n)| (*n, s.fields().len()))
             .collect();
         let expected: &[(&str, usize)] = &[
-            ("costs", 26),
+            ("costs", 27),
             ("hydros", 35),
             ("thermals", 10),
             ("exchanges", 11),

@@ -1215,6 +1215,18 @@ fn compute_cost_result(
     } else {
         range_sum(indexer.thermal.clone()) * COST_SCALE_FACTOR
     };
+    // Anticipated (forward-committed) thermal fuel is charged on the
+    // anticipated-decision columns at the decision stage. Inactive columns
+    // (non-decision stages, or boundary plants) are pinned to `[0, 0]`, so their
+    // primal is 0 and they contribute nothing — summing the whole range at every
+    // stage attributes the cost only where the decision is live, matching how
+    // `immediate_cost` books it. Same objective·primal·scale basis as the other
+    // categories, so the breakdown reconciles to `immediate_cost`.
+    let anticipated_thermal_cost = if indexer.anticipated_decision.is_empty() {
+        0.0
+    } else {
+        range_sum(indexer.anticipated_decision.clone()) * COST_SCALE_FACTOR
+    };
     let spillage_cost = if indexer.spillage.is_empty() {
         0.0
     } else {
@@ -1279,6 +1291,7 @@ fn compute_cost_result(
         future_cost,
         discount_factor: cumulative_discount_factor,
         thermal_cost,
+        anticipated_thermal_cost,
         contract_cost: 0.0,
         deficit_cost,
         excess_cost,
@@ -1336,12 +1349,18 @@ fn extract_generic_violations(
             0.0
         };
 
-        // Slack value from the LP column(s).
-        let block_hours = spec
-            .block_hours
-            .get(entry.block_idx)
-            .copied()
-            .unwrap_or(0.0);
+        // Slack value from the LP column(s). A collapsed stage-level row is
+        // priced by the stage's total hours (matching the LP objective set in
+        // `fill_generic_constraint_entries`); a per-block row by its own block's
+        // hours.
+        let block_hours = if entry.is_stage_level {
+            spec.block_hours.iter().sum()
+        } else {
+            spec.block_hours
+                .get(entry.block_idx)
+                .copied()
+                .unwrap_or(0.0)
+        };
         let (slack_value, slack_cost) = if entry.slack_enabled {
             match entry.sense {
                 ConstraintSense::Equal => {
@@ -1367,9 +1386,15 @@ fn extract_generic_violations(
 
         results.push(SimulationGenericViolationResult {
             stage_id,
+            // A collapsed stage-level row spans the whole stage, so it reports
+            // no block; a per-block row reports its block index.
             // SAFETY: block_idx is a stage block index, always < n_blocks which is << 2^32.
             #[allow(clippy::cast_possible_truncation)]
-            block_id: Some(entry.block_idx as u32),
+            block_id: if entry.is_stage_level {
+                None
+            } else {
+                Some(entry.block_idx as u32)
+            },
             constraint_id: entry.entity_id,
             slack_value,
             slack_cost,
@@ -1536,6 +1561,7 @@ fn extract_stub_collections(
 ///     future_cost: 200.0,
 ///     discount_factor: 1.0,
 ///     thermal_cost: 400.0,
+///     anticipated_thermal_cost: 0.0,
 ///     contract_cost: 100.0,
 ///     deficit_cost: 50.0,
 ///     excess_cost: 10.0,
@@ -1566,14 +1592,17 @@ fn extract_stub_collections(
 /// };
 ///
 /// accumulate_category_costs(&cost, &mut accum);
-/// assert_eq!(accum.resource_cost, 500.0);       // 400 + 100
+/// assert_eq!(accum.resource_cost, 500.0);       // 400 + 0 + 100
 /// assert_eq!(accum.recourse_cost, 60.0);         // 50 + 10
 /// assert_eq!(accum.violation_cost, 60.0);        // 20 + 30 + 5 + 3 + 2
 /// assert_eq!(accum.regularization_cost, 20.0);   // 1 + 4 + 7 + 8
 /// assert_eq!(accum.imputed_cost, 60.0);          // 60
 /// ```
 pub fn accumulate_category_costs(cost: &SimulationCostResult, accum: &mut ScenarioCategoryCosts) {
-    accum.resource_cost += cost.thermal_cost + cost.contract_cost;
+    // Anticipated thermal fuel is a resource cost (forward-committed generation),
+    // so it rolls up alongside thermal/contract. Keeping it in the resource macro
+    // category preserves Σ(macro categories) == immediate_cost.
+    accum.resource_cost += cost.thermal_cost + cost.anticipated_thermal_cost + cost.contract_cost;
     accum.recourse_cost += cost.deficit_cost + cost.excess_cost;
     accum.violation_cost += cost.storage_violation_cost
         + cost.filling_target_cost
@@ -3730,6 +3759,10 @@ mod tests {
             future_cost: 0.0,
             discount_factor: 1.0,
             thermal_cost: thermal,
+            // Exercised separately in the GNL end-to-end reconciliation test; the
+            // category-accumulation unit tests keep it at zero so the existing
+            // `resource_cost` expectations (thermal + contract) stay exact.
+            anticipated_thermal_cost: 0.0,
             contract_cost: contract,
             deficit_cost: deficit,
             excess_cost: excess,

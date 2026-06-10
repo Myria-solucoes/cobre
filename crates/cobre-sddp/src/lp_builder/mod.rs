@@ -221,9 +221,13 @@ pub(crate) const Q_EV_SAFETY_MARGIN: f64 = 2.0;
 /// associated slack columns.  Also used by the simulation extraction pipeline
 /// to map LP row/column indices back to constraint identity and block.
 ///
-/// One entry is created per active `(constraint, block)` pair. A constraint
-/// with `block_id = None` in its bounds generates one entry per block;
-/// a constraint with `block_id = Some(k)` generates exactly one entry.
+/// One entry is created per active `(constraint, block)` pair, with one
+/// exception: a `block_id = None` bound whose expression is **block-independent**
+/// (every term resolves to a per-stage column) collapses to a *single*
+/// stage-level entry (`is_stage_level = true`) instead of one per block, since
+/// the replicated rows would be identical. A `block_id = None` bound on a
+/// block-level expression still generates one entry per block; a `block_id =
+/// Some(k)` bound generates exactly one entry.
 #[derive(Debug, Clone)]
 pub struct GenericConstraintRowEntry {
     /// Index into `System::generic_constraints()` for the parent constraint.
@@ -234,7 +238,15 @@ pub struct GenericConstraintRowEntry {
     /// constraint identity without needing a reference to the full constraint list.
     pub entity_id: i32,
     /// Block index within the stage (0-indexed).
+    ///
+    /// For a collapsed stage-level row (`is_stage_level = true`) this is the
+    /// sentinel `0`: block-independent terms resolve to the same column for any
+    /// block, so the marker only needs to be a valid block index.
     pub block_idx: usize,
+    /// Whether this row represents the whole stage (a collapsed `block_id = None`
+    /// row over a block-independent expression). When `true`, the slack column is
+    /// priced by the stage's total hours rather than `block_idx`'s block hours.
+    pub is_stage_level: bool,
     /// The right-hand-side bound value for this row.
     pub bound: f64,
     /// Comparison sense of the constraint (`>=`, `<=`, or `==`).

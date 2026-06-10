@@ -548,11 +548,28 @@ fn fill_evaporation_columns(
 
 /// Withdrawal violation slack columns — neg (under-withdrawal) and pos (over-withdrawal).
 ///
-/// One stage-level column per hydro for each direction.
-/// Bounds `[0, +inf)` when `water_withdrawal_m3s > 0`; pinned to `[0, 0]` otherwise.
-/// Pinning to zero when there is no scheduled withdrawal ensures the column has
-/// no LP effect (it is presolve-eliminated), preserving identical behaviour to
-/// the pre-withdrawal implementation for cases where withdrawal is absent.
+/// One stage-level column per hydro for each direction. In the water-balance row
+/// the neg slack enters with coefficient `-zeta` and the pos slack with `+zeta`,
+/// so the *realized* withdrawal removed from the reservoir is
+/// `R = T - neg + pos`, where `T = water_withdrawal_m3s` (a signed schedule:
+/// `T > 0` is a removal, `T < 0` an inter-basin return/addition).
+///
+/// ## Sign-aware under-delivery cap
+///
+/// Realized withdrawal must stay on its signed segment and must **not flip sign**
+/// (a scheduled removal cannot become an injection, nor a scheduled addition a
+/// removal): `R ∈ [0, T]` for `T > 0`, `R ∈ [T, 0]` for `T < 0`. The *under-delivery*
+/// direction is the one that drags `R` toward — and potentially across — zero, so it
+/// is capped at the target magnitude `|T|`; the *over-delivery* direction is left
+/// unbounded (it pushes `R` further along its own sign, never across zero, and is the
+/// solver's latitude to shed excess water through the withdrawal point):
+///
+/// - `T > 0`: under-delivery is `neg` (`R = T - neg`), capped `neg ≤ |T|` (floors `R ≥ 0`);
+///   over-delivery is `pos`, left `+∞`.
+/// - `T < 0`: under-delivery is `pos` (`R = T + pos`), capped `pos ≤ |T|` (floors `R ≤ 0`);
+///   over-delivery is `neg`, left `+∞`.
+/// - `T = 0`: both pinned to `0` so the columns are presolve-eliminated, preserving
+///   identical behaviour to the pre-withdrawal implementation when withdrawal is absent.
 fn fill_withdrawal_slack_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -560,26 +577,32 @@ fn fill_withdrawal_slack_columns(
     total_stage_hours: f64,
     bufs: &mut ColumnBufs<'_>,
 ) {
-    // Neg slacks (under-withdrawal).
+    // Neg slacks: under-delivery for T>0 (cap at |T|), over-application for T<0 (unbounded).
     for h_idx in 0..layout.n_h {
         let col = layout.col_withdrawal_neg_start + h_idx;
         let hb = ctx.bounds.hydro_bounds(h_idx, stage_idx);
-        bufs.col_upper[col] = if hb.water_withdrawal_m3s > 0.0 {
-            f64::INFINITY
+        let t = hb.water_withdrawal_m3s;
+        bufs.col_upper[col] = if t > 0.0 {
+            t // under-delivery: floor R ≥ 0 by capping neg ≤ |T|
+        } else if t < 0.0 {
+            f64::INFINITY // over-application latitude (R further negative)
         } else {
-            0.0
+            0.0 // no scheduled withdrawal: presolve-eliminate
         };
         let hp = ctx.penalties.hydro_penalties(h_idx, stage_idx);
         bufs.objective[col] = hp.water_withdrawal_violation_neg_cost * total_stage_hours;
     }
-    // Pos slacks (over-withdrawal).
+    // Pos slacks: over-delivery for T>0 (unbounded), under-delivery for T<0 (cap at |T|).
     for h_idx in 0..layout.n_h {
         let col = layout.col_withdrawal_pos_start + h_idx;
         let hb = ctx.bounds.hydro_bounds(h_idx, stage_idx);
-        bufs.col_upper[col] = if hb.water_withdrawal_m3s > 0.0 {
-            f64::INFINITY
+        let t = hb.water_withdrawal_m3s;
+        bufs.col_upper[col] = if t > 0.0 {
+            f64::INFINITY // over-withdrawal latitude (R further positive)
+        } else if t < 0.0 {
+            -t // under-delivery: floor R ≤ 0 by capping pos ≤ |T|
         } else {
-            0.0
+            0.0 // no scheduled withdrawal: presolve-eliminate
         };
         let hp = ctx.penalties.hydro_penalties(h_idx, stage_idx);
         bufs.objective[col] = hp.water_withdrawal_violation_pos_cost * total_stage_hours;
@@ -1529,7 +1552,15 @@ pub(super) fn fill_generic_constraint_entries(
     for (entry_idx, entry) in layout.generic_constraint_rows.iter().enumerate() {
         let row = layout.row_generic_start + entry_idx;
         let constraint = &ctx.generic_constraints[entry.constraint_idx];
-        let block_hours = stage.blocks[entry.block_idx].duration_hours;
+        // A collapsed stage-level row is priced by the stage's total hours
+        // (it stands in for one row per block); a per-block row by its own
+        // block's hours. The total equals `penalty * Σ block_hours * D` either
+        // way, so the collapse is penalty-conserving.
+        let block_hours = if entry.is_stage_level {
+            stage.blocks.iter().map(|b| b.duration_hours).sum()
+        } else {
+            stage.blocks[entry.block_idx].duration_hours
+        };
 
         // 1. Set row bounds from sense and RHS bound value.
         match entry.sense {

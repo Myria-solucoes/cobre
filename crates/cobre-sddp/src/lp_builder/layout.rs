@@ -557,10 +557,38 @@ fn identify_active_ncs(ctx: &TemplateBuildCtx<'_>, stage: &Stage) -> Vec<usize> 
         .collect()
 }
 
+/// Allocate the slack column index/indices for one generic-constraint row.
+///
+/// Returns `(slack_plus_col, slack_minus_col)`, advancing `n_slack_cols` by the
+/// number of columns consumed: zero when slack is disabled, one for inequality
+/// senses, two for equality (plus and minus). Columns are allocated sequentially
+/// from `col_generic_slack_start` — plus first, then (for `==`) minus.
+fn allocate_generic_slack_cols(
+    constraint: &GenericConstraint,
+    col_generic_slack_start: usize,
+    n_slack_cols: &mut usize,
+) -> (Option<usize>, Option<usize>) {
+    if !constraint.slack.enabled {
+        return (None, None);
+    }
+    let plus_col = col_generic_slack_start + *n_slack_cols;
+    *n_slack_cols += 1;
+    let minus_col = if constraint.sense == ConstraintSense::Equal {
+        let mc = col_generic_slack_start + *n_slack_cols;
+        *n_slack_cols += 1;
+        Some(mc)
+    } else {
+        None
+    };
+    (Some(plus_col), minus_col)
+}
+
 /// Enumerate active generic constraint rows and assign their slack column indices.
 ///
 /// For each active `(constraint, block)` pair at this stage, one
-/// [`GenericConstraintRowEntry`] is produced. Slack columns are allocated
+/// [`GenericConstraintRowEntry`] is produced — except a `block_id = None` bound
+/// over a block-independent expression, which collapses to a single stage-level
+/// row (see [`GenericConstraintRowEntry`]). Slack columns are allocated
 /// sequentially from `col_generic_slack_start` — first the plus-slack, then
 /// (for equality constraints) the minus-slack.
 fn enumerate_generic_constraint_rows(
@@ -585,30 +613,50 @@ fn enumerate_generic_constraint_rows(
             .resolved_generic_bounds
             .bounds_for_stage(constraint_idx, stage.id);
 
+        // A `block_id = None` bound over a block-independent expression produces
+        // identical rows for every block, so it collapses to a single stage-level
+        // row priced by the stage's total hours. Block-level expressions keep the
+        // per-block replication (the rows differ by block).
+        let collapse_stage_level =
+            crate::generic_constraints::expression_is_block_independent(&constraint.expression);
+
         for &(block_id, bound) in bound_entries {
             match block_id {
+                None if collapse_stage_level => {
+                    // Single collapsed stage-level row (block_idx = 0 sentinel).
+                    let (slack_plus_col, slack_minus_col) = allocate_generic_slack_cols(
+                        constraint,
+                        col_generic_slack_start,
+                        &mut n_generic_slack_cols,
+                    );
+                    n_generic_rows += 1;
+                    generic_constraint_rows.push(GenericConstraintRowEntry {
+                        constraint_idx,
+                        entity_id: constraint.id.0,
+                        block_idx: 0,
+                        is_stage_level: true,
+                        bound,
+                        sense: constraint.sense,
+                        slack_enabled: constraint.slack.enabled,
+                        slack_penalty: constraint.slack.penalty.unwrap_or(0.0),
+                        slack_plus_col,
+                        slack_minus_col,
+                    });
+                }
                 None => {
-                    // One row per block.
+                    // One row per block (block-level expression).
                     for block_idx in 0..n_blks {
-                        let (slack_plus_col, slack_minus_col) = if constraint.slack.enabled {
-                            let plus_col = col_generic_slack_start + n_generic_slack_cols;
-                            n_generic_slack_cols += 1;
-                            let minus_col = if constraint.sense == ConstraintSense::Equal {
-                                let mc = col_generic_slack_start + n_generic_slack_cols;
-                                n_generic_slack_cols += 1;
-                                Some(mc)
-                            } else {
-                                None
-                            };
-                            (Some(plus_col), minus_col)
-                        } else {
-                            (None, None)
-                        };
+                        let (slack_plus_col, slack_minus_col) = allocate_generic_slack_cols(
+                            constraint,
+                            col_generic_slack_start,
+                            &mut n_generic_slack_cols,
+                        );
                         n_generic_rows += 1;
                         generic_constraint_rows.push(GenericConstraintRowEntry {
                             constraint_idx,
                             entity_id: constraint.id.0,
                             block_idx,
+                            is_stage_level: false,
                             bound,
                             sense: constraint.sense,
                             slack_enabled: constraint.slack.enabled,
@@ -624,25 +672,17 @@ fn enumerate_generic_constraint_rows(
                     // upstream validation ensures it is non-negative.
                     #[allow(clippy::cast_sign_loss)]
                     let block_idx = blk_id as usize;
-                    let (slack_plus_col, slack_minus_col) = if constraint.slack.enabled {
-                        let plus_col = col_generic_slack_start + n_generic_slack_cols;
-                        n_generic_slack_cols += 1;
-                        let minus_col = if constraint.sense == ConstraintSense::Equal {
-                            let mc = col_generic_slack_start + n_generic_slack_cols;
-                            n_generic_slack_cols += 1;
-                            Some(mc)
-                        } else {
-                            None
-                        };
-                        (Some(plus_col), minus_col)
-                    } else {
-                        (None, None)
-                    };
+                    let (slack_plus_col, slack_minus_col) = allocate_generic_slack_cols(
+                        constraint,
+                        col_generic_slack_start,
+                        &mut n_generic_slack_cols,
+                    );
                     n_generic_rows += 1;
                     generic_constraint_rows.push(GenericConstraintRowEntry {
                         constraint_idx,
                         entity_id: constraint.id.0,
                         block_idx,
+                        is_stage_level: false,
                         bound,
                         sense: constraint.sense,
                         slack_enabled: constraint.slack.enabled,

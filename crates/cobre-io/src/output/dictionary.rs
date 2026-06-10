@@ -390,6 +390,7 @@ fn unit_for(file: &str, column: &str) -> &'static str {
         | "immediate_cost"
         | "future_cost"
         | "thermal_cost"
+        | "anticipated_thermal_cost"
         | "contract_cost"
         | "deficit_cost"
         | "excess_cost"
@@ -474,6 +475,9 @@ fn description_for(file: &str, column: &str) -> &'static str {
         ("costs", "future_cost") => "Expected future cost (envelope value)",
         ("costs", "discount_factor") => "Discount factor applied to this stage",
         ("costs", "thermal_cost") => "Total thermal generation cost",
+        ("costs", "anticipated_thermal_cost") => {
+            "Total anticipated (forward-committed) thermal generation cost"
+        }
         ("costs", "contract_cost") => "Total contract cost",
         ("costs", "deficit_cost") => "Total load-deficit penalty cost",
         ("costs", "excess_cost") => "Total excess-generation cost",
@@ -1516,8 +1520,8 @@ mod tests {
 
         let row_count = rdr.records().count();
         assert_eq!(
-            row_count, 208,
-            "variables.csv must have exactly 208 data rows (one per column across all schemas)"
+            row_count, 209,
+            "variables.csv must have exactly 209 data rows (one per column across all schemas)"
         );
     }
 

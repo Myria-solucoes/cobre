@@ -162,7 +162,7 @@ single file. Consumers should check `status` before interpreting other fields.
   },
   "bounds": {
     "final_lower_bound": 15595518.38,
-    "final_upper_bound": 579592.20,
+    "final_upper_bound": 579592.2,
     "final_upper_bound_std": 0.0
   },
   "solve_stats": {
@@ -180,35 +180,33 @@ single file. Consumers should check `status` before interpreting other fields.
     "ranks_participated": 1,
     "num_nodes": 1,
     "threads_per_rank": 1,
-    "hosts": [
-      { "hostname": "fedora", "ranks": [0] }
-    ]
+    "hosts": [{ "hostname": "fedora", "ranks": [0] }]
   }
 }
 ```
 
 **Top-level fields:**
 
-| Field             | Type   | Nullable | Description                                                                            |
-| ----------------- | ------ | -------- | -------------------------------------------------------------------------------------- |
-| `cobre_version`   | string | No       | Version of the cobre binary that produced this output (from `CARGO_PKG_VERSION`).      |
-| `hostname`        | string | No       | Hostname of the machine that ran training.                                             |
-| `solver`          | string | No       | LP solver backend: `"highs"` or `"clp"`.                                               |
-| `solver_version`  | string | Yes      | LP solver library version string (e.g. `"1.13.1"`). Omitted when not available.       |
-| `started_at`      | string | No       | ISO 8601 timestamp when training started.                                              |
-| `completed_at`    | string | No       | ISO 8601 timestamp when training completed.                                            |
-| `duration_seconds`| number | No       | Total training wall-clock duration in seconds.                                         |
-| `status`          | string | No       | Run status: `"complete"` or `"partial"`.                                               |
+| Field              | Type   | Nullable | Description                                                                       |
+| ------------------ | ------ | -------- | --------------------------------------------------------------------------------- |
+| `cobre_version`    | string | No       | Version of the cobre binary that produced this output (from `CARGO_PKG_VERSION`). |
+| `hostname`         | string | No       | Hostname of the machine that ran training.                                        |
+| `solver`           | string | No       | LP solver backend: `"highs"` or `"clp"`.                                          |
+| `solver_version`   | string | Yes      | LP solver library version string (e.g. `"1.13.1"`). Omitted when not available.   |
+| `started_at`       | string | No       | ISO 8601 timestamp when training started.                                         |
+| `completed_at`     | string | No       | ISO 8601 timestamp when training completed.                                       |
+| `duration_seconds` | number | No       | Total training wall-clock duration in seconds.                                    |
+| `status`           | string | No       | Run status: `"complete"` or `"partial"`.                                          |
 
 **`configuration` fields:**
 
-| Field            | Type    | Nullable | Description                                                                               |
-| ---------------- | ------- | -------- | ----------------------------------------------------------------------------------------- |
-| `seed`           | integer | Yes      | Random seed used for scenario generation. `null` when not set.                            |
-| `max_iterations` | integer | Yes      | Maximum iterations from the iteration-limit stopping rule. `null` when no limit was set.  |
-| `forward_passes` | integer | Yes      | Number of forward-pass scenario trajectories per iteration.                               |
-| `stopping_mode`  | string  | No       | How multiple stopping rules combine: `"any"` or `"all"`.                                  |
-| `policy_mode`    | string  | No       | Policy warm-start mode: `"fresh"` or `"resume"`.                                          |
+| Field            | Type    | Nullable | Description                                                                              |
+| ---------------- | ------- | -------- | ---------------------------------------------------------------------------------------- |
+| `seed`           | integer | Yes      | Random seed used for scenario generation. `null` when not set.                           |
+| `max_iterations` | integer | Yes      | Maximum iterations from the iteration-limit stopping rule. `null` when no limit was set. |
+| `forward_passes` | integer | Yes      | Number of forward-pass scenario trajectories per iteration.                              |
+| `stopping_mode`  | string  | No       | How multiple stopping rules combine: `"any"` or `"all"`.                                 |
+| `policy_mode`    | string  | No       | Policy warm-start mode: `"fresh"` or `"resume"`.                                         |
 
 **`problem_dimensions` fields:**
 
@@ -222,64 +220,64 @@ single file. Consumers should check `status` before interpreting other fields.
 
 **`iterations` fields:**
 
-| Field          | Type    | Nullable | Description                                                                                       |
-| -------------- | ------- | -------- | ------------------------------------------------------------------------------------------------- |
-| `completed`    | integer | No       | Number of training iterations that finished.                                                      |
+| Field          | Type    | Nullable | Description                                                                                             |
+| -------------- | ------- | -------- | ------------------------------------------------------------------------------------------------------- |
+| `completed`    | integer | No       | Number of training iterations that finished.                                                            |
 | `converged_at` | integer | Yes      | Iteration at which a convergence stopping rule triggered termination. `null` for iteration-limit stops. |
 
 **`convergence` fields:**
 
-| Field                  | Type    | Nullable | Description                                                                                              |
-| ---------------------- | ------- | -------- | -------------------------------------------------------------------------------------------------------- |
-| `achieved`             | boolean | No       | `true` if a convergence-oriented stopping rule terminated the run.                                       |
-| `final_gap_percent`    | number  | Yes      | Optimality gap between lower and upper bounds at termination as a percentage. `null` when upper bound evaluation is disabled. |
-| `termination_reason`   | string  | No       | Machine-readable termination label. Common values: `"iteration_limit"`, `"bound_stalling"`.              |
+| Field                | Type    | Nullable | Description                                                                                                                   |
+| -------------------- | ------- | -------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `achieved`           | boolean | No       | `true` if a convergence-oriented stopping rule terminated the run.                                                            |
+| `final_gap_percent`  | number  | Yes      | Optimality gap between lower and upper bounds at termination as a percentage. `null` when upper bound evaluation is disabled. |
+| `termination_reason` | string  | No       | Machine-readable termination label. Common values: `"iteration_limit"`, `"bound_stalling"`.                                   |
 
 **`row_pool` fields:**
 
-| Field             | Type    | Nullable | Description                                                    |
-| ----------------- | ------- | -------- | -------------------------------------------------------------- |
-| `total_generated` | integer | No       | Total cut rows generated over the entire run.                  |
-| `total_active`    | integer | No       | Cut rows still active in the pool at termination.              |
-| `peak_active`     | integer | No       | Highest number of simultaneously active cut rows observed.     |
-| `cuts_active`     | integer | No       | Cut rows currently active in the LP at termination.            |
+| Field             | Type    | Nullable | Description                                                |
+| ----------------- | ------- | -------- | ---------------------------------------------------------- |
+| `total_generated` | integer | No       | Total cut rows generated over the entire run.              |
+| `total_active`    | integer | No       | Cut rows still active in the pool at termination.          |
+| `peak_active`     | integer | No       | Highest number of simultaneously active cut rows observed. |
+| `cuts_active`     | integer | No       | Cut rows currently active in the LP at termination.        |
 
 **`bounds` fields:**
 
-| Field                   | Type   | Nullable | Description                                                                                    |
-| ----------------------- | ------ | -------- | ---------------------------------------------------------------------------------------------- |
-| `final_lower_bound`     | number | No       | Final lower bound on the objective at termination.                                             |
-| `final_upper_bound`     | number | Yes      | Final upper bound estimate. `null` when upper-bound evaluation is disabled.                    |
-| `final_upper_bound_std` | number | Yes      | Standard deviation of the final upper-bound estimate. `null` when unavailable.                 |
+| Field                   | Type   | Nullable | Description                                                                    |
+| ----------------------- | ------ | -------- | ------------------------------------------------------------------------------ |
+| `final_lower_bound`     | number | No       | Final lower bound on the objective at termination.                             |
+| `final_upper_bound`     | number | Yes      | Final upper bound estimate. `null` when upper-bound evaluation is disabled.    |
+| `final_upper_bound_std` | number | Yes      | Standard deviation of the final upper-bound estimate. `null` when unavailable. |
 
 **`solve_stats` fields:**
 
-| Field                    | Type    | Nullable | Description                                                               |
-| ------------------------ | ------- | -------- | ------------------------------------------------------------------------- |
-| `total_lp_solves`        | integer | Yes      | Total number of LP solves performed during training.                      |
-| `first_try`              | integer | Yes      | Number of LP solves that succeeded on the first attempt.                  |
-| `retried`                | integer | Yes      | Number of LP solves that succeeded after one or more retries.             |
-| `failed`                 | integer | Yes      | Number of LP solves that failed terminally.                               |
-| `forward_solve_seconds`  | number  | Yes      | Cumulative wall-clock seconds in forward-phase LP solves.                 |
-| `backward_solve_seconds` | number  | Yes      | Cumulative wall-clock seconds in backward-phase LP solves.                |
-| `parallelism`            | integer | Yes      | Degree of parallelism (worker count) used during training.                |
+| Field                    | Type    | Nullable | Description                                                   |
+| ------------------------ | ------- | -------- | ------------------------------------------------------------- |
+| `total_lp_solves`        | integer | Yes      | Total number of LP solves performed during training.          |
+| `first_try`              | integer | Yes      | Number of LP solves that succeeded on the first attempt.      |
+| `retried`                | integer | Yes      | Number of LP solves that succeeded after one or more retries. |
+| `failed`                 | integer | Yes      | Number of LP solves that failed terminally.                   |
+| `forward_solve_seconds`  | number  | Yes      | Cumulative wall-clock seconds in forward-phase LP solves.     |
+| `backward_solve_seconds` | number  | Yes      | Cumulative wall-clock seconds in backward-phase LP solves.    |
+| `parallelism`            | integer | Yes      | Degree of parallelism (worker count) used during training.    |
 
 **`distribution` fields:**
 
-| Field                    | Type    | Nullable | Description                                                                                     |
-| ------------------------ | ------- | -------- | ----------------------------------------------------------------------------------------------- |
-| `backend`                | string  | No       | Communication backend: `"mpi"` or `"local"`.                                                    |
-| `world_size`             | integer | No       | Total number of processes in the communicator. `1` for single-process runs.                     |
-| `ranks_participated`     | integer | No       | Number of processes that participated in computation.                                           |
-| `num_nodes`              | integer | No       | Number of distinct physical hosts.                                                              |
-| `threads_per_rank`       | integer | No       | Rayon worker threads per process.                                                               |
-| `mpi_library`            | string  | Yes      | MPI implementation version (e.g. `"Open MPI v4.1.6"`). Omitted for the local backend.          |
-| `mpi_standard`           | string  | Yes      | MPI standard version (e.g. `"MPI 4.0"`). Omitted for the local backend.                        |
-| `thread_level`           | string  | Yes      | Negotiated MPI thread safety level. Omitted for the local backend.                              |
-| `slurm_job_id`           | string  | Yes      | SLURM job ID when running under SLURM. Omitted otherwise.                                       |
-| `hosts`                  | array   | No       | Per-host rank assignment. One entry per physical host. For local single-process runs, contains a single entry with `ranks: [0]`.              |
-| `hosts[].hostname`       | string  | No       | Hostname for this entry.                                                                        |
-| `hosts[].ranks`          | integer array | No | Sorted global ranks assigned to this host.                                                     |
+| Field                | Type          | Nullable | Description                                                                                                                      |
+| -------------------- | ------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `backend`            | string        | No       | Communication backend: `"mpi"` or `"local"`.                                                                                     |
+| `world_size`         | integer       | No       | Total number of processes in the communicator. `1` for single-process runs.                                                      |
+| `ranks_participated` | integer       | No       | Number of processes that participated in computation.                                                                            |
+| `num_nodes`          | integer       | No       | Number of distinct physical hosts.                                                                                               |
+| `threads_per_rank`   | integer       | No       | Rayon worker threads per process.                                                                                                |
+| `mpi_library`        | string        | Yes      | MPI implementation version (e.g. `"Open MPI v4.1.6"`). Omitted for the local backend.                                            |
+| `mpi_standard`       | string        | Yes      | MPI standard version (e.g. `"MPI 4.0"`). Omitted for the local backend.                                                          |
+| `thread_level`       | string        | Yes      | Negotiated MPI thread safety level. Omitted for the local backend.                                                               |
+| `slurm_job_id`       | string        | Yes      | SLURM job ID when running under SLURM. Omitted otherwise.                                                                        |
+| `hosts`              | array         | No       | Per-host rank assignment. One entry per physical host. For local single-process runs, contains a single entry with `ranks: [0]`. |
+| `hosts[].hostname`   | string        | No       | Hostname for this entry.                                                                                                         |
+| `hosts[].ranks`      | integer array | No       | Sorted global ranks assigned to this host.                                                                                       |
 
 ---
 
@@ -733,32 +731,30 @@ LP solver statistics, and distribution information.
     "ranks_participated": 1,
     "num_nodes": 1,
     "threads_per_rank": 1,
-    "hosts": [
-      { "hostname": "fedora", "ranks": [0] }
-    ]
+    "hosts": [{ "hostname": "fedora", "ranks": [0] }]
   }
 }
 ```
 
 **Top-level fields:**
 
-| Field             | Type   | Nullable | Description                                                                       |
-| ----------------- | ------ | -------- | --------------------------------------------------------------------------------- |
-| `cobre_version`   | string | No       | Version of the cobre binary that produced this output.                            |
-| `hostname`        | string | No       | Hostname of the machine that ran simulation.                                      |
-| `solver`          | string | No       | LP solver backend: `"highs"` or `"clp"`.                                          |
-| `solver_version`  | string | Yes      | LP solver library version string. Omitted when not available.                     |
-| `started_at`      | string | No       | ISO 8601 timestamp when simulation started.                                       |
-| `completed_at`    | string | No       | ISO 8601 timestamp when simulation completed.                                     |
-| `duration_seconds`| number | No       | Total simulation wall-clock duration in seconds.                                  |
-| `status`          | string | No       | Run status: `"complete"` or `"partial"`.                                          |
+| Field              | Type   | Nullable | Description                                                   |
+| ------------------ | ------ | -------- | ------------------------------------------------------------- |
+| `cobre_version`    | string | No       | Version of the cobre binary that produced this output.        |
+| `hostname`         | string | No       | Hostname of the machine that ran simulation.                  |
+| `solver`           | string | No       | LP solver backend: `"highs"` or `"clp"`.                      |
+| `solver_version`   | string | Yes      | LP solver library version string. Omitted when not available. |
+| `started_at`       | string | No       | ISO 8601 timestamp when simulation started.                   |
+| `completed_at`     | string | No       | ISO 8601 timestamp when simulation completed.                 |
+| `duration_seconds` | number | No       | Total simulation wall-clock duration in seconds.              |
+| `status`           | string | No       | Run status: `"complete"` or `"partial"`.                      |
 
 **`scenarios` fields:**
 
-| Field       | Type    | Nullable | Description                                          |
-| ----------- | ------- | -------- | ---------------------------------------------------- |
-| `total`     | integer | No       | Total number of scenarios dispatched for simulation. |
-| `completed` | integer | No       | Number of scenarios that completed without error.    |
+| Field       | Type    | Nullable | Description                                            |
+| ----------- | ------- | -------- | ------------------------------------------------------ |
+| `total`     | integer | No       | Total number of scenarios dispatched for simulation.   |
+| `completed` | integer | No       | Number of scenarios that completed without error.      |
 | `failed`    | integer | No       | Number of scenarios that encountered a terminal error. |
 
 **`cost` fields** (omitted when cost was not persisted):
@@ -772,14 +768,14 @@ LP solver statistics, and distribution information.
 
 **`solve_stats` fields:**
 
-| Field             | Type    | Nullable | Description                                                              |
-| ----------------- | ------- | -------- | ------------------------------------------------------------------------ |
-| `total_lp_solves` | integer | Yes      | Total number of LP solves performed during simulation.                   |
-| `first_try`       | integer | Yes      | Number of LP solves that succeeded on the first attempt.                 |
-| `retried`         | integer | Yes      | Number of LP solves that succeeded after one or more retries.            |
-| `failed`          | integer | Yes      | Number of LP solves that failed terminally.                              |
-| `solve_seconds`   | number  | Yes      | Cumulative wall-clock seconds spent in simulation LP solves.             |
-| `parallelism`     | integer | Yes      | Degree of parallelism (worker count) used during simulation.             |
+| Field             | Type    | Nullable | Description                                                   |
+| ----------------- | ------- | -------- | ------------------------------------------------------------- |
+| `total_lp_solves` | integer | Yes      | Total number of LP solves performed during simulation.        |
+| `first_try`       | integer | Yes      | Number of LP solves that succeeded on the first attempt.      |
+| `retried`         | integer | Yes      | Number of LP solves that succeeded after one or more retries. |
+| `failed`          | integer | Yes      | Number of LP solves that failed terminally.                   |
+| `solve_seconds`   | number  | Yes      | Cumulative wall-clock seconds spent in simulation LP solves.  |
+| `parallelism`     | integer | Yes      | Degree of parallelism (worker count) used during simulation.  |
 
 The `distribution` object has the same field structure as in `training/metadata.json`.
 See the **`distribution` fields** table above.
@@ -790,34 +786,35 @@ See the **`distribution` fields** table above.
 
 Stage and block-level cost breakdown. One row per (stage, block) pair. 26 columns.
 
-| Column                         | Type    | Nullable | Description                                                                    |
-| ------------------------------ | ------- | -------- | ------------------------------------------------------------------------------ |
-| `stage_id`                     | Int32   | No       | Stage index (0-based).                                                         |
-| `block_id`                     | Int32   | Yes      | Load block index within the stage. `null` for stage-level (non-block) records. |
-| `total_cost`                   | Float64 | No       | Total discounted cost for this stage/block (monetary units).                   |
-| `immediate_cost`               | Float64 | No       | Immediate (undiscounted) cost for this stage/block.                            |
-| `future_cost`                  | Float64 | No       | Future cost estimate (Benders cut value) at the end of this stage.             |
-| `discount_factor`              | Float64 | No       | Discount factor applied to this stage's costs.                                 |
-| `thermal_cost`                 | Float64 | No       | Thermal generation cost component.                                             |
-| `contract_cost`                | Float64 | No       | Energy contract cost component (positive for imports, negative for exports).   |
-| `deficit_cost`                 | Float64 | No       | Cost of unserved load (deficit penalty).                                       |
-| `excess_cost`                  | Float64 | No       | Cost of excess generation (excess penalty).                                    |
-| `storage_violation_cost`       | Float64 | No       | Cost of reservoir storage bound violations.                                    |
-| `filling_target_cost`          | Float64 | No       | Cost of missing reservoir filling targets.                                     |
-| `hydro_violation_cost`         | Float64 | No       | Cost of hydro operational bound violations.                                    |
-| `outflow_violation_below_cost` | Float64 | No       | Cost of total outflow below-minimum violations.                                |
-| `outflow_violation_above_cost` | Float64 | No       | Cost of total outflow above-maximum violations.                                |
-| `turbined_violation_cost`      | Float64 | No       | Cost of turbined flow bound violations.                                        |
-| `generation_violation_cost`    | Float64 | No       | Cost of generation bound violations.                                           |
-| `evaporation_violation_cost`   | Float64 | No       | Cost of evaporation violations.                                                |
-| `withdrawal_violation_cost`    | Float64 | No       | Cost of water withdrawal violations.                                           |
-| `inflow_penalty_cost`          | Float64 | No       | Cost of inflow non-negativity slack (numerical penalty).                       |
-| `generic_violation_cost`       | Float64 | No       | Cost of generic constraint violations.                                         |
-| `spillage_cost`                | Float64 | No       | Cost of reservoir spillage.                                                    |
-| `turbined_cost`                | Float64 | No       | Turbined flow penalty from the future-production hydro approximation.          |
-| `curtailment_cost`             | Float64 | No       | Cost of non-controllable source curtailment.                                   |
-| `exchange_cost`                | Float64 | No       | Transmission exchange cost component.                                          |
-| `pumping_cost`                 | Float64 | No       | Pumping station energy cost component.                                         |
+| Column                         | Type    | Nullable | Description                                                                                                                  |
+| ------------------------------ | ------- | -------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `stage_id`                     | Int32   | No       | Stage index (0-based).                                                                                                       |
+| `block_id`                     | Int32   | Yes      | Load block index within the stage. `null` for stage-level (non-block) records.                                               |
+| `total_cost`                   | Float64 | No       | Total discounted cost for this stage/block (monetary units).                                                                 |
+| `immediate_cost`               | Float64 | No       | Immediate (undiscounted) cost for this stage/block.                                                                          |
+| `future_cost`                  | Float64 | No       | Future cost estimate (Benders cut value) at the end of this stage.                                                           |
+| `discount_factor`              | Float64 | No       | Discount factor applied to this stage's costs.                                                                               |
+| `thermal_cost`                 | Float64 | No       | Thermal generation cost component.                                                                                           |
+| `anticipated_thermal_cost`     | Float64 | No       | Anticipated (forward-committed) thermal generation cost, booked at the decision stage. Zero when no anticipated units exist. |
+| `contract_cost`                | Float64 | No       | Energy contract cost component (positive for imports, negative for exports).                                                 |
+| `deficit_cost`                 | Float64 | No       | Cost of unserved load (deficit penalty).                                                                                     |
+| `excess_cost`                  | Float64 | No       | Cost of excess generation (excess penalty).                                                                                  |
+| `storage_violation_cost`       | Float64 | No       | Cost of reservoir storage bound violations.                                                                                  |
+| `filling_target_cost`          | Float64 | No       | Cost of missing reservoir filling targets.                                                                                   |
+| `hydro_violation_cost`         | Float64 | No       | Cost of hydro operational bound violations.                                                                                  |
+| `outflow_violation_below_cost` | Float64 | No       | Cost of total outflow below-minimum violations.                                                                              |
+| `outflow_violation_above_cost` | Float64 | No       | Cost of total outflow above-maximum violations.                                                                              |
+| `turbined_violation_cost`      | Float64 | No       | Cost of turbined flow bound violations.                                                                                      |
+| `generation_violation_cost`    | Float64 | No       | Cost of generation bound violations.                                                                                         |
+| `evaporation_violation_cost`   | Float64 | No       | Cost of evaporation violations.                                                                                              |
+| `withdrawal_violation_cost`    | Float64 | No       | Cost of water withdrawal violations.                                                                                         |
+| `inflow_penalty_cost`          | Float64 | No       | Cost of inflow non-negativity slack (numerical penalty).                                                                     |
+| `generic_violation_cost`       | Float64 | No       | Cost of generic constraint violations.                                                                                       |
+| `spillage_cost`                | Float64 | No       | Cost of reservoir spillage.                                                                                                  |
+| `turbined_cost`                | Float64 | No       | Turbined flow penalty from the future-production hydro approximation.                                                        |
+| `curtailment_cost`             | Float64 | No       | Cost of non-controllable source curtailment.                                                                                 |
+| `exchange_cost`                | Float64 | No       | Transmission exchange cost component.                                                                                        |
+| `pumping_cost`                 | Float64 | No       | Pumping station energy cost component.                                                                                       |
 
 ---
 
@@ -1071,10 +1068,10 @@ last successfully completed write.
 
 The `status` field is always the first indicator to check:
 
-| Status       | Meaning                                                                                       |
-| ------------ | --------------------------------------------------------------------------------------------- |
-| `"complete"` | The run finished normally. All output files are present.                                      |
-| `"partial"`  | Not all scenarios completed without error. (Simulation metadata only.)                        |
+| Status       | Meaning                                                                |
+| ------------ | ---------------------------------------------------------------------- |
+| `"complete"` | The run finished normally. All output files are present.               |
+| `"partial"`  | Not all scenarios completed without error. (Simulation metadata only.) |
 
 `cobre report` reads both metadata files and prints a combined JSON summary to
 stdout. Use it in CI pipelines or shell scripts to inspect outcomes without

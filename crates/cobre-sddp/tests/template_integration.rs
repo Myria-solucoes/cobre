@@ -5720,11 +5720,13 @@ fn withdrawal_slack_objective_zero_when_cost_is_zero() {
     );
 }
 
-/// AC-4: Withdrawal slack column has bounds [0, +inf).
+/// AC-4: Withdrawal slack bounds are sign-aware (T > 0 case).
 ///
-/// Lower bound must be 0.0 (from vec initialisation), upper bound must be +inf.
+/// For a positive target `T = 10`, realized withdrawal must stay on `[0, T]`:
+/// the under-delivery (`neg`) slack is capped at `|T| = 10` (floors R ≥ 0), while
+/// the over-delivery (`pos`) slack is left unbounded. Both lower bounds are 0.
 #[test]
-fn withdrawal_slack_bounds_are_zero_to_infinity() {
+fn withdrawal_slack_bounds_are_sign_aware_positive_target() {
     let system = one_hydro_system_with_withdrawal(1, 0, 10.0, 5_000.0);
     let result = build_stage_templates(
         &system,
@@ -5738,17 +5740,29 @@ fn withdrawal_slack_bounds_are_zero_to_infinity() {
     .expect("build ok");
 
     let t = &result.templates[0];
-    // Withdrawal slack neg: followed by N pos + 4*N operational violation slack columns.
-    let col_w = t.num_cols - 1 - 5 * t.n_hydro;
+    // Trailing slack layout per hydro: neg, pos, then 4 operational violation
+    // slacks (5 families after neg). col_neg is the first of the 6 trailing cols.
+    let col_neg = t.num_cols - 1 - 5 * t.n_hydro;
+    let col_pos = col_neg + t.n_hydro;
     assert!(
-        (t.col_lower[col_w] - 0.0).abs() < 1e-15,
-        "withdrawal slack lower bound must be 0.0, got {}",
-        t.col_lower[col_w]
+        (t.col_lower[col_neg] - 0.0).abs() < 1e-15,
+        "neg slack lower bound must be 0.0, got {}",
+        t.col_lower[col_neg]
     );
     assert!(
-        t.col_upper[col_w].is_infinite() && t.col_upper[col_w] > 0.0,
-        "withdrawal slack upper bound must be +inf, got {}",
-        t.col_upper[col_w]
+        (t.col_upper[col_neg] - 10.0).abs() < 1e-15,
+        "neg slack upper bound must be |T| = 10.0 for T > 0, got {}",
+        t.col_upper[col_neg]
+    );
+    assert!(
+        (t.col_lower[col_pos] - 0.0).abs() < 1e-15,
+        "pos slack lower bound must be 0.0, got {}",
+        t.col_lower[col_pos]
+    );
+    assert!(
+        t.col_upper[col_pos].is_infinite() && t.col_upper[col_pos] > 0.0,
+        "pos slack upper bound must be +inf for T > 0 (over-withdrawal latitude), got {}",
+        t.col_upper[col_pos]
     );
 }
 
@@ -6263,22 +6277,25 @@ fn three_hydro_num_cols_includes_three_withdrawal_slacks() {
     // Verify the withdrawal slack columns. They are followed by
     // 2*N withdrawal + 4*N operational = 6*N columns after withdrawal_neg start.
     // withdrawal_neg starts at num_cols - 6*N.
+    //
+    // All three hydros have a positive withdrawal target T = 5.0, so the
+    // under-delivery (neg) slack is capped at |T| = 5.0 (floors realized
+    // withdrawal R ≥ 0); the over-delivery (pos) slack remains unbounded.
     let n_h = t.n_hydro;
-    assert_eq!(
-        t.col_upper[t.num_cols - 6 * n_h],
-        f64::INFINITY,
-        "withdrawal slack neg column for hydro 0 should be unbounded above"
-    );
-    assert_eq!(
-        t.col_upper[t.num_cols - 6 * n_h + 1],
-        f64::INFINITY,
-        "withdrawal slack neg column for hydro 1 should be unbounded above"
-    );
-    assert_eq!(
-        t.col_upper[t.num_cols - 6 * n_h + 2],
-        f64::INFINITY,
-        "withdrawal slack neg column for hydro 2 should be unbounded above"
-    );
+    let neg_start = t.num_cols - 6 * n_h;
+    let pos_start = neg_start + n_h;
+    for h in 0..n_h {
+        assert!(
+            (t.col_upper[neg_start + h] - 5.0).abs() < 1e-15,
+            "withdrawal slack neg column for hydro {h} must be capped at |T| = 5.0, got {}",
+            t.col_upper[neg_start + h]
+        );
+        assert_eq!(
+            t.col_upper[pos_start + h],
+            f64::INFINITY,
+            "withdrawal slack pos column for hydro {h} should be unbounded above (T > 0)"
+        );
+    }
 }
 
 // ── Generic constraint layout tests ──────────────────────────
@@ -6399,22 +6416,59 @@ fn one_bus_system_n_blks(n_blks: usize) -> cobre_core::System {
 }
 
 /// Make a `GenericConstraint` with a trivial expression (no terms).
+///
+/// A no-term expression is vacuously block-independent, so a `block_id = None`
+/// bound on it collapses to a single stage-level row under the F2-A rule.
 fn make_constraint(
     id: i32,
     sense: cobre_core::ConstraintSense,
     slack_enabled: bool,
 ) -> cobre_core::GenericConstraint {
-    use cobre_core::{ConstraintExpression, GenericConstraint, SlackConfig};
+    use cobre_core::ConstraintExpression;
+    make_constraint_with_expr(
+        id,
+        sense,
+        slack_enabled,
+        ConstraintExpression { terms: vec![] },
+    )
+}
+
+/// Make a `GenericConstraint` carrying the given expression.
+fn make_constraint_with_expr(
+    id: i32,
+    sense: cobre_core::ConstraintSense,
+    slack_enabled: bool,
+    expression: cobre_core::ConstraintExpression,
+) -> cobre_core::GenericConstraint {
+    use cobre_core::{GenericConstraint, SlackConfig};
     GenericConstraint {
         id: EntityId(id),
         name: format!("gc_{id}"),
         description: None,
-        expression: ConstraintExpression { terms: vec![] },
+        expression,
         sense,
         slack: SlackConfig {
             enabled: slack_enabled,
             penalty: if slack_enabled { Some(5000.0) } else { None },
         },
+    }
+}
+
+/// A block-level expression: one `BusExcess` term with variable-level
+/// `block_id = None`. `BusExcess` resolves to a per-block column
+/// (`excess.start + bus_pos * n_blks + block_idx`), so a `block_id = None` bound
+/// on this expression is **not** collapsible — distinct blocks yield distinct
+/// rows. Used to assert the per-block path survives the F2-A change.
+fn block_level_excess_expr(bus_id: i32) -> cobre_core::ConstraintExpression {
+    use cobre_core::{ConstraintExpression, LinearTerm, VariableRef};
+    ConstraintExpression {
+        terms: vec![LinearTerm::literal(
+            1.0,
+            VariableRef::BusExcess {
+                bus_id: EntityId(bus_id),
+                block_id: None,
+            },
+        )],
     }
 }
 
@@ -6458,10 +6512,11 @@ fn generic_constraints_zero_does_not_change_layout() {
     );
 }
 
-/// AC: 1 active constraint, `block_id = None`, 3 blocks, no slack
-/// → n_generic_rows == 3, n_generic_slack_cols == 0, num_rows += 3.
+/// AC (collapse path): 1 active constraint, `block_id = None`, 3 blocks, no
+/// slack, **block-independent** (trivial) expression → the per-block rows
+/// collapse to a single stage-level row. num_rows += 1, num_cols unchanged.
 #[test]
-fn generic_constraint_no_slack_block_id_none_3_blocks() {
+fn generic_constraint_no_slack_block_id_none_3_blocks_collapses() {
     use cobre_core::{ConstraintSense, ResolvedGenericConstraintBounds};
     use std::collections::HashMap;
 
@@ -6476,6 +6531,7 @@ fn generic_constraint_no_slack_block_id_none_3_blocks() {
     let rows = vec![(10_i32, 0_i32, None::<i32>, 500.0_f64)];
     let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
 
+    // Trivial (no-term) expression is block-independent → collapses to one row.
     let constraint = make_constraint(10, ConstraintSense::LessEqual, false);
     let system = one_bus_system_n_blks_with_generic(n_blks, vec![constraint], generic_bounds);
     let t_rows = build_templates_for(&system)[0].num_rows;
@@ -6483,8 +6539,8 @@ fn generic_constraint_no_slack_block_id_none_3_blocks() {
 
     assert_eq!(
         t_rows,
-        baseline_rows + n_blks,
-        "num_rows must increase by n_blks={n_blks} (one row per block, no slack)"
+        baseline_rows + 1,
+        "num_rows must increase by 1 (block-independent block_id=None collapses to a single row)"
     );
     assert_eq!(
         t_cols, baseline_cols,
@@ -6492,10 +6548,50 @@ fn generic_constraint_no_slack_block_id_none_3_blocks() {
     );
 }
 
-/// AC: 1 active constraint (sense `<=`, slack enabled), `block_id = None`, 2 blocks
-/// → n_generic_rows == 2, n_generic_slack_cols == 2 (one slack per row).
+/// AC (per-block path): 1 active constraint, `block_id = None`, 3 blocks, no
+/// slack, **block-level** expression (`BusExcess`) → distinct rows per block,
+/// so the per-block replication is preserved. num_rows += n_blks.
 #[test]
-fn generic_constraint_le_slack_enabled_2_blocks() {
+fn generic_constraint_no_slack_block_id_none_3_blocks_block_level_per_block() {
+    use cobre_core::{ConstraintSense, ResolvedGenericConstraintBounds};
+    use std::collections::HashMap;
+
+    let n_blks = 3_usize;
+    let baseline_system = one_bus_system_n_blks(n_blks);
+    let baseline_rows = build_templates_for(&baseline_system)[0].num_rows;
+    let baseline_cols = build_templates_for(&baseline_system)[0].num_cols;
+
+    let id_map: HashMap<i32, usize> = [(11_i32, 0)].into_iter().collect();
+    let rows = vec![(11_i32, 0_i32, None::<i32>, 500.0_f64)];
+    let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
+
+    // Block-level expression (BusExcess on bus 1) → NOT collapsible.
+    let constraint = make_constraint_with_expr(
+        11,
+        ConstraintSense::LessEqual,
+        false,
+        block_level_excess_expr(1),
+    );
+    let system = one_bus_system_n_blks_with_generic(n_blks, vec![constraint], generic_bounds);
+    let t_rows = build_templates_for(&system)[0].num_rows;
+    let t_cols = build_templates_for(&system)[0].num_cols;
+
+    assert_eq!(
+        t_rows,
+        baseline_rows + n_blks,
+        "num_rows must increase by n_blks={n_blks} (block-level expression keeps one row per block)"
+    );
+    assert_eq!(
+        t_cols, baseline_cols,
+        "num_cols must be unchanged (no slack columns)"
+    );
+}
+
+/// AC (collapse path): 1 active constraint (sense `<=`, slack enabled),
+/// `block_id = None`, 2 blocks, **block-independent** expression → collapses to
+/// a single stage-level row with a single `<=` slack column.
+#[test]
+fn generic_constraint_le_slack_enabled_2_blocks_collapses() {
     use cobre_core::{ConstraintSense, ResolvedGenericConstraintBounds};
     use std::collections::HashMap;
 
@@ -6513,23 +6609,63 @@ fn generic_constraint_le_slack_enabled_2_blocks() {
     let t_rows = build_templates_for(&system)[0].num_rows;
     let t_cols = build_templates_for(&system)[0].num_cols;
 
+    // 1 collapsed row, 1 slack col (one per row for `<=`).
+    assert_eq!(
+        t_rows,
+        baseline_rows + 1,
+        "num_rows must increase by 1 (collapsed stage-level row)"
+    );
+    assert_eq!(
+        t_cols,
+        baseline_cols + 1,
+        "num_cols must increase by 1 (one `<=` slack on the single collapsed row)"
+    );
+}
+
+/// AC (per-block path): same as above but with a **block-level** expression
+/// (`BusExcess`) → 2 rows (one per block), 2 slack cols (one per row for `<=`).
+#[test]
+fn generic_constraint_le_slack_enabled_2_blocks_block_level_per_block() {
+    use cobre_core::{ConstraintSense, ResolvedGenericConstraintBounds};
+    use std::collections::HashMap;
+
+    let n_blks = 2_usize;
+    let baseline_system = one_bus_system_n_blks(n_blks);
+    let baseline_rows = build_templates_for(&baseline_system)[0].num_rows;
+    let baseline_cols = build_templates_for(&baseline_system)[0].num_cols;
+
+    let id_map: HashMap<i32, usize> = [(21_i32, 0)].into_iter().collect();
+    let rows = vec![(21_i32, 0_i32, None::<i32>, 300.0_f64)];
+    let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
+
+    let constraint = make_constraint_with_expr(
+        21,
+        ConstraintSense::LessEqual,
+        true,
+        block_level_excess_expr(1),
+    );
+    let system = one_bus_system_n_blks_with_generic(n_blks, vec![constraint], generic_bounds);
+    let t_rows = build_templates_for(&system)[0].num_rows;
+    let t_cols = build_templates_for(&system)[0].num_cols;
+
     // 2 rows (one per block), 2 slack cols (one per row for `<=`).
     assert_eq!(
         t_rows,
         baseline_rows + 2,
-        "num_rows must increase by 2 (one row per block)"
+        "num_rows must increase by 2 (block-level keeps one row per block)"
     );
     assert_eq!(
         t_cols,
         baseline_cols + 2,
-        "num_cols must increase by 2 (one slack per row for `<=`)"
+        "num_cols must increase by 2 (one slack per per-block row for `<=`)"
     );
 }
 
-/// AC: 1 active constraint (sense `==`, slack enabled), `block_id = None`, 2 blocks
-/// → n_generic_slack_cols == 4 (two slacks per row: positive and negative).
+/// AC (collapse path): 1 active constraint (sense `==`, slack enabled),
+/// `block_id = None`, 2 blocks, **block-independent** expression → collapses to
+/// a single stage-level row with two slack cols (plus and minus for `==`).
 #[test]
-fn generic_constraint_equal_sense_two_slacks_per_row() {
+fn generic_constraint_equal_sense_two_slacks_collapses() {
     use cobre_core::{ConstraintSense, ResolvedGenericConstraintBounds};
     use std::collections::HashMap;
 
@@ -6547,16 +6683,114 @@ fn generic_constraint_equal_sense_two_slacks_per_row() {
     let t_rows = build_templates_for(&system)[0].num_rows;
     let t_cols = build_templates_for(&system)[0].num_cols;
 
+    // 1 collapsed row, 2 slack cols (plus and minus for `==`).
+    assert_eq!(
+        t_rows,
+        baseline_rows + 1,
+        "num_rows must increase by 1 (collapsed stage-level row)"
+    );
+    assert_eq!(
+        t_cols,
+        baseline_cols + 2,
+        "num_cols must increase by 2 (plus+minus slacks on the single collapsed row)"
+    );
+}
+
+/// AC (per-block path): same as above but with a **block-level** expression
+/// (`BusExcess`) → 2 rows (one per block), 4 slack cols (two per row for `==`).
+#[test]
+fn generic_constraint_equal_sense_two_slacks_block_level_per_block() {
+    use cobre_core::{ConstraintSense, ResolvedGenericConstraintBounds};
+    use std::collections::HashMap;
+
+    let n_blks = 2_usize;
+    let baseline_system = one_bus_system_n_blks(n_blks);
+    let baseline_rows = build_templates_for(&baseline_system)[0].num_rows;
+    let baseline_cols = build_templates_for(&baseline_system)[0].num_cols;
+
+    let id_map: HashMap<i32, usize> = [(31_i32, 0)].into_iter().collect();
+    let rows = vec![(31_i32, 0_i32, None::<i32>, 100.0_f64)];
+    let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
+
+    let constraint =
+        make_constraint_with_expr(31, ConstraintSense::Equal, true, block_level_excess_expr(1));
+    let system = one_bus_system_n_blks_with_generic(n_blks, vec![constraint], generic_bounds);
+    let t_rows = build_templates_for(&system)[0].num_rows;
+    let t_cols = build_templates_for(&system)[0].num_cols;
+
     // 2 rows (one per block), 4 slack cols (two per row for `==`).
     assert_eq!(
         t_rows,
         baseline_rows + 2,
-        "num_rows must increase by 2 (one row per block)"
+        "num_rows must increase by 2 (block-level keeps one row per block)"
     );
     assert_eq!(
         t_cols,
         baseline_cols + 4,
-        "num_cols must increase by 4 (two slacks per row for `==`)"
+        "num_cols must increase by 4 (two slacks per per-block row for `==`)"
+    );
+}
+
+/// AC (penalty conservation): the collapsed stage-level slack is priced by the
+/// stage total hours, so the total penalty equals the old per-block sum:
+/// `penalty × total_stage_hours = penalty × Σ block_hours`.
+///
+/// 3 blocks of 720 h each (Σ = 2160 h). A block-independent (trivial) `block_id
+/// = None` constraint with slack collapses to one row; its single `<=` slack
+/// must carry objective `penalty × 2160 / COST_SCALE_FACTOR`.
+#[test]
+fn generic_constraint_collapsed_slack_priced_by_total_stage_hours() {
+    use cobre_core::{ConstraintSense, ResolvedGenericConstraintBounds};
+    use std::collections::HashMap;
+
+    let n_blks = 3_usize;
+    let block_hours = 720.0_f64; // one_bus_system_n_blks uses 720 h per block
+    let penalty = 5000.0_f64; // make_constraint sets penalty = 5000 when slack enabled
+    let total_stage_hours = block_hours * (n_blks as f64);
+
+    let baseline_system = one_bus_system_n_blks(n_blks);
+    let baseline_cols = build_templates_for(&baseline_system)[0].num_cols;
+
+    let id_map: HashMap<i32, usize> = [(60_i32, 0)].into_iter().collect();
+    let rows = vec![(60_i32, 0_i32, None::<i32>, 500.0_f64)];
+    let generic_bounds = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
+
+    // Trivial (block-independent) expression with slack → collapses to one row.
+    let constraint = make_constraint(60, ConstraintSense::LessEqual, true);
+    let system = one_bus_system_n_blks_with_generic(n_blks, vec![constraint], generic_bounds);
+    let t = &build_templates_for(&system)[0];
+
+    // Exactly one slack column was added (collapsed `<=` row → one slack).
+    assert_eq!(
+        t.num_cols,
+        baseline_cols + 1,
+        "collapsed `<=` row must add exactly one slack column"
+    );
+
+    // The new slack column is the last column (appended after the baseline cols).
+    let slack_col = baseline_cols;
+    let generic_row = t.num_rows - 1; // the single collapsed generic row is last
+
+    // Slack carries the stage-total price, equal to the old per-block sum.
+    let expected_obj = penalty * total_stage_hours / COST_SCALE_FACTOR;
+    let per_block_sum = penalty * block_hours * (n_blks as f64) / COST_SCALE_FACTOR;
+    assert!(
+        (expected_obj - per_block_sum).abs() < 1e-9,
+        "penalty conservation identity must hold: {expected_obj} vs {per_block_sum}"
+    );
+    assert!(
+        (t.objective[slack_col] - expected_obj).abs() < 1e-9,
+        "collapsed slack objective must be penalty × total_stage_hours / scale = {expected_obj}, \
+         got {}",
+        t.objective[slack_col]
+    );
+
+    // The slack must sit on the single collapsed generic row with `<=` sign.
+    let entries = csc_entries_at(t, slack_col, generic_row);
+    let total: f64 = entries.iter().sum();
+    assert!(
+        (total - (-1.0)).abs() < f64::EPSILON,
+        "collapsed `<=` slack must have -1.0 at the generic row, got {total}"
     );
 }
 
@@ -6616,11 +6850,15 @@ fn generic_constraint_inactive_does_not_contribute_rows() {
         one_bus_system_n_blks_with_generic(n_blks, vec![c_active, c_inactive], generic_bounds);
     let t_rows = build_templates_for(&system)[0].num_rows;
 
-    // Only the active constraint (c_active) contributes n_blks=2 rows.
+    // Only the active constraint (c_active) contributes rows; its trivial
+    // (block-independent) expression with block_id=None collapses to one row.
+    // The inactive constraint contributes nothing — without the collapse this
+    // would be `baseline_rows + n_blks`; the point of the test is the inactive
+    // one stays absent, which holds for either row representation.
     assert_eq!(
         t_rows,
-        baseline_rows + n_blks,
-        "only the active constraint must contribute rows"
+        baseline_rows + 1,
+        "only the active constraint must contribute rows (collapsed to one)"
     );
 }
 
