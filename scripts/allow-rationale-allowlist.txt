@@ -1,0 +1,77 @@
+# E4 rationale-on-suppression allowlist — pre-existing un-rationaled sites.
+#
+# INVARIANT-STATE PREAMBLE (read before trusting any entry here):
+#   This file grandfathers production `#[allow(...)]` suppressions of the
+#   shape/dead-code lints (too_many_lines, too_many_arguments, type_complexity,
+#   dead_code, unused_*) that pre-date the E4 gate and carry no justifying
+#   comment. The gate (scripts/check-allow-rationale.sh) enforces D4 only on
+#   NEW/CHANGED suppressions; these keys exempt the legacy backlog so the gate
+#   can land green without a mass refactor.
+#
+#   Keys are `path::symbol` (file + enclosing item name), NOT `path:line` —
+#   line numbers drift on every refactor; the symbol is stable. The optional
+#   trailing `# lints` annotation records which lints each key already covers;
+#   adding a NEW lint to a keyed site is a NEW suppression and must carry its
+#   own rationale (it is not grandfathered by the key).
+#
+#   The set of keys is NOT a frozen census. Counts and membership drift as code
+#   is added, removed, and refactored. Re-derive the current set at use time:
+#     grep -rnE '#\[allow\(.*(too_many_lines|too_many_arguments|type_complexity|dead_code|unused_)' \
+#       crates/*/src --include='*.rs'
+#   then drop hits at/below each file's first test-module boundary — both the
+#   bare `#[cfg(test)]` and the `#[cfg(all(test, ...))]` forms (test scope is
+#   out of gate scope) — and resolve each surviving site's enclosing item to
+#   its `path::symbol` key. Sites that already carry a justifying comment (e.g.
+#   a trailing inline `// ...` rationale) are recognized by the gate and need
+#   NOT appear here.
+#
+#   This list is meant to SHRINK TO ZERO: as each grandfathered suppression is
+#   either removed or given a real `// RATIONALE:` comment during the burndown,
+#   delete its key. An empty file means the whole tree satisfies D4.
+#
+crates/cobre-cli/src/commands/run.rs::broadcast_and_build_setup  # too_many_lines
+crates/cobre-cli/src/commands/run.rs::run_training_phase  # too_many_lines
+crates/cobre-cli/src/summary.rs::cobre_sddp  # unused_imports
+crates/cobre-comm/src/factory.rs::_assert_comm_backend_send_sync  # dead_code
+crates/cobre-comm/src/ferrompi.rs::mpi  # dead_code
+crates/cobre-core/src/system.rs::build  # too_many_lines
+crates/cobre-io/src/constraints/bounds.rs::parse_hydro_bounds  # too_many_lines
+crates/cobre-io/src/constraints/generic.rs::build_variable_ref  # too_many_lines
+crates/cobre-io/src/constraints/penalty_overrides.rs::parse_penalty_overrides_hydro  # too_many_lines
+crates/cobre-io/src/output/dictionary.rs::description_for  # too_many_lines
+crates/cobre-io/src/output/dictionary.rs::unit_for  # too_many_lines
+crates/cobre-io/src/output/policy/codec.rs::read_f32_vector_as_f64  # dead_code
+crates/cobre-io/src/pipeline.rs::run_pipeline_with_artifacts  # too_many_lines
+crates/cobre-io/src/resolution/bounds.rs::resolve_bounds  # too_many_lines
+crates/cobre-io/src/resolution/penalties.rs::resolve_penalties  # too_many_lines
+crates/cobre-io/src/stages.rs::Expectation  # dead_code
+crates/cobre-io/src/validation/referential.rs::check_scenario_references  # too_many_lines
+crates/cobre-io/src/validation/schema.rs::exchange_factors  # dead_code
+crates/cobre-io/src/validation/schema.rs::scalar_parameters  # dead_code
+crates/cobre-python/src/results.rs::load_convergence  # too_many_lines
+crates/cobre-python/src/study.rs::hydro_models_summary  # dead_code
+crates/cobre-python/src/study.rs::provenance  # dead_code
+crates/cobre-python/src/study.rs::stochastic_summary  # dead_code
+crates/cobre-sddp/src/backward_pass_state.rs::from_session_fields  # too_many_arguments
+crates/cobre-sddp/src/cut_selection.rs::apply_column_rule  # too_many_arguments
+crates/cobre-sddp/src/estimation.rs::apply_annual_prepass_reductions  # too_many_arguments
+crates/cobre-sddp/src/estimation.rs::estimate_ar_with_pacf_annual  # too_many_lines
+crates/cobre-sddp/src/estimation.rs::reduce_entity_orders_annual  # too_many_lines,too_many_arguments
+crates/cobre-sddp/src/fpha_fitting.rs::evaluate_losses_factor  # dead_code
+crates/cobre-sddp/src/fpha_fitting.rs::hydro_name  # dead_code
+crates/cobre-sddp/src/hydro_models.rs::resolve_evaporation_models_from_artifacts  # type_complexity
+crates/cobre-sddp/src/indexer.rs::with_equipment_and_evaporation  # too_many_lines
+crates/cobre-sddp/src/lp_builder/layout.rs::n_anticipated_state_out_def_rows  # dead_code
+crates/cobre-sddp/src/lp_builder/layout.rs::n_ant_state  # dead_code
+crates/cobre-sddp/src/lp_builder/layout.rs::new  # too_many_lines
+crates/cobre-sddp/src/lp_builder/layout.rs::row_anticipated_state_fixing_start  # dead_code
+crates/cobre-sddp/src/lp_builder/patch.rs::new  # too_many_arguments
+crates/cobre-sddp/src/lp_builder/template.rs::build_single_stage_template  # type_complexity
+crates/cobre-sddp/src/policy_load.rs::resolve_warm_start_counts  # dead_code
+crates/cobre-sddp/src/resolved_parameters.rs::resolve_computed  # too_many_arguments
+crates/cobre-sddp/src/simulation/pipeline.rs::extract_sim_stage_result  # too_many_arguments
+crates/cobre-sddp/src/training.rs::new  # too_many_arguments
+crates/cobre-sddp/src/training_session/iteration_scratch.rs::new  # too_many_arguments
+crates/cobre-sddp/src/training_session/rank_distribution.rs::my_rank  # dead_code
+crates/cobre-sddp/src/training_session/runtime.rs::export_states  # dead_code
+crates/cobre-stochastic/src/context.rs::build_stochastic_context  # too_many_lines

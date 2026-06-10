@@ -2112,7 +2112,7 @@ fn d19_multi_hydro_par_truncation() {
 
 /// Expected lower bound for D19 (2-hydro PAR(2) with truncation, 3 stages).
 ///
-/// Recorded empirically with the corrected lag-major indexing (T001 fix)
+/// Recorded empirically with the corrected lag-major indexing
 /// and season-based fallback for pre-study lag stats. The value depends on
 /// the PAR evaluation and truncation logic -- it is not hand-computable
 /// due to the 2-hydro x 2-lag state space.

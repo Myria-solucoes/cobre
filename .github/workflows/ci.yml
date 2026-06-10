@@ -251,6 +251,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
+        with:
+          # Full history so the E4 rationale gate can compute the merge base
+          # against the PR base / origin/main (git-diff-scoped enforcement).
+          fetch-depth: 0
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -260,6 +264,26 @@ jobs:
         run: bash scripts/check-cut-selection-determinism.sh
       - name: Check for plan-structure leaks
         run: bash scripts/check-no-plan-leaks.sh
+      - name: Check repo-relative doc paths/links
+        run: bash scripts/check-doc-paths.sh
+      - name: Check comment references (un-rottable-ref gate)
+        run: bash scripts/check-comment-refs.sh
+      - name: Advisory — drift-prone line references in comments (E2)
+        # ADVISORY: exits 0 regardless of hits; its output is informational and
+        # never fails the job.
+        run: bash scripts/check-comment-line-refs.sh
+      - name: Advisory — box-drawing banner glyphs in comments (E7)
+        # ADVISORY: exits 0 regardless of hits; its output is informational and
+        # never fails the job.
+        run: bash scripts/check-comment-banners.sh
+      - name: Check for doc placeholders (E5 placeholder gate)
+        run: bash scripts/check-doc-placeholders.sh
+      - name: Check rationale on new suppressions (E4 gate)
+        # On pull_request events, diff against the PR base SHA; on push (and any
+        # other event) BASE_REF is empty and the gate defaults to origin/main.
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha }}
+        run: bash scripts/check-allow-rationale.sh
       - name: Check Python parity
         run: python3 scripts/check_python_parity.py --max 0
       - name: Check book version references
