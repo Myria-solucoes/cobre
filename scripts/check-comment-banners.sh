@@ -1,26 +1,33 @@
 #!/usr/bin/env bash
 #
-# check-comment-banners.sh — Box-drawing banner-glyph advisory (ADVISORY).
+# check-comment-banners.sh — N5 in-function banner advisory (ADVISORY).
 #
-# Box-drawing banner glyphs (U+2500..U+257F) used to fence sections inside a
-# comment are a Narrator-voice tell (see .claude/rules/comments.md, the banned
-# Narrator voice and N5). There are many legitimate section-divider uses across
-# the tree, so this gate is ADVISORY — it reports the count and the candidate
-# spans so authors prefer plain section headers, but NEVER fails the build.
+# Box-drawing banner glyphs (U+2500..U+257F) that fence groups INSIDE a function
+# body are the specific thing N5 forbids ("no banners fencing groups inside one
+# long production function — extract a function instead"; see
+# .claude/rules/comments.md). Dividers between top-level items, inside `impl` /
+# `mod` blocks, and inside `extern "C"` blocks are explicitly N5-OK. This gate is
+# ADVISORY — it surfaces the in-fn banners (each a "this function wants
+# splitting" marker) so they can be ranked and remedied, but NEVER fails the
+# build.
 #
 # What it flags, over production `//`/`///`/`//!` comment lines:
-#   Any box-drawing glyph in the Unicode range U+2500..U+257F. Matching uses
-#   grep -P with the `\x{2500}-\x{257F}` UTF-8-aware class — a byte class would
-#   mis-handle these multibyte glyphs. Only the token span is reported.
+#   A box-drawing glyph in the Unicode range U+2500..U+257F on a comment line
+#   that sits inside a `fn` body. Matching uses grep -P with the
+#   `\x{2500}-\x{257F}` UTF-8-aware class — a byte class would mis-handle these
+#   multibyte glyphs. Only the token span is reported. Top-level / impl / mod
+#   dividers are deliberately NOT flagged (they are N5-OK).
 #
-# Scope: production source under crates/*/src/ (including stub crates), with two
-#   pre-filter exclusions applied in the awk stage:
+# Scope: production source under crates/*/src/ (including stub crates), with
+#   three pre-filter exclusions applied in the awk stage:
 #     1. cfg(test) tail block — everything from the first `#[cfg(test)]` line
 #        onward is dropped (borrowed from the sibling gates).
 #     2. `extern "C"` blocks — from an `extern "C"` opener line to its matching
 #        column-0 closing `}` (inclusive), all lines are suppressed. Dividers
 #        that mirror a C header inside an `extern "C"` block are an allowed N5
 #        carve-out, so they are out of scope here.
+#     3. non-fn-body scope — only comment lines whose enclosing scope includes a
+#        `fn` body are considered; top-level and impl/mod dividers are skipped.
 #
 #   Known limitation (same as the sibling gates): the cfg(test) exclusion
 #   assumes the test module is a tail block. The `extern "C"` skip assumes the
@@ -59,11 +66,22 @@ readonly SCAN_DIRS=(
 readonly GLYPH_PATTERN='[\x{2500}-\x{257F}]+'
 
 # Emit production comment lines as `FILE:LINENO:CONTENT`, restricted to lines
-# carrying a `//` comment marker (covers `//`, `///`, `//!`), with two
-# structural pre-filters applied as the file is walked:
+# carrying a `//` comment marker (covers `//`, `///`, `//!`) that sit INSIDE a
+# `fn` body — the only place N5 forbids a banner ("no banners fencing groups
+# inside one long production function"). Dividers between top-level items and
+# inside `impl` / `mod` blocks are N5-OK and are NOT emitted. Three structural
+# pre-filters are applied as the file is walked:
 #   * exit once a bare `#[cfg(test)]` line is reached (tail test-module skip).
 #   * suppress every line from an `extern "C"` opener through its matching
 #     column-0 closing `}` (inclusive) via the in_extern_c state flag.
+#   * track brace depth and an fn-body stack so only lines whose enclosing
+#     scope includes a `fn` body are emitted.
+#
+# fn-context tracking is a heuristic: a `fn NAME(` definition arms `pending_fn`,
+# and the next `{` that opens marks that brace level as a fn body; the level is
+# popped when its matching `}` is seen. Closures inside a fn stay in-fn (the
+# enclosing fn level is still on the stack). A `fn` pointer type (`fn(` with no
+# following name) does not arm the flag. Good enough for an advisory gate.
 emit_comment_lines() {
     local file="$1"
     awk -v f="$file" '
@@ -75,7 +93,26 @@ emit_comment_lines() {
             if ($0 ~ /^\}/) { in_extern_c = 0 }
             next
         }
-        /\/\// { printf "%s:%d:%s\n", f, NR, $0 }
+        {
+            # Emit a comment line only when inside a fn body. The in-fn test uses
+            # state from PRECEDING lines, so a comment on the fn-signature line
+            # (not yet inside the body) is correctly excluded.
+            if ($0 ~ /\/\// && fn_depth_count > 0) printf "%s:%d:%s\n", f, NR, $0
+            # Update brace / fn-context state for subsequent lines.
+            if ($0 ~ /(^|[^A-Za-z0-9_])fn[[:space:]]+[A-Za-z_]/) pending_fn = 1
+            rest = $0
+            while (match(rest, /[{}]/)) {
+                ch = substr(rest, RSTART, 1)
+                if (ch == "{") {
+                    depth++
+                    if (pending_fn) { fn_open[++fn_depth_count] = depth; pending_fn = 0 }
+                } else {
+                    if (fn_depth_count > 0 && depth == fn_open[fn_depth_count]) fn_depth_count--
+                    if (depth > 0) depth--
+                }
+                rest = substr(rest, RSTART + 1)
+            }
+        }
     ' "$file"
 }
 
@@ -123,15 +160,15 @@ hits="${hits%$'\n'}"
 
 if [[ -n "$hits" ]]; then
     hit_count="$(printf '%s\n' "$hits" | grep -c '' || true)"
-    echo "ADVISORY: box-drawing banner glyphs in shipped comments (${hit_count} hits)"
+    echo "ADVISORY: box-drawing banners inside fn bodies (${hit_count} N5 candidates)"
     echo ""
     echo "$hits"
     echo ""
-    echo "Banner glyphs are a Narrator-voice tell. Prefer a plain section header"
-    echo "(a short capitalised label line) over a box-drawing divider. Advisory"
-    echo "only — this does not fail the build."
+    echo "Each banner fences groups inside a function — an N5 signal that the"
+    echo "function wants splitting. The remedy is to extract a function, not to"
+    echo "delete the divider. Advisory only — this does not fail the build."
     exit 0
 fi
 
-echo "OK: no box-drawing banner glyphs found in shipped comments."
+echo "OK: no in-fn box-drawing banners found in shipped comments."
 exit 0

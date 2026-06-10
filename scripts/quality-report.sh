@@ -20,9 +20,12 @@
 #                #[allow] suppressions; a direct map of where complexity is
 #                concentrated, produced by the E4 burndown).
 #   fn_banners — indented box-drawing banner-comment lines BEFORE the first
-#                #[cfg(test)] boundary. These are the N5 candidates: dividers
-#                fencing groups inside a body, a signal a function may want to be
-#                split. Top-level (column-0) dividers are N5-OK and not counted.
+#                #[cfg(test)] boundary: a cheap PROXY for the N5 "banner fencing
+#                groups inside a function" signal. Top-level (column-0) dividers
+#                are N5-OK and not counted. This is an over-approximation (it also
+#                counts impl/mod-block dividers); the precise in-fn set is what
+#                check-comment-banners.sh reports. Good enough as a 0.10-weight
+#                hotspot proxy.
 #
 # Composite score (0..100): churn dominates, then size, then the two
 # complexity-concentration proxies. Each raw signal is min-max normalized across
@@ -119,7 +122,7 @@ emit_rows | awk -F'\t' -v top="$TOP_N" -v since="$CHURN_SINCE" '
             shown++
         }
         printf "\nscore = 100*(0.50*churn + 0.20*loc + 0.20*rationales + 0.10*fn_banners), each min-max normalized.\n"
-        printf "churn=commits touching the file; rats=// Rationale: suppressions; banners=indented (in-body) box-drawing dividers (N5 candidates).\n"
+        printf "churn=commits touching the file; rats=// Rationale: suppressions; banners=indented box-drawing dividers (proxy for in-fn N5 candidates; exact set in check-comment-banners.sh).\n"
         printf "Advisory: this report never fails the build. Tune CHURN_SINCE / TOP_N / weights for the question at hand.\n"
     }
 '

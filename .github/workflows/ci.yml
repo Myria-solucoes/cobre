@@ -276,7 +276,7 @@ jobs:
         # ADVISORY: exits 0 regardless of hits; its output is informational and
         # never fails the job.
         run: bash scripts/check-comment-line-refs.sh
-      - name: Advisory — box-drawing banner glyphs in comments (E7)
+      - name: Advisory — in-fn box-drawing banners / N5 candidates (E7)
         # ADVISORY: exits 0 regardless of hits; its output is informational and
         # never fails the job.
         run: bash scripts/check-comment-banners.sh
