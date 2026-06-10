@@ -32,12 +32,20 @@
 #   incorrectly exempt that trailing code. cobre files follow the tail-block
 #   convention.
 #
-# Rationale recognition: a suppression is justified if, within a <=4-line
-#   upward window (skipping `///` / `//!` doc lines and attribute-continuation
-#   lines) OR as a trailing inline `//` comment on the attribute line, there is
-#   EITHER a case-insensitive `RATIONALE:` token OR any non-empty, non-doc `//`
-#   comment. The rule wants a justification, not a magic keyword; the
-#   free-form form keeps existing free-form justifications valid.
+# Rationale recognition: a suppression is justified if there is a non-empty,
+#   non-doc `//` comment EITHER trailing inline on the attribute line OR
+#   CONTIGUOUS with the attribute group above the opener — reachable by crossing
+#   only `///` / `//!` doc lines and attribute / attribute-continuation lines. A
+#   blank or code line ends the group, so a `//` belonging to the PRECEDING item
+#   is not mis-credited as this site's rationale. Any non-empty comment counts
+#   (a `RATIONALE:` token is conventional but not required); the rule wants a
+#   justification, not a magic keyword, and free-form justifications stay valid.
+#
+# Test-scope exclusion: besides the in-file `#[cfg(test)]` tail-block filter,
+#   modules whose `mod NAME;` declaration is itself `#[cfg(test)]`-gated in a
+#   parent `mod.rs` / `lib.rs` are test scope even though the module file carries
+#   no `#[cfg(test)]` line. Such files are dropped from the scan (see
+#   TEST_ONLY_FILES below).
 #
 # Allowlist: scripts/allow-rationale-allowlist.txt, keyed by `path::symbol`
 #   (file path + the enclosing fn/impl/mod item name resolved as the next item
@@ -189,9 +197,13 @@ extract_sites() {
                 }
                 if (csv == "") continue
 
-                # Rationale window: trailing inline // on the closing line, or a
-                # <=4-line upward window above the opener, skipping doc lines and
-                # attribute-continuation lines (#[...] / pure ( ) , content).
+                # Rationale recognition: a trailing inline // on the closing line,
+                # or a // comment CONTIGUOUS with the attribute group above the
+                # opener. "Contiguous" means reachable by crossing only doc-comment
+                # and attribute / attribute-continuation lines — a blank or code
+                # line ends the group. This is deliberately stricter than a fixed
+                # N-line window: a window that crosses blank lines mis-credits a
+                # comment belonging to the PRECEDING item as the rationale here.
                 has_rat = 0
                 # (a) trailing inline comment on the closing attribute line.
                 cl = lines[close_line]
@@ -200,31 +212,33 @@ extract_sites() {
                     sub(/^.*\/\//, "", ct)
                     if (is_rationale(ct)) has_rat = 1
                 }
-                # (b) upward window above the opener.
+                # (b) contiguous upward walk above the opener.
                 if (!has_rat) {
-                    seen = 0
                     j = open_line - 1
-                    while (j >= 1 && seen < 4) {
+                    while (j >= 1) {
                         prev = lines[j]
-                        # Skip doc-comment lines entirely (do not count, do not match).
+                        # Cross doc-comment lines (do not match, do not stop).
                         if (prev ~ /^[[:space:]]*\/\/\// || prev ~ /^[[:space:]]*\/\/!/) {
                             j--
                             continue
                         }
-                        # Skip attribute-continuation lines (other attrs, or the
-                        # bare lint-list continuation of a multi-line allow).
+                        # Cross attribute / attribute-continuation lines (other
+                        # attrs, or the bare lint-list continuation of a multi-line
+                        # allow, or its closing paren).
                         if (prev ~ /^[[:space:]]*#\[/ || prev ~ /^[[:space:]]*[A-Za-z_:]+,?[[:space:]]*$/ || prev ~ /^[[:space:]]*\)/ ) {
                             j--
                             continue
                         }
-                        # A plain // comment line in the window?
+                        # First plain // comment contiguous with the group → rationale.
                         if (prev ~ /^[[:space:]]*\/\//) {
                             ct = prev
                             sub(/^[[:space:]]*\/\//, "", ct)
-                            if (is_rationale(ct)) { has_rat = 1; break }
+                            if (is_rationale(ct)) has_rat = 1
+                            break
                         }
-                        seen++
-                        j--
+                        # Blank or code line: end of the attribute group, no
+                        # contiguous rationale.
+                        break
                     }
                 }
 
@@ -363,6 +377,34 @@ if [[ -n "$BASE" ]]; then
     done < <(git -C "$REPO_ROOT" diff --unified=0 "${BASE}"...HEAD -- 'crates/*/src/*.rs')
 fi
 
+# Test-only module files: a `mod NAME;` declaration gated by `#[cfg(test)]` in a
+# parent `mod.rs` / `lib.rs` makes NAME's source file test scope, even though the
+# file itself carries no `#[cfg(test)]` line for the tail-block filter to catch.
+# Collect those files (both `NAME.rs` and `NAME/mod.rs` forms) and drop them from
+# the scan. An optional blank or attribute line between the cfg attr and the
+# `mod` declaration is tolerated.
+declare -A TEST_ONLY_FILES
+while IFS= read -r -d '' modfile; do
+    moddir="$(dirname "$modfile")"
+    while IFS= read -r modname; do
+        [[ -n "$modname" ]] || continue
+        for cand in "${moddir}/${modname}.rs" "${moddir}/${modname}/mod.rs"; do
+            TEST_ONLY_FILES["${cand#"${REPO_ROOT}/"}"]=1
+        done
+    done < <(awk '
+        /#\[cfg\(test\)\]/ { pend = 1; next }
+        pend == 1 && /^[[:space:]]*(pub[[:space:]]+)?mod[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*;/ {
+            name = $0
+            sub(/^[[:space:]]*(pub[[:space:]]+)?mod[[:space:]]+/, "", name)
+            sub(/[[:space:]]*;.*/, "", name)
+            print name; pend = 0; next
+        }
+        pend == 1 && (/^[[:space:]]*$/ || /^[[:space:]]*#\[/) { next }
+        { pend = 0 }
+    ' "$modfile")
+done < <(find "${REPO_ROOT}/crates" -type f \( -name "mod.rs" -o -name "lib.rs" \) -print0 2>/dev/null)
+readonly TEST_ONLY_FILES
+
 # For every file that has at least one added `#[allow(` opener, extract its
 # production-scope sites and flag any whose opener line was added, is in scope,
 # lacks a rationale, and is not allowlisted.
@@ -375,6 +417,8 @@ for key in "${!ADDED_OPENERS[@]}"; do
 done
 
 for relfile in "${!SEEN_FILES[@]}"; do
+    # Skip files that are test scope by virtue of a parent #[cfg(test)] mod gate.
+    [[ -n "${TEST_ONLY_FILES["$relfile"]:-}" ]] && continue
     absfile="${REPO_ROOT}/${relfile}"
     [[ -f "$absfile" ]] || continue
     while IFS=$'\t' read -r site_line has_rat sym csv; do
