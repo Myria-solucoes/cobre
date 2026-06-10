@@ -8723,7 +8723,6 @@ fn operational_violation_rows_outside_dual_relevant() {
 // LP consistency gap investigation: the template is structurally correct.
 // Hypotheses 1-3 (indexer path, scaling, solver rebuild) ruled out.
 // Zero slacks occur when constraints are non-binding (correct behavior).
-// See plans/lp-consistency-gap/ for the full investigation log.
 
 #[test]
 fn diagnostic_template_operational_violation_correctness() {
@@ -9333,7 +9332,7 @@ fn parameter_coefficient_persists_across_stage_template_uses() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Anticipated-decision column bounds tests (ticket-021 AC-2 through AC-5)
+// Anticipated-decision column bounds tests (AC-2 through AC-5)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Build a minimal system with one anticipated thermal (`K_i = lead_stages`,
@@ -9575,7 +9574,7 @@ fn test_anticipated_decision_bounds_inactive_when_beyond_horizon() {
     );
 }
 
-/// F2-002: the horizon boundary `t + K_i == n_stages` is REJECTED (inactive)
+/// The horizon boundary `t + K_i == n_stages` is REJECTED (inactive)
 /// under the strict predicate `t + K_i < n_stages`.
 ///
 /// Setup: `n_stages = 4`, `K_i = 2`, `min_generation_mw = 10.0`,
@@ -9646,7 +9645,7 @@ fn test_anticipated_decision_inactive_one_past_horizon_boundary() {
     );
 }
 
-// ── ticket-022 objective tests ────────────────────────────────────────────────
+// ── objective tests ────────────────────────────────────────────────────────────
 
 /// AC-1: objective at decision stage 0 uses delivery-stage cost, hours, and factor.
 ///
@@ -9691,7 +9690,7 @@ fn test_anticipated_decision_objective_uses_delivery_stage_factors() {
     );
 }
 
-/// F2-002: objective at boundary stage t + K_i == n_stages is REJECTED (zero)
+/// Objective at boundary stage t + K_i == n_stages is REJECTED (zero)
 /// under the strict predicate `t + K_i < n_stages`.
 ///
 /// System: n_stages=4, K_i=2. At stage t=2: delivery_stage=4==n_stages → inactive
@@ -9776,7 +9775,7 @@ fn test_anticipated_decision_objective_zero_one_past_boundary() {
     );
 }
 
-/// F2-002 regression: at `stage_idx = n_stages - K_i`, no anticipated-decision
+/// Regression: at `stage_idx = n_stages - K_i`, no anticipated-decision
 /// column is emitted (bounds `[0,0]` and objective `0.0`) for any K and any
 /// n_stages such that K < n_stages.
 ///
@@ -10141,7 +10140,7 @@ fn test_zero_out_and_fishing_active_predicate_align() {
     );
 }
 
-// ── ticket-023 anticipated-fishing row tests ──────────────────────────────────
+// ── anticipated-fishing row tests ────────────────────────────────────────────
 
 /// Build a system with two anticipated thermals (K_0=1, K_1=2) and one bus.
 ///
@@ -10590,7 +10589,7 @@ fn test_anticipated_fishing_same_count_both_stages() {
     );
 }
 
-// ── ticket-024 AC-1 through AC-8 ────────────────────────────────────────────
+// ── AC-1 through AC-8 ────────────────────────────────────────────────────────
 //
 // Geometry for AC-1..3, AC-6..8 (two-anticipated-thermal system):
 //   n_hydros=0, n_anticipated=2 (K_0=1, K_1=2), k_max=2, n_ant_state=4
@@ -10656,7 +10655,7 @@ fn test_anticipated_state_columns_unconstrained() {
 /// Under Alternative A, the Cat 6 state-fixing slot at K_i-1 is a PURE IDENTITY
 /// row — the decision-write coefficient is removed. The full wiring of the
 /// decision-write into the new `anticipated_state_out_def` equality row is done
-/// in ticket-010. This test verifies the removal half: the old slot entry is gone.
+/// elsewhere. This test verifies the removal half: the old slot entry is gone.
 ///
 /// Layout for this system (no hydros, 1 bus, 1 block):
 ///   n_state = n_ant_state = K = 2
@@ -10684,14 +10683,14 @@ fn test_anticipated_decision_write_to_state_out_def_row() {
     // The old Cat 6 slot: row = row_anticipated_state_fixing_start + (K_i-1)*n_anticipated + 0
     //                         = 0 + (2-1)*1 + 0 = 1.
     // Under Alternative A the decision column must have NO entry at this row.
-    // The new def-row entries (-1.0 on decision, +1.0 on state_out) are added by ticket-010
+    // The new def-row entries (-1.0 on decision, +1.0 on state_out) are added
     // when `fill_anticipated_state_out_def_entries` is wired into `build_stage_matrix_entries`.
     let old_state_fixing_row = 1_usize;
     let entries_at_old_row = csc_entries_at(t, col_dec, old_state_fixing_row);
     assert!(
         entries_at_old_row.is_empty(),
         "stage 0, active plant K=2: decision column must have NO entry at old state_fixing \
-         slot row={old_state_fixing_row} (Cat 6 write removed in ticket-008), \
+         slot row={old_state_fixing_row} (Cat 6 write removed), \
          got {entries_at_old_row:?}"
     );
 }
@@ -11092,7 +11091,7 @@ fn build_k3_system() -> cobre_core::System {
 /// Build the K=0 baseline system: 1 hydro + 1 NON-anticipated thermal, same geometry.
 ///
 /// Used by AC-4 (pre-anticipated parity).  The thermal has `anticipated_config: None`
-/// so `n_anticipated=0` and the LP layout is identical to the pre-ticket-020 baseline.
+/// so `n_anticipated=0` and the LP layout is identical to the pre-anticipated baseline.
 fn build_k0_baseline_system() -> cobre_core::System {
     use chrono::NaiveDate;
     use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
@@ -11333,7 +11332,7 @@ fn rt_row_ant_fishing_start(_k: usize) -> usize {
 /// Expected `num_cols` for the roundtrip geometry with anticipation K=k.
 ///
 /// = 28+k (as derived in the section header comment).
-/// The extra column versus the pre-ticket-007 formula is the
+/// The extra column versus the pre-anticipated formula is the
 /// `anticipated_state_out` block (one column per anticipated plant, here 1).
 fn rt_expected_num_cols(k: usize) -> usize {
     28 + k
@@ -11867,12 +11866,12 @@ fn test_anticipated_thermals_lp_roundtrip_k3() {
 ///
 /// A system with `anticipated_config: None` on the thermal (i.e. K=0/no
 /// anticipation) must produce bit-identical LP templates to a system built
-/// before ticket-020 (represented here by `build_k0_baseline_system`).
+/// before anticipation was added (represented here by `build_k0_baseline_system`).
 ///
 /// Both systems have the same geometry (N=1 hydro, T=1 non-anticipated thermal,
 /// B=1 bus, 2 blocks × 360h, n_stages=4).  The non-anticipated thermal uses
 /// `anticipated_config: None` so `n_anticipated=0` and the layout is identical
-/// to the pre-ticket-020 baseline — no extra columns, no fishing rows, no
+/// to the pre-anticipated baseline — no extra columns, no fishing rows, no
 /// state-fixing rows beyond the hydro storage fixing.
 #[test]
 fn test_anticipated_thermals_lp_roundtrip_k0_baseline_parity() {

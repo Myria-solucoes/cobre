@@ -3,7 +3,7 @@
 //!
 //! ## Bug being guarded against
 //!
-//! Prior to F1-001, `solve_simulation_stage` in
+//! Prior to the fix, `solve_simulation_stage` in
 //! `crates/cobre-sddp/src/simulation/pipeline.rs` advanced the inflow-lag
 //! ring buffer between stages but never called `shift_anticipated_state`.
 //! Because the `anticipated_state` LP columns are unbounded
@@ -146,7 +146,7 @@ impl Communicator for StubComm {
 /// **Note on non-zero seeds**: this function constructs the resolved
 /// `cobre_core::System` directly via `SystemBuilder::new()`, bypassing the
 /// `cobre-io` parse-and-validate pipeline. The semantic validator that rejects
-/// non-zero `values_mw` entries (F3-002) therefore does NOT fire here. That is
+/// non-zero `values_mw` entries therefore does NOT fire here. That is
 /// intentional: the non-zero seed is a deliberate test fixture for the
 /// ring-buffer shift mechanic (see the test doc below), not a user-supplied
 /// pre-horizon commitment. The validator's rejection rule applies to JSON input

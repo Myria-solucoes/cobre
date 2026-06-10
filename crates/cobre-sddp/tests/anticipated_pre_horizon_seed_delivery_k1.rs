@@ -9,7 +9,7 @@
 //! 1. Deliver `committed_at(0) == 100.0 MW` — the always-active fishing
 //!    equality at stage 0 pins the anticipated thermal to slot 0 of the ring
 //!    buffer, which holds the 100.0 MW seed. The cost-zeroing predicate
-//!    (ticket-013) zeros the per-block objective for this column so the LP
+//!    zeros the per-block objective for this column so the LP
 //!    accepts the delivery at zero additional cost.
 //!
 //! 2. Saturate `decision_at(t) ≈ 200 MW` (max_gen) for t ∈ {0,1,2,3} — the
@@ -28,7 +28,7 @@
 //!    - Decision cost ≤ 4 × 200 MW × $10/MWh × 744 h = $5,952,000.
 //!    - Total ≤ $186,000,000 + $5,952,000 + $1,000 (tolerance).
 //!
-//! ## Legacy behaviour (before always-active fishing, ticket-012)
+//! ## Legacy behaviour (before always-active fishing)
 //!
 //! With the old predicate `K_i > stage_idx`, stage 0 had fishing *inactive*.
 //! `committed_at(0)` returned `None` rather than `Some(100.0)`. The seed was
@@ -435,9 +435,9 @@ fn build_system() -> cobre_core::System {
 
     // Seed the anticipated ring buffer with 100.0 MW at slot 0.
     //
-    // With the always-active fishing predicate (ticket-012), stage 0 reads
+    // With the always-active fishing predicate, stage 0 reads
     // slot 0 (= 100.0 MW) via the fishing equality and delivers it at zero
-    // LP cost (ticket-013 cost-zeroing predicate). The backup thermal covers
+    // LP cost (cost-zeroing predicate). The backup thermal covers
     // the remaining 50 MW at $5000/MWh.
     //
     // Without the always-active predicate (legacy code), stage 0 has no
@@ -566,7 +566,7 @@ fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
 /// - Load: 150 MW constant across all stages
 /// - Seed: `past_anticipated_commitments = [(id=31, [100.0])]`
 ///
-/// ## Assertions (match ticket-014 ACs)
+/// ## Assertions
 ///
 /// **AC1** — `committed_at(0) == Some(100.0)`: always-active fishing equality
 /// at stage 0 pins the anticipated thermal to slot 0 = 100 MW.
@@ -587,7 +587,7 @@ fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
 /// - `committed_at(0)` returns `None` instead of `Some(100.0)` → AC1 fails.
 /// - Stage-0 backup must carry all 150 MW → stage-0 cost ≈ $558M > $191.95M → AC4 fails.
 ///
-/// If the cost-zeroing predicate is missing (ticket-013):
+/// If the cost-zeroing predicate is missing:
 /// - The LP objective double-counts the 100 MW seed delivery → AC4 fails.
 #[test]
 fn pre_horizon_seed_delivers_at_stage_zero_k1() {
@@ -661,9 +661,9 @@ fn pre_horizon_seed_delivers_at_stage_zero_k1() {
 
     // ── AC1: committed_at(0) == Some(100.0) within 1e-6 MW ─────────────────
     //
-    // The always-active fishing equality (ticket-012) pins the anticipated
+    // The always-active fishing equality pins the anticipated
     // thermal's generation at stage 0 to slot 0 of the ring buffer = 100 MW.
-    // Before ticket-012, the predicate `K_i > stage_idx` was false at stage 0
+    // Before that change, the predicate `K_i > stage_idx` was false at stage 0
     // with K=1, so fishing was inactive and committed_at(0) returned None.
     let c0 = committed_at(0).expect(
         "AC1 FAIL: committed_at(0) is None. \
@@ -738,7 +738,7 @@ fn pre_horizon_seed_delivers_at_stage_zero_k1() {
     //
     // Sum per-stage `immediate_cost` (= LP objective minus theta).
     // Use `immediate_cost`, NOT `total_cost`; the latter includes the theta
-    // approximation artefact (Epic 01 learning).
+    // approximation artefact.
     //
     // Upper bound derivation:
     //   Stage 0: seed (100 MW) at zero cost + backup 50 MW × 744 h × $5000/MWh

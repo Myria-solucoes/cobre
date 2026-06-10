@@ -944,9 +944,7 @@ impl<S: SolverInterface> WorkspacePool<S> {
 /// **If degradation is problematic (option 3):** After cut selection runs,
 /// discard the cut row statuses from all stored bases, retaining only the
 /// template row portion. This gives a clean partial warm-start at zero
-/// implementation cost beyond a single truncation. See
-/// `docs/specs/backward-pass-performance-spec.md` section 6.1 for the full
-/// design discussion.
+/// implementation cost beyond a single truncation.
 ///
 /// [`SolverStatistics`]: cobre_solver::SolverStatistics
 pub struct BasisStore {

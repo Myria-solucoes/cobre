@@ -53,14 +53,14 @@
 //!
 //! The dual of the anticipated-state-fixing row at stage `t` reflects
 //! `dQ_t/dx_ant[slot, plant]`. Under the always-active fishing predicate
-//! (`StageIndexer::is_anticipated_fishing_active` at `indexer.rs:1555`), every
+//! (`StageIndexer::is_anticipated_fishing_active`), every
 //! slot at every stage participates in the dual chain: the fishing constraint is
 //! emitted at every stage unconditionally. The dual on the Cat 6
 //! state-fixing row at slot `s` flows back to the predecessor's LP column via
 //! `state_to_lp_column`'s branch decision (Less / Equal / Greater), which maps
 //! slot `K_p-1` to the decision column and slot `i < K_p-1` to slot `i+1`.
-//! See `indexer.rs:1429-1454` for the `state_to_lp_column` rustdoc and
-//! `artifacts/layout-decision.md` Section 2 for sign-chain derivations.
+//! See the `StageIndexer::state_to_lp_column` rustdoc for the slot-to-column
+//! branch mapping that drives the dual chain.
 //!
 //! The backward pass does not call `shift_anticipated_state`. The trial point
 //! `x_hat` is the forward-shifted state; cut extraction uses it as-is. This
@@ -733,7 +733,7 @@ impl StageOpeningSolver {
     ///
     /// - [`StageOpeningSolver::Baked`]: load the baked all-cuts LP via
     ///   [`load_backward_lp`] (the former per-trial-point load that paired with
-    ///   the W2 reset).
+    ///   the per-opening solver-state reset).
     /// - [`StageOpeningSolver::Lazy`]: load the cut-free core and build the
     ///   metadata seed ONCE here, then reuse the loaded LP across this trial
     ///   point's openings — the first-solved opening reuses the loaded cut-free
@@ -6317,7 +6317,7 @@ mod tests {
         let ws = &mut workspaces[0];
         // Choose the opening-solve strategy exactly as the driver does, then issue
         // the per-trial-point prepare/load (mirrors process_stage_backward's per-`m`
-        // load after the W2 reset). The `Baked` variant loads the baked all-cuts
+        // load after the per-opening solver-state reset). The `Baked` variant loads the baked all-cuts
         // LP; the `Lazy` variant loads the cut-free core + builds the metadata seed.
         let opening_solver = super::StageOpeningSolver::from_dcs_params(
             dcs.filter(|params| params.is_active(iteration)),

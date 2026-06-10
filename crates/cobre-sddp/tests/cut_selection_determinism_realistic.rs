@@ -160,7 +160,7 @@ fn select_for_stage_deterministic_level1_and_dominated_medium() {
 }
 
 /// Disaggregated-scale test: K=1000 (placeholder until
-/// Epic 01 ticket-003's K probe lands), M=384, D=2080.
+/// the measured-K probe lands), M=384, D=2080.
 /// ~1.2 billion FMA per call × 3 pools = ~6 seconds in release on
 /// modern `x86_64` (per design §6 sizing model). Gated behind
 /// `slow-tests` per project rule.
@@ -170,9 +170,9 @@ fn select_for_stage_deterministic_level1_and_dominated_medium() {
     ignore = "slow: run with --features slow-tests"
 )]
 fn select_for_stage_deterministic_disaggregated_scale() {
-    // TODO(Epic 01 ticket-003): replace K=1000 with the measured
+    // TODO(measured-K-probe): replace K=1000 with the measured
     // disaggregated K value once the probe report lands in
-    // docs/design/cut-selection-parallelism-redesign.md §14.3.
+    // docs/design/dynamic-cut-selection-design.md.
     const K: usize = 1000;
     const D: usize = 2080;
     const M: usize = 384;

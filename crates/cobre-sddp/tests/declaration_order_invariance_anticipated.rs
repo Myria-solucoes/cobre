@@ -20,7 +20,8 @@
 //! internal `mod tests` block). That probe constructs two `TemplateBuildCtx`s
 //! with permuted `anticipated_thermal_indices`/`anticipated_lead_stages` arrays
 //! and asserts LP equivalence under the canonical column/row swap permutation.
-//! See assessment finding F3-004 for the historical context.
+//! See the LP-construction-layer invariance probe in `lp_builder/template.rs`
+//! for the direct structural check.
 //!
 //! ## Fixture description
 //!
@@ -45,7 +46,7 @@
 //! (id=2 -> local 0, id=5 -> local 1). A regression in `SystemBuilder`'s
 //! canonical sort would surface here as different `final_lb` values; deeper
 //! LP-builder regressions that depend on `anticipated_thermal_indices`
-//! ordering are caught by the F3-004 unit test referenced above.
+//! ordering are caught by the LP-construction unit test referenced above.
 
 #![allow(
     clippy::unwrap_used,
@@ -495,7 +496,7 @@ fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
 ///
 /// **This is a determinism check, not an invariance probe.** See the
 /// module-level docstring for the scope-and-limitations discussion and
-/// the pointer to the genuine LP-level invariance probe (F3-004) that
+/// the pointer to the genuine LP-level invariance probe that
 /// exercises the `anticipated_thermal_indices` consumer paths directly.
 ///
 /// What this test catches:

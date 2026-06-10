@@ -125,7 +125,7 @@ impl ThermalReverseLookup {
 /// Returns `None` silently under any of:
 /// - the thermal is not anticipated,
 /// - `spec.stage_index + K_i >= spec.n_stages` (decision absent from LP — the
-///   strict-predicate boundary set by F2-002),
+///   strict-predicate boundary),
 /// - the plant is outside its entry/exit window (the LP builder sets `[0,0]` bounds for
 ///   those columns; the activation predicate is the canonical test — do not read-then-check).
 #[inline]
@@ -138,7 +138,7 @@ fn compute_anticipated_decision_mw(
     let local_idx = lookup.thermal_is_anticipated[thermal_local]?;
     let k_i = spec.indexer.anticipated_lead_stages[local_idx];
     // Canonical predicate: matches `StageIndexer::anticipated_decision_active_at_stage`
-    // in indexer.rs and the LP-builder gates at matrix.rs:245, :291, :1047.
+    // and the LP-builder horizon gates (`stage_idx + K_i < n_stages`) in `lp_builder::matrix`.
     if spec.stage_index.saturating_add(k_i) >= spec.n_stages {
         return None;
     }
@@ -174,12 +174,13 @@ fn compute_anticipated_decision_mw(
 ///   constraint LHS sum over zero blocks vanishes, so the constraint does not
 ///   couple slot 0 to anything. Category 6 (`anticipated_state_fixing`) instead
 ///   pins `s_{i,0} = incoming_slot_0` from the ring buffer, which is the committed
-///   MW propagated from earlier stages via the ring-buffer shift (`noise.rs:253`).
+///   MW propagated from earlier stages via the ring-buffer shift (`noise::shift_anticipated_state`).
 ///
 /// In both paths the correct read is the slot-0 column.
 ///
 /// Returns `Some(v)` when thermal `thermal_local` is anticipated and the
-/// fishing predicate is active for its plant (`indexer.rs:1555`). At
+/// fishing predicate is active for its plant
+/// (`StageIndexer::is_anticipated_fishing_active`). At
 /// pre-horizon stages, the value read is the seeded `values_mw[slot 0]`
 /// injected by the setup pipeline and advanced via the per-stage ring-buffer shift.
 ///
@@ -2620,7 +2621,7 @@ mod tests {
     }
 
     /// Same fixture, `stage_index=1`.  `t+K_i = 1+2 = 3 == n_stages` (boundary
-    /// is INACTIVE under F2-002 strict predicate `<`).
+    /// is INACTIVE under the strict predicate `<`).
     ///
     /// Expects `anticipated_decision_mw == None` — the LP has [0,0] bounds at
     /// this boundary column and the extraction predicate must match.
@@ -2678,7 +2679,7 @@ mod tests {
         assert_eq!(
             result.thermals[1].anticipated_decision_mw, None,
             "expected None for thermal 20 at boundary stage 1 (K_i=2, n_stages=3): \
-             t+K_i = 3 >= n_stages = 3 under F2-002 strict predicate"
+             t+K_i = 3 >= n_stages = 3 under the strict predicate"
         );
     }
 
@@ -2963,7 +2964,7 @@ mod tests {
     ///
     /// The committed value is the slot-0 entry of the `anticipated_state` ring
     /// buffer (per-plant, per-stage scalar), NOT the per-block thermal
-    /// generation. To guard against the F2-001 regression where the helper
+    /// generation. To guard against the regression where the helper
     /// returned `primal[thermal_col]` (the per-block generation) instead of
     /// `primal[anticipated_state.start + local_idx]`, this fixture uses three
     /// distinct per-block generation values (50/60/70 MW) and a distinct
@@ -3083,7 +3084,7 @@ mod tests {
 
         // 1 thermal * 3 blocks = 3 records. Every block carries the same
         // (per-stage) committed scalar from slot 0, NOT its own generation.
-        // On the F2-001 buggy code path this assertion fails with the
+        // On the buggy code path this assertion fails with the
         // per-block thermal values [50, 60, 70].
         assert_eq!(result.thermals.len(), 3);
         for (blk, rec) in result.thermals.iter().enumerate() {
@@ -3094,7 +3095,7 @@ mod tests {
             );
             // Sanity: generation_mw is still the per-block thermal column,
             // and the per-block values are distinct from 42.0 — so the
-            // F2-001 regression would surface as committed_mw == generation_mw.
+            // regression would surface as committed_mw == generation_mw.
             assert_ne!(
                 rec.anticipated_committed_mw,
                 Some(rec.generation_mw),
@@ -3394,7 +3395,7 @@ mod tests {
         };
         // In the no-block branch the fishing-constraint LHS sum vanishes; Category 6
         // pins slot 0 to incoming (0.0 here), so the helper returns Some(0.0) — same
-        // observable as before the F2-001 fix, but via slot-0 of anticipated_state.
+        // observable as before the fix, but via slot-0 of anticipated_state.
         let n_cols_helper = indexer.anticipated_decision.end.max(1);
         let primal_helper = vec![0.0_f64; n_cols_helper];
         let dual_helper: Vec<f64> = vec![];
@@ -3547,7 +3548,7 @@ mod tests {
         );
     }
 
-    /// Regression guard for F1-002: verify that using a pre-built
+    /// Regression guard: verify that using a pre-built
     /// [`ThermalReverseLookup`] via [`extract_stage_result_with_lookups`]
     /// produces bit-for-bit identical results to the standard
     /// [`extract_stage_result`] path (which builds the lookup internally).

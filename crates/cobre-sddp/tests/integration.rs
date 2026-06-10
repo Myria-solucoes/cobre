@@ -1245,8 +1245,8 @@ fn train_propagates_infeasible_error() {
 ///
 /// Verifies that enabling `CutSelectionStrategy::Level1 { check_frequency: 2,
 /// tie_tolerance: 1e-10 }` does not break convergence. With the stub kernel,
-/// no cuts are deactivated by Level1 selection (ticket-002 will implement the
-/// value-based kernel).
+/// no cuts are deactivated by Level1 selection (the value-based kernel that
+/// drives deactivation lives elsewhere).
 ///
 /// Checks:
 /// - Lower bound is monotone non-decreasing.
@@ -1517,8 +1517,8 @@ fn d17_level1_cut_selection_reconstruction() {
 ///
 /// Verifies that enabling `CutSelectionStrategy::Lml1 { check_frequency: 2,
 /// tie_tolerance: 1e-10 }` does not break convergence. With the stub kernel,
-/// no cuts are deactivated by Lml1 selection (ticket-002 will implement the
-/// value-based kernel).
+/// no cuts are deactivated by Lml1 selection (the value-based kernel that
+/// drives deactivation lives elsewhere).
 ///
 /// Checks:
 /// - Lower bound is monotone non-decreasing.

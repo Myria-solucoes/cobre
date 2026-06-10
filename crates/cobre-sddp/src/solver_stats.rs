@@ -257,7 +257,7 @@ pub fn aggregate_solver_statistics(
 ///
 /// - `iteration`: 1-based iteration number.
 /// - `phase`: `"forward"`, `"backward"`, or `"lower_bound"` — a `&'static str`
-///   to avoid per-iteration heap allocation (F1-005 fix).
+///   to avoid per-iteration heap allocation.
 /// - `stage`: stage index — a non-negative stage index for backward and forward
 ///   phases; `-1` only for the lower-bound (LB) phase, which is rank-aggregated
 ///   and has no stage dimension. The writer maps `-1` to a NULL `Int32` column

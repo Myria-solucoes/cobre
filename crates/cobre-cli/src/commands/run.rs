@@ -1687,12 +1687,12 @@ fn merge_simulation_metadata<C: Communicator>(
 ///
 /// ## Protocol
 ///
-/// **Summary (F1-002)**: Each rank first computes its local aggregate via
+/// **Summary**: Each rank first computes its local aggregate via
 /// [`cobre_sddp::SolverStatsDelta::aggregate`], packs the 15 scalar fields into a
 /// `[f64; 15]` buffer, and calls `allreduce(Sum)`. Root reconstructs the global
 /// aggregate from the received buffer.
 ///
-/// **Per-scenario gather (F1-003)**: Each rank packs its per-scenario stats into a
+/// **Per-scenario gather**: Each rank packs its per-scenario stats into a
 /// flat `f64` buffer (16 values per scenario: `scenario_id` + 15 scalar fields).
 /// An `allgatherv` collects all scenarios on all ranks. Root sorts the result by
 /// scenario ID. All ranks participate but only root uses the gathered data.
@@ -1714,7 +1714,7 @@ fn aggregate_simulation_solver_stats<C: Communicator>(
     ),
     CliError,
 > {
-    // ── Part A: summary allreduce (F1-002) ────────────────────────────────────
+    // ── Part A: summary allreduce ─────────────────────────────────────────────
     let local_agg = cobre_sddp::SolverStatsDelta::aggregate(local_stats.iter().map(|(_, _, d)| d));
     // Guard all nine u64 fields before the u64 → f64 cast in pack_delta_scalars.
     check_stats_overflow(&local_agg)?;

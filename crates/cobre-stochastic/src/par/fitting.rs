@@ -3141,8 +3141,8 @@ pub fn estimate_periodic_ar_annual_coefficients(
 
 // Thread-local call counter used by
 // `estimate_periodic_ar_coefficients_calls_build_once_per_order` to verify
-// that F2-006 is in effect (exactly one `build_periodic_yw_matrix` call per
-// loop iteration, not two).
+// that the single-call behaviour is in effect (exactly one
+// `build_periodic_yw_matrix` call per loop iteration, not two).
 #[cfg(test)]
 thread_local! {
     static BUILD_PERIODIC_YW_MATRIX_CALL_COUNT: std::cell::RefCell<usize> =
@@ -5445,7 +5445,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // F2-006 regression: estimate_periodic_ar_coefficients calls
+    // Regression: estimate_periodic_ar_coefficients calls
     // build_periodic_yw_matrix exactly once per order (not twice).
     // -----------------------------------------------------------------------
 
@@ -5471,13 +5471,13 @@ mod tests {
         assert_eq!(
             call_count, selected_order,
             "build_periodic_yw_matrix called {call_count} times for order \
-             {selected_order}; expected exactly {selected_order} (F2-006: must \
+             {selected_order}; expected exactly {selected_order} (must \
              not call twice per order)"
         );
     }
 
     // -----------------------------------------------------------------------
-    // F2-007 regression: compute_pearson_correlation_matrix returns a flat
+    // Regression: compute_pearson_correlation_matrix returns a flat
     // row-major Vec<f64> with correct diagonals and symmetric off-diagonals.
     // -----------------------------------------------------------------------
 

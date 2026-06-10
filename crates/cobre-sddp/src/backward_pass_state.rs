@@ -925,7 +925,8 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
         .enumerate()
         .map(|(w, (ws, mut basis_slice))| {
             // Pre-allocate per-stage buffers. The per-trial-point LP load is now
-            // issued per `m` via `opening_solver.prepare` (after the W2 reset); the
+            // issued per `m` via `opening_solver.prepare` (after the per-opening
+            // solver-state reset); the
             // buffer setup below touches only `ws.backward_accum`, never
             // `ws.solver`, so no stage-level load is needed here.
             while ws.backward_accum.outcomes.len() < n_openings {
@@ -1751,7 +1752,7 @@ mod tests {
         );
     }
 
-    /// AC2 (ticket-017a): a cut generated at iteration `g` that binds at a later
+    /// AC2: a cut generated at iteration `g` that binds at a later
     /// iteration `i > g` under DCS must have its `last_active_iter` advanced to
     /// `i` by the (unchanged) per-stage metadata sync, fed by the DCS-maintained
     /// binding-count contribution.

@@ -18,7 +18,7 @@ use cobre_sddp::{
 };
 
 // ---------------------------------------------------------------------------
-// Ticket-004: basis wire-format version guard
+// basis wire-format version guard
 // ---------------------------------------------------------------------------
 
 /// Construct a valid `CapturedBasis`, serialize it via `to_broadcast_payload`,

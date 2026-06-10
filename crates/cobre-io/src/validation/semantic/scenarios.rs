@@ -299,7 +299,7 @@ pub(super) fn check_scenario_models(data: &ParsedData, ctx: &mut ValidationConte
     }
 }
 
-// ── F2-002: External scheme requires external scenario files ─────────────────
+// ── External scheme requires external scenario files ─────────────────────────
 
 /// Validates that when a class uses the `External` sampling scheme, the
 /// corresponding external scenario file data is non-empty.

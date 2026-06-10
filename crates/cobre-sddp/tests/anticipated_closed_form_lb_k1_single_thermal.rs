@@ -27,7 +27,7 @@
 //!   anticipated commitment cheaper at delivery than backup.
 //! - Load `D = 50 MW` at both stages.
 //! - `past_anticipated_commitments = [(thermal_id=2, values_mw=[0.0])]`.
-//!   Per F3-002 the past must be zero so that any non-zero anticipated
+//!   The past must be zero so that any non-zero anticipated
 //!   delivery observed at stage 1 is attributable to the stage-0 decision.
 //! - 1 deterministic opening per stage.
 //! - Default `PolicyGraph::annual_discount_rate = 0.0`, so every
@@ -44,14 +44,13 @@
 //!
 //! ### Always-active fishing (current behaviour)
 //!
-//! `StageIndexer::is_anticipated_fishing_active` at `indexer.rs:1555` now
+//! `StageIndexer::is_anticipated_fishing_active` now
 //! returns TRUE at every stage, including stage 0. The fishing row
 //! `g_a_t − x_state_t = 0` is therefore emitted at stage 0 as well, and
 //! `zero_anticipated_delivery_thermal_cost` zeros the per-block cost of the
 //! anticipated column at stage 0 (same always-active path). See the K=1
-//! sign-chain table in
-//! `artifacts/layout-decision.md`
-//! §2 for the cut-coefficient sign convention that applies here.
+//! sign-chain table for the cut-coefficient sign convention that applies
+//! here.
 //!
 //! Variables (all in MW; subscript denotes stage):
 //! - `g_a_t` — per-block anticipated thermal generation at stage `t`.
@@ -243,12 +242,10 @@ const C_DEFICIT: f64 = 1000.0;
 /// Numerical value: `(10 + 100) · 50 = 5500.0` USD.
 ///
 /// Legacy value (pre-flip predicate `K_i ≤ stage_idx`): `2 · C_A · D_LOAD = 1000.0`.
-/// The always-active fishing predicate at `indexer.rs:1555`
+/// The always-active fishing predicate
 /// (`StageIndexer::is_anticipated_fishing_active`) emits a fishing row at stage 0,
 /// forcing `g_a_0 = 0` and requiring backup to cover stage-0 load. See the K=1
-/// sign-chain table in
-/// `artifacts/layout-decision.md`
-/// §2 for the cut-coefficient convention.
+/// sign-chain table for the cut-coefficient convention.
 ///
 /// Held to bit-for-bit equality. Sub-ULP noise from a future libhighs upgrade
 /// should be rare for this trivial fixture; if it occurs, demote to a 1e-12
@@ -488,7 +485,7 @@ fn build_system() -> cobre_core::System {
         },
     );
 
-    // Past commitment is zero per F3-002 (the strict-zero precondition for
+    // Past commitment is zero (the strict-zero precondition for
     // the K=1 ring buffer). Any non-zero delivery observed at stage 1 must
     // come from the stage-0 decision.
     let initial_conditions = InitialConditions {
@@ -578,8 +575,7 @@ fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
 
 /// Closed-form canary: the LP-derived lower bound for the 2-stage K=1 fixture
 /// must equal the hand-derived value `(C_A + C_B) · D_LOAD = 5500.0` under
-/// always-active fishing (`StageIndexer::is_anticipated_fishing_active`,
-/// `indexer.rs:1555`).
+/// always-active fishing (`StageIndexer::is_anticipated_fishing_active`).
 ///
 /// Bit-for-bit equality is asserted via `f64::to_bits`. The fixture is fully
 /// deterministic (single opening, no noise, single-thread HiGHS), so any
@@ -616,7 +612,7 @@ fn anticipated_closed_form_lb_k1_single_thermal() {
         "closed-form LB mismatch: actual = {actual}, expected = {EXPECTED_LB}. \
          Under always-active fishing the answer is `(C_A + C_B) · D_LOAD = 5500.0` \
          (stage-0 backup covers load; anticipated column cost zeroed by \
-         zero_anticipated_delivery_thermal_cost; see indexer.rs:1555). \
+         zero_anticipated_delivery_thermal_cost). \
          If a libhighs upgrade introduces sub-ULP arithmetic drift, switch to \
          a 1e-12 relative tolerance check.",
     );

@@ -4,10 +4,9 @@
 //!
 //! ## Closed-form derivation
 //!
-//! Reference: K=2 sign-chain table at `artifacts/layout-decision.md:206-238`
-//! (the planning artifact for the Alternative-A layout). The derivation below
-//! adapts that table for this fixture's specific load profile and the
-//! always-active fishing predicate.
+//! Reference: the K=2 sign-chain table for the Alternative-A layout. The
+//! derivation below adapts that table for this fixture's specific load profile
+//! and the always-active fishing predicate.
 //!
 //! Fixture: one anticipated thermal (K=2, cost `c_ant`, max `max_gen_ant`)
 //! and one regular thermal (cost `c_reg`, max `max_gen_reg`) at a single bus;

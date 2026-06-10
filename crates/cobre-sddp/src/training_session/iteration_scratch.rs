@@ -346,7 +346,7 @@ mod tests {
         }
     }
 
-    /// Regression for F3-001: `IterationScratch::new` must size the lower-bound
+    /// Regression: `IterationScratch::new` must size the lower-bound
     /// patch buffer's Category 6 capacity to `n_anticipated * k_max`.
     ///
     /// Before the fix the trailing two arguments were hard-coded zero, so the
@@ -418,7 +418,7 @@ mod tests {
         );
     }
 
-    /// Regression for F3-001 (zero-anticipated case): when the study has no
+    /// Regression (zero-anticipated case): when the study has no
     /// anticipated thermals, the patch buffer must size identically to the
     /// pre-anticipated layout. This guards against accidentally allocating
     /// Category 6 capacity when the indexer reports `n_anticipated == 0`.

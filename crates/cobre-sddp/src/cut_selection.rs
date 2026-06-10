@@ -19,7 +19,7 @@
 //! tasks is commutative + associative. `RAYON_NUM_THREADS=1` and `=96` produce
 //! identical output on the same binary.
 //!
-//! See `docs/design/cut-selection-parallelism-redesign.md` for the full design,
+//! See `docs/design/dynamic-cut-selection-design.md` for the full design,
 //! sizing model, and verification record.
 //!
 //! # Algorithm semantics (unchanged from value-evaluation kernel)

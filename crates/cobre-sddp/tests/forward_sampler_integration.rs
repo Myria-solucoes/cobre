@@ -1170,7 +1170,7 @@ fn forward_sampler_convergence_sweep() {
 }
 
 // ---------------------------------------------------------------------------
-// External load / NCS library population tests (F1-106)
+// External load / NCS library population tests
 // ---------------------------------------------------------------------------
 
 /// Generate `n_stages × n_scenarios` external load rows for a single bus.

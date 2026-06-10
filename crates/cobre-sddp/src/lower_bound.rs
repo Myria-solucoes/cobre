@@ -441,7 +441,8 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
         // Patch NCS column upper bounds with per-opening stochastic availability.
         // CORRECTNESS: this patch MUST be inside the per-opening loop; each opening
         // has a different noise realization that changes the available NCS generation.
-        // Moving this outside the loop would be a bug (see MEMORY.md D15 note).
+        // Moving this outside the loop would be a bug, pinned by the D15
+        // deterministic regression case (`d15_non_controllable_source`).
         if let Some(stoch) = spec.stochastic {
             let n_stochastic_ncs = stoch.n_stochastic_ncs();
             if n_stochastic_ncs > 0 && !spec.ncs_generation.is_empty() {
@@ -1651,7 +1652,8 @@ mod tests {
     /// Regression: `lb_evaluate_stage_0` calls `set_col_bounds` once per
     /// opening when stochastic NCS entities are present.
     ///
-    /// This is the correctness guard for the MEMORY.md D15 bug: NCS column
+    /// This is the correctness guard for the D15 NCS column-bound patch
+    /// contract: NCS column
     /// bounds must be patched *per opening*, not once before the loop or not
     /// at all. With `n_openings` openings and stochastic NCS present, the
     /// solver must receive exactly `n_openings` `set_col_bounds` calls.

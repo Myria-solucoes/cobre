@@ -190,7 +190,7 @@ pub fn sync_forward<C: Communicator>(
     // Canonical-order single-pass statistics. All ranks iterate global_costs in
     // the same order, producing bit-identical statistics regardless of rank count.
     // Welford's online algorithm is used instead of the two-pass naive formula to
-    // avoid catastrophic cancellation when sum_sq ≈ n * mean^2 (F1-007 fix).
+    // avoid catastrophic cancellation when sum_sq ≈ n * mean^2.
     // MPI Welford merge is not used here because the full gathered array is
     // already available — a single sequential pass suffices.
     let mut welford = WelfordAccumulator::new();

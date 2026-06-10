@@ -13,10 +13,10 @@
 //! 2. **Low residual variance ratio** (warning): `residual_std_ratio^2 < 0.01`.
 //!    When the AR model explains more than 99% of the variance the fit may be
 //!    overfitted, which can degrade out-of-sample scenario quality.
-//! 3. **Stationarity** (deferred): per `docs/design/PAR-COEFFICIENT-REDESIGN.md`
-//!    section 8, root-of-polynomial stationarity checks are deferred for the
-//!    minimal viable implementation. [`ParWarning::NearUnitCircleRoot`] is
-//!    retained in the enum for future use but is never emitted here.
+//! 3. **Stationarity** (deferred): root-of-polynomial stationarity checks are
+//!    deferred for the minimal viable implementation.
+//!    [`ParWarning::NearUnitCircleRoot`] is retained in the enum for future use
+//!    but is never emitted here.
 //!
 //! [`StochasticError::InvalidParParameters`]: crate::StochasticError::InvalidParParameters
 
@@ -119,8 +119,8 @@ pub enum ParWarning {
 ///    calling algorithm may inspect and log.
 ///
 /// 3. **Stationarity** (deferred): root-of-polynomial stationarity checks are
-///    not performed in this implementation (see `docs/design/PAR-COEFFICIENT-REDESIGN.md`
-///    section 8). [`ParWarning::NearUnitCircleRoot`] is never emitted here.
+///    not performed in this implementation. [`ParWarning::NearUnitCircleRoot`]
+///    is never emitted here.
 ///
 /// # Errors
 ///

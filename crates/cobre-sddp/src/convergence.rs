@@ -23,7 +23,7 @@
 //! `gap = (UB - LB) / max(1.0, |UB|)`
 //!
 //! The `max(1.0, |UB|)` guard prevents division by zero when the UB is near
-//! zero (F-004 resolution).
+//! zero.
 //!
 //! ## Usage
 //!
@@ -144,7 +144,7 @@ impl ConvergenceMonitor {
         self.upper_bound_std = sync_result.global_ub_std;
         self.ci_95_half_width = sync_result.ci_95_half_width;
 
-        // gap = (UB - LB) / max(1.0, |UB|)  — F-004 resolution
+        // gap = (UB - LB) / max(1.0, |UB|)
         let denominator = self.upper_bound.abs().max(1.0_f64);
         self.gap = (self.upper_bound - lb) / denominator;
 

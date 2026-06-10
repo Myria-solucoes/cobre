@@ -19,9 +19,8 @@ subproblem solving, and `cobre-comm` for distributed communication.
 ## Iteration lifecycle
 
 Each training iteration follows a fixed eight-step sequence. The ordering
-reflects the correction introduced in the lower bound plan fix (F-019): the
-lower bound is evaluated **after** the backward pass and cut synchronization,
-not during forward synchronization.
+ensures the lower bound is evaluated **after** the backward pass and cut
+synchronization, not during forward synchronization.
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -203,11 +202,11 @@ two-stage cut management pipeline that also includes budget enforcement
 [Performance Accelerators](../guide/performance-accelerators.md#cut-management-pipeline)
 guide for the full pipeline description.
 
-| Variant     | Selection mechanism                                                                                                                                                                                                |
-| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `Level1`    | Deactivates cuts below `tie_tolerance` of the per-state max at every visited state                                                                                                                                 |
-| `Lml1`      | Deactivates cuts that are not the oldest eligible within `tie_tolerance` at any visited state                                                                                                                       |
-| `Dominated` | Deactivates cuts below `threshold` of the per-state max at every visited state (all populated cuts)                                                                                                                |
+| Variant     | Selection mechanism                                                                                                                                                                                                                                              |
+| ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Level1`    | Deactivates cuts below `tie_tolerance` of the per-state max at every visited state                                                                                                                                                                               |
+| `Lml1`      | Deactivates cuts that are not the oldest eligible within `tie_tolerance` at any visited state                                                                                                                                                                    |
+| `Dominated` | Deactivates cuts below `threshold` of the per-state max at every visited state (all populated cuts)                                                                                                                                                              |
 | `Dynamic`   | Lazy incremental scheme (DCS): adds at most `nadic` cuts per inner re-solve round (the inner loop repeats up to `max_inner_iterations` rounds per backward solve) that violate the LP solution by more than `epsilon_viol`; never deactivates cuts from the pool |
 
 `Level1`, `Lml1`, and `Dominated` respect a `check_frequency` parameter:

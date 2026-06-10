@@ -893,7 +893,7 @@ pub(super) fn fill_stage_rows(
 
     // Anticipated-fishing equality rows: one per anticipated plant.
     // The fishing predicate `StageIndexer::is_anticipated_fishing_active`
-    // (indexer.rs:1555) is always true under the always-active fishing
+    // is always true under the always-active fishing
     // flip, so this loop emits `n_anticipated` rows at every stage.
     // Row bounds 0 == 0; actual coefficients are filled in build_stage_matrix_entries.
     fill_anticipated_fishing_rows(
@@ -1110,7 +1110,7 @@ pub(super) fn fill_anticipated_fishing_entries(
 /// Row bounds are filled by `fill_anticipated_state_out_def_rows`. The
 /// final CSC ordering is enforced by the per-column
 /// `sort_unstable_by_key(|&(row, _)| row)` pass in
-/// `template.rs:206–209`, so the relative order of the two pushes here
+/// `build_single_stage_template`, so the relative order of the two pushes here
 /// does not matter for correctness.
 ///
 /// Inactive plants emit no entries.

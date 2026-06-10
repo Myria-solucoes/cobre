@@ -4,7 +4,7 @@
 //! pool level, it grows the LP's active cut set lazily within each solve until
 //! no candidate cut is violated by more than `epsilon_viol` (or a bounded
 //! inner-iteration cap is hit). See
-//! `docs/design/cut-selection-dynamic-redesign.md` for the full design.
+//! `docs/design/dynamic-cut-selection-design.md` for the full design.
 //!
 //! [`DcsParams`] is a small, `Copy`, allocation-free carrier for the DCS
 //! hyperparameters. It mirrors the values stored on
@@ -1371,7 +1371,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Batched-scoring tests (ticket-018): bit-identical vs per-row reference,
+    // Batched-scoring tests: bit-identical vs per-row reference,
     // single GEMM per pass, growth-only scratch.
     // -----------------------------------------------------------------------
 
@@ -2665,7 +2665,7 @@ mod tests {
         assert_eq!(a, vec![0, 1, 3, 4]);
     }
 
-    /// AC3 (ticket-017a): the seed keys on **binding recency** via
+    /// AC3: the seed keys on **binding recency** via
     /// `last_active_iter`, NOT on generation iteration. A cut generated long ago
     /// (`iteration_generated` well outside the k2 window) but binding recently
     /// (`last_active_iter == i`) must be seeded at iteration `i + d` for

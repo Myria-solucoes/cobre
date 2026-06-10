@@ -1028,7 +1028,7 @@ mod tests {
         );
     }
 
-    // ── Real declaration-order-invariance probe (assessment finding F3-004) ──
+    // ── Real declaration-order-invariance probe ──
 
     /// Build a 5-stage 3-thermal system used by the order-invariance probe.
     ///
@@ -1386,7 +1386,7 @@ mod tests {
         dense
     }
 
-    /// **F3-004 invariance probe** — direct LP-construction layer test.
+    /// **Invariance probe** — direct LP-construction layer test.
     ///
     /// Verifies that the LP templates produced by [`build_single_stage_template`]
     /// are equivalent under a permutation of the `anticipated_thermal_indices` /

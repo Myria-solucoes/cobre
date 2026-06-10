@@ -6,7 +6,8 @@
 //! slice is consumed read-only on the hot path, eliminating calendar arithmetic
 //! from inner solver loops.
 //!
-//! See [Design Doc — Temporal Resolution Debts §6](../../docs/design/temporal-resolution-debts.md).
+//! This precomputation addresses the Temporal Resolution Debts incurred when
+//! stages span heterogeneous calendar resolutions.
 
 use std::collections::HashMap;
 

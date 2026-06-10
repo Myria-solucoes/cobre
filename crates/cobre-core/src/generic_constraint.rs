@@ -219,7 +219,7 @@ pub enum VariableRef {
     /// `cobre-io::validation::referential::validate_variable_ref_entity`).
     ///
     /// The column also has `[0.0, 0.0]` bounds at boundary stages where
-    /// `t + K_i >= n_stages` (the F2-002 strict predicate); a constraint
+    /// `t + K_i >= n_stages` (the strict predicate); a constraint
     /// referencing the column at the boundary is structurally a no-op.
     ///
     /// **Postcard wire-format note**: this variant is appended at the END of

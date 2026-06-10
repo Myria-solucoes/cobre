@@ -1,9 +1,9 @@
-//! Microbenchmark for Dynamic Cut Selection candidate scoring (ticket-018).
+//! Microbenchmark for Dynamic Cut Selection candidate scoring.
 //!
 //! AC5 perf witness: compares the production batched `score_violated_candidates`
 //! (one GEMM per scoring pass over all eligible candidates) against a faithful
 //! per-candidate baseline that scores each candidate with its own single-row
-//! `dgemm` call (the pre-ticket-018 kernel shape). Both use the same
+//! `dgemm` call (the per-candidate kernel shape). Both use the same
 //! single-threaded `matrixmultiply::dgemm` kernel, so the comparison isolates
 //! the call-shape change (batched N-row GEMM vs N individual 1-row GEMMs).
 //!
@@ -52,8 +52,8 @@ fn fill_f64(buf: &mut [f64], seed: u64) {
 //
 // Inline copy of `src/gemm.rs::gemm_block` (which is `pub(crate)` and so not
 // reachable from a bench). Same `matrixmultiply::dgemm` call, identical strides,
-// so a single-row (`k_rows == 1`) invocation reproduces the pre-ticket-018
-// per-candidate dispatch exactly.
+// so a single-row (`k_rows == 1`) invocation reproduces the per-candidate
+// dispatch exactly.
 #[allow(clippy::cast_possible_wrap)]
 fn gemm_block(
     coef: &[f64],
@@ -93,8 +93,8 @@ fn gemm_block(
 
 /// Per-candidate baseline: replays the exact filter/gather/score logic of
 /// `score_violated_candidates` but scores each surviving candidate with its own
-/// `gemm_block(coef, x*, 1, n_state, 1, ..)` call, as the kernel did before
-/// ticket-018. Returns the violated count (mirroring the production signature).
+/// `gemm_block(coef, x*, 1, n_state, 1, ..)` call, as the per-candidate kernel
+/// did. Returns the violated count (mirroring the production signature).
 #[allow(clippy::too_many_arguments)]
 fn score_per_candidate_baseline(
     pool: &CutPool,
@@ -226,7 +226,7 @@ fn bench_one(c: &mut Criterion, k: usize, n_state: usize) {
         });
     }
 
-    // Per-candidate baseline (pre-ticket-018 call shape).
+    // Per-candidate baseline (per-candidate call shape).
     {
         let mut unscaled_state = Vec::with_capacity(n_state);
         let mut violations: Vec<(f64, u32)> = Vec::with_capacity(k);

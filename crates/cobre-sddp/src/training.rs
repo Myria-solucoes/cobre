@@ -6,7 +6,7 @@
 //!
 //! ## Iteration lifecycle
 //!
-//! Each iteration follows the corrected ordering from the LB plan fix (F-019):
+//! Each iteration follows the corrected per-iteration ordering:
 //!
 //! 1. Forward pass — scenario simulation, local UB statistics.
 //! 2. Forward sync — global synchronization for UB statistics.
