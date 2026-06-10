@@ -112,7 +112,7 @@ for dir in "${SCAN_DIRS[@]}"; do
         if [[ -n "$matches" ]]; then
             violations+="${matches}"$'\n'
         fi
-    done < <(find "$dir" -name "*.rs" ! -name "*.min.js" -print0)
+    done < <(find "$dir" -name "*.rs" -print0)
 done
 
 # Non-.rs targets: plain whole-file recursive grep. Vendored *.min.js files

@@ -259,30 +259,35 @@ extract_sites() {
         # resolve_symbol(decl_line): the declared name of the item on the line
         # immediately below the attribute. Tries keyword items first (fn, type,
         # impl, ...), then falls back to a leading identifier (field/variant/use).
-        function resolve_symbol(s,   rest, t, name) {
+        function resolve_symbol(s,   rest, t, name, sp) {
+            # Pad both ends so a leading/trailing keyword always has a non-word
+            # neighbour. The `[^A-Za-z0-9_]` boundary is POSIX-portable; the
+            # `\<`/`\>` GNU-awk word-boundary escapes are NOT (they silently
+            # never match under mawk, the default awk on Ubuntu CI runners).
+            sp = " " s " "
             # fn NAME — after any qualifiers (pub, const, async, unsafe, ...).
-            if (match(s, /\<fn[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/)) {
-                name = substr(s, RSTART, RLENGTH); sub(/^fn[[:space:]]+/, "", name); return name
+            if (match(sp, /[^A-Za-z0-9_]fn[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/)) {
+                name = substr(sp, RSTART, RLENGTH); sub(/^[^A-Za-z0-9_]fn[[:space:]]+/, "", name); return name
             }
             # struct/enum/trait/mod/const/static/type/union NAME.
-            if (match(s, /\<(struct|enum|trait|mod|const|static|type|union)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/)) {
-                name = substr(s, RSTART, RLENGTH); sub(/^[A-Za-z_]+[[:space:]]+/, "", name); return name
+            if (match(sp, /[^A-Za-z0-9_](struct|enum|trait|mod|const|static|type|union)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/)) {
+                name = substr(sp, RSTART, RLENGTH); sub(/^[^A-Za-z0-9_][A-Za-z_]+[[:space:]]+/, "", name); return name
             }
             # impl [<...>] [Trait for] Type — use the target type identifier.
-            if (match(s, /\<impl\>/)) {
-                rest = substr(s, RSTART); t = rest
-                sub(/^impl[[:space:]]*(<[^>]*>)?[[:space:]]*/, "", t)
+            if (match(sp, /[^A-Za-z0-9_]impl[^A-Za-z0-9_]/)) {
+                rest = substr(sp, RSTART); t = rest
+                sub(/^[^A-Za-z0-9_]impl[[:space:]]*(<[^>]*>)?[[:space:]]*/, "", t)
                 sub(/[[:space:]]*for[[:space:]]+/, " ", t)
                 if (match(t, /[A-Za-z_][A-Za-z0-9_]*/)) return substr(t, RSTART, RLENGTH)
                 return "impl"
             }
             # macro_rules! NAME.
-            if (match(s, /\<macro_rules![[:space:]]*[A-Za-z_][A-Za-z0-9_]*/)) {
-                name = substr(s, RSTART, RLENGTH); sub(/^macro_rules![[:space:]]*/, "", name); return name
+            if (match(sp, /[^A-Za-z0-9_]macro_rules![[:space:]]*[A-Za-z_][A-Za-z0-9_]*/)) {
+                name = substr(sp, RSTART, RLENGTH); sub(/^[^A-Za-z0-9_]macro_rules![[:space:]]*/, "", name); return name
             }
             # use re-export: key on the first path identifier after `use`.
-            if (match(s, /\<use[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/)) {
-                name = substr(s, RSTART, RLENGTH); sub(/^use[[:space:]]+/, "", name); return name
+            if (match(sp, /[^A-Za-z0-9_]use[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/)) {
+                name = substr(sp, RSTART, RLENGTH); sub(/^[^A-Za-z0-9_]use[[:space:]]+/, "", name); return name
             }
             # Fallback: struct field / enum variant — the leading identifier
             # (after any pub(...) / pub visibility qualifier).
@@ -352,6 +357,9 @@ if [[ -n "$BASE" ]]; then
                 : # context (unified=0 emits none) / metadata lines.
                 ;;
         esac
+    # git pathspec `*` crosses directory separators (unlike shell globbing), so
+    # 'crates/*/src/*.rs' also matches nested sub-modules such as
+    # crates/cobre-sddp/src/lp_builder/template.rs — they ARE in scope.
     done < <(git -C "$REPO_ROOT" diff --unified=0 "${BASE}"...HEAD -- 'crates/*/src/*.rs')
 fi
 

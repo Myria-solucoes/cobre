@@ -300,6 +300,7 @@ Per-iteration convergence log. One row per training iteration. 14 columns.
 | `time_total_ms`    | Int64   | No       | Total wall-clock time for this iteration, in milliseconds.                                                    |
 | `forward_passes`   | Int32   | No       | Number of forward-pass scenario trajectories evaluated in this iteration.                                     |
 | `lp_solves`        | Int64   | No       | Total number of LP solves across all stages and forward passes in this iteration.                             |
+| `mean_rows_in_lp`  | Float64 | No       | Mean number of active LP rows across all stage solves in this iteration.                                      |
 
 ---
 
@@ -343,6 +344,7 @@ attributed to any phase is `overhead_ms`.
 | `fwd_load_imbalance_ms`      | Int64 | No       | Forward load imbalance: `max_worker_total - avg_worker_total`, clamped to zero.                                                                                                             |
 | `fwd_scheduling_overhead_ms` | Int64 | No       | Forward scheduling overhead: `parallel_wall - max_worker_total`, clamped to zero.                                                                                                           |
 | `overhead_ms`                | Int64 | No       | Residual wall-clock time not attributed to any of the above phases.                                                                                                                         |
+| `lazy_scoring_ms`            | Int64 | No       | Per-worker time spent in lazy candidate scoring inside the lazy-selection solve. A sub-component of the forward/backward phases (not a top-level addend); `0` when the lazy path is unused. |
 
 > **Schema migration note (v0.4.x):** The single columns `bwd_rayon_overhead_ms` and `fwd_rayon_overhead_ms` from earlier releases were replaced with three columns each (`_setup_ms`, `_load_imbalance_ms`, `_scheduling_overhead_ms`). Downstream scripts that read the parquet by column name must be updated. The invariant `load_imbalance + scheduling <= parallel_wall` holds; `setup_ms` is a separate aggregate-across-workers cost and is not bounded by wall time.
 
