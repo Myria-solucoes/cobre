@@ -47,6 +47,11 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly REPO_ROOT
 
+# shellcheck source=scripts/lib/comment_scan.sh
+source "${REPO_ROOT}/scripts/lib/comment_scan.sh"
+command -v cs_emit_production_lines >/dev/null \
+    || { echo "FATAL: scripts/lib/comment_scan.sh did not load its helpers." >&2; exit 2; }
+
 # Placeholder token patterns. grep -noE extracts the matched span only.
 readonly PLACEHOLDER_PATTERN='\bTBD\b|[Tt][Oo] [Bb][Ee] [Ii][Nn][Ss][Ee][Rr][Tt][Ee][Dd]'
 
@@ -97,10 +102,7 @@ for dir in "${SCAN_DIRS[@]}"; do
         # BEFORE the per-line span extraction below — otherwise every doc-comment
         # line (tens of thousands tree-wide) would spawn a subshell. Mirrors the
         # sibling check-comment-refs.sh, whose inner loop only sees real hits.
-        doc_lines=$(awk -v f="$file" '
-            /^[[:space:]]*#\[cfg\((all\()?test[,)]/ { exit }
-            { printf "%s:%d:%s\n", f, NR, $0 }
-        ' "$file" | grep -E ':[[:space:]]*(///|//!)' \
+        doc_lines=$(cs_emit_production_lines "$file" | grep -E ':[[:space:]]*(///|//!)' \
             | grep -E "$PLACEHOLDER_PATTERN") || true
         [[ -n "$doc_lines" ]] || continue
 

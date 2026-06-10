@@ -47,6 +47,11 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly REPO_ROOT
 
+# shellcheck source=scripts/lib/comment_scan.sh
+source "${REPO_ROOT}/scripts/lib/comment_scan.sh"
+command -v cs_emit_production_lines >/dev/null \
+    || { echo "FATAL: scripts/lib/comment_scan.sh did not load its helpers." >&2; exit 2; }
+
 # .rs source directories: scanned per-file with the cfg(test) tail-block
 # exclusion (see header). Mirrors check-no-plan-leaks.sh SCAN_DIRS.
 readonly SCAN_DIRS=(
@@ -82,11 +87,7 @@ readonly E3B_TOKEN_PATTERN='(?<![A-Za-z0-9_./-])((\.\./|\./)*(docs|artifacts|pla
 # cfg(test) tail block. Restricted to lines containing a `//` comment marker so
 # the gate scopes to comments, not string literals or code.
 emit_comment_lines() {
-    local file="$1"
-    awk -v f="$file" '
-        /^[[:space:]]*#\[cfg\((all\()?test[,)]/ { exit }
-        /\/\// { printf "%s:%d:%s\n", f, NR, $0 }
-    ' "$file"
+    cs_emit_comment_lines "$1"
 }
 
 # From a pre-filtered `FILE:LINE:CONTENT` stream (each line already known to

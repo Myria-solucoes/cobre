@@ -38,6 +38,11 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly REPO_ROOT
 
+# shellcheck source=scripts/lib/comment_scan.sh
+source "${REPO_ROOT}/scripts/lib/comment_scan.sh"
+command -v cs_emit_production_lines >/dev/null \
+    || { echo "FATAL: scripts/lib/comment_scan.sh did not load its helpers." >&2; exit 2; }
+
 # Production .rs source directories, scanned per-file with the cfg(test)
 # tail-block exclusion. Mirrors check-comment-refs.sh SCAN_DIRS.
 readonly SCAN_DIRS=(
@@ -66,11 +71,7 @@ readonly TOKEN_PATTERN='[a-z_]+\.rs:[0-9]+((\x{2013}[0-9]+)|(,[0-9]+))*'
 # cfg(test) tail block, restricted to lines carrying a `//` comment marker
 # (covers `//`, `///`, and `//!`).
 emit_comment_lines() {
-    local file="$1"
-    awk -v f="$file" '
-        /^[[:space:]]*#\[cfg\((all\()?test[,)]/ { exit }
-        /\/\// { printf "%s:%d:%s\n", f, NR, $0 }
-    ' "$file"
+    cs_emit_comment_lines "$1"
 }
 
 # From a pre-filtered `FILE:LINE:CONTENT` stream, re-extract each matched TOKEN

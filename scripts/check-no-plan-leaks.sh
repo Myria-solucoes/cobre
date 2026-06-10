@@ -51,6 +51,12 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly REPO_ROOT
+
+# shellcheck source=scripts/lib/comment_scan.sh
+source "${REPO_ROOT}/scripts/lib/comment_scan.sh"
+command -v cs_emit_production_lines >/dev/null \
+    || { echo "FATAL: scripts/lib/comment_scan.sh did not load its helpers." >&2; exit 2; }
 
 readonly PATTERN='[Ee]pic[ -][0-9]+|[Tt]icket[ -][0-9]+|T0[0-9][0-9]|\bsprint\b|\bF[0-9]?-[0-9]{2,}\b|\bW[0-9]+ (reset|rebake|workstream|phase)\b'
 
@@ -105,10 +111,7 @@ violations=""
 for dir in "${SCAN_DIRS[@]}"; do
     [[ -d "$dir" ]] || continue
     while IFS= read -r -d '' file; do
-        matches=$(awk -v f="$file" '
-            /^[[:space:]]*#\[cfg\((all\()?test[,)]/ { exit }
-            { printf "%s:%d:%s\n", f, NR, $0 }
-        ' "$file" | grep -E "$PATTERN") || true
+        matches=$(cs_emit_production_lines "$file" | grep -E "$PATTERN") || true
         if [[ -n "$matches" ]]; then
             violations+="${matches}"$'\n'
         fi
