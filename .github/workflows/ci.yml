@@ -336,6 +336,28 @@ jobs:
       - name: Verify schema freshness
         run: ./scripts/check_schemas.sh --build
 
+  # Locks the DOCUMENTED structural invariants of a fresh `cobre init` -> `run`
+  # -> `report` (template file count, training/metadata.json keys,
+  # policy/metadata.json warm-start keys, the `cobre report` key set) against the
+  # live binary, so the book cannot silently drift from CLI output. Minimal
+  # setup: only the default-feature (HiGHS) `cobre` binary is needed — no MPICH
+  # or flatc, since the default CLI build enables neither `mpi` nor
+  # `flatc-conformance`. `jq` is preinstalled on `ubuntu-latest`. Scoped to the
+  # documented invariants the assert_cmd suite does not already pin; it does not
+  # re-run command-execution coverage.
+  docs-examples:
+    name: Docs Examples
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify documented init/run/report invariants
+        run: ./scripts/check-docs-examples.sh --build
+
   # Docs build once on the primary (HiGHS) backend; NOT duplicated onto CLP.
   docs:
     name: Documentation
@@ -376,6 +398,41 @@ jobs:
       - run: cargo doc --workspace --no-deps --features "${{ env.NON_SOLVER_FEATURES }}"
         env:
           RUSTDOCFLAGS: -Dwarnings
+
+  # Build the mdBook on every PR/push so book breakage (broken includes, bad
+  # preprocessor config, malformed Markdown) fails the PR instead of landing on
+  # main and only surfacing at deploy time. Build-only: the deploy workflow
+  # (Deploy docs) owns publishing and stays push-to-main. Install steps mirror
+  # that workflow's mdBook + mdbook-mermaid setup.
+  book:
+    name: Book Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install mdBook
+        uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: "latest"
+      - name: Install mdbook-mermaid
+        run: cargo install mdbook-mermaid --locked
+      # mdbook v0.5.x exits 0 even when a `{{#include}}` target is missing or a
+      # SUMMARY entry is dangling — it only logs an `ERROR` line and carries on.
+      # So the gate has two independent failure conditions:
+      #   1. mdbook's own non-zero exit (preserved via `set -o pipefail` so the
+      #      `tee` pipe does not mask it).
+      #   2. any `ERROR`-prefixed log line, which catches the broken-include /
+      #      dangling-link case that exits 0.
+      # Only lines beginning with `ERROR` are fatal; the mdbook-mermaid
+      # version-mismatch line is logged as `Warning:` and stays non-fatal.
+      - name: Build book
+        run: |
+          set -euo pipefail
+          mdbook build book 2>&1 | tee /tmp/mdbook-build.log
+          if grep -qE '^ERROR' /tmp/mdbook-build.log; then
+            echo "::error::mdbook logged an ERROR (broken include or dangling SUMMARY link); see the log above."
+            exit 1
+          fi
 
   # cargo-audit reads Cargo.lock and the advisory DB; it does not compile any
   # crate, so it never trips cobre-solver's both-backends `compile_error!`.
@@ -515,6 +572,18 @@ jobs:
         run: |
           source .venv/bin/activate
           pytest crates/cobre-python/tests/ -v --cov=cobre --cov-report=xml:python-coverage.xml
+      # Execute the quickstart notebook end-to-end against the locally built
+      # wheel (the `maturin develop` artifact above — never a PyPI install) so
+      # it cannot silently break. Run once on the lowest matrix Python; nbmake
+      # treats any cell error as a test failure. pytest runs from the repo root,
+      # and nbmake executes the notebook with its own directory as cwd, so the
+      # notebook's `../1dtoy/` case path resolves to examples/1dtoy/.
+      - name: Run quickstart notebook
+        if: matrix.python-version == '3.12'
+        run: |
+          source .venv/bin/activate
+          pip install nbmake polars matplotlib
+          pytest --nbmake examples/notebooks/quickstart.ipynb
       - uses: codecov/codecov-action@v5
         if: matrix.python-version == '3.12'
         with:

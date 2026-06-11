@@ -1,0 +1,39 @@
+# lychee ignore list — external URLs that are intentionally absent or unstable.
+# Each line is a regex matched against the full URL. Keep this minimal: only
+# pre-publication / not-yet-resolving destinations belong here. Genuinely stable
+# third-party links (doc.rust-lang.org, flatbuffers.dev, highs.dev, rustup.rs,
+# json-schema.org, conventionalcommits.org, force-color.org, no-color.org,
+# the static license badge, real user accounts) stay checked.
+
+# Pre-publication source repos / org — the cobre-rs org and its repos are not
+# public yet, so anonymous CI sees 404. Covers the repo, its sibling repos
+# (cobre-docs, cobre-bridge, ferrompi), git/blob/releases/actions sub-paths, and
+# the CI/workflow status badge.
+^https?://github\.com/cobre-rs/
+
+# Raw file fetches from the same not-yet-public repo (book schema download URLs,
+# including the literal <filename> template placeholder in the docs).
+^https?://raw\.githubusercontent\.com/cobre-rs/cobre/
+
+# Methodology / theory site (GitHub Pages) — pre-publication, may 404.
+^https?://cobre-rs\.github\.io/
+
+# Custom rendered-docs domain — not live until the docs site is published.
+^https?://docs\.cobre-rs\.dev/
+
+# Rust API docs — crates are not on crates.io yet, so docs.rs returns 404.
+^https?://docs\.rs/cobre
+
+# crates.io registry page — the crate is not published yet.
+^https?://crates\.io/crates/cobre
+
+# PyPI project page — the cobre-python distribution is not published yet.
+^https?://pypi\.org/project/cobre-python/
+
+# Coverage badge/report — the codecov repo is private/unset pre-publication.
+^https?://codecov\.io/gh/cobre-rs/
+
+# Dynamic shields.io badges that resolve against the unpublished crates.io /
+# PyPI packages above (the static Apache-2.0 license badge is NOT ignored).
+^https?://img\.shields\.io/crates/v/cobre
+^https?://img\.shields\.io/pypi/.*cobre-python
