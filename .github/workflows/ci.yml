@@ -426,6 +426,12 @@ jobs:
       # Only lines beginning with `ERROR` are fatal; the mdbook-mermaid
       # version-mismatch line is logged as `Warning:` and stays non-fatal.
       - name: Build book
+        env:
+          # Force env_logger's plain "LEVEL target: msg" format (no timestamp
+          # prefix) so the `^ERROR` match below reliably fires regardless of CI
+          # terminal detection — mdbook exits 0 on broken includes / dangling
+          # SUMMARY links, so this grep is the real gate.
+          RUST_LOG_STYLE: never
         run: |
           set -euo pipefail
           mdbook build book 2>&1 | tee /tmp/mdbook-build.log
@@ -582,7 +588,9 @@ jobs:
         if: matrix.python-version == '3.12'
         run: |
           source .venv/bin/activate
-          pip install nbmake polars matplotlib
+          # Loose upper bounds so a future major release of these floating deps
+          # cannot false-fail the notebook for reasons unrelated to cobre.
+          pip install 'nbmake>=1.5,<2' 'polars>=1.0,<2' 'matplotlib>=3.8,<4'
           pytest --nbmake examples/notebooks/quickstart.ipynb
       - uses: codecov/codecov-action@v5
         if: matrix.python-version == '3.12'
