@@ -156,7 +156,6 @@ fn write_entities_csv(path: &Path, system: &System) -> Result<(), OutputError> {
     let mut wtr = csv::Writer::from_path(&file_path)
         .map_err(|e| OutputError::io(&file_path, std::io::Error::other(e)))?;
 
-    // Write header
     wtr.write_record([
         "entity_type_code",
         "entity_id",

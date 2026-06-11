@@ -50,10 +50,8 @@ pub enum WorkerTimingPhase {
 /// Number of timing slots in the 16-wide `[u64; 16]` writer record
 /// (`cobre_io::WorkerTimingRecord`).
 ///
-/// Per-worker event payloads now use [`WorkerPhaseTimings`] (4 named fields)
-/// rather than a sparse 16-element array. The constants below remain the
-/// canonical bridge between the four named fields and the writer-record slot
-/// positions — the Parquet schema is unchanged.
+/// The `WORKER_TIMING_SLOT_*` constants below are the canonical bridge between
+/// the named [`WorkerPhaseTimings`] fields and the writer-record slot positions.
 pub const WORKER_TIMING_SLOT_COUNT: usize = 16;
 
 /// Writer-record slot index for `forward_wall_ms`.

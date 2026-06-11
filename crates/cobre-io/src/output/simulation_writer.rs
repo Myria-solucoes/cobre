@@ -456,9 +456,8 @@ impl SimulationParquetWriter {
             .map(|l| (l.id.0, 1.0 - l.losses_percent / 100.0))
             .collect();
 
-        // costs: always present (every scenario has at least one stage with cost data).
-        // We create the directory unconditionally for costs because the system always
-        // has stages. All other entity-type directories are gated on count > 0.
+        // costs is created unconditionally because the system always has stages;
+        // all other entity-type directories are gated on count > 0.
         std::fs::create_dir_all(sim_dir.join("costs"))
             .map_err(|e| OutputError::io(sim_dir.join("costs"), e))?;
 

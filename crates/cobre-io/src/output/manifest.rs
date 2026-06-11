@@ -7,9 +7,8 @@
 //! - [`write_simulation_metadata`] — writes `simulation/metadata.json` capturing
 //!   run context and scenario completion counts.
 //!
-//! Both replace the previous split of `_manifest.json` + `metadata.json` with a
-//! single merged file per output directory. The `_SUCCESS` marker still signals
-//! completion; metadata files capture the run details.
+//! Each output directory gets a single merged metadata file. The `_SUCCESS`
+//! marker signals completion; metadata files capture the run details.
 //!
 //! All writers use an atomic write pattern: data is serialized to a `.tmp` file
 //! first, then atomically renamed to the target path. This prevents partial files
@@ -80,8 +79,7 @@ pub struct HostLayout {
 /// Execution distribution information embedded in metadata files.
 ///
 /// Captures the communication backend, process topology, and optional
-/// MPI/scheduler metadata for reproducibility. Replaces the previous
-/// `MpiInfo` struct with richer environment context.
+/// MPI/scheduler metadata for reproducibility.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistributionInfo {
     /// Communication backend: `"mpi"` or `"local"`.
@@ -288,9 +286,8 @@ pub struct MetadataSimulationSolveStats {
 
 /// Merged metadata for the training output directory (`training/metadata.json`).
 ///
-/// Replaces the previous split of `training/_manifest.json` (convergence/cuts)
-/// and `training/metadata.json` (configuration/environment) with a single file
-/// containing all run information.
+/// A single file containing all run information: convergence, cuts,
+/// configuration, and environment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrainingMetadata {
     /// Version of the cobre crate that produced this output.
@@ -333,8 +330,6 @@ pub struct TrainingMetadata {
 // ── SimulationMetadata ───────────────────────────────────────────────────────
 
 /// Metadata for the simulation output directory (`simulation/metadata.json`).
-///
-/// Replaces the previous `simulation/_manifest.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimulationMetadata {
     /// Version of the cobre crate that produced this output.
