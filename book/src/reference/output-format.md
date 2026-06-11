@@ -119,7 +119,7 @@ It merges run context, configuration, convergence outcome, row-pool statistics,
 objective bounds, LP solver statistics, and distribution information into a
 single file. Consumers should check `status` before interpreting other fields.
 
-**Example (from `examples/1dtoy/output/training/metadata.json`):**
+**Example (from `output/training/metadata.json` after a run):**
 
 ```json
 {
@@ -158,7 +158,10 @@ single file. Consumers should check `status` before interpreting other fields.
     "total_generated": 384,
     "total_active": 384,
     "peak_active": 384,
-    "cuts_active": 384
+    "cuts_active": 384,
+    "rows_in_lp_total": 0,
+    "rows_in_lp_solve_count": 0,
+    "rows_in_lp_max": 0
   },
   "bounds": {
     "final_lower_bound": 15595518.38,
@@ -241,6 +244,9 @@ single file. Consumers should check `status` before interpreting other fields.
 | `total_active`    | integer | No       | Cut rows still active in the pool at termination.          |
 | `peak_active`     | integer | No       | Highest number of simultaneously active cut rows observed. |
 | `cuts_active`     | integer | No       | Cut rows currently active in the LP at termination.        |
+| `rows_in_lp_total`       | integer | No       | Sum of resident rows-in-LP over every lazy-selection solve in the run. Zero when no lazy selection ran. |
+| `rows_in_lp_solve_count` | integer | No       | Number of lazy-selection solves in the run. Zero when no lazy selection ran.                            |
+| `rows_in_lp_max`         | integer | No       | Largest resident rows-in-LP over any single lazy-selection solve. Zero when no lazy selection ran.      |
 
 **`bounds` fields:**
 
@@ -664,11 +670,10 @@ they serve as a diagnostic and analysis artifact.
 ### `policy/metadata.json`
 
 Small JSON file describing the checkpoint at a high level. Human-readable and
-intended for compatibility checking on study resume.
+machine-readable by tooling that inspects policy files.
 
 | Field                  | Type    | Nullable | Description                                                                                 |
 | ---------------------- | ------- | -------- | ------------------------------------------------------------------------------------------- |
-| `version`              | string  | No       | Checkpoint schema version.                                                                  |
 | `cobre_version`        | string  | No       | Version of the cobre binary that wrote this checkpoint.                                     |
 | `created_at`           | string  | No       | ISO 8601 timestamp when the checkpoint was written.                                         |
 | `completed_iterations` | integer | No       | Number of training iterations completed at checkpoint time.                                 |
@@ -676,11 +681,10 @@ intended for compatibility checking on study resume.
 | `best_upper_bound`     | number  | Yes      | Best upper bound observed during training. `null` when upper bound evaluation was disabled. |
 | `state_dimension`      | integer | No       | Length of each cut's coefficient vector. Must match `state_dictionary.json`.                |
 | `num_stages`           | integer | No       | Number of stages. Must match the case configuration on resume.                              |
-| `config_hash`          | string  | No       | Hash of the algorithm configuration. Checked against the current config on resume.          |
-| `system_hash`          | string  | No       | Hash of the system data. Checked against the current system on resume.                      |
 | `max_iterations`       | integer | No       | Maximum iterations configured for the run.                                                  |
 | `forward_passes`       | integer | No       | Number of forward passes per iteration configured for the run.                              |
 | `warm_start_cuts`      | integer | No       | Number of cuts loaded from a previous policy at run start. `0` for fresh runs.              |
+| `warm_start_counts`    | integer[] | No       | Per-stage warm-start cut counts (one per stage, 0-based). Empty in old checkpoints; supersedes `warm_start_cuts` when non-empty. |
 | `rng_seed`             | integer | No       | RNG seed used by the scenario sampler. Required for reproducibility.                        |
 | `total_visited_states` | integer | No       | Total number of visited state vectors across all stages. `0` when `exports.states` is off.  |
 
@@ -698,7 +702,7 @@ The simulation metadata file is written atomically when simulation completes.
 It captures run context, scenario completion counts, aggregate cost statistics,
 LP solver statistics, and distribution information.
 
-**Example (from `examples/1dtoy/output/simulation/metadata.json`):**
+**Example (from `output/simulation/metadata.json` after a run):**
 
 ```json
 {

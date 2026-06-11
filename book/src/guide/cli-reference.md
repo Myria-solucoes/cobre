@@ -222,13 +222,14 @@ The output has the following top-level shape:
 {
   "output_directory": "/abs/path/to/results",
   "status": "complete",
-  "training": { "iterations": {}, "convergence": {}, "cuts": {} },
-  "simulation": { "scenarios": {} },
-  "metadata": { "run_info": {}, "configuration_snapshot": {} }
+  "bounds": { "final_lower_bound": ..., "final_upper_bound": ... },
+  "training": { "iterations": {}, "convergence": {}, "row_pool": {}, "bounds": {}, "configuration": {}, "problem_dimensions": {} },
+  "cost": { "mean_cost": ..., "std_cost": ... } | null,
+  "simulation": { "scenarios": {}, "cost": {} } | null
 }
 ```
 
-`simulation` and `metadata` are `null` when the corresponding files are absent
+`cost` and `simulation` are `null` when the corresponding files are absent
 (e.g., when simulation was disabled in `config.json`).
 
 ### Arguments
