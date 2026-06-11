@@ -53,7 +53,7 @@ For the full dependency graph and crate responsibilities, see the [methodology r
 The ecosystem delivers a full SDDP training and simulation pipeline:
 
 - **Entity model and topology validation** (`cobre-core`)
-- **JSON/Parquet case loading** with 5-layer validation (`cobre-io`)
+- **JSON/Parquet case loading** with layered validation (`cobre-io`)
 - **LP solver abstraction** with HiGHS backend, warm-start basis management, and 12-level retry escalation (`cobre-solver`)
 - **Pluggable communication** with MPI and local backends, execution topology reporting, and SLURM integration (`cobre-comm`)
 - **PAR(p) inflow models** with deterministic correlated scenario generation, per-class sampling (InSample, OutOfSample, Historical, External), and inflow non-negativity enforcement (`cobre-stochastic`)

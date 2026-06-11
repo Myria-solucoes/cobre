@@ -331,7 +331,7 @@ See `.claude/architecture-rules.md` for the full Python parity checklist.
 
 - Every parser must have round-trip tests: parse → serialize → parse should produce identical data.
 - Include sample input files in `tests/data/` for each supported format.
-- The 5-layer validation pipeline (structural → schema → referential → dimensional → semantic) must collect all errors before failing; never short-circuit on the first error.
+- The layered validation pipeline (structural → schema → referential → dimensional → semantic) must collect all errors before failing; never short-circuit on the first error.
 - Always run `cargo test -p cobre-io --all-features` to include the full test suite. Tests gated behind the `serde` feature (from `cobre-core`) are required for integration tests.
 
 #### cobre-sddp

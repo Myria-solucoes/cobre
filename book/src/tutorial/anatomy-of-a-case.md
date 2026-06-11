@@ -2,7 +2,7 @@
 
 A Cobre case directory is a self-contained folder of input files. When you run
 `cobre run` or `cobre validate`, the first thing Cobre does is call `load_case`
-on that directory. `load_case` reads every file, runs the five-layer validation
+on that directory. `load_case` reads every file, runs the layered validation
 pipeline (schema, references, physical feasibility, stochastic consistency, solver
 feasibility), and produces a fully-validated `System` object ready for the solver.
 

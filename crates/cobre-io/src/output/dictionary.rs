@@ -17,10 +17,9 @@ use std::sync::Arc;
 use arrow::array::{Float64Builder, Int8Builder, Int32Builder, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use cobre_core::System;
-use parquet::arrow::ArrowWriter;
-use parquet::file::properties::WriterProperties;
 
 use crate::Config;
+use crate::output::atomic::{write_bytes_atomic, write_parquet_atomic};
 use crate::output::error::OutputError;
 use crate::output::parquet_config::ParquetWriterConfig;
 use crate::output::schemas::{
@@ -142,7 +141,7 @@ fn write_codes_json(path: &Path) -> Result<(), OutputError> {
             message: e.to_string(),
         })?;
 
-    write_json_atomic(path.join("codes.json").as_path(), &json_str)
+    write_bytes_atomic(path.join("codes.json").as_path(), json_str.as_bytes())
 }
 
 // ─── entities.csv ────────────────────────────────────────────────────────────
@@ -1090,52 +1089,10 @@ fn write_state_dictionary_json(path: &Path, system: &System) -> Result<(), Outpu
             message: e.to_string(),
         })?;
 
-    write_json_atomic(path.join("state_dictionary.json").as_path(), &json_str)
-}
-
-// ─── Shared helpers ───────────────────────────────────────────────────────────
-
-/// Write a JSON string atomically via a `.tmp` intermediate file.
-fn write_json_atomic(path: &Path, content: &str) -> Result<(), OutputError> {
-    let tmp_path = path.with_extension("json.tmp");
-    std::fs::write(&tmp_path, content).map_err(|e| OutputError::io(&tmp_path, e))?;
-    std::fs::rename(&tmp_path, path).map_err(|e| OutputError::io(path, e))?;
-    Ok(())
-}
-
-/// Write a `RecordBatch` to a Parquet file atomically via a `.tmp` intermediate.
-fn write_parquet_atomic(
-    path: &Path,
-    batch: &RecordBatch,
-    config: &ParquetWriterConfig,
-) -> Result<(), OutputError> {
-    let tmp_path = path.with_extension(path.extension().map_or_else(
-        || "tmp".to_string(),
-        |ext| format!("{}.tmp", ext.to_string_lossy()),
-    ));
-
-    let props = WriterProperties::builder()
-        .set_compression(config.compression)
-        .set_max_row_group_row_count(Some(config.row_group_size))
-        .set_dictionary_enabled(config.dictionary_encoding)
-        .build();
-
-    let file = std::fs::File::create(&tmp_path).map_err(|e| OutputError::io(&tmp_path, e))?;
-
-    let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props))
-        .map_err(|e| OutputError::serialization("parquet_writer", e.to_string()))?;
-
-    writer
-        .write(batch)
-        .map_err(|e| OutputError::serialization("parquet_writer", e.to_string()))?;
-
-    writer
-        .close()
-        .map_err(|e| OutputError::serialization("parquet_writer", e.to_string()))?;
-
-    std::fs::rename(&tmp_path, path).map_err(|e| OutputError::io(path, e))?;
-
-    Ok(())
+    write_bytes_atomic(
+        path.join("state_dictionary.json").as_path(),
+        json_str.as_bytes(),
+    )
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

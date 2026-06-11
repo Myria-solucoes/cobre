@@ -286,7 +286,7 @@ For context on the constraint file format see
 
 ## Validation Rules
 
-Cobre's five-layer validation pipeline checks the following conditions on thermal
+Cobre's layered validation pipeline checks the following conditions on thermal
 units. Violations are reported as error messages with the failing unit's `id`.
 
 | Rule                       | Error Class          | Description                                                                         |

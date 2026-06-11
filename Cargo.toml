@@ -29,7 +29,7 @@ rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/cobre-rs/cobre"
 homepage = "https://cobre-rs.github.io/cobre-docs/"
-documentation = "https://docs.rs/cobre"
+documentation = "https://docs.rs/cobre-sddp"
 authors = ["Rogerio J. M. Alves <rogerio.alves@cobre-rs.dev>"]
 
 [workspace.lints.rust]

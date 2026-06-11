@@ -13,7 +13,7 @@ constraint cannot be satisfied by physical generation alone, deficit slack varia
 absorb the gap at a penalty cost, ensuring the LP always has a feasible solution.
 
 Entities are grouped by type and stored in a `System` object. The `System` is built
-from the case directory by `load_case`, which runs a five-layer validation pipeline
+from the case directory by `load_case`, which runs a layered validation pipeline
 before handing the model to the solver. Within the `System`, all entity collections
 are kept in canonical ID-sorted order. This ordering is an invariant: it guarantees
 that simulation results are bit-for-bit identical regardless of the order entities

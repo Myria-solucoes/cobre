@@ -97,15 +97,19 @@ vhs recordings/multithreading.tape
 ```
 
 The `validation-error.tape` uses `jq` to corrupt the 1dtoy case on the fly (no
-pre-built broken directory is committed). It injects two distinct error categories:
+pre-built broken directory is committed). It applies two mutations:
 
-- A schema error: the `reservoir` object is deleted from `hydros.json`, causing a
-  missing required field error in the structural validation layer.
-- A semantic constraint violation: `max_turbined_m3s` is set to a negative value,
-  triggering a constraint check in the semantic validation layer.
+- The `reservoir` object is deleted from `hydros.json`, producing a missing
+  required field error in the schema validation layer.
+- `max_turbined_m3s` is set to a negative value, which would trip a constraint
+  check in the semantic validation layer.
 
-Both errors appear in the `cobre validate` output with red `error:` labels and the
-command exits with a non-zero exit code.
+Validation runs the layers in strict dependency order and stops after the schema
+layer when that layer collects errors, because the later layers consume parsed
+data the schema layer failed to produce. As a result the recording surfaces the
+schema error — a red `error:` label and a non-zero exit code — while the semantic
+mutation is never reached. To observe the semantic error on its own, corrupt only
+`max_turbined_m3s` and leave the schema intact.
 
 The `multithreading.tape` runs the same 1dtoy case twice in sequence — first with
 `--threads 1`, then with `--threads 4` — so the post-run summary timing lines appear

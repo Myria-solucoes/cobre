@@ -12,7 +12,7 @@ into a single executable with a consistent user interface.
 | Subcommand                   | Description                                                                         |
 | ---------------------------- | ----------------------------------------------------------------------------------- |
 | `cobre run <CASE_DIR>`       | Load a case, train an SDDP policy, optionally simulate, and write all results       |
-| `cobre validate <CASE_DIR>`  | Run the 5-layer validation pipeline and print a structured diagnostic report        |
+| `cobre validate <CASE_DIR>`  | Run the layered validation pipeline and print a structured diagnostic report        |
 | `cobre report <RESULTS_DIR>` | Read result manifests and print a machine-readable JSON summary to stdout           |
 | `cobre summary <OUTPUT_DIR>` | Display the human-readable post-run summary table from a completed output directory |
 | `cobre init <DIRECTORY>`     | Scaffold a new case directory from an embedded template                             |

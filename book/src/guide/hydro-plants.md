@@ -749,7 +749,7 @@ contain all hydro penalty fields.
 
 ## Validation Rules
 
-Cobre's five-layer validation pipeline checks the following conditions on hydro
+Cobre's layered validation pipeline checks the following conditions on hydro
 plants. Violations are reported as error messages with the failing plant's `id`
 and the nature of the problem.
 

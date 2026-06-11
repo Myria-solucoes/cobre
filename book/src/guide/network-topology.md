@@ -293,7 +293,7 @@ references resolve to existing buses.
 
 ## Validation Rules
 
-Cobre's five-layer validation pipeline checks the following conditions for buses
+Cobre's layered validation pipeline checks the following conditions for buses
 and lines. Violations are reported as error messages with the failing entity's `id`.
 
 | Rule                      | Error Class          | Description                                                                                                   |

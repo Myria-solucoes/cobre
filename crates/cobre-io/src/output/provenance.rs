@@ -5,9 +5,9 @@
 //! each role — seasonal statistics, AR coefficients, correlation, and the
 //! opening scenario tree.
 
-use std::io::BufWriter;
 use std::path::Path;
 
+use super::atomic::write_json_atomic;
 use super::error::OutputError;
 
 /// Write a model provenance report as pretty-printed JSON.
@@ -29,14 +29,7 @@ pub fn write_provenance_report(
         std::fs::create_dir_all(parent).map_err(|e| OutputError::io(parent, e))?;
     }
 
-    let tmp_path = path.with_extension("json.tmp");
-    let file = std::fs::File::create(&tmp_path).map_err(|e| OutputError::io(&tmp_path, e))?;
-    let writer = BufWriter::new(file);
-    serde_json::to_writer_pretty(writer, report).map_err(|e| {
-        OutputError::serialization("model_provenance", format!("JSON serialization: {e}"))
-    })?;
-    std::fs::rename(&tmp_path, path).map_err(|e| OutputError::io(path, e))?;
-    Ok(())
+    write_json_atomic(path, report, "model_provenance")
 }
 
 /// Read a model provenance report from a JSON file.

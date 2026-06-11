@@ -189,8 +189,8 @@ pub struct StageRowSelectionRecord {
 /// Typed events emitted by an iterative optimization training loop and
 /// simulation runner.
 ///
-/// The enum has 15 variants: 11 per-iteration events (one per lifecycle step)
-/// and 4 lifecycle events (emitted once per training or simulation run).
+/// The enum has 16 variants: 11 per-iteration events (one per lifecycle step)
+/// and 5 lifecycle events (emitted once per training or simulation run).
 ///
 /// ## Per-iteration events (steps 1–7 + 4a + 4b + 4c + per-worker)
 ///
@@ -716,6 +716,14 @@ mod tests {
                 total_time_ms: 300_000,
                 total_rows: 2400,
             },
+            TrainingEvent::SimulationStarted {
+                case_name: "test_case".to_string(),
+                n_scenarios: 200,
+                n_stages: 60,
+                ranks: 4,
+                threads_per_rank: 8,
+                timestamp: "2026-01-01T00:00:00Z".to_string(),
+            },
             TrainingEvent::SimulationProgress {
                 scenarios_complete: 50,
                 scenarios_total: 200,
@@ -740,12 +748,12 @@ mod tests {
     }
 
     #[test]
-    fn all_fifteen_variants_construct() {
+    fn all_variants_construct() {
         let variants = make_all_variants();
         assert_eq!(
             variants.len(),
-            15,
-            "expected exactly 15 TrainingEvent variants"
+            16,
+            "expected exactly 16 TrainingEvent variants"
         );
     }
 

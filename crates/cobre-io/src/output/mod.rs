@@ -7,6 +7,7 @@
 //! it accepts aggregate result types and writes all output artifacts to the
 //! specified directory.
 
+pub(crate) mod atomic;
 pub mod convergence_reader;
 pub mod dictionary;
 pub mod error;

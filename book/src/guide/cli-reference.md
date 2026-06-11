@@ -65,7 +65,7 @@ cobre init --template 1dtoy --force my_study
 
 Executes the full solve lifecycle for a case directory:
 
-1. **Load** — reads all input files and runs the 5-layer validation pipeline
+1. **Load** — reads all input files and runs the layered validation pipeline
 2. **Train** — trains an SDDP policy using the configured stopping rules
 3. **Simulate** — (optional) evaluates the trained policy over simulation scenarios
 4. **Write** — writes all output files to the results directory
@@ -176,7 +176,7 @@ srun --cpu-bind=cores --mpi=pmi2 ./cobre-mpi run /data/case \
 
 ## `cobre validate`
 
-Runs the 5-layer validation pipeline and prints a diagnostic report to stdout.
+Runs the layered validation pipeline and prints a diagnostic report to stdout.
 
 On success, prints entity counts:
 

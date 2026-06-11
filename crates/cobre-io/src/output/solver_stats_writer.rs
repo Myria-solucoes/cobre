@@ -8,11 +8,10 @@ use std::sync::Arc;
 
 use arrow::array::{Float64Array, Int32Array, StringBuilder, UInt32Array, UInt64Array};
 use arrow::record_batch::RecordBatch;
-use parquet::arrow::ArrowWriter;
-use parquet::basic::{Compression, ZstdLevel};
-use parquet::file::properties::WriterProperties;
 
+use super::atomic::write_parquet_atomic;
 use super::error::OutputError;
+use super::parquet_config::ParquetWriterConfig;
 use super::schemas::{retry_histogram_schema, solver_iterations_schema};
 
 /// A single row in the solver statistics Parquet file.
@@ -205,49 +204,26 @@ fn build_retry_histogram_batch(rows: &[SolverStatsRow]) -> Result<RecordBatch, O
     .map_err(|e| OutputError::serialization("retry_histogram", format!("RecordBatch: {e}")))
 }
 
-/// Write a `RecordBatch` to a Parquet file using atomic `.tmp` + rename.
-fn write_parquet(
-    path: &Path,
-    schema: &Arc<arrow::datatypes::Schema>,
-    batch: &RecordBatch,
-) -> Result<(), OutputError> {
-    let tmp_path = path.with_extension("parquet.tmp");
-    let file = std::fs::File::create(&tmp_path).map_err(|e| OutputError::io(&tmp_path, e))?;
-    let props = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(ZstdLevel::default()))
-        .build();
-    let mut writer = ArrowWriter::try_new(file, Arc::clone(schema), Some(props))
-        .map_err(|e| OutputError::serialization("solver_stats", format!("ArrowWriter: {e}")))?;
-    writer
-        .write(batch)
-        .map_err(|e| OutputError::serialization("solver_stats", format!("write: {e}")))?;
-    writer
-        .close()
-        .map_err(|e| OutputError::serialization("solver_stats", format!("close: {e}")))?;
-    std::fs::rename(&tmp_path, path).map_err(|e| OutputError::io(path, e))?;
-    Ok(())
-}
-
 /// Internal: write solver statistics to `{dir}/iterations.parquet` and
 /// `{dir}/retry_histogram.parquet`.
 fn write_solver_stats_to(dir: &Path, rows: &[SolverStatsRow]) -> Result<(), OutputError> {
     std::fs::create_dir_all(dir).map_err(|e| OutputError::io(dir, e))?;
+
+    // The shared atomic helper honors `ParquetWriterConfig`; the crate-wide
+    // default (Zstd-3, dictionary on) is used so solver-stats files match every
+    // other Parquet output rather than carrying a bespoke codec.
+    let config = ParquetWriterConfig::default();
 
     // iterations.parquet — scalar metrics
     let iter_schema = Arc::new(solver_iterations_schema());
     let columns = build_iterations_columns(rows);
     let iter_batch = RecordBatch::try_new(Arc::clone(&iter_schema), columns)
         .map_err(|e| OutputError::serialization("solver_stats", format!("RecordBatch: {e}")))?;
-    write_parquet(&dir.join("iterations.parquet"), &iter_schema, &iter_batch)?;
+    write_parquet_atomic(&dir.join("iterations.parquet"), &iter_batch, &config)?;
 
     // retry_histogram.parquet — normalized per-level retry counts
-    let hist_schema = Arc::new(retry_histogram_schema());
     let hist_batch = build_retry_histogram_batch(rows)?;
-    write_parquet(
-        &dir.join("retry_histogram.parquet"),
-        &hist_schema,
-        &hist_batch,
-    )?;
+    write_parquet_atomic(&dir.join("retry_histogram.parquet"), &hist_batch, &config)?;
 
     Ok(())
 }

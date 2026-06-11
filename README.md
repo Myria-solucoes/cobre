@@ -12,13 +12,13 @@
   <a href="https://crates.io/crates/cobre"><img src="https://img.shields.io/crates/v/cobre.svg" alt="crates.io"/></a>
   <a href="https://pypi.org/project/cobre-python/"><img alt="PyPI - Version" src="https://img.shields.io/pypi/v/cobre-python"></a>
   <a href="https://pypi.org/project/cobre-python/"><img alt="Python Versions" src="https://img.shields.io/pypi/pyversions/cobre-python"></a>
-  <a href="https://docs.rs/cobre"><img src="https://docs.rs/cobre/badge.svg" alt="docs.rs"/></a>
+  <a href="https://docs.rs/cobre-sddp"><img src="https://docs.rs/cobre-sddp/badge.svg" alt="docs.rs"/></a>
   <a href="https://github.com/cobre-rs/cobre/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache 2.0"/></a>
 </p>
 
 ---
 
-**Cobre** is a Rust ecosystem for power system optimization. It ships a distributed SDDP solver for hydrothermal dispatch with CLI, Python, and AI-agent interfaces. The name comes from the Portuguese word for **copper**.
+**Cobre** is a Rust ecosystem for power system optimization. It ships a distributed SDDP solver for hydrothermal dispatch with a CLI and Python bindings. The name comes from the Portuguese word for **copper**.
 
 ## Why Cobre?
 
@@ -41,9 +41,9 @@ pip install cobre-python
 
 | Resource      | Link                                                                    |
 | ------------- | ----------------------------------------------------------------------- |
-| Software Book | [docs.cobre-rs.dev](https://docs.cobre-rs.dev/)           |
+| Software Book | [docs.cobre-rs.dev](https://docs.cobre-rs.dev/)                         |
 | Methodology   | [cobre-rs.github.io/cobre-docs](https://cobre-rs.github.io/cobre-docs/) |
-| API Docs      | [docs.rs/cobre](https://docs.rs/cobre)                                  |
+| API Docs      | [docs.rs/cobre-sddp](https://docs.rs/cobre-sddp)                        |
 | PyPI          | [pypi.org/project/cobre-python](https://pypi.org/project/cobre-python/) |
 
 ## Getting Started

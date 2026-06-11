@@ -17,10 +17,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow::array::{ArrayRef, Float64Builder, Int32Builder, Int64Builder, RecordBatch};
-use parquet::arrow::ArrowWriter;
-use parquet::file::properties::WriterProperties;
 
 use super::{IterationRecord, TrainingOutput, WorkerTimingRecord};
+use crate::output::atomic::write_parquet_atomic;
 use crate::output::error::OutputError;
 use crate::output::parquet_config::ParquetWriterConfig;
 use crate::output::schemas::{convergence_schema, iteration_timing_schema};
@@ -131,11 +130,11 @@ impl TrainingParquetWriter {
 
         let convergence_batch = build_convergence_batch(records)?;
         let convergence_path = self.output_dir.join("training/convergence.parquet");
-        write_parquet(&convergence_path, &convergence_batch, &self.config)?;
+        write_parquet_atomic(&convergence_path, &convergence_batch, &self.config)?;
 
         let timing_batch = build_iteration_timing_batch(&training_output.worker_timing_records)?;
         let timing_path = self.output_dir.join("training/timing/iterations.parquet");
-        write_parquet(&timing_path, &timing_batch, &self.config)?;
+        write_parquet_atomic(&timing_path, &timing_batch, &self.config)?;
 
         Ok(())
     }
@@ -363,46 +362,7 @@ pub fn write_row_selection_records(
     let batch = RecordBatch::try_new(Arc::clone(&schema), columns)
         .map_err(|e| OutputError::serialization("cut_selection", e.to_string()))?;
 
-    write_parquet(&dir.join("iterations.parquet"), &batch, config)
-}
-
-/// Write a `RecordBatch` to `path` as a Parquet file, atomically.
-///
-/// The batch is written to `{path}.tmp` first, then renamed to `path`.  If
-/// any step fails the `.tmp` file may remain on disk but the final path is
-/// never partially written.
-fn write_parquet(
-    path: &Path,
-    batch: &RecordBatch,
-    config: &ParquetWriterConfig,
-) -> Result<(), OutputError> {
-    let tmp_path = path.with_extension(path.extension().map_or_else(
-        || "tmp".to_string(),
-        |ext| format!("{}.tmp", ext.to_string_lossy()),
-    ));
-
-    let props = WriterProperties::builder()
-        .set_compression(config.compression)
-        .set_max_row_group_row_count(Some(config.row_group_size))
-        .set_dictionary_enabled(config.dictionary_encoding)
-        .build();
-
-    let file = std::fs::File::create(&tmp_path).map_err(|e| OutputError::io(&tmp_path, e))?;
-
-    let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props))
-        .map_err(|e| OutputError::serialization("parquet_writer", e.to_string()))?;
-
-    writer
-        .write(batch)
-        .map_err(|e| OutputError::serialization("parquet_writer", e.to_string()))?;
-
-    writer
-        .close()
-        .map_err(|e| OutputError::serialization("parquet_writer", e.to_string()))?;
-
-    std::fs::rename(&tmp_path, path).map_err(|e| OutputError::io(path, e))?;
-
-    Ok(())
+    write_parquet_atomic(&dir.join("iterations.parquet"), &batch, config)
 }
 
 #[cfg(test)]
@@ -704,7 +664,7 @@ mod tests {
         let path = tmp.path().join("convergence.parquet");
         let config = ParquetWriterConfig::default();
 
-        write_parquet(&path, &batch, &config).expect("write must succeed");
+        write_parquet_atomic(&path, &batch, &config).expect("write must succeed");
         assert!(path.exists(), "convergence.parquet must exist after write");
 
         // Read back and verify row count + column values.
@@ -763,7 +723,7 @@ mod tests {
         let path = tmp.path().join("convergence.parquet");
         let config = ParquetWriterConfig::default();
 
-        write_parquet(&path, &batch, &config).expect("write must succeed");
+        write_parquet_atomic(&path, &batch, &config).expect("write must succeed");
 
         // The .tmp file must not remain after a successful write.
         let tmp_path = path.with_extension("parquet.tmp");

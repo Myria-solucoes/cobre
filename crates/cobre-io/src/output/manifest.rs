@@ -19,6 +19,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use super::atomic::write_bytes_atomic;
 use super::error::OutputError;
 
 // ── OutputContext ─────────────────────────────────────────────────────────────
@@ -433,16 +434,16 @@ fn write_json_atomic<T: Serialize>(
     value: &T,
     manifest_type: &str,
 ) -> Result<(), OutputError> {
+    // Serialize here (not via the shared JSON helper) to keep the
+    // `ManifestError` failure variant this writer's callers expect; the bytes
+    // produced are identical to the shared helper's pretty output. The shared
+    // helper then owns the crash-safe write (flush before rename).
     let json = serde_json::to_string_pretty(value).map_err(|e| OutputError::ManifestError {
         manifest_type: manifest_type.to_string(),
         message: e.to_string(),
     })?;
 
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, &json).map_err(|e| OutputError::io(&tmp, e))?;
-    std::fs::rename(&tmp, path).map_err(|e| OutputError::io(path, e))?;
-
-    Ok(())
+    write_bytes_atomic(path, json.as_bytes())
 }
 
 #[cfg(test)]

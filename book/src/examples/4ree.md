@@ -177,7 +177,7 @@ cobre run examples/4ree
 To write output to an explicit directory:
 
 ```sh
-cobre run examples/4ree --output examples/4ree/output
+cobre run examples/4ree --output output
 ```
 
 The run produces the same output directory structure as the 1dtoy case:

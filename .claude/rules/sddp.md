@@ -5,7 +5,7 @@ paths:
 
 # SDDP Numerical & Algorithm Conventions
 
-Hard-won correctness contracts of the SDDP solver. Each one is a *contract*, not
+Hard-won correctness contracts of the SDDP solver. Each one is a _contract_, not
 a style preference: a plausible-looking deviation produces wrong bounds, rejected
 warm-starts, or silently understated cuts that still compile and pass most tests.
 Verify against the cited code before changing any of them.
@@ -13,13 +13,15 @@ Verify against the cited code before changing any of them.
 ## Benders cut sign & subgradient extraction
 
 The FCF stores the **raw subgradient** `∂Q/∂x` as a cut's `coefficients` (it is
-*not* negated at storage). That subgradient is the incoming-state column's
+_not_ negated at storage). That subgradient is the incoming-state column's
 reduced cost **divided** by `col_scale`:
 `∂Q/∂x_orig = rc_scaled / col_scale[col]` — divided, not multiplied, because the
 pin sets `v_scaled = v_orig / col_scale`. Cut-row construction then negates the
 gradient so the LP row reads `−∇·x + θ ≥ intercept`, yielding the Benders cut
 `θ ≥ Q(x̂) + π'(x − x̂)`.
-Read: `backward.rs` (`extract_duals_from_view`), `cut/fcf.rs`.
+Read: `backward.rs` (`extract_duals_from_view`), `cut/fcf.rs`, and
+`forward.rs` (`push_scaled_coefficient`, where `batch.values.push(-coeff * d)`
+applies the negation).
 
 ## State pinning uses column bounds, not equality rows
 

@@ -2,7 +2,7 @@
 
 `cobre-io` reports two kinds of errors: `LoadError` variants (the top-level
 `Result<System, LoadError>` returned by `load_case`) and `ErrorKind` values
-(diagnostic categories collected by `ValidationContext` during the five-layer
+(diagnostic categories collected by `ValidationContext` during the layered
 validation pipeline).
 
 For an explanation of how the validation pipeline works and when each error
@@ -158,7 +158,7 @@ but a hydro, thermal, or line still references its old ID.
 ### `ConstraintError`
 
 **When it occurs:** A catch-all for all validation diagnostics collected by
-`ValidationContext` across any of the five layers, and for `SystemBuilder::build()`
+`ValidationContext` across any validation layer, and for `SystemBuilder::build()`
 rejections. The `description` field contains every collected error message joined
 by newlines, each prefixed with its `[ErrorKind]`, source file, optional entity
 identifier, and message text.

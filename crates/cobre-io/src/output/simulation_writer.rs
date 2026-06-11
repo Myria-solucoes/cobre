@@ -33,17 +33,15 @@
 //! solver's output integration layer.
 
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow::array::{BooleanBuilder, Float64Builder, Int8Builder, Int32Builder, RecordBatch};
-use parquet::arrow::ArrowWriter;
-use parquet::file::properties::WriterProperties;
 
 use cobre_core::System;
 
 use crate::output::SimulationOutput;
+use crate::output::atomic::write_parquet_atomic;
 use crate::output::error::OutputError;
 use crate::output::parquet_config::ParquetWriterConfig;
 use crate::output::schemas::{
@@ -1497,56 +1495,6 @@ fn build_generic_violations_batch<'a>(
         ],
     )
     .map_err(|e| OutputError::serialization("generic_violations", e.to_string()))
-}
-
-// ---------------------------------------------------------------------------
-// Atomic Parquet write helper
-// ---------------------------------------------------------------------------
-
-/// Write a `RecordBatch` to `path` as a Parquet file, atomically.
-///
-/// Writes to `{path}.tmp` first, then renames to `path`. If any step fails
-/// the `.tmp` file may remain on disk but the final path is never partially
-/// written.
-fn write_parquet_atomic(
-    path: &Path,
-    batch: &RecordBatch,
-    config: &ParquetWriterConfig,
-) -> Result<(), OutputError> {
-    let tmp_path = path.with_extension(path.extension().map_or_else(
-        || "tmp".to_string(),
-        |ext| format!("{}.tmp", ext.to_string_lossy()),
-    ));
-
-    let props = WriterProperties::builder()
-        .set_compression(config.compression)
-        .set_max_row_group_row_count(Some(config.row_group_size))
-        .set_dictionary_enabled(config.dictionary_encoding)
-        .build();
-
-    let file = std::fs::File::create(&tmp_path).map_err(|e| OutputError::io(&tmp_path, e))?;
-    let buf = std::io::BufWriter::new(file);
-
-    let mut writer = ArrowWriter::try_new(buf, batch.schema(), Some(props))
-        .map_err(|e| OutputError::serialization("parquet_writer", e.to_string()))?;
-
-    writer
-        .write(batch)
-        .map_err(|e| OutputError::serialization("parquet_writer", e.to_string()))?;
-
-    // `ArrowWriter::into_inner` finalizes the parquet footer into the
-    // `BufWriter` but does NOT flush the `BufWriter` into the underlying
-    // `File`. The explicit `flush` below guarantees every buffered byte reaches
-    // the file before the atomic rename — relying on drop-flush would swallow
-    // I/O errors and could truncate the file.
-    let mut buf = writer
-        .into_inner()
-        .map_err(|e| OutputError::serialization("parquet_writer", e.to_string()))?;
-    buf.flush().map_err(|e| OutputError::io(&tmp_path, e))?;
-
-    std::fs::rename(&tmp_path, path).map_err(|e| OutputError::io(path, e))?;
-
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
