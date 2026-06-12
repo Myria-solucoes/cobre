@@ -379,7 +379,6 @@ impl ClpSolver {
     /// warm-start contract); the LP column count is fixed at `load_model` and
     /// never grows mid-life, so a column mismatch is a genuine shape bug.
     fn install_basis(&mut self, b: &crate::Basis) -> Result<(), SolverError> {
-        // NOTE: CLP set_*Status does not run isBasisConsistent; no BasisInconsistent path.
         // CLP's per-element setters silently accept an inconsistent offered basis
         // and `Clp_dual` repairs it, so — unlike `HighsSolver::solve` — there is no
         // consistency check and no `SolverError::BasisInconsistent` surface here.

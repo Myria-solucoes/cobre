@@ -137,9 +137,8 @@ impl<S: SolverInterface> SolverInterface for ProfiledSolver<S> {
         // `set_profile`, and the retry-escalation path re-applies the full
         // profile (tolerances + strategies) after `restore_default_settings`,
         // so the inner solver's options already equal `current_profile` on
-        // entry to every solve. Verified result-neutral against the D01-D15
-        // parity hashes (identical actual hashes with and without the former
-        // per-solve re-application).
+        // entry to every solve. Result-neutral against the D01-D15 parity
+        // hashes.
         self.inner.solve(basis)
     }
 
