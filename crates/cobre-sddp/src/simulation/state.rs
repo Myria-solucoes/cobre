@@ -40,7 +40,6 @@ use crate::{
     FutureCostFunction,
     context::{StageContext, TrainingContext},
     cut::row::build_cut_row_batch_into,
-    forward::partition,
     simulation::{
         config::SimulationConfig,
         error::SimulationError,
@@ -51,6 +50,7 @@ use crate::{
             emit_sim_progress, process_scenario_stages,
         },
     },
+    solve::partition,
     solver_stats::SolverStatsDelta,
     workspace::{CapturedBasis, SolverWorkspace},
 };

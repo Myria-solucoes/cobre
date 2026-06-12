@@ -23,8 +23,9 @@ use crate::{
     cut::FutureCostFunction,
     cut_sync::CutSyncBuffers,
     error::SddpError,
-    forward::{build_delta_cut_row_batch_into, partition},
+    forward::build_delta_cut_row_batch_into,
     risk_measure::RiskMeasure,
+    solve::partition,
     solver_phase::Phase,
     solver_stats::{
         SolverStatsDelta, StageWorkerStatsBuffer, WORKER_STATS_ENTRY_STRIDE,

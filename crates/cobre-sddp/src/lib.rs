@@ -51,9 +51,8 @@ pub mod policy;
 pub mod production;
 pub mod setup;
 pub mod simulation;
-pub mod solver_phase;
+pub mod solve;
 pub mod solver_stats;
-pub(crate) mod stage_solve;
 pub(crate) mod state_exchange;
 pub mod stochastic;
 pub mod training;
@@ -69,6 +68,18 @@ pub mod workspace;
 // `cobre_sddp::context` path, so the in-crate `crate::context::{StageContext,
 // TrainingContext}` call sites resolve verbatim without per-site edits.
 pub use workspace::context;
+
+// Crate-root submodule shim: re-exposes the inner `solver_phase` / `stage_solve`
+// file modules (now `solve::solver_phase` / `solve::stage_solve` after the
+// `solve/` cluster move) at their pre-move crate-root paths, so the in-crate
+// `crate::solver_phase::Phase` use in `simulation/state.rs` and the
+// `crate::stage_solve::{fill_unscaled, fill_unscaled_dual, StageInputs,
+// run_stage_solve}` uses in `forward.rs`, `backward.rs`, and
+// `simulation/pipeline.rs` resolve verbatim without per-site edits.
+// `stage_solve` keeps `pub(crate)` visibility — it has no external raw-path
+// consumer.
+pub use solve::solver_phase;
+pub(crate) use solve::stage_solve;
 
 // Crate-root submodule shim: preserves the pre-move
 // `cobre_sddp::risk_measure::` / `cobre_sddp::stopping_rule::` raw paths
@@ -187,9 +198,9 @@ pub use simulation::{
     SimulationStageResult, SimulationSummary, aggregate_simulation, simulate,
 };
 // ── solver_phase ─────────────────────────────────────────────────────────────
-pub use solver_phase::Phase;
+pub use solve::solver_phase::Phase;
 #[cfg(feature = "highs")]
-pub use solver_phase::{BACKWARD_PROFILE, FORWARD_PROFILE, SIMULATION_PROFILE};
+pub use solve::solver_phase::{BACKWARD_PROFILE, FORWARD_PROFILE, SIMULATION_PROFILE};
 // ── solver_stats ──────────────────────────────────────────────────────────────
 pub use solver_stats::{
     SOLVER_STATS_DELTA_SCALAR_FIELDS, SolverStatsDelta, SolverStatsLogEntry, delta_to_stats_row,

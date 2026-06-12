@@ -1026,7 +1026,7 @@ impl BasisStore {
         let mut offset = 0usize;
 
         for w in 0..n_workers {
-            let (start, end) = crate::forward::partition(total_scenarios, n_workers, w);
+            let (start, end) = crate::solve::partition(total_scenarios, n_workers, w);
             let count = end - start;
             let chunk = count * self.num_stages;
             let (bases_left, bases_rest) = bases_rem.split_at_mut(chunk);
