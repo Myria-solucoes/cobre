@@ -83,46 +83,50 @@ and Phase B operates on already-relocated files.
 
 ### cobre-sddp/src (46 flat → ~8 flat + domain dirs)
 
-| Target dir         | Absorbs (flat files today)                                                                                                                     |
-| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `passes/`          | forward, backward, forward_pass_state, backward_pass_state, lower_bound, stage_solve, solver_phase, state_exchange, visited_states, trajectory |
-| `cut/` _(extend)_  | + cut_selection, cut_sync, dcs, basis_reconstruct                                                                                              |
-| `stochastic/`      | estimation, noise, noise_key_diag, lag_transition, inflow_method, stochastic_summary                                                           |
-| `production/`      | hydro_models, fpha_fitting, energy_conversion, conversion                                                                                      |
-| `lp/`              | indexer, generic_constraints _(co-located with the existing `lp_builder/`; see Open Questions on whether to nest `lp_builder/` under `lp/`)_   |
-| `convergence/`     | convergence, stopping_rule, risk_measure                                                                                                       |
-| `policy/`          | policy_load, policy_export, provenance, resolved_parameters, training_output, scaling_report, orchestration                                    |
-| `workspace/`       | workspace, context                                                                                                                             |
-| **root keeps**     | lib, error, config, horizon_mode, solver_stats, gemm, validate_phases, training                                                                |
-| _(unchanged dirs)_ | setup/, simulation/, training_session/                                                                                                         |
+| Target dir         | Absorbs (flat files today)                                                                                                                                                                                                                                                                                                                                          |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `training/`        | train (loop, from `training.rs`) + the `training_session/` contents (session, results) + training_output, **and** the training-phase passes: forward, backward, forward_pass_state, backward_pass_state, lower_bound, state_exchange, visited_states, trajectory. Sibling to `simulation/`. **Eliminates the root `training.rs` and the `training_session/` name.** |
+| `solve/`           | stage_solve, solver_phase — the LP-solve seam **shared** by training and simulation (so it lives outside `training/`)                                                                                                                                                                                                                                               |
+| `cut/` _(extend)_  | + cut_selection, cut_sync, dcs, basis_reconstruct                                                                                                                                                                                                                                                                                                                   |
+| `stochastic/`      | estimation, noise, noise_key_diag, lag_transition, inflow_method, stochastic_summary                                                                                                                                                                                                                                                                                |
+| `production/`      | hydro_models, fpha_fitting, energy_conversion, conversion                                                                                                                                                                                                                                                                                                           |
+| `lp/`              | indexer, generic_constraints, **and the existing `lp_builder/` nested as `lp/builder/`**                                                                                                                                                                                                                                                                            |
+| `convergence/`     | convergence, stopping_rule, risk_measure                                                                                                                                                                                                                                                                                                                            |
+| `policy/`          | policy_load, policy_export, provenance, resolved_parameters, scaling_report, orchestration                                                                                                                                                                                                                                                                          |
+| `workspace/`       | workspace, context                                                                                                                                                                                                                                                                                                                                                  |
+| **root keeps**     | lib, error, config, horizon_mode, solver_stats, gemm, validate_phases                                                                                                                                                                                                                                                                                               |
+| _(unchanged dirs)_ | setup/, simulation/                                                                                                                                                                                                                                                                                                                                                 |
 
-`training.rs` (the public `train()` entry) stays at root for discoverability —
-see Open Questions.
+**`training/` ⇄ `simulation/` symmetry (owner decision):** the two solver phases
+become sibling directory modules. `training.rs` and `training_session/` both
+dissolve into `training/`. The exact training-vs-shared boundary (which pass code
+is training-only vs reused by simulation — e.g. is any of `forward` shared?) is
+confirmed during plan refinement by reading the cross-module call graph;
+`solve/` holds what is provably shared.
 
 ### cobre-solver/src (10 flat → 4 flat + 3 dirs)
 
-| Target      | Files                                                                                                                              |
-| ----------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `backends/` | highs, clp, profiled                                                                                                               |
-| `ffi/`      | highs (from `ffi.rs`), clp (from `clp_ffi.rs`) — **the unsafe boundary, isolated**                                                 |
-| `core/`     | baking, types, trait_def, profile _(or keep types/trait_def/profile at root as the crate's public vocabulary; see Open Questions)_ |
-| root keeps  | lib                                                                                                                                |
+| Target      | Files                                                                                                     |
+| ----------- | --------------------------------------------------------------------------------------------------------- |
+| `backends/` | highs, clp, profiled                                                                                      |
+| `ffi/`      | highs (from `ffi.rs`), clp (from `clp_ffi.rs`) — **the unsafe boundary, isolated**                        |
+| root keeps  | types, trait_def, profile (the crate's public vocabulary — **kept at root, owner decision**), baking, lib |
+
+(`cobre-solver` → 2 dirs + root: `backends/`, `ffi/`; everything else stays at root.)
 
 ### cobre-core/src (13 flat → ~3 flat + dirs)
 
-| Target             | Files                                                        |
-| ------------------ | ------------------------------------------------------------ |
-| `model/`           | resolved, scenario, temporal, parameters, penalty            |
-| `constraints/`     | generic_constraint, initial_conditions, training_event       |
-| `stats/`           | welford                                                      |
-| root keeps         | lib, error, entity_id, system _(or `system/` if split — §5)_ |
-| _(unchanged dirs)_ | entities/, topology/                                         |
+| Target             | Files                                                         |
+| ------------------ | ------------------------------------------------------------- |
+| `model/`           | resolved, scenario, temporal, parameters, penalty             |
+| `constraints/`     | generic_constraint, initial_conditions, training_event        |
+| `stats/`           | welford                                                       |
+| root keeps         | lib, error, entity*id, system *(or `system/` if split — §5)\_ |
+| _(unchanged dirs)_ | entities/, topology/                                          |
 
-### cobre-comm/src (7 flat, optional)
+### cobre-comm/src — SKIPPED (owner decision)
 
-Small (3.8k lines). Optional clustering: `backends/` (ferrompi, local, factory),
-root keeps traits, types, topology, lib. Low urgency; include only if the owner
-wants full uniformity.
+Small enough (7 files / 3.8k lines) that clustering adds little. Out of scope.
 
 ## 5. Target structure — Phase B god-file splits
 
@@ -131,14 +135,14 @@ unit (determinism-critical), do not edit during the split.
 
 ### Split (high value, feasible)
 
-**`passes/backward/`** (6888) → `mod` (docs, `BackwardResult`, `StagedCut`,
+**`training/backward/`** (6888) → `mod` (docs, `BackwardResult`, `StagedCut`,
 `SuccessorSpec`) · `lp_setup` (load_backward_lp, patch_opening_bounds,
 resolve_backward_basis) · **`duals_extraction` [SEALED]** (extract_duals_from_view,
 extract_state_duals_only — Benders sign + `col_scale` division) ·
 `outcome_aggregation` · **`trial_point` [SEALED]** (process_trial_point_backward —
 hot-path kernel, deterministic ordering) · `tests`.
 
-**`passes/forward/`** (4734) → `mod` (docs, `ForwardResult`, `SyncResult`,
+**`training/forward/`** (4734) → `mod` (docs, `ForwardResult`, `SyncResult`,
 `sync_forward`) · `scenario_partition` · **`stats_aggregation` [SEALED]** (Welford
 canonical-order) · `stage_loop` (hot-path scratch reuse — careful) ·
 `delta_cut_batch` · `basis_capture` · `tests`.
@@ -234,7 +238,8 @@ busy ones:
 1. cobre-solver `ffi/` + `backends/` (isolated, genericity-checked).
 2. cobre-core `model/` + `constraints/` + `stats/`.
 3. cobre-sddp `convergence/`, `policy/`, `workspace/`, `production/` (relocate
-   only), `stochastic/`, `lp/`, extend `cut/`, then `passes/`.
+   only), `stochastic/`, `solve/`, `lp/` (+ nest `lp_builder/`→`lp/builder/`),
+   extend `cut/`, then `training/` (fold in `training.rs` + `training_session/`).
 
 Phase B, one god-file per commit, easiest→hardest: `model/resolved`, `system`,
 `hydro_models`, `energy_conversion`, `indexer`, `fpha_fitting`, solver backends,
@@ -244,19 +249,18 @@ Each commit: relocation/split → `cargo build --release --workspace` +
 `cargo build --manifest-path crates/cobre-python/Cargo.toml` → targeted nextest →
 clippy → genericity (infra) → 1dtoy oracle → `cargo fmt`.
 
-## 10. Open questions (owner decisions before/at execution)
+## 10. Resolved decisions (owner)
 
-1. **`lp_builder/` nesting** — leave `lp_builder/` at root next to a new `lp/`,
-   or nest it as `lp/builder/`? (Nesting is cleaner but churns more paths.)
-2. **`training.rs` home** — root (discoverable `train()` entry) vs.
-   `training_session/` vs. a new `engine/`.
-3. **cobre-solver `core/`** — cluster types/trait_def/profile into `core/`, or
-   keep them root-level as the crate's public vocabulary?
-4. **cobre-comm** — include (full uniformity) or skip (low value, 3.8k lines)?
-5. **Phase B depth** — split all listed god-files, or stop after the cobre-sddp
-   ones and defer solver/core splits?
-6. **Vehicle** — formal progressive plan (`/plan` → `/implement-plan`) vs.
-   direct incremental execution once this design is approved.
+1. **`lp_builder/` nesting** — ✅ NEST as `lp/builder/`.
+2. **`training.rs` home** — ✅ Create a `training/` directory module, sibling to
+   `simulation/`, that absorbs `training.rs` **and** `training_session/`. No root
+   `training.rs`; no `training_session/` name.
+3. **cobre-solver `core/`** — ✅ KEEP `types`/`trait_def`/`profile` at root (the
+   crate's public vocabulary). Only `backends/` + `ffi/` are introduced.
+4. **cobre-comm** — ✅ SKIP (small enough).
+5. **Phase B depth** — ✅ Split ALL listed god-files (cobre-sddp + solver + core).
+6. **Vehicle** — ✅ Formal progressive plan via the `/plan` skill, executed with
+   `/implement-plan` (same guardian/score/boundary rigor as the prior plan).
 
 ## 11. Effort (rough)
 
