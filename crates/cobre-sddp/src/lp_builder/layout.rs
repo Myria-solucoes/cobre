@@ -353,50 +353,6 @@ pub(crate) struct StageLayout {
 
 // ── Private helper return structs ─────────────────────────────────────────────
 
-/// Column offsets for the decision variable region of the LP.
-struct DecisionColumnOffsets {
-    col_turbine_start: usize,
-    col_spillage_start: usize,
-    col_diversion_start: usize,
-    col_thermal_start: usize,
-    /// Start of anticipated-decision columns: one per anticipated thermal per stage
-    /// (stage-level, NOT per block). Equals `col_thermal_end`.
-    col_anticipated_decision_start: usize,
-    /// Start of anticipated-state-out columns: one per anticipated thermal per stage
-    /// (stage-level, NOT per block). Placed immediately after `col_anticipated_decision_start`.
-    col_anticipated_state_out_start: usize,
-    col_line_fwd_start: usize,
-    col_line_rev_start: usize,
-    col_deficit_start: usize,
-    col_excess_start: usize,
-    col_inflow_slack_start: usize,
-    max_deficit_segments: usize,
-    n_slack_cols: usize,
-}
-
-/// Column offsets for the FPHA generation variable region of the LP.
-struct FphaColumnOffsets {
-    col_generation_start: usize,
-    col_generation_end: usize,
-}
-
-/// Column offsets for the evaporation variable region of the LP.
-struct EvapColumnOffsets {
-    col_evap_start: usize,
-    n_evap_cols: usize,
-}
-
-/// Column offsets for all operational slack variable regions of the LP.
-struct OperationalSlackColumnOffsets {
-    col_withdrawal_neg_start: usize,
-    col_withdrawal_pos_start: usize,
-    col_outflow_below_start: usize,
-    col_outflow_above_start: usize,
-    col_turbine_below_start: usize,
-    col_generation_below_start: usize,
-    operational_slack_end: usize,
-}
-
 /// Layout metadata for all active generic constraint rows and slack columns.
 struct GenericConstraintLayout {
     n_generic_rows: usize,
@@ -406,65 +362,14 @@ struct GenericConstraintLayout {
 
 // ── Private helper functions ───────────────────────────────────────────────────
 
-/// Compute column offsets for the core decision variable region.
+/// Collect the FPHA hydro indices and per-hydro plane counts for this stage.
 ///
-/// Covers turbine, spillage, diversion, thermal, `line_fwd`, `line_rev`, deficit,
-/// excess, and inflow slack columns in that order.
-fn compute_decision_column_offsets(
-    ctx: &TemplateBuildCtx<'_>,
-    n_blks: usize,
-    decision_start: usize,
-) -> DecisionColumnOffsets {
-    let col_turbine_start = decision_start;
-    let col_spillage_start = col_turbine_start + ctx.n_hydros * n_blks;
-    let col_diversion_start = col_spillage_start + ctx.n_hydros * n_blks;
-    let col_thermal_start = col_diversion_start + ctx.n_hydros * n_blks;
-    // Anticipated-decision and anticipated-state-out columns: stage-level (NOT per-block),
-    // one per anticipated thermal each. Inserted between thermal (per-block) and line_fwd.
-    // Layout: thermal | anticipated_decision (A cols) | anticipated_state_out (A cols) | line_fwd
-    let col_anticipated_decision_start = col_thermal_start + ctx.n_thermals * n_blks;
-    let col_anticipated_state_out_start = col_anticipated_decision_start + ctx.n_anticipated;
-    let col_line_fwd_start = col_anticipated_state_out_start + ctx.n_anticipated;
-    let col_line_rev_start = col_line_fwd_start + ctx.n_lines * n_blks;
-    let max_deficit_segments = ctx
-        .buses
-        .iter()
-        .map(|b| b.deficit_segments.len())
-        .max()
-        .unwrap_or(0);
-    let col_deficit_start = col_line_rev_start + ctx.n_lines * n_blks;
-    let col_excess_start = col_deficit_start + ctx.n_buses * max_deficit_segments * n_blks;
-    let col_inflow_slack_start = col_excess_start + ctx.n_buses * n_blks;
-    let n_slack_cols = if ctx.has_penalty { ctx.n_hydros } else { 0 };
-
-    DecisionColumnOffsets {
-        col_turbine_start,
-        col_spillage_start,
-        col_diversion_start,
-        col_thermal_start,
-        col_anticipated_decision_start,
-        col_anticipated_state_out_start,
-        col_line_fwd_start,
-        col_line_rev_start,
-        col_deficit_start,
-        col_excess_start,
-        col_inflow_slack_start,
-        max_deficit_segments,
-        n_slack_cols,
-    }
-}
-
-/// Identify which hydros use FPHA at this stage and compute their column offsets.
+/// The returned vectors feed the indexer's [`FphaColumnLayout`], which is the
+/// single owner of the FPHA column and row offsets; this helper only enumerates
+/// which hydros use FPHA, never their offsets.
 ///
-/// Returns the FPHA column offsets along with the hydro index and plane-count
-/// vectors needed for row layout and matrix construction.
-fn identify_and_layout_fpha_columns(
-    ctx: &TemplateBuildCtx<'_>,
-    stage_idx: usize,
-    n_blks: usize,
-    col_inflow_slack_start: usize,
-    n_slack_cols: usize,
-) -> (FphaColumnOffsets, Vec<usize>, Vec<usize>) {
+/// [`FphaColumnLayout`]: crate::indexer::FphaColumnLayout
+fn identify_fpha_hydros(ctx: &TemplateBuildCtx<'_>, stage_idx: usize) -> (Vec<usize>, Vec<usize>) {
     let mut fpha_hydro_indices: Vec<usize> = Vec::new();
     let mut fpha_planes_per_hydro: Vec<usize> = Vec::new();
     for h_idx in 0..ctx.n_hydros {
@@ -475,79 +380,25 @@ fn identify_and_layout_fpha_columns(
             fpha_planes_per_hydro.push(planes.len());
         }
     }
-    let n_fpha_hydros = fpha_hydro_indices.len();
-    let col_generation_start = col_inflow_slack_start + n_slack_cols;
-    let col_generation_end = col_generation_start + n_fpha_hydros * n_blks;
-
-    (
-        FphaColumnOffsets {
-            col_generation_start,
-            col_generation_end,
-        },
-        fpha_hydro_indices,
-        fpha_planes_per_hydro,
-    )
+    (fpha_hydro_indices, fpha_planes_per_hydro)
 }
 
-/// Identify which hydros have linearized evaporation and compute their column offsets.
+/// Collect the indices of hydros with linearized evaporation at this stage.
 ///
-/// Returns the evaporation column offsets along with the hydro index vector
-/// needed for row layout and matrix construction.
-fn identify_and_layout_evap_columns(
-    ctx: &TemplateBuildCtx<'_>,
-    col_generation_end: usize,
-) -> (EvapColumnOffsets, Vec<usize>) {
-    let mut evap_hydro_indices: Vec<usize> = Vec::new();
-    for h_idx in 0..ctx.n_hydros {
-        if matches!(
-            ctx.evaporation_models.model(h_idx),
-            EvaporationModel::Linearized { .. }
-        ) {
-            evap_hydro_indices.push(h_idx);
-        }
-    }
-    let n_evap_hydros = evap_hydro_indices.len();
-    let col_evap_start = col_generation_end;
-    let n_evap_cols = n_evap_hydros * 3;
-
-    (
-        EvapColumnOffsets {
-            col_evap_start,
-            n_evap_cols,
-        },
-        evap_hydro_indices,
-    )
-}
-
-/// Compute column offsets for all operational slack variable families.
+/// The returned vector feeds the indexer's [`EvapConfig`], which is the single
+/// owner of the evaporation column and row offsets; this helper only enumerates
+/// which hydros use evaporation, never their offsets.
 ///
-/// Covers withdrawal (neg/pos) slacks and the four per-hydro-per-block
-/// operational violation slacks (`outflow_below`, `outflow_above`, `turbine_below`,
-/// `generation_below`), placed after the evaporation columns.
-fn compute_operational_slack_column_offsets(
-    ctx: &TemplateBuildCtx<'_>,
-    n_blks: usize,
-    withdrawal_slack_start: usize,
-) -> OperationalSlackColumnOffsets {
-    let col_withdrawal_neg_start = withdrawal_slack_start;
-    let col_withdrawal_pos_start = col_withdrawal_neg_start + ctx.n_hydros;
-
-    let n_op_slack = ctx.n_hydros * n_blks;
-    let col_outflow_below_start = col_withdrawal_pos_start + ctx.n_hydros;
-    let col_outflow_above_start = col_outflow_below_start + n_op_slack;
-    let col_turbine_below_start = col_outflow_above_start + n_op_slack;
-    let col_generation_below_start = col_turbine_below_start + n_op_slack;
-    let operational_slack_end = col_generation_below_start + n_op_slack;
-
-    OperationalSlackColumnOffsets {
-        col_withdrawal_neg_start,
-        col_withdrawal_pos_start,
-        col_outflow_below_start,
-        col_outflow_above_start,
-        col_turbine_below_start,
-        col_generation_below_start,
-        operational_slack_end,
-    }
+/// [`EvapConfig`]: crate::indexer::EvapConfig
+fn identify_evap_hydros(ctx: &TemplateBuildCtx<'_>) -> Vec<usize> {
+    (0..ctx.n_hydros)
+        .filter(|&h_idx| {
+            matches!(
+                ctx.evaporation_models.model(h_idx),
+                EvaporationModel::Linearized { .. }
+            )
+        })
+        .collect()
 }
 
 /// Collect indices of NCS entities that are active at this stage.
@@ -713,27 +564,23 @@ fn enumerate_generic_constraint_rows(
 
 impl StageLayout {
     // Rationale: single cohesive LP layout constructor; every local binding contributes to
-    // the `Self { .. }` literal that terminates the function.  The eight-phase offset
-    // chain (FPHA → evaporation → operational-slack → NCS → generic → z-inflow → row
-    // regions → struct literal) must remain visible in sequence so that each offset's
-    // derivation from its predecessor is auditable; splitting would scatter the chain
-    // across helpers and obscure layout correctness.
+    // the `Self { .. }` literal that terminates the function.  Each `StageLayout` field is
+    // assigned next to the `idx` field (or NCS/generic/fishing arithmetic) it reads from, so
+    // keeping the indexer-owned reads and the NCS/generic/fishing-only derivations in one
+    // place is what makes the read-vs-recompute distinction auditable; splitting would scatter
+    // the field initializers across helpers and obscure which offsets the indexer owns.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn new(ctx: &TemplateBuildCtx<'_>, stage: &Stage, stage_idx: usize) -> Self {
         let n_blks = stage.blocks.len();
 
         // Identify FPHA and evaporation hydros before constructing the augmented
         // indexer, since their indices are needed for the indexer's `FphaColumnLayout`
-        // and `EvapConfig` arguments.
-        let (fpha_cols_pre, fpha_hydro_indices, fpha_planes_per_hydro) =
-            identify_and_layout_fpha_columns(
-                ctx, stage_idx, n_blks,
-                0, // placeholder; real offset is derived from the augmented indexer below
-                0,
-            );
-        let (_, evap_hydro_indices) = identify_and_layout_evap_columns(ctx, 0); // placeholder offset; only indices needed
+        // and `EvapConfig` arguments. The indexer owns the resulting column offsets.
+        let (fpha_hydro_indices, fpha_planes_per_hydro) = identify_fpha_hydros(ctx, stage_idx);
+        let evap_hydro_indices = identify_evap_hydros(ctx);
 
-        // Compute max_deficit_segments once (same formula as compute_decision_column_offsets).
+        // Compute max_deficit_segments once; the indexer derives every offset
+        // downstream of the deficit block from this count.
         let max_deficit_segments = ctx
             .buses
             .iter()
@@ -769,33 +616,60 @@ impl StageLayout {
         );
 
         let n_ant_state = ctx.n_anticipated * ctx.k_max;
-        let decision_start = idx.theta + 1;
-
-        // Column offsets: decision variables start at `idx.theta + 1`.
-        let dec = compute_decision_column_offsets(ctx, n_blks, decision_start);
-
-        // FPHA generation columns start after the inflow-slack region.
-        // Re-derive the FPHA column offsets using the corrected decision offsets.
-        let fpha_generation_start = dec.col_inflow_slack_start + dec.n_slack_cols;
-        let n_fpha_hydros = fpha_hydro_indices.len();
-        let fpha_generation_end = fpha_generation_start + n_fpha_hydros * n_blks;
-        let fpha_cols = FphaColumnOffsets {
-            col_generation_start: fpha_generation_start,
-            col_generation_end: fpha_generation_end,
-        };
-
-        let (evap_cols, _) = identify_and_layout_evap_columns(ctx, fpha_cols.col_generation_end);
-        let op_slack = compute_operational_slack_column_offsets(
-            ctx,
-            n_blks,
-            evap_cols.col_evap_start + evap_cols.n_evap_cols,
-        );
 
         // NCS: identify active entities and compute their column region.
+        // The NCS block follows the last operational-violation slack family
+        // (`generation_below_slack`), so its start is that family's end. The
+        // generation-below slack is non-empty whenever `hydro_count > 0`; when
+        // there are no hydros it is the empty `0..0` sentinel, so fall back to
+        // the evaporation-column cursor (`evap_col_start`, the start of the
+        // withdrawal/operational-slack region) which carries the correct value.
         let active_ncs_indices = identify_active_ncs(ctx, stage);
         let n_active_ncs = active_ncs_indices.len();
-        let col_ncs_start = op_slack.operational_slack_end;
+        let col_ncs_start = if ctx.n_hydros > 0 {
+            idx.generation_below_slack.end
+        } else {
+            idx.evap_col_start()
+        };
         let col_ncs_end = col_ncs_start + n_active_ncs * n_blks;
+
+        // FPHA generation and evaporation column starts: read from the indexer
+        // accessors so the empty-block cursor (not the normalised `0..0`) is
+        // used when no FPHA/evap hydros exist.
+        let col_generation_start = idx.generation_col_start();
+        let col_evap_start = idx.evap_col_start();
+
+        // Withdrawal and operational-violation slack columns: non-empty whenever
+        // `hydro_count > 0` and then carry the canonical cursors; with no hydros
+        // they normalise to `0..0`, so fall back to the column region start
+        // (`evap_col_start`), preserving today's empty-case cursor.
+        let (
+            col_withdrawal_neg_start,
+            col_withdrawal_pos_start,
+            col_outflow_below_start,
+            col_outflow_above_start,
+            col_turbine_below_start,
+            col_generation_below_start,
+        ) = if ctx.n_hydros > 0 {
+            (
+                idx.withdrawal_slack_neg.start,
+                idx.withdrawal_slack_pos.start,
+                idx.outflow_below_slack.start,
+                idx.outflow_above_slack.start,
+                idx.turbine_below_slack.start,
+                idx.generation_below_slack.start,
+            )
+        } else {
+            let region_start = idx.evap_col_start();
+            (
+                region_start,
+                region_start,
+                region_start,
+                region_start,
+                region_start,
+                region_start,
+            )
+        };
 
         // Row offsets: z_inflow, water balance, load balance, FPHA, evap, operational, generic.
         // z_inflow starts at row 0; state pinning is applied via column bounds.
@@ -806,16 +680,39 @@ impl StageLayout {
         // pinning uses column bounds. Cut-subgradient extraction reads
         // view.reduced_costs; n_dual_relevant on the row side is unused by the cut path.
         let n_dual_relevant = 0_usize;
-        let row_water_balance_start = ctx.n_hydros;
-        let row_load_balance_start = row_water_balance_start + ctx.n_hydros;
-        let row_fpha_start = row_load_balance_start + ctx.n_buses * n_blks;
-        let n_fpha_rows: usize = fpha_planes_per_hydro.iter().map(|&p| p * n_blks).sum();
-        let row_evap_start = row_fpha_start + n_fpha_rows;
+        // Leading row regions: read from the augmented indexer (the single owner
+        // of this chain). The FPHA and evap row blocks normalise to empty, so
+        // read their cursors via the indexer accessors rather than the `0..0`
+        // public ranges: `row_fpha_start` is the load-balance row end, and
+        // `row_evap_start` is the row at which evap rows begin (the FPHA-rows
+        // end cursor). The operational-violation row blocks keep their cursor
+        // even when empty, so their `.start` fields are read directly.
+        let row_water_balance_start = idx.water_balance.start;
+        let row_load_balance_start = idx.load_balance.start;
+        let row_fpha_start = idx.load_balance.end;
+        let row_evap_start = idx.fpha_rows_end();
         let n_op_rows = ctx.n_hydros * n_blks;
-        let row_min_outflow_start = row_evap_start + evap_hydro_indices.len();
-        let row_max_outflow_start = row_min_outflow_start + n_op_rows;
-        let row_min_turbine_start = row_max_outflow_start + n_op_rows;
-        let row_min_generation_start = row_min_turbine_start + n_op_rows;
+        // The four operational-violation row blocks are non-empty whenever
+        // `hydro_count > 0` and then carry the canonical cursors; with no hydros
+        // they normalise to `0..0`, so fall back to the evaporation-row end
+        // cursor (`row_evap_start + n_evap_hydros`), which is what the empty
+        // region begins at.
+        let (
+            row_min_outflow_start,
+            row_max_outflow_start,
+            row_min_turbine_start,
+            row_min_generation_start,
+        ) = if ctx.n_hydros > 0 {
+            (
+                idx.min_outflow_rows.start,
+                idx.max_outflow_rows.start,
+                idx.min_turbine_rows.start,
+                idx.min_generation_rows.start,
+            )
+        } else {
+            let evap_rows_end = row_evap_start + idx.n_evap_hydros;
+            (evap_rows_end, evap_rows_end, evap_rows_end, evap_rows_end)
+        };
 
         // One fishing row per anticipated plant at every stage (always-active).
         let n_anticipated_fishing_rows = ctx.n_anticipated;
@@ -859,10 +756,6 @@ impl StageLayout {
         let num_rows = row_generic_start + generic.n_generic_rows;
         let zeta = stage.blocks.iter().map(|b| b.duration_hours).sum::<f64>() * M3S_TO_HM3;
 
-        // Suppress the pre-computed pre-indexer FPHA offsets; actual offsets are
-        // re-derived above from the augmented decision_start.
-        let _ = fpha_cols_pre;
-
         Self {
             n_blks,
             n_h: ctx.n_hydros,
@@ -873,27 +766,31 @@ impl StageLayout {
             col_theta,
             col_storage_in_start,
             col_inflow_lags_start,
-            col_turbine_start: dec.col_turbine_start,
-            col_spillage_start: dec.col_spillage_start,
-            col_diversion_start: dec.col_diversion_start,
-            col_thermal_start: dec.col_thermal_start,
-            col_anticipated_decision_start: dec.col_anticipated_decision_start,
-            col_anticipated_state_out_start: dec.col_anticipated_state_out_start,
+            col_turbine_start: idx.turbine.start,
+            col_spillage_start: idx.spillage.start,
+            col_diversion_start: idx.diversion.start,
+            col_thermal_start: idx.thermal.start,
+            // The anticipated blocks normalise to `0..0` when empty; their starts
+            // are the thermal-block end plus the (possibly zero) anticipated count.
+            col_anticipated_decision_start: idx.thermal.end,
+            col_anticipated_state_out_start: idx.thermal.end + ctx.n_anticipated,
             col_anticipated_state_start,
-            col_line_fwd_start: dec.col_line_fwd_start,
-            col_line_rev_start: dec.col_line_rev_start,
-            col_deficit_start: dec.col_deficit_start,
-            max_deficit_segments: dec.max_deficit_segments,
-            col_excess_start: dec.col_excess_start,
-            col_inflow_slack_start: dec.col_inflow_slack_start,
-            col_generation_start: fpha_cols.col_generation_start,
-            col_evap_start: evap_cols.col_evap_start,
-            col_withdrawal_neg_start: op_slack.col_withdrawal_neg_start,
-            col_withdrawal_pos_start: op_slack.col_withdrawal_pos_start,
-            col_outflow_below_start: op_slack.col_outflow_below_start,
-            col_outflow_above_start: op_slack.col_outflow_above_start,
-            col_turbine_below_start: op_slack.col_turbine_below_start,
-            col_generation_below_start: op_slack.col_generation_below_start,
+            col_line_fwd_start: idx.line_fwd.start,
+            col_line_rev_start: idx.line_rev.start,
+            col_deficit_start: idx.deficit.start,
+            max_deficit_segments: idx.max_deficit_segments,
+            col_excess_start: idx.excess.start,
+            // `inflow_slack` normalises to `0..0` without the penalty, so the
+            // inflow-slack column start is the excess-block end cursor.
+            col_inflow_slack_start: idx.excess.end,
+            col_generation_start,
+            col_evap_start,
+            col_withdrawal_neg_start,
+            col_withdrawal_pos_start,
+            col_outflow_below_start,
+            col_outflow_above_start,
+            col_turbine_below_start,
+            col_generation_below_start,
             col_ncs_start,
             n_ncs: n_active_ncs,
             active_ncs_indices,
@@ -1126,19 +1023,10 @@ mod tests {
         };
 
         let fixtures = ZeroEntityFixtures::new();
-        // Override n_thermals to 3 via the ctx — but ZeroEntityFixtures uses
-        // empty thermals slice. We need to test the arithmetic only, so we
-        // construct the ctx directly with the relevant counts.
-        // ZeroEntityFixtures.make_ctx builds n_thermals=0; we can't override that
-        // without a separate constructor, so we test via StageLayout directly after
-        // constructing a ctx that reflects n_thermals=3.
-        // The ZeroEntityFixtures ctx has n_thermals=0; to get n_thermals=3 we
-        // need to use `compute_decision_column_offsets` logic directly via a
-        // minimal ctx. We do it by constructing a ctx with n_thermals=0 and
-        // verifying the formula holds, then checking the algebra.
-        //
-        // The easiest approach: build the layout with zero entities except for
-        // the n_anticipated metadata, observe col_line_fwd_start - col_thermal_start == n_anticipated.
+        // ZeroEntityFixtures builds n_thermals=0, so the thermal per-block block is
+        // empty and col_anticipated_decision_start == col_thermal_start. The two
+        // stage-level anticipated blocks then separate col_thermal_start from
+        // col_line_fwd_start by exactly 2 * n_anticipated columns.
         let n_anticipated = 2_usize;
         let k_max = 1_usize;
         let ctx = fixtures.make_ctx(n_anticipated, k_max, vec![1, 1], vec![0, 0]);

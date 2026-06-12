@@ -1360,6 +1360,46 @@ impl StageIndexer {
         &self.evap_indices[local_idx]
     }
 
+    /// First column of the FPHA generation block, even when that block is empty.
+    ///
+    /// The public [`Self::generation`] range is normalised to `0..0` when no FPHA
+    /// hydros exist, so its `.start` is `0` rather than the real cursor. This
+    /// returns the cursor (`inflow_slack.end` when the inflow penalty is active,
+    /// otherwise `excess.end`), matching the `generation_start` derivation in the
+    /// constructor — never `0` for a real LP.
+    #[must_use]
+    pub(crate) fn generation_col_start(&self) -> usize {
+        if self.has_inflow_penalty {
+            self.inflow_slack.end
+        } else {
+            self.excess.end
+        }
+    }
+
+    /// First column of the evaporation block, even when that block is empty.
+    ///
+    /// The public [`Self::evap_indices`] list is empty when no evaporation hydros
+    /// exist, so it exposes no cursor. This returns the cursor
+    /// (`generation_col_start + n_fpha_hydros * n_blks`, i.e. the FPHA generation
+    /// block end), matching the `evap_col_start` derivation in the constructor.
+    #[must_use]
+    pub(crate) fn evap_col_start(&self) -> usize {
+        self.generation_col_start() + self.n_fpha_hydros * self.n_blks
+    }
+
+    /// First row after the FPHA constraint block, even when that block is empty.
+    ///
+    /// The public [`Self::fpha_rows`] list is empty when no FPHA hydros exist, so
+    /// it exposes no end cursor. This returns the cursor
+    /// (`load_balance.end + n_blks * sum(planes_per_block)`, i.e. the row at which
+    /// evaporation rows begin), matching the `fpha_row_cursor` derivation in the
+    /// constructor.
+    #[must_use]
+    pub(crate) fn fpha_rows_end(&self) -> usize {
+        let total_planes: usize = self.fpha_rows.iter().map(|r| r.planes_per_block).sum();
+        self.load_balance.end + self.n_blks * total_planes
+    }
+
     /// Build FPHA constraint row ranges from per-hydro plane counts.
     fn build_fpha_rows(
         planes_per_hydro: &[usize],

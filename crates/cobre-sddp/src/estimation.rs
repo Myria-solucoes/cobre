@@ -1532,6 +1532,59 @@ fn apply_annual_prepass_reductions(
     all_reductions
 }
 
+/// Detect the seasons whose recursively-composed AR contributions have turned
+/// negative at their current order, recording a `NegativeContribution`
+/// reduction for each and returning the failing season ids.
+///
+/// Rationale: this is the single genuinely-shared sub-block of the two
+/// iterative reduction loops ([`reduce_entity_orders`] and
+/// [`reduce_entity_orders_annual`]). Both call it at the top of each loop
+/// iteration with the same locals — the regular path and the annual path build
+/// `all_coeffs`/`std_by_season`/`frozen` differently beforehand, but the
+/// detection logic itself is byte-identical, so it is owned here once. The
+/// per-season re-solve bodies that follow legitimately diverge (regular vs
+/// annual Yule-Walker primitives) and stay in their respective callers.
+fn detect_failing_seasons(
+    estimates: &[ArCoefficientEstimate],
+    indices: &[usize],
+    frozen: &[bool],
+    n_seasons: usize,
+    all_coeffs: &[Vec<f64>],
+    std_by_season: &[f64],
+    hydro_id: EntityId,
+    all_reductions: &mut HashMap<EntityId, Vec<ContributionReduction>>,
+) -> Vec<usize> {
+    let mut failing_seasons: Vec<usize> = Vec::new();
+    for &idx in indices {
+        let season_id = estimates[idx].season_id;
+        if frozen[season_id] || estimates[idx].coefficients.is_empty() {
+            continue;
+        }
+        let current_order = estimates[idx].coefficients.len();
+        let result = validate_order_contributions(
+            season_id,
+            n_seasons,
+            current_order,
+            all_coeffs,
+            std_by_season,
+        );
+        if !result.valid {
+            all_reductions
+                .entry(hydro_id)
+                .or_default()
+                .push(ContributionReduction {
+                    season_id,
+                    original_order: estimates[idx].coefficients.len(),
+                    reduced_order: result.max_valid_order,
+                    contributions: result.contributions,
+                    reason: ReductionReason::NegativeContribution,
+                });
+            failing_seasons.push(season_id);
+        }
+    }
+    failing_seasons
+}
+
 /// Run the iterative contribution-based order reduction for one entity in the
 /// PAR-A path.
 ///
@@ -1551,8 +1604,11 @@ fn apply_annual_prepass_reductions(
 // observations and year-starts) plus two stat maps, a hydro key, season count,
 // and two scalar controls — all independently sourced by the caller; no context
 // struct spans them. The length reflects a per-entity iterative contribution
-// loop that re-solves Yule-Walker at each ceiling reduction and cannot be
-// decomposed without threading the mutable `estimates` slice across helpers.
+// loop that re-solves the annual Yule-Walker system at each ceiling reduction
+// and cannot be decomposed without threading the mutable `estimates` slice
+// across helpers. The one sub-block shared with the regular path — failing-
+// season detection — is extracted into `detect_failing_seasons`; the per-season
+// re-solve body that follows is annual-specific and legitimately stays here.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn reduce_entity_orders_annual(
     estimates: &mut [ArCoefficientEstimate],
@@ -1621,34 +1677,16 @@ fn reduce_entity_orders_annual(
 
     loop {
         // Detect failing seasons (negative contribution among the φ entries).
-        let mut failing_seasons: Vec<usize> = Vec::new();
-        for &idx in indices {
-            let season_id = estimates[idx].season_id;
-            if frozen[season_id] || estimates[idx].coefficients.is_empty() {
-                continue;
-            }
-            let current_order = estimates[idx].coefficients.len();
-            let result = validate_order_contributions(
-                season_id,
-                n_seasons,
-                current_order,
-                &all_coeffs,
-                &std_by_season,
-            );
-            if !result.valid {
-                all_reductions
-                    .entry(hydro_id)
-                    .or_default()
-                    .push(ContributionReduction {
-                        season_id,
-                        original_order: estimates[idx].coefficients.len(),
-                        reduced_order: result.max_valid_order,
-                        contributions: result.contributions,
-                        reason: ReductionReason::NegativeContribution,
-                    });
-                failing_seasons.push(season_id);
-            }
-        }
+        let failing_seasons = detect_failing_seasons(
+            estimates,
+            indices,
+            &frozen,
+            n_seasons,
+            &all_coeffs,
+            &std_by_season,
+            hydro_id,
+            all_reductions,
+        );
         if failing_seasons.is_empty() {
             break;
         }
@@ -2009,34 +2047,16 @@ fn reduce_entity_orders(
     }
     let obs_refs: Vec<&[f64]> = obs_by_season.iter().map(Vec::as_slice).collect();
     loop {
-        let mut failing_seasons: Vec<usize> = Vec::new();
-        for &idx in indices {
-            let season_id = estimates[idx].season_id;
-            if frozen[season_id] || estimates[idx].coefficients.is_empty() {
-                continue;
-            }
-            let current_order = estimates[idx].coefficients.len();
-            let result = validate_order_contributions(
-                season_id,
-                n_seasons,
-                current_order,
-                &all_coeffs,
-                &std_by_season,
-            );
-            if !result.valid {
-                all_reductions
-                    .entry(hydro_id)
-                    .or_default()
-                    .push(ContributionReduction {
-                        season_id,
-                        original_order: estimates[idx].coefficients.len(),
-                        reduced_order: result.max_valid_order,
-                        contributions: result.contributions,
-                        reason: ReductionReason::NegativeContribution,
-                    });
-                failing_seasons.push(season_id);
-            }
-        }
+        let failing_seasons = detect_failing_seasons(
+            estimates,
+            indices,
+            &frozen,
+            n_seasons,
+            &all_coeffs,
+            &std_by_season,
+            hydro_id,
+            all_reductions,
+        );
         if failing_seasons.is_empty() {
             break;
         }
