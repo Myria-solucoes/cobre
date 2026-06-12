@@ -24,7 +24,7 @@ use crate::{
     SddpError, TrainingConfig,
     backward_pass_state::{BackwardPassInputs, BackwardPassState},
     context::{StageContext, TrainingContext},
-    convergence::ConvergenceMonitor,
+    convergence::convergence::ConvergenceMonitor,
     cut::fcf::FutureCostFunction,
     cut::row::build_cut_row_batch_into,
     cut_selection::CutActivityUpdates,

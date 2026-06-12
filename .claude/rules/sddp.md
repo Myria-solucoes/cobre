@@ -77,4 +77,4 @@ Read: `backward_pass_state.rs`.
 `ConvergenceMonitor::upper_bound()` returns the raw per-iteration upper bound —
 there is no exponentially-weighted smoothing. Gap closure is immediate for
 deterministic cases.
-Read: `convergence.rs`.
+Read: `convergence/convergence.rs`.
