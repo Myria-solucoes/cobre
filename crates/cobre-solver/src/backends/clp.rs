@@ -1,7 +1,7 @@
 //! CLP LP solver backend.
 //!
 //! This module provides [`ClpSolver`], which wraps the CLP C API through the
-//! FFI layer in [`crate::clp_ffi`]. It defines the solver type, its associated
+//! FFI layer in [`crate::ffi::clp`]. It defines the solver type, its associated
 //! [`ClpProfile`] value type, the handle lifecycle, and the reusable solution
 //! buffers, plus the complete [`crate::SolverInterface`] implementation.
 //!
@@ -1646,7 +1646,7 @@ pub fn clp_version() -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::clp::{ClpAlgorithm, ClpProfile, ClpSolver, LADDER_RUNGS, clp_version};
+    use crate::backends::clp::{ClpAlgorithm, ClpProfile, ClpSolver, LADDER_RUNGS, clp_version};
     use crate::profile::DEFAULT_PROFILE_HEURISTIC_SENTINEL;
     use crate::types::{
         Basis, RowBatch, SolutionView, SolverError, SolverStatistics, StageTemplate,

@@ -3012,8 +3012,8 @@ mod research_tests {
     /// that switch to IPM.
     #[test]
     fn test_research_verify_non_optimal_highs_status_mapping() {
-        use super::super::HighsSolver;
         use crate::SolverInterface;
+        use crate::backends::highs::HighsSolver;
         use crate::types::SolverError;
         use crate::types::StageTemplate;
 
@@ -3088,8 +3088,8 @@ mod research_tests {
     /// than the verdict being trusted immediately as it was before the fix.
     #[test]
     fn infeasible_initial_solve_runs_cold_restart_before_terminating() {
-        use super::super::HighsSolver;
         use crate::SolverInterface;
+        use crate::backends::highs::HighsSolver;
         use crate::types::SolverError;
         use crate::types::StageTemplate;
 
@@ -3136,8 +3136,8 @@ mod research_tests {
     /// historical hardcoded behaviour bit-for-bit.
     #[test]
     fn new_highs_solver_starts_with_default_profile() {
-        use super::super::HighsSolver;
         use crate::HighsProfile;
+        use crate::backends::highs::HighsSolver;
 
         let solver = HighsSolver::new().expect("HighsSolver::new() must succeed");
         assert_eq!(

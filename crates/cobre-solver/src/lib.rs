@@ -53,7 +53,7 @@ compile_error!("no LP backend selected: enable exactly one of `highs` or `clp`."
 pub mod ffi;
 
 #[cfg(feature = "clp")]
-pub mod clp_ffi;
+pub use ffi::clp as clp_ffi;
 
 pub mod trait_def;
 pub use trait_def::SolverInterface;
@@ -66,31 +66,26 @@ pub use types::{
 pub mod profile;
 pub use profile::{DEFAULT_PROFILE_HEURISTIC_SENTINEL, DEFAULT_PROFILE_IPM_UNBOUNDED_SENTINEL};
 
-pub mod profiled;
-pub use profiled::ProfiledSolver;
-
 pub mod baking;
 pub use baking::{BakingScratch, bake_rows_into_template};
 
+pub mod backends;
+pub use backends::profiled::ProfiledSolver;
+
 #[cfg(feature = "highs")]
-pub mod highs;
-#[cfg(feature = "highs")]
-pub use highs::HighsProfile;
-#[cfg(feature = "highs")]
-pub use highs::HighsSolver;
-#[cfg(feature = "highs")]
-pub use highs::highs_version;
+pub use backends::highs::{HighsProfile, HighsSolver, highs_version};
 
 #[cfg(feature = "clp")]
-pub mod clp;
+pub use backends::clp::{ClpAlgorithm, ClpProfile, ClpSolver, clp_version};
+
+// Module-path shims preserving the pre-relocation public paths
+// `cobre_solver::highs` / `cobre_solver::clp` for downstream code that imports a
+// backend by module rather than through the curated re-exports above. Mirrors
+// the `clp_ffi` shim for the `ffi::clp` module.
 #[cfg(feature = "clp")]
-pub use clp::ClpAlgorithm;
-#[cfg(feature = "clp")]
-pub use clp::ClpProfile;
-#[cfg(feature = "clp")]
-pub use clp::ClpSolver;
-#[cfg(feature = "clp")]
-pub use clp::clp_version;
+pub use backends::clp;
+#[cfg(feature = "highs")]
+pub use backends::highs;
 
 // Active backend selection (compile-time type alias). Per-item docs below carry
 // the mutual-exclusivity and "no alias when neither feature is enabled" rules.
