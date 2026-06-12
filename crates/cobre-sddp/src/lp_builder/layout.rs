@@ -622,8 +622,9 @@ impl StageLayout {
         // (`generation_below_slack`), so its start is that family's end. The
         // generation-below slack is non-empty whenever `hydro_count > 0`; when
         // there are no hydros it is the empty `0..0` sentinel, so fall back to
-        // the evaporation-column cursor (`evap_col_start`, the start of the
-        // withdrawal/operational-slack region) which carries the correct value.
+        // the evaporation-column cursor (`evap_col_start`), which equals the end
+        // of all pre-NCS columns when `n_hydros == 0` because the evaporation and
+        // withdrawal/operational-slack blocks are then both empty.
         let active_ncs_indices = identify_active_ncs(ctx, stage);
         let n_active_ncs = active_ncs_indices.len();
         let col_ncs_start = if ctx.n_hydros > 0 {
@@ -641,8 +642,9 @@ impl StageLayout {
 
         // Withdrawal and operational-violation slack columns: non-empty whenever
         // `hydro_count > 0` and then carry the canonical cursors; with no hydros
-        // they normalise to `0..0`, so fall back to the column region start
-        // (`evap_col_start`), preserving today's empty-case cursor.
+        // they normalise to `0..0`, so fall back to the evaporation-column cursor
+        // (`evap_col_start`), which is the correct column index for an empty
+        // withdrawal/operational-slack region.
         let (
             col_withdrawal_neg_start,
             col_withdrawal_pos_start,

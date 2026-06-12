@@ -1204,7 +1204,7 @@ impl StageIndexer {
         let line_fwd_start = anticipated_state_out_end;
         let line_rev_start = line_fwd_start + n_lines * n_blks;
         let deficit_start = line_rev_start + n_lines * n_blks;
-        let max_deficit_segments = counts.max_deficit_segments; // also assigned to Self
+        let max_deficit_segments = counts.max_deficit_segments;
         let excess_start = deficit_start + n_buses * max_deficit_segments * n_blks;
         let excess_end = excess_start + n_buses * n_blks;
 
@@ -1747,7 +1747,7 @@ impl StageIndexer {
     /// `k_max - K_i` slots are padding and are excluded from the mask: no
     /// decision variable writes to those columns, so their cut coefficients
     /// are structurally zero. Including padded slots would over-estimate cut
-    /// hyperplanes (the direct analogue of the d0e4a42 PAR(p)-A bug, where
+    /// hyperplanes (the direct analogue of the PAR(p)-A bug, where
     /// padded lag slots were included and shifted the cut above the LP value
     /// at the visited state).
     ///
