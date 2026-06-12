@@ -39,19 +39,14 @@ pub mod cut_selection;
 pub mod cut_sync;
 pub mod dcs;
 pub mod error;
-pub mod estimation;
 pub mod forward;
 pub(crate) mod forward_pass_state;
 pub(crate) mod gemm;
 pub(crate) mod generic_constraints;
 pub mod horizon_mode;
 pub mod indexer;
-pub mod inflow_method;
-pub mod lag_transition;
 pub mod lower_bound;
 pub mod lp_builder;
-pub(crate) mod noise;
-pub mod noise_key_diag;
 pub mod policy;
 pub mod production;
 pub mod setup;
@@ -60,7 +55,7 @@ pub mod solver_phase;
 pub mod solver_stats;
 pub(crate) mod stage_solve;
 pub(crate) mod state_exchange;
-pub(crate) mod stochastic_summary;
+pub mod stochastic;
 pub mod training;
 pub(crate) mod training_output;
 pub(crate) mod training_session;
@@ -115,6 +110,28 @@ pub use policy::{orchestration, policy_export, resolved_parameters, scaling_repo
 pub(crate) use production::fpha_fitting;
 pub use production::{energy_conversion, hydro_models};
 
+// Crate-root submodule shim: preserves the pre-`stochastic/`-relocation raw
+// `cobre_sddp::<module>::` / `crate::<module>::` paths verbatim so consumers
+// resolve without edits. Every one of the six modules has raw-path callers in
+// non-moved files that the curated re-exports below do not cover:
+//   - `estimation` — `crate::estimation::` in `error.rs`,
+//     `policy/{orchestration,provenance}.rs`, and
+//     `setup/stochastic_pipeline.rs`.
+//   - `inflow_method` — `crate::inflow_method::` in `indexer.rs`, `forward.rs`,
+//     and `lp_builder/{template,matrix}.rs`, `simulation/pipeline.rs`.
+//   - `lag_transition` — `cobre_sddp::lag_transition::precompute_stage_lag_transitions`
+//     in `cobre-cli/src/commands/run/setup.rs` (this symbol is intentionally NOT
+//     in the curated re-export; the shim is its sole resolution path), plus
+//     `crate::lag_transition::` uses in `workspace/context.rs` and
+//     `setup/{stochastic_pipeline,stage_data,mod}.rs`.
+//   - `noise_key_diag` — `crate::noise_key_diag::` in `setup/mod.rs`.
+//   - `noise` — `crate::noise::` in `workspace/context.rs`, `forward.rs`, and
+//     `simulation/pipeline.rs`; `pub(crate)` keeps its crate-private visibility.
+//   - `stochastic_summary` — `crate::stochastic_summary::` in
+//     `policy/orchestration.rs`; `pub(crate)` keeps its crate-private visibility.
+pub use stochastic::{estimation, inflow_method, lag_transition, noise_key_diag};
+pub(crate) use stochastic::{noise, stochastic_summary};
+
 // ── config ────────────────────────────────────────────────────────────────────
 pub use config::TrainingConfig;
 // ── convergence ───────────────────────────────────────────────────────────────
@@ -133,7 +150,7 @@ pub use production::energy_conversion::{EnergyConversionSet, HydroEnergyProducti
 // ── error ─────────────────────────────────────────────────────────────────────
 pub use error::SddpError;
 // ── estimation ────────────────────────────────────────────────────────────────
-pub use estimation::{EstimationPath, EstimationReport, estimate_from_history};
+pub use stochastic::estimation::{EstimationPath, EstimationReport, estimate_from_history};
 // ── forward ───────────────────────────────────────────────────────────────────
 pub use forward::SyncResult;
 // ── hydro_models ──────────────────────────────────────────────────────────────
@@ -144,7 +161,7 @@ pub use production::hydro_models::{
 // ── indexer ───────────────────────────────────────────────────────────────────
 pub use indexer::{EquipmentCounts, FphaColumnLayout, StageIndexer};
 // ── inflow_method ─────────────────────────────────────────────────────────────
-pub use inflow_method::InflowNonNegativityMethod;
+pub use stochastic::inflow_method::InflowNonNegativityMethod;
 // ── lp_builder ────────────────────────────────────────────────────────────────
 pub use lp_builder::{StageTemplates, build_stage_templates};
 // ── policy_load ───────────────────────────────────────────────────────────────
@@ -180,7 +197,7 @@ pub use solver_stats::{
     unpack_scenario_stats,
 };
 // ── stochastic_summary ────────────────────────────────────────────────────────
-pub use stochastic_summary::{
+pub use stochastic::stochastic_summary::{
     ArOrderSummary, StochasticSource, StochasticSummary, build_stochastic_summary,
     estimation_report_to_fitting_report, inflow_models_to_annual_component_rows,
     inflow_models_to_ar_rows, inflow_models_to_stats_rows,

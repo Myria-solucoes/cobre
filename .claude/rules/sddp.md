@@ -56,7 +56,7 @@ Read: `cut/pool.rs`, `basis_reconstruct.rs`.
 Non-controllable-source availability `α_r(ω) ∈ [0, 1]` is dimensionless. The
 realized cap is `A_r = max_gen · clamp(mean + std·η, 0, 1)`. The
 `non_controllable_models.parquet` stores `(mean, std)` **as factors**, not as MW.
-Read: `noise.rs` (`transform_ncs_noise`, `compute_effective_eta`).
+Read: `stochastic/noise.rs` (`transform_ncs_noise`, `compute_effective_eta`).
 
 ## Lower-bound evaluation must patch NCS
 
