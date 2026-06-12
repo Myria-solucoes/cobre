@@ -34,21 +34,17 @@ pub(crate) mod backward_pass_state;
 pub mod basis_reconstruct;
 pub mod config;
 pub mod convergence;
-pub(crate) mod conversion;
 pub mod cut;
 pub mod cut_selection;
 pub mod cut_sync;
 pub mod dcs;
-pub mod energy_conversion;
 pub mod error;
 pub mod estimation;
 pub mod forward;
 pub(crate) mod forward_pass_state;
-pub(crate) mod fpha_fitting;
 pub(crate) mod gemm;
 pub(crate) mod generic_constraints;
 pub mod horizon_mode;
-pub mod hydro_models;
 pub mod indexer;
 pub mod inflow_method;
 pub mod lag_transition;
@@ -57,6 +53,7 @@ pub mod lp_builder;
 pub(crate) mod noise;
 pub mod noise_key_diag;
 pub mod policy;
+pub mod production;
 pub mod setup;
 pub mod simulation;
 pub mod solver_phase;
@@ -100,6 +97,24 @@ pub use convergence::{risk_measure, stopping_rule};
 //     `setup/{template_postprocess,mod}.rs`.
 pub use policy::{orchestration, policy_export, resolved_parameters, scaling_report};
 
+// Crate-root submodule shim: preserves the pre-`production/`-relocation raw
+// `cobre_sddp::<module>::` / `crate::<module>::` paths verbatim so consumers
+// resolve without edits. Each re-exported module has raw-path callers that the
+// curated re-exports above do not cover:
+//   - `energy_conversion` — `cobre_sddp::energy_conversion::` in the integration
+//     tests `tests/{scalar_parameters_declaration_order,simulation_pipeline_integration}.rs`,
+//     plus intra-crate `crate::energy_conversion::` uses.
+//   - `hydro_models` — `cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts`
+//     in `cobre-cli/src/commands/{run/setup,validate}.rs` and
+//     `cobre-python/src/{io,run}.rs` (this symbol is intentionally NOT in the
+//     curated re-export above; the shim is its sole resolution path), plus
+//     intra-crate `crate::hydro_models::` uses.
+//   - `fpha_fitting` — `crate::fpha_fitting::FphaFittingError` in the non-moved
+//     `error.rs` plus intra-cluster uses in `hydro_models` and
+//     `energy_conversion`; `pub(crate)` keeps its crate-private visibility.
+pub(crate) use production::fpha_fitting;
+pub use production::{energy_conversion, hydro_models};
+
 // ── config ────────────────────────────────────────────────────────────────────
 pub use config::TrainingConfig;
 // ── convergence ───────────────────────────────────────────────────────────────
@@ -114,7 +129,7 @@ pub use cut_sync::CutSyncBuffers;
 // ── cut::row ──────────────────────────────────────────────────────────────────
 pub use cut::row::build_cut_row_batch_into;
 // ── energy_conversion ─────────────────────────────────────────────────────────
-pub use energy_conversion::{EnergyConversionSet, HydroEnergyProductivityOverride};
+pub use production::energy_conversion::{EnergyConversionSet, HydroEnergyProductivityOverride};
 // ── error ─────────────────────────────────────────────────────────────────────
 pub use error::SddpError;
 // ── estimation ────────────────────────────────────────────────────────────────
@@ -122,7 +137,7 @@ pub use estimation::{EstimationPath, EstimationReport, estimate_from_history};
 // ── forward ───────────────────────────────────────────────────────────────────
 pub use forward::SyncResult;
 // ── hydro_models ──────────────────────────────────────────────────────────────
-pub use hydro_models::{
+pub use production::hydro_models::{
     FphaHydroDetail, HydroModelSummary, PrepareHydroModelsResult, ProductionModelSource,
     build_hydro_model_summary, prepare_hydro_models,
 };
