@@ -2302,8 +2302,8 @@ mod tests {
     ///
     /// AC5: the cap-hit fallback scores the live primal, appends remaining
     /// violated slots, and solves once to return — preserving the all-cuts
-    /// optimum. Solve count is unchanged from before this ticket on the TC path:
-    /// initial + one capped add/resolve + the final TC solve = 3.
+    /// optimum. The TC path issues initial + one capped add/resolve + the final
+    /// TC solve = 3.
     #[test]
     fn lazy_solve_tc_fallback_terminates() {
         let indexer = lazy_indexer();

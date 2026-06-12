@@ -225,7 +225,6 @@ pub fn build_stochastic_summary(
 ) -> StochasticSummary {
     let n_hydros = system.hydros().len();
 
-    // Determine inflow source from estimation report presence.
     let inflow_source = if estimation_report.is_some() {
         StochasticSource::Estimated
     } else if n_hydros > 0 {
@@ -244,17 +243,13 @@ pub fn build_stochastic_summary(
         0
     };
 
-    // Build AR order summary from estimation report or inflow model coefficients.
     let ar_summary = build_ar_order_summary(system, estimation_report, n_hydros);
 
-    // Correlation source from provenance — replaces the heuristic that mirrored
-    // inflow source. When the correlation was Generated from system data, its
-    // provenance still cannot distinguish estimated vs loaded on its own; the
-    // estimation report presence is the tiebreaker.
+    // When the correlation was Generated from system data, its provenance cannot
+    // distinguish estimated vs loaded on its own; the estimation report presence
+    // is the tiebreaker.
     let correlation_source = match stochastic.provenance().correlation {
         ComponentProvenance::Generated => {
-            // Correlation was decomposed from system data. If estimation ran,
-            // the correlation matrix was estimated; otherwise it was loaded.
             if estimation_report.is_some() {
                 StochasticSource::Estimated
             } else {
@@ -275,9 +270,8 @@ pub fn build_stochastic_summary(
         None
     };
 
-    // Opening tree source from provenance. The old heuristic (based on opening count)
-    // could not distinguish a user-supplied tree with one opening/stage from a
-    // generated tree. Provenance records this unambiguously.
+    // Provenance distinguishes a user-supplied tree with one opening/stage from a
+    // generated tree; opening count alone cannot.
     let opening_tree_source = match stochastic.provenance().opening_tree {
         ComponentProvenance::UserSupplied => StochasticSource::Loaded,
         ComponentProvenance::Generated => StochasticSource::Estimated,

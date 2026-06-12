@@ -1,8 +1,9 @@
 //! Cut management data structures for the SDDP Future Cost Function (FCF).
 //!
 //! This module provides the per-stage cut pool, the all-stages FCF container,
-//! the wire format for MPI exchange, and supporting types used to store,
-//! query, and prune Benders cuts during the SDDP training loop.
+//! the wire format for MPI exchange, cut-row construction for the LP, and
+//! supporting types used to store, query, and prune Benders cuts during the
+//! SDDP training loop.
 //!
 //! ## Contents
 //!
@@ -16,6 +17,12 @@
 //!   [`FutureCostFunction::cuts_in_lp`].
 //! - [`wire`] — [`CutWireHeader`] and serialization functions for the MPI
 //!   cut-exchange wire format (24-byte header + variable coefficient tail).
+//! - [`row`] — cut-row construction for the SDDP LP; owns the cut-sign
+//!   convention ([`push_scaled_coefficient`](row::push_scaled_coefficient)
+//!   negates the raw subgradient). Entry points:
+//!   [`build_cut_row_batch_into`](row::build_cut_row_batch_into),
+//!   [`append_new_cuts_to_lp`](row::append_new_cuts_to_lp),
+//!   [`append_slots_to_lp`](row::append_slots_to_lp).
 //!
 //! ## Sentinel value
 //!

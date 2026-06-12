@@ -69,8 +69,6 @@ pub struct AicSelectionResult {
 pub fn select_order_aic(sigma2_per_order: &[f64], n_observations: usize) -> AicSelectionResult {
     let p_max = sigma2_per_order.len();
 
-    // aic_values[0] = AIC for order 0 (white noise baseline).
-    // aic_values[k] = AIC for AR order k, for k in 1..=p_max.
     let mut aic_values = Vec::with_capacity(p_max + 1);
     aic_values.push(0.0_f64); // order 0: N*ln(1) + 0 = 0
 

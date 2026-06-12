@@ -143,16 +143,13 @@ pub(super) fn build_season_lookups<'a>(
     stages: &[Stage],
     season_map: Option<&SeasonMap>,
 ) -> SeasonLookups<'a> {
-    // Step 1: Build date-to-season mapping (stage index sorted by start_date).
     let stage_index = build_stage_index(stages);
 
-    // Build stage_id -> season_id lookup.
     let stage_id_to_season: HashMap<i32, usize> = stage_index
         .iter()
         .map(|&(_, _, stage_id, season_id)| (stage_id, season_id))
         .collect();
 
-    // Step 2: Build (entity_id, season_id) -> SeasonalStats lookup.
     let stats_lookup: HashMap<(EntityId, usize), &SeasonalStats> = seasonal_stats
         .iter()
         .filter_map(|s| {
@@ -176,7 +173,6 @@ pub(super) fn build_season_lookups<'a>(
         |sm| sm.seasons.len(),
     );
 
-    // Step 3: Group observations by entity in chronological order.
     let mut entity_obs: HashMap<EntityId, Vec<(NaiveDate, f64)>> = HashMap::new();
     for &(entity_id, date, value) in observations {
         entity_obs.entry(entity_id).or_default().push((date, value));
@@ -238,7 +234,6 @@ pub fn estimate_ar_coefficients_with_season_map(
         });
     }
 
-    // Build stage_id -> season_id lookup to map seasonal_stats entries.
     let stage_id_to_season: HashMap<i32, usize> = stages
         .iter()
         .filter_map(|s| s.season_id.map(|sid| (s.id, sid)))
@@ -263,6 +258,8 @@ pub fn estimate_ar_coefficients_with_season_map(
         })
         .collect();
 
+    // Canonical (hydro_id, season_id) order: output is independent of the
+    // seasonal_stats slice order, upholding declaration-order bit-determinism.
     result.sort_unstable_by_key(|e| (e.hydro_id.0, e.season_id));
     Ok(result)
 }

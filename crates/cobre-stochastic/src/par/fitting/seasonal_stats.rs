@@ -155,9 +155,10 @@ impl HistoryClass {
 /// as integers). The constancy check uses an absolute tolerance of
 /// `1e-6` to absorb the float round-trip from parquet.
 ///
-/// Returns `HistoryClass::Constant { value: 0.0 }` for an empty input — the
-/// degenerate single-observation case is treated the same as a zero-history
-/// series so that downstream fitters short-circuit predictably.
+/// Returns `HistoryClass::Constant { value: 0.0 }` for an empty input. A
+/// single-observation input also classifies as `Constant` (with that
+/// observation as the value), so downstream fitters short-circuit predictably
+/// in both cases.
 pub fn classify_history(observations: &[f64]) -> HistoryClass {
     if observations.is_empty() {
         return HistoryClass::Constant { value: 0.0 };
@@ -404,10 +405,9 @@ pub fn estimate_seasonal_stats_with_season_map(
         // buckets and ecological-flow months. The classifier returns
         // `Default` for normal series, in which case we keep the
         // empirical (mean, std) computed above.
-        let (final_mean, final_std) = match classify_history(&values).stats_override() {
-            Some((override_mean, override_std)) => (override_mean, override_std),
-            None => (mean, std),
-        };
+        let (final_mean, final_std) = classify_history(&values)
+            .stats_override()
+            .unwrap_or((mean, std));
 
         result.push(SeasonalStats {
             entity_id,
@@ -417,7 +417,9 @@ pub fn estimate_seasonal_stats_with_season_map(
         });
     }
 
-    // Sort by (entity_id, stage_id) ascending to match parser convention.
+    // group_map (HashMap) has non-deterministic iteration order; sort by
+    // (entity_id, stage_id) ascending to enforce declaration-order
+    // bit-determinism regardless of input entity ordering.
     result.sort_unstable_by_key(|s| (s.entity_id.0, s.stage_id));
 
     Ok(result)

@@ -265,10 +265,8 @@ fn lb_init_rank0<S: SolverInterface>(
     // state), fall back to full rebuild each call.
     if let Some(row_map) = lb_cut_row_map {
         if row_map.total_cut_rows() == 0 {
-            // First call: full load.
             solver.load_model(spec.template);
         }
-        // Append only cuts not yet present in the LP.
         crate::cut::row::append_new_cuts_to_lp(
             solver,
             fcf,

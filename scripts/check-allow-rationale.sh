@@ -366,9 +366,7 @@ extract_sites() {
 # HEAD~1 fallback + warning if merge-base fails.
 # --------------------------------------------------------------------------
 BASE_REF="${BASE_REF:-origin/main}"
-if BASE="$(git -C "$REPO_ROOT" merge-base HEAD "$BASE_REF" 2>/dev/null)"; then
-    :
-else
+if ! BASE="$(git -C "$REPO_ROOT" merge-base HEAD "$BASE_REF" 2>/dev/null)"; then
     echo "WARNING: git merge-base HEAD '$BASE_REF' failed; falling back to HEAD~1." >&2
     if ! BASE="$(git -C "$REPO_ROOT" rev-parse HEAD~1 2>/dev/null)"; then
         echo "WARNING: HEAD~1 unavailable; treating BASE as empty (no diff)." >&2

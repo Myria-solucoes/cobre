@@ -617,14 +617,12 @@ fn assemble_seasonal_correlation_model(
         .iter()
         .filter_map(|stage| {
             let season_id = stage.season_id?;
-            if seasonal_matrices.contains_key(&season_id) {
-                Some(CorrelationScheduleEntry {
+            seasonal_matrices
+                .contains_key(&season_id)
+                .then(|| CorrelationScheduleEntry {
                     stage_id: stage.id,
                     profile_name: format!("season_{season_id:0>width$}"),
                 })
-            } else {
-                None
-            }
         })
         .collect();
     schedule.sort_by_key(|e| e.stage_id);

@@ -359,7 +359,7 @@ fn estimate_ar_with_pacf_annual(
     season_map: Option<&cobre_core::temporal::SeasonMap>,
     max_coeff_magnitude: Option<f64>,
 ) -> Result<(Vec<ArCoefficientEstimate>, EstimationReport), StochasticError> {
-    // ── 1. Compute (μ^A_m, σ^A_m) per (hydro, season). ─────────────────────
+    // 1. Compute (μ^A_m, σ^A_m) per (hydro, season).
     let annual_stats: Vec<AnnualSeasonalStats> =
         estimate_annual_seasonal_stats(observations, stages, hydro_ids, season_map)?;
 
@@ -369,10 +369,10 @@ fn estimate_ar_with_pacf_annual(
         .map(|s| ((s.hydro_id, s.season_id), s))
         .collect();
 
-    // ── 2. Build stage index for date-to-season mapping. ─────────────────────
+    // 2. Build stage index for date-to-season mapping.
     let (stage_index, stats_map, n_seasons) = build_pacf_stage_lookups(stages, seasonal_stats);
 
-    // ── 3. Group Z observations by (hydro, season) + per-bucket year start. ──
+    // 3. Group Z observations by (hydro, season) + per-bucket year start.
     let group_obs = group_observations_by_season(observations, hydro_ids, &stage_index, season_map);
     let group_z_year_starts: HashMap<(EntityId, usize), i32> = {
         let entity_set: HashSet<EntityId> = hydro_ids.iter().copied().collect();
@@ -399,7 +399,7 @@ fn estimate_ar_with_pacf_annual(
         starts
     };
 
-    // ── 4. Build rolling-window A_t groups by (hydro, season) + year start. ──
+    // 4. Build rolling-window A_t groups by (hydro, season) + year start.
     //
     // Reproduce the same chronological grouping as `estimate_annual_seasonal_stats`
     // so that `annual_observations_by_season[s]` aligns with `obs_by_season[s]`.
@@ -457,7 +457,7 @@ fn estimate_ar_with_pacf_annual(
         }
     }
 
-    // ── 5. Per (hydro, season): conditional FACP → order → extended YW. ─────
+    // 5. Per (hydro, season): conditional FACP → order → extended YW.
     let z_alpha = 1.96_f64;
     let mut estimates: Vec<ArCoefficientEstimate> = Vec::new();
 
@@ -1196,9 +1196,7 @@ fn reduce_entity_orders(
             stats_by_season[season] = (stats.mean, stats.std);
         }
     }
-    let std_by_season: Vec<f64> = (0..n_seasons)
-        .map(|sid| stats_map.get(&(hydro_id, sid)).map_or(0.0, |s| s.std))
-        .collect();
+    let std_by_season: Vec<f64> = stats_by_season.iter().map(|&(_, s)| s).collect();
     let mut max_orders: Vec<usize> = vec![params.initial_max_order; n_seasons];
     let mut all_coeffs: Vec<Vec<f64>> = vec![Vec::new(); n_seasons];
     for &idx in indices {

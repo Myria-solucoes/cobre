@@ -190,8 +190,7 @@ pub(crate) struct SimulationState {
 impl SimulationState {
     /// Construct a new `SimulationState` with empty re-bake buffers.
     ///
-    /// `num_stages` is used only to pre-allocate the `owned_baked` capacity;
-    /// the field is initialized to `None` and populated lazily on the first
+    /// `owned_baked` is initialized to `None` and populated lazily on the first
     /// run that requires re-baking.
     #[must_use]
     pub(crate) fn new(_num_stages: usize) -> Self {

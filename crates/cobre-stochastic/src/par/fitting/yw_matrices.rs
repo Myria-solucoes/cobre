@@ -46,7 +46,6 @@ pub fn periodic_autocorrelation(
         return 1.0;
     }
 
-    // Compute lagged season index.
     let lag_season = (ref_season + n_seasons - lag % n_seasons) % n_seasons;
 
     let (mu_ref, std_ref) = stats_by_season[ref_season];
@@ -63,16 +62,10 @@ pub fn periodic_autocorrelation(
     // Cross-year lag adjustment: the number of year boundaries crossed by
     // a lag of `k` seasons determines how many observations must be dropped.
     //
-    // A lag that stays within the same calendar year (lag_season < ref_season
-    // and lag < n_seasons) crosses 0 boundaries. Otherwise, the number of
-    // full years spanned is `(lag + n_seasons - 1) / n_seasons` when the lag
-    // crosses into an earlier calendar position, or `lag / n_seasons` when
-    // it wraps full cycles.
-    //
-    // Approach: for lag `k` within one cycle (k < n_seasons),
-    // detect cross-year when lag_season >= ref_season. For larger lags,
-    // additional years are spanned. The total drop count equals the number
-    // of year boundaries crossed.
+    // For a lag within one cycle (lag < n_seasons), 0 or 1 boundary is
+    // crossed: detect cross-year when `lag_season >= ref_season`. For
+    // lag >= n_seasons, floor division `lag / n_seasons` counts the year
+    // boundaries: lag = q*n_seasons + r means q complete years back.
     let years_crossed = if lag < n_seasons {
         usize::from(lag_season >= ref_season)
     } else {
@@ -227,6 +220,11 @@ pub fn build_periodic_yw_matrix_into(
     matrix_out: &mut Vec<f64>,
     rhs_out: &mut Vec<f64>,
 ) {
+    #[cfg(test)]
+    BUILD_PERIODIC_YW_MATRIX_CALL_COUNT.with(|c| {
+        *c.borrow_mut() += 1;
+    });
+
     if order == 0 {
         matrix_out.clear();
         rhs_out.clear();
@@ -234,8 +232,8 @@ pub fn build_periodic_yw_matrix_into(
     }
 
     matrix_out.resize(order * order, 0.0_f64);
-    // Zero-fill: entries are written below, but the symmetric fill relies on
-    // the upper triangle being populated before mirroring.
+    // Clears stale values left from a prior call with a larger order, where
+    // `resize` to a smaller `order*order` keeps the leading entries unchanged.
     matrix_out.fill(0.0);
     rhs_out.resize(order, 0.0_f64);
 
@@ -417,8 +415,10 @@ pub fn cross_correlation_z_a(
 ///
 /// This corresponds to `ρ_{Z,A}^{ref_season}(-1)` — equivalently,
 /// `ρ_{A,Z}^{ref_season}(+1)` with the arguments reversed. In the PAR-A
-/// extended Yule-Walker RHS (eq. 15), this entry pairs `A_{t-1}` (season `m-1`)
-/// with `Z_t` (season `m`), so `Z` is one step **ahead** of `A`.
+/// extended Yule-Walker right-hand side — the cross-covariance vector that
+/// couples the annual component into the periodic regression — this entry
+/// pairs `A_{t-1}` (season `m-1`) with `Z_t` (season `m`), so `Z` is one
+/// step **ahead** of `A`.
 ///
 /// # Cross-year alignment
 ///

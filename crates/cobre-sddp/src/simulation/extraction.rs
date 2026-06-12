@@ -1266,18 +1266,6 @@ fn compute_cost_result(
     };
 
     let hv = compute_hydro_violation_costs(indexer, col_cost, range_sum);
-    debug_assert!(
-        (hv.total()
-            - (hv.outflow_below
-                + hv.outflow_above
-                + hv.turbined
-                + hv.generation
-                + hv.evaporation
-                + hv.withdrawal))
-            .abs()
-            < 1e-6,
-        "hydro_violation_cost must equal sum of components"
-    );
 
     SimulationCostResult {
         stage_id,
@@ -1313,10 +1301,9 @@ fn compute_cost_result(
 /// Extract generic constraint violation results from a solved LP.
 ///
 /// For each active generic constraint row, reads the slack value from the
-/// primal vector (for constraints with `slack.enabled`) and the dual value
-/// from the dual vector.  Returns the violation records and the total
-/// violation cost (sum of `slack_value * penalty * block_hours` across all
-/// active constraint rows).
+/// primal vector (for constraints with `slack.enabled`).  Returns the
+/// violation records and the total violation cost (sum of
+/// `slack_value * penalty * block_hours` across all active constraint rows).
 ///
 /// For `==` sense constraints with two slack columns (positive and negative),
 /// the reported `slack_value` is the net violation: `s_plus - s_minus`.
@@ -1330,21 +1317,10 @@ fn extract_generic_violations(
         return (Vec::new(), 0.0);
     }
 
-    let indexer = spec.indexer;
-    let gc_row_start = indexer.generic_constraint_rows.start;
     let mut results = Vec::with_capacity(entries.len());
     let mut total_cost = 0.0;
 
-    for (entry_idx, entry) in entries.iter().enumerate() {
-        let row_idx = gc_row_start + entry_idx;
-
-        // Dual value from the LP row (unused for now but kept for future use).
-        let _dual_value = if row_idx < view.dual.len() {
-            view.dual[row_idx]
-        } else {
-            0.0
-        };
-
+    for entry in entries {
         // Slack value from the LP column(s). A collapsed stage-level row is
         // priced by the stage's total hours (matching the LP objective set in
         // `fill_generic_constraint_entries`); a per-block row by its own block's

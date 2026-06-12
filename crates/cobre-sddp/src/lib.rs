@@ -17,7 +17,7 @@
     )
 )]
 
-// Module visibility policy (audit reference: HI-1, 2026-05-18):
+// Module visibility policy:
 //
 // - `pub mod` modules are accessed by name from outside the crate.
 //   `setup` and `policy_export` are reached by qualified path from
@@ -91,14 +91,14 @@ pub use cut::{CutPool, FutureCostFunction};
 pub use cut_selection::CutSelectionStrategy;
 // ── cut_sync ──────────────────────────────────────────────────────────────────
 pub use cut_sync::CutSyncBuffers;
+// ── cut::row ──────────────────────────────────────────────────────────────────
+pub use cut::row::build_cut_row_batch_into;
 // ── energy_conversion ─────────────────────────────────────────────────────────
 pub use energy_conversion::{EnergyConversionSet, HydroEnergyProductivityOverride};
 // ── error ─────────────────────────────────────────────────────────────────────
 pub use error::SddpError;
 // ── estimation ────────────────────────────────────────────────────────────────
 pub use estimation::{EstimationPath, EstimationReport, estimate_from_history};
-// ── cut::row ──────────────────────────────────────────────────────────────────
-pub use cut::row::build_cut_row_batch_into;
 // ── forward ───────────────────────────────────────────────────────────────────
 pub use forward::SyncResult;
 // ── hydro_models ──────────────────────────────────────────────────────────────

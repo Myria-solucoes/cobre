@@ -58,7 +58,7 @@ pub struct AnnualSeasonalStats {
 /// 1. Group observations by `EntityId` and sort each group chronologically.
 /// 2. For each entity group, build the rolling 12-month average:
 ///    `A_{i+12} = (1/12) · Σ_{j=0..11} z[i+j]` for every chronological index `i`
-///    such that `i + 12 < group.len()`. The target date is `group[i+12].date`.
+///    such that `i + 12 < group.len()`. The target date is `group[i+11].date`.
 /// 3. Group `A_{i+12}` values by the season of the target date (using
 ///    [`find_season_for_date`] + `season_map` fallback, mirroring
 ///    [`estimate_seasonal_stats_with_season_map`]).
@@ -141,8 +141,6 @@ pub fn estimate_annual_seasonal_stats(
                 continue;
             };
 
-            // A_{(i+12)-1} = (1/12) * sum of z[i..i+12]; PDF time of this value
-            // is i + 11, so it is stored under the season of group[i + 11].
             let mean_a: f64 = group[i..i + 12].iter().map(|(_, v)| v).sum::<f64>() / 12.0;
             group_map
                 .entry((entity_id, season_id))
@@ -162,17 +160,13 @@ pub fn estimate_annual_seasonal_stats(
         let n = values.len();
         #[allow(clippy::cast_precision_loss)]
         let mean_m3s = values.iter().copied().sum::<f64>() / n as f64;
-        let std_m3s = if n >= 1 {
-            #[allow(clippy::cast_precision_loss)]
-            let var = values
-                .iter()
-                .map(|&v| (v - mean_m3s) * (v - mean_m3s))
-                .sum::<f64>()
-                / n as f64;
-            var.sqrt()
-        } else {
-            0.0
-        };
+        #[allow(clippy::cast_precision_loss)]
+        let var = values
+            .iter()
+            .map(|&v| (v - mean_m3s) * (v - mean_m3s))
+            .sum::<f64>()
+            / n as f64;
+        let std_m3s = var.sqrt();
 
         result.push(AnnualSeasonalStats {
             hydro_id: *entity_id,

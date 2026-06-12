@@ -101,7 +101,6 @@ pub fn build_ncs_factor_entries(
     use cobre_stochastic::normal::precompute::BlockFactorPair;
     use std::collections::BTreeSet;
 
-    // Collect NCS entity IDs that have model entries.
     let stochastic_ncs: BTreeSet<cobre_core::EntityId> =
         system.ncs_models().iter().map(|m| m.ncs_id).collect();
 

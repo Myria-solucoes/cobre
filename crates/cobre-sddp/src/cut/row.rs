@@ -3,9 +3,9 @@
 //! Builds the LP rows that encode the Future Cost Function's cuts. The cut-sign
 //! convention is owned here: [`push_scaled_coefficient`] negates the stored raw
 //! subgradient so each row reads `−∇·x + θ ≥ intercept`, yielding the Benders
-//! cut `θ ≥ Q(x̂) + π'(x − x̂)`. See `.claude/rules/sddp.md` and
-//! [`crate::backward::extract_duals_from_view`] for the subgradient-extraction
-//! side of the contract.
+//! cut `θ ≥ Q(x̂) + π'(x − x̂)`. See [`push_scaled_coefficient`] for the
+//! cut-sign negation contract and [`crate::backward::extract_duals_from_view`]
+//! for the subgradient-extraction side of the contract.
 //!
 //! Consumers: the backward pass, simulation, lower-bound evaluation, and DCS
 //! (Dynamic Cut Selection). The forward training loop uses pre-baked templates

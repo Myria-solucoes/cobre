@@ -1,7 +1,7 @@
 //! Periodic Yule-Walker AR coefficient estimators (classical and PAR-A).
 
 use super::yw_matrices::{
-    build_extended_periodic_yw_matrix, build_periodic_yw_matrix, solve_linear_system,
+    build_extended_periodic_yw_matrix, build_periodic_yw_matrix_into, solve_linear_system,
 };
 
 // ---------------------------------------------------------------------------
@@ -63,20 +63,27 @@ pub fn estimate_periodic_ar_coefficients(
     let mut sigma2_per_order = Vec::with_capacity(selected_order);
     let mut final_coefficients = Vec::new();
 
+    // Reuse two scratch buffers across the loop to avoid allocating a new
+    // Vec pair per order k. build_periodic_yw_matrix_into resizes them in
+    // place (no-alloc when capacity already covers the new size).
+    let mut matrix_buf: Vec<f64> = Vec::new();
+    let mut rhs_buf: Vec<f64> = Vec::new();
+
     for k in 1..=selected_order {
-        // Build and solve the periodic YW system at order k.
-        // Save the original RHS for sigma2 computation (solve modifies in-place).
-        // Build the matrix once; clone rhs (O(k)) before the in-place solve.
-        let (mut matrix, mut rhs) = build_periodic_yw_matrix(
+        build_periodic_yw_matrix_into(
             season,
             k,
             n_seasons,
             observations_by_season,
             stats_by_season,
+            &mut matrix_buf,
+            &mut rhs_buf,
         );
-        let rhs_orig: Vec<f64> = rhs.clone();
+        // Clone only the rhs (O(k)), not the matrix (O(k²)) — sigma2 needs the
+        // pre-solve rhs values, and solve_linear_system overwrites rhs_buf.
+        let rhs_orig: Vec<f64> = rhs_buf.clone();
 
-        match solve_linear_system(&mut matrix, &mut rhs, k) {
+        match solve_linear_system(&mut matrix_buf, &mut rhs_buf, k) {
             Some(phi) => {
                 // sigma2(k) = 1 - sum_{j=0}^{k-1} phi[j] * rhs_original[j]
                 let sigma2_k: f64 = 1.0

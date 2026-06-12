@@ -75,10 +75,9 @@ use cobre_stochastic::{
 };
 
 // Re-export so the public `cobre_sddp::` surface (`lib.rs`) and external
-// consumers resolve `EstimationReport` through this shell module unchanged
-// after the numeric core moved into `cobre-stochastic`. This `pub use` is the
-// sole binding of `EstimationReport` in the shell, so it also serves the
-// module's own references to the type.
+// consumers resolve `EstimationReport` through this shell module unchanged.
+// This `pub use` is the sole binding of `EstimationReport` in the shell, so it
+// also serves the module's own references to the type.
 pub use cobre_stochastic::par::fitting::EstimationReport;
 
 /// Classification of the estimation path taken for a given input file manifest.

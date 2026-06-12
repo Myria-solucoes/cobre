@@ -5,10 +5,6 @@ use super::yw_matrices::{
     solve_linear_system,
 };
 
-// ---------------------------------------------------------------------------
-// Conditional FACP for PAR-A (partitioned-covariance approach)
-// ---------------------------------------------------------------------------
-
 /// Partitioned covariance matrices for one `(season, k)` evaluation.
 ///
 /// Stores the three sub-matrices used in the conditional FACP formula
@@ -16,6 +12,9 @@ use super::yw_matrices::{
 /// - `sigma_11`: 2×2 (always four entries).
 /// - `sigma_12`: 2×k row-major (the conditioning set has `k` elements).
 /// - `sigma_22`: k×k row-major symmetric matrix.
+// Rationale: the sigma_11/sigma_12/sigma_22 names mirror the partitioned-covariance
+// notation (Σ_11, Σ_12, Σ_22); dropping the common prefix to silence the lint would
+// break the correspondence with the algorithm documentation.
 #[allow(clippy::struct_field_names)]
 pub(crate) struct PartitionedCov {
     /// 2×2 auto-covariance of `(Z_t, Z_{t−k})`, row-major.
@@ -67,17 +66,13 @@ pub(crate) fn assemble_partitioned_covariance(
 ) -> PartitionedCov {
     let prev_season = (season + n_seasons - 1) % n_seasons;
 
-    // ------------------------------------------------------------------
     // Σ_11: 2×2 auto-covariance of (Z_t, Z_{t−k}).
     // Row-major: [0,0]=1, [0,1]=ρ^season(k), [1,0]=ρ^season(k), [1,1]=1.
-    // ------------------------------------------------------------------
     let rho_k = periodic_autocorrelation(season, k, n_seasons, obs_z, stats_z);
     let sigma_11 = [1.0, rho_k, rho_k, 1.0];
 
-    // ------------------------------------------------------------------
     // Σ_22: k×k auto-covariance of conditioning set.
     // Conditioning set: (Z_{t−1}, …, Z_{t−k+1}, A_{t−1})  (k elements).
-    // ------------------------------------------------------------------
     let mut sigma_22 = vec![0.0_f64; k * k];
 
     // Z-block: rows/cols 0..k−1, all against season prev_season.
@@ -119,9 +114,7 @@ pub(crate) fn assemble_partitioned_covariance(
     // Diagonal entry for A_{t−1}: unit variance by construction.
     sigma_22[(k - 1) * k + (k - 1)] = 1.0;
 
-    // ------------------------------------------------------------------
     // Σ_12: 2×k cross-covariance between (Z_t, Z_{t−k}) and conditioning set.
-    // ------------------------------------------------------------------
     let mut sigma_12 = vec![0.0_f64; 2 * k];
 
     // Row 0 (Z_t) with Z-block of conditioning set.
@@ -247,11 +240,9 @@ pub fn conditional_facp_partitioned(
             a_year_starts,
         );
 
-        // ------------------------------------------------------------------
         // Solve Σ_22 · X = Σ_21 column-by-column (2 columns, one per row of
         // Σ_12). Σ_21 = Σ_12ᵀ, so column c of Σ_21 = row c of Σ_12.
         // X has shape k×2; store solutions as two Vec<f64> of length k.
-        // ------------------------------------------------------------------
         let mut x_cols: [Vec<f64>; 2] = [Vec::new(), Vec::new()];
         let mut singular = false;
 
@@ -279,7 +270,6 @@ pub fn conditional_facp_partitioned(
             break;
         }
 
-        // ------------------------------------------------------------------
         // Compute Σ̄ = Σ_11 − Σ_12 · X  (2×2 result).
         //
         // Σ_12 is 2×k, X is k×2.
@@ -287,7 +277,6 @@ pub fn conditional_facp_partitioned(
         //                  = sum_{j=0}^{k-1} sigma_12[r*k + j] * x_cols[c][j]
         //
         // sigma_bar is stored row-major: [0,0], [0,1], [1,0], [1,1].
-        // ------------------------------------------------------------------
         let mut sigma_bar = cov.sigma_11;
         for r in 0..2 {
             for c in 0..2 {
@@ -296,10 +285,8 @@ pub fn conditional_facp_partitioned(
             }
         }
 
-        // ------------------------------------------------------------------
         // Extract conditional FACP: sigma_bar[0,1] / sqrt(sigma_bar[0,0] * sigma_bar[1,1]).
         // Guard against non-positive product (numerical degeneracy).
-        // ------------------------------------------------------------------
         let denom_sq = sigma_bar[0] * sigma_bar[3];
         let facp = if denom_sq <= 0.0 {
             0.0

@@ -44,6 +44,8 @@
 //! - `partitioned_covariance` — the conditional FACP via partitioned covariance.
 //! - `periodic_ar` — periodic Yule-Walker coefficient estimators.
 //! - `annual` — annual-component seasonal statistics.
+//! - `estimation` — top-level AR coefficient estimation with order selection,
+//!   contribution validation, and the estimation report.
 
 mod annual;
 mod ar_coefficients;
