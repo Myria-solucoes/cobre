@@ -207,7 +207,6 @@ pub(super) fn broadcast_and_build_setup(
     ctx: &RunContext<impl Communicator>,
     args: &RunArgs,
 ) -> Result<LoadBroadcastResult, CliError> {
-    // Rank 0 loads from disk; system and config are broadcast to all ranks.
     let (
         raw_system,
         raw_bcast_config,
@@ -574,7 +573,6 @@ pub(super) fn run_pre_training(
         })?;
     }
 
-    // Build and emit provenance report.
     if ctx.is_root
         && let Some(path) = root_estimation_path
     {

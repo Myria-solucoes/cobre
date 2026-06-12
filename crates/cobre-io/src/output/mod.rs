@@ -627,7 +627,6 @@ mod tests {
             time_fwd_setup_ms: 0,
             time_fwd_load_imbalance_ms: 0,
             time_fwd_scheduling_overhead_ms: 0,
-            // overhead = 400 - (150 + 250 + 5 + 3 + 4) = 0 (saturating)
             time_overhead_ms: 400u64.saturating_sub(150 + 250 + 5 + 3 + 4),
             solve_time_ms: 0.0,
             mean_rows_in_lp: 0.0,

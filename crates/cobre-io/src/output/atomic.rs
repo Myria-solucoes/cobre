@@ -152,11 +152,13 @@ pub(crate) fn write_parquet_atomic(
         .write(batch)
         .map_err(|e| OutputError::serialization("parquet_writer", e.to_string()))?;
 
-    // `ArrowWriter::into_inner` finalizes the parquet footer into the
-    // `BufWriter` but does NOT flush the `BufWriter` into the underlying `File`.
-    // The explicit `flush` below guarantees every buffered byte reaches the file
-    // before the atomic rename — relying on drop-flush would swallow I/O errors
-    // and could truncate the file.
+    // `ArrowWriter::into_inner` calls `self.flush()` internally, and
+    // `BufWriter::into_inner` also flushes before returning the `File`, so the
+    // buffer is already drained here. The explicit `flush` below is a defensive
+    // guard against future parquet API changes that might not guarantee a flush
+    // on `into_inner`; it also surfaces any I/O error before the atomic rename
+    // rather than relying on drop-flush, which would swallow the error. Do not
+    // remove it without re-verifying the parquet version in `Cargo.lock`.
     let mut buf = writer
         .into_inner()
         .map_err(|e| OutputError::serialization("parquet_writer", e.to_string()))?;
@@ -169,9 +171,11 @@ pub(crate) fn write_parquet_atomic(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::*;
+    use super::super::error::OutputError;
+    use super::{serialize_json_then_flush, tmp_path, write_bytes_atomic, write_json_atomic};
     use serde::Serialize;
     use std::io;
+    use std::path::{Path, PathBuf};
     use tempfile::TempDir;
 
     #[derive(Serialize)]

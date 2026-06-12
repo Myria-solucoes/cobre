@@ -119,7 +119,7 @@ pub(super) fn write_simulation_outputs(args: &WriteSimulationArgs<'_>) -> Result
         .map_err(CliError::from)?;
 
     // Write simulation solver stats to simulation/solver/iterations.parquet.
-    // Simulation has no opening dimension and no per-worker dimension yet;
+    // Simulation has no opening dimension and no per-worker dimension;
     // opening, rank, and worker_id are all None.
     if !args.sim_solver_stats.is_empty() {
         let rows: Vec<cobre_io::SolverStatsRow> = args

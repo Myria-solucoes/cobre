@@ -81,16 +81,12 @@ pub const WORKER_TIMING_SLOT_FWD_SETUP: usize = 11;
 /// Writer-record slot index for `scoring_ms`.
 ///
 /// Used in `training_output.rs` to map [`WorkerPhaseTimings::scoring_ms`]
-/// into slot 15 of `cobre_io::WorkerTimingRecord` — the previously-reserved
-/// trailing slot, now surfaced as a written timing column.
+/// into slot 15 of `cobre_io::WorkerTimingRecord`.
 pub const WORKER_TIMING_SLOT_SCORING: usize = 15;
 
 /// Per-worker timing payload for [`TrainingEvent::WorkerTiming`].
 ///
-/// Names the five populated values explicitly. Replaces the previous
-/// `[f64; 16]` payload where most slots were always zero on per-worker
-/// events. `WorkerPhaseTimings` is `5 × f64 = 40 bytes`; the previous
-/// `[f64; 16]` payload was 128 bytes.
+/// Names the populated values explicitly.
 ///
 /// On `Forward`-phase events, `forward_wall_ms` and `fwd_setup_ms` are
 /// populated; the backward fields are 0. On `Backward`-phase events,
@@ -102,8 +98,7 @@ pub const WORKER_TIMING_SLOT_SCORING: usize = 15;
 ///
 /// The writer adapter in `training_output.rs` maps these fields into the
 /// 16-wide `cobre_io::WorkerTimingRecord` via the `WORKER_TIMING_SLOT_*`
-/// constants. The record stays `[u64; 16]`; `scoring_ms` occupies the
-/// previously-reserved slot 15.
+/// constants. The record stays `[u64; 16]`; `scoring_ms` occupies slot 15.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WorkerPhaseTimings {
     /// Forward-pass wall time in ms (populated on Forward; 0 on Backward).
@@ -557,8 +552,7 @@ pub enum TrainingEvent {
     /// for every rayon worker in the local pool — after the parallel region
     /// completes. For a 10-worker / 50-iteration run this produces
     /// `2 × 10 × 50 = 1 000` extra events; the [`WorkerPhaseTimings`]
-    /// payload (32 bytes, 4 named fields) is moved by value so no heap
-    /// allocation occurs per event.
+    /// payload is moved by value so no heap allocation occurs per event.
     ///
     /// ## Payload fields
     ///
@@ -574,7 +568,7 @@ pub enum TrainingEvent {
     /// the 16-wide `cobre_io::WorkerTimingRecord` via [`WORKER_TIMING_SLOT_FWD_WALL`],
     /// [`WORKER_TIMING_SLOT_BWD_WALL`], [`WORKER_TIMING_SLOT_BWD_SETUP`],
     /// [`WORKER_TIMING_SLOT_FWD_SETUP`], and [`WORKER_TIMING_SLOT_SCORING`]
-    /// (the previously-reserved slot 15). The remaining rank-only slots
+    /// (slot 15). The remaining rank-only slots
     /// (2–7, 9–10, 12–14) are populated by the rank-aggregated
     /// `IterationSummary` rows rather than per-worker events.
     ///
@@ -593,7 +587,7 @@ pub enum TrainingEvent {
         iteration: u64,
         /// Forward or Backward, distinguishing the two per-iteration emissions.
         phase: WorkerTimingPhase,
-        /// Per-worker timing payload with four named fields. See [`WorkerPhaseTimings`].
+        /// Per-worker timing payload. See [`WorkerPhaseTimings`].
         timings: WorkerPhaseTimings,
     },
 }

@@ -12,7 +12,7 @@ use crate::StochasticError;
 use crate::par::fitting::{ArCoefficientEstimate, SeasonalStats};
 
 /// Apply coefficient magnitude bound and contribution-based order validation
-/// to all AR estimates (used only in tests after Fixed-path removal).
+/// to all AR estimates (used only in tests).
 fn apply_contribution_validation(
     estimates: &mut [ArCoefficientEstimate],
     n_seasons: usize,

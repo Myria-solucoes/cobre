@@ -673,7 +673,7 @@ impl StageWorkerStatsBuffer {
     /// lower-bound paths). Does not re-allocate; always `O(n_workers * n_slots)`.
     pub fn reset(&mut self) {
         for slot in &mut self.data {
-            *slot = SolverStatsDelta::default();
+            slot.reset_in_place();
         }
     }
 

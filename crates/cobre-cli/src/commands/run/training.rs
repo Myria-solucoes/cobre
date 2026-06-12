@@ -249,6 +249,10 @@ fn aggregate_solver_stats(
             continue;
         }
         let delta = &entry.delta;
+        // lower_bound LP solve counts (first_try/retried/failed) are included in
+        // these totals; their solve_time_ms is intentionally excluded by the
+        // `_ => {}` arm below. lower-bound wall time is tracked separately, and
+        // there is no lower_bound_solve_seconds output field to receive it.
         first_try += delta.first_try_successes;
         retried += delta.lp_successes.saturating_sub(delta.first_try_successes);
         failed += delta.lp_failures;

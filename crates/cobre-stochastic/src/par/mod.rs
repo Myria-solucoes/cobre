@@ -15,7 +15,9 @@
 //!   solves for the noise that produces a target value (inverse)
 //! - [`fitting`] — periodic Yule-Walker matrix method for AR coefficient
 //!   estimation and PACF-based order selection; provides periodic
-//!   autocorrelation, matrix construction, and linear system solver
+//!   autocorrelation, matrix construction, linear system solver, and the
+//!   top-level [`estimate_ar_coefficients_with_selection`] /
+//!   [`build_estimation_report`] estimation-orchestration layer
 //! - [`contribution`] — recursive contribution composition for detecting
 //!   explosive lag effects in periodic autoregressive models
 

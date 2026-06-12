@@ -120,7 +120,7 @@ fn valid_case_stdout_contains_buses_count() {
         .args(["validate", dir.path().to_str().unwrap()])
         .assert()
         .success()
-        .stdout(predicate::str::contains("buses:"));
+        .stdout(predicate::str::contains("buses,"));
 }
 
 // ── acceptance criterion 2: missing required file → exit 1, error in stdout ──

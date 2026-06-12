@@ -197,10 +197,6 @@ pub fn execute(args: ValidateArgs) -> Result<(), CliError> {
         prepared.system.n_thermals(),
         prepared.system.n_lines(),
     ));
-    let _ = stdout.write_line(&format!("  buses: {}", prepared.system.n_buses()));
-    let _ = stdout.write_line(&format!("  hydros: {}", prepared.system.n_hydros()));
-    let _ = stdout.write_line(&format!("  thermals: {}", prepared.system.n_thermals()));
-    let _ = stdout.write_line(&format!("  lines: {}", prepared.system.n_lines()));
     if report.warning_count > 0 {
         let _ = stdout.write_line(&format!(
             "Validation: 0 errors, {} warnings in {}",

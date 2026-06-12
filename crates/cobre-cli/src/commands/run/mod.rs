@@ -224,11 +224,13 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
 ///
 /// `f64` can represent all integers exactly up to `2^53`. Any `u64` value greater
 /// than `2^53` loses precision when cast to `f64`, which would produce incorrect
-/// global totals after `allreduce(Sum)`. This function checks all nine `u64` fields
-/// of [`cobre_sddp::SolverStatsDelta`] that are cast to `f64` by `pack_delta_scalars`
-/// (indices 0–8) and returns `Err` if any exceeds the limit.
+/// global totals after `allreduce(Sum)`. This function checks every `u64` field
+/// of [`cobre_sddp::SolverStatsDelta`] that is cast to `f64` by
+/// [`cobre_sddp::pack_delta_scalars`] and returns `Err` if any exceeds the limit.
+/// The list of checked fields in the function body is the authoritative
+/// specification of which counters are guarded.
 ///
-/// The four `f64` timing fields (`solve_time_ms`, `load_model_time_ms`,
+/// The `f64` timing fields (`solve_time_ms`, `load_model_time_ms`,
 /// `set_bounds_time_ms`, `basis_set_time_ms`) are native `f64` and excluded from
 /// this check. `retry_level_histogram` is not packed by `pack_delta_scalars` and
 /// is also excluded.
@@ -445,9 +447,9 @@ mod tests {
         d
     }
 
-    /// AC1: every u64 counter packed by `pack_delta_scalars` (indices 0–8) must
-    /// be rejected with an error containing "exceeds 2^53" and the field label
-    /// when its value exceeds 2^53.
+    /// AC1: every u64 counter packed by `pack_delta_scalars` must be rejected
+    /// with an error containing "exceeds 2^53" and the field label when its
+    /// value exceeds 2^53.
     #[test]
     fn test_overflow_guard_rejects_excessive_counter() {
         let over_limit = (1u64 << 53) + 1;

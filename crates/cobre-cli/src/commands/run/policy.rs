@@ -15,7 +15,7 @@ use super::RunContext;
 
 /// Load a policy checkpoint from disk and optionally validate its compatibility.
 ///
-/// Returns the loaded checkpoint. The `policy_dir` must already exist.
+/// The `policy_dir` must already exist.
 fn load_and_validate_checkpoint(
     policy_dir: &Path,
     system: &System,

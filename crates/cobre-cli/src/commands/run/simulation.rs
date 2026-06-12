@@ -338,12 +338,14 @@ fn merge_simulation_metadata<C: Communicator>(
 /// ## Protocol
 ///
 /// **Summary**: Each rank first computes its local aggregate via
-/// [`cobre_sddp::SolverStatsDelta::aggregate`], packs the 15 scalar fields into a
-/// `[f64; 15]` buffer, and calls `allreduce(Sum)`. Root reconstructs the global
+/// [`cobre_sddp::SolverStatsDelta::aggregate`], packs the
+/// [`cobre_sddp::SOLVER_STATS_DELTA_SCALAR_FIELDS`] scalar fields into a
+/// fixed-size buffer, and calls `allreduce(Sum)`. Root reconstructs the global
 /// aggregate from the received buffer.
 ///
 /// **Per-scenario gather**: Each rank packs its per-scenario stats into a
-/// flat `f64` buffer (16 values per scenario: `scenario_id` + 15 scalar fields).
+/// flat `f64` buffer (one `scenario_id` field plus
+/// [`cobre_sddp::SOLVER_STATS_DELTA_SCALAR_FIELDS`] scalar fields per scenario).
 /// An `allgatherv` collects all scenarios on all ranks. Root sorts the result by
 /// scenario ID. All ranks participate but only root uses the gathered data.
 ///
@@ -364,9 +366,8 @@ fn aggregate_simulation_solver_stats<C: Communicator>(
     ),
     CliError,
 > {
-    // ── Part A: summary allreduce ─────────────────────────────────────────────
     let local_agg = cobre_sddp::SolverStatsDelta::aggregate(local_stats.iter().map(|(_, _, d)| d));
-    // Guard all nine u64 fields before the u64 → f64 cast in pack_delta_scalars.
+    // Guard every u64 field before the u64 → f64 cast in pack_delta_scalars.
     check_stats_overflow(&local_agg)?;
     let send_scalars = cobre_sddp::pack_delta_scalars(&local_agg);
     let mut recv_scalars = [0.0_f64; cobre_sddp::SOLVER_STATS_DELTA_SCALAR_FIELDS];
@@ -376,7 +377,6 @@ fn aggregate_simulation_solver_stats<C: Communicator>(
         })?;
     let global_agg = cobre_sddp::unpack_delta_scalars(&recv_scalars);
 
-    // ── Part B: per-scenario allgatherv ───────────────────────────────────────
     // Strip the opening field (always -1 for simulation) before packing — the
     // MPI wire format does not carry the opening field.
     let local_stats_stripped: Vec<(u32, cobre_sddp::SolverStatsDelta)> = local_stats

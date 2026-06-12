@@ -2104,8 +2104,8 @@ mod tests {
     /// `global_ub_std` > 0.
     ///
     /// The sequential summation of [60, 70, 80, 90] gives:
-    /// `cost_sum` = 300, `cost_sum_sq` = 22700, N = 4, mean = 75.
-    /// std = sqrt((22700 - 4*75^2) / 3) = sqrt(200/3) ≈ 8.165.
+    /// `cost_sum` = 300, `cost_sum_sq` = 23000, N = 4, mean = 75.
+    /// std = sqrt((23000 - 4*75^2) / 3) = sqrt(500/3) ≈ 12.910.
     #[test]
     fn acceptance_criterion_ub_mean() {
         let local = ForwardResult {
@@ -2121,10 +2121,12 @@ mod tests {
         let result = sync_forward(&local, &comm, 4).unwrap();
 
         assert_eq!(result.global_ub_mean, 75.0);
-        // std = sqrt((22700 - 4 * 75^2) / 3) = sqrt(200/3) ≈ 8.165
+        // std = sqrt((23000 - 4 * 75^2) / 3) = sqrt(500/3) ≈ 12.910
+        let expected_std = (500.0_f64 / 3.0).sqrt();
         assert!(
-            result.global_ub_std > 0.0,
-            "std must be positive for 4 distinct scenarios"
+            (result.global_ub_std - expected_std).abs() < 1e-9,
+            "std deviation {got} should be ≈ {expected_std}",
+            got = result.global_ub_std,
         );
     }
 
