@@ -398,8 +398,8 @@ fn reconstruct_stochastic_context_non_root(
             external_scenario_counts: None,
             // noise_group_ids: None for non-root ranks — the opened tree
             // is broadcast from rank 0 when auto-generated, so independent
-            // noise per stage is acceptable here. noise-group wiring for
-            // non-root SAA tree generation is deferred.
+            // noise per stage is acceptable here.
+            // TODO(noise-group-non-root-saa-tree): wire noise_group_ids for non-root SAA tree generation
             noise_group_ids: None,
         },
         cobre_stochastic::ClassSchemes {
@@ -511,6 +511,10 @@ fn rebuild_historical_library_non_root(
 }
 
 /// Construct `StudySetup` on all ranks from broadcast parameters.
+// Rationale: `stochastic`, `hydro_models`, and `scalar_parameters` are taken by
+// value because `StudySetup` construction consumes (moves) them into the setup —
+// passing by reference would force an internal clone, so by-value is correct, not
+// needless.
 #[allow(clippy::needless_pass_by_value)]
 fn build_study_setup(
     system: &System,

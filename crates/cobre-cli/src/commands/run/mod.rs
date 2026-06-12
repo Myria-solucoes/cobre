@@ -128,9 +128,6 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
         policy_mode,
     } = broadcast_and_build_setup(ctx, args)?;
 
-    // Emit soft consistency warnings for non-FPHA hydros whose stored
-    // `ρ_eq_stored` diverges from the implied `ρ_esp = ρ_eq_stored / h_eq`.
-    // Warnings are purely diagnostic — they do not abort the run.
     // Pre-training outputs (estimation artifacts, scaling report) run
     // regardless of training_enabled — they are data preparation outputs.
     run_pre_training(
@@ -388,6 +385,7 @@ mod tests {
 
     #[test]
     fn test_resolve_thread_count_default() {
+        assert_eq!(resolve_thread_count(None), 1);
         assert_eq!(resolve_thread_count(Some(1)), 1);
     }
 

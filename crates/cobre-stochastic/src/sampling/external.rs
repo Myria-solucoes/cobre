@@ -910,7 +910,6 @@ pub fn pad_library_to_uniform(library: &mut ExternalScenarioLibrary) {
     for s in 0..n_stages {
         let raw_count = library.raw_scenarios_per_stage[s];
         if raw_count == 0 || raw_count >= n_scenarios {
-            // Nothing to do for this stage.
             continue;
         }
 

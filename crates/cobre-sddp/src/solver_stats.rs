@@ -138,8 +138,8 @@ impl SolverStatsDelta {
     /// with `copy_from_slice`. When `dst` already has a histogram of the same
     /// length (the common case on iteration ≥ 2), no heap allocation occurs.
     ///
-    /// Prefer this over `dst = self.clone()` or `dst = self.clone_into_reuse(..)`
-    /// on hot paths where the histogram length is stable across calls.
+    /// Prefer this over `dst = self.clone()` on hot paths where the histogram
+    /// length is stable across calls.
     pub fn clone_into_reuse(&self, dst: &mut Self) {
         dst.lp_solves = self.lp_solves;
         dst.lp_successes = self.lp_successes;
@@ -318,9 +318,11 @@ impl SolverStatsLogEntry {
 ///
 /// The `id` parameter is the row identifier: iteration number for training phases,
 /// scenario ID for the simulation phase. `opening` is `Some(ω)` for backward rows
-/// and `None` for forward, `lower_bound`, and simulation rows. `rank` and `worker_id`
-/// are `Some` for backward rows (from allgatherv unpack) and `None` for forward,
-/// `lower_bound`, and simulation rows (no per-worker dimension yet).
+/// and `None` for forward, `lower_bound`, and simulation rows. `rank` is `Some` for
+/// every training-phase row (forward, backward, and `lower_bound` — [`solver_stats_log_to_rows`]
+/// always supplies the producing rank) and `None` only for simulation rows.
+/// `worker_id` is `Some` for backward rows (from the allgatherv unpack) and `None`
+/// otherwise (no per-worker dimension on forward, `lower_bound`, or simulation rows).
 #[must_use]
 #[allow(clippy::cast_possible_truncation)]
 pub fn delta_to_stats_row(

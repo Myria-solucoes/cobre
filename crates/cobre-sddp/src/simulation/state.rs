@@ -354,8 +354,7 @@ impl SimulationState {
         // emitting a contiguous ascending range `[scenario_start +
         // start_local, scenario_start + end_local)`. The sequential
         // `extend` preserves order, so `all_costs` and `all_stats` are
-        // already sorted by `scenario_id`. The `sort_by_key` previously
-        // here was redundant work O(n log n).
+        // already sorted by `scenario_id` — no sort needed.
         debug_assert!(
             all_costs.windows(2).all(|w| w[0].0 <= w[1].0),
             "all_costs not pre-sorted: workers must emit ascending scenario_id"

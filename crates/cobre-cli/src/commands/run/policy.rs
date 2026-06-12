@@ -31,6 +31,8 @@ fn load_and_validate_checkpoint(
     if let Some(config) = root_config
         && config.policy.validate_compatibility
     {
+        // Rationale: the cast cannot truncate — `n_stages` is the validated study
+        // horizon (a `u16`-scale stage count), far below `u32::MAX`.
         #[allow(clippy::cast_possible_truncation)]
         let n_stages = system.stages().iter().filter(|s| s.id >= 0).count() as u32;
         let state_dim =
@@ -63,8 +65,7 @@ fn load_checkpoint_into_setup(
     // Seed the warm-start basis store from the checkpoint's stored
     // bases so iteration 1's cut-loaded LPs warm-start. Skip when the
     // checkpoint carries no bases (written without `store_basis`):
-    // the store stays empty and iteration 1 cold-starts, matching the
-    // prior behavior.
+    // the store stays empty and iteration 1 cold-starts.
     if !checkpoint.stage_bases.is_empty() {
         let basis_cache = cobre_sddp::build_basis_cache_from_checkpoint(
             setup.stage_data.stage_templates.templates.len(),
@@ -153,6 +154,9 @@ pub(super) fn apply_training_policy(
     // entire FCF first, then boundary cuts overwrite only the terminal pool.
     if let Some(bp) = root_config.and_then(|c| c.policy.boundary.as_ref()) {
         let boundary_path = ctx.output_dir.join(&bp.path);
+        // Rationale: the cast cannot truncate — `state_dimension` counts FCF
+        // state variables (one per reservoir/lag), bounded by the validated study
+        // dimensions and far below `u32::MAX`.
         #[allow(clippy::cast_possible_truncation)]
         let state_dim = setup.fcf.state_dimension as u32;
         let boundary_records =

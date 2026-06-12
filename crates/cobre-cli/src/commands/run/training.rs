@@ -119,8 +119,7 @@ pub(super) fn run_training_phase(
     // populates the full set so rank 0 can write them to parquet). Filter to this
     // rank's own contribution here so the subsequent allreduce(Sum) produces
     // correct global totals instead of multiplying backward by world_size.
-    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
-    let my_rank = ctx.comm.rank() as i32;
+    let my_rank = i32::try_from(ctx.comm.rank()).unwrap_or(i32::MAX);
     let (
         local_first_try,
         local_retried,
@@ -174,7 +173,6 @@ pub(super) fn run_training_phase(
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let parallelism = (ctx.n_threads as u32).saturating_mul(ctx.comm.size() as u32);
 
-    // Print training summary on rank 0.
     let training_summary = TrainingSummary {
         iterations: training_result.iterations,
         converged: training_output.converged,

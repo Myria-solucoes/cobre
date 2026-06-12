@@ -303,7 +303,6 @@ pub(crate) fn validate_schema(
         ctx,
     );
 
-    //
     // parse_buses, parse_hydros, parse_lines, and parse_non_controllable_sources
     // require a `&GlobalPenaltyDefaults`. We use the parsed penalties when
     // available, or a sentinel when penalties failed to parse (so that remaining

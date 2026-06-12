@@ -116,7 +116,6 @@ pub(super) fn run_simulation_phase(
         message: format!("post-simulation barrier error: {e}"),
     })?;
 
-    // Aggregate simulation solver stats across all MPI ranks.
     let (global_agg, global_scenario_stats) =
         aggregate_simulation_solver_stats(&ctx.comm, &sim_run_result.solver_stats)?;
 
