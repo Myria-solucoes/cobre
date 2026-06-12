@@ -16,10 +16,10 @@ Available context structs:
 
 | Struct                | File                                     | Purpose                                                                                        | Mutability              |
 | --------------------- | ---------------------------------------- | ---------------------------------------------------------------------------------------------- | ----------------------- |
-| `StageContext`        | `cobre-sddp/src/context.rs`              | Per-stage templates, base rows, layout                                                         | Immutable (`&`)         |
-| `TrainingContext`     | `cobre-sddp/src/context.rs`              | Horizon, indexer, stochastic, initial state                                                    | Immutable (`&`)         |
-| `ScratchBuffers`      | `cobre-sddp/src/workspace.rs`            | Per-worker noise/patch scratch space                                                           | Mutable (`&mut`)        |
-| `SolverWorkspace`     | `cobre-sddp/src/workspace.rs`            | Solver + scratch + patch buffer                                                                | Mutable (`&mut`)        |
+| `StageContext`        | `cobre-sddp/src/workspace/context.rs`    | Per-stage templates, base rows, layout                                                         | Immutable (`&`)         |
+| `TrainingContext`     | `cobre-sddp/src/workspace/context.rs`    | Horizon, indexer, stochastic, initial state                                                    | Immutable (`&`)         |
+| `ScratchBuffers`      | `cobre-sddp/src/workspace/workspace.rs`  | Per-worker noise/patch scratch space                                                           | Mutable (`&mut`)        |
+| `SolverWorkspace`     | `cobre-sddp/src/workspace/workspace.rs`  | Solver + scratch + patch buffer                                                                | Mutable (`&mut`)        |
 | `TrainingConfig`      | `cobre-sddp/src/config.rs`               | Forward passes, iteration limit, seed                                                          | Owned (moved in)        |
 | `SimulationConfig`    | `cobre-sddp/src/simulation/config.rs`    | Scenario count, channel capacity                                                               | Immutable (`&`)         |
 | `ForwardPassBatch`    | `cobre-sddp/src/forward.rs`              | Local pass count, iteration, offset                                                            | Immutable (`&`)         |

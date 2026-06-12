@@ -76,7 +76,7 @@ Two public entry points exist — use the correct one for the path:
   `enforce_basic_count_invariant` to restore the invariant.
 
 When changing the MPI basis-cache wire format, read:
-→ `crates/cobre-sddp/src/workspace.rs` —
+→ `crates/cobre-sddp/src/workspace/workspace.rs` —
 `CapturedBasis::to_broadcast_payload` and
 `CapturedBasis::try_from_broadcast_payload` are the sole
 owners of the byte layout. Any layout change must update

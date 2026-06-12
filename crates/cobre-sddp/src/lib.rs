@@ -33,7 +33,6 @@ pub(crate) mod backward;
 pub(crate) mod backward_pass_state;
 pub mod basis_reconstruct;
 pub mod config;
-pub mod context;
 pub mod convergence;
 pub(crate) mod conversion;
 pub mod cut;
@@ -72,6 +71,12 @@ pub(crate) mod trajectory;
 pub mod validate_phases;
 pub(crate) mod visited_states;
 pub mod workspace;
+
+// Crate-root submodule shim: re-exposes the inner `context` file module (now
+// `workspace::context` after the `workspace/` cluster move) at the pre-move
+// `cobre_sddp::context` path, so the in-crate `crate::context::{StageContext,
+// TrainingContext}` call sites resolve verbatim without per-site edits.
+pub use workspace::context;
 
 // Crate-root submodule shim: preserves the pre-move
 // `cobre_sddp::risk_measure::` / `cobre_sddp::stopping_rule::` raw paths
@@ -181,4 +186,4 @@ pub use state_exchange::ExchangeBuffers;
 // ── trajectory ────────────────────────────────────────────────────────────────
 pub use trajectory::TrajectoryRecord;
 // ── workspace ─────────────────────────────────────────────────────────────────
-pub use workspace::{BASIS_BROADCAST_WIRE_VERSION, CapturedBasis};
+pub use workspace::workspace::{BASIS_BROADCAST_WIRE_VERSION, CapturedBasis};
