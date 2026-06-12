@@ -20,8 +20,8 @@ pin sets `v_scaled = v_orig / col_scale`. Cut-row construction then negates the
 gradient so the LP row reads `−∇·x + θ ≥ intercept`, yielding the Benders cut
 `θ ≥ Q(x̂) + π'(x − x̂)`.
 Read: `backward.rs` (`extract_duals_from_view`), `cut/fcf.rs`, and
-`forward.rs` (`push_scaled_coefficient`, where `batch.values.push(-coeff * d)`
-applies the negation).
+`cut::row::push_scaled_coefficient`, where `batch.values.push(-coeff * d)`
+applies the negation.
 
 ## State pinning uses column bounds, not equality rows
 

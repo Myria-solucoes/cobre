@@ -1177,11 +1177,6 @@ fn compute_hydro_violation_costs(
 /// in scaled cost space (objective coefficients divided by [`COST_SCALE_FACTOR`]);
 /// this function multiplies back by [`COST_SCALE_FACTOR`] at the reporting
 /// boundary to recover original units.
-// RATIONALE: 152 lines — enumerates all cost components (thermal, hydro, NCS, load shed,
-// deficit, generic violations) from the LP solution view in a single linear extraction pass.
-// Each component uses a different indexer slice, so no sub-function extraction is possible
-// without propagating the same indexer and scale arguments throughout.
-#[allow(clippy::too_many_lines)]
 fn compute_cost_result(
     view: &SolutionView<'_>,
     indexer: &StageIndexer,

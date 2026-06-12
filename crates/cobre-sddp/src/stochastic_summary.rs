@@ -321,7 +321,7 @@ pub fn estimation_report_to_fitting_report(report: &EstimationReport) -> Fitting
         .map(
             |(id, entry): (
                 &cobre_core::EntityId,
-                &crate::estimation::HydroEstimationEntry,
+                &cobre_stochastic::par::fitting::HydroEstimationEntry,
             )| {
                 (
                     id.0.to_string(),
@@ -448,7 +448,7 @@ mod tests {
         inflow_models_to_ar_rows, inflow_models_to_stats_rows,
     };
     use crate::EstimationReport;
-    use crate::estimation::HydroEstimationEntry;
+    use cobre_stochastic::par::fitting::HydroEstimationEntry;
 
     // ── Test helpers ──────────────────────────────────────────────────────────
 
@@ -1160,7 +1160,7 @@ mod tests {
 
     #[test]
     fn fitting_report_includes_reason_strings() {
-        use crate::estimation::{
+        use cobre_stochastic::par::fitting::{
             ContributionReduction, EstimationReport, HydroEstimationEntry, ReductionReason,
         };
 
@@ -1229,7 +1229,9 @@ mod tests {
 
     #[test]
     fn estimation_report_tracks_all_reductions() {
-        use crate::estimation::{ContributionReduction, ReductionReason, build_estimation_report};
+        use cobre_stochastic::par::fitting::{
+            ContributionReduction, ReductionReason, build_estimation_report,
+        };
         use std::collections::HashMap;
 
         let estimates = vec![

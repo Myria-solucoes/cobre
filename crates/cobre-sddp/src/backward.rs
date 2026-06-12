@@ -35,8 +35,8 @@
 //! column bounds in the state-fixing cutover; the gradient is now a reduced cost,
 //! unscaled by `col_scale` (not `row_scale`). The convention is
 //! `coefficients = reduced_cost` (raw, no sign flip at extraction). Negation is
-//! applied later when building the LP cut row in `build_cut_row_batch_into`
-//! (forward.rs):
+//! applied later when building the LP cut row in
+//! `cut::row::build_cut_row_batch_into`:
 //! `-coeff * x + theta >= intercept`.
 //! The intercept formula covers all `n_state` indices uniformly; no special handling
 //! for the anticipated-state subrange.
@@ -6094,7 +6094,7 @@ mod tests {
             row_lower: Vec::new(),
             row_upper: Vec::new(),
         };
-        crate::forward::build_cut_row_batch_into(&mut batch, &fcf, 1, &indexer, &[]);
+        crate::cut::row::build_cut_row_batch_into(&mut batch, &fcf, 1, &indexer, &[]);
 
         let lp_col = indexer.state_to_lp_column(indexer.anticipated_state.start);
         assert_eq!(lp_col, 1);
@@ -6251,7 +6251,7 @@ mod tests {
 
         let mut fcf = dcs_two_stage_fcf();
         // All-cuts batch for the baked path (delta == all cuts here).
-        let cut_batch = crate::forward::build_cut_row_batch(&fcf, 1, &indexer, &[]);
+        let cut_batch = crate::cut::row::build_cut_row_batch(&fcf, 1, &indexer, &[]);
         let successor_active_slots: Vec<usize> = (0..fcf.pools[1].populated_count).collect();
         let num_cuts = successor_active_slots.len();
 
@@ -6731,7 +6731,7 @@ mod tests {
         // binding cut, the delta is the remaining (non-baked) cuts. For the DCS
         // exactness comparison we only need the all-cuts reference, computed
         // from the full pool against the cut-free base below.
-        let cut_batch = crate::forward::build_cut_row_batch(&fcf, 1, &indexer, &[]);
+        let cut_batch = crate::cut::row::build_cut_row_batch(&fcf, 1, &indexer, &[]);
         let successor_active_slots: Vec<usize> = (0..fcf.pools[1].populated_count).collect();
         let num_cuts = successor_active_slots.len();
 

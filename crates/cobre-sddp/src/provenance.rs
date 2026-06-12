@@ -319,10 +319,11 @@ mod tests {
     use cobre_core::EntityId;
     use cobre_stochastic::{ComponentProvenance, StochasticProvenance};
 
-    use crate::estimation::{EstimationPath, EstimationReport, HydroEstimationEntry};
+    use crate::estimation::{EstimationPath, EstimationReport};
     use crate::hydro_models::{
         EvaporationReferenceSource, EvaporationSource, HydroModelProvenance, ProductionModelSource,
     };
+    use cobre_stochastic::par::fitting::HydroEstimationEntry;
 
     use super::{
         HydroProductionProvenance, ModelProvenanceReport, ProvenanceSource, build_provenance_report,

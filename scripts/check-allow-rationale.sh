@@ -60,11 +60,45 @@
 #   `git diff --unified=0 "$BASE"...HEAD -- 'crates/*/src/*.rs'` (three-dot, so
 #   only changes on HEAD's side of the merge base are considered).
 #
+# Still-true line-count mode (WHOLE-TREE, additive):
+#   The presence check above is diff-scoped (it grandfathers the legacy backlog).
+#   A separate "still-true" pass re-measures any production
+#   `clippy::too_many_lines` rationale that cites a numeric line count and fails
+#   if the cited count has drifted from the function body. A rationale that
+#   states the function's *shape* ("single linear pipeline") rather than a count
+#   is durable and is SKIPPED — only a parseable `<N> lines` cite is checked.
+#
+#   Why whole-tree and not diff-scoped: unlike presence, the still-true check has
+#   no legacy backlog to grandfather — every cited count must be true NOW. A
+#   diff-scoped variant would never re-examine an unchanged-but-drifted site,
+#   which is the exact failure mode (a rationale citing "214 lines" stays green
+#   forever after the body shrinks to 84). This is the prose-drift class the
+#   doc-integrity rules target (stale snapshot presented as standing truth).
+#
+#   Counting convention (DOCUMENTED so a future reader does not file a false
+#   drift finding from a different convention): the gate counts PHYSICAL lines —
+#   every line from the `fn`/`pub fn`/`pub(crate) fn` signature line that follows
+#   the attribute group, down to and INCLUDING its matching closing brace, with
+#   no exclusion of blank or comment lines. This is intentionally NOT clippy's
+#   own metric (clippy counts non-blank, non-comment lines and is typically lower
+#   by 10-25%). The TOLERANCE band below is wide enough to absorb that
+#   convention gap plus minor edits, while still catching gross drift (214-vs-84).
+#
+#   Count parsing: the first `<N> lines` token in the recognised rationale text,
+#   via the COUNT_RE ERE below. A trailing `each` / `per` qualifier marks a RATE
+#   ("~10 lines each") not a body total, and is NOT treated as a cited body
+#   count — such a rationale is qualitative for this mode and is skipped.
+#
+#   Unmeasurable body (no matching closing brace located) is reported as an
+#   explicit WARNING, never silently skipped (false-confidence guard).
+#
 # Exit codes:
 #   0 — every new/changed in-scope suppression carries a rationale or is
-#       allowlisted.
+#       allowlisted, AND every whole-tree numeric too_many_lines cite is
+#       still true within TOLERANCE.
 #   1 — at least one new/changed in-scope suppression lacks a rationale and is
-#       not allowlisted (details printed to stdout).
+#       not allowlisted, OR at least one numeric too_many_lines cite has drifted
+#       beyond TOLERANCE (details printed to stdout).
 
 set -euo pipefail
 
@@ -75,6 +109,19 @@ readonly ALLOWLIST_FILE="${REPO_ROOT}/scripts/allow-rationale-allowlist.txt"
 
 # In-scope lint tokens (ERE alternation, used to test an extracted lint list).
 readonly IN_SCOPE_LINTS='too_many_lines|too_many_arguments|type_complexity|dead_code|unused_'
+
+# Still-true mode: how far a cited line count may drift from the measured
+# physical body before it is a violation. Wide enough to absorb the gap between
+# the gate's physical-line convention and clippy's non-blank-non-comment metric
+# (typically 10-25% lower) plus minor edits; narrow enough to catch gross drift
+# such as a "214 lines" cite on an 84-line body.
+readonly TOLERANCE=10
+
+# Cited-count ERE: a number immediately bound to a `lines`/`ln`/`lns` token.
+# `awk` ERE has no `\b`; a `[^A-Za-z0-9_]` (or end-of-string) trailing boundary
+# is the POSIX-portable equivalent and avoids matching `linesXYZ`. A trailing
+# `each`/`per` qualifier (handled separately) marks a RATE, not a body total.
+readonly COUNT_RE='[0-9]+[[:space:]]*(lines|lns|ln|line)([^A-Za-z0-9_]|$)'
 
 # --------------------------------------------------------------------------
 # Allowlist membership: load `path::symbol` keys (and the lints each key
@@ -439,6 +486,7 @@ done
 
 violations="${violations%$'\n'}"
 
+presence_failed=0
 if [[ -n "$violations" ]]; then
     echo "FAIL: E4 un-rationaled suppression"
     echo ""
@@ -449,8 +497,216 @@ if [[ -n "$violations" ]]; then
     echo "the attribute (or a trailing inline // comment) explaining WHY the"
     echo "length/complexity/dead item is load-bearing and the refactor that"
     echo "would remove the lint is inappropriate."
-    exit 1
+    presence_failed=1
+else
+    echo "OK: all new/changed suppressions carry a rationale."
 fi
 
-echo "OK: all new/changed suppressions carry a rationale."
+# --------------------------------------------------------------------------
+# extract_too_many_lines_cites <file>
+# Emit one record per production-scope `#[allow(clippy::too_many_lines)]` site
+# whose recognised rationale text cites a numeric line count:
+#   SIG_LINE<TAB>SYMBOL<TAB>CITED_COUNT
+# A site with no `too_many_lines` lint, or whose rationale is qualitative (no
+# parseable `<N> lines` token), or whose count is a RATE (`<N> lines each/per`),
+# emits nothing. The recognised rationale is the same contiguous-group / inline
+# comment the presence pass credits, so the count parsed here is exactly the
+# text the gate treats as the suppression's justification.
+# The tail-block `#[cfg(test)]` filter mirrors extract_sites (test scope is out).
+# --------------------------------------------------------------------------
+extract_too_many_lines_cites() {
+    local file="$1"
+    awk -v count_re="$COUNT_RE" '
+        /^[[:space:]]*#\[cfg\((all\()?test[,)]/ { exit }
+        { lines[NR] = $0 }
+        END {
+            n = NR
+            for (i = 1; i <= n; i++) {
+                line = lines[i]
+                if (line !~ /#\[allow\(/) continue
+                open_line = i
+                # Accumulate the full attribute text to its closing `)]`.
+                attr = line
+                close_line = i
+                while (attr !~ /\)\]/ && close_line < n) {
+                    close_line++
+                    attr = attr " " lines[close_line]
+                }
+                inner = attr
+                sub(/^.*#\[allow\(/, "", inner)
+                sub(/\)\].*$/, "", inner)
+                if (index(inner, "too_many_lines") == 0) continue
+
+                # Recover the recognised rationale text (mirror extract_sites):
+                # (a) trailing inline comment on the closing attribute line, else
+                # (b) first plain // comment contiguous with the attribute group.
+                rat = ""
+                cl = lines[close_line]
+                if (cl ~ /\/\//) {
+                    ct = cl; sub(/^.*\/\//, "", ct)
+                    if (is_rationale(ct)) rat = ct
+                }
+                if (rat == "") {
+                    j = open_line - 1
+                    while (j >= 1) {
+                        prev = lines[j]
+                        if (prev ~ /^[[:space:]]*\/\/\// || prev ~ /^[[:space:]]*\/\/!/) { j--; continue }
+                        if (prev ~ /^[[:space:]]*#\[/ || prev ~ /^[[:space:]]*[A-Za-z_:]+,?[[:space:]]*$/ || prev ~ /^[[:space:]]*\)/) { j--; continue }
+                        if (prev ~ /^[[:space:]]*\/\//) {
+                            ct = prev; sub(/^[[:space:]]*\/\//, "", ct)
+                            if (is_rationale(ct)) rat = ct
+                            break
+                        }
+                        break
+                    }
+                }
+                if (rat == "") continue
+
+                # Parse the cited count. A RATE form (`<N> lines each|per`) is not
+                # a body total → skip. Otherwise take the first `<N> lines` token.
+                if (!match(rat, count_re)) continue
+                tok = substr(rat, RSTART, RLENGTH)
+                tail = substr(rat, RSTART + RLENGTH)
+                if (tail ~ /^[[:space:]]*(each|per)([^A-Za-z0-9_]|$)/) continue
+                cited = tok
+                gsub(/[^0-9].*$/, "", cited)
+                if (cited == "") continue
+
+                # Enclosing symbol + its signature line: the first non-blank,
+                # non-comment, non-attribute item line below the attribute group.
+                sym = "?"
+                sig = 0
+                for (j = close_line + 1; j <= n; j++) {
+                    s = lines[j]
+                    if (s ~ /^[[:space:]]*$/) continue
+                    if (s ~ /^[[:space:]]*\/\//) continue
+                    if (s ~ /^[[:space:]]*#\[/ || s ~ /^[[:space:]]*#!/) continue
+                    sym = resolve_symbol(s)
+                    sig = j
+                    break
+                }
+                if (sig == 0) continue
+                printf "%d\t%s\t%d\n", sig, sym, cited
+            }
+        }
+        function is_rationale(text,   t) {
+            t = text
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", t)
+            if (t == "") return 0
+            return 1
+        }
+        function resolve_symbol(s,   rest, t, name, sp) {
+            sp = " " s " "
+            if (match(sp, /[^A-Za-z0-9_]fn[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/)) {
+                name = substr(sp, RSTART, RLENGTH); sub(/^[^A-Za-z0-9_]fn[[:space:]]+/, "", name); return name
+            }
+            if (match(sp, /[^A-Za-z0-9_](struct|enum|trait|mod|const|static|type|union)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/)) {
+                name = substr(sp, RSTART, RLENGTH); sub(/^[^A-Za-z0-9_][A-Za-z_]+[[:space:]]+/, "", name); return name
+            }
+            if (match(sp, /[^A-Za-z0-9_]impl[^A-Za-z0-9_]/)) {
+                rest = substr(sp, RSTART); t = rest
+                sub(/^[^A-Za-z0-9_]impl[[:space:]]*(<[^>]*>)?[[:space:]]*/, "", t)
+                sub(/[[:space:]]*for[[:space:]]+/, " ", t)
+                if (match(t, /[A-Za-z_][A-Za-z0-9_]*/)) return substr(t, RSTART, RLENGTH)
+                return "impl"
+            }
+            t = s
+            sub(/^[[:space:]]*/, "", t)
+            sub(/^pub(\([^)]*\))?[[:space:]]+/, "", t)
+            if (match(t, /^[A-Za-z_][A-Za-z0-9_]*/)) return substr(t, RSTART, RLENGTH)
+            return "?"
+        }
+    ' "$file"
+}
+
+# --------------------------------------------------------------------------
+# measure_body_lines <file> <sig_line>
+# Count PHYSICAL lines from the signature line (inclusive) down to the matching
+# closing brace (inclusive), tracking `{`/`}` balance. The body is considered to
+# open on the first line at or after <sig_line> that contains a `{`. Emits the
+# integer line span on success; emits the literal `UNMEASURABLE` when no
+# matching close brace is found (false-confidence guard). No exclusion of blank
+# or comment lines — this is the PHYSICAL-line convention documented in the
+# header. Brace counting is line-granular and does not strip braces inside
+# string/char literals or comments; the TOLERANCE band absorbs the rare skew
+# this introduces for a drift check.
+# --------------------------------------------------------------------------
+measure_body_lines() {
+    local file="$1"
+    local sig="$2"
+    awk -v sig="$sig" '
+        NR < sig { next }
+        {
+            opens = gsub(/{/, "{")
+            closes = gsub(/}/, "}")
+            if (started == 0) {
+                if (opens == 0) { count++; next }   # signature spread before the `{`
+                started = 1
+            }
+            depth += opens - closes
+            count++
+            if (started == 1 && depth <= 0) { print count; found = 1; exit }
+        }
+        END { if (found != 1) print "UNMEASURABLE" }
+    ' "$file"
+}
+
+# --------------------------------------------------------------------------
+# check_still_true: whole-tree re-measurement of every production
+# `too_many_lines` rationale that cites a numeric line count. Sets
+# still_true_failed=1 on drift beyond TOLERANCE; emits an explicit WARNING (does
+# NOT fail) when a body cannot be measured. Test-only module files (parent
+# `#[cfg(test)] mod`) and the in-file tail-block filter are honoured exactly as
+# the presence pass does.
+# --------------------------------------------------------------------------
+still_true_failed=0
+still_true_violations=""
+still_true_warnings=""
+
+while IFS= read -r -d '' absfile; do
+    relfile="${absfile#"${REPO_ROOT}/"}"
+    [[ -n "${TEST_ONLY_FILES["$relfile"]:-}" ]] && continue
+    while IFS=$'\t' read -r sig sym cited; do
+        [[ -n "$sig" ]] || continue
+        measured="$(measure_body_lines "$absfile" "$sig")"
+        if [[ "$measured" == "UNMEASURABLE" ]]; then
+            still_true_warnings+="${relfile}::${sym}: cited ${cited} lines, but the function body could not be measured (no matching closing brace located)."$'\n'
+            continue
+        fi
+        local_diff=$((cited - measured))
+        [[ $local_diff -lt 0 ]] && local_diff=$((-local_diff))
+        if [[ $local_diff -gt $TOLERANCE ]]; then
+            still_true_violations+="${relfile}::${sym}: rationale cites ${cited} lines, measured body is ${measured} physical lines (drift ${local_diff} > tolerance ${TOLERANCE})."$'\n'
+        fi
+    done < <(extract_too_many_lines_cites "$absfile")
+done < <(find "${REPO_ROOT}/crates" -type f -name '*.rs' -path '*/src/*' -print0 2>/dev/null)
+
+still_true_violations="${still_true_violations%$'\n'}"
+still_true_warnings="${still_true_warnings%$'\n'}"
+
+if [[ -n "$still_true_warnings" ]]; then
+    echo ""
+    echo "WARNING: E4 still-true could not measure these function bodies:"
+    echo "$still_true_warnings"
+fi
+
+if [[ -n "$still_true_violations" ]]; then
+    still_true_failed=1
+    echo ""
+    echo "FAIL: E4 stale line-count rationale"
+    echo ""
+    echo "$still_true_violations"
+    echo ""
+    echo "A too_many_lines rationale that cites a line count must stay true. Either"
+    echo "correct the cited number to the current body length, or — preferred —"
+    echo "replace it with a qualitative shape invariant (no number), mirroring the"
+    echo "cleaned exemplars (run_forward_stage: 'single linear pipeline'; "
+    echo "run_cut_management: '5 interleaved mutation phases')."
+else
+    echo "OK: every numeric too_many_lines rationale is still true (within ${TOLERANCE} lines)."
+fi
+
+if [[ $presence_failed -ne 0 || $still_true_failed -ne 0 ]]; then
+    exit 1
+fi
 exit 0

@@ -34,8 +34,8 @@ use cobre_stochastic::{OpeningTree, StochasticContext, evaluate_par_batch, solve
 
 use crate::{
     cut::FutureCostFunction,
+    cut::row::build_cut_row_batch_into,
     error::SddpError,
-    forward::build_cut_row_batch_into,
     indexer::StageIndexer,
     inflow_method::InflowNonNegativityMethod,
     lp_builder::COST_SCALE_FACTOR,
@@ -269,7 +269,7 @@ fn lb_init_rank0<S: SolverInterface>(
             solver.load_model(spec.template);
         }
         // Append only cuts not yet present in the LP.
-        crate::forward::append_new_cuts_to_lp(
+        crate::cut::row::append_new_cuts_to_lp(
             solver,
             fcf,
             0,

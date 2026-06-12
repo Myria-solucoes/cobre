@@ -362,11 +362,6 @@ fn compute_external_scenario_counts(
 ///
 /// Returns [`SddpError::Io`] on file read/parse/validation failure,
 /// or [`SddpError::Stochastic`] on PAR/decomposition failure.
-// RATIONALE: 214 lines — orchestrates the complete stochastic preprocessing pipeline
-// (estimation, block-factor loading, opening-tree library, and stochastic context
-// construction). Each phase is already delegated to a dedicated helper; the remaining
-// body is unavoidable sequential plumbing that connects those helpers.
-#[allow(clippy::too_many_lines)]
 pub fn prepare_stochastic(
     system: System,
     case_dir: &Path,

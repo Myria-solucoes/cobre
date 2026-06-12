@@ -97,8 +97,10 @@ pub use energy_conversion::{EnergyConversionSet, HydroEnergyProductivityOverride
 pub use error::SddpError;
 // ── estimation ────────────────────────────────────────────────────────────────
 pub use estimation::{EstimationPath, EstimationReport, estimate_from_history};
+// ── cut::row ──────────────────────────────────────────────────────────────────
+pub use cut::row::build_cut_row_batch_into;
 // ── forward ───────────────────────────────────────────────────────────────────
-pub use forward::{SyncResult, build_cut_row_batch_into};
+pub use forward::SyncResult;
 // ── hydro_models ──────────────────────────────────────────────────────────────
 pub use hydro_models::{
     FphaHydroDetail, HydroModelSummary, PrepareHydroModelsResult, ProductionModelSource,

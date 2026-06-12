@@ -27,6 +27,7 @@
 
 pub mod fcf;
 pub mod pool;
+pub mod row;
 pub mod row_map;
 pub mod wire;
 

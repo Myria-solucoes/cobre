@@ -25,10 +25,10 @@ use cobre_solver::{
 use crate::basis_reconstruct::{
     ReconstructionTarget, enforce_basic_count_invariant, reconstruct_basis_uniform_basic,
 };
+use crate::cut::row::append_slots_to_lp;
 use crate::cut::{CutPool, CutRowMap};
 use crate::cut_selection::CutSelectionStrategy;
 use crate::error::SddpError;
-use crate::forward::append_slots_to_lp;
 use crate::gemm::gemm_block;
 use crate::indexer::StageIndexer;
 use crate::workspace::CapturedBasis;
@@ -217,7 +217,7 @@ impl DcsScoringScratch {
 ///
 /// State index → LP column mapping uses
 /// [`StageIndexer::state_to_lp_column`], identical to the cut-row builder in
-/// `forward::build_cut_row_batch_into`, so scoring and row construction
+/// `cut::row::build_cut_row_batch_into`, so scoring and row construction
 /// reference the same columns.
 ///
 /// # Batched scoring
@@ -311,7 +311,7 @@ pub fn score_violated_candidates(
     };
 
     // Unscale the raw state vector at the LP state columns. The column mapping
-    // mirrors `forward::build_cut_row_batch_into` exactly.
+    // mirrors `cut::row::build_cut_row_batch_into` exactly.
     scratch.unscaled_state.clear();
     for j in 0..n_state {
         let c = indexer.state_to_lp_column(j);
@@ -1889,7 +1889,7 @@ mod tests {
             row_upper: Vec::new(),
         };
         let all_slots: Vec<u32> = (0..pool.populated_count as u32).collect();
-        crate::forward::append_slots_to_lp(
+        crate::cut::row::append_slots_to_lp(
             &mut solver,
             pool,
             &all_slots,

@@ -39,7 +39,8 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelI
 use crate::{
     FutureCostFunction,
     context::{StageContext, TrainingContext},
-    forward::{build_cut_row_batch_into, partition},
+    cut::row::build_cut_row_batch_into,
+    forward::partition,
     simulation::{
         config::SimulationConfig,
         error::SimulationError,
