@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use crate::solver_stats::SolverStatsEntry;
+use crate::solver_stats::SolverStatsLogEntry;
 use crate::stopping_rule::RULE_ITERATION_LIMIT;
 
 /// Accumulates per-iteration results for one training run.
@@ -17,7 +17,7 @@ pub(crate) struct TrainingResults {
     pub final_gap: f64,
     pub completed_iterations: u64,
     pub termination_reason: String,
-    pub solver_stats_log: Vec<SolverStatsEntry>,
+    pub solver_stats_log: Vec<SolverStatsLogEntry>,
     pub start_time: Instant,
 }
 

@@ -482,6 +482,131 @@ pub fn standardize_external_inflow(
 }
 
 // ---------------------------------------------------------------------------
+// standardize_external_simple
+// ---------------------------------------------------------------------------
+
+/// Sole owner of the simple `η = (value - mean) / std` standardization arithmetic
+/// shared by every non-PAR(p) external entity class.
+///
+/// Contract: for each `(stage, scenario, entity)` triple the stored eta is
+/// `(value - mean) / std`, with the `std == 0.0` case yielding `η = 0.0` (a
+/// deterministic entity, consistent with the sigma=0 convention) — the obvious
+/// alternative of dividing unconditionally would emit NaN/inf for those entities.
+/// The `mean_std` lookup is laid out as `mean_std[stage * n_entities + idx]`;
+/// callers and this body must agree on that index expression — it is the storage
+/// contract, not an implementation detail.
+///
+/// Determinism: `models` and `external_rows` are traversed in the order given,
+/// and entity indices come from `entity_ids` order. Nothing is collected, sorted,
+/// or reordered, so the output is invariant to anything but input declaration
+/// order — upholding the bit-determinism rule.
+///
+/// Entity-class–agnostic by construction: the per-class field access is supplied
+/// by the two monomorphized accessor closures, so this body carries no entity
+/// vocabulary. The wrappers ([`standardize_external_load`],
+/// [`standardize_external_ncs`]) own that vocabulary.
+///
+/// # Parameters
+///
+/// - `library` — destination library, must have `n_entities() == entity_ids.len()`
+/// - `external_rows` — raw rows; iterated in the given order
+/// - `entity_ids` — canonical-order entity IDs
+/// - `models` — per-(entity, stage) models; iterated in the given order
+/// - `n_stages` — number of study stages
+/// - `model_fields` — yields `(entity_id, stage_id, mean, std)` for one model
+/// - `row_fields` — yields `(entity_id, stage_id, scenario_id, value)` for one row
+///
+/// # Panics
+///
+/// Panics in debug builds if dimension mismatches are detected.
+fn standardize_external_simple<R, M, FM, FR>(
+    library: &mut ExternalScenarioLibrary,
+    external_rows: &[R],
+    entity_ids: &[EntityId],
+    models: &[M],
+    n_stages: usize,
+    model_fields: FM,
+    row_fields: FR,
+) where
+    FM: Fn(&M) -> (EntityId, i32, f64, f64),
+    FR: Fn(&R) -> (EntityId, i32, i32, f64),
+{
+    let n_entities = entity_ids.len();
+    let n_scenarios = library.n_scenarios();
+
+    debug_assert_eq!(
+        library.n_entities(),
+        n_entities,
+        "library.n_entities() ({}) must equal entity_ids.len() ({})",
+        library.n_entities(),
+        n_entities,
+    );
+    debug_assert_eq!(
+        library.n_stages(),
+        n_stages,
+        "library.n_stages() ({}) must equal n_stages ({})",
+        library.n_stages(),
+        n_stages,
+    );
+
+    if n_entities == 0 || n_stages == 0 || n_scenarios == 0 {
+        return;
+    }
+
+    // -----------------------------------------------------------------------
+    // Build entity ID → canonical index map.
+    // -----------------------------------------------------------------------
+    let entity_index: std::collections::HashMap<EntityId, usize> = entity_ids
+        .iter()
+        .enumerate()
+        .map(|(i, &id)| (id, i))
+        .collect();
+
+    // -----------------------------------------------------------------------
+    // Build (entity_idx, stage_idx) → (mean, std) lookup.
+    // Indexed as mean_std[stage * n_entities + entity_idx] = (mean, std).
+    // -----------------------------------------------------------------------
+    let mut mean_std = vec![(0.0_f64, 0.0_f64); n_stages * n_entities];
+    #[allow(clippy::cast_sign_loss)]
+    for model in models {
+        let (entity_id, stage_id, mean, std) = model_fields(model);
+        if let Some(&e_idx) = entity_index.get(&entity_id) {
+            let stage_idx = stage_id as usize;
+            if stage_idx < n_stages {
+                mean_std[stage_idx * n_entities + e_idx] = (mean, std);
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Apply (value - mean) / std for each row.
+    // -----------------------------------------------------------------------
+    #[allow(clippy::cast_sign_loss)]
+    for row in external_rows {
+        let (entity_id, stage_id, scenario_id, value) = row_fields(row);
+        let stage_idx = stage_id as usize;
+        let scenario_idx = scenario_id as usize;
+        if let Some(&e_idx) = entity_index.get(&entity_id) {
+            debug_assert!(
+                stage_idx < n_stages,
+                "row stage_id ({stage_idx}) >= n_stages ({n_stages})",
+            );
+            debug_assert!(
+                scenario_idx < n_scenarios,
+                "row scenario_id ({scenario_idx}) >= n_scenarios ({n_scenarios})",
+            );
+            let (mean, std) = mean_std[stage_idx * n_entities + e_idx];
+            let eta = if std == 0.0 {
+                0.0
+            } else {
+                (value - mean) / std
+            };
+            library.eta_slice_mut(stage_idx, scenario_idx)[e_idx] = eta;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // standardize_external_load
 // ---------------------------------------------------------------------------
 
@@ -509,74 +634,15 @@ pub fn standardize_external_load(
     load_models: &[LoadModel],
     n_stages: usize,
 ) {
-    let n_buses = bus_ids.len();
-    let n_scenarios = library.n_scenarios();
-
-    debug_assert_eq!(
-        library.n_entities(),
-        n_buses,
-        "library.n_entities() ({}) must equal bus_ids.len() ({})",
-        library.n_entities(),
-        n_buses,
-    );
-    debug_assert_eq!(
-        library.n_stages(),
+    standardize_external_simple(
+        library,
+        external_rows,
+        bus_ids,
+        load_models,
         n_stages,
-        "library.n_stages() ({}) must equal n_stages ({})",
-        library.n_stages(),
-        n_stages,
+        |model| (model.bus_id, model.stage_id, model.mean_mw, model.std_mw),
+        |row| (row.bus_id, row.stage_id, row.scenario_id, row.value_mw),
     );
-
-    if n_buses == 0 || n_stages == 0 || n_scenarios == 0 {
-        return;
-    }
-
-    // -----------------------------------------------------------------------
-    // Build bus ID → canonical index map.
-    // -----------------------------------------------------------------------
-    let bus_index: std::collections::HashMap<EntityId, usize> =
-        bus_ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
-
-    // -----------------------------------------------------------------------
-    // Build (bus_idx, stage_idx) → (mean_mw, std_mw) lookup.
-    // Indexed as mean_std[stage * n_buses + bus_idx] = (mean, std).
-    // -----------------------------------------------------------------------
-    let mut mean_std = vec![(0.0_f64, 0.0_f64); n_stages * n_buses];
-    #[allow(clippy::cast_sign_loss)]
-    for model in load_models {
-        if let Some(&b_idx) = bus_index.get(&model.bus_id) {
-            let stage_idx = model.stage_id as usize;
-            if stage_idx < n_stages {
-                mean_std[stage_idx * n_buses + b_idx] = (model.mean_mw, model.std_mw);
-            }
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Apply (value - mean) / std for each row.
-    // -----------------------------------------------------------------------
-    #[allow(clippy::cast_sign_loss)]
-    for row in external_rows {
-        let stage_idx = row.stage_id as usize;
-        let scenario_idx = row.scenario_id as usize;
-        if let Some(&b_idx) = bus_index.get(&row.bus_id) {
-            debug_assert!(
-                stage_idx < n_stages,
-                "row stage_id ({stage_idx}) >= n_stages ({n_stages})",
-            );
-            debug_assert!(
-                scenario_idx < n_scenarios,
-                "row scenario_id ({scenario_idx}) >= n_scenarios ({n_scenarios})",
-            );
-            let (mean, std) = mean_std[stage_idx * n_buses + b_idx];
-            let eta = if std == 0.0 {
-                0.0
-            } else {
-                (row.value_mw - mean) / std
-            };
-            library.eta_slice_mut(stage_idx, scenario_idx)[b_idx] = eta;
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -607,74 +673,15 @@ pub fn standardize_external_ncs(
     ncs_models: &[NcsModel],
     n_stages: usize,
 ) {
-    let n_ncs = ncs_ids.len();
-    let n_scenarios = library.n_scenarios();
-
-    debug_assert_eq!(
-        library.n_entities(),
-        n_ncs,
-        "library.n_entities() ({}) must equal ncs_ids.len() ({})",
-        library.n_entities(),
-        n_ncs,
-    );
-    debug_assert_eq!(
-        library.n_stages(),
+    standardize_external_simple(
+        library,
+        external_rows,
+        ncs_ids,
+        ncs_models,
         n_stages,
-        "library.n_stages() ({}) must equal n_stages ({})",
-        library.n_stages(),
-        n_stages,
+        |model| (model.ncs_id, model.stage_id, model.mean, model.std),
+        |row| (row.ncs_id, row.stage_id, row.scenario_id, row.value),
     );
-
-    if n_ncs == 0 || n_stages == 0 || n_scenarios == 0 {
-        return;
-    }
-
-    // -----------------------------------------------------------------------
-    // Build ncs ID → canonical index map.
-    // -----------------------------------------------------------------------
-    let ncs_index: std::collections::HashMap<EntityId, usize> =
-        ncs_ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
-
-    // -----------------------------------------------------------------------
-    // Build (ncs_idx, stage_idx) → (mean, std) lookup.
-    // Indexed as mean_std[stage * n_ncs + ncs_idx] = (mean, std).
-    // -----------------------------------------------------------------------
-    let mut mean_std = vec![(0.0_f64, 0.0_f64); n_stages * n_ncs];
-    #[allow(clippy::cast_sign_loss)]
-    for model in ncs_models {
-        if let Some(&n_idx) = ncs_index.get(&model.ncs_id) {
-            let stage_idx = model.stage_id as usize;
-            if stage_idx < n_stages {
-                mean_std[stage_idx * n_ncs + n_idx] = (model.mean, model.std);
-            }
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Apply (value - mean) / std for each row.
-    // -----------------------------------------------------------------------
-    #[allow(clippy::cast_sign_loss)]
-    for row in external_rows {
-        let stage_idx = row.stage_id as usize;
-        let scenario_idx = row.scenario_id as usize;
-        if let Some(&n_idx) = ncs_index.get(&row.ncs_id) {
-            debug_assert!(
-                stage_idx < n_stages,
-                "row stage_id ({stage_idx}) >= n_stages ({n_stages})",
-            );
-            debug_assert!(
-                scenario_idx < n_scenarios,
-                "row scenario_id ({scenario_idx}) >= n_scenarios ({n_scenarios})",
-            );
-            let (mean, std) = mean_std[stage_idx * n_ncs + n_idx];
-            let eta = if std == 0.0 {
-                0.0
-            } else {
-                (row.value - mean) / std
-            };
-            library.eta_slice_mut(stage_idx, scenario_idx)[n_idx] = eta;
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1524,6 +1531,178 @@ mod tests {
 
         let eta = lib.eta_slice(0, 0)[0];
         assert_eq!(eta, 0.0, "eta must be 0.0 when std=0.0, got {eta}");
+    }
+
+    /// NCS counterpart of the std=0 guard: when `std`=0.0, eta must be 0.0.
+    #[test]
+    fn test_ncs_std_zero_returns_zero() {
+        let ncs_id = EntityId(9);
+        let ncs_ids = vec![ncs_id];
+
+        let ncs_models = vec![NcsModel {
+            ncs_id,
+            stage_id: 0,
+            mean: 0.4,
+            std: 0.0,
+        }];
+
+        let mut lib = ExternalScenarioLibrary::new(1, 1, 1, "ncs", vec![1]);
+        let rows = vec![ExternalNcsRow {
+            stage_id: 0,
+            scenario_id: 0,
+            ncs_id,
+            value: 0.4,
+        }];
+        standardize_external_ncs(&mut lib, &rows, &ncs_ids, &ncs_models, 1);
+
+        let eta = lib.eta_slice(0, 0)[0];
+        assert_eq!(eta, 0.0, "eta must be 0.0 when std=0.0, got {eta}");
+    }
+
+    /// Multi-(stage, entity) load fixture. Pins the stage-major `mean_std`
+    /// storage layout and the per-(bus, stage) model lookup: a transposed index
+    /// or a swapped mean/std accessor in the shared helper would change at least
+    /// one eta here, so the four asserts together guard the load wrapper's four
+    /// field accessors and the storage-layout contract.
+    #[test]
+    fn test_load_standardization_multi_stage_entity() {
+        let bus_a = EntityId(1);
+        let bus_b = EntityId(2);
+        let bus_ids = vec![bus_a, bus_b];
+
+        // Distinct (mean, std) per (bus, stage) so any index/accessor swap shows up.
+        let load_models = vec![
+            LoadModel {
+                bus_id: bus_a,
+                stage_id: 0,
+                mean_mw: 100.0,
+                std_mw: 10.0,
+            },
+            LoadModel {
+                bus_id: bus_a,
+                stage_id: 1,
+                mean_mw: 200.0,
+                std_mw: 20.0,
+            },
+            LoadModel {
+                bus_id: bus_b,
+                stage_id: 0,
+                mean_mw: 300.0,
+                std_mw: 30.0,
+            },
+            LoadModel {
+                bus_id: bus_b,
+                stage_id: 1,
+                mean_mw: 400.0,
+                std_mw: 40.0,
+            },
+        ];
+
+        let mut lib = ExternalScenarioLibrary::new(2, 1, 2, "load", vec![2, 2]);
+        let rows = vec![
+            ExternalLoadRow {
+                stage_id: 0,
+                scenario_id: 0,
+                bus_id: bus_a,
+                value_mw: 115.0, // (115-100)/10 = 1.5
+            },
+            ExternalLoadRow {
+                stage_id: 0,
+                scenario_id: 0,
+                bus_id: bus_b,
+                value_mw: 360.0, // (360-300)/30 = 2.0
+            },
+            ExternalLoadRow {
+                stage_id: 1,
+                scenario_id: 0,
+                bus_id: bus_a,
+                value_mw: 250.0, // (250-200)/20 = 2.5
+            },
+            ExternalLoadRow {
+                stage_id: 1,
+                scenario_id: 0,
+                bus_id: bus_b,
+                value_mw: 520.0, // (520-400)/40 = 3.0
+            },
+        ];
+        standardize_external_load(&mut lib, &rows, &bus_ids, &load_models, 2);
+
+        assert!((lib.eta_slice(0, 0)[0] - 1.5).abs() < 1e-10);
+        assert!((lib.eta_slice(0, 0)[1] - 2.0).abs() < 1e-10);
+        assert!((lib.eta_slice(1, 0)[0] - 2.5).abs() < 1e-10);
+        assert!((lib.eta_slice(1, 0)[1] - 3.0).abs() < 1e-10);
+    }
+
+    /// Multi-(stage, entity) NCS counterpart of
+    /// `test_load_standardization_multi_stage_entity`: pins the same layout and
+    /// lookup for the NCS wrapper's distinct field accessors (`value`, `mean`,
+    /// `std`, `ncs_id`).
+    #[test]
+    fn test_ncs_standardization_multi_stage_entity() {
+        let ncs_a = EntityId(4);
+        let ncs_b = EntityId(8);
+        let ncs_ids = vec![ncs_a, ncs_b];
+
+        let ncs_models = vec![
+            NcsModel {
+                ncs_id: ncs_a,
+                stage_id: 0,
+                mean: 0.10,
+                std: 0.10,
+            },
+            NcsModel {
+                ncs_id: ncs_a,
+                stage_id: 1,
+                mean: 0.20,
+                std: 0.20,
+            },
+            NcsModel {
+                ncs_id: ncs_b,
+                stage_id: 0,
+                mean: 0.30,
+                std: 0.30,
+            },
+            NcsModel {
+                ncs_id: ncs_b,
+                stage_id: 1,
+                mean: 0.40,
+                std: 0.40,
+            },
+        ];
+
+        let mut lib = ExternalScenarioLibrary::new(2, 1, 2, "ncs", vec![2, 2]);
+        let rows = vec![
+            ExternalNcsRow {
+                stage_id: 0,
+                scenario_id: 0,
+                ncs_id: ncs_a,
+                value: 0.25, // (0.25-0.10)/0.10 = 1.5
+            },
+            ExternalNcsRow {
+                stage_id: 0,
+                scenario_id: 0,
+                ncs_id: ncs_b,
+                value: 0.90, // (0.90-0.30)/0.30 = 2.0
+            },
+            ExternalNcsRow {
+                stage_id: 1,
+                scenario_id: 0,
+                ncs_id: ncs_a,
+                value: 0.70, // (0.70-0.20)/0.20 = 2.5
+            },
+            ExternalNcsRow {
+                stage_id: 1,
+                scenario_id: 0,
+                ncs_id: ncs_b,
+                value: 1.60, // (1.60-0.40)/0.40 = 3.0
+            },
+        ];
+        standardize_external_ncs(&mut lib, &rows, &ncs_ids, &ncs_models, 2);
+
+        assert!((lib.eta_slice(0, 0)[0] - 1.5).abs() < 1e-10);
+        assert!((lib.eta_slice(0, 0)[1] - 2.0).abs() < 1e-10);
+        assert!((lib.eta_slice(1, 0)[0] - 2.5).abs() < 1e-10);
+        assert!((lib.eta_slice(1, 0)[1] - 3.0).abs() < 1e-10);
     }
 
     #[test]

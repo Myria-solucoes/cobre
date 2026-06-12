@@ -124,6 +124,7 @@ pub fn execute(args: ValidateArgs) -> Result<(), CliError> {
             format_constraint_description(&stdout, &description, 0, &args.case_dir);
             return Err(CliError::Validation {
                 report: description,
+                already_rendered: true,
             });
         }
         Err(other) => {
@@ -146,7 +147,10 @@ pub fn execute(args: ValidateArgs) -> Result<(), CliError> {
         Ok(p) => p,
         Err(ref err) => {
             let report_msg = format_prep_error(&stdout, PrepPhase::Config, err, &args.case_dir);
-            return Err(CliError::Validation { report: report_msg });
+            return Err(CliError::Validation {
+                report: report_msg,
+                already_rendered: true,
+            });
         }
     };
 
@@ -167,7 +171,10 @@ pub fn execute(args: ValidateArgs) -> Result<(), CliError> {
         Ok(p) => p,
         Err(ref err) => {
             let report_msg = format_prep_error(&stdout, PrepPhase::Stochastic, err, &args.case_dir);
-            return Err(CliError::Validation { report: report_msg });
+            return Err(CliError::Validation {
+                report: report_msg,
+                already_rendered: true,
+            });
         }
     };
 
@@ -176,7 +183,10 @@ pub fn execute(args: ValidateArgs) -> Result<(), CliError> {
     // to avoid re-reading disk.
     if let Err(ref err) = prepare_hydro_models_from_artifacts(&prepared.system, &artifacts) {
         let report_msg = format_prep_error(&stdout, PrepPhase::HydroModels, err, &args.case_dir);
-        return Err(CliError::Validation { report: report_msg });
+        return Err(CliError::Validation {
+            report: report_msg,
+            already_rendered: true,
+        });
     }
 
     // All phases passed — print entity counts and any pipeline warnings.

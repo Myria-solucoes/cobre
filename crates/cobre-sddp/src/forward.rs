@@ -902,10 +902,12 @@ pub(crate) fn write_capture_metadata(
 ///
 /// Returns `Err(SddpError::Infeasible)` when the stage LP is infeasible, or
 /// `Err(SddpError::Solver)` for any other terminal solver failure.
-// RATIONALE: 225 lines — covers the complete sequence of patch→solve→record→advance
-// for one forward stage. The body is a single linear pipeline with no opportunities
-// for intermediate extraction that would not require passing all the same context
-// objects; splitting would only add indirection without reducing complexity.
+// RATIONALE: covers the complete sequence of patch→solve→record→advance for one
+// forward stage. The body is a single linear pipeline whose numerical work is
+// already delegated to free helpers; the residual is orchestration glue threading
+// disjoint partial borrows of one `&mut SolverWorkspace`. Any further extraction
+// would pass either the whole workspace (no gain) or many borrowed fields
+// (reintroducing too_many_arguments), without reducing complexity.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
     ws: &mut SolverWorkspace<S>,

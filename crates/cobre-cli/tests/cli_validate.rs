@@ -164,6 +164,55 @@ fn missing_buses_json_stdout_mentions_file() {
         .stdout(predicate::str::contains("buses.json"));
 }
 
+// ── failure presentation: report goes to stdout only, no circular hint ───────
+
+/// A validation failure prints the report to stdout (the `validate` command's
+/// deliverable). It must NOT be re-printed to stderr, and stderr must NOT carry
+/// the "run `cobre validate`" hint — that would point the user back at the very
+/// command they just ran.
+#[test]
+fn validate_failure_report_in_stdout_not_stderr() {
+    let dir = TempDir::new().unwrap();
+    make_valid_case(&dir);
+    fs::remove_file(dir.path().join("system/buses.json")).unwrap();
+    cobre()
+        .args(["validate", dir.path().to_str().unwrap()])
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::contains("error"))
+        .stderr(predicate::str::contains("buses.json").not())
+        .stderr(predicate::str::contains("run `cobre validate`").not());
+}
+
+/// A schema-violation failure (duplicate bus IDs — the file parses but breaks
+/// schema) must surface the offending path exactly once. Before the dedup, the
+/// combined message carried the relative path as a prefix AND the absolute path
+/// inside the embedded `SchemaError` display.
+#[test]
+fn validate_schema_failure_path_appears_once() {
+    let dir = TempDir::new().unwrap();
+    make_valid_case(&dir);
+    // Two buses sharing id 1 — parses, but trips the duplicate-id schema check.
+    write_file(
+        dir.path(),
+        "system/buses.json",
+        r#"{ "buses": [{ "id": 1, "name": "BUS_1" }, { "id": 1, "name": "BUS_2" }] }"#,
+    );
+
+    let output = cobre()
+        .args(["validate", dir.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "expected validation failure");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let occurrences = stdout.matches("system/buses.json").count();
+    assert_eq!(
+        occurrences, 1,
+        "offending path must appear exactly once, found {occurrences} in: {stdout:?}"
+    );
+}
+
 // ── acceptance criterion 3: nonexistent path → exit 2, I/O error in stderr ───
 
 #[test]

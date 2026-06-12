@@ -245,6 +245,27 @@ fn missing_required_file_stderr_contains_validation_error() {
         .stderr(predicate::str::contains("error"));
 }
 
+/// On the `run` path a validation failure is surfaced ONLY via stderr (nothing
+/// is printed to stdout first), so both the report and the "run `cobre validate`"
+/// hint must appear there. This is the counterpart to the `validate`-path
+/// suppression: the hint is non-circular and actionable here, so it is kept.
+#[test]
+fn missing_required_file_stderr_contains_report_and_hint() {
+    let dir = TempDir::new().unwrap();
+    make_valid_case(&dir);
+    fs::remove_file(dir.path().join("system/buses.json")).unwrap();
+
+    cobre()
+        .args(["run", dir.path().to_str().unwrap()])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("buses.json"))
+        .stderr(predicate::str::contains(
+            "run `cobre validate <CASE_DIR>` for a full diagnostic report",
+        ));
+}
+
 #[test]
 fn nonexistent_path_exits_2() {
     cobre()

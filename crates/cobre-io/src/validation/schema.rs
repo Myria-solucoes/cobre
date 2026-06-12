@@ -194,36 +194,43 @@ pub(crate) struct ParsedData {
 /// - [`LoadError::SchemaError`] maps to [`ErrorKind::SchemaViolation`].
 /// - All other variants map to [`ErrorKind::SchemaViolation`] as a safe
 ///   fallback (they should not occur in Layer 2).
+///
+/// The entry `message` carries only the path-free detail of each variant: the
+/// `ValidationEntry.file` field already holds `relative_path`, and the report
+/// renderer prefixes that path. Embedding the variant's full `Display` (which
+/// repeats the file path) would surface the same path twice in the combined
+/// message — relative as the prefix, absolute inside the `Display`.
 fn map_load_error(err: &LoadError, relative_path: &str, ctx: &mut ValidationContext) {
     match err {
-        LoadError::IoError { .. } => {
+        LoadError::IoError { source, .. } => {
             ctx.add_error(
                 ErrorKind::FileNotFound,
                 relative_path,
                 None::<&str>,
-                err.to_string(),
+                source.to_string(),
             );
         }
-        LoadError::ParseError { .. } => {
+        LoadError::ParseError { message, .. } => {
             ctx.add_error(
                 ErrorKind::ParseError,
                 relative_path,
                 None::<&str>,
-                err.to_string(),
+                format!("parse error: {message}"),
             );
         }
-        LoadError::SchemaError { .. } => {
+        LoadError::SchemaError { field, message, .. } => {
             ctx.add_error(
                 ErrorKind::SchemaViolation,
                 relative_path,
                 None::<&str>,
-                err.to_string(),
+                format!("field {field}: {message}"),
             );
         }
         _ => {
             // CrossReferenceError, ConstraintError, PolicyIncompatible should
             // not arise from individual file parsers in Layer 2, but map
-            // conservatively to SchemaViolation.
+            // conservatively to SchemaViolation. These variants do not embed
+            // `relative_path` as a prefix, so their full Display is safe here.
             ctx.add_error(
                 ErrorKind::SchemaViolation,
                 relative_path,

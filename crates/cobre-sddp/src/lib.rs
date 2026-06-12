@@ -138,8 +138,9 @@ pub use solver_phase::Phase;
 pub use solver_phase::{BACKWARD_PROFILE, FORWARD_PROFILE, SIMULATION_PROFILE};
 // ── solver_stats ──────────────────────────────────────────────────────────────
 pub use solver_stats::{
-    SOLVER_STATS_DELTA_SCALAR_FIELDS, SolverStatsDelta, pack_delta_scalars, pack_scenario_stats,
-    unpack_delta_scalars, unpack_scenario_stats,
+    SOLVER_STATS_DELTA_SCALAR_FIELDS, SolverStatsDelta, SolverStatsLogEntry, delta_to_stats_row,
+    pack_delta_scalars, pack_scenario_stats, solver_stats_log_to_rows, unpack_delta_scalars,
+    unpack_scenario_stats,
 };
 // ── stochastic_summary ────────────────────────────────────────────────────────
 pub use stochastic_summary::{

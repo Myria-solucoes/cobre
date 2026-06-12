@@ -216,20 +216,14 @@ fn test_backward_cache_reduces_pivots() {
         result.iterations
     );
 
-    // Collect simplex_iterations for all backward-pass ω=0 (opening == 0) entries
-    // at iteration ≥ 2.  These are the rows whose warm-start quality the cache
-    // is supposed to improve.
-    //
-    // SolverStatsEntry tuple layout:
-    //   (iteration: u64, phase: &'static str, stage: i32, opening: i32,
-    //    rank: i32, worker_id: i32, delta: SolverStatsDelta)
+    // Collect simplex_iterations for all backward-pass ω=0 (opening == Some(0))
+    // entries at iteration ≥ 2.  These are the rows whose warm-start quality the
+    // cache is supposed to improve.
     let bwd_omega0_ge2: Vec<u64> = result
         .solver_stats_log
         .iter()
-        .filter(|(iter, phase, _stage, opening, _rank, _wid, _delta)| {
-            *phase == "backward" && *opening == 0 && *iter >= 2
-        })
-        .map(|(_iter, _phase, _stage, _opening, _rank, _wid, delta)| delta.simplex_iterations)
+        .filter(|e| e.phase == "backward" && e.opening == Some(0) && e.iteration >= 2)
+        .map(|e| e.delta.simplex_iterations)
         .collect();
 
     assert!(

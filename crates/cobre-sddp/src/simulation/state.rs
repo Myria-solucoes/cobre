@@ -111,6 +111,55 @@ impl<'a, S: SolverInterface + Send, C> SimulationInputs<'a, S, C> {
     }
 }
 
+/// Read-only captures shared across all rayon workers in the simulation pass.
+///
+/// Built once by [`SimulationState::run`] after the resolved `baked_templates`
+/// binding and the sampler, then passed by shared reference
+/// (`&SimWorkerParams`) to every [`run_worker_scenarios`] invocation. All fields
+/// are either `Copy` scalars or immutable borrows; no field is mutated inside the
+/// worker. The mutable per-worker [`SolverWorkspace`] rides on a separate `ws`
+/// argument.
+///
+/// The single lifetime `'w` is the body scope of [`SimulationState::run`], not
+/// the `inputs` lifetime: `scenarios_complete` and `sampler` are run-local, and
+/// borrowing them is sound because `par_iter_mut` joins before `run` returns.
+///
+/// The struct is not generic over the solver type `S` because no field holds an
+/// `S`-typed value. The `SolverWorkspace<S>` is passed as a separate `ws`
+/// argument to [`run_worker_scenarios`].
+pub(crate) struct SimWorkerParams<'w> {
+    /// Stage-level LP context (templates, row counts, noise scales).
+    ctx: &'w StageContext<'w>,
+    /// Future-cost function — read-only for the simulation pass.
+    fcf: &'w FutureCostFunction,
+    /// Study-level training context (horizon, indexer, stochastic model).
+    training_ctx: &'w TrainingContext<'w>,
+    /// Output-channel and extraction metadata for streaming scenario results.
+    output: &'w SimulationOutputSpec<'w>,
+    /// Simulation configuration (scenario count, I/O channel capacity).
+    config: &'w SimulationConfig,
+    /// Per-stage warm-start basis captured from the training checkpoint.
+    stage_bases: &'w [Option<CapturedBasis>],
+    /// Resolved baked LP templates (caller-supplied or locally re-baked).
+    baked_templates: &'w [StageTemplate],
+    /// Shared completion counter scaled to a global progress estimate.
+    scenarios_complete: &'w AtomicU32,
+    /// Wall-clock start of the simulation, for progress elapsed-time reporting.
+    sim_start: Instant,
+    /// Rank-local scenario count to partition across workers.
+    local_count: usize,
+    /// Number of rayon worker threads on this rank.
+    n_workers: usize,
+    /// Global index of this rank's first scenario (for `scenario_id` derivation).
+    scenario_start: usize,
+    /// Forward sampler that drives per-scenario-per-stage noise generation.
+    sampler: &'w ForwardSampler<'w>,
+    /// Number of stages in the study horizon.
+    num_stages: usize,
+    /// Number of MPI ranks, scaling rank-local progress to a global estimate.
+    world_size: u32,
+}
+
 /// Owned scratch state for one simulation run.
 ///
 /// `SimulationState` is typically created immediately before calling
@@ -269,31 +318,29 @@ impl SimulationState {
             ws.solver.set_profile(&simulation_profile);
         }
 
+        let params = SimWorkerParams {
+            ctx: inputs.ctx,
+            fcf: inputs.fcf,
+            training_ctx,
+            output: &inputs.output,
+            config: inputs.config,
+            stage_bases: inputs.stage_bases,
+            baked_templates,
+            scenarios_complete: &scenarios_complete,
+            sim_start,
+            local_count,
+            n_workers,
+            scenario_start,
+            sampler: &sampler,
+            num_stages,
+            world_size,
+        };
+
         let worker_results: Vec<Result<(WorkerCosts, WorkerStats), SimulationError>> = inputs
             .workspaces
             .par_iter_mut()
             .enumerate()
-            .map(|(w, ws)| {
-                run_worker_scenarios(
-                    w,
-                    ws,
-                    inputs.ctx,
-                    inputs.fcf,
-                    training_ctx,
-                    &inputs.output,
-                    inputs.config,
-                    inputs.stage_bases,
-                    baked_templates,
-                    &scenarios_complete,
-                    sim_start,
-                    local_count,
-                    n_workers,
-                    scenario_start,
-                    &sampler,
-                    num_stages,
-                    world_size,
-                )
-            })
+            .map(|(w, ws)| run_worker_scenarios(w, ws, &params))
             .collect();
 
         let mut all_costs = Vec::with_capacity(local_count);
@@ -371,45 +418,24 @@ fn debug_assert_inputs(
 ///
 /// Returns `(worker_costs, worker_stats)` for the worker's assigned scenarios,
 /// or a [`SimulationError`] if any scenario LP fails or the channel is closed.
-// RATIONALE: 16 args are passed through the rayon parallel closure boundary.
-// Each represents a distinct read-only data source (ctx, fcf, training_ctx, config,
-// stage_bases, baked_templates, sampler) or mutable accumulator (ws), or progress
-// tracking primitive (scenarios_complete, sim_start). Bundling into a struct would
-// require either cloning or wrapping in Arc — both incompatible with the zero-allocation
-// HPC constraint for the simulation hot path.
-#[allow(clippy::too_many_arguments)]
 fn run_worker_scenarios<S: SolverInterface + Send>(
     w: usize,
     ws: &mut SolverWorkspace<S>,
-    ctx: &StageContext<'_>,
-    fcf: &FutureCostFunction,
-    training_ctx: &TrainingContext<'_>,
-    output: &SimulationOutputSpec<'_>,
-    config: &SimulationConfig,
-    stage_bases: &[Option<CapturedBasis>],
-    baked_templates: &[StageTemplate],
-    scenarios_complete: &AtomicU32,
-    sim_start: Instant,
-    local_count: usize,
-    n_workers: usize,
-    scenario_start: usize,
-    sampler: &ForwardSampler,
-    num_stages: usize,
-    world_size: u32,
+    params: &SimWorkerParams<'_>,
 ) -> Result<(WorkerCosts, WorkerStats), SimulationError> {
-    let (start_local, end_local) = partition(local_count, n_workers, w);
-    let worker_sender: Option<Sender<TrainingEvent>> = output.event_sender.clone();
+    let (start_local, end_local) = partition(params.local_count, params.n_workers, w);
+    let worker_sender: Option<Sender<TrainingEvent>> = params.output.event_sender.clone();
     let n_scenarios = end_local - start_local;
     let mut worker_costs = Vec::with_capacity(n_scenarios);
     let mut worker_stats = Vec::with_capacity(n_scenarios);
     // Sampling scratch: resize ws.scratch buffers once per worker, reuse across
     // scenarios. Avoids per-worker vec![...] allocations on the hot path.
-    let noise_dim = training_ctx.stochastic.dim();
+    let noise_dim = params.training_ctx.stochastic.dim();
     ws.scratch.raw_noise_buf.resize(noise_dim, 0.0_f64);
     #[allow(clippy::cast_possible_truncation)]
     ws.scratch
         .perm_scratch
-        .resize(config.n_scenarios.max(1) as usize, 0_usize);
+        .resize(params.config.n_scenarios.max(1) as usize, 0_usize);
 
     // Build the study-invariant reverse-lookup tables once per worker thread.
     // Both lookups depend only on the indexer and entity counts, which are
@@ -417,20 +443,20 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
     // per-(scenario, stage) allocation that would otherwise occur inside
     // extract_thermals / extract_hydros (600k allocs for 10k scenarios × 60 stages).
     let lookups = SimLookups::build(
-        training_ctx.indexer,
-        output.entity_counts.thermal_ids.len(),
-        output.entity_counts.hydro_ids.len(),
+        params.training_ctx.indexer,
+        params.output.entity_counts.thermal_ids.len(),
+        params.output.entity_counts.hydro_ids.len(),
     );
 
     for local_idx in start_local..end_local {
         #[allow(clippy::cast_possible_truncation)]
-        let scenario_id = (scenario_start + local_idx) as u32;
+        let scenario_id = (params.scenario_start + local_idx) as u32;
         let global_scenario = SIMULATION_SEED_OFFSET.saturating_add(scenario_id);
 
         let stats_before = ws.solver.statistics();
         let load_spec = crate::simulation::pipeline::SimScenarioLoadSpec {
-            baked_templates,
-            stage_bases,
+            baked_templates: params.baked_templates,
+            stage_bases: params.stage_bases,
         };
         // Split raw_noise_buf and perm_scratch out of ws.scratch so that the
         // immutable borrows of those slices in ScenarioIds do not conflict with
@@ -440,19 +466,19 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
         let mut perm_scratch = std::mem::take(&mut ws.scratch.perm_scratch);
         let result = process_scenario_stages(
             ws,
-            ctx,
-            fcf,
-            training_ctx,
+            params.ctx,
+            params.fcf,
+            params.training_ctx,
             &load_spec,
-            output,
+            params.output,
             &mut ScenarioIds {
                 scenario_id,
                 global_scenario,
-                num_stages,
-                total_scenarios: config.n_scenarios,
+                num_stages: params.num_stages,
+                total_scenarios: params.config.n_scenarios,
                 raw_noise_buf: &mut raw_noise_buf,
                 perm_scratch: &mut perm_scratch,
-                sampler,
+                sampler: params.sampler,
             },
             &lookups,
         );
@@ -468,16 +494,18 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
         worker_stats.push((scenario_id, -1_i32, scenario_delta));
 
         worker_costs.push(dispatch_scenario_result(
-            output,
+            params.output,
             scenario_id,
             total_cost,
             stage_results,
         )?);
-        let completed = scenarios_complete.fetch_add(1, Ordering::Relaxed) + 1;
+        let completed = params.scenarios_complete.fetch_add(1, Ordering::Relaxed) + 1;
         // Scale rank-local count to a global estimate assuming balanced
         // workload across ranks (the assign_scenarios invariant). Clamp at
         // the global total so the final scenario lands exactly on 100%.
-        let completed_global = completed.saturating_mul(world_size).min(config.n_scenarios);
+        let completed_global = completed
+            .saturating_mul(params.world_size)
+            .min(params.config.n_scenarios);
         #[allow(clippy::cast_possible_truncation)]
         emit_sim_progress(
             worker_sender.as_ref(),
@@ -485,8 +513,8 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
             scenario_solve_time_ms,
             scenario_lp_solves,
             completed_global,
-            config.n_scenarios,
-            sim_start.elapsed().as_millis() as u64,
+            params.config.n_scenarios,
+            params.sim_start.elapsed().as_millis() as u64,
         );
     }
     Ok((worker_costs, worker_stats))

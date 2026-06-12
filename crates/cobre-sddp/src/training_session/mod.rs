@@ -33,8 +33,8 @@ use crate::{
     lower_bound::evaluate_lower_bound,
     lower_bound::{LbEvalScratchBundle, LbEvalSpec},
     solver_stats::{
-        SOLVER_STATS_DELTA_SCALAR_FIELDS, SolverStatsDelta, aggregate_solver_statistics,
-        pack_delta_scalars, unpack_delta_scalars,
+        SOLVER_STATS_DELTA_SCALAR_FIELDS, SolverStatsDelta, SolverStatsLogEntry,
+        aggregate_solver_statistics, pack_delta_scalars, unpack_delta_scalars,
     },
     state_exchange::ExchangeBuffers,
     stopping_rule::RULE_GRACEFUL_SHUTDOWN,
@@ -712,15 +712,17 @@ where
         for (stage_idx, delta) in global_forward_stage_stats.iter().enumerate() {
             let mut entry = SolverStatsDelta::default();
             delta.clone_into_reuse(&mut entry);
-            self.results.solver_stats_log.push((
-                iteration,
-                "forward",
-                i32::try_from(stage_idx).unwrap_or(i32::MAX),
-                -1,
-                self.ranks.fwd_rank,
-                -1,
-                entry,
-            ));
+            self.results
+                .solver_stats_log
+                .push(SolverStatsLogEntry::from_raw(
+                    iteration,
+                    "forward",
+                    i32::try_from(stage_idx).unwrap_or(i32::MAX),
+                    -1,
+                    self.ranks.fwd_rank,
+                    -1,
+                    entry,
+                ));
         }
 
         let local_n = forward_result.scenario_costs.len();
@@ -810,16 +812,18 @@ where
                 for (rank, worker_id, omega, delta) in entries {
                     let mut entry = SolverStatsDelta::default();
                     delta.clone_into_reuse(&mut entry);
-                    self.results.solver_stats_log.push((
-                        iteration,
-                        "backward",
-                        *stage_idx as i32,
-                        i32::try_from(*omega)
-                            .expect("opening index is bounded well below i32::MAX"),
-                        *rank,
-                        *worker_id,
-                        entry,
-                    ));
+                    self.results
+                        .solver_stats_log
+                        .push(SolverStatsLogEntry::from_raw(
+                            iteration,
+                            "backward",
+                            *stage_idx as i32,
+                            i32::try_from(*omega)
+                                .expect("opening index is bounded well below i32::MAX"),
+                            *rank,
+                            *worker_id,
+                            entry,
+                        ));
                 }
             }
             agg.solve_time_ms
@@ -1213,15 +1217,17 @@ where
         let lb_lp_solves = lb_stats_after.solve_count - lb_stats_before.solve_count;
         let lb_delta = SolverStatsDelta::from_snapshots(&lb_stats_before, &lb_stats_after);
         let lb_solve_time_ms = lb_delta.solve_time_ms;
-        self.results.solver_stats_log.push((
-            iteration,
-            "lower_bound",
-            -1,
-            -1,
-            self.ranks.fwd_rank,
-            -1,
-            lb_delta,
-        ));
+        self.results
+            .solver_stats_log
+            .push(SolverStatsLogEntry::from_raw(
+                iteration,
+                "lower_bound",
+                -1,
+                -1,
+                self.ranks.fwd_rank,
+                -1,
+                lb_delta,
+            ));
         #[allow(clippy::cast_possible_truncation)]
         let lb_wall_ms = lb_wall_start.elapsed().as_millis() as u64;
 

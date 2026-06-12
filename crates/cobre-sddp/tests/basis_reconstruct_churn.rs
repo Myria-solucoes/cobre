@@ -49,7 +49,8 @@ use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::scenario::ScenarioSource;
 use cobre_io::config::StoppingRuleConfig;
 use cobre_sddp::{
-    SolverStatsDelta, StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic,
+    SolverStatsDelta, SolverStatsLogEntry, StudySetup, hydro_models::prepare_hydro_models,
+    setup::prepare_stochastic,
 };
 use cobre_solver::ActiveSolver;
 
@@ -129,13 +130,11 @@ fn d01_case_dir() -> std::path::PathBuf {
 // ---------------------------------------------------------------------------
 
 /// Aggregate `SolverStatsDelta` across all `"forward"` log entries.
-fn sum_forward_deltas(
-    log: &[(u64, &'static str, i32, i32, i32, i32, SolverStatsDelta)],
-) -> SolverStatsDelta {
+fn sum_forward_deltas(log: &[SolverStatsLogEntry]) -> SolverStatsDelta {
     SolverStatsDelta::aggregate(
         log.iter()
-            .filter(|(_, phase, _, _, _, _, _)| *phase == "forward")
-            .map(|(_, _, _, _, _, _, d)| d),
+            .filter(|e| e.phase == "forward")
+            .map(|e| &e.delta),
     )
 }
 
@@ -610,8 +609,8 @@ fn test_basis_reconstruct_full_churn_no_rows_preserved() {
         let iter2_fwd: Vec<&SolverStatsDelta> = result2
             .solver_stats_log
             .iter()
-            .filter(|(iter, phase, _, _, _, _, _)| *iter == 2 && *phase == "forward")
-            .map(|(_, _, _, _, _, _, d)| d)
+            .filter(|e| e.iteration == 2 && e.phase == "forward")
+            .map(|e| &e.delta)
             .collect();
 
         assert!(

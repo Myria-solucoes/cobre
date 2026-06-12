@@ -34,7 +34,7 @@ use crate::{
     SddpError, TrainingConfig,
     context::{StageContext, TrainingContext},
     cut::fcf::FutureCostFunction,
-    solver_stats::SolverStatsEntry,
+    solver_stats::SolverStatsLogEntry,
     training_session::{IterationOutcome, TrainingSession},
     workspace::CapturedBasis,
 };
@@ -98,11 +98,11 @@ pub struct TrainingResult {
 
     /// Per-iteration, per-phase solver statistics log.
     ///
-    /// Each entry is `(iteration, phase_name, stage_index, delta)`.
-    /// Phase names: `"forward"`, `"backward"`, `"lower_bound"`.
-    /// Stage index is `-1` for forward and lower bound (which span all stages),
-    /// and the actual stage index for backward per-stage entries (added in T-004).
-    pub solver_stats_log: Vec<SolverStatsEntry>,
+    /// Each [`SolverStatsLogEntry`] carries `(iteration, phase, stage, opening,
+    /// rank, worker_id, delta)`. Phase names: `"forward"`, `"backward"`,
+    /// `"lower_bound"`. Stage index is `-1` for lower bound (rank-aggregated, no
+    /// stage axis) and the actual stage index for forward and backward entries.
+    pub solver_stats_log: Vec<SolverStatsLogEntry>,
 
     /// Visited states archive containing all forward-pass trial points.
     ///
@@ -144,7 +144,7 @@ impl TrainingResult {
         reason: String,
         total_time_ms: u64,
         basis_cache: Vec<Option<CapturedBasis>>,
-        solver_stats_log: Vec<SolverStatsEntry>,
+        solver_stats_log: Vec<SolverStatsLogEntry>,
         visited_archive: Option<crate::visited_states::VisitedStatesArchive>,
         baked_templates: Option<Vec<StageTemplate>>,
     ) -> Self {
@@ -480,7 +480,7 @@ mod tests {
         indexer::StageIndexer,
         inflow_method::InflowNonNegativityMethod,
         risk_measure::RiskMeasure,
-        solver_stats::SolverStatsDelta,
+        solver_stats::{SolverStatsDelta, SolverStatsLogEntry},
     };
 
     /// Minimal LP for N=1 hydro, L=0 PAR order.
@@ -3380,16 +3380,13 @@ mod tests {
             cut_row_slots: vec![4_u32],
             state_at_capture: vec![5.0_f64],
         })];
-        // SolverStatsEntry is a 7-tuple:
-        // (iteration: u64, phase: &'static str, stage: i32, opening: i32,
-        //  rank: i32, worker_id: i32, delta: SolverStatsDelta)
-        let solver_stats_log = vec![(
-            7_u64,
+        let solver_stats_log = vec![SolverStatsLogEntry::from_raw(
+            7,
             "forward",
-            -1_i32,
-            -1_i32,
-            0_i32,
-            -1_i32,
+            -1,
+            -1,
+            0,
+            -1,
             SolverStatsDelta::default(),
         )];
 
@@ -3419,8 +3416,8 @@ mod tests {
         assert_eq!(captured.base_row_count, 3, "basis_cache[0].base_row_count");
         assert_eq!(result.solver_stats_log.len(), 1, "solver_stats_log length");
         assert_eq!(
-            result.solver_stats_log[0].0, 7_u64,
-            "solver_stats_log[0].0 (iteration)"
+            result.solver_stats_log[0].iteration, 7_u64,
+            "solver_stats_log[0].iteration"
         );
         assert!(result.visited_archive.is_none(), "visited_archive");
         assert!(result.baked_templates.is_none(), "baked_templates");

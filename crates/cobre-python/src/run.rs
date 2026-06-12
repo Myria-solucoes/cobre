@@ -156,46 +156,6 @@ where
     Ok(pool.install(|| f(n)))
 }
 
-/// Convert a [`SolverStatsDelta`] into a [`SolverStatsRow`] for Parquet output.
-///
-/// The `id` parameter is the row identifier: iteration number for training phases,
-/// scenario ID for the simulation phase. `opening` is `Some(ω)` for backward rows
-/// and `None` for forward, `lower_bound`, and simulation rows. `rank` and `worker_id`
-/// are `Some` for backward rows (from allgatherv unpack) and `None` for forward,
-/// `lower_bound`, and simulation rows (no per-worker dimension yet).
-#[allow(clippy::cast_possible_truncation)]
-fn delta_to_stats_row(
-    id: u32,
-    phase: &str,
-    stage: i32,
-    opening: Option<i32>,
-    rank: Option<i32>,
-    worker_id: Option<i32>,
-    delta: &SolverStatsDelta,
-) -> SolverStatsRow {
-    SolverStatsRow {
-        iteration: id,
-        phase: phase.to_string(),
-        stage,
-        opening,
-        rank,
-        worker_id,
-        lp_solves: delta.lp_solves as u32,
-        lp_successes: delta.lp_successes as u32,
-        lp_retries: delta.lp_successes.saturating_sub(delta.first_try_successes) as u32,
-        lp_failures: delta.lp_failures as u32,
-        retry_attempts: delta.retry_attempts as u32,
-        basis_offered: delta.basis_offered as u32,
-        basis_consistency_failures: delta.basis_consistency_failures as u32,
-        simplex_iterations: delta.simplex_iterations,
-        solve_time_ms: delta.solve_time_ms,
-        load_model_time_ms: delta.load_model_time_ms,
-        set_bounds_time_ms: delta.set_bounds_time_ms,
-        basis_set_time_ms: delta.basis_set_time_ms,
-        retry_level_histogram: delta.retry_level_histogram.clone(),
-    }
-}
-
 /// Fold the per-phase training solver-stats log into category totals.
 ///
 /// Returns `(first_try, retried, failed, forward_solve_seconds,
@@ -209,18 +169,19 @@ fn delta_to_stats_row(
 /// cases. The caller computes it from the convergence records to stay
 /// bit-for-bit identical to the CLI.
 fn aggregate_training_solve_stats(
-    stats_log: &[(u64, &'static str, i32, i32, i32, i32, SolverStatsDelta)],
+    stats_log: &[cobre_sddp::SolverStatsLogEntry],
 ) -> (u64, u64, u64, f64, f64) {
     let mut first_try = 0u64;
     let mut retried = 0u64;
     let mut failed = 0u64;
     let mut forward_solve_ms = 0.0_f64;
     let mut backward_solve_ms = 0.0_f64;
-    for (_, phase, _, _, _, _, delta) in stats_log {
+    for entry in stats_log {
+        let delta = &entry.delta;
         first_try += delta.first_try_successes;
         retried += delta.lp_successes.saturating_sub(delta.first_try_successes);
         failed += delta.lp_failures;
-        match *phase {
+        match entry.phase {
             "forward" => forward_solve_ms += delta.solve_time_ms,
             "backward" => backward_solve_ms += delta.solve_time_ms,
             _ => {}
@@ -525,31 +486,7 @@ pub(crate) fn write_training_artifacts(
     .map_err(|e| format!("policy checkpoint error: {e}"))?;
 
     if !training.result.solver_stats_log.is_empty() {
-        let rows: Vec<SolverStatsRow> = training
-            .result
-            .solver_stats_log
-            .iter()
-            .map(|(iter, phase, stage, opening, rank, worker_id, delta)| {
-                let opening_opt = if *opening == -1 { None } else { Some(*opening) };
-                // worker_id == -1 means "no per-worker dimension" → NULL in parquet.
-                let worker_id_opt = if *worker_id == -1 {
-                    None
-                } else {
-                    Some(*worker_id)
-                };
-                #[allow(clippy::cast_possible_truncation)] // iteration count fits in u32
-                let id = *iter as u32;
-                delta_to_stats_row(
-                    id,
-                    phase,
-                    *stage,
-                    opening_opt,
-                    Some(*rank),
-                    worker_id_opt,
-                    delta,
-                )
-            })
-            .collect();
+        let rows = cobre_sddp::solver_stats_log_to_rows(&training.result.solver_stats_log);
         cobre_io::write_solver_stats(output_dir, &rows)
             .map_err(|e| format!("output write error: solver stats output: {e}"))?;
     }
@@ -719,7 +656,15 @@ pub(crate) fn run_simulation_phase_py(
             .solver_stats
             .iter()
             .map(|(scenario_id, _opening, delta)| {
-                delta_to_stats_row(*scenario_id, "simulation", -1, None, None, None, delta)
+                cobre_sddp::delta_to_stats_row(
+                    *scenario_id,
+                    "simulation",
+                    -1,
+                    None,
+                    None,
+                    None,
+                    delta,
+                )
             })
             .collect();
         cobre_io::write_simulation_solver_stats(output_dir, &rows)
@@ -1669,8 +1614,8 @@ pub fn run(
 mod tests {
     use std::path::Path;
 
-    use cobre_sddp::SolverStatsDelta;
     use cobre_sddp::setup::prepare_stochastic;
+    use cobre_sddp::{SolverStatsDelta, SolverStatsLogEntry};
 
     use cobre_core::TrainingEvent;
     use cobre_core::training_event::{WorkerPhaseTimings, WorkerTimingPhase};
@@ -1895,8 +1840,8 @@ mod tests {
         };
 
         let stats_log = vec![
-            (0u64, "forward", 0, -1, 0, -1, forward_delta),
-            (0u64, "backward", 0, 0, 0, 0, backward_delta),
+            SolverStatsLogEntry::from_raw(0, "forward", 0, -1, 0, -1, forward_delta),
+            SolverStatsLogEntry::from_raw(0, "backward", 0, 0, 0, 0, backward_delta),
         ];
 
         // The helper returns the 5 phase-derived counts only. `total_lp_solves`

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Check that CLI and Python bindings write the same output files.
 
-Parses both `crates/cobre-cli/src/commands/run.rs` and
+Parses both the CLI `run` module (`crates/cobre-cli/src/commands/run/`, a
+directory module whose write calls are spread across submodules) and
 `crates/cobre-python/src/run.rs` for calls to `cobre_io::write_*`,
 `write_results`, `write_checkpoint` / `write_policy_checkpoint`,
 `write_scaling_report`, and the stochastic export functions.
@@ -54,15 +55,8 @@ NORMALISE: dict[str, str] = {
 }
 
 
-def extract_write_functions(path: Path) -> set[str]:
-    """Extract the set of write function names from a Rust source file."""
-    if not path.exists():
-        print(f"WARNING: {path} does not exist", file=sys.stderr)
-        return set()
-
-    text = path.read_text(errors="replace")
-    names: set[str] = set()
-
+def _extract_from_text(text: str, names: set[str]) -> None:
+    """Collect write function names from one Rust source body into ``names``."""
     for line in text.splitlines():
         stripped = line.strip()
         # Skip comments and use/import lines (we want actual calls, not imports).
@@ -78,6 +72,27 @@ def extract_write_functions(path: Path) -> set[str]:
                 name = NORMALISE.get(name, name)
                 names.add(name)
 
+
+def extract_write_functions(path: Path) -> set[str]:
+    """Extract the set of write function names from a Rust source location.
+
+    Accepts either a single ``.rs`` file or a directory module: when ``path``
+    is a directory, every ``.rs`` file beneath it is scanned recursively and the
+    extracted names are unioned. This keeps the full CLI write surface in scope
+    even when the writes are spread across submodules of a directory module.
+    """
+    names: set[str] = set()
+
+    if path.is_dir():
+        for rs_file in sorted(path.rglob("*.rs")):
+            _extract_from_text(rs_file.read_text(errors="replace"), names)
+        return names
+
+    if not path.exists():
+        print(f"WARNING: {path} does not exist", file=sys.stderr)
+        return set()
+
+    _extract_from_text(path.read_text(errors="replace"), names)
     return names
 
 
@@ -99,7 +114,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    cli_path = args.root / "crates" / "cobre-cli" / "src" / "commands" / "run.rs"
+    cli_path = args.root / "crates" / "cobre-cli" / "src" / "commands" / "run"
     python_path = args.root / "crates" / "cobre-python" / "src" / "run.rs"
 
     cli_writes = extract_write_functions(cli_path)
@@ -123,7 +138,7 @@ def main() -> None:
                 print(f"    - {name}")
         print()
         print("Fix: add the missing write call(s) to the other path.")
-        print("CLI path:    crates/cobre-cli/src/commands/run.rs")
+        print("CLI path:    crates/cobre-cli/src/commands/run/")
         print("Python path: crates/cobre-python/src/run.rs")
         sys.exit(1)
     else:

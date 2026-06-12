@@ -265,8 +265,10 @@ pub struct StageIndexer {
 
     /// Column range `[N*(2+L), N*(3+L))` for incoming storage volumes.
     ///
-    /// Fixed by the storage-fixing constraints; transferred from the preceding
-    /// stage's `storage` solution values.
+    /// Pinned to the preceding stage's outgoing `storage` solution values via
+    /// `set_col_bounds` on these columns — not via equality rows (the
+    /// `storage_fixing` row range is a permanent empty sentinel). Resolve the
+    /// column with [`StageIndexer::state_to_lp_incoming_column`].
     pub storage_in: Range<usize>,
 
     /// Column index `N*(3+L)` for the future cost variable (theta).
@@ -388,8 +390,7 @@ pub struct StageIndexer {
     ///
     /// Decision variables are stage-level (NOT per-block): each column represents
     /// the MW the dispatcher commits for that plant at the current stage. The
-    /// commitment is delivered `K_i` stages later (fishing constraint, added by
-    /// a subsequent ticket).
+    /// commitment is delivered `K_i` stages later via the fishing constraint.
     ///
     /// The `cobre-io` semantic validator enforces `K_i <= T` for every
     /// anticipated plant, so at stage 0 every anticipated plant is active and
@@ -699,35 +700,46 @@ pub struct StageIndexer {
     /// `false` otherwise (including when built via [`StageIndexer::new`]).
     pub has_operational_violations: bool,
 
-    // ── Generic constraint row and column ranges ────────────────────────────
-    // Populated only by `StageLayout::new` in lp_builder via the full build
-    // path; empty (`0..0`, 0) when built via [`StageIndexer::new`].
-    /// Row range for generic constraint rows (one per active `(constraint, block)` pair).
+    // ── Generic constraint row and column ranges (permanent sentinels) ──────
+    // CONTRACT: these three `StageIndexer` fields are never assigned a non-zero
+    // value by any constructor or wiring step — they are permanent `0..0` / `0`
+    // sentinels in this implementation, the same status as the `storage_fixing`
+    // row range. The live per-stage generic-constraint layout lives on the
+    // separate `StageLayout::generic_constraint_rows` field (a
+    // `Vec<GenericConstraintRowEntry>`), which the matrix-build and simulation
+    // extraction code consume; that vec is never written back into these
+    // indexer fields. The sole read of the indexer field is
+    // `generic_constraint_rows.start` in simulation extraction, where the
+    // always-zero start feeds a discarded `_dual_value`; the offset extraction
+    // actually uses is the per-entry loop counter, so the zero value is inert.
+    // FORBIDDEN: do not "fix" the sentinel by wiring `StageLayout`'s vec back
+    // into the indexer field, and do not treat the indexer field as the live
+    // generic-row offset — both break the layout single-owner contract.
+    /// Row range a generic-constraint block would occupy (one per active
+    /// `(constraint, block)` pair), placed after evaporation rows.
     ///
-    /// Rows are placed after evaporation rows (the last row region before
-    /// generic constraints).  Empty (`0..0`) when no generic constraints are
-    /// active at this stage or when built via [`StageIndexer::new`].
+    /// Always empty (`0..0`) here — see the permanent-sentinel contract above.
+    /// The live per-stage layout is `StageLayout::generic_constraint_rows`.
     pub generic_constraint_rows: Range<usize>,
 
-    /// Column range for generic constraint slack variables.
+    /// Column range a generic-constraint slack block would occupy, placed after
+    /// withdrawal slack columns.
     ///
-    /// Columns are placed after withdrawal slack columns (the last column region
-    /// before generic constraint slacks).  The number of columns equals the number
-    /// of active rows when `slack.enabled = true` and sense is `<=` or `>=`, or
-    /// twice the number of active rows when sense is `==` (positive and negative
-    /// violation slacks).  Empty (`0..0`) when no slack is needed or when built
-    /// via [`StageIndexer::new`].
+    /// Always empty (`0..0`) here — see the permanent-sentinel contract above.
     pub generic_constraint_slack: Range<usize>,
 
-    /// Number of active generic constraint rows contributed at this stage.
+    /// Count a generic-constraint block would contribute at this stage.
     ///
-    /// Zero when no generic constraints are active or when built via
-    /// [`StageIndexer::new`].
+    /// Always `0` here — see the permanent-sentinel contract above.
     pub n_generic_constraints_active: usize,
 
     // ── NCS column range ──────────────────────────────────────────────────
-    // Populated only by `StageLayout::new` in lp_builder; empty when built
-    // via `new`, `with_equipment`, or `from_stage_template`.
+    // OWNER: populated after construction by the NCS wiring in `setup`
+    // (`build_wired_indexer`, which assigns `indexer.ncs_generation` from the LP
+    // builder's stage-0 NCS column starts) — NOT by `StageLayout::new`, which
+    // only reads indexer cursors. Left empty by every `StageIndexer` constructor
+    // (`new`, `with_equipment`, `from_stage_template`); the wiring fills it in,
+    // and the hot paths (forward, backward, simulation, lower-bound spec) read it.
     /// Column range for NCS generation variables, one per (ncs, block) pair.
     ///
     /// Index for NCS `r`, block `b`: `ncs_generation.start + r * n_blks + b`.
@@ -3133,7 +3145,7 @@ mod tests {
         assert_eq!(idx.nonzero_state_indices, vec![0, 1, 2, 3, 4, 6, 9]);
     }
 
-    /// `n_anticipated == 0` reproduces the pre-ticket behaviour exactly.
+    /// `n_anticipated == 0` reproduces the pre-anticipated behaviour exactly.
     #[test]
     fn nonzero_mask_anticipated_state_zero_anticipated_matches_existing() {
         let mut idx_with = StageIndexer::new(4, 6);
@@ -3317,7 +3329,7 @@ mod tests {
     }
 
     /// When `n_anticipated == 0` the layout produced by
-    /// `with_equipment_and_evaporation` must match the pre-ticket layout
+    /// `with_equipment_and_evaporation` must match the pre-anticipated layout
     /// field-for-field against `StageIndexer::new`.
     #[test]
     fn anticipated_state_no_thermals_matches_existing() {
@@ -3630,7 +3642,7 @@ mod tests {
         assert_eq!(active, vec![(0, idx.anticipated_decision.start)]);
     }
 
-    /// F2-002 strict-predicate boundary rejection: `stage_idx + K_i == n_stages`
+    /// Strict-predicate boundary rejection: `stage_idx + K_i == n_stages`
     /// is REJECTED. `K_i = 3`, `stage_idx = 3`, `n_stages = 6` → `delivery_stage` = 6
     /// would fall outside the study horizon `[0, 6)`. The strict predicate
     /// `stage_idx + K_i < n_stages` excludes this case so the LP never builds
@@ -4948,7 +4960,7 @@ mod tests {
     }
 
     /// Structural-invariant sweep tests for the anticipated-thermal indexer
-    /// extensions added by tickets 012-015.
+    /// extensions.
     ///
     /// Each test in this sub-module iterates the same hand-written parameter
     /// grid (see [`parameter_grid`]) and asserts a single structural invariant
