@@ -304,9 +304,10 @@ pub struct ScalarParameter {
 // identical in-memory and JSON shapes.  `ParameterKindJson` is a private
 // serde-only intermediate that carries `PerStage` as `Vec<(i32, f64)>`.
 //
-// The `#[serde(into = "ParameterKindJson", from = "ParameterKindJson")]`
-// attribute on `ParameterKind` routes all (de)serialization through this shim
-// so the public type is never exposed in serde output.
+// The `#[serde(into = "ParameterKindJson")]` attribute on `ParameterKind`
+// routes serialization through this shim so the public type is never exposed
+// in serde output; deserialization goes through the manual `Deserialize` impl
+// below, which also deserializes via `ParameterKindJson`.
 
 #[cfg(feature = "serde")]
 #[derive(serde::Serialize, serde::Deserialize)]

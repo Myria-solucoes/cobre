@@ -455,19 +455,12 @@ impl ResolvedPenalties {
 
     /// Allocate a new resolved-penalties table filled with the given defaults.
     ///
-    /// `n_stages` must be `> 0`. Entity counts may be `0` (empty vectors are valid).
+    /// `counts.n_stages` must be `> 0`. Entity counts may be `0` (empty vectors are valid).
     ///
     /// # Arguments
     ///
-    /// * `n_hydros` — number of hydro plants
-    /// * `n_buses` — number of buses
-    /// * `n_lines` — number of transmission lines
-    /// * `n_ncs` — number of non-controllable sources
-    /// * `n_stages` — number of study stages
-    /// * `hydro_default` — initial value for all (hydro, stage) cells
-    /// * `bus_default` — initial value for all (bus, stage) cells
-    /// * `line_default` — initial value for all (line, stage) cells
-    /// * `ncs_default` — initial value for all (ncs, stage) cells
+    /// * `counts` — entity counts grouped into [`PenaltiesCountsSpec`]
+    /// * `defaults` — default per-stage penalty values grouped into [`PenaltiesDefaults`]
     #[must_use]
     pub fn new(counts: &PenaltiesCountsSpec, defaults: &PenaltiesDefaults) -> Self {
         Self {

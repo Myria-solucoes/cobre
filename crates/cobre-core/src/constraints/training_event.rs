@@ -212,7 +212,7 @@ pub struct StageRowSelectionRecord {
 /// | [`Self::SimulationFinished`] | Simulation completion               |
 #[derive(Clone, Debug)]
 pub enum TrainingEvent {
-    // ── Per-iteration events (8) ─────────────────────────────────────────────
+    // ── Per-iteration events ─────────────────────────────────────────────────
     /// Step 1: Forward pass completed for this iteration on the local rank.
     ForwardPassComplete {
         /// Iteration number (1-based).
@@ -446,7 +446,7 @@ pub enum TrainingEvent {
         rows_in_lp_max: u64,
     },
 
-    // ── Lifecycle events (4) ─────────────────────────────────────────────────
+    // ── Lifecycle events ─────────────────────────────────────────────────────
     /// Emitted once when the training loop begins.
     ///
     /// Carries run-level metadata describing the problem size and parallelism

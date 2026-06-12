@@ -73,8 +73,6 @@ pub enum SamplingScheme {
     Historical,
 }
 
-// ScenarioSource (SS14 top-level config)
-
 /// Top-level scenario source configuration, parsed from `stages.json`.
 ///
 /// Groups the sampling scheme and random seed that govern how forward-pass
@@ -124,8 +122,6 @@ pub struct ScenarioSource {
     /// When `None`, all valid windows are auto-discovered at validation time.
     pub historical_years: Option<HistoricalYears>,
 }
-
-// HistoricalYears (SS14 — year pool for Historical sampling)
 
 /// Specifies which historical years to draw from when using
 /// [`SamplingScheme::Historical`] sampling.
@@ -194,8 +190,6 @@ impl HistoricalYears {
         }
     }
 }
-
-// InflowModel (SS14 — per hydro, per stage)
 
 /// Annual component of a PAR(p)-A inflow model for one (hydro, stage) pair.
 ///
@@ -341,8 +335,6 @@ impl InflowModel {
     }
 }
 
-// LoadModel (SS14 — per bus, per stage)
-
 /// Raw load seasonal statistics for a single (bus, stage) pair.
 ///
 /// Stores the mean and standard deviation of load demand loaded from
@@ -381,8 +373,6 @@ pub struct LoadModel {
     /// Seasonal standard deviation of load demand in MW.
     pub std_mw: f64,
 }
-
-// NcsModel (per NCS entity, per stage)
 
 /// Per-stage normal noise model parameters for a non-controllable source.
 ///
@@ -426,8 +416,6 @@ pub struct NcsModel {
     pub std: f64,
 }
 
-// InflowHistoryRow (SS2.4 — raw historical observation)
-
 /// A single row from `scenarios/inflow_history.parquet`.
 ///
 /// Carries one historical inflow observation for a (hydro, date) pair.
@@ -459,8 +447,6 @@ pub struct InflowHistoryRow {
     /// Mean inflow for this observation period in m³/s. Must be finite.
     pub value_m3s: f64,
 }
-
-// ExternalScenarioRow (SS2.5 — pre-computed external scenario value)
 
 /// A single row from `scenarios/external_inflow_scenarios.parquet`.
 ///
@@ -497,8 +483,6 @@ pub struct ExternalScenarioRow {
     pub value_m3s: f64,
 }
 
-// ExternalLoadRow (E2 — pre-computed external load scenario value)
-
 /// A single row from `scenarios/external_load_scenarios.parquet`.
 ///
 /// Each row defines the pre-computed load value for one (stage, scenario, bus)
@@ -533,8 +517,6 @@ pub struct ExternalLoadRow {
     /// Pre-computed load value in MW. Must be finite.
     pub value_mw: f64,
 }
-
-// ExternalNcsRow (E2 — pre-computed external NCS scenario value)
 
 /// A single row from `scenarios/external_ncs_scenarios.parquet`.
 ///
@@ -572,8 +554,6 @@ pub struct ExternalNcsRow {
     pub value: f64,
 }
 
-// CorrelationEntity
-
 /// A single entity reference within a correlation group.
 ///
 /// `entity_type` is a string tag that identifies the kind of stochastic
@@ -597,8 +577,6 @@ pub struct CorrelationEntity {
     /// Entity identifier matching the corresponding entity's `id` field.
     pub id: EntityId,
 }
-
-// CorrelationGroup
 
 /// A named group of correlated entities and their correlation matrix.
 ///
@@ -645,8 +623,6 @@ pub struct CorrelationGroup {
     pub matrix: Vec<Vec<f64>>,
 }
 
-// CorrelationProfile
-
 /// A named correlation profile containing one or more correlation groups.
 ///
 /// A profile groups correlated entities into disjoint [`CorrelationGroup`]s.
@@ -684,8 +660,6 @@ pub struct CorrelationProfile {
     pub groups: Vec<CorrelationGroup>,
 }
 
-// CorrelationScheduleEntry
-
 /// Maps a stage to its active correlation profile name.
 ///
 /// When [`CorrelationModel::schedule`] is non-empty, each stage that
@@ -704,8 +678,6 @@ pub struct CorrelationScheduleEntry {
     /// Must match a key in [`CorrelationModel::profiles`].
     pub profile_name: String,
 }
-
-// CorrelationModel
 
 /// Top-level correlation configuration for the scenario pipeline.
 ///
@@ -790,8 +762,6 @@ impl Default for CorrelationModel {
         }
     }
 }
-
-// Tests
 
 #[cfg(test)]
 mod tests {

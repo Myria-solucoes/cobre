@@ -670,7 +670,7 @@ mod tests {
         let v1 = VariableRef::AnticipatedDecision {
             thermal_id: EntityId(5),
         };
-        let v2 = v1; // copy
+        let v2 = v1;
         assert_eq!(v1, v2);
 
         let v3 = VariableRef::AnticipatedDecision {

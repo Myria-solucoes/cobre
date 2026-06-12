@@ -306,8 +306,7 @@ pub enum StageRiskConfig {
 
 /// Scenario source configuration for one stage.
 ///
-/// Groups the scenario-related settings that were formerly separate
-/// `num_scenarios` and `sampling_method` fields. Sourced from
+/// Groups the scenario-related settings. Sourced from
 /// `stages.json` `scenario_source` and per-stage overrides.
 ///
 /// See [Input Scenarios §1.4, §1.8](input-scenarios.md).
@@ -315,7 +314,7 @@ pub enum StageRiskConfig {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ScenarioSourceConfig {
     /// Number of noise realizations per stage for both the opening
-    /// tree and forward pass. Formerly `num_scenarios`.
+    /// tree and forward pass.
     /// Must be positive. Controls the per-stage branching factor.
     pub branching_factor: usize,
 
