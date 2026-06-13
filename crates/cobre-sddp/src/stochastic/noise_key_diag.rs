@@ -18,7 +18,7 @@
 //! never reaches the hot path.
 //!
 //! The table is built **only** when `COBRE_W1_DIAG` is set
-//! ([`NoiseKeyDiag::from_keys_if_enabled`] returns `None` otherwise), so the
+//! (`NoiseKeyDiag::from_keys_if_enabled` returns `None` otherwise), so the
 //! default path allocates nothing and computes
 //! nothing new. No infrastructure crate (`cobre-core`, `cobre-stochastic`) is
 //! touched and no parquet column / Arrow schema is added — this is throwaway
@@ -29,7 +29,7 @@
 //! The opening noise vector's first `n_hydros` components are the per-hydro
 //! inflow residuals η, in canonical `System::hydros()` order. The σ weight for
 //! each is the seasonal `InflowModel::std_m3s` for that `(hydro, stage)` pair.
-//! [`build_sigma_table`] aligns σ to this layout by keying the inflow models on
+//! `build_sigma_table` aligns σ to this layout by keying the inflow models on
 //! `(hydro_id, stage_id)` exactly as the PAR precompute does, indexed
 //! `[stage * n_hydros + h]`. A `(hydro, stage)` pair with no inflow model
 //! contributes σ = 0 (matching the PAR's deterministic-zero-inflow fallback).
@@ -46,7 +46,7 @@ const DIAG_ENV_VAR: &str = "COBRE_W1_DIAG";
 /// Precomputed per-(stage, canonical-ω) σ-weighted noise keys for the backward
 /// diagnostic.
 ///
-/// Built once at setup by [`NoiseKeyDiag::from_keys_if_enabled`] and borrowed read-only by
+/// Built once at setup by `NoiseKeyDiag::from_keys_if_enabled` and borrowed read-only by
 /// the backward pass via [`TrainingContext`](crate::context::TrainingContext).
 /// `keys[stage][omega]` is `Σ_h std_m3s_{stage,h} · raw_noise_{stage,omega}[h]`
 /// over the `n_hydros` inflow components of the opening noise vector.

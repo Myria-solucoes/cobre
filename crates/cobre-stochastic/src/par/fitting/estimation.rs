@@ -221,9 +221,9 @@ pub struct ArEstimationConfig<'a> {
 /// Estimate AR coefficients, dispatching to the classical or PAR-A path.
 ///
 /// When `cfg.use_annual_component` is `false` (the default), delegates to
-/// [`estimate_ar_with_pacf`] (classical periodic Yule-Walker + PACF).
+/// `estimate_ar_with_pacf` (classical periodic Yule-Walker + PACF).
 /// When `cfg.use_annual_component` is `true`, delegates to
-/// [`estimate_ar_with_pacf_annual`] (extended YW with rolling 12-month average).
+/// `estimate_ar_with_pacf_annual` (extended YW with rolling 12-month average).
 ///
 /// # Errors
 ///

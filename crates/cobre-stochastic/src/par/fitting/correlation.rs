@@ -24,8 +24,9 @@ use crate::StochasticError;
 
 /// Estimate the cross-entity residual correlation matrix from historical observations.
 ///
-/// After a PAR(p) model is fitted (via [`estimate_seasonal_stats`] and
-/// [`estimate_ar_coefficients`]), this function computes the standardized
+/// After a PAR(p) model is fitted (via
+/// [`estimate_seasonal_stats`](super::estimate_seasonal_stats) and
+/// [`estimate_ar_coefficients`](super::estimate_ar_coefficients)), this function computes the standardized
 /// innovation residuals for each entity at each time step and derives
 /// the Pearson correlation between each pair of entities. The result is
 /// a [`CorrelationModel`] with a single `"default"` profile containing
@@ -73,8 +74,8 @@ use crate::StochasticError;
 ///
 /// - `observations` — flat slice of `(entity_id, date, value)` triples,
 ///   sorted by `(entity_id, date)`.
-/// - `ar_estimates` — output of [`estimate_ar_coefficients`].
-/// - `seasonal_stats` — output of [`estimate_seasonal_stats`].
+/// - `ar_estimates` — output of [`estimate_ar_coefficients`](super::estimate_ar_coefficients).
+/// - `seasonal_stats` — output of [`estimate_seasonal_stats`](super::estimate_seasonal_stats).
 /// - `stages` — all study stages with `season_id` assignments.
 /// - `hydro_ids` — canonical sorted entity IDs; determines matrix row/column order.
 ///

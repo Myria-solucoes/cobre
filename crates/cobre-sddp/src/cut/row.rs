@@ -1,10 +1,10 @@
 //! Benders cut-row construction for the SDDP LP.
 //!
 //! Builds the LP rows that encode the Future Cost Function's cuts. The cut-sign
-//! convention is owned here: [`push_scaled_coefficient`] negates the stored raw
+//! convention is owned here: `push_scaled_coefficient` negates the stored raw
 //! subgradient so each row reads `−∇·x + θ ≥ intercept`, yielding the Benders
-//! cut `θ ≥ Q(x̂) + π'(x − x̂)`. See [`push_scaled_coefficient`] for the
-//! cut-sign negation contract and [`crate::backward::extract_duals_from_view`]
+//! cut `θ ≥ Q(x̂) + π'(x − x̂)`. See `push_scaled_coefficient` for the
+//! cut-sign negation contract and `training::backward::extract_duals_from_view`
 //! for the subgradient-extraction side of the contract.
 //!
 //! Consumers: the backward pass, simulation, lower-bound evaluation, and DCS
@@ -355,7 +355,7 @@ pub fn append_new_cuts_to_lp<S: SolverInterface>(
 /// The DCS analogue of [`append_new_cuts_to_lp`]: instead of "all active cuts
 /// not yet resident", it adds exactly the slots in `slots`, skipping any that
 /// are inactive or already resident in `row_map`. Each added row is built with
-/// the shared [`push_cut_row`] constructor (identical layout to
+/// the shared `push_cut_row` constructor (identical layout to
 /// [`append_new_cuts_to_lp`]) and recorded in `row_map`.
 ///
 /// Returns the number of cut rows actually appended (`0` if none — `slots` was
@@ -370,7 +370,7 @@ pub fn append_new_cuts_to_lp<S: SolverInterface>(
 ///   this order for the appended subset).
 /// - `indexer`: provides `n_state`, `theta`, and the state→column mapping.
 /// - `col_scale`: column scaling factors (empty slice ⇒ no scaling).
-/// - `row_map`: per-(stage, solve) [`CutRowMap`] to update.
+/// - `row_map`: per-(stage, solve) [`CutRowMap`](crate::cut::CutRowMap) to update.
 /// - `batch_buf`: reusable [`RowBatch`] buffer.
 ///
 /// # Panics

@@ -251,7 +251,6 @@ impl SimulationState {
 
         debug_assert_inputs(inputs.ctx, num_stages, initial_state.len(), indexer.n_state);
 
-        // Validate baked-template slice length if provided.
         if let Some(baked) = inputs.baked_templates
             && baked.len() != num_stages
         {
@@ -312,7 +311,7 @@ impl SimulationState {
         // which the simulation phase previously omitted — so the solver ran on its
         // backend-native defaults). For CLP this selects the primal simplex, which
         // eliminates the dual simplex's false-infeasibility on the warm-started,
-        // fully-baked cut-laden simulation LPs (A1 diagnosis).
+        // fully-baked cut-laden simulation LPs.
         let simulation_profile = crate::solver_phase::Phase::Simulation.profile();
         for ws in inputs.workspaces.iter_mut() {
             ws.solver.set_profile(&simulation_profile);

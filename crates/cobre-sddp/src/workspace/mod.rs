@@ -9,18 +9,16 @@
 //!   [`CapturedBasis`] is the slot-tracked basis whose
 //!   [`to_broadcast_payload`](workspace::CapturedBasis::to_broadcast_payload) /
 //!   [`try_from_broadcast_payload`](workspace::CapturedBasis::try_from_broadcast_payload)
-//!   are the sole owners of the MPI basis-cache wire format
-//!   (`.claude/rules/comments.md` E6 table; the `CLAUDE.md` byte-layout pointer).
+//!   are the sole owners of the MPI basis-cache wire format.
 //! - [`context`] — the immutable per-stage / per-training parameter bundles
-//!   ([`StageContext`](context::StageContext), [`TrainingContext`](context::TrainingContext))
+//!   ([`StageContext`], [`TrainingContext`])
 //!   passed by reference to keep hot-path argument counts down.
 
 // Rationale: the workspace file keeps its established `workspace` basename
 // inside this `workspace/` cluster, so the submodule shares its parent's name.
 // Renaming the submodule would break the `workspace::workspace::{...}` re-export
 // path the crate root uses for `CapturedBasis` / `BASIS_BROADCAST_WIRE_VERSION`
-// and the `CLAUDE.md` / `.claude/rules/comments.md` "workspace/workspace.rs"
-// wire-format pointers for no behavioural gain.
+// for no behavioural gain.
 pub mod context;
 #[allow(clippy::module_inception)]
 pub mod workspace;

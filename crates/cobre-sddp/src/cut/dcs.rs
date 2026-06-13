@@ -8,7 +8,7 @@
 //!
 //! [`DcsParams`] is a small, `Copy`, allocation-free carrier for the DCS
 //! hyperparameters. It mirrors the values stored on
-//! [`CutSelectionStrategy::Dynamic`](crate::cut_selection::CutSelectionStrategy::Dynamic)
+//! [`CutSelectionStrategy::Dynamic`]
 //! (the serde-stable config representation) but is intentionally decoupled from
 //! it so the hot path is not coupled to config parsing. Construct one from a
 //! strategy via [`DcsParams::from_strategy`].
@@ -38,7 +38,7 @@ use crate::workspace::CapturedBasis;
 /// A `Copy`, allocation-free value type. Field invariants (`nadic >= 1`,
 /// `epsilon_viol > 0`, `k1` either `None` or `Some(>= 1)`) are enforced by the
 /// config-parse step that produces
-/// [`CutSelectionStrategy::Dynamic`](crate::cut_selection::CutSelectionStrategy::Dynamic);
+/// [`CutSelectionStrategy::Dynamic`];
 /// `DcsParams` trusts its inputs and documents the invariants here.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DcsParams {
@@ -140,7 +140,7 @@ pub struct DcsScoringScratch {
 
     /// Gathered coefficient rows of the eligible candidates for a single scoring
     /// pass, row-major `k_rows × n_state`. Cleared and re-filled each pass; the
-    /// single batched [`gemm_block`] reads it as the GEMM left operand. Reserved
+    /// single batched `gemm_block` reads it as the GEMM left operand. Reserved
     /// to `pool_capacity * n_state` so even an all-eligible pass needs no growth.
     pub cand_coef_block: Vec<f64>,
 
@@ -226,7 +226,7 @@ impl DcsScoringScratch {
 /// the filters below and **gathers** each surviving candidate's `coefficients`
 /// slice into the contiguous row-major `scratch.cand_coef_block`
 /// (`k_rows × n_state`), recording its slot in `scratch.cand_slots`. One
-/// [`gemm_block`] then fills `scratch.alpha[0..k_rows]` with every candidate's
+/// `gemm_block` then fills `scratch.alpha[0..k_rows]` with every candidate's
 /// `∇·x*_raw` in a single dispatch. Because `gemm_block` computes each output
 /// row's dot product independently, a candidate's activity is **bit-identical**
 /// whether scored alone (`k_rows = 1`) or in a batch (`k_rows = N`); the
@@ -484,7 +484,7 @@ pub struct DcsSolveScratch {
     pub scoring_time_seconds: f64,
     /// Cumulative sum of the resident cut-row count (`row_map.total_cut_rows()`)
     /// over every solve that used this scratch — one term per
-    /// [`lazy_solve_preloaded`] completion (see [`Self::store_result`]). With
+    /// [`lazy_solve_preloaded`] completion (see `Self::store_result`). With
     /// [`Self::rows_in_lp_count`] this yields the mean rows-in-LP per solve.
     /// Grows monotonically; never reset by the solve loop (a per-worker
     /// accumulator surviving across all (stage, solve) pairs, like
@@ -492,7 +492,7 @@ pub struct DcsSolveScratch {
     /// hot path.
     pub rows_in_lp_sum: u64,
     /// Number of solves folded into [`Self::rows_in_lp_sum`] (one per
-    /// [`Self::store_result`] call). The denominator for the mean.
+    /// `Self::store_result` call). The denominator for the mean.
     pub rows_in_lp_count: u64,
     /// Largest resident cut-row count observed across every solve that used this
     /// scratch.

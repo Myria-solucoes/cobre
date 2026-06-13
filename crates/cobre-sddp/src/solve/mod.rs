@@ -7,11 +7,11 @@
 //!
 //! - [`solver_phase`] — the SDDP phase enum, the backend-agnostic profile trait,
 //!   and the per-phase solver-profile constants.
-//! - [`stage_solve`] — the single unified per-stage LP-solve entry point
-//!   ([`stage_solve::run_stage_solve`]) wrapping the 3-driver
+//! - `stage_solve` — the single unified per-stage LP-solve entry point
+//!   (`run_stage_solve`) wrapping the 3-driver
 //!   `enforce_basic_count_invariant` seam. Kept as ONE file: fragmenting the
 //!   invariant-enforcement seam would let a driver bypass it.
-//! - [`partition`] — the deterministic static work partition every driver uses
+//! - `partition` — the deterministic static work partition every driver uses
 //!   to split scenarios across workers.
 
 pub(crate) mod partition;

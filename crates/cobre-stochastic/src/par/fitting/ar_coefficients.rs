@@ -52,7 +52,8 @@ pub struct ArCoefficientEstimate {
 /// # Errors
 ///
 /// - [`StochasticError::InsufficientData`] when `max_order > 0` (use the
-///   periodic Yule-Walker path via [`estimate_periodic_ar_coefficients`] instead).
+///   periodic Yule-Walker path via
+///   [`estimate_periodic_ar_coefficients`](super::estimate_periodic_ar_coefficients) instead).
 ///
 /// # Examples
 ///
@@ -215,7 +216,8 @@ pub(super) fn build_season_lookups<'a>(
 /// # Errors
 ///
 /// Returns [`StochasticError::InsufficientData`] when `max_order > 0`; callers
-/// requiring AR order selection must use [`estimate_periodic_ar_coefficients`]
+/// requiring AR order selection must use
+/// [`estimate_periodic_ar_coefficients`](super::estimate_periodic_ar_coefficients)
 /// and the periodic Yule-Walker path instead.
 pub fn estimate_ar_coefficients_with_season_map(
     _observations: &[(EntityId, NaiveDate, f64)],

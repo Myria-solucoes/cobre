@@ -19,7 +19,8 @@
 //!    for all `(entity, season)` pairs; used by the PACF path when
 //!    `max_order == 0`.
 //! 7. [`estimate_correlation`] — computes the Pearson correlation matrix of
-//!    PAR model residuals across entities, returning a [`CorrelationModel`]
+//!    PAR model residuals across entities, returning a
+//!    [`CorrelationModel`](cobre_core::scenario::CorrelationModel)
 //!    suitable for downstream spectral decomposition.
 //!
 //! ## Periodic Yule-Walker equations

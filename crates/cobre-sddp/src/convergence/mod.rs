@@ -7,7 +7,7 @@
 //!   tracks the lower bound, upper bound, gap, and per-iteration history, and
 //!   evaluates the stopping rules. Its [`upper_bound`](convergence::ConvergenceMonitor::upper_bound)
 //!   returns the raw per-iteration upper bound with **no** exponential smoothing
-//!   — a contract, not an oversight (see `.claude/rules/sddp.md`).
+//!   — a contract, not an oversight.
 //! - [`stopping_rule`] — stopping-rule variants ([`StoppingRule`](stopping_rule::StoppingRule)),
 //!   their AND/OR composition ([`StoppingRuleSet`](stopping_rule::StoppingRuleSet)),
 //!   and the convergence state they read ([`MonitorState`](stopping_rule::MonitorState)).
@@ -17,9 +17,8 @@
 // Rationale: the convergence-monitor file keeps its established `convergence`
 // basename inside this `convergence/` cluster, so the submodule shares its
 // parent's name. Renaming the submodule (e.g. to `monitor`) would break the
-// `cobre_sddp::convergence::convergence::ConvergenceMonitor` re-export path and
-// the `.claude/rules/sddp.md` "Read: convergence/convergence.rs" pointer for no
-// behavioural gain.
+// `cobre_sddp::convergence::convergence::ConvergenceMonitor` re-export path for
+// no behavioural gain.
 #[allow(clippy::module_inception)]
 pub mod convergence;
 pub mod risk_measure;

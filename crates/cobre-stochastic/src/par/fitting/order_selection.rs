@@ -229,7 +229,7 @@ pub fn select_order_pacf(
 /// # Parameters
 ///
 /// - `conditional_facp` -- conditional FACP coefficients from
-///   [`conditional_facp_partitioned`]. `conditional_facp[k]` is the
+///   [`conditional_facp_partitioned`](super::conditional_facp_partitioned). `conditional_facp[k]` is the
 ///   conditional FACP at lag `k+1`.
 /// - `n_observations` -- number of historical observations for the given
 ///   (hydro, season) pair.

@@ -4,21 +4,20 @@
 //! orchestrating loop, the per-pass execution kernels, and the per-pass scratch
 //! state — as a sibling to [`crate::simulation`]:
 //!
-//! - [`training`] — [`train`](training::train): wires the forward pass, forward
-//!   sync, state exchange, backward pass, cut sync, lower-bound evaluation, and
-//!   convergence check into a single iterative loop.
-//! - [`session`] — [`TrainingSession`](session::TrainingSession): owns all
-//!   scratch buffers for one `train` call and drives `run_iteration`.
-//! - [`forward`] / [`backward`] — the forward and backward pass kernels.
-//! - [`forward_pass_state`] / [`backward_pass_state`] — pre-allocated per-pass
+//! - `training` — `train`: wires the forward pass, forward sync, state exchange,
+//!   backward pass, cut sync, lower-bound evaluation, and convergence check into
+//!   a single iterative loop.
+//! - `session` — `TrainingSession`: owns all scratch buffers for one `train`
+//!   call and drives `run_iteration`.
+//! - `forward` / `backward` — the forward and backward pass kernels.
+//! - `forward_pass_state` / `backward_pass_state` — pre-allocated per-pass
 //!   scratch state and the borrowed-inputs bundles their `run` boundaries take.
-//! - [`lower_bound`] — [`evaluate_lower_bound`](lower_bound::evaluate_lower_bound).
-//! - [`state_exchange`] — [`ExchangeBuffers`](state_exchange::ExchangeBuffers):
-//!   `allgatherv` of trial points between the forward and backward passes.
-//! - [`trajectory`] — [`TrajectoryRecord`](trajectory::TrajectoryRecord): the
-//!   forward→backward data unit.
-//! - [`visited_states`] — archived trial-point states for dominated cut selection.
-//! - [`training_output`] — converts the training summary plus event log into the
+//! - `lower_bound` — `evaluate_lower_bound`.
+//! - `state_exchange` — `ExchangeBuffers`: `allgatherv` of trial points between
+//!   the forward and backward passes.
+//! - `trajectory` — `TrajectoryRecord`: the forward→backward data unit.
+//! - `visited_states` — archived trial-point states for dominated cut selection.
+//! - `training_output` — converts the training summary plus event log into the
 //!   structured output the `cobre-io` writers consume.
 
 // Rationale: the training-loop file keeps its established `training` basename

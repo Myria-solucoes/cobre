@@ -277,7 +277,7 @@ impl StochasticContext {
     ///
     /// # Errors
     ///
-    /// Propagates [`StochasticError::InsufficientData`](crate::StochasticError::InsufficientData)
+    /// Propagates [`StochasticError::InsufficientData`]
     /// when the key table's stage count or any stage's key count does not match
     /// the tree.
     pub fn set_solve_order(

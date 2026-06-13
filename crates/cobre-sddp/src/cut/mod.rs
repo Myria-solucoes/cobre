@@ -18,11 +18,19 @@
 //! - [`wire`] — [`CutWireHeader`] and serialization functions for the MPI
 //!   cut-exchange wire format (24-byte header + variable coefficient tail).
 //! - [`row`] — cut-row construction for the SDDP LP; owns the cut-sign
-//!   convention ([`push_scaled_coefficient`](row::push_scaled_coefficient)
+//!   convention (`push_scaled_coefficient`
 //!   negates the raw subgradient). Entry points:
 //!   [`build_cut_row_batch_into`](row::build_cut_row_batch_into),
 //!   [`append_new_cuts_to_lp`](row::append_new_cuts_to_lp),
 //!   [`append_slots_to_lp`](row::append_slots_to_lp).
+//! - [`row_map`] — [`CutRowMap`]: slot-to-LP-row mapping that preserves cut-pool
+//!   slot identity for warm-start basis reconstruction.
+//! - [`cut_selection`] — [`CutSelectionStrategy`] (and `CutMetadata`): per-cut
+//!   activity tracking and the LML1/LML2 dominated-cut selection strategies.
+//! - [`dcs`] — Dynamic Cut Selection: scores all resident cuts per stage.
+//! - [`cut_sync`] — [`CutSyncBuffers`]: MPI cut-synchronization scratch space.
+//! - [`basis_reconstruct`] — warm-start basis reconstruction for the baked
+//!   hot path and the DCS path.
 //!
 //! ## Sentinel value
 //!

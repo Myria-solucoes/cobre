@@ -4,7 +4,7 @@
 //! convergence monitoring, and policy simulation. Parallelized via rayon (intra-rank)
 //! and ferrompi (inter-rank).
 
-// Relax strict production lints for test builds (normal in test contexts).
+// Relax strict production lints for test builds.
 #![cfg_attr(
     test,
     allow(
@@ -194,7 +194,7 @@ pub(crate) use stochastic::{noise, stochastic_summary};
 //   - `state_exchange` — no current `crate::state_exchange::` consumer; re-exported
 //     for symmetry with the other pass modules.
 //   - `trajectory` — `crate::trajectory::TrajectoryRecord` in `training/forward.rs`
-//     and `training/state_exchange.rs` test modules.
+//     and `training/state_exchange.rs`.
 //   - `visited_states` — `crate::visited_states::VisitedStatesArchive` in
 //     `training/training.rs`, `training/session/mod.rs`, and `policy/policy_export.rs`.
 pub(crate) use training::{

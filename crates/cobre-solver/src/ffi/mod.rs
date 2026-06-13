@@ -4,7 +4,7 @@
 //! backend's bindings live in its own module:
 //!
 //! - [`highs`] — `cobre_highs_*` bindings to `csrc/highs_wrapper.h`.
-//! - [`clp`] — `cobre_clp_*` bindings to `csrc/clp_wrapper.h` (`clp` feature).
+//! - `clp` — `cobre_clp_*` bindings to `csrc/clp_wrapper.h` (`clp` feature).
 //!
 //! The `HiGHS` symbols are re-exported flat from this module so that
 //! `crate::ffi::cobre_highs_*` continues to resolve at every call site without

@@ -24,7 +24,8 @@ use crate::StochasticError;
 /// The `mean_m3s` and `std_m3s` fields are in the original m³/s units of the
 /// observation series; they are **not** standardised. The standardisation
 /// happens inside the cross-correlation helpers from
-/// [`build_extended_periodic_yw_matrix`], and the unit conversion to `ψ̂`
+/// [`build_extended_periodic_yw_matrix`](super::build_extended_periodic_yw_matrix),
+/// and the unit conversion to `ψ̂`
 /// happens at `PrecomputedPar::build` time.
 #[must_use]
 #[derive(Debug, Clone, PartialEq)]
@@ -49,7 +50,7 @@ pub struct AnnualSeasonalStats {
 /// date falls in season `m`. `σ^A_m` is the **population-divisor standard
 /// deviation** using divisor `1/N`, matching the Maceira-Damazio PAR(p)-A
 /// standard-deviation convention and the workspace-wide convention used by
-/// [`estimate_seasonal_stats`]. The PAR(p)-A runtime coefficient is then
+/// [`estimate_seasonal_stats`](super::estimate_seasonal_stats). The PAR(p)-A runtime coefficient is then
 /// `ψ̂ = ψ · σ_m / σ^A_m`, which requires `σ^A_m > 0` (enforced by the
 /// output validator in `cobre-io`).
 ///
@@ -61,7 +62,7 @@ pub struct AnnualSeasonalStats {
 ///    such that `i + 12 < group.len()`. The target date is `group[i+11].date`.
 /// 3. Group `A_{i+12}` values by the season of the target date (using
 ///    [`find_season_for_date`] + `season_map` fallback, mirroring
-///    [`estimate_seasonal_stats_with_season_map`]).
+///    [`estimate_seasonal_stats_with_season_map`](super::estimate_seasonal_stats_with_season_map)).
 /// 4. Compute per (entity, season) the sample mean and population-divisor std (1/N).
 ///
 /// Returns rows sorted by `(hydro_id, season_id)` ascending.
