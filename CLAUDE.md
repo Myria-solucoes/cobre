@@ -57,8 +57,9 @@ Comment & documentation rules for all `.rs` files are codified in `.claude/rules
 
 Prose documentation integrity rules (scope matrix, the single adaptation, and the six prose-only failure modes) are codified in `.claude/rules/doc-integrity.md`, which auto-loads when editing Markdown files in `book/`, `CONTRIBUTING.md`, `CHANGELOG.md`, and root-level `*.md`.
 
-When modifying hot-path code (`forward.rs`, `backward.rs`, `training.rs`,
-`simulation/pipeline.rs`, `lower_bound.rs`), read:
+When modifying hot-path code (`training/forward.rs`, `training/backward.rs`,
+`training/training.rs`, `simulation/pipeline.rs`, `training/lower_bound.rs`),
+read:
 → `.claude/architecture-rules.md`
 
 When applying a stored basis at any call site, read:
@@ -81,7 +82,7 @@ When changing the MPI basis-cache wire format, read:
 `CapturedBasis::try_from_broadcast_payload` are the sole
 owners of the byte layout. Any layout change must update
 both methods together; the `broadcast_basis_cache` helper
-in `training.rs` only owns the four MPI broadcast calls.
+in `training/training.rs` only owns the four MPI broadcast calls.
 
 When adding new LP variables, constraints, or entity types, read:
 → `crates/cobre-sddp/src/lp/builder/mod.rs` module docs and `crates/cobre-sddp/src/lp/indexer.rs`

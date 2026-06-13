@@ -113,7 +113,7 @@ impl CapturedBasis {
     /// Append this basis's wire-format payload to the output buffers.
     ///
     /// The layout mirrors the pack loop in
-    /// `broadcast_basis_cache` (`training.rs`). This method is the
+    /// `broadcast_basis_cache` (`training/training.rs`). This method is the
     /// type-level owner of the wire format; any future change must
     /// update both this method and
     /// [`CapturedBasis::try_from_broadcast_payload`] together.

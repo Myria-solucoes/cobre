@@ -29,17 +29,12 @@
 // - `pub(crate)` modules are pure internals — never named from outside
 //   this crate (verified by grep against `tests/`, `examples/`, and the
 //   other workspace crates).
-pub(crate) mod backward;
-pub(crate) mod backward_pass_state;
 pub mod config;
 pub mod convergence;
 pub mod cut;
 pub mod error;
-pub mod forward;
-pub(crate) mod forward_pass_state;
 pub(crate) mod gemm;
 pub mod horizon_mode;
-pub mod lower_bound;
 pub mod lp;
 pub mod policy;
 pub mod production;
@@ -47,14 +42,9 @@ pub mod setup;
 pub mod simulation;
 pub mod solve;
 pub mod solver_stats;
-pub(crate) mod state_exchange;
 pub mod stochastic;
 pub mod training;
-pub(crate) mod training_output;
-pub(crate) mod training_session;
-pub(crate) mod trajectory;
 pub mod validate_phases;
-pub(crate) mod visited_states;
 pub mod workspace;
 
 // Crate-root submodule shim: re-exposes the inner `context` file module (now
@@ -68,7 +58,7 @@ pub use workspace::context;
 // `solve/` cluster move) at their pre-move crate-root paths, so the in-crate
 // `crate::solver_phase::Phase` use in `simulation/state.rs` and the
 // `crate::stage_solve::{fill_unscaled, fill_unscaled_dual, StageInputs,
-// run_stage_solve}` uses in `forward.rs`, `backward.rs`, and
+// run_stage_solve}` uses in `training/forward.rs`, `training/backward.rs`, and
 // `simulation/pipeline.rs` resolve verbatim without per-site edits.
 // `stage_solve` keeps `pub(crate)` visibility — it has no external raw-path
 // consumer.
@@ -88,23 +78,23 @@ pub use convergence::{risk_measure, stopping_rule};
 //
 //   - `cut_selection` — `cobre_sddp::cut_selection::` in `benches/cut_selection_kernel.rs`
 //     and the integration tests `tests/{cut_selection_kernel_perf,cut_selection_determinism_realistic}.rs`,
-//     the internal `crate::cut_selection::` call sites across `backward.rs`,
-//     `backward_pass_state.rs`, `config.rs`, `cut/pool.rs`, `cut/dcs.rs`,
-//     `forward.rs`, `simulation/pipeline.rs`, `training.rs`, and
-//     `training_session/mod.rs`, plus the `crate::cut_selection::CutMetadata`
+//     the internal `crate::cut_selection::` call sites across `training/backward.rs`,
+//     `training/backward_pass_state.rs`, `config.rs`, `cut/pool.rs`, `cut/dcs.rs`,
+//     `training/forward.rs`, `simulation/pipeline.rs`, `training/training.rs`, and
+//     `training/session/mod.rs`, plus the `crate::cut_selection::CutMetadata`
 //     intra-doc links in `cut/mod.rs`.
 //   - `cut_sync` — the internal `crate::cut_sync::CutSyncBuffers` references
-//     (reached via grouped `use crate::{ … }` imports) in `backward.rs`,
-//     `backward_pass_state.rs`, and `training_session/mod.rs`.
+//     (reached via grouped `use crate::{ … }` imports) in `training/backward.rs`,
+//     `training/backward_pass_state.rs`, and `training/session/mod.rs`.
 //   - `dcs` — `cobre_sddp::dcs::` in `benches/dcs_batched_scoring.rs` plus the
-//     internal `crate::dcs::` call sites across `backward.rs`, `forward.rs`,
-//     `setup/{accessors,mod}.rs`, `simulation/pipeline.rs`, and
-//     `workspace/workspace.rs`.
+//     internal `crate::dcs::` call sites across `training/backward.rs`,
+//     `training/forward.rs`, `setup/{accessors,mod}.rs`, `simulation/pipeline.rs`,
+//     and `workspace/workspace.rs`.
 //   - `basis_reconstruct` — `cobre_sddp::basis_reconstruct::` in
 //     `tests/hybrid_reconstruction.rs` (plus the doc-comment intra-doc links in
 //     `tests/basis_reconstruct_churn.rs` and `cobre-python/src/run.rs`), and the
 //     internal `crate::basis_reconstruct::` call sites in `cut/dcs.rs`,
-//     `forward.rs`, and `workspace/workspace.rs`.
+//     `training/forward.rs`, and `workspace/workspace.rs`.
 pub use cut::{basis_reconstruct, cut_selection, cut_sync, dcs};
 
 // Crate-root submodule shims for the `lp/` cluster move (`indexer` /
@@ -167,7 +157,7 @@ pub use production::{energy_conversion, hydro_models};
 //   - `estimation` — `crate::estimation::` in `error.rs`,
 //     `policy/{orchestration,provenance}.rs`, and
 //     `setup/stochastic_pipeline.rs`.
-//   - `inflow_method` — `crate::inflow_method::` in `indexer.rs`, `forward.rs`,
+//   - `inflow_method` — `crate::inflow_method::` in `indexer.rs`, `training/forward.rs`,
 //     and `lp_builder/{template,matrix}.rs`, `simulation/pipeline.rs`.
 //   - `lag_transition` — `cobre_sddp::lag_transition::precompute_stage_lag_transitions`
 //     in `cobre-cli/src/commands/run/setup.rs` (this symbol is intentionally NOT
@@ -175,12 +165,48 @@ pub use production::{energy_conversion, hydro_models};
 //     `crate::lag_transition::` uses in `workspace/context.rs` and
 //     `setup/{stochastic_pipeline,stage_data,mod}.rs`.
 //   - `noise_key_diag` — `crate::noise_key_diag::` in `setup/mod.rs`.
-//   - `noise` — `crate::noise::` in `workspace/context.rs`, `forward.rs`, and
+//   - `noise` — `crate::noise::` in `workspace/context.rs`, `training/forward.rs`, and
 //     `simulation/pipeline.rs`; `pub(crate)` keeps its crate-private visibility.
 //   - `stochastic_summary` — `crate::stochastic_summary::` in
 //     `policy/orchestration.rs`; `pub(crate)` keeps its crate-private visibility.
 pub use stochastic::{estimation, inflow_method, lag_transition, noise_key_diag};
 pub(crate) use stochastic::{noise, stochastic_summary};
+
+// Crate-root submodule shim: preserves the pre-`training/`-relocation raw
+// `crate::<module>::` paths verbatim for the internal references that the
+// curated re-exports below do not cover, so the consumer files resolve without
+// per-site edits. The pass files moved into `training/`; their pre-move
+// crate-root paths are re-exposed here:
+//   - `forward` — `crate::forward::{ForwardResult, SyncResult}` in
+//     `training/session/mod.rs`, the `crate::forward::sync_forward` use there and
+//     its intra-doc links in `convergence/convergence.rs`, and the
+//     `crate::forward::build_delta_cut_row_batch_into` intra-doc link in
+//     `cut/row.rs`. Keeps `pub` to match its pre-move visibility.
+//   - `backward` — `crate::backward::StagedCut` in `workspace/workspace.rs`,
+//     `crate::backward::BackwardResult` in `training/session/mod.rs`, and the
+//     `crate::backward::extract_duals_from_view` intra-doc link in `cut/row.rs`.
+//   - `backward_pass_state` — `crate::backward_pass_state::BackwardPass{State,Inputs}`
+//     in `training/backward.rs` and the doc reference in `cut/cut_selection.rs`.
+//   - `forward_pass_state` — `crate::forward_pass_state::{ForwardPassInputs,
+//     ForwardPassState}` in `training/forward.rs`.
+//   - `lower_bound` — `crate::lower_bound::evaluate_lower_bound` intra-doc links
+//     in `convergence/convergence.rs`. Keeps `pub` to match its pre-move visibility.
+//   - `state_exchange` — no current `crate::state_exchange::` consumer; re-exported
+//     for symmetry with the other pass modules.
+//   - `trajectory` — `crate::trajectory::TrajectoryRecord` in `training/forward.rs`
+//     and `training/state_exchange.rs` test modules.
+//   - `visited_states` — `crate::visited_states::VisitedStatesArchive` in
+//     `training/training.rs`, `training/session/mod.rs`, and `policy/policy_export.rs`.
+pub(crate) use training::{
+    backward, backward_pass_state, forward_pass_state, state_exchange, trajectory, visited_states,
+};
+pub use training::{forward, lower_bound};
+
+// Crate-root submodule shim: aliases the nested `training/session/` subtree at
+// the pre-move `crate::training_session::` path so the
+// `crate::training_session::{iteration_scratch, rank_distribution, runtime}`
+// references in `training/forward_pass_state.rs` resolve verbatim.
+pub(crate) use training::session as training_session;
 
 // ── config ────────────────────────────────────────────────────────────────────
 pub use config::TrainingConfig;
@@ -202,7 +228,7 @@ pub use error::SddpError;
 // ── estimation ────────────────────────────────────────────────────────────────
 pub use stochastic::estimation::{EstimationPath, EstimationReport, estimate_from_history};
 // ── forward ───────────────────────────────────────────────────────────────────
-pub use forward::SyncResult;
+pub use training::forward::SyncResult;
 // ── hydro_models ──────────────────────────────────────────────────────────────
 pub use production::hydro_models::{
     FphaHydroDetail, HydroModelSummary, PrepareHydroModelsResult, ProductionModelSource,
@@ -255,17 +281,17 @@ pub use stochastic::stochastic_summary::{
 // ── stopping_rule ─────────────────────────────────────────────────────────────
 pub use convergence::stopping_rule::{MonitorState, StoppingMode, StoppingRule, StoppingRuleSet};
 // ── training ──────────────────────────────────────────────────────────────────
-pub use training::{TrainingOutcome, TrainingResult, train};
+pub use training::training::{TrainingOutcome, TrainingResult, train};
 // ── training_output ───────────────────────────────────────────────────────────
-pub use training_output::build_training_output;
+pub use training::training_output::build_training_output;
 // ── resolved_parameters ───────────────────────────────────────────────────────
 pub use policy::resolved_parameters::{
     ResolvedParameters, ResolvedParametersError, build_resolved_parameters,
     deserialize_resolved_parameters, serialize_resolved_parameters,
 };
 // ── state_exchange ────────────────────────────────────────────────────────────
-pub use state_exchange::ExchangeBuffers;
+pub use training::state_exchange::ExchangeBuffers;
 // ── trajectory ────────────────────────────────────────────────────────────────
-pub use trajectory::TrajectoryRecord;
+pub use training::trajectory::TrajectoryRecord;
 // ── workspace ─────────────────────────────────────────────────────────────────
 pub use workspace::workspace::{BASIS_BROADCAST_WIRE_VERSION, CapturedBasis};

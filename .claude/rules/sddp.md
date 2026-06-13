@@ -19,7 +19,7 @@ reduced cost **divided** by `col_scale`:
 pin sets `v_scaled = v_orig / col_scale`. Cut-row construction then negates the
 gradient so the LP row reads `−∇·x + θ ≥ intercept`, yielding the Benders cut
 `θ ≥ Q(x̂) + π'(x − x̂)`.
-Read: `backward.rs` (`extract_duals_from_view`), `cut/fcf.rs`, and
+Read: `training/backward.rs` (`extract_duals_from_view`), `cut/fcf.rs`, and
 `cut::row::push_scaled_coefficient`, where `batch.values.push(-coeff * d)`
 applies the negation.
 
@@ -64,13 +64,13 @@ Read: `stochastic/noise.rs` (`transform_ncs_noise`, `compute_effective_eta`).
 `transform_ncs_noise`, exactly as the forward and backward passes do. Skipping
 the patch understates the bound (a real bug caught during D15). The patch inputs
 ride on `LbEvalSpec` (`ncs_max_gen`, `ncs_allow_curtailment`).
-Read: `lower_bound.rs`.
+Read: `training/lower_bound.rs`.
 
 ## Per-stage exchange in the backward pass
 
 `exchange()` is called inside the backward loop, once per stage, not in a
 separate pre-pass before the loop.
-Read: `backward_pass_state.rs`.
+Read: `training/backward_pass_state.rs`.
 
 ## No EWMA upper bound
 
