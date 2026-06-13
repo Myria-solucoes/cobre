@@ -67,7 +67,7 @@ jobs:
       - name: Cache MPICH
         if: matrix.mpi_source == 'source'
         id: mpich-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /opt/mpich
           key: mpich-${{ env.MPICH_VERSION }}-${{ runner.os }}-${{ runner.arch }}

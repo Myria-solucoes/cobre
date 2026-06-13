@@ -42,7 +42,7 @@ jobs:
           submodules: recursive
       - name: Cache MPICH
         id: mpich-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /opt/mpich
           key: mpich-${{ env.MPICH_VERSION }}-${{ runner.os }}-${{ runner.arch }}
@@ -80,7 +80,7 @@ jobs:
           submodules: recursive
       - name: Cache MPICH
         id: mpich-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /opt/mpich
           key: mpich-${{ env.MPICH_VERSION }}-${{ runner.os }}-${{ runner.arch }}
@@ -123,7 +123,7 @@ jobs:
           submodules: recursive
       - name: Cache MPICH
         id: mpich-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /opt/mpich
           key: mpich-${{ env.MPICH_VERSION }}-${{ runner.os }}-${{ runner.arch }}
@@ -173,7 +173,7 @@ jobs:
           submodules: recursive
       - name: Cache MPICH
         id: mpich-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /opt/mpich
           key: mpich-${{ env.MPICH_VERSION }}-${{ runner.os }}-${{ runner.arch }}
@@ -307,7 +307,7 @@ jobs:
           submodules: recursive
       - name: Cache MPICH
         id: mpich-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /opt/mpich
           key: mpich-${{ env.MPICH_VERSION }}-${{ runner.os }}-${{ runner.arch }}
@@ -369,7 +369,7 @@ jobs:
           submodules: recursive
       - name: Cache MPICH
         id: mpich-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /opt/mpich
           key: mpich-${{ env.MPICH_VERSION }}-${{ runner.os }}-${{ runner.arch }}
@@ -411,9 +411,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Install mdBook
-        uses: peaceiris/actions-mdbook@v2
+        uses: taiki-e/install-action@v2
         with:
-          mdbook-version: "latest"
+          tool: mdbook
       - name: Install mdbook-mermaid
         run: cargo install mdbook-mermaid --locked
       # mdbook v0.5.x exits 0 even when a `{{#include}}` target is missing or a
@@ -501,7 +501,7 @@ jobs:
           submodules: recursive
       - name: Cache MPICH
         id: mpich-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /opt/mpich
           key: mpich-${{ env.MPICH_VERSION }}-${{ runner.os }}-${{ runner.arch }}
@@ -555,7 +555,7 @@ jobs:
           submodules: recursive
       - name: Cache MPICH
         id: mpich-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /opt/mpich
           key: mpich-${{ env.MPICH_VERSION }}-${{ runner.os }}-${{ runner.arch }}
