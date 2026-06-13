@@ -19,6 +19,7 @@
         clippy::too_many_lines
     )
 )]
+#![cfg(feature = "highs")]
 
 use cobre_solver::{HighsSolver, RowBatch, SolverError, SolverInterface, StageTemplate};
 

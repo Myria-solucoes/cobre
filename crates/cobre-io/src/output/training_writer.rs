@@ -17,10 +17,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow::array::{ArrayRef, Float64Builder, Int32Builder, Int64Builder, RecordBatch};
-use parquet::arrow::ArrowWriter;
-use parquet::file::properties::WriterProperties;
 
 use super::{IterationRecord, TrainingOutput, WorkerTimingRecord};
+use crate::output::atomic::write_parquet_atomic;
 use crate::output::error::OutputError;
 use crate::output::parquet_config::ParquetWriterConfig;
 use crate::output::schemas::{convergence_schema, iteration_timing_schema};
@@ -57,6 +56,9 @@ use crate::output::schemas::{convergence_schema, iteration_timing_schema};
 ///         total_active: 0,
 ///         peak_active: 0,
 ///         cuts_active: 0,
+///         rows_in_lp_total: 0,
+///         rows_in_lp_solve_count: 0,
+///         rows_in_lp_max: 0,
 ///     },
 ///     cut_selection_records: Vec::new(),
 ///     worker_timing_records: Vec::new(),
@@ -128,11 +130,11 @@ impl TrainingParquetWriter {
 
         let convergence_batch = build_convergence_batch(records)?;
         let convergence_path = self.output_dir.join("training/convergence.parquet");
-        write_parquet(&convergence_path, &convergence_batch, &self.config)?;
+        write_parquet_atomic(&convergence_path, &convergence_batch, &self.config)?;
 
         let timing_batch = build_iteration_timing_batch(&training_output.worker_timing_records)?;
         let timing_path = self.output_dir.join("training/timing/iterations.parquet");
-        write_parquet(&timing_path, &timing_batch, &self.config)?;
+        write_parquet_atomic(&timing_path, &timing_batch, &self.config)?;
 
         Ok(())
     }
@@ -164,6 +166,7 @@ fn build_convergence_batch(records: &[IterationRecord]) -> Result<RecordBatch, O
     let mut time_total_ms = Int64Builder::with_capacity(n);
     let mut forward_passes = Int32Builder::with_capacity(n);
     let mut lp_solves = Int64Builder::with_capacity(n);
+    let mut mean_rows_in_lp = Float64Builder::with_capacity(n);
 
     for rec in records {
         iteration.append_value(rec.iteration as i32);
@@ -179,6 +182,7 @@ fn build_convergence_batch(records: &[IterationRecord]) -> Result<RecordBatch, O
         time_total_ms.append_value(rec.time_total_ms as i64);
         forward_passes.append_value(rec.forward_passes as i32);
         lp_solves.append_value(i64::from(rec.lp_solves));
+        mean_rows_in_lp.append_value(rec.mean_rows_in_lp);
     }
 
     RecordBatch::try_new(
@@ -197,6 +201,7 @@ fn build_convergence_batch(records: &[IterationRecord]) -> Result<RecordBatch, O
             Arc::new(time_total_ms.finish()),
             Arc::new(forward_passes.finish()),
             Arc::new(lp_solves.finish()),
+            Arc::new(mean_rows_in_lp.finish()),
         ],
     )
     .map_err(|e| OutputError::serialization("convergence", e.to_string()))
@@ -236,6 +241,7 @@ fn build_iteration_timing_batch(
     let mut fwd_load_imbalance_ms = Int64Builder::with_capacity(n);
     let mut fwd_scheduling_overhead_ms = Int64Builder::with_capacity(n);
     let mut overhead_ms = Int64Builder::with_capacity(n);
+    let mut lazy_scoring_ms = Int64Builder::with_capacity(n);
 
     for rec in records {
         iteration.append_value(rec.iteration as i32);
@@ -247,7 +253,7 @@ fn build_iteration_timing_batch(
         //   6: state_exchange_ms 7: cut_batch_build_ms 8: bwd_setup_ms
         //   9: bwd_load_imbalance_ms  10: bwd_scheduling_overhead_ms
         //  11: fwd_setup_ms  12: fwd_load_imbalance_ms  13: fwd_scheduling_overhead_ms
-        //  14: overhead_ms   15: reserved
+        //  14: overhead_ms   15: lazy_scoring_ms
         forward_wall_ms.append_value(rec.timings[0] as i64);
         backward_wall_ms.append_value(rec.timings[1] as i64);
         cut_selection_ms.append_value(rec.timings[2] as i64);
@@ -263,6 +269,7 @@ fn build_iteration_timing_batch(
         fwd_load_imbalance_ms.append_value(rec.timings[12] as i64);
         fwd_scheduling_overhead_ms.append_value(rec.timings[13] as i64);
         overhead_ms.append_value(rec.timings[14] as i64);
+        lazy_scoring_ms.append_value(rec.timings[15] as i64);
     }
 
     RecordBatch::try_new(
@@ -286,6 +293,7 @@ fn build_iteration_timing_batch(
             Arc::new(fwd_load_imbalance_ms.finish()),
             Arc::new(fwd_scheduling_overhead_ms.finish()),
             Arc::new(overhead_ms.finish()),
+            Arc::new(lazy_scoring_ms.finish()),
         ],
     )
     .map_err(|e| OutputError::serialization("iteration_timing", e.to_string()))
@@ -354,46 +362,7 @@ pub fn write_row_selection_records(
     let batch = RecordBatch::try_new(Arc::clone(&schema), columns)
         .map_err(|e| OutputError::serialization("cut_selection", e.to_string()))?;
 
-    write_parquet(&dir.join("iterations.parquet"), &batch, config)
-}
-
-/// Write a `RecordBatch` to `path` as a Parquet file, atomically.
-///
-/// The batch is written to `{path}.tmp` first, then renamed to `path`.  If
-/// any step fails the `.tmp` file may remain on disk but the final path is
-/// never partially written.
-fn write_parquet(
-    path: &Path,
-    batch: &RecordBatch,
-    config: &ParquetWriterConfig,
-) -> Result<(), OutputError> {
-    let tmp_path = path.with_extension(path.extension().map_or_else(
-        || "tmp".to_string(),
-        |ext| format!("{}.tmp", ext.to_string_lossy()),
-    ));
-
-    let props = WriterProperties::builder()
-        .set_compression(config.compression)
-        .set_max_row_group_row_count(Some(config.row_group_size))
-        .set_dictionary_enabled(config.dictionary_encoding)
-        .build();
-
-    let file = std::fs::File::create(&tmp_path).map_err(|e| OutputError::io(&tmp_path, e))?;
-
-    let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props))
-        .map_err(|e| OutputError::serialization("parquet_writer", e.to_string()))?;
-
-    writer
-        .write(batch)
-        .map_err(|e| OutputError::serialization("parquet_writer", e.to_string()))?;
-
-    writer
-        .close()
-        .map_err(|e| OutputError::serialization("parquet_writer", e.to_string()))?;
-
-    std::fs::rename(&tmp_path, path).map_err(|e| OutputError::io(path, e))?;
-
-    Ok(())
+    write_parquet_atomic(&dir.join("iterations.parquet"), &batch, config)
 }
 
 #[cfg(test)]
@@ -438,6 +407,7 @@ mod tests {
             forward_passes: 4,
             lp_solves: 40,
             solve_time_ms: 0.0,
+            mean_rows_in_lp: 0.0,
         }
     }
 
@@ -457,6 +427,9 @@ mod tests {
                 total_active: 80,
                 peak_active: 95,
                 cuts_active: 80,
+                rows_in_lp_total: 0,
+                rows_in_lp_solve_count: 0,
+                rows_in_lp_max: 0,
             },
             cut_selection_records: vec![],
             worker_timing_records: vec![],
@@ -481,7 +454,7 @@ mod tests {
     fn convergence_batch_from_empty_records() {
         let batch = build_convergence_batch(&[]).expect("empty batch must succeed");
         assert_eq!(batch.num_rows(), 0, "empty records yield 0 rows");
-        assert_eq!(batch.num_columns(), 13, "convergence schema has 13 columns");
+        assert_eq!(batch.num_columns(), 14, "convergence schema has 14 columns");
     }
 
     #[test]
@@ -489,7 +462,7 @@ mod tests {
         let records: Vec<IterationRecord> = (1..=3).map(|i| make_record(i, Some(5.0))).collect();
         let batch = build_convergence_batch(&records).expect("batch must be built");
         assert_eq!(batch.num_rows(), 3);
-        assert_eq!(batch.num_columns(), 13);
+        assert_eq!(batch.num_columns(), 14);
 
         let expected_schema = convergence_schema();
         assert_eq!(
@@ -529,8 +502,8 @@ mod tests {
         assert_eq!(batch.num_rows(), 3, "3 records yield 3 rows");
         assert_eq!(
             batch.num_columns(),
-            18,
-            "iteration_timing schema has 18 columns (16 timings + iteration + rank + worker_id)"
+            19,
+            "iteration_timing schema has 19 columns (16 timings + iteration + rank + worker_id)"
         );
 
         let expected_schema = iteration_timing_schema();
@@ -584,6 +557,7 @@ mod tests {
                 forward_passes: 4,
                 lp_solves: 40,
                 solve_time_ms: 0.0,
+                mean_rows_in_lp: 0.0,
             })
             .collect();
 
@@ -631,7 +605,7 @@ mod tests {
         let batch = reader.next().expect("must have rows").expect("batch Ok");
 
         assert_eq!(batch.num_rows(), 3);
-        assert_eq!(batch.num_columns(), 18);
+        assert_eq!(batch.num_columns(), 19);
 
         // Old column names should not be present.
         assert!(batch.column_by_name("bwd_rayon_overhead_ms").is_none());
@@ -690,7 +664,7 @@ mod tests {
         let path = tmp.path().join("convergence.parquet");
         let config = ParquetWriterConfig::default();
 
-        write_parquet(&path, &batch, &config).expect("write must succeed");
+        write_parquet_atomic(&path, &batch, &config).expect("write must succeed");
         assert!(path.exists(), "convergence.parquet must exist after write");
 
         // Read back and verify row count + column values.
@@ -749,7 +723,7 @@ mod tests {
         let path = tmp.path().join("convergence.parquet");
         let config = ParquetWriterConfig::default();
 
-        write_parquet(&path, &batch, &config).expect("write must succeed");
+        write_parquet_atomic(&path, &batch, &config).expect("write must succeed");
 
         // The .tmp file must not remain after a successful write.
         let tmp_path = path.with_extension("parquet.tmp");
@@ -853,7 +827,7 @@ mod tests {
             .expect("reader");
         let batch = reader.next().expect("must have rows").expect("batch Ok");
         assert_eq!(batch.num_rows(), 5);
-        assert_eq!(batch.num_columns(), 13);
+        assert_eq!(batch.num_columns(), 14);
 
         let timing_path = tmp.path().join("training/timing/iterations.parquet");
         let file = std::fs::File::open(&timing_path).expect("file must open");
@@ -863,7 +837,7 @@ mod tests {
             .expect("reader");
         let batch = reader.next().expect("must have rows").expect("batch Ok");
         assert_eq!(batch.num_rows(), 5);
-        assert_eq!(batch.num_columns(), 18, "timing schema has 18 columns");
+        assert_eq!(batch.num_columns(), 19, "timing schema has 19 columns");
     }
 
     #[test]

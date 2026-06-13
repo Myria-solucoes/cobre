@@ -201,6 +201,37 @@ pub struct SolverStatistics {
     pub retry_level_histogram: Vec<u64>,
 }
 
+impl SolverStatistics {
+    /// Overwrite `self` from `src` in place, reusing `self.retry_level_histogram`'s
+    /// allocation (resize + `copy_from_slice`; no allocation when capacity suffices).
+    ///
+    /// All scalar fields are overwritten by value. The histogram `Vec<u64>` is
+    /// `resize`d to `src`'s length, then overwritten with `copy_from_slice`. When
+    /// `self` already holds a histogram of the same length (the steady-state case),
+    /// no heap allocation occurs. After this call `*self` equals `src.clone()`
+    /// field-for-field.
+    pub fn copy_from(&mut self, src: &SolverStatistics) {
+        self.solve_count = src.solve_count;
+        self.success_count = src.success_count;
+        self.failure_count = src.failure_count;
+        self.total_iterations = src.total_iterations;
+        self.retry_count = src.retry_count;
+        self.total_solve_time_seconds = src.total_solve_time_seconds;
+        self.basis_consistency_failures = src.basis_consistency_failures;
+        self.first_try_successes = src.first_try_successes;
+        self.basis_offered = src.basis_offered;
+        self.load_model_count = src.load_model_count;
+        self.total_load_model_time_seconds = src.total_load_model_time_seconds;
+        self.total_set_bounds_time_seconds = src.total_set_bounds_time_seconds;
+        self.total_basis_set_time_seconds = src.total_basis_set_time_seconds;
+        self.basis_reconstructions = src.basis_reconstructions;
+        self.retry_level_histogram
+            .resize(src.retry_level_histogram.len(), 0);
+        self.retry_level_histogram
+            .copy_from_slice(&src.retry_level_histogram);
+    }
+}
+
 /// Pre-assembled structural LP for one stage, in CSC (column-major) form.
 ///
 /// Built once at initialization from resolved internal structures.
@@ -483,6 +514,17 @@ pub enum SolverError {
         /// Number of basic rows in the offered basis.
         row_basic: i64,
     },
+
+    /// The offered warm-start basis has fewer row entries than the loaded LP
+    /// has rows. The basis predates an `add_rows` growth and cannot be padded
+    /// soundly (a BASIC pad is wrong for inequality-row slacks), so it is
+    /// rejected; the caller should fall back to a cold solve.
+    BasisRowCountMismatch {
+        /// The LP row count at the point of rejection.
+        lp_rows: usize,
+        /// The row-entry count in the offered basis.
+        basis_rows: usize,
+    },
 }
 
 impl fmt::Display for SolverError {
@@ -515,6 +557,13 @@ impl fmt::Display for SolverError {
             } => write!(
                 f,
                 "basis inconsistent: num_row={num_row}, total_basic={total_basic} (col_basic={col_basic}, row_basic={row_basic})"
+            ),
+            Self::BasisRowCountMismatch {
+                lp_rows,
+                basis_rows,
+            } => write!(
+                f,
+                "basis row count mismatch: lp_rows={lp_rows}, basis_rows={basis_rows}"
             ),
         }
     }
@@ -582,6 +631,10 @@ mod tests {
                 col_basic: 3,
                 row_basic: 2,
             },
+            SolverError::BasisRowCountMismatch {
+                lp_rows: 3,
+                basis_rows: 2,
+            },
         ];
 
         let messages: Vec<String> = variants.iter().map(|err| format!("{err}")).collect();
@@ -617,6 +670,94 @@ mod tests {
         assert_eq!(stats.total_set_bounds_time_seconds, 0.0);
         assert_eq!(stats.basis_reconstructions, 0);
         assert!(stats.retry_level_histogram.is_empty());
+    }
+
+    fn make_fixture_statistics() -> SolverStatistics {
+        SolverStatistics {
+            solve_count: 11,
+            success_count: 9,
+            failure_count: 2,
+            total_iterations: 3456,
+            retry_count: 5,
+            total_solve_time_seconds: 1.25,
+            basis_consistency_failures: 1,
+            first_try_successes: 7,
+            basis_offered: 8,
+            load_model_count: 4,
+            total_load_model_time_seconds: 0.5,
+            total_set_bounds_time_seconds: 0.25,
+            total_basis_set_time_seconds: 0.125,
+            basis_reconstructions: 6,
+            retry_level_histogram: vec![1, 0, 2, 0, 3, 0, 0, 0, 4, 0, 0, 5],
+        }
+    }
+
+    fn assert_statistics_eq(a: &SolverStatistics, b: &SolverStatistics) {
+        assert_eq!(a.solve_count, b.solve_count);
+        assert_eq!(a.success_count, b.success_count);
+        assert_eq!(a.failure_count, b.failure_count);
+        assert_eq!(a.total_iterations, b.total_iterations);
+        assert_eq!(a.retry_count, b.retry_count);
+        assert_eq!(a.total_solve_time_seconds, b.total_solve_time_seconds);
+        assert_eq!(a.basis_consistency_failures, b.basis_consistency_failures);
+        assert_eq!(a.first_try_successes, b.first_try_successes);
+        assert_eq!(a.basis_offered, b.basis_offered);
+        assert_eq!(a.load_model_count, b.load_model_count);
+        assert_eq!(
+            a.total_load_model_time_seconds,
+            b.total_load_model_time_seconds
+        );
+        assert_eq!(
+            a.total_set_bounds_time_seconds,
+            b.total_set_bounds_time_seconds
+        );
+        assert_eq!(
+            a.total_basis_set_time_seconds,
+            b.total_basis_set_time_seconds
+        );
+        assert_eq!(a.basis_reconstructions, b.basis_reconstructions);
+        assert_eq!(a.retry_level_histogram, b.retry_level_histogram);
+    }
+
+    #[test]
+    fn test_solver_statistics_copy_from_equals_clone() {
+        let src = make_fixture_statistics();
+
+        // Buffer starts empty: first copy resizes the histogram from scratch.
+        let mut buf = SolverStatistics::default();
+        buf.copy_from(&src);
+        assert_statistics_eq(&buf, &src);
+
+        // Buffer with a differently-sized histogram is also overwritten exactly.
+        let mut buf2 = SolverStatistics {
+            retry_level_histogram: vec![99; 5],
+            ..Default::default()
+        };
+        buf2.copy_from(&src);
+        assert_statistics_eq(&buf2, &src);
+    }
+
+    #[test]
+    fn test_solver_statistics_copy_from_no_realloc_second_call() {
+        let src = make_fixture_statistics();
+
+        // Pre-size the buffer's histogram to the source length so the first
+        // copy stabilizes capacity; the second copy must not reallocate.
+        let mut buf = SolverStatistics {
+            retry_level_histogram: vec![0; src.retry_level_histogram.len()],
+            ..Default::default()
+        };
+        buf.copy_from(&src);
+
+        let ptr_before = buf.retry_level_histogram.as_ptr();
+        buf.copy_from(&src);
+        let ptr_after = buf.retry_level_histogram.as_ptr();
+
+        assert_eq!(
+            ptr_before, ptr_after,
+            "second copy_from must not reallocate the histogram"
+        );
+        assert_statistics_eq(&buf, &src);
     }
 
     fn make_fixture_stage_template() -> StageTemplate {
@@ -719,6 +860,14 @@ mod tests {
                 },
                 "num_row=2",
             ),
+            (
+                "BasisRowCountMismatch",
+                SolverError::BasisRowCountMismatch {
+                    lp_rows: 3,
+                    basis_rows: 2,
+                },
+                "lp_rows=3",
+            ),
         ];
 
         for (name, err, expected_text) in cases {
@@ -756,6 +905,10 @@ mod tests {
                 total_basic: 5,
                 col_basic: 3,
                 row_basic: 2,
+            },
+            SolverError::BasisRowCountMismatch {
+                lp_rows: 3,
+                basis_rows: 2,
             },
         ];
 

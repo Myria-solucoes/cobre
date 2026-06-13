@@ -15,7 +15,7 @@ common problems from the output data.
 
 ## Convergence Diagnostics
 
-### Reading the gap from `training/_manifest.json`
+### Reading the gap from `training/metadata.json`
 
 The manifest is the first place to check after any run. The key fields for
 convergence assessment are:
@@ -58,7 +58,7 @@ on the decision being made and the study's time horizon. As rough guidance:
    bound estimate per iteration.
 3. Check `training/convergence.parquet` (see next section) to see whether
    the gap is still decreasing or has plateaued.
-4. Check for solver infeasibilities: if `simulation/_manifest.json` shows
+4. Check for solver infeasibilities: if `simulation/metadata.json` shows
    failed scenarios, the policy may be encountering numerically difficult
    stages.
 
@@ -69,21 +69,22 @@ on the decision being made and the study's time horizon. As rough guidance:
 `training/convergence.parquet` contains one row per training iteration with
 the full convergence history. Its schema:
 
-| Column             | Type    | Description                                                 |
-| ------------------ | ------- | ----------------------------------------------------------- |
-| `iteration`        | INT32   | Iteration number (1-based)                                  |
-| `lower_bound`      | FLOAT64 | Optimizer's proven lower bound on the expected cost         |
-| `upper_bound_mean` | FLOAT64 | Statistical upper bound estimate (mean over forward passes) |
-| `upper_bound_std`  | FLOAT64 | Standard deviation of the upper bound estimate              |
-| `gap_percent`      | FLOAT64 | Relative gap as a percentage (null when lower_bound <= 0)   |
-| `cuts_added`       | INT32   | Cuts added to the pool in this iteration                    |
-| `cuts_removed`     | INT32   | Cuts removed by the cut selection strategy                  |
-| `cuts_active`      | INT64   | Total active cuts across all stages after this iteration    |
-| `time_forward_ms`  | INT64   | Wall-clock time for the forward pass in milliseconds        |
-| `time_backward_ms` | INT64   | Wall-clock time for the backward pass in milliseconds       |
-| `time_total_ms`    | INT64   | Total wall-clock time for the iteration in milliseconds     |
-| `forward_passes`   | INT32   | Number of forward pass scenarios in this iteration          |
-| `lp_solves`        | INT64   | Cumulative LP solves up to this iteration                   |
+| Column             | Type    | Description                                                                            |
+| ------------------ | ------- | -------------------------------------------------------------------------------------- |
+| `iteration`        | INT32   | Iteration number (1-based)                                                             |
+| `lower_bound`      | FLOAT64 | Optimizer's proven lower bound on the expected cost                                    |
+| `upper_bound_mean` | FLOAT64 | Statistical upper bound estimate (mean over forward passes)                            |
+| `upper_bound_std`  | FLOAT64 | Standard deviation of the upper bound estimate                                         |
+| `gap_percent`      | FLOAT64 | Relative gap as a percentage (null when lower_bound <= 0)                              |
+| `cuts_added`       | INT32   | Cuts added to the pool in this iteration                                               |
+| `cuts_removed`     | INT32   | Cuts removed by the cut selection strategy                                             |
+| `cuts_active`      | INT64   | Total active cuts across all stages after this iteration                               |
+| `time_forward_ms`  | INT64   | Wall-clock time for the forward pass in milliseconds                                   |
+| `time_backward_ms` | INT64   | Wall-clock time for the backward pass in milliseconds                                  |
+| `time_total_ms`    | INT64   | Total wall-clock time for the iteration in milliseconds                                |
+| `forward_passes`   | INT32   | Number of forward pass scenarios in this iteration                                     |
+| `lp_solves`        | INT64   | Cumulative LP solves up to this iteration                                              |
+| `mean_rows_in_lp`  | FLOAT64 | Mean cuts loaded per LP solve this iteration under dynamic cut selection (0 otherwise) |
 
 ### Python (Polars)
 

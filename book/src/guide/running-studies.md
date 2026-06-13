@@ -58,7 +58,7 @@ cobre run /path/to/my_study --output /path/to/results
 
 ### Lifecycle Stages
 
-1. **Load** — reads input files, runs 5-layer validation (exits code 1 on validation failure, 2 on I/O error)
+1. **Load** — reads input files, runs layered validation (exits code 1 on validation failure, 2 on I/O error)
 2. **Train** — builds the SDDP policy by iterating forward/backward passes; stops when stopping rules are met
 3. **Simulate** — (optional) evaluates the policy over independent scenarios; requires `simulation.enabled = true`
 4. **Write** — writes Hive-partitioned Parquet (tabular), JSON manifests/metadata, and FlatBuffers output

@@ -4,11 +4,11 @@
 //! and asserts the result is below the 1-ms threshold mandated by design
 //! section 1.
 //!
-//! **Unconditionally ignored at ticket-010**: the initial 1-ms threshold
+//! **Unconditionally ignored**: the initial 1-ms threshold
 //! was observed to be tight on the dev host (median ~1.5 ms at 8 threads
-//! on a 16-core Xeon Platinum 8259CL). Threshold tuning is deferred to
-//! ticket-011, which sweeps `M_BLOCK` and finalises both the kernel
-//! configuration and the perf-guard value. Once ticket-011 lands, this
+//! on a 16-core Xeon Platinum 8259CL). Threshold tuning is deferred to a
+//! later `M_BLOCK` sweep that finalises both the kernel
+//! configuration and the perf-guard value. Once that sweep lands, this
 //! `#[ignore]` attribute should be replaced with the
 //! `slow-tests`-feature gate used elsewhere in this crate, and the
 //! threshold should be set to the post-sweep target.
@@ -70,7 +70,7 @@ fn make_states(m: usize, d: usize, seed: u64) -> Vec<f64> {
 }
 
 #[test]
-#[ignore = "perf threshold pending ticket-011 M_BLOCK sweep"]
+#[ignore = "perf threshold pending a later M_BLOCK sweep"]
 fn select_for_stage_aggregated_under_one_ms() {
     const K: usize = 945;
     const D: usize = 155;

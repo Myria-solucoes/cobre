@@ -9,7 +9,7 @@ cobre/crates/
 ├── cobre-io/           JSON/Parquet input, FlatBuffers/Parquet output
 ├── cobre-stochastic/   PAR(p) models, scenario generation
 ├── cobre-solver/       LP solver abstraction (HiGHS backend)
-├── cobre-comm/         Communication abstraction (MPI, TCP, shm, local)
+├── cobre-comm/         Communication abstraction (MPI, NUMA, shared-memory placeholder, local)
 ├── cobre-sddp/         SDDP training loop, simulation, cut management
 ├── cobre-cli/          Binary: run/validate/report/init/schema/summary/version
 ├── cobre-mcp/          Binary: MCP server for AI agent integration (reserved)
@@ -53,7 +53,7 @@ For the full dependency graph and crate responsibilities, see the [methodology r
 The ecosystem delivers a full SDDP training and simulation pipeline:
 
 - **Entity model and topology validation** (`cobre-core`)
-- **JSON/Parquet case loading** with 5-layer validation (`cobre-io`)
+- **JSON/Parquet case loading** with layered validation (`cobre-io`)
 - **LP solver abstraction** with HiGHS backend, warm-start basis management, and 12-level retry escalation (`cobre-solver`)
 - **Pluggable communication** with MPI and local backends, execution topology reporting, and SLURM integration (`cobre-comm`)
 - **PAR(p) inflow models** with deterministic correlated scenario generation, per-class sampling (InSample, OutOfSample, Historical, External), and inflow non-negativity enforcement (`cobre-stochastic`)
@@ -66,6 +66,6 @@ The ecosystem delivers a full SDDP training and simulation pipeline:
 - **Python bindings** via PyO3 with Arrow zero-copy result loading (`cobre-python`)
 - **JSON Schema** files for all input types, hosted for `$schema` editor integration
 
-The workspace is verified by over 3,450 tests, including 27 deterministic
-regression cases (D01--D16, D19--D27) and 2 cut selection integration tests
-(D17--D18).
+The workspace is verified by over 3,450 tests, including 29 deterministic
+example regression cases (D01--D17, D19--D30; the D18 index is reserved —
+no example directory exists, though an integration test covers that scenario).

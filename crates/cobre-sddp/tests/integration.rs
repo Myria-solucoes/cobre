@@ -214,9 +214,9 @@ impl MockSolver {
 }
 
 impl SolverInterface for MockSolver {
-    type Profile = cobre_solver::HighsProfile;
+    type Profile = cobre_solver::ActiveProfile;
 
-    fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
+    fn apply_profile(&mut self, _profile: &cobre_solver::ActiveProfile) {}
     fn solver_name_version(&self) -> String {
         "MockSolver 0.0.0".to_string()
     }
@@ -251,17 +251,13 @@ impl SolverInterface for MockSolver {
         SolverStatistics::default()
     }
 
+    fn statistics_into(&self, out: &mut SolverStatistics) {
+        *out = self.statistics();
+    }
+
     fn name(&self) -> &'static str {
         "MockIntegration"
     }
-
-    fn set_primal_feasibility_tolerance(&mut self, _tolerance: f64) {}
-
-    fn set_dual_feasibility_tolerance(&mut self, _tolerance: f64) {}
-
-    fn set_simplex_iteration_limit_profile(&mut self, _limit: u32) {}
-
-    fn set_ipm_iteration_limit_profile(&mut self, _limit: u32) {}
 }
 
 /// Mock solver that returns a zero-filled dual slice matching the current row count.
@@ -290,9 +286,9 @@ impl ExpandingMockSolver {
 }
 
 impl SolverInterface for ExpandingMockSolver {
-    type Profile = cobre_solver::HighsProfile;
+    type Profile = cobre_solver::ActiveProfile;
 
-    fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
+    fn apply_profile(&mut self, _profile: &cobre_solver::ActiveProfile) {}
     fn solver_name_version(&self) -> String {
         "ExpandingMockSolver 0.0.0".to_string()
     }
@@ -337,17 +333,13 @@ impl SolverInterface for ExpandingMockSolver {
         SolverStatistics::default()
     }
 
+    fn statistics_into(&self, out: &mut SolverStatistics) {
+        *out = self.statistics();
+    }
+
     fn name(&self) -> &'static str {
         "ExpandingMock"
     }
-
-    fn set_primal_feasibility_tolerance(&mut self, _tolerance: f64) {}
-
-    fn set_dual_feasibility_tolerance(&mut self, _tolerance: f64) {}
-
-    fn set_simplex_iteration_limit_profile(&mut self, _limit: u32) {}
-
-    fn set_ipm_iteration_limit_profile(&mut self, _limit: u32) {}
 }
 
 /// Build a `StochasticContext` with `n_stages` stages, 1 hydro, and seed 42.
@@ -545,7 +537,15 @@ const FCF_CAPACITY_ITERATIONS: u64 = 50;
 
 impl Fixture {
     fn new(n_stages: usize) -> Self {
-        let indexer = StageIndexer::new(1, 0); // N=1, L=0
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            // Finalize as production setup does: full-order mask + state→LP-column map.
+            let lag_counts = vec![ix.max_par_order; ix.hydro_count];
+            let anticipated_k = ix.anticipated_lead_stages.clone();
+            ix.set_nonzero_mask(&lag_counts, &anticipated_k);
+            ix.finalize_state_column_map();
+            ix
+        }; // N=1, L=0
         let templates = vec![minimal_template(); n_stages];
         // base_row = n_dual_relevant + n_hydros = 1 + 1 = 2 (z_inflow rows follow state rows)
         let base_rows = vec![2usize; n_stages];
@@ -639,7 +639,9 @@ fn run_one_deterministic_pass(
             external_ncs_library: None,
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
+            dcs: None,
             stages: &[],
+            noise_key_diag: None,
         },
         &StubComm,
         || Ok(MockSolver::with_fixed(50.0)),
@@ -719,7 +721,9 @@ fn train_converges_with_mock_solver() {
             external_ncs_library: None,
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
+            dcs: None,
             stages: &[],
+            noise_key_diag: None,
         },
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
@@ -829,7 +833,9 @@ fn train_lb_monotonically_nondecreasing() {
             external_ncs_library: None,
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
+            dcs: None,
             stages: &[],
+            noise_key_diag: None,
         },
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
@@ -930,7 +936,9 @@ fn train_emits_correct_event_sequence() {
             external_ncs_library: None,
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
+            dcs: None,
             stages: &[],
+            noise_key_diag: None,
         },
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
@@ -1036,7 +1044,9 @@ fn train_stops_at_iteration_limit() {
             external_ncs_library: None,
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
+            dcs: None,
             stages: &[],
+            noise_key_diag: None,
         },
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
@@ -1126,7 +1136,9 @@ fn train_stops_on_graceful_shutdown() {
             external_ncs_library: None,
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
+            dcs: None,
             stages: &[],
+            noise_key_diag: None,
         },
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
@@ -1206,7 +1218,9 @@ fn train_propagates_infeasible_error() {
             external_ncs_library: None,
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
+            dcs: None,
             stages: &[],
+            noise_key_diag: None,
         },
         &comm,
         || Ok(MockSolver::infeasible_on_first()),
@@ -1231,8 +1245,8 @@ fn train_propagates_infeasible_error() {
 ///
 /// Verifies that enabling `CutSelectionStrategy::Level1 { check_frequency: 2,
 /// tie_tolerance: 1e-10 }` does not break convergence. With the stub kernel,
-/// no cuts are deactivated by Level1 selection (ticket-002 will implement the
-/// value-based kernel).
+/// no cuts are deactivated by Level1 selection (the value-based kernel that
+/// drives deactivation lives elsewhere).
 ///
 /// Checks:
 /// - Lower bound is monotone non-decreasing.
@@ -1313,7 +1327,9 @@ fn d17_level1_cut_selection_convergence() {
             external_ncs_library: None,
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
+            dcs: None,
             stages: &[],
+            noise_key_diag: None,
         },
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
@@ -1471,7 +1487,9 @@ fn d17_level1_cut_selection_reconstruction() {
             external_ncs_library: None,
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
+            dcs: None,
             stages: &[],
+            noise_key_diag: None,
         },
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
@@ -1499,8 +1517,8 @@ fn d17_level1_cut_selection_reconstruction() {
 ///
 /// Verifies that enabling `CutSelectionStrategy::Lml1 { check_frequency: 2,
 /// tie_tolerance: 1e-10 }` does not break convergence. With the stub kernel,
-/// no cuts are deactivated by Lml1 selection (ticket-002 will implement the
-/// value-based kernel).
+/// no cuts are deactivated by Lml1 selection (the value-based kernel that
+/// drives deactivation lives elsewhere).
 ///
 /// Checks:
 /// - Lower bound is monotone non-decreasing.
@@ -1581,7 +1599,9 @@ fn d18_lml1_cut_selection_convergence() {
             external_ncs_library: None,
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
+            dcs: None,
             stages: &[],
+            noise_key_diag: None,
         },
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
@@ -1659,8 +1679,8 @@ fn test_forward_basis_reconstruct_bit_identical_d01() {
     use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
     use cobre_core::scenario::ScenarioSource;
     use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic};
+    use cobre_solver::ActiveSolver;
     use cobre_solver::SolverInterface;
-    use cobre_solver::highs::HighsSolver;
 
     struct LocalStubComm;
 
@@ -1719,10 +1739,10 @@ fn test_forward_basis_reconstruct_bit_identical_d01() {
         StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup must build");
 
     let comm = LocalStubComm;
-    let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
 
     let outcome = setup
-        .train(&mut solver, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
         .expect("train must return Ok");
     assert!(outcome.error.is_none(), "expected no training error");
 
@@ -1819,7 +1839,9 @@ fn baked_backward_pass_smoke_test() {
             external_ncs_library: None,
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
+            dcs: None,
             stages: &[],
+            noise_key_diag: None,
         },
         &StubComm,
         || Ok(ExpandingMockSolver::with_objectives(vec![50.0])),

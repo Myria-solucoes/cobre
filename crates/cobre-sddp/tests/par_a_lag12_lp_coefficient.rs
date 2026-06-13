@@ -247,7 +247,7 @@ fn build_par_a_fixture() -> (cobre_core::System, PrecomputedPar) {
     // -----------------------------------------------------------------------
     // Build PrecomputedPar
     // -----------------------------------------------------------------------
-    let par_lp = PrecomputedPar::build(&all_inflow_models, &study_stages, &hydro_ids)
+    let par_lp = PrecomputedPar::build(&all_inflow_models, &study_stages, &hydro_ids, None)
         .expect("PrecomputedPar::build must succeed for a valid PAR(2)-A fixture");
 
     // -----------------------------------------------------------------------
@@ -482,7 +482,7 @@ fn build_classical_fixture() -> (cobre_core::System, PrecomputedPar) {
         }
     }
 
-    let par_lp = PrecomputedPar::build(&all_inflow_models, &study_stages, &hydro_ids)
+    let par_lp = PrecomputedPar::build(&all_inflow_models, &study_stages, &hydro_ids, None)
         .expect("PrecomputedPar::build must succeed for a classical PAR(2) fixture");
 
     let hydro_bounds_default = HydroStageBounds {

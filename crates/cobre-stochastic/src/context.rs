@@ -79,7 +79,7 @@ use crate::{
     sampling::historical::HistoricalScenarioLibrary,
     tree::{
         generate::{ClassDimensions, OpeningTreeGenerationInputs, generate_opening_tree},
-        opening_tree::OpeningTreeView,
+        opening_tree::{OpeningTreeView, SweepDirection},
     },
 };
 
@@ -267,6 +267,27 @@ impl StochasticContext {
         self.opening_tree.view()
     }
 
+    /// Install a per-stage opening solve order on the owned opening tree.
+    ///
+    /// Forwards to [`OpeningTree::set_solve_order`]: `keys[s]` holds one scalar key
+    /// per canonical opening ω of stage `s`, and each stage's openings are sorted
+    /// by that key in `direction` (ties broken by ascending canonical ω). The keys
+    /// are caller-computed from setup-constant data, so the resulting order is
+    /// run-constant and identical across processes handed the same keys.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`StochasticError::InsufficientData`]
+    /// when the key table's stage count or any stage's key count does not match
+    /// the tree.
+    pub fn set_solve_order(
+        &mut self,
+        keys: &[Vec<f64>],
+        direction: SweepDirection,
+    ) -> Result<(), crate::StochasticError> {
+        self.opening_tree.set_solve_order(keys, direction)
+    }
+
     /// Returns the base seed used to generate the opening tree.
     #[must_use]
     pub fn base_seed(&self) -> u64 {
@@ -385,6 +406,13 @@ impl StochasticContext {
 ///   is not positive-definite.
 ///
 /// [`LoadModel`]: cobre_core::scenario::LoadModel
+// Rationale: this function assembles all stochastic sub-contexts (inflow, load,
+// NCS availability, opening-tree) in a single ordered pass over validated system
+// inputs. The sequencing — PAR validation, stage filtering, entity-ID collection,
+// per-class scenario-count reconciliation, noise-group wiring, and correlation
+// matrix decomposition — is itself the observable contract; extracting sub-steps
+// into helpers would require passing the same partially-built context state through
+// every call, obscuring the dependency order without reducing real complexity.
 #[allow(clippy::too_many_lines)]
 pub fn build_stochastic_context(
     system: &System,
@@ -470,7 +498,13 @@ pub fn build_stochastic_context(
         }
     };
 
-    let par_lp = PrecomputedPar::build(system.inflow_models(), &study_stages, &hydro_ids)?;
+    let cycle_len = system
+        .policy_graph()
+        .season_map
+        .as_ref()
+        .map(|sm| sm.seasons.len());
+    let par_lp =
+        PrecomputedPar::build(system.inflow_models(), &study_stages, &hydro_ids, cycle_len)?;
 
     let correlation = if dim == 0 || system.correlation().profiles.is_empty() {
         DecomposedCorrelation::empty()

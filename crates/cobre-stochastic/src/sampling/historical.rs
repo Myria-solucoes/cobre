@@ -358,6 +358,13 @@ impl HistoricalScenarioLibrary {
 /// Panics in debug builds if dimension mismatches between `library`, `par`,
 /// `stages`, or `stage_lag_transitions` are detected. Does not panic for valid
 /// inputs where all windows were pre-validated.
+// Rationale: the function maintains shared mutable lag-state and accumulator
+// buffers that advance through the (window × stage × entity) triple loop; the
+// observation-table build, the past-inflows digest computation, and the
+// lag-accumulation and finalize-and-shift steps within the stage loop all share
+// these structures and must execute in sequence within the same pass, making
+// extraction into helpers impractical without threading multiple mutable buffers
+// across call boundaries.
 #[allow(clippy::too_many_lines)]
 pub fn standardize_historical_windows(
     library: &mut HistoricalScenarioLibrary,
@@ -1011,7 +1018,7 @@ mod tests {
                 annual: None,
             },
         ];
-        let par = PrecomputedPar::build(&models, &stages, &[hydro]).unwrap();
+        let par = PrecomputedPar::build(&models, &stages, &[hydro], None).unwrap();
 
         // Observations at window_year=1990, season 0 (Jan) and season 1 (Feb).
         let history = vec![
@@ -1089,7 +1096,7 @@ mod tests {
                 annual: None,
             })
             .collect();
-        let par = PrecomputedPar::build(&models, &stages, &[hydro]).unwrap();
+        let par = PrecomputedPar::build(&models, &stages, &[hydro], None).unwrap();
 
         // Verify precomputed values: psi_orig = 0.5 * 25/25 = 0.5;
         // base = 160 - 0.5*160 = 80; sigma = 25.
@@ -1215,7 +1222,7 @@ mod tests {
                 annual: None,
             },
         ];
-        let par = PrecomputedPar::build(&models, &stages, &[h1, h2]).unwrap();
+        let par = PrecomputedPar::build(&models, &stages, &[h1, h2], None).unwrap();
 
         // Observations at year=window_year (year_offset=0 for both stages).
         let history = vec![
@@ -1288,7 +1295,7 @@ mod tests {
             residual_std_ratio: 1.0,
             annual: None,
         }];
-        let par = PrecomputedPar::build(&models, &stages, &[hydro]).unwrap();
+        let par = PrecomputedPar::build(&models, &stages, &[hydro], None).unwrap();
 
         // n_seasons=1, max_order=0: full_sequence = [(0,0)].
         // Observation at (window_year + 0, season 0) = (2000, month 0 = Jan 2000).
@@ -1532,7 +1539,7 @@ mod tests {
                 annual: None,
             },
         ];
-        let par = PrecomputedPar::build(&models, &stages, &[hydro]).unwrap();
+        let par = PrecomputedPar::build(&models, &stages, &[hydro], None).unwrap();
 
         // Observations at window_year=2000, seasons 0 (Jan) and 1 (Feb).
         let history = vec![
@@ -1671,7 +1678,7 @@ mod tests {
                 annual: None,
             })
             .collect();
-        let par = PrecomputedPar::build(&models, &stages, &[hydro]).unwrap();
+        let par = PrecomputedPar::build(&models, &stages, &[hydro], None).unwrap();
 
         let sm = quarterly_season_map();
 
@@ -1776,7 +1783,7 @@ mod tests {
             residual_std_ratio: 1.0,
             annual: None,
         }];
-        let par = PrecomputedPar::build(&models, &stages, &[hydro]).unwrap();
+        let par = PrecomputedPar::build(&models, &stages, &[hydro], None).unwrap();
 
         // Observation at (window_year=1995, season 0 = Jan) via month0() = 0.
         let history = vec![make_row(hydro, 1995, 0, 110.0)];
@@ -1863,7 +1870,7 @@ mod tests {
                 });
             }
         }
-        let par = PrecomputedPar::build(&models, &stages, &[h1, h2]).unwrap();
+        let par = PrecomputedPar::build(&models, &stages, &[h1, h2], None).unwrap();
 
         let sm = quarterly_season_map();
 

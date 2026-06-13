@@ -74,6 +74,9 @@ pub(crate) struct ParsedData {
     ///
     /// Global defaults are already embedded in entity structs by the parsers;
     /// this field is retained for Layer 5 penalty-ordering checks.
+    // Rationale: the per-entity parsers embed these defaults for resolution, but the
+    // Layer 5 penalty-ordering check needs the original global values; retaining the
+    // parsed field here avoids re-reading `penalties.json` when that check runs.
     #[allow(dead_code)]
     pub(crate) penalties: GlobalPenaltyDefaults,
     /// Parsed `stages.json`.
@@ -111,6 +114,9 @@ pub(crate) struct ParsedData {
     ///
     /// Loaded before `constraints/generic_constraints.json` so that `@name`
     /// sigils in constraint expressions can be resolved during Layer 2.
+    // Rationale: the field is populated by the schema-validation layer for the expression-resolution
+    // step that substitutes `@name` sigils in constraint expressions; removing it would discard
+    // the parsed data and require re-parsing from disk at that step.
     #[allow(dead_code)]
     pub(crate) scalar_parameters: Vec<ScalarParameter>,
 
@@ -154,6 +160,9 @@ pub(crate) struct ParsedData {
     /// Parsed `constraints/exchange_factors.json`. Empty when absent.
     ///
     /// Parsed for schema validation; not yet forwarded to `System`.
+    // Rationale: the field is populated by the schema-validation layer to confirm the file
+    // parses correctly against the schema; dropping the field would silently skip schema
+    // validation for this file when no consumer is present.
     #[allow(dead_code)]
     pub(crate) exchange_factors: Vec<ExchangeFactorEntry>,
     /// Parsed `constraints/generic_constraints.json`. Empty when absent.
@@ -185,36 +194,43 @@ pub(crate) struct ParsedData {
 /// - [`LoadError::SchemaError`] maps to [`ErrorKind::SchemaViolation`].
 /// - All other variants map to [`ErrorKind::SchemaViolation`] as a safe
 ///   fallback (they should not occur in Layer 2).
+///
+/// The entry `message` carries only the path-free detail of each variant: the
+/// `ValidationEntry.file` field already holds `relative_path`, and the report
+/// renderer prefixes that path. Embedding the variant's full `Display` (which
+/// repeats the file path) would surface the same path twice in the combined
+/// message — relative as the prefix, absolute inside the `Display`.
 fn map_load_error(err: &LoadError, relative_path: &str, ctx: &mut ValidationContext) {
     match err {
-        LoadError::IoError { .. } => {
+        LoadError::IoError { source, .. } => {
             ctx.add_error(
                 ErrorKind::FileNotFound,
                 relative_path,
                 None::<&str>,
-                err.to_string(),
+                source.to_string(),
             );
         }
-        LoadError::ParseError { .. } => {
+        LoadError::ParseError { message, .. } => {
             ctx.add_error(
                 ErrorKind::ParseError,
                 relative_path,
                 None::<&str>,
-                err.to_string(),
+                format!("parse error: {message}"),
             );
         }
-        LoadError::SchemaError { .. } => {
+        LoadError::SchemaError { field, message, .. } => {
             ctx.add_error(
                 ErrorKind::SchemaViolation,
                 relative_path,
                 None::<&str>,
-                err.to_string(),
+                format!("field {field}: {message}"),
             );
         }
         _ => {
             // CrossReferenceError, ConstraintError, PolicyIncompatible should
             // not arise from individual file parsers in Layer 2, but map
-            // conservatively to SchemaViolation.
+            // conservatively to SchemaViolation. These variants do not embed
+            // `relative_path` as a prefix, so their full Display is safe here.
             ctx.add_error(
                 ErrorKind::SchemaViolation,
                 relative_path,
@@ -248,6 +264,11 @@ fn map_load_error(err: &LoadError, relative_path: &str, ctx: &mut ValidationCont
 /// * `case_root` — path to the case directory root.
 /// * `manifest`  — output from [`crate::validation::structural::validate_structure`].
 /// * `ctx`        — mutable validation context that accumulates diagnostics.
+// Rationale: every optional file in the manifest must be attempted in a single
+// sequential pass so that all parse and schema errors are collected before the
+// function returns; splitting the file-loading into smaller helpers would either
+// require threading `ctx` through many call boundaries or short-circuit on the
+// first failure, both of which violate the all-errors-collected contract.
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub(crate) fn validate_schema(
@@ -282,7 +303,6 @@ pub(crate) fn validate_schema(
         ctx,
     );
 
-    //
     // parse_buses, parse_hydros, parse_lines, and parse_non_controllable_sources
     // require a `&GlobalPenaltyDefaults`. We use the parsed penalties when
     // available, or a sentinel when penalties failed to parse (so that remaining

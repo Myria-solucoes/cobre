@@ -17,12 +17,12 @@ If you have not installed Cobre yet, start with [Installation](../guide/installa
 cobre init --template 1dtoy my_first_study
 ```
 
-Cobre writes 10 input files into a new `my_first_study/` directory and prints a
+Cobre writes 11 input files into a new `my_first_study/` directory and prints a
 summary to stderr:
 
 ```
  ━━━━━━━━━━━●
- ━━━━━━━━━━━●⚡  COBRE v0.8.0
+ ━━━━━━━━━━━●⚡  COBRE v0.8.1
  ━━━━━━━━━━━●   Power systems in Rust
 
 Created my_first_study case directory from template '1dtoy':
@@ -33,6 +33,7 @@ Created my_first_study case directory from template '1dtoy':
   ✔ stages.json                    Planning horizon definition: policy graph type, discount rate, stage dates, time blocks, and scenario counts
   ✔ system/buses.json              Electrical bus definitions with deficit cost segments
   ✔ system/hydros.json             Hydro plant definitions: reservoir bounds, outflow limits, turbine model, and generation limits
+  ✔ system/hydro_production_models.json  Per-(hydro, stage) production-model configuration carrying the productivity coefficient
   ✔ system/lines.json              Transmission line definitions (empty in this single-bus example)
   ✔ system/thermals.json           Thermal plant definitions with piecewise cost segments and generation bounds
   ✔ scenarios/inflow_seasonal_stats.parquet  Seasonal PAR(p) statistics for hydro inflow scenario generation (mean, std, lag correlations)
@@ -54,6 +55,7 @@ my_first_study/
   system/
     buses.json
     hydros.json
+    hydro_production_models.json
     lines.json
     thermals.json
   scenarios/
@@ -69,7 +71,7 @@ my_first_study/
 cobre validate my_first_study
 ```
 
-The validation pipeline checks all five layers — schema, references, physical
+The validation pipeline checks all layers — schema, references, physical
 feasibility, stochastic consistency, and solver feasibility — and prints entity
 counts on success:
 
@@ -97,38 +99,45 @@ a simulation pass (100 scenarios). Output is written to `my_first_study/results/
 The banner, a progress bar, and a post-run summary are printed to stderr:
 
 ```
- ━━━━━━━━━━━●
- ━━━━━━━━━━━●⚡  COBRE v0.8.0
- ━━━━━━━━━━━●   Power systems in Rust
+Training complete in 0.5s (128 iterations, iteration_limit)
+  Lower bound:  1.55955e7 $/stage
+  Upper bound:  5.79592e5 +/- 0.00000e0 $/stage
+  Gap:          -2590.8% (started at 70.5%)
+  Policy rows:  384 active / 384 generated
+  LP solves:    5632 (5632 first-try, 0 retried, 0 failed)
 
-Training complete in 3.2s (128 iterations, converged at iter 94)
-  Lower bound:  142.3 $/stage
-  Upper bound:  143.1 +/- 1.2 $/stage
-  Gap:          0.6%
-  Cuts:         94 active / 94 generated
-  LP solves:    512 (512 first-try, 0 retried, 0 failed)
-  LP time:      1.2s total, 2.3ms avg
-  Basis reuse:  100.0% hit (0 rejections / 510 offered)
-  Simplex iter: 2048
-
-Simulation complete (100 scenarios)
+Simulation complete in 0.6s (100 scenarios)
   Completed: 100  Failed: 0
-  LP solves:    400 (400 first-try, 0 retried, 0 failed)
-  LP time:      0.8s total, 2.0ms avg
-  Simplex iter: 3200
 
 Output written to my_first_study/results/
 ```
 
-Exact numerical values (bounds, gap, cut counts, timing) will vary across runs
-because scenario sampling is stochastic. The gap and iteration count depend on the
-random seed and the convergence tolerance configured in `config.json`.
+> **Why is the gap a large negative number?**
+> The 1dtoy config uses `forward_passes: 1`, which means each training iteration
+> draws a single scenario trajectory for the upper-bound estimate. A single scenario
+> is an extremely noisy sample of the true expected cost — one unlucky trajectory
+> can land far below the lower bound, driving the gap deeply negative. This is
+> expected behavior, not a solver error. The gap only becomes well-behaved and
+> stable when training runs with many forward passes (typically 10 or more), because
+> averaging over more scenarios produces a reliable upper-bound estimate. The 1dtoy
+> template keeps `forward_passes: 1` for speed; in a production study you would
+> increase this value and add a convergence-based stopping rule so training halts
+> when the gap truly stabilizes.
 
-The results directory contains Hive-partitioned Parquet files for costs, hydro
-dispatch, thermal dispatch, and bus balance, plus a FlatBuffers policy checkpoint:
+Exact numerical values (bounds, gap, policy row counts, timing) will vary across
+runs because scenario sampling is stochastic. The gap and iteration count depend on
+the random seed and the convergence tolerance configured in `config.json`.
+
+The results directory contains training convergence data, a FlatBuffers policy
+checkpoint, and Hive-partitioned Parquet files for simulation dispatch results:
 
 ```
 my_first_study/results/
+  training/
+    metadata.json
+    convergence.parquet
+    dictionaries/
+    timing/
   policy/
     cuts/
       stage_000.bin  ...  stage_003.bin
@@ -136,6 +145,7 @@ my_first_study/results/
       stage_000.bin  ...  stage_003.bin
     metadata.json
   simulation/
+    metadata.json
     costs/
     hydros/
     thermals/

@@ -30,7 +30,7 @@ use cobre_core::{
     },
 };
 use cobre_solver::{
-    Basis, HighsProfile, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
+    ActiveProfile, Basis, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
 };
 use cobre_stochastic::{
     ClassSchemes, OpeningTreeInputs, StochasticContext, build_stochastic_context,
@@ -119,9 +119,9 @@ impl MockSolver {
 }
 
 impl SolverInterface for MockSolver {
-    type Profile = HighsProfile;
+    type Profile = ActiveProfile;
 
-    fn apply_profile(&mut self, _profile: &HighsProfile) {}
+    fn apply_profile(&mut self, _profile: &ActiveProfile) {}
 
     fn solver_name_version(&self) -> String {
         "MockSolver 0.0.0".to_string()
@@ -130,11 +130,6 @@ impl SolverInterface for MockSolver {
     fn add_rows(&mut self, _cuts: &RowBatch) {}
     fn set_row_bounds(&mut self, _indices: &[usize], _lower: &[f64], _upper: &[f64]) {}
     fn set_col_bounds(&mut self, _indices: &[usize], _lower: &[f64], _upper: &[f64]) {}
-    fn set_primal_feasibility_tolerance(&mut self, _v: f64) {}
-    fn set_dual_feasibility_tolerance(&mut self, _v: f64) {}
-    fn set_simplex_iteration_limit_profile(&mut self, _v: u32) {}
-    fn set_ipm_iteration_limit_profile(&mut self, _v: u32) {}
-
     fn solve(
         &mut self,
         _basis: Option<&Basis>,
@@ -156,6 +151,10 @@ impl SolverInterface for MockSolver {
 
     fn statistics(&self) -> SolverStatistics {
         SolverStatistics::default()
+    }
+
+    fn statistics_into(&self, out: &mut SolverStatistics) {
+        *out = self.statistics();
     }
 
     fn name(&self) -> &'static str {
@@ -355,7 +354,15 @@ const FCF_CAPACITY_ITERATIONS: u64 = 50;
 
 impl Fixture {
     fn new(n_stages: usize) -> Self {
-        let indexer = StageIndexer::new(1, 0); // N=1, L=0
+        let indexer = {
+            let mut ix = StageIndexer::new(1, 0);
+            // Finalize as production setup does: full-order mask + state→LP-column map.
+            let lag_counts = vec![ix.max_par_order; ix.hydro_count];
+            let anticipated_k = ix.anticipated_lead_stages.clone();
+            ix.set_nonzero_mask(&lag_counts, &anticipated_k);
+            ix.finalize_state_column_map();
+            ix
+        }; // N=1, L=0
         let templates = vec![minimal_template(); n_stages];
         // base_row: the AR-dynamics row offset is 1 (1 dual-relevant row)
         let base_rows = vec![2usize; n_stages];
@@ -622,7 +629,9 @@ fn train_simulate_write_cycle() {
             external_ncs_library: None,
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
+            dcs: None,
             stages: &[],
+            noise_key_diag: None,
         },
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
@@ -801,7 +810,9 @@ fn train_simulate_write_cycle() {
             external_ncs_library: None,
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
+            dcs: None,
             stages: &[],
+            noise_key_diag: None,
         },
         &sim_config,
         SimulationOutputSpec {
@@ -960,9 +971,9 @@ impl SizedMockSolver {
 }
 
 impl SolverInterface for SizedMockSolver {
-    type Profile = HighsProfile;
+    type Profile = ActiveProfile;
 
-    fn apply_profile(&mut self, _profile: &HighsProfile) {}
+    fn apply_profile(&mut self, _profile: &ActiveProfile) {}
 
     fn solver_name_version(&self) -> String {
         "MockSolver 0.0.0".to_string()
@@ -978,11 +989,6 @@ impl SolverInterface for SizedMockSolver {
 
     fn set_row_bounds(&mut self, _indices: &[usize], _lower: &[f64], _upper: &[f64]) {}
     fn set_col_bounds(&mut self, _indices: &[usize], _lower: &[f64], _upper: &[f64]) {}
-    fn set_primal_feasibility_tolerance(&mut self, _v: f64) {}
-    fn set_dual_feasibility_tolerance(&mut self, _v: f64) {}
-    fn set_simplex_iteration_limit_profile(&mut self, _v: u32) {}
-    fn set_ipm_iteration_limit_profile(&mut self, _v: u32) {}
-
     fn solve(
         &mut self,
         _basis: Option<&Basis>,
@@ -1001,6 +1007,10 @@ impl SolverInterface for SizedMockSolver {
 
     fn statistics(&self) -> SolverStatistics {
         SolverStatistics::default()
+    }
+
+    fn statistics_into(&self, out: &mut SolverStatistics) {
+        *out = self.statistics();
     }
 
     fn name(&self) -> &'static str {
@@ -1272,7 +1282,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
     let t0 = &templates_result.templates[0];
 
     // Build indexer matching the template layout.
-    let indexer = StageIndexer::with_equipment(
+    let mut indexer = StageIndexer::with_equipment(
         &cobre_sddp::indexer::EquipmentCounts {
             hydro_count: 1,
             max_par_order: 0,
@@ -1292,6 +1302,13 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
             planes_per_hydro: vec![],
         },
     );
+    // Finalize as production setup does: full-order mask + state→LP-column map.
+    {
+        let lag_counts = vec![indexer.max_par_order; indexer.hydro_count];
+        let anticipated_k = indexer.anticipated_lead_stages.clone();
+        indexer.set_nonzero_mask(&lag_counts, &anticipated_k);
+        indexer.finalize_state_column_map();
+    }
 
     assert!(indexer.has_operational_violations);
     assert!(!indexer.outflow_below_slack.is_empty());
@@ -1401,7 +1418,9 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
             external_ncs_library: None,
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
+            dcs: None,
             stages: &[],
+            noise_key_diag: None,
         },
         &StubComm,
         || Ok(SizedMockSolver::new(t0.num_cols, t0.num_rows)),
@@ -1483,7 +1502,9 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
             external_ncs_library: None,
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
+            dcs: None,
             stages: &[],
+            noise_key_diag: None,
         },
         &sim_config,
         SimulationOutputSpec {

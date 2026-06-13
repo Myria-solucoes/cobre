@@ -8,7 +8,7 @@
 //! 3. Declaration-order invariance for `OutOfSample`: entity ordering does not
 //!    affect the lower bound (bitwise identical results for both orderings).
 //!
-//! All tests use `StubComm` (single-rank) and `HighsSolver`.
+//! All tests use `StubComm` (single-rank) and `ActiveSolver`.
 
 #![allow(
     clippy::unwrap_used,
@@ -52,7 +52,7 @@ use cobre_sddp::{
     hydro_models::PrepareHydroModelsResult,
     setup::{ConstructionConfig, prepare_stochastic},
 };
-use cobre_solver::highs::HighsSolver;
+use cobre_solver::ActiveSolver;
 use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
 // ---------------------------------------------------------------------------
@@ -110,7 +110,7 @@ impl Communicator for StubComm {
 
 /// Run the SDDP training pipeline on a pre-loaded case directory.
 ///
-/// Uses `StubComm`, `HighsSolver`, seed 42, and 1 thread.
+/// Uses `StubComm`, `ActiveSolver`, seed 42, and 1 thread.
 /// Returns the `TrainingResult`.
 fn run_case_from_dir(case_dir: &Path) -> cobre_sddp::TrainingResult {
     use cobre_io::parse_config;
@@ -136,10 +136,10 @@ fn run_case_from_dir(case_dir: &Path) -> cobre_sddp::TrainingResult {
         StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup must build");
 
     let comm = StubComm;
-    let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
 
     let outcome = setup
-        .train(&mut solver, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
         .expect("train must return Ok");
     assert!(outcome.error.is_none(), "expected no training error");
     outcome.result
@@ -526,10 +526,10 @@ fn run_programmatic(
             .expect("StudySetup::from_broadcast_params must succeed");
 
     let comm = StubComm;
-    let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
 
     let outcome = setup
-        .train(&mut solver, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
         .expect("train must return Ok");
     assert!(outcome.error.is_none(), "expected no training error");
     outcome.result
@@ -855,9 +855,9 @@ fn run_with_setup(
             .expect("StudySetup::from_broadcast_params must succeed");
 
     let comm = StubComm;
-    let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
     let outcome = setup
-        .train(&mut solver, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
         .expect("train must return Ok");
     assert!(outcome.error.is_none(), "expected no training error");
     (setup, outcome.result)
@@ -1170,7 +1170,7 @@ fn forward_sampler_convergence_sweep() {
 }
 
 // ---------------------------------------------------------------------------
-// External load / NCS library population tests (F1-106)
+// External load / NCS library population tests
 // ---------------------------------------------------------------------------
 
 /// Generate `n_stages × n_scenarios` external load rows for a single bus.

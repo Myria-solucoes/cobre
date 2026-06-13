@@ -7,9 +7,8 @@
 //! - [`write_simulation_metadata`] — writes `simulation/metadata.json` capturing
 //!   run context and scenario completion counts.
 //!
-//! Both replace the previous split of `_manifest.json` + `metadata.json` with a
-//! single merged file per output directory. The `_SUCCESS` marker still signals
-//! completion; metadata files capture the run details.
+//! Each output directory gets a single merged metadata file. The `_SUCCESS`
+//! marker signals completion; metadata files capture the run details.
 //!
 //! All writers use an atomic write pattern: data is serialized to a `.tmp` file
 //! first, then atomically renamed to the target path. This prevents partial files
@@ -19,6 +18,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use super::atomic::write_bytes_atomic;
 use super::error::OutputError;
 
 // ── OutputContext ─────────────────────────────────────────────────────────────
@@ -32,7 +32,7 @@ use super::error::OutputError;
 pub struct OutputContext {
     /// Hostname of the machine that produced this output.
     pub hostname: String,
-    /// LP solver backend name (e.g. `"highs"`).
+    /// LP solver backend name (e.g. `"highs"` or `"clp"`).
     pub solver: String,
     /// LP solver version string (e.g. `"1.8.0"`), if known.
     pub solver_version: Option<String>,
@@ -79,8 +79,7 @@ pub struct HostLayout {
 /// Execution distribution information embedded in metadata files.
 ///
 /// Captures the communication backend, process topology, and optional
-/// MPI/scheduler metadata for reproducibility. Replaces the previous
-/// `MpiInfo` struct with richer environment context.
+/// MPI/scheduler metadata for reproducibility.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistributionInfo {
     /// Communication backend: `"mpi"` or `"local"`.
@@ -176,6 +175,18 @@ pub struct MetadataRowPool {
     /// Rows currently active in the LP at termination.
     #[serde(default)]
     pub cuts_active: u64,
+    /// Sum of resident rows-in-LP over every lazy-selection solve in the run
+    /// (reduced across ranks). With `rows_in_lp_solve_count`, the mean per solve.
+    /// Zero when no lazy selection ran. `serde(default)` for old-metadata reads.
+    #[serde(default)]
+    pub rows_in_lp_total: u64,
+    /// Number of lazy-selection solves in the run (reduced across ranks).
+    #[serde(default)]
+    pub rows_in_lp_solve_count: u64,
+    /// Largest resident rows-in-LP over any single lazy-selection solve
+    /// (reduced across ranks). Zero when no lazy selection ran.
+    #[serde(default)]
+    pub rows_in_lp_max: u64,
 }
 
 /// Final objective bounds embedded in [`TrainingMetadata`].
@@ -275,16 +286,15 @@ pub struct MetadataSimulationSolveStats {
 
 /// Merged metadata for the training output directory (`training/metadata.json`).
 ///
-/// Replaces the previous split of `training/_manifest.json` (convergence/cuts)
-/// and `training/metadata.json` (configuration/environment) with a single file
-/// containing all run information.
+/// A single file containing all run information: convergence, cuts,
+/// configuration, and environment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrainingMetadata {
     /// Version of the cobre crate that produced this output.
     pub cobre_version: String,
     /// Hostname of the machine that ran training.
     pub hostname: String,
-    /// LP solver backend name (e.g. `"highs"`).
+    /// LP solver backend name (e.g. `"highs"` or `"clp"`).
     pub solver: String,
     /// LP solver version string (e.g. `"1.8.0"`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -320,15 +330,13 @@ pub struct TrainingMetadata {
 // ── SimulationMetadata ───────────────────────────────────────────────────────
 
 /// Metadata for the simulation output directory (`simulation/metadata.json`).
-///
-/// Replaces the previous `simulation/_manifest.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimulationMetadata {
     /// Version of the cobre crate that produced this output.
     pub cobre_version: String,
     /// Hostname of the machine that ran simulation.
     pub hostname: String,
-    /// LP solver backend name (e.g. `"highs"`).
+    /// LP solver backend name (e.g. `"highs"` or `"clp"`).
     pub solver: String,
     /// LP solver version string (e.g. `"1.8.0"`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -421,16 +429,16 @@ fn write_json_atomic<T: Serialize>(
     value: &T,
     manifest_type: &str,
 ) -> Result<(), OutputError> {
+    // Serialize here (not via the shared JSON helper) to keep the
+    // `ManifestError` failure variant this writer's callers expect; the bytes
+    // produced are identical to the shared helper's pretty output. The shared
+    // helper then owns the crash-safe write (flush before rename).
     let json = serde_json::to_string_pretty(value).map_err(|e| OutputError::ManifestError {
         manifest_type: manifest_type.to_string(),
         message: e.to_string(),
     })?;
 
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, &json).map_err(|e| OutputError::io(&tmp, e))?;
-    std::fs::rename(&tmp, path).map_err(|e| OutputError::io(path, e))?;
-
-    Ok(())
+    write_bytes_atomic(path, json.as_bytes())
 }
 
 #[cfg(test)]
@@ -499,6 +507,9 @@ mod tests {
                 total_active: 980_000,
                 peak_active: 1_100_000,
                 cuts_active: 980_000,
+                rows_in_lp_total: 0,
+                rows_in_lp_solve_count: 0,
+                rows_in_lp_max: 0,
             },
             bounds: MetadataBounds {
                 final_lower_bound: 48_500.0,

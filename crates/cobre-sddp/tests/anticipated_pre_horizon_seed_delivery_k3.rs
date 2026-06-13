@@ -113,7 +113,7 @@ use cobre_io::config::{
     TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
 use cobre_sddp::{StudySetup, hydro_models::PrepareHydroModelsResult};
-use cobre_solver::highs::HighsSolver;
+use cobre_solver::ActiveSolver;
 use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
 // ---------------------------------------------------------------------------
@@ -563,12 +563,12 @@ fn pre_horizon_seed_delivers_three_pre_horizon_stages_k3() {
     let config = build_config();
     let mut setup = build_setup(system, &config);
     let comm = StubComm;
-    let mut solver = HighsSolver::new().expect("HighsSolver::new");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
 
     // Step 1: train for 5 iterations so cuts sharpen and stage-2 decisions reach max_gen.
     // (This covers stage-5 delivery at zero backup cost, satisfying AC6 bound.)
     let outcome = setup
-        .train(&mut solver, &comm, 5, HighsSolver::new, None, None)
+        .train(&mut solver, &comm, 5, ActiveSolver::new, None, None)
         .expect("train: must not return Err");
     assert!(
         outcome.error.is_none(),
@@ -578,7 +578,7 @@ fn pre_horizon_seed_delivers_three_pre_horizon_stages_k3() {
 
     // Step 2: run a single deterministic simulation.
     let mut pool = setup
-        .create_workspace_pool(&comm, 1, HighsSolver::new)
+        .create_workspace_pool(&comm, 1, ActiveSolver::new)
         .expect("create_workspace_pool: must succeed");
     let io_capacity = setup.simulation_config.io_channel_capacity.max(1);
     let (result_tx, result_rx) = mpsc::sync_channel(io_capacity);

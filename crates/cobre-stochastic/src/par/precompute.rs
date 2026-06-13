@@ -137,7 +137,7 @@ fn resolve_season_id(stage_id: i32, n_seasons: usize, season_offset: usize) -> u
 ///     annual: None,
 /// };
 ///
-/// let lp = PrecomputedPar::build(&[model], &[stage], &[EntityId(1)]).unwrap();
+/// let lp = PrecomputedPar::build(&[model], &[stage], &[EntityId(1)], None).unwrap();
 /// assert_eq!(lp.n_stages(), 1);
 /// assert_eq!(lp.n_hydros(), 1);
 /// assert!((lp.deterministic_base(0, 0) - 100.0).abs() < f64::EPSILON);
@@ -196,6 +196,13 @@ impl PrecomputedPar {
     ///   used for lag initialization.
     /// - `stages`: study stages sorted by `index` from the system (non-negative IDs).
     /// - `hydro_ids`: canonical sorted entity IDs (determines series element array index order).
+    /// - `cycle_len`: the **true** seasonal cycle length (e.g. 12 for a monthly
+    ///   model), used as the modulus for the season-based lag fallback. `None`
+    ///   infers the modulus from the distinct study `season_id`s as before; this
+    ///   is correct only for full-year studies, where the inferred count already
+    ///   equals the cycle length. Pass `Some(season_map.seasons.len())` for
+    ///   partial-year studies so out-of-window lag stages resolve to the right
+    ///   season.
     ///
     /// # Errors
     ///
@@ -209,6 +216,7 @@ impl PrecomputedPar {
         inflow_models: &[InflowModel],
         stages: &[Stage],
         hydro_ids: &[EntityId],
+        cycle_len: Option<usize>,
     ) -> Result<Self, StochasticError> {
         let n_stages = stages.len();
         let n_hydros = hydro_ids.len();
@@ -281,6 +289,7 @@ impl PrecomputedPar {
             &hydro_index,
             &model_map,
             inflow_models,
+            cycle_len,
             &mut bufs,
         )?;
 
@@ -526,6 +535,7 @@ fn fill_stage_arrays(
     hydro_index: &HashMap<EntityId, usize>,
     model_map: &HashMap<(i32, i32), &InflowModel>,
     inflow_models: &[InflowModel],
+    cycle_len: Option<usize>,
     bufs: &mut StageArrayBuffers<'_>,
 ) -> Result<(), StochasticError> {
     let n_hydros = bufs.n_hydros;
@@ -549,11 +559,18 @@ fn fill_stage_arrays(
     // entries), we resolve lag_stage_id to a season_id via modular
     // arithmetic on the season cycle length, then look up (h_idx, season_id)
     // in season_stats.
-    let n_seasons = stages
-        .iter()
-        .filter_map(|s| s.season_id)
-        .collect::<HashSet<_>>()
-        .len();
+    // Prefer the true seasonal cycle length supplied by the caller; fall back to
+    // the count of distinct study `season_id`s when absent. For full-year studies
+    // the two agree, so this is a determinism no-op for the existing cases. For
+    // partial-year studies the true cycle length is required for the modular
+    // season fallback to resolve out-of-window lag stages to the correct season.
+    let n_seasons = cycle_len.unwrap_or_else(|| {
+        stages
+            .iter()
+            .filter_map(|s| s.season_id)
+            .collect::<HashSet<_>>()
+            .len()
+    });
 
     // Season offset: the season_id of the first stage. For a March-start study
     // with season_id=2, pre-study stage -1 maps to season 1 (February), not
@@ -777,7 +794,7 @@ mod tests {
     fn ar_order_zero_deterministic_base_equals_mean() {
         let stage = make_stage(0, 0, Some(0));
         let model = make_model(1, 0, 100.0, 30.0, vec![], 1.0);
-        let lp = PrecomputedPar::build(&[model], &[stage], &[EntityId(1)]).unwrap();
+        let lp = PrecomputedPar::build(&[model], &[stage], &[EntityId(1)], None).unwrap();
 
         assert_eq!(lp.n_stages(), 1);
         assert_eq!(lp.n_hydros(), 1);
@@ -800,7 +817,7 @@ mod tests {
     fn ar_order_zero_std_zero_gives_zero_sigma() {
         let stage = make_stage(0, 0, Some(0));
         let model = make_model(1, 0, 50.0, 0.0, vec![], 1.0);
-        let lp = PrecomputedPar::build(&[model], &[stage], &[EntityId(1)]).unwrap();
+        let lp = PrecomputedPar::build(&[model], &[stage], &[EntityId(1)], None).unwrap();
 
         assert!((lp.sigma(0, 0)).abs() < f64::EPSILON);
         assert!((lp.deterministic_base(0, 0) - 50.0).abs() < f64::EPSILON);
@@ -821,6 +838,7 @@ mod tests {
             &[pre_study_model, study_model],
             &[study_stage],
             &[EntityId(1)],
+            None,
         )
         .unwrap();
 
@@ -865,7 +883,7 @@ mod tests {
         let mut all_models: Vec<InflowModel> = prestudy_models;
         all_models.extend(study_models);
 
-        let lp = PrecomputedPar::build(&all_models, &stages, &hydro_ids).unwrap();
+        let lp = PrecomputedPar::build(&all_models, &stages, &hydro_ids, None).unwrap();
 
         assert_eq!(lp.n_stages(), 3);
         assert_eq!(lp.n_hydros(), 2);
@@ -920,7 +938,7 @@ mod tests {
 
         let hydro_ids = [EntityId(3), EntityId(5)];
 
-        let lp = PrecomputedPar::build(&models, &[stage], &hydro_ids).unwrap();
+        let lp = PrecomputedPar::build(&models, &[stage], &hydro_ids, None).unwrap();
 
         assert!(
             (lp.deterministic_base(0, 0) - 100.0).abs() < f64::EPSILON,
@@ -954,7 +972,7 @@ mod tests {
         let mut all_models = pre_models;
         all_models.extend(study_models);
 
-        let lp = PrecomputedPar::build(&all_models, &stages, &hydro_ids).unwrap();
+        let lp = PrecomputedPar::build(&all_models, &stages, &hydro_ids, None).unwrap();
 
         assert_eq!(lp.max_order(), 3);
 
@@ -987,7 +1005,7 @@ mod tests {
 
         let models = [make_model(1, 0, 100.0, 30.0, vec![], 1.0)];
 
-        let lp = PrecomputedPar::build(&models, &[stages[0].clone()], &hydro_ids).unwrap();
+        let lp = PrecomputedPar::build(&models, &[stages[0].clone()], &hydro_ids, None).unwrap();
 
         assert!((lp.deterministic_base(0, 1)).abs() < f64::EPSILON);
         assert!((lp.sigma(0, 1)).abs() < f64::EPSILON);
@@ -999,7 +1017,7 @@ mod tests {
     fn deterministic_base_out_of_bounds_panics() {
         let stage = make_stage(0, 0, Some(0));
         let model = make_model(1, 0, 100.0, 30.0, vec![], 1.0);
-        let lp = PrecomputedPar::build(&[model], &[stage], &[EntityId(1)]).unwrap();
+        let lp = PrecomputedPar::build(&[model], &[stage], &[EntityId(1)], None).unwrap();
         let _ = lp.deterministic_base(1, 0);
     }
 
@@ -1009,7 +1027,7 @@ mod tests {
     fn sigma_out_of_bounds_panics() {
         let stage = make_stage(0, 0, Some(0));
         let model = make_model(1, 0, 100.0, 30.0, vec![], 1.0);
-        let lp = PrecomputedPar::build(&[model], &[stage], &[EntityId(1)]).unwrap();
+        let lp = PrecomputedPar::build(&[model], &[stage], &[EntityId(1)], None).unwrap();
         let _ = lp.sigma(1, 0);
     }
 
@@ -1017,7 +1035,7 @@ mod tests {
     fn acceptance_criterion_ar_order_zero_std_zero() {
         let stage = make_stage(0, 0, Some(0));
         let model = make_model(1, 0, 50.0, 0.0, vec![], 1.0);
-        let lp = PrecomputedPar::build(&[model], &[stage], &[EntityId(1)]).unwrap();
+        let lp = PrecomputedPar::build(&[model], &[stage], &[EntityId(1)], None).unwrap();
 
         assert!((lp.sigma(0, 0)).abs() < f64::EPSILON);
         assert!((lp.deterministic_base(0, 0) - 50.0).abs() < f64::EPSILON);
@@ -1067,7 +1085,7 @@ mod tests {
         let stages = make_monthly_stages();
         let models = make_monthly_models(1, 0, &[0.5], 0.9);
 
-        let lp = PrecomputedPar::build(&models, &stages, &[EntityId(1)]).unwrap();
+        let lp = PrecomputedPar::build(&models, &stages, &[EntityId(1)], None).unwrap();
 
         // At stage 0 (season 0): lag-1 -> stage_id = -1 -> season 11.
         // Season 11 stats: mean = 100 + 11*10 = 210, std = 20 + 11*2 = 42.
@@ -1106,7 +1124,7 @@ mod tests {
         let stages = make_monthly_stages();
         let models = make_monthly_models(1, 0, &[0.3, 0.2, 0.15, 0.1, 0.08, 0.05], 0.85);
 
-        let lp = PrecomputedPar::build(&models, &stages, &[EntityId(1)]).unwrap();
+        let lp = PrecomputedPar::build(&models, &stages, &[EntityId(1)], None).unwrap();
 
         // All 6 AR coefficients at stage 0 should be non-zero.
         let psi = lp.psi_slice(0, 0);
@@ -1143,7 +1161,7 @@ mod tests {
         let stages = make_monthly_stages();
         let models = make_monthly_models(1, 1, &[0.4, 0.25], 0.9);
 
-        let lp = PrecomputedPar::build(&models, &stages, &[EntityId(1)]).unwrap();
+        let lp = PrecomputedPar::build(&models, &stages, &[EntityId(1)], None).unwrap();
 
         // Stage 1 (season 1): s_1 = 22.0
         let s_1 = 22.0;
@@ -1176,7 +1194,7 @@ mod tests {
         // Use DIFFERENT stats than season 11 to prove exact match is used.
         models.push(make_model(1, -1, 100.0, 30.0, vec![], 1.0));
 
-        let lp = PrecomputedPar::build(&models, &stages, &[EntityId(1)]).unwrap();
+        let lp = PrecomputedPar::build(&models, &stages, &[EntityId(1)], None).unwrap();
 
         // Stage 0: AR(1), lag-1 -> stage_id = -1 -> EXACT match to prestudy
         // (mean=100, std=30), NOT season 11 (mean=210, std=42).
@@ -1300,7 +1318,7 @@ mod tests {
         all_models.extend(models_h3);
 
         let hydro_ids = [EntityId(1), EntityId(2), EntityId(3)];
-        let lp = PrecomputedPar::build(&all_models, &stages, &hydro_ids).unwrap();
+        let lp = PrecomputedPar::build(&all_models, &stages, &hydro_ids, None).unwrap();
 
         // 1. Non-zero coefficients at stage 0 for all hydros.
         for (h_idx, order) in [(0, 1), (1, 3), (2, 6)] {
@@ -1378,7 +1396,7 @@ mod tests {
         }
 
         let hydro_ids = [EntityId(1), EntityId(2)];
-        let lp = PrecomputedPar::build(&all_models, &stages, &hydro_ids).unwrap();
+        let lp = PrecomputedPar::build(&all_models, &stages, &hydro_ids, None).unwrap();
 
         // Stage 0: lag-1 (id=-1, season 11) and lag-2 (id=-2, season 10)
         // resolve via season fallback.
@@ -1430,7 +1448,7 @@ mod tests {
             }
         }
 
-        let lp2 = PrecomputedPar::build(&models_v2, &stages, &hydro_ids).unwrap();
+        let lp2 = PrecomputedPar::build(&models_v2, &stages, &hydro_ids, None).unwrap();
 
         // Stage 12: lag-1 = stage 11 (exact match, season 11).
         // Stage 0: lag-1 = stage -1 (season fallback, season 11).
@@ -1504,7 +1522,7 @@ mod tests {
         let stages = make_march_start_stages();
         let models = make_march_start_models(1, 0, &[0.5], 0.9);
 
-        let lp = PrecomputedPar::build(&models, &stages, &[EntityId(1)]).unwrap();
+        let lp = PrecomputedPar::build(&models, &stages, &[EntityId(1)], None).unwrap();
 
         // Stage 0 is season 2 (March): mean=120, std=24.
         let s_mar = season_std(2); // 24.0
@@ -1546,7 +1564,7 @@ mod tests {
         let psi_star = [0.3, 0.2, 0.15, 0.1, 0.08, 0.05];
         let models = make_march_start_models(1, 0, &psi_star, 0.85);
 
-        let lp = PrecomputedPar::build(&models, &stages, &[EntityId(1)]).unwrap();
+        let lp = PrecomputedPar::build(&models, &stages, &[EntityId(1)], None).unwrap();
 
         let s_mar = season_std(2);
         let expected_lag_seasons = [1, 0, 11, 10, 9, 8]; // Feb, Jan, Dec, Nov, Oct, Sep
@@ -1590,8 +1608,9 @@ mod tests {
         // Give it the same AR coefficients at the equivalent stage.
         let jan_models = make_monthly_models(1, 8, &[0.4, 0.25], 0.9);
 
-        let lp_mar = PrecomputedPar::build(&march_models, &march_stages, &[EntityId(1)]).unwrap();
-        let lp_jan = PrecomputedPar::build(&jan_models, &jan_stages, &[EntityId(1)]).unwrap();
+        let lp_mar =
+            PrecomputedPar::build(&march_models, &march_stages, &[EntityId(1)], None).unwrap();
+        let lp_jan = PrecomputedPar::build(&jan_models, &jan_stages, &[EntityId(1)], None).unwrap();
 
         // Both should have identical psi and base for their September stage
         // since all lags are resolved via exact match.
@@ -1649,7 +1668,7 @@ mod tests {
         let mut all_models = pre_models;
         all_models.push(study_model);
 
-        let lp = PrecomputedPar::build(&all_models, &stages, &[EntityId(1)]).unwrap();
+        let lp = PrecomputedPar::build(&all_models, &stages, &[EntityId(1)], None).unwrap();
 
         assert_eq!(lp.max_order(), 2, "classical max_order should be 2");
         assert_eq!(
@@ -1677,7 +1696,7 @@ mod tests {
         let mut all_models = pre_models;
         all_models.push(study_model);
 
-        let lp = PrecomputedPar::build(&all_models, &stages, &[EntityId(1)]).unwrap();
+        let lp = PrecomputedPar::build(&all_models, &stages, &[EntityId(1)], None).unwrap();
 
         assert_eq!(
             lp.max_order(),
@@ -1708,8 +1727,13 @@ mod tests {
         };
         let study_model = make_model_with_annual(1, 0, 100.0, 30.0, vec![0.3], 0.954, ann);
 
-        let lp = PrecomputedPar::build(&[pre_study, study_model], &[study_stage], &[EntityId(1)])
-            .unwrap();
+        let lp = PrecomputedPar::build(
+            &[pre_study, study_model],
+            &[study_stage],
+            &[EntityId(1)],
+            None,
+        )
+        .unwrap();
 
         let psi = lp.psi_slice(0, 0);
         assert_eq!(psi.len(), 12);
@@ -1764,7 +1788,7 @@ mod tests {
             })
             .collect();
 
-        let lp = PrecomputedPar::build(&models, &stages, &[EntityId(1)]).unwrap();
+        let lp = PrecomputedPar::build(&models, &stages, &[EntityId(1)], None).unwrap();
 
         let s_0 = 20.0_f64;
         let s_11 = 42.0_f64;
@@ -1814,7 +1838,7 @@ mod tests {
         all_models.push(model_h2);
 
         let hydro_ids = [EntityId(1), EntityId(2)];
-        let lp = PrecomputedPar::build(&all_models, &stages, &hydro_ids).unwrap();
+        let lp = PrecomputedPar::build(&all_models, &stages, &hydro_ids, None).unwrap();
 
         assert_eq!(lp.max_order(), 12);
 
@@ -1883,8 +1907,13 @@ mod tests {
         };
         let study_model = make_model_with_annual(1, 0, 100.0, 30.0, vec![0.3], 0.9, ann);
 
-        let lp = PrecomputedPar::build(&[pre_study, study_model], &[study_stage], &[EntityId(1)])
-            .unwrap();
+        let lp = PrecomputedPar::build(
+            &[pre_study, study_model],
+            &[study_stage],
+            &[EntityId(1)],
+            None,
+        )
+        .unwrap();
 
         // psi[0] = φ̂_1 + 0/12 = 0.3 * 30/30 = 0.3 (no annual contribution).
         // psi[1..12] = 0/12 = 0.0.
@@ -1928,11 +1957,16 @@ mod tests {
         let stages = [stage];
 
         // Forward order.
-        let lp_fwd =
-            PrecomputedPar::build(&[model_h3.clone(), model_h5.clone()], &stages, &hydro_ids)
-                .unwrap();
+        let lp_fwd = PrecomputedPar::build(
+            &[model_h3.clone(), model_h5.clone()],
+            &stages,
+            &hydro_ids,
+            None,
+        )
+        .unwrap();
         // Reversed order.
-        let lp_rev = PrecomputedPar::build(&[model_h5, model_h3], &stages, &hydro_ids).unwrap();
+        let lp_rev =
+            PrecomputedPar::build(&[model_h5, model_h3], &stages, &hydro_ids, None).unwrap();
 
         assert_eq!(lp_fwd.max_order(), 12);
         assert_eq!(lp_rev.max_order(), 12);
@@ -1980,7 +2014,7 @@ mod tests {
             })
             .collect();
 
-        let lp = PrecomputedPar::build(&models, &stages, &[EntityId(1)]).unwrap();
+        let lp = PrecomputedPar::build(&models, &stages, &[EntityId(1)], None).unwrap();
 
         let s_0 = season_std(0); // 20.0
         let annual_coeff = 0.5 * s_0 / 30.0;

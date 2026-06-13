@@ -54,7 +54,9 @@ use cobre_core::{
     scenario::{SamplingScheme, ScenarioSource},
 };
 use cobre_io::build_hydro_reference_volume_fractions;
-use cobre_stochastic::{ExternalScenarioLibrary, HistoricalScenarioLibrary, StochasticContext};
+use cobre_stochastic::{
+    ExternalScenarioLibrary, HistoricalScenarioLibrary, StochasticContext, SweepDirection,
+};
 
 use crate::{
     config::{CutManagementConfig, EventParams},
@@ -195,6 +197,15 @@ pub struct StudySetup {
     ///
     /// `None` for a fresh start, leaving fresh-mode behavior untouched.
     pub(crate) warm_start_basis_cache: Option<Vec<Option<CapturedBasis>>>,
+
+    /// Throwaway, env-gated backward `noise_key` diagnostic table.
+    ///
+    /// `Some` only when `COBRE_W1_DIAG` was set at setup; `None` otherwise (the
+    /// default), in which case nothing is allocated or computed and the backward
+    /// solve path is byte-identical. Borrowed read-only into the training
+    /// [`TrainingContext`](crate::context::TrainingContext). See
+    /// [`crate::noise_key_diag`].
+    pub(crate) noise_key_diag: Option<crate::noise_key_diag::NoiseKeyDiag>,
 }
 
 impl StudySetup {
@@ -268,7 +279,7 @@ impl StudySetup {
     // fields together in initialization order.
     pub fn from_broadcast_params(
         system: &System,
-        stochastic: StochasticContext,
+        mut stochastic: StochasticContext,
         config: ConstructionConfig,
         hydro_models: PrepareHydroModelsResult,
         training_source: &ScenarioSource,
@@ -288,6 +299,23 @@ impl StudySetup {
             export_states,
             scalar_parameters,
         } = config;
+
+        // Install the per-stage backward opening solve order once, here, where the
+        // inflow models (σ = std_m3s) and the synced opening tree (raw_noise) are
+        // both in scope. The keys are the SAME σ-weighted noise keys the throwaway
+        // `noise_key` diagnostic records (shared via `build_noise_key_table`), so
+        // the solve order and the diagnostic that validates it cannot drift. The
+        // order is run-constant and rank-invariant (a pure function of the synced
+        // tree + fixed σ), so every rank computes the identical permutation. The
+        // backward pass always solves in this order (descending: largest-noise-key
+        // opening first) for warm-start friendliness; the canonical-ω cut
+        // aggregation is unaffected, so cuts stay bit-identical across thread/rank
+        // counts. The σ-vs-noise-dim length mismatch is a hard error (raised inside
+        // `build_noise_key_table` via `noise_key`).
+        let solve_order_keys = crate::noise_key_diag::build_noise_key_table(system, &stochastic)?;
+        stochastic
+            .set_solve_order(&solve_order_keys, SweepDirection::Descending)
+            .map_err(|e| SddpError::Validation(e.to_string()))?;
 
         let EnergyAndTemplates {
             energy_conversion,
@@ -386,6 +414,14 @@ impl StudySetup {
         let hydro_min_storage_hm3: Vec<f64> =
             system.hydros().iter().map(|h| h.min_storage_hm3).collect();
 
+        // Throwaway, env-gated backward diagnostic: built only when
+        // `COBRE_W1_DIAG` is set, reusing the `solve_order_keys` table already
+        // computed above (so the diagnostic and the solve order cannot drift and
+        // the table is not recomputed). `None` otherwise — zero allocation,
+        // byte-identical default path.
+        let noise_key_diag =
+            crate::noise_key_diag::NoiseKeyDiag::from_keys_if_enabled(&solve_order_keys);
+
         Ok(Self {
             stage_data: stage_data::StageData {
                 stage_templates,
@@ -435,6 +471,7 @@ impl StudySetup {
             energy_conversion,
             hydro_min_storage_hm3,
             warm_start_basis_cache: None,
+            noise_key_diag,
         })
     }
 }
@@ -698,7 +735,11 @@ fn build_wired_indexer(
     // Using `par.order(h)` here would silently truncate the cut row's state
     // coefficients on lag slots that carry the annual `ψ̂/12` term and
     // produce over-estimating cuts (analogue of d0e4a42).
-    if (indexer.max_par_order > 0 && stochastic.par().n_hydros() > 0) || indexer.n_anticipated > 0 {
+    // Populate the cut sparse mask unconditionally so every production study —
+    // including storage-only (mask = [0, n_state) ascending) and pure-thermal
+    // (n_state == 0 → empty mask) — has a mask. The forward-pass cut-row loop is
+    // single-path (mask-driven); it relies on the mask always being populated.
+    {
         let par = stochastic.par();
         let effective_lag_counts: Vec<usize> = if indexer.max_par_order > 0 {
             (0..par.n_hydros())
@@ -712,6 +753,9 @@ fn build_wired_indexer(
         let anticipated_k: Vec<usize> = indexer.anticipated_lead_stages.clone();
         indexer.set_nonzero_mask(&effective_lag_counts, &anticipated_k);
     }
+    // Precompute state_to_lp_column(j) from the now-final state layout, in the
+    // same place as the mask so both layout-derived caches stay in lockstep.
+    indexer.finalize_state_column_map();
 
     indexer
 }
@@ -2003,13 +2047,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn simulation_ctx_propagates_dynamic_dcs_from_setup() {
+        let n_stages = 3;
+        let system = minimal_system(n_stages);
+        let mut config = minimal_config(2, 10);
+        // Configure the dynamic cut-selection method so `parse_cut_selection_config`
+        // yields a `Dynamic` strategy and `simulation_ctx()` populates `dcs`.
+        config.training.cut_selection = RowSelectionConfig {
+            enabled: Some(true),
+            method: Some("dynamic".to_string()),
+            ..RowSelectionConfig::default()
+        };
+        let stochastic = build_stochastic_context(
+            &system,
+            42,
+            None,
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::InSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .expect("stochastic context");
+
+        let setup = StudySetup::new(
+            &system,
+            &config,
+            stochastic,
+            PrepareHydroModelsResult::default_from_system(&system),
+        )
+        .expect("setup");
+        let ctx = setup.simulation_ctx();
+
+        // The dynamic method with default fields maps to the spec defaults
+        // (k1 = None, k2 = 5, nadic = 10, epsilon_viol = 1e-10, start_iteration = 2).
+        let expected = crate::dcs::DcsParams {
+            k1: None,
+            k2: 5,
+            nadic: 10,
+            epsilon_viol: 1e-10,
+            start_iteration: 2,
+            max_inner_iterations: crate::dcs::DcsParams::default().max_inner_iterations,
+        };
+        assert_eq!(
+            ctx.dcs,
+            Some(expected),
+            "simulation_ctx().dcs must carry the configured dynamic DcsParams, got {:?}",
+            ctx.dcs
+        );
+    }
+
     /// Given a 1-hydro, 1-thermal, 1-bus, 2-stage system with an iteration
     /// limit of 3, when `train()` is called, then it completes successfully
     /// with `result.iterations <= 3`.
     #[test]
     fn train_completes_within_iteration_limit() {
         use cobre_comm::LocalBackend;
-        use cobre_solver::highs::HighsSolver;
+        use cobre_solver::ActiveSolver;
 
         let system = minimal_system(2);
         let config = minimal_config(1, 3);
@@ -2036,10 +2134,10 @@ mod tests {
         )
         .expect("setup");
         let comm = LocalBackend;
-        let mut solver = HighsSolver::new().expect("solver");
+        let mut solver = ActiveSolver::new().expect("solver");
 
         let result = setup
-            .train(&mut solver, &comm, 1, HighsSolver::new, None, None)
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
             .expect("train");
 
         assert!(
@@ -2059,7 +2157,7 @@ mod tests {
     #[test]
     fn train_generates_cuts_in_fcf() {
         use cobre_comm::LocalBackend;
-        use cobre_solver::highs::HighsSolver;
+        use cobre_solver::ActiveSolver;
 
         let system = minimal_system(2);
         let config = minimal_config(1, 3);
@@ -2086,10 +2184,10 @@ mod tests {
         )
         .expect("setup");
         let comm = LocalBackend;
-        let mut solver = HighsSolver::new().expect("solver");
+        let mut solver = ActiveSolver::new().expect("solver");
 
         setup
-            .train(&mut solver, &comm, 1, HighsSolver::new, None, None)
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
             .expect("train");
 
         assert!(
@@ -2150,7 +2248,7 @@ mod tests {
     #[test]
     fn create_workspace_pool_returns_correct_size() {
         use cobre_comm::LocalBackend;
-        use cobre_solver::highs::HighsSolver;
+        use cobre_solver::ActiveSolver;
 
         let system = minimal_system(2);
         let config = minimal_config(1, 3);
@@ -2179,7 +2277,7 @@ mod tests {
 
         let comm = LocalBackend;
         let pool = setup
-            .create_workspace_pool(&comm, 2, HighsSolver::new)
+            .create_workspace_pool(&comm, 2, ActiveSolver::new)
             .expect("workspace pool");
 
         assert_eq!(pool.workspaces.len(), 2);
@@ -2191,7 +2289,7 @@ mod tests {
     #[test]
     fn build_training_output_non_empty() {
         use cobre_comm::LocalBackend;
-        use cobre_solver::highs::HighsSolver;
+        use cobre_solver::ActiveSolver;
 
         let system = minimal_system(2);
         let config = minimal_config(1, 2);
@@ -2218,7 +2316,7 @@ mod tests {
         )
         .expect("setup");
         let comm = LocalBackend;
-        let mut solver = HighsSolver::new().expect("solver");
+        let mut solver = ActiveSolver::new().expect("solver");
 
         // Collect events from training so we have at least one IterationSummary.
         let (event_tx, event_rx) = std::sync::mpsc::channel();
@@ -2227,7 +2325,7 @@ mod tests {
                 &mut solver,
                 &comm,
                 1,
-                HighsSolver::new,
+                ActiveSolver::new,
                 Some(event_tx),
                 None,
             )
@@ -2247,7 +2345,7 @@ mod tests {
     #[test]
     fn simulate_after_train_returns_nonempty_costs() {
         use cobre_comm::LocalBackend;
-        use cobre_solver::highs::HighsSolver;
+        use cobre_solver::ActiveSolver;
 
         // Enable simulation with 3 scenarios.
         let mut config = minimal_config(1, 3);
@@ -2284,14 +2382,14 @@ mod tests {
 
         // Train first so the FCF has cuts.
         let comm = LocalBackend;
-        let mut solver = HighsSolver::new().expect("solver");
+        let mut solver = ActiveSolver::new().expect("solver");
         setup
-            .train(&mut solver, &comm, 1, HighsSolver::new, None, None)
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
             .expect("train");
 
         // Build simulation pool.
         let mut pool = setup
-            .create_workspace_pool(&comm, 1, HighsSolver::new)
+            .create_workspace_pool(&comm, 1, ActiveSolver::new)
             .expect("sim pool");
 
         // Create the result channel and drain thread.

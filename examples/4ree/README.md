@@ -10,13 +10,13 @@ located at `example/4ree/` in that repository.
 
 ## System Summary
 
-| Entity   | Count | Notes                                         |
-| -------- | ----- | --------------------------------------------- |
-| Buses    | 4     | SUDESTE (0), SUL (1), NORDESTE (2), NORTE (3) |
-| Hydros   | 4     | One per region, independent cascades          |
-| Thermals | 126   | All original thermals, remapped to 4 buses    |
-| Lines    | 2     | SUDESTE-SUL and SUDESTE-NORDESTE only         |
-| Stages   | 12    | Monthly, Jan 2015 – Dec 2015                  |
+| Entity   | Count | Notes                                                                           |
+| -------- | ----- | ------------------------------------------------------------------------------- |
+| Buses    | 5     | SUDESTE (0), SUL (1), NORDESTE (2), NORTE (3), NOFICT1 (4)                      |
+| Hydros   | 4     | One per real region, independent cascades                                       |
+| Thermals | 126   | All original thermals, remapped to 4 real buses                                 |
+| Lines    | 5     | SUDESTE-SUL, SUDESTE-NORDESTE, SUDESTE-NOFICT1, NORDESTE-NOFICT1, NORTE-NOFICT1 |
+| Stages   | 12    | Monthly, Jan 2015 – Dec 2015                                                    |
 
 ## Usage
 
@@ -44,44 +44,32 @@ sddp-lab uses 1-indexed bus IDs; Cobre uses 0-indexed IDs. The mapping is:
 | 2           | SUL           | 1        | SUL        |
 | 3           | NORDESTE      | 2        | NORDESTE   |
 | 4           | NORTE         | 3        | NORTE      |
-| 5           | NOFICT1       | excluded | —          |
+| 5           | NOFICT1       | 4        | NOFICT1    |
 
 All `bus_id` references in hydros, thermals, and lines are remapped accordingly.
 Thermal IDs are also remapped from 1-indexed (sddp-lab) to 0-indexed (Cobre).
 
-### Bus 5 (NOFICT1) exclusion
+### NOFICT1 as a transit hub
 
-sddp-lab includes a fictitious aggregation node NOFICT1 (id=5) with zero load
-that acts as an intermediate hub connecting northern generation to southern load
-centers. Cobre does not model fictitious nodes.
+sddp-lab includes a fictitious aggregation node NOFICT1 (sddp-lab id=5) with zero
+load that acts as an intermediate hub connecting northern generation to southern
+load centers. In this conversion NOFICT1 is retained as bus id=4 because three of
+the five modeled transmission lines use it as an endpoint.
 
-Decision: exclude NOFICT1 entirely.
+All 126 thermals in sddp-lab are connected to real buses 1–4; none were connected
+to bus 5, so no thermal reassignment was needed. No hydro plant is assigned to
+NOFICT1.
 
-- **Thermals**: all 126 thermals in sddp-lab are connected to real buses 1–4;
-  none were connected to bus 5, so no thermal reassignment was needed.
-- **Lines**: six of the ten sddp-lab lines involve NOFICT1 as source or target:
-  - `SUDESTE_NOFICT1` (1→5, 4000 MW)
-  - `NORDESTE_NOFICT1` (3→5, 3500 MW)
-  - `NORTE_NOFICT1` (4→5, 10000 MW)
-  - `NOFICT1_SUDESTE` (5→1, 2940 MW)
-  - `NOFICT1_NORDESTE` (5→3, 3300 MW)
-  - `NOFICT1_NORTE` (5→4, 4407 MW)
-
-  These six lines are excluded because converting them to direct inter-region
-  connections without knowledge of the actual physical routing would introduce
-  spurious transmission paths. The four northern exports from NORTE that transit
-  through NOFICT1 to SUDESTE are lost in this approximation, which means NORTE
-  generation is effectively isolated in this model.
-
-- **Remaining lines**: two real-to-real lines survive:
-  - `SUDESTE_SUL` / `SUL_SUDESTE` merged into one bidirectional line
-    (direct: 7500 MW, reverse: 5470 MW)
-  - `SUDESTE_NORDESTE` / `NORDESTE_SUDESTE` merged into one bidirectional line
-    (direct: 1000 MW, reverse: 600 MW)
+- **Lines retained**: all ten sddp-lab lines collapse to five Cobre bidirectional
+  entries using `capacity.direct_mw` / `capacity.reverse_mw`:
+  - `SUDESTE_SUL` (direct: 7500 MW, reverse: 5470 MW)
+  - `SUDESTE_NORDESTE` (direct: 1000 MW, reverse: 600 MW)
+  - `SUDESTE_NOFICT1` (direct: 4000 MW, reverse: 2940 MW)
+  - `NORDESTE_NOFICT1` (direct: 3500 MW, reverse: 3300 MW)
+  - `NORTE_NOFICT1` (direct: 10000 MW, reverse: 4407 MW)
 
   The sddp-lab model used paired unidirectional lines for asymmetric capacity.
-  Cobre's `capacity.direct_mw` / `capacity.reverse_mw` fields encode both
-  directions in a single line entry.
+  Cobre's single bidirectional line entry encodes both directions.
 
 ### Inflow model (NOT converted)
 
@@ -134,8 +122,9 @@ Initial reservoir storage values are taken directly from `hydros.csv`:
 
 - **Results are NOT comparable to sddp-lab**: different stochastic model
   (PAR(p) normal vs. lognormal), different risk measure (Expectation vs. CVaR),
-  and excluded NOFICT1 transit lines all mean the objective values and dispatch
-  patterns will differ.
-- **NORTE is isolated**: without the NOFICT1 transit lines, NORTE generation
-  cannot reach SUDESTE or NORDESTE. NORTE hydro and thermal generation can only
-  serve NORTE's own load.
+  and differences in how the NOFICT1 hub lines are modeled all mean the objective
+  values and dispatch patterns will differ.
+- **NOFICT1 carries no load and no generation**: as a fictitious hub node it has a
+  zero-load balance constraint. Energy may flow through it in transit between NORTE,
+  NORDESTE, and SUDESTE, but there is no generator or consumer attached directly
+  to it.

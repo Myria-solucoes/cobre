@@ -11,8 +11,8 @@
 //! grep tests targeted at the anticipated-thermals output calls. Those
 //! tests were subset checks of what the script already covers, and any
 //! call site that happened to mention the substring in a comment or
-//! string literal would satisfy the assertion. Per assessment finding
-//! F3-005 the redundant grep tests are removed; the script is the
+//! string literal would satisfy the assertion. Per assessment finding,
+//! the redundant grep tests are removed; the script is the
 //! canonical check.
 //!
 //! A future behavioural parity test — running cobre CLI and cobre-python

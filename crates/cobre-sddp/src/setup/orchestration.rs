@@ -11,6 +11,7 @@ use cobre_solver::{SolverError, SolverInterface};
 use crate::{
     config::{CutManagementConfig, EventConfig, LoopConfig, TrainingConfig},
     context::{StageContext, TrainingContext},
+    dcs::DcsParams,
     error::SddpError,
     simulation::{
         SimulationOutputSpec, error::SimulationError, pipeline::SimulationRunResult,
@@ -42,7 +43,7 @@ impl StudySetup {
         shutdown_flag: Option<&Arc<AtomicBool>>,
     ) -> Result<TrainingOutcome, SddpError>
     where
-        S: SolverInterface<Profile = cobre_solver::HighsProfile> + Send,
+        S: SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
     {
         let training_config = TrainingConfig {
             loop_config: LoopConfig {
@@ -106,6 +107,16 @@ impl StudySetup {
             external_ncs_library: tr.external_ncs.as_ref(),
             recent_accum_seed: &self.recent_observation_seed.accum_seed,
             recent_weight_seed: self.recent_observation_seed.weight_seed,
+            // DCS params reach the backward hot path via this context field.
+            // `Some` only for the dynamic cut-selection method; `None` otherwise.
+            dcs: self
+                .cut_management
+                .cut_selection
+                .as_ref()
+                .and_then(DcsParams::from_strategy),
+            // Throwaway backward diagnostic; `Some` only when `COBRE_W1_DIAG`
+            // was set at setup, else `None` (byte-identical default path).
+            noise_key_diag: self.noise_key_diag.as_ref(),
         };
 
         // Hand the warm-start basis cache (if any) to the training session so
@@ -137,7 +148,7 @@ impl StudySetup {
     ///
     /// Returns `SimulationError` on LP infeasibility, solver failure, channel closure,
     /// or if `baked_templates.len() != num_stages`.
-    pub fn simulate<S: SolverInterface + Send, C: Communicator>(
+    pub fn simulate<S, C: Communicator>(
         &self,
         workspaces: &mut [SolverWorkspace<S>],
         comm: &C,
@@ -145,7 +156,10 @@ impl StudySetup {
         event_sender: Option<Sender<TrainingEvent>>,
         baked_templates: Option<&[cobre_solver::StageTemplate]>,
         stage_bases: &[Option<CapturedBasis>],
-    ) -> Result<SimulationRunResult, SimulationError> {
+    ) -> Result<SimulationRunResult, SimulationError>
+    where
+        S: SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
+    {
         let stage_ctx = self.stage_ctx();
         let training_ctx = self.simulation_ctx();
 

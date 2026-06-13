@@ -86,6 +86,16 @@ impl StudySetup {
         &self.stage_data.indexer
     }
 
+    /// Number of stages in the planning horizon.
+    ///
+    /// Used by the CLI summary to express the pool-level active-row total on a
+    /// per-stage basis, so it is directly comparable to the per-solve
+    /// rows-in-LP metric reported for Dynamic Cut Selection.
+    #[must_use]
+    pub fn num_stages(&self) -> usize {
+        self.methodology.horizon.num_stages()
+    }
+
     /// Construct a [`StageContext`] borrowing from this setup.
     #[must_use]
     pub fn stage_ctx(&self) -> StageContext<'_> {
@@ -132,6 +142,12 @@ impl StudySetup {
             external_ncs_library: tr.external_ncs.as_ref(),
             recent_accum_seed: &self.recent_observation_seed.accum_seed,
             recent_weight_seed: self.recent_observation_seed.weight_seed,
+            dcs: self
+                .cut_management
+                .cut_selection
+                .as_ref()
+                .and_then(crate::dcs::DcsParams::from_strategy),
+            noise_key_diag: None,
         }
     }
 
@@ -195,6 +211,16 @@ impl StudySetup {
             external_ncs_library,
             recent_accum_seed: &self.recent_observation_seed.accum_seed,
             recent_weight_seed: self.recent_observation_seed.weight_seed,
+            // When the dynamic cut-selection method is configured, simulation
+            // solves each stage lazily against the cut pool (`Some` only for the
+            // dynamic variant); otherwise it uses the baked all-cuts path.
+            dcs: self
+                .cut_management
+                .cut_selection
+                .as_ref()
+                .and_then(crate::dcs::DcsParams::from_strategy),
+            // The backward `noise_key` diagnostic does not apply to simulation.
+            noise_key_diag: None,
         }
     }
 }

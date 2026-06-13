@@ -7,6 +7,7 @@
 //! it accepts aggregate result types and writes all output artifacts to the
 //! specified directory.
 
+pub(crate) mod atomic;
 pub mod convergence_reader;
 pub mod dictionary;
 pub mod error;
@@ -187,6 +188,13 @@ pub struct IterationRecord {
 
     /// Cumulative LP solve wall-clock time for this iteration, in milliseconds.
     pub solve_time_ms: f64,
+
+    /// Mean resident row count loaded per lazy-selection LP solve during this
+    /// iteration (reduced across ranks). `0.0` when no lazy selection ran. Maps
+    /// to `mean_rows_in_lp` in `training/convergence.parquet`; it reflects the
+    /// per-solve LP size the lazy selector actually carried, which (unlike the
+    /// pool-level active count) shrinks well below the generated total.
+    pub mean_rows_in_lp: f64,
 }
 
 /// Summary statistics for the row pool at the end of a training run.
@@ -205,6 +213,21 @@ pub struct RowPoolStatistics {
 
     /// Total rows currently active in the LP.
     pub cuts_active: u64,
+
+    /// Sum, over every lazy-selection LP solve in the run, of the resident row
+    /// count loaded into that solve (reduced across ranks). With
+    /// [`Self::rows_in_lp_solve_count`] this gives the mean rows-in-LP per solve.
+    /// Zero when no lazy selection ran (the resident-subset solve path was never
+    /// taken), letting consumers distinguish "not applicable" from "zero rows".
+    pub rows_in_lp_total: u64,
+
+    /// Number of lazy-selection LP solves in the run (reduced across ranks); the
+    /// denominator for the mean rows-in-LP. Zero when no lazy selection ran.
+    pub rows_in_lp_solve_count: u64,
+
+    /// Largest resident row count loaded into any single lazy-selection LP solve
+    /// over the run (reduced across ranks). Zero when no lazy selection ran.
+    pub rows_in_lp_max: u64,
 }
 
 /// One row in `training/cut_selection/iterations.parquet`.
@@ -247,7 +270,7 @@ pub struct RowSelectionRecord {
 ///   timing columns (`worker_id = None`). Per-worker slots are `0` on this row.
 /// - One **per-worker** row per `(iteration, rank, worker_id)` carrying
 ///   per-worker slots (`forward_wall_ms`, `backward_wall_ms`, `bwd_setup_ms`,
-///   `fwd_setup_ms`). Rank-only slots are `0` on these rows.
+///   `fwd_setup_ms`, `lazy_scoring_ms`). Rank-only slots are `0` on these rows.
 ///
 /// `SUM(col) GROUP BY iteration` across all rows recovers the
 /// single-row-per-iteration value for each of the 16 timing columns.
@@ -490,90 +513,6 @@ fn merge_simulation_solve_stats(outputs: &[SimulationOutput]) -> MetadataSimulat
     }
 }
 
-/// Write all output artifacts to `output_dir`.
-///
-/// This function is the symmetric counterpart of [`crate::load_case`]: it
-/// accepts the aggregate result types produced by the solver and writes
-/// every output artifact — convergence tables, dictionaries, manifests,
-/// metadata, and optionally simulation artifacts — to the specified root
-/// directory.
-///
-/// The function creates the complete directory structure, delegates to
-/// sub-writers in the order required by the output specification, and
-/// writes `_SUCCESS` marker files after all artifacts are complete.
-///
-/// # Directory layout produced
-///
-/// ```text
-/// output_dir/
-///   training/
-///     _SUCCESS
-///     metadata.json
-///     convergence.parquet
-///     dictionaries/
-///       codes.json
-///       entities.csv
-///       variables.csv
-///       bounds.parquet
-///       state_dictionary.json
-///     timing/
-///       iterations.parquet
-///   simulation/
-///     _SUCCESS              (only when simulation_output is Some)
-///     metadata.json         (only when simulation_output is Some)
-/// ```
-///
-/// # Parameters
-///
-/// - `output_dir` — root directory that will receive all output artifacts.
-/// - `training_output` — convergence records and summary statistics from
-///   the completed training run.
-/// - `simulation_output` — optional simulation results; `None` is allowed
-///   and still causes the `simulation/` directory to be created.
-/// - `system` — the loaded system, used by dictionary writers to enumerate
-///   entity identifiers.
-/// - `config` — run configuration supplying writer settings and metadata.
-///
-/// # Errors
-///
-/// - [`OutputError::IoError`] — directory creation or file write failed.
-/// - [`OutputError::SerializationError`] — Arrow batch construction failed.
-/// - [`OutputError::ManifestError`] — JSON serialization failed.
-///
-/// # Examples
-///
-/// ```no_run
-/// use cobre_io::{write_results, TrainingOutput, RowPoolStatistics};
-/// use cobre_io::MetadataTrainingSolveStats;
-/// use std::path::Path;
-///
-/// # fn main() -> Result<(), cobre_io::OutputError> {
-/// # let system = unimplemented!();
-/// # let config = unimplemented!();
-/// let training = TrainingOutput {
-///     convergence_records: Vec::new(),
-///     final_lower_bound: 42.0,
-///     final_upper_bound: Some(44.0),
-///     final_gap_percent: Some(4.76),
-///     final_upper_bound_std: Some(2.0),
-///     iterations_completed: 10,
-///     converged: true,
-///     termination_reason: "gap tolerance reached".to_string(),
-///     total_time_ms: 3_000,
-///     cut_stats: RowPoolStatistics {
-///         total_generated: 200,
-///         total_active: 80,
-///         peak_active: 95,
-///         cuts_active: 80,
-///     },
-///     cut_selection_records: Vec::new(),
-///     worker_timing_records: Vec::new(),
-///     training_solve_stats: MetadataTrainingSolveStats::default(),
-/// };
-/// write_results(Path::new("/tmp/out"), &training, None, system, config)?;
-/// # Ok(())
-/// # }
-/// ```
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -617,6 +556,7 @@ mod tests {
                 time_fwd_scheduling_overhead_ms: 0,
                 time_overhead_ms: 0,
                 solve_time_ms: 0.0,
+                mean_rows_in_lp: 0.0,
             })
             .collect();
         let output = TrainingOutput {
@@ -634,6 +574,9 @@ mod tests {
                 total_active: 120,
                 peak_active: 150,
                 cuts_active: 120,
+                rows_in_lp_total: 0,
+                rows_in_lp_solve_count: 0,
+                rows_in_lp_max: 0,
             },
             cut_selection_records: vec![],
             worker_timing_records: vec![],
@@ -684,9 +627,9 @@ mod tests {
             time_fwd_setup_ms: 0,
             time_fwd_load_imbalance_ms: 0,
             time_fwd_scheduling_overhead_ms: 0,
-            // overhead = 400 - (150 + 250 + 5 + 3 + 4) = 0 (saturating)
             time_overhead_ms: 400u64.saturating_sub(150 + 250 + 5 + 3 + 4),
             solve_time_ms: 0.0,
+            mean_rows_in_lp: 0.0,
         };
 
         assert_eq!(record.iteration, 7);
@@ -739,6 +682,9 @@ mod tests {
             total_active: 200,
             peak_active: 250,
             cuts_active: 200,
+            rows_in_lp_total: 0,
+            rows_in_lp_solve_count: 0,
+            rows_in_lp_max: 0,
         };
 
         assert_eq!(stats.total_generated, 500);
@@ -754,6 +700,9 @@ mod tests {
             total_active: 7,
             peak_active: 9,
             cuts_active: 7,
+            rows_in_lp_total: 30,
+            rows_in_lp_solve_count: 6,
+            rows_in_lp_max: 8,
         };
         let json = serde_json::to_string(&stats).expect("serialization must succeed");
         assert!(
@@ -764,6 +713,13 @@ mod tests {
             json.contains("\"cuts_active\""),
             "JSON must contain cuts_active key"
         );
+        for key in [
+            "\"rows_in_lp_total\"",
+            "\"rows_in_lp_solve_count\"",
+            "\"rows_in_lp_max\"",
+        ] {
+            assert!(json.contains(key), "JSON must contain {key}");
+        }
     }
 
     #[test]

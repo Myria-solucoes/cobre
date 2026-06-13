@@ -27,6 +27,7 @@ use console::Term;
 ///
 /// let err = CliError::Validation {
 ///     report: "constraint violation: hydro cascade contains a cycle".to_string(),
+///     already_rendered: false,
 /// };
 /// assert_eq!(err.exit_code(), 1);
 /// assert!(!err.to_string().is_empty());
@@ -42,6 +43,14 @@ pub enum CliError {
     Validation {
         /// Human-readable summary of the validation failure.
         report: String,
+        /// `true` when the originating subcommand already printed `report` to
+        /// stdout (the `validate` subcommand). When set, [`CliError::format_error`]
+        /// suppresses the stderr re-print and the "run `cobre validate`" hint, so
+        /// the report surfaces exactly once and the hint never points back at the
+        /// command the user just ran. `false` on every other path (`run`,
+        /// `report`, …), where the stderr render is the only surfacing and the
+        /// hint is actionable.
+        already_rendered: bool,
     },
 
     /// Filesystem I/O error (exit code 2).
@@ -86,7 +95,10 @@ impl CliError {
     /// ```
     /// use cobre_cli::error::CliError;
     ///
-    /// assert_eq!(CliError::Validation { report: "bad".to_string() }.exit_code(), 1);
+    /// assert_eq!(
+    ///     CliError::Validation { report: "bad".to_string(), already_rendered: false }.exit_code(),
+    ///     1
+    /// );
     /// assert_eq!(CliError::Solver { message: "infeasible".to_string() }.exit_code(), 3);
     /// ```
     pub fn exit_code(&self) -> i32 {
@@ -96,6 +108,27 @@ impl CliError {
             Self::Solver { .. } => 3,
             Self::Internal { .. } => 4,
         }
+    }
+
+    /// Build the stderr diagnostic lines for a [`CliError::Validation`].
+    ///
+    /// Returns the report line plus the "run `cobre validate`" hint when the
+    /// caller has NOT already rendered the report to stdout. When
+    /// `already_rendered` is `true` (the `validate` subcommand printed the
+    /// report to stdout), returns an empty list: re-printing to stderr would
+    /// double the output and the hint would point back at the command the user
+    /// just ran. This is the single decision point exercised by the unit tests;
+    /// keeping it pure lets the test assert the rendered lines without a TTY.
+    fn validation_lines(report: &str, already_rendered: bool) -> Vec<String> {
+        if already_rendered {
+            return Vec::new();
+        }
+        let label = console::style("error:").red().bold();
+        let hint_arrow = console::style("->").yellow();
+        vec![
+            format!("{label} {report}"),
+            format!("  {hint_arrow} run `cobre validate <CASE_DIR>` for a full diagnostic report"),
+        ]
     }
 
     /// Print a structured, colored diagnostic to `stderr`.
@@ -120,11 +153,13 @@ impl CliError {
         let hint_arrow = console::style("->").yellow();
 
         match self {
-            Self::Validation { report } => {
-                let _ = stderr.write_line(&format!("{label} {report}"));
-                let _ = stderr.write_line(&format!(
-                    "  {hint_arrow} run `cobre validate <CASE_DIR>` for a full diagnostic report"
-                ));
+            Self::Validation {
+                report,
+                already_rendered,
+            } => {
+                for line in Self::validation_lines(report, *already_rendered) {
+                    let _ = stderr.write_line(&line);
+                }
             }
             Self::Io { source, context } => {
                 let _ = stderr.write_line(&format!("{label} I/O error in {context}: {source}"));
@@ -163,6 +198,7 @@ impl From<cobre_io::LoadError> for CliError {
             },
             other => Self::Validation {
                 report: other.to_string(),
+                already_rendered: false,
             },
         }
     }
@@ -206,7 +242,10 @@ impl From<cobre_sddp::SddpError> for CliError {
                 message: solver_err.to_string(),
             },
             cobre_sddp::SddpError::Io(load_err) => Self::from(load_err),
-            cobre_sddp::SddpError::Validation(msg) => Self::Validation { report: msg },
+            cobre_sddp::SddpError::Validation(msg) => Self::Validation {
+                report: msg,
+                already_rendered: false,
+            },
             cobre_sddp::SddpError::Communication(comm_err) => Self::Internal {
                 message: comm_err.to_string(),
             },
@@ -261,8 +300,48 @@ mod tests {
     fn validation_exit_code_is_1() {
         let err = CliError::Validation {
             report: "constraint violation".to_string(),
+            already_rendered: false,
         };
         assert_eq!(err.exit_code(), 1);
+    }
+
+    #[test]
+    fn validation_exit_code_is_1_when_already_rendered() {
+        // The discriminator must not perturb the exit code: a validate-originated
+        // failure still exits 1, identical to the run/report path.
+        let err = CliError::Validation {
+            report: "constraint violation".to_string(),
+            already_rendered: true,
+        };
+        assert_eq!(err.exit_code(), 1);
+    }
+
+    #[test]
+    fn validation_lines_skipped_when_already_rendered() {
+        // The validate subcommand already wrote the report to stdout; the stderr
+        // arm must emit nothing — no report re-print, no circular hint.
+        let lines = CliError::validation_lines("constraint violation", true);
+        assert!(
+            lines.is_empty(),
+            "expected no stderr lines when already_rendered=true, got: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn validation_lines_emitted_when_not_rendered() {
+        // The run/report path never rendered to stdout, so the stderr arm is the
+        // only surfacing: it must carry both the report and the actionable hint.
+        console::set_colors_enabled_stderr(false);
+        let lines = CliError::validation_lines("hydro cascade contains a cycle", false);
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("hydro cascade contains a cycle"),
+            "expected the report in the rendered lines, got: {joined}"
+        );
+        assert!(
+            joined.contains("run `cobre validate <CASE_DIR>`"),
+            "expected the validate hint in the rendered lines, got: {joined}"
+        );
     }
 
     #[test]
@@ -294,6 +373,7 @@ mod tests {
     fn display_validation_non_empty() {
         let err = CliError::Validation {
             report: "hydro cascade contains a cycle".to_string(),
+            already_rendered: false,
         };
         let s = err.to_string();
         assert!(!s.is_empty());

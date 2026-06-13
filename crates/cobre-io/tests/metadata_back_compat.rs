@@ -287,6 +287,9 @@ fn fully_populated_training_metadata() -> TrainingMetadata {
             total_active: 980_000,
             peak_active: 1_100_000,
             cuts_active: 980_000,
+            rows_in_lp_total: 0,
+            rows_in_lp_solve_count: 0,
+            rows_in_lp_max: 0,
         },
         bounds: MetadataBounds {
             final_lower_bound: 48_500.0,

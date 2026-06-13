@@ -4,7 +4,7 @@
 //!
 //! ## Closed-form derivation
 //!
-//! Reference: K=3 sign-chain table at `artifacts/layout-decision.md:240-269`.
+//! Reference: the K=3 sign-chain table for the Alternative-A layout.
 //! Fixture: one anticipated thermal (K=3, cost $50/MWh, max 50 MW),
 //! one regular thermal (cost $100/MWh, max 100 MW), loads [5, 10, 15, 30] MW,
 //! seeds [0, 0, 0], one-hour blocks per stage.
@@ -24,8 +24,7 @@
 //! - **Slot 2**: Stage-3 fishing dual routed via two successive Less-branch shifts
 //!   (stage-2 FCF cut, then stage-1 FCF cut) reaching slot 2 at stage 0.
 //!
-//! See `artifacts/layout-decision.md:240-269` and `indexer.rs:state_to_lp_column`
-//! for the complete algebraic chain.
+//! See `indexer.rs:state_to_lp_column` for the complete algebraic chain.
 //!
 //! ## Why `iterations = 5`
 //!
@@ -70,7 +69,7 @@ use cobre_io::config::{
     TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
 use cobre_sddp::{StudySetup, hydro_models::PrepareHydroModelsResult};
-use cobre_solver::highs::HighsSolver;
+use cobre_solver::ActiveSolver;
 use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
 // ---------------------------------------------------------------------------
@@ -446,7 +445,7 @@ fn four_stage_k3_anticipated_cut_coefficient_propagates_correctly() {
     let config = build_config();
     let mut setup = build_setup(system, &config);
     let comm = StubComm;
-    let mut solver = HighsSolver::new().expect("HighsSolver::new");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
 
     // Run N_ITERATIONS = 5 training iterations so the FCF at stage 0 receives
     // a non-zero cut propagated from stage 3 via stages 2 and 1.
@@ -455,7 +454,7 @@ fn four_stage_k3_anticipated_cut_coefficient_propagates_correctly() {
             &mut solver,
             &comm,
             N_ITERATIONS as usize,
-            HighsSolver::new,
+            ActiveSolver::new,
             None,
             None,
         )

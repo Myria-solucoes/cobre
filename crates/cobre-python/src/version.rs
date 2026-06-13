@@ -12,7 +12,8 @@ use pyo3::types::PyDict;
 /// The returned dict has the following keys:
 ///
 /// * `"version"` — the `cobre-python` package version (`cobre.__version__`).
-/// * `"solver"` — the active LP backend, e.g. `"HiGHS 1.7.2"`.
+/// * `"solver"` — the active LP backend and its version, e.g. `"HiGHS 1.7.2"`
+///   or `"CLP <v>"`.
 /// * `"comm"` — always `"local"`; this crate is single-process and never
 ///   initializes MPI.
 /// * `"zstd"` — `"enabled"` (compression support is always compiled in).
@@ -26,13 +27,20 @@ use pyo3::types::PyDict;
 /// info = cobre.version_info()
 /// assert info["version"] == cobre.__version__
 /// assert info["comm"] == "local"
-/// assert info["solver"].startswith("HiGHS ")
+/// assert info["solver"].split()[0] in ("HiGHS", "CLP")
 /// ```
 #[pyfunction]
 pub fn version_info(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
     dict.set_item("version", env!("CARGO_PKG_VERSION"))?;
-    dict.set_item("solver", format!("HiGHS {}", cobre_solver::highs_version()))?;
+    dict.set_item(
+        "solver",
+        format!(
+            "{} {}",
+            cobre_solver::active_solver_name(),
+            cobre_solver::active_solver_version()
+        ),
+    )?;
     // Single-process invariant (P1): this crate never initializes MPI, so the
     // communication backend is always local.
     dict.set_item("comm", "local")?;

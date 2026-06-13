@@ -2,7 +2,7 @@
 
 `cobre-io` reports two kinds of errors: `LoadError` variants (the top-level
 `Result<System, LoadError>` returned by `load_case`) and `ErrorKind` values
-(diagnostic categories collected by `ValidationContext` during the five-layer
+(diagnostic categories collected by `ValidationContext` during the layered
 validation pipeline).
 
 For an explanation of how the validation pipeline works and when each error
@@ -158,7 +158,7 @@ but a hydro, thermal, or line still references its old ID.
 ### `ConstraintError`
 
 **When it occurs:** A catch-all for all validation diagnostics collected by
-`ValidationContext` across any of the five layers, and for `SystemBuilder::build()`
+`ValidationContext` across any validation layer, and for `SystemBuilder::build()`
 rejections. The `description` field contains every collected error message joined
 by newlines, each prefixed with its `[ErrorKind]`, source file, optional entity
 identifier, and message text.
@@ -232,9 +232,12 @@ diagnostic system. Every `ValidationEntry` carries one `ErrorKind`. When
 `ValidationContext::into_result()` produces a `ConstraintError`, each line in
 `description` is prefixed with the `ErrorKind` in debug format (e.g., `[FileNotFound]`).
 
-There are 14 `ErrorKind` values. Two (`UnusedEntity` and `ModelQuality`) default
-to `Severity::Warning` — they are reported but do not block execution. All others
-default to `Severity::Error` and must be resolved before `load_case` succeeds.
+There are 15 `ErrorKind` values. Three (`UnusedEntity`, `ModelQuality`, and
+`SemanticAmbiguity`) default to `Severity::Warning` — they are reported but do
+not block execution. All others default to `Severity::Error` and must be
+resolved before `load_case` succeeds. One value, `NotImplemented`, is reserved
+and never emitted by the current validator, so it is not documented in detail
+below.
 
 ### `FileNotFound`
 
@@ -425,23 +428,6 @@ discard the checkpoint and start a new run.
 
 ---
 
-### `NotImplemented`
-
-**Default severity:** Error
-
-**What triggers it:** A feature referenced in the input files is recognized by
-the schema but not yet implemented in the current version of Cobre. This is used
-during development to surface unimplemented feature requests from valid input.
-
-**Example message:** `hydro production model 'linearized_head' is not yet implemented`
-
-**Resolution:** Avoid using the unimplemented feature until it is available.
-Check the [CHANGELOG](https://github.com/cobre-rs/cobre/blob/main/CHANGELOG.md) for the implementation timeline.
-Alternatively, use the currently supported alternatives (e.g., `"constant_productivity"`
-or `"fpha"` for hydro generation models).
-
----
-
 ### `UnusedEntity`
 
 **Default severity:** Warning (does not block execution)
@@ -478,12 +464,34 @@ not accurately represent historical inflows.
 
 ---
 
+### `SemanticAmbiguity`
+
+**Default severity:** Warning (does not block execution)
+
+**What triggers it:** A valid construct whose semantics are ambiguous or
+stage-dependent in a way that is likely to surprise the user. The primary case
+is using `thermal_generation(N)` in a generic constraint when thermal `N` is an
+anticipated thermal. `thermal_generation` refers to the per-block generation
+measured at the _delivery_ stage (when the commitment matures), not the
+commitment decision made at the current stage. Users who intend to constrain the
+commitment itself should use `anticipated_decision(N)` instead. Emitted by Layer
+5 (semantic validation) in `constraints/generic_constraints.json`.
+
+**Example message:** `Constraint "peak_cap": thermal_generation(5) references an anticipated thermal. thermal_generation refers to the per-block generation at the delivery stage, not the forward commitment. If you intend to constrain the commitment itself, use anticipated_decision(5) instead.`
+
+**Resolution:** Review the constraint expression. If you want to bound the
+generation dispatched at the delivery stage, `thermal_generation(N)` is correct
+and the warning can be ignored. If you want to bound the advance commitment
+decision itself, replace `thermal_generation(N)` with `anticipated_decision(N)`.
+
+---
+
 ## Severity reference
 
-| Severity | Effect                                | `ErrorKind` values                                 |
-| -------- | ------------------------------------- | -------------------------------------------------- |
-| Error    | Prevents `load_case` from succeeding  | All kinds except `UnusedEntity` and `ModelQuality` |
-| Warning  | Reported but does not block execution | `UnusedEntity`, `ModelQuality`                     |
+| Severity | Effect                                | `ErrorKind` values                                                       |
+| -------- | ------------------------------------- | ------------------------------------------------------------------------ |
+| Error    | Prevents `load_case` from succeeding  | All kinds except `UnusedEntity`, `ModelQuality`, and `SemanticAmbiguity` |
+| Warning  | Reported but does not block execution | `UnusedEntity`, `ModelQuality`, `SemanticAmbiguity`                      |
 
 To inspect warnings after a successful `load_case`, call
 `ValidationContext::warnings()` before calling `into_result()`. Warnings are

@@ -1228,6 +1228,11 @@ mod tests {
             max_active_per_stage: Some(100),
             basis_activity_window: Some(7),
             tie_tolerance: None,
+            start_iteration: None,
+            active_window: None,
+            candidate_window: None,
+            nadic: None,
+            violation_tolerance: None,
         };
         let json = serde_json::to_string(&original).unwrap();
         let roundtripped: RowSelectionConfig = serde_json::from_str(&json).unwrap();
@@ -1357,6 +1362,37 @@ mod tests {
         let json = r#"{"threshold": 5}"#;
         let cfg: RowSelectionConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.threshold, Some(5), "threshold must be stored");
+    }
+
+    /// AC: an existing config JSON that still carries the deprecated
+    /// `threshold` / `memory_window` keys alongside the new first-class
+    /// `active_window` key deserializes without error (the deprecated fields are
+    /// retained for `deny_unknown_fields`; `active_window` is the new k2 field).
+    #[test]
+    fn test_row_selection_deprecated_keys_and_active_window_deserialize() {
+        let json = r#"{
+            "enabled": true,
+            "method": "dynamic",
+            "threshold": 3,
+            "memory_window": 20,
+            "active_window": 0
+        }"#;
+        let cfg: RowSelectionConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            cfg.threshold,
+            Some(3),
+            "deprecated threshold must round-trip"
+        );
+        assert_eq!(
+            cfg.memory_window,
+            Some(20),
+            "deprecated memory_window must round-trip"
+        );
+        assert_eq!(
+            cfg.active_window,
+            Some(0),
+            "active_window must round-trip (0 is valid)"
+        );
     }
 
     /// Stale `exports` keys (`training`, `cuts`, `vertices`, `simulation`,

@@ -11,9 +11,54 @@
 use std::sync::mpsc;
 
 use cobre_core::{TrainingEvent, WorkerTimingPhase};
+use cobre_solver::{
+    SolverInterface,
+    types::{Basis, RowBatch, SolutionView, SolverError, SolverStatistics, StageTemplate},
+};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 use cobre_sddp::solver_stats::{SolverStatsDelta, StageWorkerStatsBuffer};
+
+/// Trivial profile type for the bench mock (satisfies the trait's
+/// `Copy + PartialEq + Default + Send` associated-type bounds).
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+struct BenchProfile;
+
+/// Minimal `SolverInterface` impl holding a fixed `SolverStatistics` snapshot
+/// with a non-empty `retry_level_histogram`, used solely to exercise the
+/// `statistics_into` copy path.
+struct BenchStatsMockSolver {
+    stats: SolverStatistics,
+}
+
+impl SolverInterface for BenchStatsMockSolver {
+    type Profile = BenchProfile;
+
+    fn apply_profile(&mut self, _profile: &BenchProfile) {}
+    fn load_model(&mut self, _template: &StageTemplate) {}
+    fn add_rows(&mut self, _rows: &RowBatch) {}
+    fn set_row_bounds(&mut self, _indices: &[usize], _lower: &[f64], _upper: &[f64]) {}
+    fn set_col_bounds(&mut self, _indices: &[usize], _lower: &[f64], _upper: &[f64]) {}
+    fn solve(&mut self, _basis: Option<&Basis>) -> Result<SolutionView<'_>, SolverError> {
+        Err(SolverError::InternalError {
+            message: "bench mock".to_string(),
+            error_code: None,
+        })
+    }
+    fn get_basis(&mut self, _out: &mut Basis) {}
+    fn statistics(&self) -> SolverStatistics {
+        self.stats.clone()
+    }
+    fn statistics_into(&self, out: &mut SolverStatistics) {
+        out.copy_from(&self.stats);
+    }
+    fn name(&self) -> &'static str {
+        "BenchStatsMock"
+    }
+    fn solver_name_version(&self) -> String {
+        "BenchStatsMockSolver 0.0.0".to_string()
+    }
+}
 
 fn bench_gather(c: &mut Criterion) {
     let n_workers = 10;
@@ -68,5 +113,53 @@ fn bench_worker_timing_emit(c: &mut Criterion) {
     while rx.try_recv().is_ok() {}
 }
 
-criterion_group!(benches, bench_gather, bench_worker_timing_emit);
+/// Per-opening `statistics_into` snapshot micro-benchmark.
+///
+/// Locks in the steady-state zero-allocation property of the backward hot
+/// loop's solver-statistics snapshot: a reusable [`SolverStatistics`] buffer is
+/// filled via `statistics_into` on every iteration, which `resize`s + copies the
+/// histogram in place rather than cloning a fresh `Vec`. After the first call the
+/// buffer's `retry_level_histogram` capacity is stable, so no further heap
+/// allocation occurs (verifiable by running this loop under `dhat`: only the
+/// one-time pre-loop allocation appears).
+fn bench_statistics_snapshot(c: &mut Criterion) {
+    let solver = BenchStatsMockSolver {
+        stats: SolverStatistics {
+            solve_count: 100,
+            success_count: 95,
+            failure_count: 5,
+            total_iterations: 4096,
+            retry_count: 7,
+            total_solve_time_seconds: 2.5,
+            basis_consistency_failures: 1,
+            first_try_successes: 88,
+            basis_offered: 60,
+            load_model_count: 3,
+            total_load_model_time_seconds: 0.4,
+            total_set_bounds_time_seconds: 0.2,
+            total_basis_set_time_seconds: 0.1,
+            basis_reconstructions: 12,
+            retry_level_histogram: vec![1, 0, 2, 0, 3, 0, 0, 0, 4, 0, 0, 5],
+        },
+    };
+
+    // Reusable buffer: pre-warm its histogram capacity so the timed loop is
+    // strictly the steady-state (zero-alloc) path.
+    let mut buf = SolverStatistics::default();
+    solver.statistics_into(&mut buf);
+
+    c.bench_function("backward_statistics_snapshot", |b| {
+        b.iter(|| {
+            solver.statistics_into(black_box(&mut buf));
+            black_box(buf.solve_count);
+        });
+    });
+}
+
+criterion_group!(
+    benches,
+    bench_gather,
+    bench_worker_timing_emit,
+    bench_statistics_snapshot
+);
 criterion_main!(benches);

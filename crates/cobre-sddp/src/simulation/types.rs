@@ -47,6 +47,16 @@ pub struct SimulationCostResult {
     // Resource costs
     /// Cost attributed to thermal generation dispatch.
     pub thermal_cost: f64,
+    /// Cost attributed to anticipated (forward-committed) thermal generation.
+    ///
+    /// Charged on the anticipated-decision column at the decision stage
+    /// (`cost_per_mwh * delivery_hours * discount[delivery]`), where the
+    /// delivery-stage generation cost is zeroed to avoid double-counting. This
+    /// is the fuel that `immediate_cost` already includes but `thermal_cost`
+    /// (which sums only the per-block generation columns) does not, so reporting
+    /// it as its own category lets the breakdown reconcile to `immediate_cost`.
+    /// Zero for cases with no anticipated thermals.
+    pub anticipated_thermal_cost: f64,
     /// Cost attributed to contract energy delivery.
     pub contract_cost: f64,
     /// Cost of load deficit (emergency energy).
@@ -544,6 +554,7 @@ mod tests {
             future_cost: 200.0,
             discount_factor: 0.95,
             thermal_cost: 500.0,
+            anticipated_thermal_cost: 90.0,
             contract_cost: 100.0,
             deficit_cost: 50.0,
             excess_cost: 10.0,
@@ -572,6 +583,7 @@ mod tests {
         assert_eq!(r.future_cost, 200.0);
         assert_eq!(r.discount_factor, 0.95);
         assert_eq!(r.thermal_cost, 500.0);
+        assert_eq!(r.anticipated_thermal_cost, 90.0);
         assert_eq!(r.contract_cost, 100.0);
         assert_eq!(r.deficit_cost, 50.0);
         assert_eq!(r.excess_cost, 10.0);

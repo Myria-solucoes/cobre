@@ -96,6 +96,10 @@ pub enum CommBackend {
 }
 
 #[cfg(feature = "mpi")]
+// Rationale: compile-time trait assertion — this function is intentionally never
+// called; its existence is the check. The compiler verifies `CommBackend: Send +
+// Sync` when it monomorphises `assert_send_sync::<CommBackend>()`, catching any
+// future field addition that would break thread safety without a runtime test.
 #[allow(dead_code)]
 const fn _assert_comm_backend_send_sync() {
     const fn assert_send_sync<T: Send + Sync>() {}

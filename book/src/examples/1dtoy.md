@@ -2,7 +2,7 @@
 
 The `1dtoy` case ships in `examples/1dtoy/` in the Cobre repository. It is the
 smallest complete hydrothermal dispatch problem that exercises every stage of the
-workflow: input loading, five-layer validation, stochastic training, and post-training
+workflow: input loading, layered validation, stochastic training, and post-training
 simulation. The case solves in under a second and produces inspectable output files.
 
 This page is a self-contained annotated reference. For the pedagogical walkthrough
@@ -69,7 +69,7 @@ this ordering implicitly through the Benders cuts it generates.
 
 `forward_passes: 1` draws one scenario trajectory per training iteration, which
 is standard for single-cut SDDP. The only stopping rule is an `iteration_limit`
-of 128, so the pre-generated output ran all 128 iterations. In a production study
+of 128, so a run executes all 128 iterations. In a production study
 you would add a convergence-based rule such as `"type": "bound_stalling", "iterations": 20, "tolerance": 0.01`
 to stop early when the lower bound improvement stalls.
 
@@ -218,16 +218,16 @@ filling reservoirs (non-generating upstream storage) in this case.
 
 ## Convergence Behavior
 
-The pre-generated output in `examples/1dtoy/output/training/` ran 128 iterations
-and stopped at the iteration limit (no convergence-based stopping rule is configured
-in `config.json`).
+A training run writes its results to `output/training/`. With this configuration
+the solver runs all 128 iterations and stops at the iteration limit (no
+convergence-based stopping rule is configured in `config.json`).
 
 ```
-Training summary (from output/training/_manifest.json):
+Training summary (from output/training/metadata.json):
   Iterations completed:    128
   Termination reason:      iteration_limit
   Convergence achieved:    false
-  Cuts generated:          387
+  Cuts generated:          384
   Cuts active:             384
 ```
 
@@ -258,20 +258,18 @@ run.
 
 ## Output Structure
 
-After `cobre run examples/1dtoy --output examples/1dtoy/output`, the output
-directory contains three subdirectories:
+After running `cobre run examples/1dtoy`, the output directory contains three subdirectories:
 
 ```
 output/
   training/
-    _manifest.json          # Run metadata: status, iterations, convergence, cuts
-    metadata.json           # Problem dimensions, solver version, timing
+    metadata.json           # Run metadata: status, iterations, convergence, cuts, problem dimensions
     convergence.parquet     # Per-iteration lower bound, upper bound, gap
     timing/                 # Per-stage, per-iteration solver timing
     dictionaries/           # Variable and entity dictionaries for output parsing
     _SUCCESS                # Zero-byte sentinel written on clean completion
   simulation/
-    _manifest.json          # Simulation metadata: total/completed/failed scenarios
+    metadata.json           # Simulation metadata: total/completed/failed scenarios
     buses/                  # Bus dispatch results (Hive-partitioned by scenario)
       scenario_id=0000/
         data.parquet
@@ -291,15 +289,14 @@ output/
 
 ### Key files
 
-| File                                           | What it contains                                                           |
-| ---------------------------------------------- | -------------------------------------------------------------------------- |
-| `training/_manifest.json`                      | Run status, iteration count, convergence result, row pool statistics       |
-| `training/metadata.json`                       | Problem dimensions (stages, hydros, thermals, buses), Cobre version        |
-| `training/convergence.parquet`                 | Lower bound, upper bound, gap per iteration — use this to plot convergence |
-| `simulation/buses/scenario_id=N/data.parquet`  | Bus-level demand, generation, deficit per stage for scenario N             |
-| `simulation/hydros/scenario_id=N/data.parquet` | Storage level, turbined flow, spillage per stage for scenario N            |
-| `simulation/costs/scenario_id=N/data.parquet`  | Total cost per stage for scenario N                                        |
-| `policy/cuts/`                                 | Saved Benders cuts — load this with `--policy` to warm-start a future run  |
+| File                                           | What it contains                                                                         |
+| ---------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `training/metadata.json`                       | Run status, convergence result, iteration count, row pool statistics, problem dimensions |
+| `training/convergence.parquet`                 | Lower bound, upper bound, gap per iteration — use this to plot convergence               |
+| `simulation/buses/scenario_id=N/data.parquet`  | Bus-level demand, generation, deficit per stage for scenario N                           |
+| `simulation/hydros/scenario_id=N/data.parquet` | Storage level, turbined flow, spillage per stage for scenario N                          |
+| `simulation/costs/scenario_id=N/data.parquet`  | Total cost per stage for scenario N                                                      |
+| `policy/cuts/`                                 | Saved Benders cuts — load this with `--policy` to warm-start a future run                |
 
 ### Querying results
 
@@ -309,12 +306,12 @@ All Parquet files are readable with any columnar query tool:
 import polars as pl
 
 # Convergence plot data
-df = pl.read_parquet("examples/1dtoy/output/training/convergence.parquet")
+df = pl.read_parquet("output/training/convergence.parquet")
 print(df.head())
 
 # Hydro dispatch for scenario 0
 df = pl.read_parquet(
-    "examples/1dtoy/output/simulation/hydros/scenario_id=0000/data.parquet"
+    "output/simulation/hydros/scenario_id=0000/data.parquet"
 )
 print(df)
 ```
@@ -322,7 +319,7 @@ print(df)
 ```sql
 -- DuckDB: average reservoir storage across all 100 simulation scenarios
 SELECT stage_id, AVG(storage_hm3) AS mean_storage
-FROM read_parquet('examples/1dtoy/output/simulation/hydros/*/data.parquet')
+FROM read_parquet('output/simulation/hydros/*/data.parquet')
 GROUP BY stage_id
 ORDER BY stage_id;
 ```
@@ -333,15 +330,15 @@ For the complete output schema reference, see [Output Format](../reference/outpu
 
 ## Running the Example
 
-The example directory already contains pre-generated output. To reproduce it from
-scratch:
+Generated output is not committed to the repository — produce it by running the
+case yourself:
 
 ```bash
 # Validate the input files
 cobre validate examples/1dtoy
 
-# Run training and simulation (overwrites the existing output)
-cobre run examples/1dtoy --output examples/1dtoy/output
+# Run training and simulation (writes to the output directory)
+cobre run examples/1dtoy --output output
 ```
 
 To scaffold a fresh copy of the 1dtoy case into a new directory:

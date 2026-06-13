@@ -81,6 +81,10 @@ pub(crate) fn run_pipeline_with_report(
 /// # Errors
 ///
 /// Same error conditions as [`run_pipeline`].
+// Rationale: the function is the canonical orchestrator that runs all six validation layers and
+// resolution steps in strict dependency order, where each stage's output feeds the next; splitting
+// at arbitrary layer boundaries would introduce artificial module seams in a single linear cascade
+// and scatter the global ordering guarantee across multiple call sites.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn run_pipeline_with_artifacts(
     path: &Path,

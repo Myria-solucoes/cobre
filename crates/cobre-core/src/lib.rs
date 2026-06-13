@@ -37,21 +37,40 @@
     )
 )]
 
+pub mod constraints;
 pub mod entities;
 pub mod entity_id;
 pub mod error;
-pub mod generic_constraint;
-pub mod initial_conditions;
-pub mod parameters;
-pub mod penalty;
-pub mod resolved;
-pub mod scenario;
+pub mod model;
+pub mod stats;
 pub mod system;
-pub mod temporal;
 pub mod topology;
-pub mod training_event;
-pub mod welford;
 
+// Crate-root module-alias re-exports: make `crate::resolved::` /
+// `crate::scenario::` / `crate::temporal::` / `crate::parameters::` /
+// `crate::penalty::` valid module paths for in-crate callers (system.rs,
+// scenario.rs) and external `cobre_core::<module>::Symbol` consumers. The
+// canonical sources are the `model::{...}` submodules.
+pub use model::{parameters, penalty, resolved, scenario, temporal};
+
+// Crate-root module-alias re-exports: make `cobre_core::generic_constraint::` /
+// `cobre_core::initial_conditions::` / `cobre_core::training_event::` valid
+// module paths for external consumers. Canonical source: the `constraints::`
+// submodules.
+pub use constraints::{generic_constraint, initial_conditions, training_event};
+
+pub use constraints::generic_constraint::{
+    ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
+};
+pub use constraints::initial_conditions::{
+    AnticipatedCommitmentHistory, HydroPastInflows, HydroStorage, InitialConditions,
+    RecentObservation,
+};
+pub use constraints::training_event::{
+    StageRowSelectionRecord, StoppingRuleResult, TrainingEvent, WORKER_TIMING_SLOT_BWD_SETUP,
+    WORKER_TIMING_SLOT_BWD_WALL, WORKER_TIMING_SLOT_COUNT, WORKER_TIMING_SLOT_FWD_SETUP,
+    WORKER_TIMING_SLOT_FWD_WALL, WORKER_TIMING_SLOT_SCORING, WorkerPhaseTimings, WorkerTimingPhase,
+};
 pub use entities::{
     AnticipatedConfig, Bus, ContractType, DeficitSegment, DiversionChannel, EfficiencyModel,
     EnergyContract, FillingConfig, HydraulicLossesModel, Hydro, HydroGenerationModel,
@@ -60,42 +79,30 @@ pub use entities::{
 };
 pub use entity_id::EntityId;
 pub use error::ValidationError;
-pub use generic_constraint::{
-    ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
-};
-pub use initial_conditions::{
-    AnticipatedCommitmentHistory, HydroPastInflows, HydroStorage, InitialConditions,
-    RecentObservation,
-};
-pub use parameters::{CoefficientRef, ComputedParameter, ParameterKind, ScalarParameter};
-pub use penalty::{
+pub use model::parameters::{CoefficientRef, ComputedParameter, ParameterKind, ScalarParameter};
+pub use model::penalty::{
     GlobalPenaltyDefaults, HydroPenaltyOverrides, resolve_bus_deficit_segments,
     resolve_bus_excess_cost, resolve_hydro_penalties, resolve_line_exchange_cost,
     resolve_ncs_curtailment_cost,
 };
-pub use resolved::{
+pub use model::resolved::{
     BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, HydroStageBounds,
     HydroStagePenalties, LineStageBounds, LineStagePenalties, NcsStagePenalties,
     PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
     ResolvedExchangeFactors, ResolvedGenericConstraintBounds, ResolvedLoadFactors,
     ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, ThermalStageBounds,
 };
-pub use scenario::{
+pub use model::scenario::{
     CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile,
     CorrelationScheduleEntry, ExternalLoadRow, ExternalNcsRow, ExternalScenarioRow,
     HistoricalYears, InflowHistoryRow, InflowModel, LoadModel, NcsModel, SamplingScheme,
     ScenarioSource,
 };
-pub use system::{System, SystemBuilder};
-pub use temporal::{
+pub use model::temporal::{
     Block, BlockMode, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig,
     SeasonCycleType, SeasonDefinition, SeasonMap, Stage, StageRiskConfig, StageStateConfig,
     Transition,
 };
+pub use stats::welford::WelfordAccumulator;
+pub use system::{System, SystemBuilder};
 pub use topology::{BusGenerators, BusLineConnection, BusLoads, CascadeTopology, NetworkTopology};
-pub use training_event::{
-    StageRowSelectionRecord, StoppingRuleResult, TrainingEvent, WORKER_TIMING_SLOT_BWD_SETUP,
-    WORKER_TIMING_SLOT_BWD_WALL, WORKER_TIMING_SLOT_COUNT, WORKER_TIMING_SLOT_FWD_SETUP,
-    WORKER_TIMING_SLOT_FWD_WALL, WorkerPhaseTimings, WorkerTimingPhase,
-};
-pub use welford::WelfordAccumulator;

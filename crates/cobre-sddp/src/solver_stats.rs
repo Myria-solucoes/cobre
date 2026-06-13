@@ -138,8 +138,8 @@ impl SolverStatsDelta {
     /// with `copy_from_slice`. When `dst` already has a histogram of the same
     /// length (the common case on iteration ≥ 2), no heap allocation occurs.
     ///
-    /// Prefer this over `dst = self.clone()` or `dst = self.clone_into_reuse(..)`
-    /// on hot paths where the histogram length is stable across calls.
+    /// Prefer this over `dst = self.clone()` on hot paths where the histogram
+    /// length is stable across calls.
     pub fn clone_into_reuse(&self, dst: &mut Self) {
         dst.lp_solves = self.lp_solves;
         dst.lp_successes = self.lp_successes;
@@ -252,29 +252,134 @@ pub fn aggregate_solver_statistics(
     result
 }
 
-/// A single row in the solver stats log:
-/// `(iteration, phase, stage, opening, rank, worker_id, delta)`.
+/// A single row in the per-iteration, per-phase solver-stats log.
 ///
-/// - `iteration`: 1-based iteration number.
-/// - `phase`: `"forward"`, `"backward"`, or `"lower_bound"` — a `&'static str`
-///   to avoid per-iteration heap allocation (F1-005 fix).
-/// - `stage`: stage index — a non-negative stage index for backward and forward
-///   phases; `-1` only for the lower-bound (LB) phase, which is rank-aggregated
-///   and has no stage dimension. The writer maps `-1` to a NULL `Int32` column
-///   in `solver/iterations.parquet`.
-/// - `opening`: opening index `0..n_openings` for backward rows; `-1` for
-///   forward, lower-bound, and simulation rows (no opening dimension).
-///   The parquet writer maps `-1` to a NULL `Int32` column.
-/// - `rank`: MPI rank that produced this row. Always `>= 0`; the writer adapter
-///   wraps it in `Some(rank)` when populating the per-rank `SolverStatsRow`.
-///   Rank-aggregated rows (none in the per-rank path) use `rank: None` at the
-///   writer side.
-/// - `worker_id`: rayon worker that produced this row. `-1` maps to NULL at the
-///   writer boundary. Forward and lower-bound rows carry `-1` (no per-worker
-///   dimension yet); backward rows carry the real `worker_id` from the
-///   `allgatherv` unpack on backward.
-/// - `delta`: the solver counter delta for this entry.
-pub type SolverStatsEntry = (u64, &'static str, i32, i32, i32, i32, SolverStatsDelta);
+/// The `opening`/`worker_id` `-1 → None` sentinel decode is owned by
+/// [`SolverStatsLogEntry::from_raw`] — the sole construction path on the hot
+/// push sites — so no consumer re-decodes a sentinel.
+#[derive(Debug, Clone)]
+pub struct SolverStatsLogEntry {
+    /// 1-based iteration number (training) or scenario id (simulation).
+    pub iteration: u64,
+    /// `"forward"`, `"backward"`, or `"lower_bound"`. A `&'static str` to avoid
+    /// per-iteration heap allocation on the hot push path; a `String` here
+    /// would allocate once per log entry.
+    pub phase: &'static str,
+    /// Stage index `>= 0` for forward/backward; `-1` for the lower-bound phase
+    /// (rank-aggregated, no stage axis). Passed through verbatim to
+    /// [`cobre_io::SolverStatsRow`]`.stage` — the parquet writer maps `-1` to a
+    /// NULL `Int32` column. Kept as `i32`, NOT `Option`, because the `-1 → NULL`
+    /// mapping lives downstream in the writer; converting it here would move the
+    /// mapping and change the column encoding.
+    pub stage: i32,
+    /// Opening index `Some(ω)` for backward rows; `None` for forward,
+    /// lower-bound, and simulation rows (no opening axis). The writer maps `None`
+    /// to a NULL `Int32` column.
+    pub opening: Option<i32>,
+    /// MPI rank that produced this row. Always present (`>= 0`, never a
+    /// sentinel); the writer wraps it in `Some(rank)`.
+    pub rank: i32,
+    /// rayon worker that produced this row: `Some` for backward rows (from the
+    /// `allgatherv` unpack); `None` for forward/lower-bound rows (no per-worker
+    /// axis yet). The writer maps `None` to a NULL `Int32` column.
+    pub worker_id: Option<i32>,
+    /// Solver-counter delta for this entry.
+    pub delta: SolverStatsDelta,
+}
+
+impl SolverStatsLogEntry {
+    /// Build an entry from the raw producer-side values, decoding the `-1`
+    /// sentinel on `opening`/`worker_id` into `None` exactly once here.
+    /// `stage` and `rank` are stored verbatim (no sentinel decode): `stage`'s
+    /// `-1 → NULL` mapping is the writer's job, and `rank` is never a sentinel.
+    #[must_use]
+    pub fn from_raw(
+        iteration: u64,
+        phase: &'static str,
+        stage: i32,
+        opening: i32,
+        rank: i32,
+        worker_id: i32,
+        delta: SolverStatsDelta,
+    ) -> Self {
+        Self {
+            iteration,
+            phase,
+            stage,
+            opening: (opening != -1).then_some(opening),
+            rank,
+            worker_id: (worker_id != -1).then_some(worker_id),
+            delta,
+        }
+    }
+}
+
+/// Convert a [`SolverStatsDelta`] into a [`cobre_io::SolverStatsRow`] for Parquet output.
+///
+/// The `id` parameter is the row identifier: iteration number for training phases,
+/// scenario ID for the simulation phase. `opening` is `Some(ω)` for backward rows
+/// and `None` for forward, `lower_bound`, and simulation rows. `rank` is `Some` for
+/// every training-phase row (forward, backward, and `lower_bound` — [`solver_stats_log_to_rows`]
+/// always supplies the producing rank) and `None` only for simulation rows.
+/// `worker_id` is `Some` for backward rows (from the allgatherv unpack) and `None`
+/// otherwise (no per-worker dimension on forward, `lower_bound`, or simulation rows).
+#[must_use]
+#[allow(clippy::cast_possible_truncation)]
+pub fn delta_to_stats_row(
+    id: u32,
+    phase: &str,
+    stage: i32,
+    opening: Option<i32>,
+    rank: Option<i32>,
+    worker_id: Option<i32>,
+    delta: &SolverStatsDelta,
+) -> cobre_io::SolverStatsRow {
+    cobre_io::SolverStatsRow {
+        iteration: id,
+        phase: phase.to_string(),
+        stage,
+        opening,
+        rank,
+        worker_id,
+        lp_solves: delta.lp_solves as u32,
+        lp_successes: delta.lp_successes as u32,
+        lp_retries: delta.lp_successes.saturating_sub(delta.first_try_successes) as u32,
+        lp_failures: delta.lp_failures as u32,
+        retry_attempts: delta.retry_attempts as u32,
+        basis_offered: delta.basis_offered as u32,
+        basis_consistency_failures: delta.basis_consistency_failures as u32,
+        simplex_iterations: delta.simplex_iterations,
+        solve_time_ms: delta.solve_time_ms,
+        load_model_time_ms: delta.load_model_time_ms,
+        set_bounds_time_ms: delta.set_bounds_time_ms,
+        basis_set_time_ms: delta.basis_set_time_ms,
+        retry_level_histogram: delta.retry_level_histogram.clone(),
+    }
+}
+
+/// Map a per-iteration solver-stats log into Parquet rows.
+///
+/// The `opening`/`worker_id` `None` decode is already resolved on each
+/// [`SolverStatsLogEntry`] (by [`SolverStatsLogEntry::from_raw`]); this consumer
+/// reads the fields directly and does not re-decode any sentinel.
+#[must_use]
+pub fn solver_stats_log_to_rows(log: &[SolverStatsLogEntry]) -> Vec<cobre_io::SolverStatsRow> {
+    log.iter()
+        .map(|entry| {
+            #[allow(clippy::cast_possible_truncation)] // iteration count fits in u32
+            let id = entry.iteration as u32;
+            delta_to_stats_row(
+                id,
+                entry.phase,
+                entry.stage,
+                entry.opening,
+                Some(entry.rank),
+                entry.worker_id,
+                &entry.delta,
+            )
+        })
+        .collect()
+}
 
 /// Number of scalar fields in [`SolverStatsDelta`] (excludes histogram `Vec`).
 /// Buffer size for MPI allreduce/allgatherv: 8 `u64` fields cast to `f64` + 5 native `f64` fields.
@@ -568,7 +673,7 @@ impl StageWorkerStatsBuffer {
     /// lower-bound paths). Does not re-allocate; always `O(n_workers * n_slots)`.
     pub fn reset(&mut self) {
         for slot in &mut self.data {
-            *slot = SolverStatsDelta::default();
+            slot.reset_in_place();
         }
     }
 
@@ -945,59 +1050,99 @@ mod tests {
 
     #[test]
     fn test_solver_stats_log_per_opening_shape() {
-        // AC-002: SolverStatsEntry is a 7-tuple (iteration, phase, stage, opening,
-        // rank, worker_id, delta). Forward entries use a real stage index (>= 0)
-        // and opening == -1, worker_id == -1 (no per-worker dimension yet).
-        // LB entries continue to use stage == -1, opening == -1, worker_id == -1.
-        // Backward entries carry real (rank, worker_id) from allgatherv unpack.
-        let fwd_entry: SolverStatsEntry = (1, "forward", 0, -1, 0, -1, make_delta(4));
-        let bwd_entry_0: SolverStatsEntry = (1, "backward", 2, 0, 0, 0, make_delta(2));
-        let bwd_entry_1: SolverStatsEntry = (1, "backward", 2, 1, 0, 1, make_delta(3));
-        let lb_entry: SolverStatsEntry = (1, "lower_bound", -1, -1, 0, -1, make_delta(1));
+        // Forward entries use a real stage index (>= 0), opening == None,
+        // worker_id == None (no per-worker dimension yet). LB entries use
+        // stage == -1, opening == None, worker_id == None. Backward entries
+        // carry real (rank, worker_id) from allgatherv unpack.
+        let fwd_entry = SolverStatsLogEntry::from_raw(1, "forward", 0, -1, 0, -1, make_delta(4));
+        let bwd_entry_0 = SolverStatsLogEntry::from_raw(1, "backward", 2, 0, 0, 0, make_delta(2));
+        let bwd_entry_1 = SolverStatsLogEntry::from_raw(1, "backward", 2, 1, 0, 1, make_delta(3));
+        let lb_entry =
+            SolverStatsLogEntry::from_raw(1, "lower_bound", -1, -1, 0, -1, make_delta(1));
 
-        let log: Vec<SolverStatsEntry> = vec![fwd_entry, bwd_entry_0, bwd_entry_1, lb_entry];
+        let log: Vec<SolverStatsLogEntry> = vec![fwd_entry, bwd_entry_0, bwd_entry_1, lb_entry];
 
-        // Verify the forward entry has a real stage index, opening == -1, worker_id == -1.
-        let (_, phase_fwd, stage_fwd, opening_fwd, _rank_fwd, worker_id_fwd, _) = &log[0];
-        assert_eq!(*phase_fwd, "forward");
+        // Verify the forward entry has a real stage index, opening None, worker_id None.
+        assert_eq!(log[0].phase, "forward");
         assert!(
-            *stage_fwd >= 0,
-            "forward stage must be a real stage index, got {stage_fwd}"
+            log[0].stage >= 0,
+            "forward stage must be a real stage index, got {}",
+            log[0].stage
         );
-        assert_eq!(*opening_fwd, -1);
+        assert_eq!(log[0].opening, None);
         assert_eq!(
-            *worker_id_fwd, -1,
+            log[0].worker_id, None,
             "forward rows have no per-worker dimension"
         );
 
         // Verify backward entries carry correct opening indices and worker ids.
-        let (_, _, stage0, opening0, rank0, worker_id0, delta0) = &log[1];
-        assert_eq!(*stage0, 2);
-        assert_eq!(*opening0, 0);
-        assert_eq!(*rank0, 0);
-        assert_eq!(*worker_id0, 0);
-        assert_eq!(delta0.lp_solves, 2);
+        assert_eq!(log[1].stage, 2);
+        assert_eq!(log[1].opening, Some(0));
+        assert_eq!(log[1].rank, 0);
+        assert_eq!(log[1].worker_id, Some(0));
+        assert_eq!(log[1].delta.lp_solves, 2);
 
-        let (_, _, stage1, opening1, rank1, worker_id1, delta1) = &log[2];
-        assert_eq!(*stage1, 2);
-        assert_eq!(*opening1, 1);
-        assert_eq!(*rank1, 0);
-        assert_eq!(*worker_id1, 1);
-        assert_eq!(delta1.lp_solves, 3);
+        assert_eq!(log[2].stage, 2);
+        assert_eq!(log[2].opening, Some(1));
+        assert_eq!(log[2].rank, 0);
+        assert_eq!(log[2].worker_id, Some(1));
+        assert_eq!(log[2].delta.lp_solves, 3);
 
         // Verify that collapsing across openings/workers yields the per-stage total.
         let backward_entries: Vec<&SolverStatsDelta> = log
             .iter()
-            .filter(|(_, ph, _, _, _, _, _)| *ph == "backward")
-            .map(|(_, _, _, _, _, _, d)| d)
+            .filter(|e| e.phase == "backward")
+            .map(|e| &e.delta)
             .collect();
         let collapsed = SolverStatsDelta::aggregate(backward_entries.into_iter());
         assert_eq!(collapsed.lp_solves, 5); // 2 + 3
 
-        // Verify that LB entry has opening == -1, worker_id == -1.
-        let (_, _, _, opening_lb, _, worker_id_lb, _) = &log[3];
-        assert_eq!(*opening_lb, -1);
-        assert_eq!(*worker_id_lb, -1);
+        // Verify that LB entry has opening None, worker_id None.
+        assert_eq!(log[3].opening, None);
+        assert_eq!(log[3].worker_id, None);
+    }
+
+    #[test]
+    fn solver_stats_log_entry_from_raw_decodes_minus_one_to_none() {
+        // The -1 sentinel on opening/worker_id decodes to None on the struct;
+        // a non-negative index decodes to Some. stage and rank are verbatim.
+        let forward = SolverStatsLogEntry::from_raw(3, "forward", 1, -1, 0, -1, make_delta(5));
+        assert_eq!(forward.opening, None);
+        assert_eq!(forward.worker_id, None);
+
+        let backward = SolverStatsLogEntry::from_raw(3, "backward", 2, 0, 1, 4, make_delta(2));
+        assert_eq!(backward.opening, Some(0));
+        assert_eq!(backward.worker_id, Some(4));
+        assert_eq!(backward.rank, 1);
+        assert_eq!(backward.stage, 2);
+    }
+
+    #[test]
+    fn test_solver_stats_log_to_rows_decodes_minus_one_to_none() {
+        // The -1 sentinel on opening/worker_id maps to None in the Parquet row;
+        // a non-negative index maps to Some. rank is always wrapped in Some.
+        let backward = SolverStatsLogEntry::from_raw(3, "backward", 2, 0, 1, 4, make_delta(2));
+        let forward = SolverStatsLogEntry::from_raw(3, "forward", 1, -1, 1, -1, make_delta(5));
+        let log: Vec<SolverStatsLogEntry> = vec![backward, forward];
+
+        let rows = solver_stats_log_to_rows(&log);
+        assert_eq!(rows.len(), 2);
+
+        // Backward: non-negative opening/worker_id → Some; rank → Some.
+        assert_eq!(rows[0].opening, Some(0));
+        assert_eq!(rows[0].worker_id, Some(4));
+        assert_eq!(rows[0].rank, Some(1));
+        assert_eq!(rows[0].iteration, 3);
+        assert_eq!(rows[0].stage, 2);
+        assert_eq!(rows[0].phase, "backward");
+        assert_eq!(rows[0].lp_solves, 2);
+
+        // Forward: opening == -1 → None; worker_id == -1 → None; rank → Some.
+        assert_eq!(rows[1].opening, None);
+        assert_eq!(rows[1].worker_id, None);
+        assert_eq!(rows[1].rank, Some(1));
+        assert_eq!(rows[1].phase, "forward");
+        assert_eq!(rows[1].lp_solves, 5);
     }
 
     /// per-stage forward `stage_stats` summed element-wise across workers.
@@ -1050,21 +1195,20 @@ mod tests {
         assert_eq!(stage_stats[1].simplex_iterations, 350); // (20 + 15) * 10
         assert_eq!(stage_stats[2].simplex_iterations, 550); // (30 + 25) * 10
 
-        // Verify the log shape: one SolverStatsEntry per stage with stage index 0..3.
-        // forward rows use real stage index, opening sentinel -1 → NULL)
-        // 7-tuple: (iter, phase, stage, opening, rank, worker_id, delta)
-        // Forward rows carry rank = local rank, worker_id = -1 (no per-worker dimension).
-        let log: Vec<SolverStatsEntry> = stage_stats
+        // Verify the log shape: one SolverStatsLogEntry per stage with stage
+        // index 0..3. Forward rows use a real stage index, rank = local rank,
+        // and the opening/worker_id sentinels (-1) decode to None.
+        let log: Vec<SolverStatsLogEntry> = stage_stats
             .iter()
             .enumerate()
             .map(|(t, delta)| {
-                (
-                    1u64,
+                SolverStatsLogEntry::from_raw(
+                    1,
                     "forward",
                     i32::try_from(t).expect("stage fits i32"),
-                    -1_i32,
-                    0_i32,  // rank
-                    -1_i32, // worker_id sentinel → NULL at writer
+                    -1,
+                    0,  // rank
+                    -1, // worker_id sentinel → None
                     delta.clone(),
                 )
             })
@@ -1072,15 +1216,20 @@ mod tests {
 
         assert_eq!(log.len(), 3, "one entry per stage");
         for (t, entry) in log.iter().enumerate() {
-            let (_, phase, stage, opening, _rank, worker_id, _) = entry;
-            assert_eq!(*phase, "forward");
+            assert_eq!(entry.phase, "forward");
             assert_eq!(
-                *stage,
+                entry.stage,
                 i32::try_from(t).expect("stage fits i32"),
                 "stage index must match loop variable"
             );
-            assert_eq!(*opening, -1, "forward rows have no opening dimension");
-            assert_eq!(*worker_id, -1, "forward rows have no per-worker dimension");
+            assert_eq!(
+                entry.opening, None,
+                "forward rows have no opening dimension"
+            );
+            assert_eq!(
+                entry.worker_id, None,
+                "forward rows have no per-worker dimension"
+            );
         }
     }
 

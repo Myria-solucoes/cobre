@@ -20,7 +20,7 @@ use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::scenario::ScenarioSource;
 use cobre_io::output::policy::write_policy_checkpoint;
 use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic};
-use cobre_solver::highs::HighsSolver;
+use cobre_solver::ActiveSolver;
 
 /// Single-rank communicator stub for testing.
 struct StubComm;
@@ -149,9 +149,9 @@ fn boundary_cuts_improve_terminal_stage_objective() {
     // --- Run A: source study (produces checkpoint) ---
     let mut setup_a = build_setup(&case_dir, &config_5iter);
     let comm = StubComm;
-    let mut solver_a = HighsSolver::new().expect("solver");
+    let mut solver_a = ActiveSolver::new().expect("solver");
     let outcome_a = setup_a
-        .train(&mut solver_a, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut solver_a, &comm, 1, ActiveSolver::new, None, None)
         .expect("train A");
     assert!(outcome_a.error.is_none());
 
@@ -164,9 +164,9 @@ fn boundary_cuts_improve_terminal_stage_objective() {
 
     // --- Run B: consumer WITHOUT boundary cuts (baseline) ---
     let mut setup_b = build_setup(&case_dir, &config_5iter);
-    let mut solver_b = HighsSolver::new().expect("solver");
+    let mut solver_b = ActiveSolver::new().expect("solver");
     let outcome_b = setup_b
-        .train(&mut solver_b, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut solver_b, &comm, 1, ActiveSolver::new, None, None)
         .expect("train B");
     assert!(outcome_b.error.is_none());
     let lb_no_boundary = outcome_b.result.final_lb;
@@ -194,9 +194,9 @@ fn boundary_cuts_improve_terminal_stage_objective() {
         "populated_count must include boundary cuts"
     );
 
-    let mut solver_c = HighsSolver::new().expect("solver");
+    let mut solver_c = ActiveSolver::new().expect("solver");
     let outcome_c = setup_c
-        .train(&mut solver_c, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut solver_c, &comm, 1, ActiveSolver::new, None, None)
         .expect("train C");
     assert!(outcome_c.error.is_none());
     let lb_with_boundary = outcome_c.result.final_lb;

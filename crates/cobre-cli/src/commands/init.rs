@@ -95,6 +95,9 @@ fn execute_scaffold(
                 template_name,
                 available.join(", ")
             ),
+            // `init` surfaces this error directly; nothing was rendered to stdout,
+            // so the stderr render and hint must remain.
+            already_rendered: false,
         }
     })?;
 
@@ -214,7 +217,7 @@ mod tests {
             force: false,
             directory: Some(tmp.path().to_path_buf()),
         };
-        let Err(CliError::Validation { report }) = execute(args) else {
+        let Err(CliError::Validation { report, .. }) = execute(args) else {
             panic!("expected CliError::Validation");
         };
         assert!(report.contains("bogus_template_xyz"));

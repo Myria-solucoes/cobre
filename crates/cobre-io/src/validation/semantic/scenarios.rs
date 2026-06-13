@@ -15,6 +15,11 @@ use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 ///
 /// Emits one `ModelQuality` warning per violated ordering check, aggregating
 /// all violating entities into a single warning with the count and worst-case ID.
+// Rationale: the function implements five independent penalty-hierarchy ordering
+// rules (rules 6–10), each requiring a separate pass to aggregate worst-case
+// violations across all entities and emit a single warning; splitting into
+// per-rule helpers would not reduce complexity because each rule needs the same
+// entity iteration and the result of cross-entity aggregation before emitting.
 #[allow(clippy::too_many_lines)]
 pub(super) fn check_penalty_ordering(data: &ParsedData, ctx: &mut ValidationContext) {
     // Collect max deficit cost across all buses (combining all deficit segments).
@@ -299,7 +304,7 @@ pub(super) fn check_scenario_models(data: &ParsedData, ctx: &mut ValidationConte
     }
 }
 
-// ── F2-002: External scheme requires external scenario files ─────────────────
+// ── External scheme requires external scenario files ─────────────────────────
 
 /// Validates that when a class uses the `External` sampling scheme, the
 /// corresponding external scenario file data is non-empty.

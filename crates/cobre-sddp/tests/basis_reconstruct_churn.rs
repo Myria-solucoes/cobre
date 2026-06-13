@@ -49,9 +49,10 @@ use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::scenario::ScenarioSource;
 use cobre_io::config::StoppingRuleConfig;
 use cobre_sddp::{
-    SolverStatsDelta, StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic,
+    SolverStatsDelta, SolverStatsLogEntry, StudySetup, hydro_models::prepare_hydro_models,
+    setup::prepare_stochastic,
 };
-use cobre_solver::highs::HighsSolver;
+use cobre_solver::ActiveSolver;
 
 // ---------------------------------------------------------------------------
 // StubComm — single-rank communicator for testing
@@ -129,13 +130,11 @@ fn d01_case_dir() -> std::path::PathBuf {
 // ---------------------------------------------------------------------------
 
 /// Aggregate `SolverStatsDelta` across all `"forward"` log entries.
-fn sum_forward_deltas(
-    log: &[(u64, &'static str, i32, i32, i32, i32, SolverStatsDelta)],
-) -> SolverStatsDelta {
+fn sum_forward_deltas(log: &[SolverStatsLogEntry]) -> SolverStatsDelta {
     SolverStatsDelta::aggregate(
         log.iter()
-            .filter(|(_, phase, _, _, _, _, _)| *phase == "forward")
-            .map(|(_, _, _, _, _, _, d)| d),
+            .filter(|e| e.phase == "forward")
+            .map(|e| &e.delta),
     )
 }
 
@@ -199,9 +198,17 @@ fn basis_reconstruct_churn() {
     //
     // Sensitivity: the `padding_state = x_hat` regression this test was
     // designed to catch raises this count beyond the ±5 % band.
+    // The simplex-iteration band and the lower-bound pin below are calibrated
+    // against HiGHS's simplex path and last-ULP accumulation, so they are gated
+    // to the `highs` backend. CLP gets its own calibrated pins in the
+    // CLP-baselines epic; the structural checks below (iterations, zero basis
+    // rejections) remain un-gated and run on both backends.
+    #[cfg(feature = "highs")]
     const PINNED_SIMPLEX_ITERS: u64 = 30;
     // ±5 % expressed as integer fractions to avoid `clippy::cast_sign_loss`.
+    #[cfg(feature = "highs")]
     const LO_SIMPLEX: u64 = PINNED_SIMPLEX_ITERS * 95 / 100; // floor of 0.95×pin
+    #[cfg(feature = "highs")]
     const HI_SIMPLEX: u64 = PINNED_SIMPLEX_ITERS * 105 / 100; // floor of 1.05×pin
 
     // AC-6: lower-bound pin (float-exact).
@@ -209,6 +216,7 @@ fn basis_reconstruct_churn() {
     // 1_391_697.766_666_667 (last digit differed due to float accumulation order
     // change when state-fixing rows were removed from the LP).
     // The lower bound is deterministic for a fixed SDDP seed and scenario count.
+    #[cfg(feature = "highs")]
     const PINNED_FINAL_LB: f64 = 1_391_697.766_666_666_8;
 
     let case_dir = d03_case_dir();
@@ -243,10 +251,10 @@ fn basis_reconstruct_churn() {
         StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup must build");
 
     let comm = StubComm;
-    let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
 
     let outcome = setup
-        .train(&mut solver, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
         .expect("train must return Ok");
     assert!(
         outcome.error.is_none(),
@@ -276,27 +284,35 @@ fn basis_reconstruct_churn() {
         fwd.basis_consistency_failures
     );
 
-    // AC-5: simplex-iteration pin (±5 % tolerance).
-    let observed_simplex = fwd.simplex_iterations;
-    assert!(
-        (LO_SIMPLEX..=HI_SIMPLEX).contains(&observed_simplex),
-        "basis_reconstruct_churn: simplex_iterations={observed_simplex} is outside \
-         the ±5 % band [{LO_SIMPLEX}, {HI_SIMPLEX}] around pin={PINNED_SIMPLEX_ITERS}"
-    );
+    // AC-5: simplex-iteration pin (±5 % tolerance). HiGHS-calibrated; see the
+    // gated `PINNED_SIMPLEX_ITERS` definition above.
+    #[cfg(feature = "highs")]
+    {
+        let observed_simplex = fwd.simplex_iterations;
+        assert!(
+            (LO_SIMPLEX..=HI_SIMPLEX).contains(&observed_simplex),
+            "basis_reconstruct_churn: simplex_iterations={observed_simplex} is outside \
+             the ±5 % band [{LO_SIMPLEX}, {HI_SIMPLEX}] around pin={PINNED_SIMPLEX_ITERS}"
+        );
+    }
 
     // `final_lb` is deterministic for a fixed seed and scenario count, but its
     // last ULP can shift with the HiGHS build or feasibility-tolerance settings
     // (e.g. the 1e-9 tightening). Pin to a tight relative tolerance — strong
     // enough to catch any real drift (~9 significant figures) while absorbing
     // floating-point noise — mirroring the ±5 % band used for the simplex pin.
-    let lb_rel_err = (result.final_lb - PINNED_FINAL_LB).abs() / PINNED_FINAL_LB.abs();
-    assert!(
-        lb_rel_err <= 1e-9,
-        "basis_reconstruct_churn: final_lb={} deviates from pin={PINNED_FINAL_LB:.15e} \
-         by relative error {lb_rel_err:.3e} (> 1e-9); the lower bound must be \
-         deterministic for a fixed seed and scenario count",
-        result.final_lb
-    );
+    // HiGHS-calibrated; see the gated `PINNED_FINAL_LB` definition above.
+    #[cfg(feature = "highs")]
+    {
+        let lb_rel_err = (result.final_lb - PINNED_FINAL_LB).abs() / PINNED_FINAL_LB.abs();
+        assert!(
+            lb_rel_err <= 1e-9,
+            "basis_reconstruct_churn: final_lb={} deviates from pin={PINNED_FINAL_LB:.15e} \
+             by relative error {lb_rel_err:.3e} (> 1e-9); the lower bound must be \
+             deterministic for a fixed seed and scenario count",
+            result.final_lb
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -356,10 +372,10 @@ fn test_basis_reconstruct_no_churn_full_preservation() {
         StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup must build");
 
     let comm = StubComm;
-    let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
 
     let outcome = setup
-        .train(&mut solver, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
         .expect("train must return Ok");
     assert!(
         outcome.error.is_none(),
@@ -471,10 +487,10 @@ fn test_basis_reconstruct_full_churn_no_rows_preserved() {
         .expect("StudySetup phase1 must build");
 
     let comm = StubComm;
-    let mut solver1 = HighsSolver::new().expect("HighsSolver phase1 must succeed");
+    let mut solver1 = ActiveSolver::new().expect("ActiveSolver phase1 must succeed");
 
     let outcome1 = setup
-        .train(&mut solver1, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut solver1, &comm, 1, ActiveSolver::new, None, None)
         .expect("phase1 train must return Ok");
     assert!(
         outcome1.error.is_none(),
@@ -533,7 +549,7 @@ fn test_basis_reconstruct_full_churn_no_rows_preserved() {
     // Update start_iteration so the training loop begins at iteration 2.
     setup.set_start_iteration(1);
 
-    let mut solver2 = HighsSolver::new().expect("HighsSolver phase2 must succeed");
+    let mut solver2 = ActiveSolver::new().expect("ActiveSolver phase2 must succeed");
 
     // We cannot call `setup.train` again with the new stopping rule because
     // the config is baked into setup at construction time. Instead we use the
@@ -574,7 +590,7 @@ fn test_basis_reconstruct_full_churn_no_rows_preserved() {
         setup2.set_start_iteration(1);
 
         let outcome2 = setup2
-            .train(&mut solver2, &comm, 1, HighsSolver::new, None, None)
+            .train(&mut solver2, &comm, 1, ActiveSolver::new, None, None)
             .expect("phase2 train must return Ok");
         assert!(
             outcome2.error.is_none(),
@@ -593,8 +609,8 @@ fn test_basis_reconstruct_full_churn_no_rows_preserved() {
         let iter2_fwd: Vec<&SolverStatsDelta> = result2
             .solver_stats_log
             .iter()
-            .filter(|(iter, phase, _, _, _, _, _)| *iter == 2 && *phase == "forward")
-            .map(|(_, _, _, _, _, _, d)| d)
+            .filter(|e| e.iteration == 2 && e.phase == "forward")
+            .map(|e| &e.delta)
             .collect();
 
         assert!(
@@ -693,10 +709,10 @@ fn simulate_baked_path_zero_consistency_failures() {
         StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup must build");
 
     let comm = StubComm;
-    let mut train_solver = HighsSolver::new().expect("HighsSolver for training must succeed");
+    let mut train_solver = ActiveSolver::new().expect("ActiveSolver for training must succeed");
 
     let outcome = setup
-        .train(&mut train_solver, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut train_solver, &comm, 1, ActiveSolver::new, None, None)
         .expect("train must return Ok");
     assert!(
         outcome.error.is_none(),
@@ -723,9 +739,9 @@ fn simulate_baked_path_zero_consistency_failures() {
          non-empty cut_row_slots in basis_cache after 2 iterations"
     );
 
-    // Build a simulation workspace pool (1 thread, HighsSolver).
+    // Build a simulation workspace pool (1 thread, ActiveSolver).
     let mut pool = setup
-        .create_workspace_pool(&comm, 1, HighsSolver::new)
+        .create_workspace_pool(&comm, 1, ActiveSolver::new)
         .expect("simulation workspace pool must build");
 
     let io_capacity = setup.simulation_config.io_channel_capacity.max(1);

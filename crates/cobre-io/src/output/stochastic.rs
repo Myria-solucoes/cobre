@@ -90,10 +90,9 @@ use arrow::array::{Float64Builder, Int32Builder, RecordBatch, UInt32Builder};
 use arrow::datatypes::{DataType, Field, Schema};
 use cobre_core::scenario::{CorrelationModel, CorrelationScheduleEntry};
 use cobre_stochastic::OpeningTree;
-use parquet::arrow::ArrowWriter;
-use parquet::file::properties::WriterProperties;
 use serde::Serialize;
 
+use crate::output::atomic::{write_bytes_atomic, write_parquet_atomic};
 use crate::output::error::OutputError;
 use crate::output::parquet_config::ParquetWriterConfig;
 use crate::scenarios::{
@@ -821,51 +820,6 @@ pub fn write_fitting_report(path: &Path, report: &FittingReport) -> Result<(), O
     let bytes = serde_json::to_vec_pretty(report)
         .map_err(|e| OutputError::serialization("fitting_report", e.to_string()))?;
     write_bytes_atomic(path, &bytes)
-}
-
-/// Write bytes to `path` atomically via a `.tmp` intermediate file.
-///
-/// Creates `{path}.tmp`, writes `bytes`, then renames to `path`.
-/// Parent directory must already exist before calling.
-fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<(), OutputError> {
-    let tmp_path = match path.extension() {
-        Some(ext) => path.with_extension(format!("{}.tmp", ext.to_string_lossy())),
-        None => path.with_extension("tmp"),
-    };
-
-    std::fs::write(&tmp_path, bytes).map_err(|e| OutputError::io(&tmp_path, e))?;
-    std::fs::rename(&tmp_path, path).map_err(|e| OutputError::io(path, e))?;
-
-    Ok(())
-}
-
-pub(crate) fn write_parquet_atomic(
-    path: &Path,
-    batch: &RecordBatch,
-    config: &ParquetWriterConfig,
-) -> Result<(), OutputError> {
-    let tmp_path = match path.extension() {
-        Some(ext) => path.with_extension(format!("{}.tmp", ext.to_string_lossy())),
-        None => path.with_extension("tmp"),
-    };
-
-    let props = WriterProperties::builder()
-        .set_compression(config.compression)
-        .set_max_row_group_row_count(Some(config.row_group_size))
-        .set_dictionary_enabled(config.dictionary_encoding)
-        .build();
-
-    let file = std::fs::File::create(&tmp_path).map_err(|e| OutputError::io(&tmp_path, e))?;
-    let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props))
-        .map_err(|e| OutputError::serialization("parquet_writer", e.to_string()))?;
-
-    writer
-        .write(batch)
-        .and_then(|()| writer.close())
-        .map_err(|e| OutputError::serialization("parquet_writer", e.to_string()))?;
-
-    std::fs::rename(&tmp_path, path).map_err(|e| OutputError::io(path, e))?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1966,10 +1920,6 @@ mod tests {
         );
         assert!(path.exists(), "final file must exist");
     }
-
-    // -------------------------------------------------------------------------
-    // write_fitting_report_aic_scores_preserved
-    // -------------------------------------------------------------------------
 
     // =========================================================================
     // write_correlation_json_multi_profile_round_trip

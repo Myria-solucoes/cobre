@@ -85,6 +85,9 @@ fn write_training_fixture(dir: &Path) {
             total_active: 90,
             peak_active: 100,
             cuts_active: 90,
+            rows_in_lp_total: 0,
+            rows_in_lp_solve_count: 0,
+            rows_in_lp_max: 0,
         },
         bounds: MetadataBounds {
             final_lower_bound: 48_500.0,

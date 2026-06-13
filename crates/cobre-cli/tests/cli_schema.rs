@@ -8,6 +8,8 @@
 
 use assert_cmd::prelude::*;
 use predicates::prelude::*;
+use std::collections::BTreeSet;
+use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;
 
@@ -15,8 +17,9 @@ fn cobre() -> Command {
     Command::new(assert_cmd::cargo::cargo_bin!("cobre"))
 }
 
-/// `cobre schema export --output-dir <tmpdir>` writes at least 8 `.schema.json`
-/// files and prints the expected summary line to stderr.
+/// `cobre schema export --output-dir <tmpdir>` writes a set of `.schema.json`
+/// files whose basenames exactly match the schemas committed under
+/// `book/src/schemas/`, and prints the expected summary line to stderr.
 #[test]
 fn test_schema_export_writes_files() {
     let tmp = TempDir::new().unwrap();
@@ -40,10 +43,30 @@ fn test_schema_export_writes_files() {
         .filter(|e| e.file_name().to_string_lossy().ends_with(".schema.json"))
         .collect();
 
-    assert!(
-        schema_files.len() >= 8,
-        "expected at least 8 .schema.json files, got {}",
-        schema_files.len()
+    // The set of emitted `.schema.json` basenames must exactly equal the set of
+    // `.schema.json` basenames committed under `book/src/schemas/`. The committed
+    // set is derived from the directory at test time (never a hard-coded count),
+    // so a dropped, added, or renamed schema fails on whichever side diverges.
+    let emitted: BTreeSet<String> = schema_files
+        .iter()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+
+    let committed_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../book/src/schemas");
+    let committed: BTreeSet<String> = std::fs::read_dir(&committed_dir)
+        .expect("read book/src/schemas")
+        .filter_map(std::result::Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".schema.json"))
+        .collect();
+
+    assert_eq!(
+        emitted,
+        committed,
+        "emitted schema set must equal committed book/src/schemas set; \
+         emitted-only: {:?}; committed-only: {:?}",
+        emitted.difference(&committed).collect::<Vec<_>>(),
+        committed.difference(&emitted).collect::<Vec<_>>(),
     );
 
     // Parse config.schema.json and verify it is valid JSON with expected keys.

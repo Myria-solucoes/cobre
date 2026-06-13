@@ -28,7 +28,7 @@ use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::temporal::SeasonCycleType;
 use cobre_io::output::policy::write_policy_checkpoint;
 use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic};
-use cobre_solver::highs::HighsSolver;
+use cobre_solver::ActiveSolver;
 
 // ---------------------------------------------------------------------------
 // StubComm — single-rank communicator for testing
@@ -216,10 +216,10 @@ fn structural_properties_and_training() {
 
     let mut setup = build_setup(&case_dir, &config);
     let comm = StubComm;
-    let mut solver = HighsSolver::new().expect("solver");
+    let mut solver = ActiveSolver::new().expect("solver");
 
     let outcome = setup
-        .train(&mut solver, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
         .expect("train must not return Err");
 
     // ── 3. Training correctness assertions ────────────────────────────────────
@@ -282,7 +282,7 @@ fn structural_properties_and_training() {
     // ── 5. Simulation ─────────────────────────────────────────────────────────
 
     let mut pool = setup
-        .create_workspace_pool(&comm, 1, HighsSolver::new)
+        .create_workspace_pool(&comm, 1, ActiveSolver::new)
         .expect("workspace pool must build");
     let io_capacity = setup.simulation_config.io_channel_capacity.max(1);
     let (result_tx, result_rx) = mpsc::sync_channel(io_capacity);
@@ -343,9 +343,9 @@ fn decomp_boundary_cuts_compose_with_weekly_monthly() {
 
     // --- Run A: source study (produces checkpoint) ---
     let mut setup_a = build_setup(&case_dir, &config);
-    let mut solver_a = HighsSolver::new().expect("solver A");
+    let mut solver_a = ActiveSolver::new().expect("solver A");
     let outcome_a = setup_a
-        .train(&mut solver_a, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut solver_a, &comm, 1, ActiveSolver::new, None, None)
         .expect("train A");
     assert!(outcome_a.error.is_none(), "source training must not error");
 
@@ -358,9 +358,9 @@ fn decomp_boundary_cuts_compose_with_weekly_monthly() {
 
     // --- Run B: consumer WITHOUT boundary cuts (baseline) ---
     let mut setup_b = build_setup(&case_dir, &config);
-    let mut solver_b = HighsSolver::new().expect("solver B");
+    let mut solver_b = ActiveSolver::new().expect("solver B");
     let outcome_b = setup_b
-        .train(&mut solver_b, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut solver_b, &comm, 1, ActiveSolver::new, None, None)
         .expect("train B");
     assert!(
         outcome_b.error.is_none(),
@@ -393,9 +393,9 @@ fn decomp_boundary_cuts_compose_with_weekly_monthly() {
         terminal_pool.warm_start_count
     );
 
-    let mut solver_c = HighsSolver::new().expect("solver C");
+    let mut solver_c = ActiveSolver::new().expect("solver C");
     let outcome_c = setup_c
-        .train(&mut solver_c, &comm, 1, HighsSolver::new, None, None)
+        .train(&mut solver_c, &comm, 1, ActiveSolver::new, None, None)
         .expect("train C");
     assert!(
         outcome_c.error.is_none(),

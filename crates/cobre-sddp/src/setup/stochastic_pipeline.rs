@@ -101,7 +101,6 @@ pub fn build_ncs_factor_entries(
     use cobre_stochastic::normal::precompute::BlockFactorPair;
     use std::collections::BTreeSet;
 
-    // Collect NCS entity IDs that have model entries.
     let stochastic_ncs: BTreeSet<cobre_core::EntityId> =
         system.ncs_models().iter().map(|m| m.ncs_id).collect();
 
@@ -180,8 +179,17 @@ fn build_opening_tree_library(
         .cloned()
         .collect();
     let hydro_ids: Vec<EntityId> = system.hydros().iter().map(|h| h.id).collect();
-    let par =
-        cobre_stochastic::PrecomputedPar::build(system.inflow_models(), &study_stages, &hydro_ids)?;
+    let cycle_len = system
+        .policy_graph()
+        .season_map
+        .as_ref()
+        .map(|sm| sm.seasons.len());
+    let par = cobre_stochastic::PrecomputedPar::build(
+        system.inflow_models(),
+        &study_stages,
+        &hydro_ids,
+        cycle_len,
+    )?;
     let max_order = par.max_order();
     let user_pool = training_source.historical_years.as_ref();
     let window_years = cobre_stochastic::discover_historical_windows(
@@ -353,11 +361,6 @@ fn compute_external_scenario_counts(
 ///
 /// Returns [`SddpError::Io`] on file read/parse/validation failure,
 /// or [`SddpError::Stochastic`] on PAR/decomposition failure.
-// RATIONALE: 214 lines — orchestrates the complete stochastic preprocessing pipeline
-// (estimation, block-factor loading, opening-tree library, and stochastic context
-// construction). Each phase is already delegated to a dedicated helper; the remaining
-// body is unavoidable sequential plumbing that connects those helpers.
-#[allow(clippy::too_many_lines)]
 pub fn prepare_stochastic(
     system: System,
     case_dir: &Path,

@@ -397,6 +397,9 @@ fn follow_uoffset(buf: &[u8], pos: usize) -> Option<usize> {
 ///
 /// `FlatBuffers` vector layout: `u32 length` followed by `length × 4` bytes.
 /// This function is not used currently but kept for completeness.
+// Rationale: the f32 vector reader is the symmetric counterpart to `read_f64_vector`; retaining
+// it keeps the codec complete against the full FlatBuffers type palette and avoids re-deriving
+// the safe byte-level parsing pattern from scratch when an f32 field is added to the schema.
 #[allow(dead_code)]
 fn read_f32_vector_as_f64(buf: &[u8], vec_pos: usize) -> Option<Vec<f64>> {
     let len = read_u32_le(buf, vec_pos)? as usize;

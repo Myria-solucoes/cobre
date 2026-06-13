@@ -41,17 +41,25 @@
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
+#[cfg(feature = "highs")]
 use std::path::Path;
 
+#[cfg(feature = "highs")]
 use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
+#[cfg(feature = "highs")]
 use cobre_core::scenario::ScenarioSource;
+#[cfg(feature = "highs")]
 use cobre_io::{config::StoppingRuleConfig, parse_config};
+#[cfg(feature = "highs")]
 use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic};
+#[cfg(feature = "highs")]
 use cobre_solver::highs::HighsSolver;
 
 /// Single-rank stub communicator — mirrors the one in `tests/deterministic.rs`.
+#[cfg(feature = "highs")]
 struct StubComm;
 
+#[cfg(feature = "highs")]
 impl Communicator for StubComm {
     fn allgatherv<T: CommData>(
         &self,
@@ -95,6 +103,12 @@ impl Communicator for StubComm {
     }
 }
 
+#[cfg(not(feature = "highs"))]
+fn main() {
+    eprintln!("dhat_baseline example requires the `highs` feature; rebuild with --features highs");
+}
+
+#[cfg(feature = "highs")]
 fn main() {
     #[cfg(feature = "dhat-heap")]
     let _profiler = dhat::Profiler::new_heap();

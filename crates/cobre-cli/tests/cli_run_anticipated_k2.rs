@@ -388,7 +388,7 @@ fn cli_run_k2_populates_anticipated_columns_and_state_dictionary() {
     }
 
     // Anticipated thermal at stage 1 — anticipated_decision_mw null (horizon-boundary
-    // INACTIVE under F2-002 strict predicate: t + K_i = 1 + 2 = 3 = n_stages, so
+    // INACTIVE under the strict predicate: t + K_i = 1 + 2 = 3 = n_stages, so
     // the decision column has [0, 0] bounds and the extraction returns None).
     // anticipated_committed_mw non-null under always-active fishing (reads slot 0).
     let stage_1_ant_rows: Vec<usize> = rows
@@ -409,7 +409,7 @@ fn cli_run_k2_populates_anticipated_columns_and_state_dictionary() {
             rows.anticipated_decision_mw[row_idx].is_none(),
             "row {row_idx}: anticipated thermal at stage 1 must have \
              anticipated_decision_mw=null (horizon-boundary inactive: \
-             t + K_i = 3 >= n_stages = 3 under F2-002 strict predicate)"
+             t + K_i = 3 >= n_stages = 3 under the strict predicate)"
         );
         let committed = rows.anticipated_committed_mw[row_idx];
         assert!(
@@ -525,7 +525,7 @@ fn cli_run_k2_populates_anticipated_columns_and_state_dictionary() {
         "anticipated_state entries must cover slot_index values {{0, 1}}, found {slot_indices:?}"
     );
 
-    // F1-007: each entry must carry `lead_stages` so consumers can
+    // Each entry must carry `lead_stages` so consumers can
     // distinguish active slots (slot_index < lead_stages) from padding
     // slots (slot_index >= lead_stages). For this fixture lead_stages=2
     // and k_max=2, so every slot is active.

@@ -784,6 +784,10 @@ fn parse_variable_ref(tokens: &[Token], pos: usize) -> Result<(VariableRef, usiz
 ///
 /// Returns `Err(String)` if the variable name is not one of the 20 known names, or
 /// if a block argument is provided for a stage-only variable (no block argument expected).
+// Rationale: the function body is a single exhaustive match over all 21 recognized LP variable
+// name strings; each arm maps to its typed `VariableRef` variant and enforces block-vs-stage-only
+// semantics inline. Splitting by group would break the compile-time exhaustiveness check and
+// scatter the canonical variable catalog across multiple call sites.
 #[allow(clippy::too_many_lines)]
 fn build_variable_ref(
     name: &str,

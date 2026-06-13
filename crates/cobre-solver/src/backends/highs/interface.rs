@@ -1,0 +1,530 @@
+//! `impl SolverInterface for HighsSolver`.
+//!
+//! Additional `impl` block (the struct and its solve primitives are owned by
+//! `solver`): the public [`SolverInterface`](crate::SolverInterface) surface —
+//! profile application, model loading, row/bound mutation, the warm-start
+//! `solve` entry point (which delegates to `solver`'s `solve_inner`), basis
+//! extraction, and statistics reporting.
+
+use std::time::Instant;
+
+use super::config::HighsProfile;
+use super::solver::{HighsSolver, highs_version};
+use crate::{
+    SolverInterface, ffi,
+    types::{RowBatch, SolutionView, SolverError, SolverStatistics, StageTemplate},
+};
+
+impl SolverInterface for HighsSolver {
+    type Profile = HighsProfile;
+
+    fn apply_profile(&mut self, profile: &HighsProfile) {
+        // SAFETY: `self.handle` is a valid, non-null HiGHS pointer obtained
+        // from `cobre_highs_create()`. The option name is a static C string
+        // literal with no retained pointer after the call returns.
+        unsafe {
+            ffi::cobre_highs_set_double_option(
+                self.handle,
+                c"primal_feasibility_tolerance".as_ptr(),
+                profile.primal_feasibility_tolerance,
+            );
+        }
+        // SAFETY: `self.handle` is a valid, non-null HiGHS pointer obtained
+        // from `cobre_highs_create()`. The option name is a static C string
+        // literal with no retained pointer after the call returns.
+        unsafe {
+            ffi::cobre_highs_set_double_option(
+                self.handle,
+                c"dual_feasibility_tolerance".as_ptr(),
+                profile.dual_feasibility_tolerance,
+            );
+        }
+        // The iteration-limit fields are cache-only (no FFI here); the actual
+        // caps are computed later by `set_iteration_limits`, which reads
+        // `self.current_profile`. The `self.current_profile = *profile` below
+        // covers all field caching.
+        // SAFETY: self.handle is a valid HiGHS pointer; ffi setters accept any i32.
+        unsafe {
+            ffi::cobre_highs_set_int_option(
+                self.handle,
+                c"simplex_dual_edge_weight_strategy".as_ptr(),
+                profile.simplex_dual_edge_weight_strategy,
+            );
+            ffi::cobre_highs_set_int_option(
+                self.handle,
+                c"simplex_scale_strategy".as_ptr(),
+                profile.simplex_scale_strategy,
+            );
+            ffi::cobre_highs_set_int_option(
+                self.handle,
+                c"simplex_price_strategy".as_ptr(),
+                profile.simplex_price_strategy,
+            );
+        }
+        self.current_profile = *profile;
+    }
+
+    fn name(&self) -> &'static str {
+        "HiGHS"
+    }
+
+    fn solver_name_version(&self) -> String {
+        format!("HiGHS {}", highs_version())
+    }
+
+    fn load_model(&mut self, template: &StageTemplate) {
+        let t0 = Instant::now();
+        // SAFETY:
+        // - `self.handle` is a valid, non-null HiGHS pointer from `cobre_highs_create()`.
+        // - All pointer arguments point into owned `Vec` data that remains alive for the
+        //   duration of this call.
+        // - `template.col_starts` and `template.row_indices` are `Vec<i32>` owned by the
+        //   template, alive for the duration of this borrow.
+        // - All slice lengths match the HiGHS API contract:
+        //   `num_col + 1` for a_start, `num_nz` for a_index and a_value,
+        //   `num_col` for col_cost/col_lower/col_upper, `num_row` for row_lower/row_upper.
+        assert!(
+            i32::try_from(template.num_cols).is_ok(),
+            "num_cols {} overflows i32: LP exceeds HiGHS API limit",
+            template.num_cols
+        );
+        assert!(
+            i32::try_from(template.num_rows).is_ok(),
+            "num_rows {} overflows i32: LP exceeds HiGHS API limit",
+            template.num_rows
+        );
+        assert!(
+            i32::try_from(template.num_nz).is_ok(),
+            "num_nz {} overflows i32: LP exceeds HiGHS API limit",
+            template.num_nz
+        );
+        // Length guards: every slice handed to the HiGHS API must match the dimension
+        // it is keyed by. These are internally-constructed buffers, so a mismatch is a
+        // construction bug, not user input -- guard with debug_assert* (no release panic
+        // boundary). CSC column starts carry one extra trailing offset (`num_cols + 1`).
+        debug_assert_eq!(
+            template.col_starts.len(),
+            template.num_cols + 1,
+            "col_starts len {} != num_cols + 1 ({})",
+            template.col_starts.len(),
+            template.num_cols + 1
+        );
+        debug_assert_eq!(
+            template.row_indices.len(),
+            template.num_nz,
+            "row_indices len {} != num_nz {}",
+            template.row_indices.len(),
+            template.num_nz
+        );
+        debug_assert_eq!(
+            template.values.len(),
+            template.num_nz,
+            "values len {} != num_nz {}",
+            template.values.len(),
+            template.num_nz
+        );
+        debug_assert_eq!(
+            template.col_lower.len(),
+            template.num_cols,
+            "col_lower len {} != num_cols {}",
+            template.col_lower.len(),
+            template.num_cols
+        );
+        debug_assert_eq!(
+            template.col_upper.len(),
+            template.num_cols,
+            "col_upper len {} != num_cols {}",
+            template.col_upper.len(),
+            template.num_cols
+        );
+        debug_assert_eq!(
+            template.objective.len(),
+            template.num_cols,
+            "objective len {} != num_cols {}",
+            template.objective.len(),
+            template.num_cols
+        );
+        debug_assert_eq!(
+            template.row_lower.len(),
+            template.num_rows,
+            "row_lower len {} != num_rows {}",
+            template.row_lower.len(),
+            template.num_rows
+        );
+        debug_assert_eq!(
+            template.row_upper.len(),
+            template.num_rows,
+            "row_upper len {} != num_rows {}",
+            template.row_upper.len(),
+            template.num_rows
+        );
+        // Scale vectors are optional: empty means "no scaling", otherwise they must be
+        // keyed by the matching dimension.
+        debug_assert!(
+            template.col_scale.is_empty() || template.col_scale.len() == template.num_cols,
+            "col_scale len {} != num_cols {} (and is non-empty)",
+            template.col_scale.len(),
+            template.num_cols
+        );
+        debug_assert!(
+            template.row_scale.is_empty() || template.row_scale.len() == template.num_rows,
+            "row_scale len {} != num_rows {} (and is non-empty)",
+            template.row_scale.len(),
+            template.num_rows
+        );
+        // SAFETY: All three values have been asserted to fit in i32 above.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let num_col = template.num_cols as i32;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let num_row = template.num_rows as i32;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let num_nz = template.num_nz as i32;
+        let status = unsafe {
+            ffi::cobre_highs_pass_lp(
+                self.handle,
+                num_col,
+                num_row,
+                num_nz,
+                ffi::HIGHS_MATRIX_FORMAT_COLWISE,
+                ffi::HIGHS_OBJ_SENSE_MINIMIZE,
+                0.0, // objective offset
+                template.objective.as_ptr(),
+                template.col_lower.as_ptr(),
+                template.col_upper.as_ptr(),
+                template.row_lower.as_ptr(),
+                template.row_upper.as_ptr(),
+                template.col_starts.as_ptr(),
+                template.row_indices.as_ptr(),
+                template.values.as_ptr(),
+            )
+        };
+
+        assert_ne!(
+            status,
+            ffi::HIGHS_STATUS_ERROR,
+            "cobre_highs_pass_lp failed with status {status}"
+        );
+
+        self.num_cols = template.num_cols;
+        self.num_rows = template.num_rows;
+        self.has_model = true;
+
+        // Resize solution extraction buffers to match the new LP dimensions.
+        // Zero-fill is fine; these are overwritten in full by `cobre_highs_get_solution`.
+        self.col_value.resize(self.num_cols, 0.0);
+        self.col_dual.resize(self.num_cols, 0.0);
+        self.row_value.resize(self.num_rows, 0.0);
+        self.row_dual.resize(self.num_rows, 0.0);
+
+        // Resize basis status i32 buffers. Zero-fill is fine; values are overwritten before
+        // any FFI call. These never shrink -- only grow -- to prevent reallocation on hot path.
+        self.basis_col_i32.resize(self.num_cols, 0);
+        self.basis_row_i32.resize(self.num_rows, 0);
+        self.stats.total_load_model_time_seconds += t0.elapsed().as_secs_f64();
+        self.stats.load_model_count += 1;
+    }
+
+    fn add_rows(&mut self, rows: &RowBatch) {
+        assert!(
+            i32::try_from(rows.num_rows).is_ok(),
+            "rows.num_rows {} overflows i32: RowBatch exceeds HiGHS API limit",
+            rows.num_rows
+        );
+        assert!(
+            i32::try_from(rows.col_indices.len()).is_ok(),
+            "rows nnz {} overflows i32: RowBatch exceeds HiGHS API limit",
+            rows.col_indices.len()
+        );
+        // SAFETY: Both values have been asserted to fit in i32 above.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let num_new_row = rows.num_rows as i32;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let num_new_nz = rows.col_indices.len() as i32;
+
+        // SAFETY:
+        // - `self.handle` is a valid, non-null HiGHS pointer.
+        // - All pointer arguments point into owned data alive for the duration of this call.
+        // - `rows.row_starts` and `rows.col_indices` are `Vec<i32>` owned by the RowBatch,
+        //   alive for the duration of this borrow.
+        // - Slice lengths: `num_rows + 1` for starts, total nnz for index and value,
+        //   `num_rows` for lower/upper bounds.
+        let status = unsafe {
+            ffi::cobre_highs_add_rows(
+                self.handle,
+                num_new_row,
+                rows.row_lower.as_ptr(),
+                rows.row_upper.as_ptr(),
+                num_new_nz,
+                rows.row_starts.as_ptr(),
+                rows.col_indices.as_ptr(),
+                rows.values.as_ptr(),
+            )
+        };
+
+        assert_ne!(
+            status,
+            ffi::HIGHS_STATUS_ERROR,
+            "cobre_highs_add_rows failed with status {status}"
+        );
+
+        self.num_rows += rows.num_rows;
+
+        // Grow row-indexed solution extraction buffers to cover the new rows.
+        self.row_value.resize(self.num_rows, 0.0);
+        self.row_dual.resize(self.num_rows, 0.0);
+
+        // Grow basis row i32 buffer to cover the new rows.
+        self.basis_row_i32.resize(self.num_rows, 0);
+    }
+
+    fn set_row_bounds(&mut self, indices: &[usize], lower: &[f64], upper: &[f64]) {
+        assert!(
+            indices.len() == lower.len() && indices.len() == upper.len(),
+            "set_row_bounds: indices ({}), lower ({}), and upper ({}) must have equal length",
+            indices.len(),
+            lower.len(),
+            upper.len()
+        );
+        if indices.is_empty() {
+            return;
+        }
+
+        assert!(
+            i32::try_from(indices.len()).is_ok(),
+            "set_row_bounds: indices.len() {} overflows i32",
+            indices.len()
+        );
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let num_entries = indices.len() as i32;
+
+        let t0 = Instant::now();
+        // SAFETY:
+        // - `self.handle` is a valid, non-null HiGHS pointer.
+        // - `convert_to_i32_scratch()` returns a slice pointing into `self.scratch_i32`,
+        //   alive for `'self`. Pointer is used immediately in the FFI call.
+        // - `lower` and `upper` are borrowed slices alive for the duration of this call.
+        // - `num_entries` equals the lengths of all three arrays.
+        let status = unsafe {
+            ffi::cobre_highs_change_rows_bounds_by_set(
+                self.handle,
+                num_entries,
+                self.convert_to_i32_scratch(indices).as_ptr(),
+                lower.as_ptr(),
+                upper.as_ptr(),
+            )
+        };
+
+        assert_ne!(
+            status,
+            ffi::HIGHS_STATUS_ERROR,
+            "cobre_highs_change_rows_bounds_by_set failed with status {status}"
+        );
+        self.stats.total_set_bounds_time_seconds += t0.elapsed().as_secs_f64();
+    }
+
+    fn set_col_bounds(&mut self, indices: &[usize], lower: &[f64], upper: &[f64]) {
+        assert!(
+            indices.len() == lower.len() && indices.len() == upper.len(),
+            "set_col_bounds: indices ({}), lower ({}), and upper ({}) must have equal length",
+            indices.len(),
+            lower.len(),
+            upper.len()
+        );
+        if indices.is_empty() {
+            return;
+        }
+
+        assert!(
+            i32::try_from(indices.len()).is_ok(),
+            "set_col_bounds: indices.len() {} overflows i32",
+            indices.len()
+        );
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let num_entries = indices.len() as i32;
+
+        let t0 = Instant::now();
+        // SAFETY:
+        // - `self.handle` is a valid, non-null HiGHS pointer.
+        // - Converted indices point into `self.scratch_i32`, alive for `'self`.
+        // - `lower` and `upper` are borrowed slices alive for the duration of this call.
+        // - `num_entries` equals the lengths of all three arrays.
+        let status = unsafe {
+            ffi::cobre_highs_change_cols_bounds_by_set(
+                self.handle,
+                num_entries,
+                self.convert_to_i32_scratch(indices).as_ptr(),
+                lower.as_ptr(),
+                upper.as_ptr(),
+            )
+        };
+
+        assert_ne!(
+            status,
+            ffi::HIGHS_STATUS_ERROR,
+            "cobre_highs_change_cols_bounds_by_set failed with status {status}"
+        );
+        self.stats.total_set_bounds_time_seconds += t0.elapsed().as_secs_f64();
+    }
+
+    /// # Preconditions
+    ///
+    /// When `basis` is `Some(b)`, the caller should size `b.row_status` to at
+    /// least `self.num_rows` (the current LP row count). A basis with **fewer**
+    /// row entries than the LP (e.g. one captured before `add_rows` grew the LP)
+    /// cannot be padded soundly — a BASIC pad is wrong for inequality-row slacks
+    /// — so it is rejected with `Err(SolverError::BasisRowCountMismatch)` and
+    /// `basis_consistency_failures` is incremented; the caller should fall back
+    /// to a cold solve. A basis with **more** row entries is tolerated: the
+    /// trailing entries beyond `self.num_rows` are ignored. The column count
+    /// must match exactly (hard `assert!`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(SolverError::BasisRowCountMismatch { lp_rows, basis_rows })`
+    /// when the offered basis has fewer row entries than the LP has rows, and
+    /// `Err(SolverError::BasisInconsistent { .. })` when `HiGHS` rejects the
+    /// offered basis via `isBasisConsistent`.
+    fn solve(
+        &mut self,
+        basis: Option<&crate::types::Basis>,
+    ) -> Result<SolutionView<'_>, SolverError> {
+        assert!(
+            self.has_model,
+            "solve called without a loaded model — call load_model first"
+        );
+
+        if let Some(basis) = basis {
+            assert!(
+                basis.col_status.len() == self.num_cols,
+                "basis column count {} does not match LP column count {}",
+                basis.col_status.len(),
+                self.num_cols
+            );
+            // An undersized row basis (fewer entries than the LP has rows, e.g.
+            // captured before `add_rows` grew the LP) cannot be padded soundly:
+            // a BASIC pad is wrong for newly added inequality rows, whose slacks
+            // should be non-basic at the appropriate bound. Reject it as a
+            // recoverable warm-start failure so the caller can fall back to a
+            // cold solve. This runs *before* `basis_offered` is incremented —
+            // a rejected basis was never offered to the solver.
+            if basis.row_status.len() < self.num_rows {
+                self.stats.basis_consistency_failures += 1;
+                return Err(SolverError::BasisRowCountMismatch {
+                    lp_rows: self.num_rows,
+                    basis_rows: basis.row_status.len(),
+                });
+            }
+
+            // Track every warm-start call as a basis offer for diagnostics.
+            self.stats.basis_offered += 1;
+
+            // Copy raw i32 codes directly into the pre-allocated buffers — no enum
+            // translation. Zero-copy warm-start path.
+            self.basis_col_i32[..self.num_cols].copy_from_slice(&basis.col_status);
+
+            // The undersized case (`basis_rows < lp_rows`) is rejected above, so
+            // here `basis_rows >= lp_rows` always holds:
+            // - `basis_rows == lp_rows`: an exact copy.
+            // - `basis_rows > lp_rows`: truncate the trailing entries. The solver
+            //   ignores any basis entry beyond `num_rows`.
+            let basis_rows = basis.row_status.len();
+            let lp_rows = self.num_rows;
+            let copy_len = basis_rows.min(lp_rows);
+            self.basis_row_i32[..copy_len].copy_from_slice(&basis.row_status[..copy_len]);
+
+            // SAFETY:
+            // - `self.handle` is a valid, non-null HiGHS pointer obtained from
+            //   `cobre_highs_create()` and kept alive by `HighsSolver`.
+            // - `basis_col_i32` was sized to `num_cols` in `load_model` and grown in
+            //   `add_rows`; the slice written above covers exactly `num_cols` entries.
+            // - `basis_row_i32` was sized to `num_rows` in `load_model` and grown in
+            //   `add_rows`; the slice written above covers exactly `num_rows` entries
+            //   (an undersized basis is rejected before reaching this point).
+            let basis_set_start = Instant::now();
+            let set_status = unsafe {
+                ffi::cobre_highs_set_basis_non_alien(
+                    self.handle,
+                    self.basis_col_i32.as_ptr(),
+                    self.basis_row_i32.as_ptr(),
+                )
+            };
+            if set_status == ffi::HIGHS_STATUS_ERROR {
+                // Non-alien rejected: the offered basis failed
+                // `isBasisConsistent` (total_basic != num_row).
+                // Count the rejection and surface it as a hard error.
+                self.stats.basis_consistency_failures += 1;
+                // Count basic entries from the already-populated buffers.
+                //
+                // `usize` -> `i64` is lossless for any basis that fits in memory:
+                // realistic LP sizes are bounded well below 2^63.
+                #[allow(clippy::cast_possible_wrap)]
+                let col_basic = self.basis_col_i32[..self.num_cols]
+                    .iter()
+                    .filter(|&&s| s == ffi::HIGHS_BASIS_STATUS_BASIC)
+                    .count() as i64;
+                #[allow(clippy::cast_possible_wrap)]
+                let row_basic = self.basis_row_i32[..self.num_rows]
+                    .iter()
+                    .filter(|&&s| s == ffi::HIGHS_BASIS_STATUS_BASIC)
+                    .count() as i64;
+                // Accumulate the elapsed time even on early return.
+                self.stats.total_basis_set_time_seconds += basis_set_start.elapsed().as_secs_f64();
+                #[allow(clippy::cast_possible_wrap)]
+                return Err(SolverError::BasisInconsistent {
+                    num_row: self.num_rows as i64,
+                    total_basic: col_basic + row_basic,
+                    col_basic,
+                    row_basic,
+                });
+            }
+            self.stats.total_basis_set_time_seconds += basis_set_start.elapsed().as_secs_f64();
+        }
+
+        // Basis is installed (warm path) or not needed (cold path); run the simplex.
+        // HiGHS retains its internal basis across consecutive solves on the same
+        // LP shape, giving the backward pass ~15x fewer simplex iterations on
+        // repeat solves at the same stage/opening.
+        self.solve_inner()
+    }
+
+    fn get_basis(&mut self, out: &mut crate::types::Basis) {
+        assert!(
+            self.has_model,
+            "get_basis called without a loaded model — call load_model first"
+        );
+
+        out.col_status.resize(self.num_cols, 0);
+        out.row_status.resize(self.num_rows, 0);
+
+        // SAFETY:
+        // - `self.handle` is a valid, non-null HiGHS pointer.
+        // - `out.col_status` has been resized to `num_cols` entries above.
+        // - `out.row_status` has been resized to `num_rows` entries above.
+        // - HiGHS writes exactly `num_cols` col values and `num_rows` row values.
+        let get_status = unsafe {
+            ffi::cobre_highs_get_basis(
+                self.handle,
+                out.col_status.as_mut_ptr(),
+                out.row_status.as_mut_ptr(),
+            )
+        };
+
+        assert_ne!(
+            get_status,
+            ffi::HIGHS_STATUS_ERROR,
+            "cobre_highs_get_basis failed: basis must exist after a successful solve (programming error)"
+        );
+    }
+
+    fn statistics(&self) -> SolverStatistics {
+        self.stats.clone()
+    }
+
+    fn statistics_into(&self, out: &mut SolverStatistics) {
+        out.copy_from(&self.stats);
+    }
+
+    fn record_reconstruction_stats(&mut self) {
+        self.stats.basis_reconstructions += 1;
+    }
+}

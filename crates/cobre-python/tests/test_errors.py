@@ -8,6 +8,7 @@ Run with (from the repo root):
 """
 
 import pathlib
+import sys
 
 import pytest
 
@@ -126,6 +127,12 @@ def test_validation_failure_raises_validation_error(tmp_path: pathlib.Path) -> N
         cobre.io.load_case(str(empty_case))
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="forces the write failure via os.chmod(dir, 0o500), which does not make "
+    "a directory read-only on Windows, so the output-write error path cannot be "
+    "exercised here; cobre.run's CaseIoError behavior itself is platform-independent",
+)
 def test_io_failure_raises_caseio_error(tmp_path: pathlib.Path) -> None:
     """An output-write I/O failure raises CaseIoError, also catchable as OSError.
 

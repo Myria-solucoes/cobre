@@ -1,7 +1,8 @@
 """Tests for the top-level cobre.version_info function.
 
 Verify the dict shape and the single-process invariant (comm is always
-"local"), and that the solver string carries a live HiGHS version.
+"local"), and that the solver string carries the active LP backend name
+(HiGHS or CLP) followed by a live version token.
 
 Run with (from the repo root):
     pytest crates/cobre-python/tests/test_version.py
@@ -40,13 +41,15 @@ def test_comm_is_always_local() -> None:
 
 
 def test_solver_string_format() -> None:
-    """The solver field starts with "HiGHS " and contains a version dot."""
+    """The solver field names the active backend and carries a version token."""
     import cobre  # noqa: PLC0415
 
     solver = cobre.version_info()["solver"]
+    parts = solver.split()
 
-    assert solver.startswith("HiGHS ")
-    assert "." in solver
+    assert parts[0] in ("HiGHS", "CLP")
+    assert len(parts) >= 2  # noqa: PLR2004
+    assert parts[1]  # a non-empty version token follows the backend name
 
 
 def test_zstd_enabled_and_build_known() -> None:

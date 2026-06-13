@@ -7,9 +7,9 @@ vertical is SDDP-based hydrothermal dispatch.
 
 - **Language**: Rust 2024 edition, MSRV 1.88
 - **License**: Apache-2.0
-- **Workspace**: 14 crates (8 workspace + 6 excluded: `cobre-mcp` stub, `cobre-tui` stub, `cobre-flow` stub, `cobre-uc` stub, `cobre-emt` stub, `cobre-python`)
+- **Workspace**: 13 workspace members (`cobre-mcp`, `cobre-tui`, `cobre-flow`, `cobre-uc`, `cobre-emt` are member stubs) + the maturin-built `cobre-python` (excluded from the workspace so `cargo test --workspace` does not require a Python interpreter)
 - **Build**: `cargo build --workspace`
-- **Test**: `cargo test --workspace --all-features`
+- **Test**: `cargo test --workspace --features "mpi numa shared-memory serde schema slow-tests flatc-conformance test-support"`
 - **Format**: `cargo fmt --all` (CI enforces `--check`)
 
 ## Hard Rules
@@ -46,43 +46,56 @@ These are non-negotiable. Violations must be fixed before committing.
 
 ## Architecture Guides (Read When Relevant)
 
-When modifying hot-path code (`forward.rs`, `backward.rs`, `training.rs`,
-`simulation/pipeline.rs`, `lower_bound.rs`), read:
+SDDP correctness contracts (Benders cut sign, column-bound state pinning, FPHA
+average storage, append-only cut pool / slot-identity basis, NCS availability
+factors) are codified in `.claude/rules/sddp.md`, which auto-loads when editing
+`crates/cobre-sddp/**/*.rs`. Each is a contract, not a style preference — a
+plausible deviation produces wrong bounds or rejected warm-starts that still
+compile.
+
+Comment & documentation rules for all `.rs` files are codified in `.claude/rules/comments.md`, which auto-loads when editing any `**/*.rs` file. It governs the Earned-Comment Test, the Four Voices, and directives D1–D5 / N1–N6.
+
+Prose documentation integrity rules (scope matrix, the single adaptation, and the six prose-only failure modes) are codified in `.claude/rules/doc-integrity.md`, which auto-loads when editing Markdown files in `book/`, `CONTRIBUTING.md`, `CHANGELOG.md`, and root-level `*.md`.
+
+When modifying hot-path code (`training/forward/`, `training/backward/`,
+`training/training.rs`, `simulation/pipeline.rs`, `training/lower_bound.rs`),
+read:
 → `.claude/architecture-rules.md`
 
 When applying a stored basis at any call site, read:
-→ `crates/cobre-sddp/src/basis_reconstruct.rs` module docs.
-`reconstruct_basis` is the single hot-path entry point; never
-bypass it.
+→ `crates/cobre-sddp/src/cut/basis_reconstruct.rs` module docs.
+Two public entry points exist — use the correct one for the path:
+
+- `reconstruct_basis` — the **baked hot path** (forward pass, simulation, baked
+  backward). Slot-identity-based: matches stored cut-row statuses to the current
+  LP by `CutPool` slot, assigns `BASIC` to new cuts, then calls
+  `enforce_basic_count_invariant`. **Never bypass this on the baked path.**
+- `reconstruct_basis_uniform_basic` — the **DCS path** (`dcs.rs`). Slot-identity-
+  free: copies the column block and template rows, then assigns every resident cut
+  row `BASIC` unconditionally. DCS adds its cut rows fresh each solve and does not
+  track which will bind, so slot alignment is unnecessary. The caller pairs it with
+  `enforce_basic_count_invariant` to restore the invariant.
 
 When changing the MPI basis-cache wire format, read:
-→ `crates/cobre-sddp/src/workspace.rs` —
+→ `crates/cobre-sddp/src/workspace/workspace.rs` —
 `CapturedBasis::to_broadcast_payload` and
 `CapturedBasis::try_from_broadcast_payload` are the sole
 owners of the byte layout. Any layout change must update
 both methods together; the `broadcast_basis_cache` helper
-in `training.rs` only owns the four MPI broadcast calls.
+in `training/training.rs` only owns the four MPI broadcast calls.
 
 When adding new LP variables, constraints, or entity types, read:
-→ `crates/cobre-sddp/src/lp_builder.rs` module docs and `crates/cobre-sddp/src/indexer.rs`
+→ `crates/cobre-sddp/src/lp/builder/mod.rs` module docs and `crates/cobre-sddp/src/lp/indexer/mod.rs`
 
-When modifying study setup construction or scenario library building, note that
-`setup.rs` is now a directory module (`setup/mod.rs`) with nine sub-modules:
-→ `setup/params.rs` — `StudyParams`, `ConstructionConfig`, constants
-→ `setup/stochastic_pipeline.rs` — `PrepareStochasticResult`, `prepare_stochastic`, helpers
-→ `setup/template_postprocess.rs` — `postprocess_templates`
-→ `setup/scenario_libraries.rs` — 4 scenario library builder functions
-→ `setup/scenario_library_set.rs` — `ScenarioLibraries` nested per-phase container
-→ `setup/stage_data.rs` — `StageData` stage-indexed sub-struct
-→ `setup/methodology_config.rs` — `MethodologyConfig` numerical-methodology params
-→ `setup/accessors.rs` — accessor methods and context builders
-→ `setup/orchestration.rs` — `train`, `simulate`, `build_training_output`, `create_workspace_pool`
-The `StudySetup` struct, its two constructors (`new`, `from_broadcast_params`), and three
-private helpers remain in `setup/mod.rs`.
+When modifying study setup construction or scenario library building, read:
+→ `crates/cobre-sddp/src/setup/mod.rs` — `setup/` is a directory module whose
+`mod.rs` owns the `StudySetup` struct and its two constructors. The sub-struct
+layout and which sub-module owns each piece is mapped in
+`.claude/architecture-rules.md` → "StudySetup Sub-Structs".
 
 When adding new output files, check both CLI and Python write paths:
-→ `crates/cobre-cli/src/commands/run.rs` (`write_outputs` function)
-→ `crates/cobre-python/src/run.rs` (`run_inner` function)
+→ `crates/cobre-cli/src/commands/run/outputs.rs` (`write_training_outputs` / `write_simulation_outputs` functions)
+→ `crates/cobre-python/src/run.rs` (`run_via_study` / `run_training_phase_py` functions)
 
 ---
 
@@ -93,4 +106,4 @@ When adding new output files, check both CLI and Python write paths:
 | Software book         | `book/`             | User-facing documentation (mdBook)           |
 | Methodology reference | `~/git/cobre-docs/` | Specs, theory, math                          |
 | CHANGELOG             | `CHANGELOG.md`      | Per-release feature list                     |
-| Design docs           | `docs/design/`      | Future feature designs (not yet implemented) |
+| Design docs           | `docs/design/`      | Design proposals & performance investigations (not all implemented) |

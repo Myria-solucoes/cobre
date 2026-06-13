@@ -19,9 +19,8 @@ subproblem solving, and `cobre-comm` for distributed communication.
 ## Iteration lifecycle
 
 Each training iteration follows a fixed eight-step sequence. The ordering
-reflects the correction introduced in the lower bound plan fix (F-019): the
-lower bound is evaluated **after** the backward pass and cut synchronization,
-not during forward synchronization.
+ensures the lower bound is evaluated **after** the backward pass and cut
+synchronization, not during forward synchronization.
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -50,7 +49,8 @@ not during forward synchronization.
 │                                                                         │
 │  Step 5a Cut management pipeline (optional, two stages)                 │
 │          S1: Strategy-based selection (Level1/LML1/Dominated) —         │
-│              runs at multiples of check_frequency.                      │
+│              runs at multiples of check_frequency. Dynamic (DCS) is a   │
+│              per-solve lazy loop that ignores check_frequency.          │
 │          S2: Budget enforcement — hard cap on active cuts per stage,    │
 │              runs every iteration when max_active_per_stage is set.     │
 │                                                                         │
@@ -202,24 +202,35 @@ two-stage cut management pipeline that also includes budget enforcement
 [Performance Accelerators](../guide/performance-accelerators.md#cut-management-pipeline)
 guide for the full pipeline description.
 
-| Variant     | Deactivation condition                                                             |
-| ----------- | ---------------------------------------------------------------------------------- |
-| `Level1`    | Below `tie_tolerance` of the per-state max at every visited state                  |
-| `Lml1`      | Not the oldest eligible cut at the per-state max at any visited state              |
-| `Dominated` | Below `threshold` of the per-state max at every visited state (all populated cuts) |
+| Variant     | Selection mechanism                                                                                                                                                                                                                                              |
+| ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Level1`    | Deactivates cuts below `tie_tolerance` of the per-state max at every visited state                                                                                                                                                                               |
+| `Lml1`      | Deactivates cuts that are not the oldest eligible within `tie_tolerance` at any visited state                                                                                                                                                                    |
+| `Dominated` | Deactivates cuts below `threshold` of the per-state max at every visited state (all populated cuts)                                                                                                                                                              |
+| `Dynamic`   | Lazy incremental scheme (DCS): adds at most `nadic` cuts per inner re-solve round (the inner loop repeats up to `max_inner_iterations` rounds per backward solve) that violate the LP solution by more than `epsilon_viol`; never deactivates cuts from the pool |
 
-All variants respect a `check_frequency` parameter: selection only runs at
-iterations that are multiples of `check_frequency` and never at iteration 0.
-Stage 0 is always exempt.
+`Level1`, `Lml1`, and `Dominated` respect a `check_frequency` parameter:
+selection only runs at iterations that are multiples of `check_frequency`
+and never at iteration 0. Stage 0 is always exempt.
 
-All three variants share a single value-evaluation kernel
+`Level1`, `Lml1`, and `Dominated` share a single value-evaluation kernel
 (`select_for_stage` in `cut_selection.rs`) that performs
 `O(|populated cuts| x |visited states|)` work per stage per check.
 The `VisitedStatesArchive` is always collected during training when any
-cut-selection variant is enabled; the archive feeds the kernel for
+of these three variants is enabled; the archive feeds the kernel for
 `Level1`, `Lml1`, and `Dominated` alike. `Dominated` uses its `threshold`
 field as the tie tolerance; `Level1` and `Lml1` use `tie_tolerance`
 (default `1e-10`).
+
+`Dynamic` (Dynamic Cut Selection, DCS) operates differently: it is a
+per-solve lazy selection loop that adds cuts on demand. It never invokes
+the value-evaluation kernel and does not respect `check_frequency`. The
+initial active set is seeded from the `active_window` most recent
+iterations. See the
+[Performance Accelerators](../guide/performance-accelerators.md#cut-management-pipeline)
+guide for the full description and the
+[`cut_selection`](../guide/configuration.md#cut_selection) reference for
+all DCS parameters.
 
 ## Key data structures
 
@@ -278,8 +289,9 @@ populated_per_stage × state_dimension × 8 bytes × num_stages
 
 For the convertido production scale (117 stages, 159 state dimensions, up to
 10 000 populated cuts per stage) this formula gives approximately 1.5 GB per
-rank. The actual measured value at process end on the convertido benchmark is
-(actual value from manual convertido benchmark to be inserted).
+rank. The measured peak coefficient storage at process end is bounded above by
+this analytic estimate; for the convertido scale it stays within the ≈1.5 GB-per-rank
+bound derived above.
 
 Inactive cuts still consume pricing time during the LP solve: the row
 coefficients participate in dual-simplex scanning even when the RHS is at the
@@ -625,23 +637,19 @@ every cut ever generated.
 
 ### Cut wire format
 
-The cut wire format used by `CutSyncBuffers` is at version 2
-(`CUT_WIRE_VERSION = 2`). Each record carries a version byte at offset 0
-(value `2`) and a record-type tag at offset 13 to distinguish two record
-variants:
+The cut wire format used by `CutSyncBuffers` is at version 1
+(`CUT_WIRE_VERSION = 1`). Every record is a cut record. Each record carries
+a version byte at offset 0 and a record-tag byte at offset 13
+(`RECORD_TAG_CUT = 0`, zeroed padding reserved for future tag dispatch):
 
-- **Cut record**: a 24-byte header (slot index, iteration, forward pass
-  index, intercept) followed by `n_state * 8` bytes of coefficients. The
-  total record size is `cut_wire_size(n_state) = 24 + n_state * 8` bytes.
-- **Activity-update record**: a fixed-size payload encoding `(stage, slot,
-ActivityChange)`, where `ActivityChange` is either `Deactivate` (apply
-  the sentinel RHS) or `Reactivate` (restore the original intercept).
-  Activity-update records travel through the same allgatherv channel as
-  new cuts so that RHS toggles propagate to all ranks in the same step.
+- **Cut record**: a 25-byte fixed header (1 version byte + 24 bytes of
+  fields: slot index, iteration, forward pass index, 3 padding bytes,
+  intercept) followed by `n_state * 8` bytes of coefficients. The total
+  record size is `cut_wire_size(n_state) = 25 + n_state * 8` bytes.
 
-Version-1 wire payloads are rejected by version-2 receivers with
-`SddpError::Validation`. Cross-version MPI runs are not a supported
-deployment mode.
+Receivers reject any record whose version byte does not equal
+`CUT_WIRE_VERSION`. No compatibility shim is provided; redeploy all nodes
+when upgrading.
 
 ### Basis cache wire format
 
@@ -673,7 +681,7 @@ sums all fields across workers.
 ## Testing
 
 ```
-cargo test -p cobre-sddp --all-features
+cargo test -p cobre-sddp
 ```
 
 The crate requires no external system libraries beyond what is needed by the

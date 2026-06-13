@@ -15,6 +15,7 @@ pub(crate) fn costs_schema() -> Schema {
         Field::new("future_cost", DataType::Float64, false),
         Field::new("discount_factor", DataType::Float64, false),
         Field::new("thermal_cost", DataType::Float64, false),
+        Field::new("anticipated_thermal_cost", DataType::Float64, false),
         Field::new("contract_cost", DataType::Float64, false),
         Field::new("deficit_cost", DataType::Float64, false),
         Field::new("excess_cost", DataType::Float64, false),
@@ -229,7 +230,7 @@ pub(crate) fn generic_violations_schema() -> Schema {
 
 /// Schema for `training/convergence.parquet` — iteration-level convergence log.
 ///
-/// 13 fields. See output-schemas.md SS6.1.
+/// 14 fields. See output-schemas.md SS6.1.
 pub(crate) fn convergence_schema() -> Schema {
     Schema::new(vec![
         Field::new("iteration", DataType::Int32, false),
@@ -245,16 +246,17 @@ pub(crate) fn convergence_schema() -> Schema {
         Field::new("time_total_ms", DataType::Int64, false),
         Field::new("forward_passes", DataType::Int32, false),
         Field::new("lp_solves", DataType::Int64, false),
+        Field::new("mean_rows_in_lp", DataType::Float64, false),
     ])
 }
 
 /// Schema for `training/timing/iterations.parquet` — per-iteration timing breakdown.
 ///
-/// 18 fields. Row semantics: one row per `(iteration, rank)` for
+/// 19 fields. Row semantics: one row per `(iteration, rank)` for
 /// rank-only sequential values (`worker_id = NULL`), and one row per
 /// `(iteration, rank, worker_id)` for per-worker parallel-region values.
 /// `SUM(col) GROUP BY iteration` recovers the single-row-per-iteration
-/// value for each of the 15 timing columns.
+/// value for each of the 16 timing columns.
 ///
 /// Top-level non-overlapping phases: `forward_wall_ms`,
 /// `backward_wall_ms`, `cut_selection_ms`, `mpi_allreduce_ms`,
@@ -262,7 +264,11 @@ pub(crate) fn convergence_schema() -> Schema {
 /// `state_exchange_ms`, `cut_batch_build_ms`, `bwd_setup_ms`,
 /// `bwd_load_imbalance_ms`, `bwd_scheduling_overhead_ms`.
 /// Sub-components of forward: `fwd_setup_ms`, `fwd_load_imbalance_ms`,
-/// `fwd_scheduling_overhead_ms`. Residual: `overhead_ms`.
+/// `fwd_scheduling_overhead_ms`. Residual: `overhead_ms`. The trailing
+/// `lazy_scoring_ms` column is the per-worker time spent in lazy
+/// candidate scoring inside the lazy-selection solve (0 when that solve
+/// path is not used); it is a sub-component of the forward/backward
+/// phases, not a top-level addend.
 pub(crate) fn iteration_timing_schema() -> Schema {
     Schema::new(vec![
         Field::new("iteration", DataType::Int32, false),
@@ -283,6 +289,7 @@ pub(crate) fn iteration_timing_schema() -> Schema {
         Field::new("fwd_load_imbalance_ms", DataType::Int64, false),
         Field::new("fwd_scheduling_overhead_ms", DataType::Int64, false),
         Field::new("overhead_ms", DataType::Int64, false),
+        Field::new("lazy_scoring_ms", DataType::Int64, false),
     ])
 }
 
@@ -374,7 +381,7 @@ pub(crate) fn hydro_energy_productivity_schema() -> Schema {
 /// Schema for `training/cut_selection/iterations.parquet` — per-stage
 /// row-selection statistics.
 ///
-/// 11 fields. One row per (iteration, stage) pair. The two nullable Int32
+/// 10 fields. One row per (iteration, stage) pair. The two nullable Int32
 /// columns (`budget_evicted`, `active_after_budget`) are `None` when
 /// budget enforcement is disabled.
 pub(crate) fn row_selection_schema() -> Schema {
@@ -432,8 +439,8 @@ mod tests {
         let schema = costs_schema();
         assert_eq!(
             schema.fields().len(),
-            26,
-            "costs schema must have 26 fields"
+            27,
+            "costs schema must have 27 fields"
         );
         let names = field_names(&schema);
         assert_eq!(
@@ -446,6 +453,7 @@ mod tests {
                 "future_cost",
                 "discount_factor",
                 "thermal_cost",
+                "anticipated_thermal_cost",
                 "contract_cost",
                 "deficit_cost",
                 "excess_cost",
@@ -485,6 +493,7 @@ mod tests {
             "future_cost",
             "discount_factor",
             "thermal_cost",
+            "anticipated_thermal_cost",
             "contract_cost",
             "deficit_cost",
             "excess_cost",
@@ -732,8 +741,8 @@ mod tests {
         let schema = convergence_schema();
         assert_eq!(
             schema.fields().len(),
-            13,
-            "convergence schema must have 13 fields"
+            14,
+            "convergence schema must have 14 fields"
         );
         // spot-check types per spec SS6.1
         assert_eq!(field_type(&schema, "iteration"), DataType::Int32);
@@ -778,8 +787,8 @@ mod tests {
         let schema = iteration_timing_schema();
         assert_eq!(
             schema.fields().len(),
-            18,
-            "iteration_timing schema must have 18 fields"
+            19,
+            "iteration_timing schema must have 19 fields"
         );
     }
 
@@ -795,7 +804,7 @@ mod tests {
             .field_with_name("worker_id")
             .expect("worker_id field must exist");
         assert!(worker_id_field.is_nullable(), "worker_id must be nullable");
-        // All other 16 timing columns must be non-nullable.
+        // All other 17 timing columns must be non-nullable.
         for field in schema.fields() {
             if field.name() != "rank" && field.name() != "worker_id" {
                 assert!(
@@ -965,7 +974,7 @@ mod tests {
             .map(|(s, n)| (*n, s.fields().len()))
             .collect();
         let expected: &[(&str, usize)] = &[
-            ("costs", 26),
+            ("costs", 27),
             ("hydros", 35),
             ("thermals", 10),
             ("exchanges", 11),
@@ -975,8 +984,8 @@ mod tests {
             ("non_controllables", 10),
             ("inflow_lags", 4),
             ("generic_violations", 5),
-            ("convergence", 13),
-            ("iteration_timing", 18),
+            ("convergence", 14),
+            ("iteration_timing", 19),
             ("rank_timing", 8),
             ("cut_selection", 10),
             ("solver_iterations", 18),

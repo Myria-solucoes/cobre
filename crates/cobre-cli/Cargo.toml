@@ -18,12 +18,12 @@ path = "src/main.rs"
 doc = false
 
 [dependencies]
-cobre-core = { version = "0.8.0", path = "../cobre-core", features = ["serde"] }
-cobre-io = { version = "0.8.0", path = "../cobre-io", features = ["schema"] }
-cobre-sddp = { version = "0.8.0", path = "../cobre-sddp" }
-cobre-solver = { version = "0.8.0", path = "../cobre-solver" }
-cobre-comm = { version = "0.8.0", path = "../cobre-comm" }
-cobre-stochastic = { version = "0.8.0", path = "../cobre-stochastic" }
+cobre-core = { version = "0.8.1", path = "../cobre-core", features = ["serde"] }
+cobre-io = { version = "0.8.1", path = "../cobre-io", features = ["schema"] }
+cobre-sddp = { version = "0.8.1", path = "../cobre-sddp", default-features = false }
+cobre-solver = { version = "0.8.1", path = "../cobre-solver", default-features = false }
+cobre-comm = { version = "0.8.1", path = "../cobre-comm" }
+cobre-stochastic = { version = "0.8.1", path = "../cobre-stochastic" }
 clap = { version = "4", features = ["derive"] }
 postcard = { version = "1", features = ["alloc"] }
 console = "0.16"
@@ -36,6 +36,19 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [features]
+## Default feature set: build against the HiGHS solver backend.
+default = ["highs"]
+
+## Select the HiGHS LP solver backend across the dependency graph.
+##
+## Forwards to both `cobre-solver` and `cobre-sddp`; forwarding to only one
+## leaves the other on its own `highs` default and re-trips the mutually
+## exclusive `compile_error!` in `cobre-solver`.
+highs = ["cobre-solver/highs", "cobre-sddp/highs"]
+
+## Select the CLP/CoinUtils LP solver backend across the dependency graph.
+clp = ["cobre-solver/clp", "cobre-sddp/clp"]
+
 mpi = ["cobre-comm/mpi"]
 ## Opt-in to the slow test suite (no slow tests currently in this crate;
 ## declaration reserved for workspace consistency).
@@ -45,7 +58,8 @@ slow-tests = []
 arrow = { version = "58", default-features = false }
 assert_cmd = "2"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
-cobre-io = { version = "0.8.0", path = "../cobre-io" }
+cobre-io = { version = "0.8.1", path = "../cobre-io" }
+cobre-solver = { version = "0.8.1", path = "../cobre-solver", default-features = false }
 parquet = { version = "58", default-features = false, features = ["arrow"] }
 predicates = "3"
 tempfile = "3"

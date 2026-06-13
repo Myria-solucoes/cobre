@@ -7,7 +7,7 @@
 produces a fully-validated [`cobre_core::System`] ready for use by downstream
 solver and analysis crates.
 
-The crate owns the entire input path: JSON and Parquet parsing, five layers of
+The crate owns the entire input path: JSON and Parquet parsing, layered
 validation, three-tier penalty and bound resolution, scenario model assembly, and
 optional parameter estimation from historical data. No other crate reads input
 files. Every crate downstream of `cobre-io` receives a structurally sound `System`
@@ -25,7 +25,7 @@ with all foreign keys resolved and all domain rules verified.
 | `penalties`          | Global penalty defaults parser (`penalties.json`)                                                                                                                                                                                 |
 | `stages`             | Stage sequence and policy graph loading (`stages.json`), per-class scenario source parsing (`ScenarioSource`), and backward-incompatibility detection for removed fields                                                          |
 | `initial_conditions` | Reservoir initial storage loading                                                                                                                                                                                                 |
-| `validation`         | Five-layer validation pipeline and `ValidationContext`                                                                                                                                                                            |
+| `validation`         | Layered validation pipeline and `ValidationContext`                                                                                                                                                                            |
 | `resolution`         | Three-tier penalty and bound resolution into O(1) lookup tables                                                                                                                                                                   |
 | `pipeline`           | Orchestrator that wires all layers into a single `load_case` call                                                                                                                                                                 |
 | `report`             | Structured validation report generation                                                                                                                                                                                           |
@@ -68,7 +68,7 @@ full layout.
    hydro cascade topology, penalty ordering (lower tiers may not exceed upper),
    PAR model stationarity, stage count consistency, estimation prerequisites, and
    other invariants. Violations produce [`LoadError::ConstraintError`] entries.
-6. **Resolution.** After all five layers pass, three-tier penalty and bound
+6. **Resolution.** After all validation layers pass, three-tier penalty and bound
    resolution is performed. The result is pre-resolved lookup tables embedded in
    the `System` for O(1) solver access.
 7. **Scenario assembly.** Inflow and load statistical models are assembled from
@@ -155,7 +155,7 @@ For the full JSON and Parquet schemas for each file, see the
 
 ## Validation pipeline
 
-The five layers run in sequence. Earlier layers gate later ones: if Layer 1 finds
+The validation pipeline layers run in sequence. Earlier layers gate later ones: if Layer 1 finds
 a missing required file, the file is not parsed in Layer 2. All diagnostics across
 all layers are collected before returning.
 
@@ -496,7 +496,7 @@ all entity types are collected before returning.
 constraint violation: {description}
 ```
 
-A catch-all for collected validation errors from any of the five layers, and for
+A catch-all for collected validation errors from any validation layer, and for
 `SystemBuilder::build()` rejections. The `description` field contains all error
 messages joined by newlines, each prefixed with its `[ErrorKind]`, source file,
 optional entity identifier, and message text.

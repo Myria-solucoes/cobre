@@ -19,6 +19,14 @@ on:
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+*"
+  # Build + test wheels across all platforms on PRs that touch the Python
+  # bindings, so platform-specific failures (e.g. a Windows-only test) are
+  # caught before a release tag rather than in the post-tag publish. The
+  # publish job is gated to tag-push / workflow_dispatch, so PRs never publish.
+  pull_request:
+    paths:
+      - "crates/cobre-python/**"
+      - ".github/workflows/release-python.yml"
   workflow_dispatch:
     inputs:
       dry-run:
@@ -67,6 +75,10 @@ jobs:
         with:
           submodules: recursive
 
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
       - uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
@@ -95,7 +107,24 @@ jobs:
               fi
             done
 
-      - uses: actions/upload-artifact@v4
+      # PEP 639 `license-files` cannot reference files above the project dir, and
+      # the canonical license texts live at the repo root, so inject them into
+      # each wheel's `.dist-info/licenses/` post-build (RECORD is recomputed).
+      - name: Bundle license notices into wheels
+        shell: bash
+        run: |
+          # manylinux wheels are built as root inside the maturin Docker
+          # container, so the host runner (non-root) cannot rewrite them; reclaim
+          # ownership on Linux before repacking. macOS/Windows build natively, so
+          # this is a Linux-only no-op elsewhere ($RUNNER_OS is set by Actions).
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo chown -R "$(id -u):$(id -g)" crates/cobre-python/dist
+          fi
+          python -m pip install --quiet wheel
+          python scripts/inject_wheel_licenses.py crates/cobre-python/dist \
+            LICENSE NOTICE THIRD_PARTY_NOTICES.md THIRD_PARTY_LICENSES.md
+
+      - uses: actions/upload-artifact@v6
         with:
           name: wheels-${{ matrix.target }}
           path: crates/cobre-python/dist/
@@ -128,7 +157,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           allow-prereleases: true
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: wheels-${{ matrix.target }}
           path: dist/
@@ -158,7 +187,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: "wheels-*"
           merge-multiple: true

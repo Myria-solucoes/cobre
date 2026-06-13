@@ -32,7 +32,7 @@ use cobre_sddp::{
     hydro_models::prepare_hydro_models,
     setup::{StudyParams, prepare_stochastic},
 };
-use cobre_solver::highs::HighsSolver;
+use cobre_solver::ActiveSolver;
 
 mod common;
 
@@ -135,7 +135,7 @@ fn run_d02_once() -> String {
     .expect("StudySetup must build");
 
     let comm = StubComm;
-    let mut solver = HighsSolver::new().expect("HighsSolver::new must succeed");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
 
     let (event_tx, event_rx) = mpsc::channel::<TrainingEvent>();
 
@@ -144,7 +144,7 @@ fn run_d02_once() -> String {
             &mut solver,
             &comm,
             1,
-            HighsSolver::new,
+            ActiveSolver::new,
             Some(event_tx),
             None,
         )
@@ -173,7 +173,7 @@ fn run_d02_once() -> String {
     convergence_updates.sort_by_key(|&(iter, ..)| iter);
 
     let mut pool = setup
-        .create_workspace_pool(&comm, 1, HighsSolver::new)
+        .create_workspace_pool(&comm, 1, ActiveSolver::new)
         .expect("simulation workspace pool must build");
 
     let io_capacity = setup.simulation_config.io_channel_capacity.max(1);

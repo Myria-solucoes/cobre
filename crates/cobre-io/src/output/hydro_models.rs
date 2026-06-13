@@ -24,7 +24,6 @@
 //! All writes use atomic file creation: data is first written to a `.tmp`
 //! suffix, then renamed to the final path.
 
-use std::io::BufWriter;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -32,9 +31,10 @@ use arrow::array::{Float64Builder, Int32Builder, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 
 use crate::extensions::FphaHyperplaneRow;
+use crate::output::atomic::{write_json_atomic, write_parquet_atomic};
 use crate::output::error::OutputError;
 use crate::output::parquet_config::ParquetWriterConfig;
-use crate::output::stochastic::{ensure_parent_dir, write_parquet_atomic};
+use crate::output::stochastic::ensure_parent_dir;
 
 /// Write a slice of [`FphaHyperplaneRow`] to a Parquet file at `path`.
 ///
@@ -135,32 +135,16 @@ fn build_fpha_hyperplanes_batch(rows: &[FphaHyperplaneRow]) -> Result<RecordBatc
 
     for row in rows {
         hydro_id_col.append_value(row.hydro_id.0);
-        if let Some(sid) = row.stage_id {
-            stage_id_col.append_value(sid);
-        } else {
-            stage_id_col.append_null();
-        }
+        stage_id_col.append_option(row.stage_id);
         plane_id_col.append_value(row.plane_id);
         gamma_0_col.append_value(row.gamma_0);
         gamma_v_col.append_value(row.gamma_v);
         gamma_q_col.append_value(row.gamma_q);
         gamma_s_col.append_value(row.gamma_s);
         kappa_col.append_value(row.kappa);
-        if let Some(v) = row.valid_v_min_hm3 {
-            valid_v_min_col.append_value(v);
-        } else {
-            valid_v_min_col.append_null();
-        }
-        if let Some(v) = row.valid_v_max_hm3 {
-            valid_v_max_col.append_value(v);
-        } else {
-            valid_v_max_col.append_null();
-        }
-        if let Some(v) = row.valid_q_max_m3s {
-            valid_q_max_col.append_value(v);
-        } else {
-            valid_q_max_col.append_null();
-        }
+        valid_v_min_col.append_option(row.valid_v_min_hm3);
+        valid_v_max_col.append_option(row.valid_v_max_hm3);
+        valid_q_max_col.append_option(row.valid_q_max_m3s);
     }
 
     RecordBatch::try_new(
@@ -204,14 +188,7 @@ pub fn write_hydro_model_summary(
         std::fs::create_dir_all(parent).map_err(|e| OutputError::io(parent, e))?;
     }
 
-    let tmp_path = path.with_extension("json.tmp");
-    let file = std::fs::File::create(&tmp_path).map_err(|e| OutputError::io(&tmp_path, e))?;
-    let writer = BufWriter::new(file);
-    serde_json::to_writer_pretty(writer, summary).map_err(|e| {
-        OutputError::serialization("hydro_models", format!("JSON serialization: {e}"))
-    })?;
-    std::fs::rename(&tmp_path, path).map_err(|e| OutputError::io(path, e))?;
-    Ok(())
+    write_json_atomic(path, summary, "hydro_models")
 }
 
 /// Read a structural hydro-model summary from a JSON file.

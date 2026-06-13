@@ -96,7 +96,7 @@ fn select_for_stage_aggregated_96threads(c: &mut Criterion) {
 }
 
 fn select_for_stage_disaggregated_8threads(c: &mut Criterion) {
-    // TODO(Epic 01 ticket-003): update K=1000 to the measured
+    // TODO(measured-K-probe): update K=1000 to the measured
     // disaggregated value when the probe report lands.
     bench_one(
         c,

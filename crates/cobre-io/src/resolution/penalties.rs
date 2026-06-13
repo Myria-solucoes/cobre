@@ -169,6 +169,12 @@ pub struct PenaltiesOverrides<'a> {
 /// // Hydro index 1: never overridden.
 /// assert!((result.hydro_penalties(1, 1).spillage_cost - 0.01).abs() < f64::EPSILON);
 /// ```
+// Rationale: the function applies a shared three-tier override cascade (global → entity →
+// stage-varying) across four entity types using a common stage-index map; keeping all four
+// entity passes in one function makes the shared resolution contract visible and avoids
+// duplicating the stage-index lookup across per-entity helper functions.
+// `implicit_hasher`: the public API accepts the concrete `HashMap` type required by callers;
+// making it generic over `BuildHasher` would complicate call sites with no practical benefit.
 #[must_use]
 #[allow(clippy::too_many_lines, clippy::implicit_hasher)]
 pub fn resolve_penalties(

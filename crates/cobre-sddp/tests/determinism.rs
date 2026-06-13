@@ -59,7 +59,7 @@ use cobre_solver::{
     Basis, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
 };
 use cobre_stochastic::{
-    ClassSchemes, OpeningTreeInputs, StochasticContext, build_stochastic_context,
+    ClassSchemes, OpeningTreeInputs, StochasticContext, SweepDirection, build_stochastic_context,
 };
 
 // ===========================================================================
@@ -149,9 +149,9 @@ impl MockSolver3H {
 }
 
 impl SolverInterface for MockSolver3H {
-    type Profile = cobre_solver::HighsProfile;
+    type Profile = cobre_solver::ActiveProfile;
 
-    fn apply_profile(&mut self, _profile: &cobre_solver::HighsProfile) {}
+    fn apply_profile(&mut self, _profile: &cobre_solver::ActiveProfile) {}
     fn solver_name_version(&self) -> String {
         "MockSolver 0.0.0".to_string()
     }
@@ -180,17 +180,13 @@ impl SolverInterface for MockSolver3H {
         SolverStatistics::default()
     }
 
+    fn statistics_into(&self, out: &mut SolverStatistics) {
+        *out = self.statistics();
+    }
+
     fn name(&self) -> &'static str {
         "MockDeterminism3H"
     }
-
-    fn set_primal_feasibility_tolerance(&mut self, _tolerance: f64) {}
-
-    fn set_dual_feasibility_tolerance(&mut self, _tolerance: f64) {}
-
-    fn set_simplex_iteration_limit_profile(&mut self, _limit: u32) {}
-
-    fn set_ipm_iteration_limit_profile(&mut self, _limit: u32) {}
 }
 
 // ===========================================================================
@@ -201,7 +197,10 @@ impl SolverInterface for MockSolver3H {
 ///
 /// Uses PAR(0) (no AR lags) and a single opening per stage so the fixture
 /// remains small while still exercising more code paths than a 1-hydro system.
-fn make_stochastic_context_3h(n_stages: usize) -> StochasticContext {
+fn make_stochastic_context_3h_branching(
+    n_stages: usize,
+    branching_factor: usize,
+) -> StochasticContext {
     use cobre_core::SystemBuilder;
     use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
     use cobre_core::scenario::InflowModel;
@@ -286,7 +285,7 @@ fn make_stochastic_context_3h(n_stages: usize) -> StochasticContext {
         },
         risk_config: StageRiskConfig::Expectation,
         scenario_config: ScenarioSourceConfig {
-            branching_factor: 1,
+            branching_factor,
             noise_method: NoiseMethod::Saa,
         },
     };
@@ -460,14 +459,29 @@ struct Fixture3H {
 
 impl Fixture3H {
     fn new() -> Self {
+        Self::with_branching(1)
+    }
+
+    /// Build the 3-hydro / 5-stage fixture with `branching_factor` openings per
+    /// stage. `branching_factor > 1` is used by the opening-reorder determinism
+    /// test so the per-trial-point solve loop visits multiple openings.
+    fn with_branching(branching_factor: usize) -> Self {
         let n_stages = 5;
         // N=3 hydros, L=0 PAR order
-        let indexer = StageIndexer::new(3, 0);
+        let indexer = {
+            let mut ix = StageIndexer::new(3, 0);
+            // Finalize as production setup does: full-order mask + state→LP-column map.
+            let lag_counts = vec![ix.max_par_order; ix.hydro_count];
+            let anticipated_k = ix.anticipated_lead_stages.clone();
+            ix.set_nonzero_mask(&lag_counts, &anticipated_k);
+            ix.finalize_state_column_map();
+            ix
+        };
         let templates = vec![template_3h(); n_stages];
         // base_row: water-balance rows start at row_water_balance_start = n_state + n_hydros = 3 + 3 = 6.
         let base_rows = vec![6usize; n_stages];
         let initial_state = vec![0.0_f64; indexer.n_state];
-        let stochastic = make_stochastic_context_3h(n_stages);
+        let stochastic = make_stochastic_context_3h_branching(n_stages, branching_factor);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
@@ -495,6 +509,14 @@ impl Fixture3H {
 ///
 /// An isolated rayon thread pool with exactly `n_workspaces` threads is used
 /// to prevent interaction with the global pool or other parallel tests.
+///
+/// The backward pass always solves each trial point's openings in the opening
+/// tree's precomputed solve order. With the default fixture this is the identity
+/// permutation; tests that install a non-identity order via
+/// [`StochasticContext::set_solve_order`] exercise the reordered solve path.
+/// Cuts must be bit-identical across thread counts in either case because the
+/// solve order is run-constant and the per-ω outcomes are aggregated by
+/// canonical ω.
 fn run_training(
     n_workspaces: usize,
     fx: &Fixture3H,
@@ -577,6 +599,8 @@ fn run_training(
                     stages: &[],
                     recent_accum_seed: &[],
                     recent_weight_seed: 0.0,
+                    dcs: None,
+                    noise_key_diag: None,
                 },
                 &comm,
                 || Ok(MockSolver3H::new(100.0)),
@@ -704,6 +728,8 @@ fn run_simulation(
                     stages: &[],
                     recent_accum_seed: &[],
                     recent_weight_seed: 0.0,
+                    dcs: None,
+                    noise_key_diag: None,
                 },
                 &sim_config,
                 SimulationOutputSpec {
@@ -749,6 +775,86 @@ fn test_training_determinism_across_thread_counts() {
     const N_ITERATIONS: u64 = 10;
 
     let fx = Fixture3H::new();
+    let (result_1, fcf_1) = run_training(1, &fx, N_ITERATIONS);
+    let (result_4, fcf_4) = run_training(4, &fx, N_ITERATIONS);
+
+    assert_eq!(result_1.iterations, result_4.iterations);
+    assert_eq!(result_1.final_lb.to_bits(), result_4.final_lb.to_bits());
+    assert_eq!(result_1.final_ub.to_bits(), result_4.final_ub.to_bits());
+    assert_eq!(result_1.final_gap.to_bits(), result_4.final_gap.to_bits());
+
+    assert_eq!(fcf_1.pools.len(), fcf_4.pools.len());
+    for t in 0..fcf_1.pools.len() {
+        let pool_1 = &fcf_1.pools[t];
+        let pool_4 = &fcf_4.pools[t];
+        assert_eq!(pool_1.populated_count, pool_4.populated_count);
+
+        for s in 0..pool_1.populated_count {
+            assert_eq!(pool_1.active[s], pool_4.active[s]);
+            assert_eq!(
+                pool_1.intercepts[s].to_bits(),
+                pool_4.intercepts[s].to_bits()
+            );
+            let sd = pool_1.state_dimension;
+            let start = s * sd;
+            let c1 = &pool_1.coefficients[start..start + sd];
+            let c4 = &pool_4.coefficients[start..start + sd];
+            assert_eq!(c1.len(), c4.len());
+            for (&coeff_1, &coeff_4) in c1.iter().zip(c4.iter()) {
+                assert_eq!(coeff_1.to_bits(), coeff_4.to_bits());
+            }
+        }
+    }
+}
+
+/// Work-distribution invariance with a NON-IDENTITY backward opening solve order.
+///
+/// This is the in-crate proof gate for the reorder feature: with a NON-IDENTITY
+/// per-stage solve order installed on the opening tree (the backward pass always
+/// honors the solve order), `train()` must still produce bit-identical FCF cuts
+/// when run with 1 workspace versus 4 workspaces. The solve order is run-constant
+/// (precomputed once, identical on every worker), so every worker solves a
+/// given trial point's openings in the same order — yielding the same warm-start
+/// chain and the same per-ω values regardless of thread count. We do NOT compare
+/// against an identity-order run: reordering the solves legitimately changes the
+/// warm-start bases (marginal numerical differences are accepted); the invariant
+/// is across work distributions for the SAME version + config.
+#[test]
+fn test_training_determinism_across_thread_counts_with_reorder() {
+    const N_ITERATIONS: u64 = 10;
+    const BRANCHING: usize = 4;
+
+    // Multi-opening fixture so the per-trial-point solve loop visits >1 opening.
+    let mut fx = Fixture3H::with_branching(BRANCHING);
+
+    // Install a NON-IDENTITY solve order on every stage. The keys are arbitrary
+    // (the determinism property does not depend on them being noise-derived,
+    // only on the order being run-constant). Keys [3, 1, 4, 2] sorted descending
+    // give the permutation [2, 0, 3, 1] for each stage.
+    let n_openings_per_stage: Vec<usize> = (0..fx.n_stages)
+        .map(|s| fx.stochastic.tree_view().n_openings(s))
+        .collect();
+    let keys: Vec<Vec<f64>> = n_openings_per_stage
+        .iter()
+        .map(|&n| {
+            assert_eq!(
+                n, BRANCHING,
+                "fixture must have BRANCHING openings per stage"
+            );
+            vec![3.0, 1.0, 4.0, 2.0]
+        })
+        .collect();
+    fx.stochastic
+        .set_solve_order(&keys, SweepDirection::Descending)
+        .expect("solve-order key dims match the tree");
+    // Sanity: the installed order is genuinely non-identity (else the test would
+    // not exercise the reorder path).
+    assert_eq!(
+        fx.stochastic.tree_view().solve_order(0),
+        &[2u32, 0, 3, 1],
+        "expected a non-identity descending solve order"
+    );
+
     let (result_1, fcf_1) = run_training(1, &fx, N_ITERATIONS);
     let (result_4, fcf_4) = run_training(4, &fx, N_ITERATIONS);
 
@@ -1034,6 +1140,56 @@ fn test_simulation_determinism_across_thread_counts() {
 
     let fx = Fixture3H::new();
     // Train once with 1 workspace to get a stable FCF for simulation.
+    let (_training_result, fcf) = run_training(1, &fx, N_ITERATIONS);
+
+    let costs_1 = run_simulation(1, &fx, &fcf, N_SCENARIOS);
+    let costs_4 = run_simulation(4, &fx, &fcf, N_SCENARIOS);
+
+    assert_eq!(costs_1.len(), costs_4.len());
+    for ((id_1, cost_1, cats_1), (id_4, cost_4, cats_4)) in costs_1.iter().zip(costs_4.iter()) {
+        assert_eq!(id_1, id_4);
+        assert_eq!(cost_1.to_bits(), cost_4.to_bits());
+        assert_eq!(
+            cats_1.resource_cost.to_bits(),
+            cats_4.resource_cost.to_bits()
+        );
+        assert_eq!(
+            cats_1.recourse_cost.to_bits(),
+            cats_4.recourse_cost.to_bits()
+        );
+        assert_eq!(
+            cats_1.violation_cost.to_bits(),
+            cats_4.violation_cost.to_bits()
+        );
+        assert_eq!(
+            cats_1.regularization_cost.to_bits(),
+            cats_4.regularization_cost.to_bits()
+        );
+        assert_eq!(cats_1.imputed_cost.to_bits(), cats_4.imputed_cost.to_bits());
+    }
+}
+
+/// Simulation work-distribution invariance when the policy was trained with a
+/// NON-IDENTITY backward opening solve order.
+///
+/// Trains a policy with a non-identity solve order installed (multi-opening
+/// fixture), then verifies the simulation cost buffer is bit-identical across
+/// 1 vs 4 simulation workspaces. The reorder is a backward-pass-only setting;
+/// this exercises that a reorder-trained FCF still simulates invariantly across
+/// thread counts.
+#[test]
+fn test_simulation_determinism_across_thread_counts_with_reorder() {
+    const N_ITERATIONS: u64 = 10;
+    const N_SCENARIOS: u32 = 20;
+    const BRANCHING: usize = 4;
+
+    let mut fx = Fixture3H::with_branching(BRANCHING);
+    let keys: Vec<Vec<f64>> = (0..fx.n_stages).map(|_| vec![3.0, 1.0, 4.0, 2.0]).collect();
+    fx.stochastic
+        .set_solve_order(&keys, SweepDirection::Descending)
+        .expect("solve-order key dims match the tree");
+
+    // Train with the non-identity solve order to produce the policy under test.
     let (_training_result, fcf) = run_training(1, &fx, N_ITERATIONS);
 
     let costs_1 = run_simulation(1, &fx, &fcf, N_SCENARIOS);

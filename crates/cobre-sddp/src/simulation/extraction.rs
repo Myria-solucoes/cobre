@@ -125,7 +125,7 @@ impl ThermalReverseLookup {
 /// Returns `None` silently under any of:
 /// - the thermal is not anticipated,
 /// - `spec.stage_index + K_i >= spec.n_stages` (decision absent from LP — the
-///   strict-predicate boundary set by F2-002),
+///   strict-predicate boundary),
 /// - the plant is outside its entry/exit window (the LP builder sets `[0,0]` bounds for
 ///   those columns; the activation predicate is the canonical test — do not read-then-check).
 #[inline]
@@ -138,7 +138,7 @@ fn compute_anticipated_decision_mw(
     let local_idx = lookup.thermal_is_anticipated[thermal_local]?;
     let k_i = spec.indexer.anticipated_lead_stages[local_idx];
     // Canonical predicate: matches `StageIndexer::anticipated_decision_active_at_stage`
-    // in indexer.rs and the LP-builder gates at matrix.rs:245, :291, :1047.
+    // and the LP-builder horizon gates (`stage_idx + K_i < n_stages`) in `lp_builder::matrix`.
     if spec.stage_index.saturating_add(k_i) >= spec.n_stages {
         return None;
     }
@@ -174,12 +174,13 @@ fn compute_anticipated_decision_mw(
 ///   constraint LHS sum over zero blocks vanishes, so the constraint does not
 ///   couple slot 0 to anything. Category 6 (`anticipated_state_fixing`) instead
 ///   pins `s_{i,0} = incoming_slot_0` from the ring buffer, which is the committed
-///   MW propagated from earlier stages via the ring-buffer shift (`noise.rs:253`).
+///   MW propagated from earlier stages via the ring-buffer shift (`noise::shift_anticipated_state`).
 ///
 /// In both paths the correct read is the slot-0 column.
 ///
 /// Returns `Some(v)` when thermal `thermal_local` is anticipated and the
-/// fishing predicate is active for its plant (`indexer.rs:1555`). At
+/// fishing predicate is active for its plant
+/// (`StageIndexer::is_anticipated_fishing_active`). At
 /// pre-horizon stages, the value read is the seeded `values_mw[slot 0]`
 /// injected by the setup pipeline and advanced via the per-stage ring-buffer shift.
 ///
@@ -1176,11 +1177,6 @@ fn compute_hydro_violation_costs(
 /// in scaled cost space (objective coefficients divided by [`COST_SCALE_FACTOR`]);
 /// this function multiplies back by [`COST_SCALE_FACTOR`] at the reporting
 /// boundary to recover original units.
-// RATIONALE: 152 lines — enumerates all cost components (thermal, hydro, NCS, load shed,
-// deficit, generic violations) from the LP solution view in a single linear extraction pass.
-// Each component uses a different indexer slice, so no sub-function extraction is possible
-// without propagating the same indexer and scale arguments throughout.
-#[allow(clippy::too_many_lines)]
 fn compute_cost_result(
     view: &SolutionView<'_>,
     indexer: &StageIndexer,
@@ -1214,6 +1210,18 @@ fn compute_cost_result(
         0.0
     } else {
         range_sum(indexer.thermal.clone()) * COST_SCALE_FACTOR
+    };
+    // Anticipated (forward-committed) thermal fuel is charged on the
+    // anticipated-decision columns at the decision stage. Inactive columns
+    // (non-decision stages, or boundary plants) are pinned to `[0, 0]`, so their
+    // primal is 0 and they contribute nothing — summing the whole range at every
+    // stage attributes the cost only where the decision is live, matching how
+    // `immediate_cost` books it. Same objective·primal·scale basis as the other
+    // categories, so the breakdown reconciles to `immediate_cost`.
+    let anticipated_thermal_cost = if indexer.anticipated_decision.is_empty() {
+        0.0
+    } else {
+        range_sum(indexer.anticipated_decision.clone()) * COST_SCALE_FACTOR
     };
     let spillage_cost = if indexer.spillage.is_empty() {
         0.0
@@ -1258,18 +1266,6 @@ fn compute_cost_result(
     };
 
     let hv = compute_hydro_violation_costs(indexer, col_cost, range_sum);
-    debug_assert!(
-        (hv.total()
-            - (hv.outflow_below
-                + hv.outflow_above
-                + hv.turbined
-                + hv.generation
-                + hv.evaporation
-                + hv.withdrawal))
-            .abs()
-            < 1e-6,
-        "hydro_violation_cost must equal sum of components"
-    );
 
     SimulationCostResult {
         stage_id,
@@ -1279,6 +1275,7 @@ fn compute_cost_result(
         future_cost,
         discount_factor: cumulative_discount_factor,
         thermal_cost,
+        anticipated_thermal_cost,
         contract_cost: 0.0,
         deficit_cost,
         excess_cost,
@@ -1304,10 +1301,9 @@ fn compute_cost_result(
 /// Extract generic constraint violation results from a solved LP.
 ///
 /// For each active generic constraint row, reads the slack value from the
-/// primal vector (for constraints with `slack.enabled`) and the dual value
-/// from the dual vector.  Returns the violation records and the total
-/// violation cost (sum of `slack_value * penalty * block_hours` across all
-/// active constraint rows).
+/// primal vector (for constraints with `slack.enabled`).  Returns the
+/// violation records and the total violation cost (sum of
+/// `slack_value * penalty * block_hours` across all active constraint rows).
 ///
 /// For `==` sense constraints with two slack columns (positive and negative),
 /// the reported `slack_value` is the net violation: `s_plus - s_minus`.
@@ -1321,27 +1317,22 @@ fn extract_generic_violations(
         return (Vec::new(), 0.0);
     }
 
-    let indexer = spec.indexer;
-    let gc_row_start = indexer.generic_constraint_rows.start;
     let mut results = Vec::with_capacity(entries.len());
     let mut total_cost = 0.0;
 
-    for (entry_idx, entry) in entries.iter().enumerate() {
-        let row_idx = gc_row_start + entry_idx;
-
-        // Dual value from the LP row (unused for now but kept for future use).
-        let _dual_value = if row_idx < view.dual.len() {
-            view.dual[row_idx]
+    for entry in entries {
+        // Slack value from the LP column(s). A collapsed stage-level row is
+        // priced by the stage's total hours (matching the LP objective set in
+        // `fill_generic_constraint_entries`); a per-block row by its own block's
+        // hours.
+        let block_hours = if entry.is_stage_level {
+            spec.block_hours.iter().sum()
         } else {
-            0.0
+            spec.block_hours
+                .get(entry.block_idx)
+                .copied()
+                .unwrap_or(0.0)
         };
-
-        // Slack value from the LP column(s).
-        let block_hours = spec
-            .block_hours
-            .get(entry.block_idx)
-            .copied()
-            .unwrap_or(0.0);
         let (slack_value, slack_cost) = if entry.slack_enabled {
             match entry.sense {
                 ConstraintSense::Equal => {
@@ -1367,9 +1358,15 @@ fn extract_generic_violations(
 
         results.push(SimulationGenericViolationResult {
             stage_id,
+            // A collapsed stage-level row spans the whole stage, so it reports
+            // no block; a per-block row reports its block index.
             // SAFETY: block_idx is a stage block index, always < n_blocks which is << 2^32.
             #[allow(clippy::cast_possible_truncation)]
-            block_id: Some(entry.block_idx as u32),
+            block_id: if entry.is_stage_level {
+                None
+            } else {
+                Some(entry.block_idx as u32)
+            },
             constraint_id: entry.entity_id,
             slack_value,
             slack_cost,
@@ -1536,6 +1533,7 @@ fn extract_stub_collections(
 ///     future_cost: 200.0,
 ///     discount_factor: 1.0,
 ///     thermal_cost: 400.0,
+///     anticipated_thermal_cost: 0.0,
 ///     contract_cost: 100.0,
 ///     deficit_cost: 50.0,
 ///     excess_cost: 10.0,
@@ -1566,14 +1564,17 @@ fn extract_stub_collections(
 /// };
 ///
 /// accumulate_category_costs(&cost, &mut accum);
-/// assert_eq!(accum.resource_cost, 500.0);       // 400 + 100
+/// assert_eq!(accum.resource_cost, 500.0);       // 400 + 0 + 100
 /// assert_eq!(accum.recourse_cost, 60.0);         // 50 + 10
 /// assert_eq!(accum.violation_cost, 60.0);        // 20 + 30 + 5 + 3 + 2
 /// assert_eq!(accum.regularization_cost, 20.0);   // 1 + 4 + 7 + 8
 /// assert_eq!(accum.imputed_cost, 60.0);          // 60
 /// ```
 pub fn accumulate_category_costs(cost: &SimulationCostResult, accum: &mut ScenarioCategoryCosts) {
-    accum.resource_cost += cost.thermal_cost + cost.contract_cost;
+    // Anticipated thermal fuel is a resource cost (forward-committed generation),
+    // so it rolls up alongside thermal/contract. Keeping it in the resource macro
+    // category preserves Σ(macro categories) == immediate_cost.
+    accum.resource_cost += cost.thermal_cost + cost.anticipated_thermal_cost + cost.contract_cost;
     accum.recourse_cost += cost.deficit_cost + cost.excess_cost;
     accum.violation_cost += cost.storage_violation_cost
         + cost.filling_target_cost
@@ -2591,7 +2592,7 @@ mod tests {
     }
 
     /// Same fixture, `stage_index=1`.  `t+K_i = 1+2 = 3 == n_stages` (boundary
-    /// is INACTIVE under F2-002 strict predicate `<`).
+    /// is INACTIVE under the strict predicate `<`).
     ///
     /// Expects `anticipated_decision_mw == None` — the LP has [0,0] bounds at
     /// this boundary column and the extraction predicate must match.
@@ -2649,7 +2650,7 @@ mod tests {
         assert_eq!(
             result.thermals[1].anticipated_decision_mw, None,
             "expected None for thermal 20 at boundary stage 1 (K_i=2, n_stages=3): \
-             t+K_i = 3 >= n_stages = 3 under F2-002 strict predicate"
+             t+K_i = 3 >= n_stages = 3 under the strict predicate"
         );
     }
 
@@ -2934,7 +2935,7 @@ mod tests {
     ///
     /// The committed value is the slot-0 entry of the `anticipated_state` ring
     /// buffer (per-plant, per-stage scalar), NOT the per-block thermal
-    /// generation. To guard against the F2-001 regression where the helper
+    /// generation. To guard against the regression where the helper
     /// returned `primal[thermal_col]` (the per-block generation) instead of
     /// `primal[anticipated_state.start + local_idx]`, this fixture uses three
     /// distinct per-block generation values (50/60/70 MW) and a distinct
@@ -3054,7 +3055,7 @@ mod tests {
 
         // 1 thermal * 3 blocks = 3 records. Every block carries the same
         // (per-stage) committed scalar from slot 0, NOT its own generation.
-        // On the F2-001 buggy code path this assertion fails with the
+        // On the buggy code path this assertion fails with the
         // per-block thermal values [50, 60, 70].
         assert_eq!(result.thermals.len(), 3);
         for (blk, rec) in result.thermals.iter().enumerate() {
@@ -3065,7 +3066,7 @@ mod tests {
             );
             // Sanity: generation_mw is still the per-block thermal column,
             // and the per-block values are distinct from 42.0 — so the
-            // F2-001 regression would surface as committed_mw == generation_mw.
+            // regression would surface as committed_mw == generation_mw.
             assert_ne!(
                 rec.anticipated_committed_mw,
                 Some(rec.generation_mw),
@@ -3365,7 +3366,7 @@ mod tests {
         };
         // In the no-block branch the fishing-constraint LHS sum vanishes; Category 6
         // pins slot 0 to incoming (0.0 here), so the helper returns Some(0.0) — same
-        // observable as before the F2-001 fix, but via slot-0 of anticipated_state.
+        // observable as before the fix, but via slot-0 of anticipated_state.
         let n_cols_helper = indexer.anticipated_decision.end.max(1);
         let primal_helper = vec![0.0_f64; n_cols_helper];
         let dual_helper: Vec<f64> = vec![];
@@ -3518,7 +3519,7 @@ mod tests {
         );
     }
 
-    /// Regression guard for F1-002: verify that using a pre-built
+    /// Regression guard: verify that using a pre-built
     /// [`ThermalReverseLookup`] via [`extract_stage_result_with_lookups`]
     /// produces bit-for-bit identical results to the standard
     /// [`extract_stage_result`] path (which builds the lookup internally).
@@ -3730,6 +3731,10 @@ mod tests {
             future_cost: 0.0,
             discount_factor: 1.0,
             thermal_cost: thermal,
+            // Exercised separately in the GNL end-to-end reconciliation test; the
+            // category-accumulation unit tests keep it at zero so the existing
+            // `resource_cost` expectations (thermal + contract) stay exact.
+            anticipated_thermal_cost: 0.0,
             contract_cost: contract,
             deficit_cost: deficit,
             excess_cost: excess,

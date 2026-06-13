@@ -1,0 +1,1158 @@
+//! Bridge from `TrainingResult` and `TrainingEvent` log to `TrainingOutput`.
+//!
+//! [`build_training_output`] converts the summary produced by the training loop
+//! ([`TrainingResult`]) plus the collected event log into the structured
+//! [`TrainingOutput`] type required by the output writers in `cobre-io`.
+//!
+//! ## Design
+//!
+//! The training loop already emits [`TrainingEvent`] variants at each lifecycle
+//! step boundary. Rather than modifying the hot-path `train()` function, this
+//! module reads those events after training completes and reconstructs the
+//! per-iteration records required by [`cobre_io::TrainingOutput`].
+//!
+//! The conversion is a pure function — it cannot fail. Missing events for a
+//! given iteration produce zero values for the affected fields.
+
+use std::collections::BTreeMap;
+
+use cobre_core::TrainingEvent;
+use cobre_io::{IterationRecord, RowPoolStatistics, RowSelectionRecord, TrainingOutput};
+
+use crate::{FutureCostFunction, TrainingResult};
+
+/// Partial iteration record accumulated from multiple [`TrainingEvent`] variants
+/// before the final [`IterationRecord`] is assembled.
+#[derive(Default)]
+struct PartialRecord {
+    /// Lower bound from [`TrainingEvent::IterationSummary`].
+    lower_bound: f64,
+    /// Upper bound mean from [`TrainingEvent::ForwardSyncComplete`].
+    upper_bound_mean: f64,
+    /// Upper bound std from [`TrainingEvent::ForwardSyncComplete`].
+    upper_bound_std: f64,
+    /// Gap from [`TrainingEvent::IterationSummary`].
+    gap: f64,
+    /// Forward pass wall-clock from [`TrainingEvent::IterationSummary`] (ms).
+    forward_ms: u64,
+    /// Backward pass wall-clock from [`TrainingEvent::IterationSummary`] (ms).
+    backward_ms: u64,
+    /// Iteration total wall-clock from [`TrainingEvent::IterationSummary`] (ms).
+    iteration_time_ms: u64,
+    /// LP solve count from [`TrainingEvent::IterationSummary`].
+    lp_solves: u64,
+    /// Forward passes from [`TrainingEvent::ForwardPassComplete`].
+    forward_passes: u32,
+    /// Cuts generated from [`TrainingEvent::BackwardPassComplete`].
+    cuts_added: u32,
+    /// Rows removed from [`TrainingEvent::PolicySyncComplete`].
+    cuts_removed: u32,
+    /// Active rows from [`TrainingEvent::PolicySyncComplete`].
+    cuts_active: u32,
+    /// Wall-clock time for the `allreduce` bound-statistic reduction
+    /// from [`TrainingEvent::ForwardSyncComplete`] (ms).
+    ///
+    /// Note: the forward-pass scenario exchange uses `allgatherv`, not
+    /// `allreduce`. This field tracks only the scalar bound reduction.
+    forward_sync_ms: u64,
+    /// Policy sync allgatherv time from [`TrainingEvent::PolicySyncComplete`] (ms).
+    cut_sync_ms: u64,
+    /// Local row selection time from [`TrainingEvent::PolicySelectionComplete`] (ms).
+    cut_selection_ms: u64,
+    /// Allgatherv time from [`TrainingEvent::PolicySelectionComplete`] (ms).
+    cut_selection_allgatherv_ms: u64,
+    /// Cumulative LP solve wall-clock time for this iteration (ms).
+    solve_time_ms: f64,
+    /// State exchange time from [`TrainingEvent::BackwardPassComplete`] (ms).
+    state_exchange_ms: u64,
+    /// Cut batch build time from [`TrainingEvent::BackwardPassComplete`] (ms).
+    cut_batch_build_ms: u64,
+    /// Thread-pool setup time from [`TrainingEvent::BackwardPassComplete`] (ms).
+    bwd_setup_ms: u64,
+    /// Load imbalance from [`TrainingEvent::BackwardPassComplete`] (ms).
+    bwd_load_imbalance_ms: u64,
+    /// Scheduling overhead from [`TrainingEvent::BackwardPassComplete`] (ms).
+    bwd_scheduling_overhead_ms: u64,
+    /// Lower bound evaluation wall-clock from [`TrainingEvent::IterationSummary`] (ms).
+    lower_bound_eval_ms: u64,
+    /// Forward pass setup time from [`TrainingEvent::IterationSummary`] (ms).
+    fwd_setup_ms: u64,
+    /// Forward pass load imbalance from [`TrainingEvent::IterationSummary`] (ms).
+    fwd_load_imbalance_ms: u64,
+    /// Forward pass scheduling overhead from [`TrainingEvent::IterationSummary`] (ms).
+    fwd_scheduling_overhead_ms: u64,
+    /// Sum of resident rows-in-LP over this iteration's lazy solves (all ranks),
+    /// from [`TrainingEvent::IterationSummary`]. Zero for non-lazy methods.
+    rows_in_lp_sum: u64,
+    /// Count of this iteration's lazy solves (all ranks), from
+    /// [`TrainingEvent::IterationSummary`]. The per-iteration mean denominator.
+    rows_in_lp_count: u64,
+    /// Running peak resident rows-in-LP up to and including this iteration (all
+    /// ranks), from [`TrainingEvent::IterationSummary`]. A `max`-fold over
+    /// iterations yields the run-level peak. Zero for non-lazy methods.
+    rows_in_lp_max: u64,
+}
+
+/// Accumulate per-iteration partial records from the event log.
+///
+/// Processes each [`TrainingEvent`] variant that carries per-iteration timing
+/// or convergence data, building a [`BTreeMap`] keyed by iteration number.
+/// Also tracks the peak active cut count observed in the log.
+///
+/// Returns `(partials, peak_active)`.
+fn accumulate_partial_records(events: &[TrainingEvent]) -> (BTreeMap<u64, PartialRecord>, u64) {
+    let mut partials: BTreeMap<u64, PartialRecord> = BTreeMap::new();
+    let mut peak_active: u64 = 0;
+
+    for event in events {
+        match event {
+            TrainingEvent::IterationSummary {
+                iteration,
+                lower_bound,
+                upper_bound,
+                gap,
+                iteration_time_ms,
+                forward_ms,
+                backward_ms,
+                lp_solves,
+                solve_time_ms,
+                lower_bound_eval_ms,
+                fwd_setup_time_ms,
+                fwd_load_imbalance_ms,
+                fwd_scheduling_overhead_ms,
+                rows_in_lp_sum,
+                rows_in_lp_count,
+                rows_in_lp_max,
+                ..
+            } => {
+                let record = partials.entry(*iteration).or_default();
+                record.lower_bound = *lower_bound;
+                record.upper_bound_mean = *upper_bound;
+                record.gap = *gap;
+                record.iteration_time_ms = *iteration_time_ms;
+                record.forward_ms = *forward_ms;
+                record.backward_ms = *backward_ms;
+                record.lp_solves = *lp_solves;
+                record.solve_time_ms = *solve_time_ms;
+                record.lower_bound_eval_ms = *lower_bound_eval_ms;
+                record.fwd_setup_ms = *fwd_setup_time_ms;
+                record.fwd_load_imbalance_ms = *fwd_load_imbalance_ms;
+                record.fwd_scheduling_overhead_ms = *fwd_scheduling_overhead_ms;
+                record.rows_in_lp_sum = *rows_in_lp_sum;
+                record.rows_in_lp_count = *rows_in_lp_count;
+                record.rows_in_lp_max = *rows_in_lp_max;
+            }
+
+            TrainingEvent::ForwardSyncComplete {
+                iteration,
+                global_ub_std,
+                sync_time_ms,
+                ..
+            } => {
+                let record = partials.entry(*iteration).or_default();
+                record.upper_bound_std = *global_ub_std;
+                record.forward_sync_ms = *sync_time_ms;
+            }
+
+            TrainingEvent::ForwardPassComplete {
+                iteration,
+                scenarios,
+                ..
+            } => {
+                let record = partials.entry(*iteration).or_default();
+                record.forward_passes = *scenarios;
+            }
+
+            TrainingEvent::BackwardPassComplete {
+                iteration,
+                rows_generated,
+                state_exchange_time_ms,
+                row_batch_build_time_ms,
+                setup_time_ms,
+                load_imbalance_ms,
+                scheduling_overhead_ms,
+                ..
+            } => {
+                let record = partials.entry(*iteration).or_default();
+                record.cuts_added = *rows_generated;
+                record.state_exchange_ms = *state_exchange_time_ms;
+                record.cut_batch_build_ms = *row_batch_build_time_ms;
+                record.bwd_setup_ms = *setup_time_ms;
+                record.bwd_load_imbalance_ms = *load_imbalance_ms;
+                record.bwd_scheduling_overhead_ms = *scheduling_overhead_ms;
+            }
+
+            TrainingEvent::PolicySyncComplete {
+                iteration,
+                rows_active,
+                rows_removed,
+                sync_time_ms,
+                ..
+            } => {
+                let record = partials.entry(*iteration).or_default();
+                record.cuts_active = *rows_active;
+                record.cuts_removed = *rows_removed;
+                record.cut_sync_ms = *sync_time_ms;
+                peak_active = peak_active.max(u64::from(*rows_active));
+            }
+
+            TrainingEvent::PolicySelectionComplete {
+                iteration,
+                rows_deactivated,
+                selection_time_ms,
+                allgatherv_time_ms,
+                ..
+            } => {
+                let record = partials.entry(*iteration).or_default();
+                record.cut_selection_ms = *selection_time_ms;
+                record.cut_selection_allgatherv_ms = *allgatherv_time_ms;
+                // Adjust cuts_active to reflect the post-selection count.
+                record.cuts_active = record.cuts_active.saturating_sub(*rows_deactivated);
+            }
+
+            _ => {}
+        }
+    }
+
+    (partials, peak_active)
+}
+
+/// Convert a single [`PartialRecord`] into an [`IterationRecord`].
+///
+/// Computes derived fields (gap percent, overhead) from the accumulated timing
+/// data and casts u64 iteration/solve counts to u32.
+fn partial_to_iteration_record(iter: u64, partial: &PartialRecord) -> IterationRecord {
+    let gap_percent = if partial.lower_bound > 0.0 {
+        Some(partial.gap * 100.0)
+    } else {
+        None
+    };
+
+    #[allow(clippy::cast_possible_truncation)]
+    let iteration_u32 = iter as u32;
+    #[allow(clippy::cast_possible_truncation)]
+    let lp_solves_u32 = partial.lp_solves as u32;
+
+    // Compute overhead as total minus the sum of all TOP-LEVEL non-overlapping
+    // phases. Note: cut_sync_ms is a sub-component of backward_ms and must NOT
+    // be included here (that was a double-counting bug in the previous version).
+    let attributed_ms = partial
+        .forward_ms
+        .saturating_add(partial.backward_ms)
+        .saturating_add(partial.cut_selection_ms)
+        .saturating_add(partial.cut_selection_allgatherv_ms)
+        .saturating_add(partial.forward_sync_ms)
+        .saturating_add(partial.lower_bound_eval_ms);
+    let overhead_ms = partial.iteration_time_ms.saturating_sub(attributed_ms);
+
+    // Mean resident rows-in-LP per lazy solve this iteration (0.0 when no lazy
+    // solve ran). The sum/count are already reduced across ranks on the event.
+    #[allow(clippy::cast_precision_loss)]
+    let mean_rows_in_lp = if partial.rows_in_lp_count > 0 {
+        partial.rows_in_lp_sum as f64 / partial.rows_in_lp_count as f64
+    } else {
+        0.0
+    };
+
+    IterationRecord {
+        iteration: iteration_u32,
+        lower_bound: partial.lower_bound,
+        upper_bound_mean: partial.upper_bound_mean,
+        upper_bound_std: partial.upper_bound_std,
+        gap_percent,
+        cuts_added: partial.cuts_added,
+        cuts_removed: partial.cuts_removed,
+        cuts_active: partial.cuts_active,
+        time_forward_ms: partial.forward_ms,
+        time_backward_ms: partial.backward_ms,
+        time_total_ms: partial.iteration_time_ms,
+        forward_passes: partial.forward_passes,
+        lp_solves: lp_solves_u32,
+        time_forward_wall_ms: partial.forward_ms,
+        time_backward_wall_ms: partial.backward_ms,
+        time_cut_selection_ms: partial.cut_selection_ms,
+        time_mpi_allreduce_ms: partial.forward_sync_ms,
+        time_cut_sync_ms: partial.cut_sync_ms,
+        time_lower_bound_ms: partial.lower_bound_eval_ms,
+        time_state_exchange_ms: partial.state_exchange_ms,
+        time_cut_batch_build_ms: partial.cut_batch_build_ms,
+        time_bwd_setup_ms: partial.bwd_setup_ms,
+        time_bwd_load_imbalance_ms: partial.bwd_load_imbalance_ms,
+        time_bwd_scheduling_overhead_ms: partial.bwd_scheduling_overhead_ms,
+        time_fwd_setup_ms: partial.fwd_setup_ms,
+        time_fwd_load_imbalance_ms: partial.fwd_load_imbalance_ms,
+        time_fwd_scheduling_overhead_ms: partial.fwd_scheduling_overhead_ms,
+        time_overhead_ms: overhead_ms,
+        solve_time_ms: partial.solve_time_ms,
+        mean_rows_in_lp,
+    }
+}
+
+/// Convert a [`TrainingResult`] and collected event log into a [`TrainingOutput`].
+///
+/// The caller passes the full event log received from the training loop's
+/// `mpsc::Receiver<TrainingEvent>`. Events from multiple lifecycle steps are
+/// correlated by their `iteration` field to produce one [`IterationRecord`] per
+/// completed iteration.
+///
+/// # Examples
+///
+/// ```rust
+/// use cobre_sddp::{build_training_output, TrainingResult, FutureCostFunction};
+/// use cobre_core::TrainingEvent;
+///
+/// let result = TrainingResult::new(
+///     100.0,
+///     110.0,
+///     5.0,
+///     0.091,
+///     1,
+///     "iteration_limit".to_string(),
+///     500,
+///     Vec::new(),
+///     Vec::new(),
+///     None,
+///     None,
+/// );
+///
+/// let events = vec![TrainingEvent::IterationSummary {
+///     iteration: 1,
+///     lower_bound: 100.0,
+///     upper_bound: 110.0,
+///     gap: 0.091,
+///     wall_time_ms: 500,
+///     iteration_time_ms: 500,
+///     forward_ms: 200,
+///     backward_ms: 250,
+///     lp_solves: 60,
+///     solve_time_ms: 0.0,
+///     lower_bound_eval_ms: 0,
+///     fwd_setup_time_ms: 0,
+///     fwd_load_imbalance_ms: 0,
+///     fwd_scheduling_overhead_ms: 0,
+///     rows_in_lp_sum: 0,
+///     rows_in_lp_count: 0,
+///     rows_in_lp_max: 0,
+/// }];
+///
+/// let fcf = FutureCostFunction::new(2, 1, 4, 1, &[0; 2]);
+/// let output = build_training_output(&result, &events, &fcf);
+///
+/// assert_eq!(output.convergence_records.len(), 1);
+/// assert!(!output.converged);
+/// ```
+#[must_use]
+pub fn build_training_output(
+    result: &TrainingResult,
+    events: &[TrainingEvent],
+    fcf: &FutureCostFunction,
+) -> TrainingOutput {
+    let (partials, peak_active) = accumulate_partial_records(events);
+
+    // Only include iterations that have an IterationSummary event.
+    let summary_iterations: std::collections::BTreeSet<u64> = events
+        .iter()
+        .filter_map(|e| {
+            if let TrainingEvent::IterationSummary { iteration, .. } = e {
+                Some(*iteration)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Run-level rows-in-LP aggregate, all from the per-iteration IterationSummary
+    // events (already reduced across ranks): sum/count fold to the run total and
+    // solve count (→ mean per solve), and the running peak max-folds to the
+    // run-level peak. Keeping all three on the one event path avoids a separate
+    // finalize reduce or a TrainingResult conduit. All zero for non-lazy methods,
+    // so the consumer can detect "no lazy selection ran".
+    let (rows_in_lp_total, rows_in_lp_solve_count, rows_in_lp_max) =
+        partials.values().fold((0u64, 0u64, 0u64), |(s, c, m), p| {
+            (
+                s + p.rows_in_lp_sum,
+                c + p.rows_in_lp_count,
+                m.max(p.rows_in_lp_max),
+            )
+        });
+
+    let convergence_records: Vec<IterationRecord> = partials
+        .into_iter()
+        .filter(|(iter, _)| summary_iterations.contains(iter))
+        .map(|(iter, partial)| partial_to_iteration_record(iter, &partial))
+        .collect();
+
+    let cut_stats = RowPoolStatistics {
+        total_generated: fcf.total_generated_cuts() as u64,
+        total_active: fcf.total_active_cuts() as u64,
+        peak_active,
+        cuts_active: fcf.total_active_cuts() as u64,
+        rows_in_lp_total,
+        rows_in_lp_solve_count,
+        rows_in_lp_max,
+    };
+
+    let converged = result.reason == crate::stopping_rule::RULE_BOUND_STALLING
+        || result.reason == crate::stopping_rule::RULE_SIMULATION_BASED;
+
+    // `final_gap_percent` is reported only when `final_lb > 0.0`.
+    // For a non-positive lower bound the gap percentage is either
+    // undefined (`final_lb == 0.0`) or sign-inverted
+    // (`final_lb < 0.0`), so the writer reports `None` rather than
+    // a value that would mislead downstream consumers.
+    let final_gap_percent = if result.final_lb > 0.0 {
+        Some(result.final_gap * 100.0)
+    } else {
+        None
+    };
+
+    #[allow(clippy::cast_possible_truncation)]
+    let iterations_completed = result.iterations as u32;
+
+    #[allow(clippy::cast_possible_truncation)]
+    let cut_selection_records: Vec<RowSelectionRecord> = events
+        .iter()
+        .filter_map(|event| {
+            if let TrainingEvent::PolicySelectionComplete {
+                iteration,
+                per_stage,
+                ..
+            } = event
+            {
+                Some(per_stage.iter().map(move |rec| RowSelectionRecord {
+                    iteration: *iteration as u32,
+                    stage: rec.stage,
+                    cuts_populated: rec.rows_populated,
+                    cuts_active_before: rec.rows_active_before,
+                    cuts_deactivated: rec.rows_deactivated,
+                    cuts_reactivated: rec.rows_reactivated,
+                    cuts_active_after: rec.rows_active_after,
+                    selection_time_ms: rec.selection_time_ms,
+                    budget_evicted: rec.budget_evicted,
+                    active_after_budget: rec.active_after_budget,
+                }))
+            } else {
+                None
+            }
+        })
+        .flatten()
+        .collect();
+
+    let worker_timing_records = build_worker_timing_records(events, &convergence_records);
+
+    TrainingOutput {
+        convergence_records,
+        final_lower_bound: result.final_lb,
+        final_upper_bound: Some(result.final_ub),
+        final_gap_percent,
+        final_upper_bound_std: Some(result.final_ub_std),
+        iterations_completed,
+        converged,
+        termination_reason: result.reason.clone(),
+        total_time_ms: result.total_time_ms,
+        cut_stats,
+        cut_selection_records,
+        worker_timing_records,
+        // Populated downstream (CLI/Python) from live solver statistics.
+        training_solve_stats: cobre_io::MetadataTrainingSolveStats::default(),
+    }
+}
+
+/// Build the per-`(iteration, rank, worker_id)` timing rows for
+/// `training/timing/iterations.parquet`.
+///
+/// For each completed iteration:
+/// - One rank-aggregated row per rank (`worker_id=None`) carries the rank-only
+///   columns (`cut_selection`, `mpi_allreduce`, `cut_sync`, `lower_bound`,
+///   `state_exchange`, `cut_batch_build`, the synthetic
+///   `load_imbalance`/`scheduling_overhead` pair, and `overhead`).
+/// - One per-worker row per `(rank, worker_id)` carries the parallel-region
+///   contributions (`forward_wall`, `backward_wall`, `fwd_setup`, `bwd_setup`)
+///   merged from the `WorkerTiming{Forward}` and `WorkerTiming{Backward}` events.
+///
+/// `SUM(col) GROUP BY iteration` recovers the single-row totals.
+fn build_worker_timing_records(
+    events: &[TrainingEvent],
+    convergence_records: &[IterationRecord],
+) -> Vec<cobre_io::WorkerTimingRecord> {
+    use cobre_core::{
+        WORKER_TIMING_SLOT_BWD_SETUP, WORKER_TIMING_SLOT_BWD_WALL, WORKER_TIMING_SLOT_COUNT,
+        WORKER_TIMING_SLOT_FWD_SETUP, WORKER_TIMING_SLOT_FWD_WALL, WORKER_TIMING_SLOT_SCORING,
+    };
+
+    // Per-(iteration, rank, worker_id) merged timings for the per-worker rows.
+    // The BTreeMap value is the 16-wide writer record that bridges the named
+    // WorkerPhaseTimings fields and the Parquet schema.
+    let mut per_worker: BTreeMap<(u32, i32, i32), [u64; WORKER_TIMING_SLOT_COUNT]> =
+        BTreeMap::new();
+    for event in events {
+        if let TrainingEvent::WorkerTiming {
+            iteration,
+            rank,
+            worker_id,
+            timings,
+            ..
+        } = event
+        {
+            #[allow(clippy::cast_possible_truncation)]
+            let iter_u32 = *iteration as u32;
+            let entry = per_worker
+                .entry((iter_u32, *rank, *worker_id))
+                .or_insert([0_u64; WORKER_TIMING_SLOT_COUNT]);
+            // Map the named fields into the corresponding writer-record slots.
+            // Forward fills FWD_WALL/FWD_SETUP (both 0 on Backward events).
+            // Backward fills BWD_WALL/BWD_SETUP (both 0 on Forward events).
+            // SCORING (slot 15) is filled by whichever phase scored; summing
+            // across both phases' events recovers the per-iteration total.
+            // All other slots remain 0 on per-worker rows; rank-aggregated rows
+            // carry the rank-only columns. The f64-ms → u64 conversion matches
+            // the wall/setup fields (clamp negatives to 0, round, saturating-add).
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            {
+                entry[WORKER_TIMING_SLOT_FWD_WALL] = entry[WORKER_TIMING_SLOT_FWD_WALL]
+                    .saturating_add(timings.forward_wall_ms.max(0.0).round() as u64);
+                entry[WORKER_TIMING_SLOT_BWD_WALL] = entry[WORKER_TIMING_SLOT_BWD_WALL]
+                    .saturating_add(timings.backward_wall_ms.max(0.0).round() as u64);
+                entry[WORKER_TIMING_SLOT_BWD_SETUP] = entry[WORKER_TIMING_SLOT_BWD_SETUP]
+                    .saturating_add(timings.bwd_setup_ms.max(0.0).round() as u64);
+                entry[WORKER_TIMING_SLOT_FWD_SETUP] = entry[WORKER_TIMING_SLOT_FWD_SETUP]
+                    .saturating_add(timings.fwd_setup_ms.max(0.0).round() as u64);
+                entry[WORKER_TIMING_SLOT_SCORING] = entry[WORKER_TIMING_SLOT_SCORING]
+                    .saturating_add(timings.scoring_ms.max(0.0).round() as u64);
+            }
+        }
+    }
+
+    let mut out: Vec<cobre_io::WorkerTimingRecord> =
+        Vec::with_capacity(convergence_records.len() + per_worker.len());
+
+    // Rank-aggregated rows: one per iteration. Single-rank in current builds —
+    // multi-rank emits one rank-aggregated row per rank when ranks > 0
+    // produce IterationSummary events (rank-0-only by design today).
+    for record in convergence_records {
+        let mut timings = [0_u64; WORKER_TIMING_SLOT_COUNT];
+        timings[2] = record.time_cut_selection_ms;
+        timings[3] = record.time_mpi_allreduce_ms;
+        timings[4] = record.time_cut_sync_ms;
+        timings[5] = record.time_lower_bound_ms;
+        timings[6] = record.time_state_exchange_ms;
+        timings[7] = record.time_cut_batch_build_ms;
+        timings[9] = record.time_bwd_load_imbalance_ms;
+        timings[10] = record.time_bwd_scheduling_overhead_ms;
+        timings[12] = record.time_fwd_load_imbalance_ms;
+        timings[13] = record.time_fwd_scheduling_overhead_ms;
+        timings[14] = record.time_overhead_ms;
+        out.push(cobre_io::WorkerTimingRecord {
+            iteration: record.iteration,
+            rank: 0,
+            worker_id: None,
+            timings,
+        });
+    }
+
+    // Per-worker rows.
+    for ((iteration, rank, worker_id), timings) in per_worker {
+        out.push(cobre_io::WorkerTimingRecord {
+            iteration,
+            rank,
+            worker_id: Some(worker_id),
+            timings,
+        });
+    }
+
+    out
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic, clippy::doc_markdown)]
+mod tests {
+    use cobre_core::TrainingEvent;
+
+    use super::build_training_output;
+    use crate::{FutureCostFunction, TrainingResult};
+
+    fn make_result(reason: &str, lb: f64, ub: f64, gap: f64, iterations: u64) -> TrainingResult {
+        TrainingResult::new(
+            lb,
+            ub,
+            0.0,
+            gap,
+            iterations,
+            reason.to_string(),
+            1_000,
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+        )
+    }
+
+    fn make_iteration_summary(iter: u64, lb: f64, ub: f64, gap: f64) -> TrainingEvent {
+        TrainingEvent::IterationSummary {
+            iteration: iter,
+            lower_bound: lb,
+            upper_bound: ub,
+            gap,
+            wall_time_ms: iter * 100,
+            iteration_time_ms: 100,
+            forward_ms: 40,
+            backward_ms: 50,
+            lp_solves: 60,
+            solve_time_ms: 0.0,
+            lower_bound_eval_ms: 0,
+            fwd_setup_time_ms: 0,
+            fwd_load_imbalance_ms: 0,
+            fwd_scheduling_overhead_ms: 0,
+            rows_in_lp_sum: 0,
+            rows_in_lp_count: 0,
+            rows_in_lp_max: 0,
+        }
+    }
+
+    fn make_empty_fcf() -> FutureCostFunction {
+        FutureCostFunction::new(2, 1, 4, 10, &[0; 2])
+    }
+
+    #[test]
+    fn records_count_matches_iteration_summaries() {
+        let result = make_result("iteration_limit", 100.0, 110.0, 0.091, 3);
+        let events = vec![
+            make_iteration_summary(1, 95.0, 112.0, 0.15),
+            make_iteration_summary(2, 98.0, 111.0, 0.12),
+            make_iteration_summary(3, 100.0, 110.0, 0.091),
+        ];
+        let fcf = make_empty_fcf();
+
+        let output = build_training_output(&result, &events, &fcf);
+
+        assert_eq!(output.convergence_records.len(), 3);
+    }
+
+    #[test]
+    fn converged_true_for_bound_stalling() {
+        let result = make_result("bound_stalling", 100.0, 101.0, 0.01, 5);
+        let events = vec![make_iteration_summary(1, 100.0, 101.0, 0.01)];
+        let fcf = make_empty_fcf();
+
+        let output = build_training_output(&result, &events, &fcf);
+
+        assert!(output.converged);
+    }
+
+    #[test]
+    fn converged_true_for_simulation_based() {
+        let result = make_result("simulation_based", 100.0, 101.0, 0.01, 5);
+        let events = vec![make_iteration_summary(1, 100.0, 101.0, 0.01)];
+        let fcf = make_empty_fcf();
+
+        let output = build_training_output(&result, &events, &fcf);
+
+        assert!(output.converged);
+    }
+
+    #[test]
+    fn converged_false_for_iteration_limit() {
+        let result = make_result("iteration_limit", 90.0, 110.0, 0.2, 100);
+        let events = vec![make_iteration_summary(1, 90.0, 110.0, 0.2)];
+        let fcf = make_empty_fcf();
+
+        let output = build_training_output(&result, &events, &fcf);
+
+        assert!(!output.converged);
+    }
+
+    #[test]
+    fn cut_stats_from_fcf() {
+        let result = make_result("iteration_limit", 80.0, 100.0, 0.2, 1);
+        let events = vec![make_iteration_summary(1, 80.0, 100.0, 0.2)];
+
+        let mut fcf = FutureCostFunction::new(2, 1, 4, 10, &[0; 2]);
+
+        // Add 3 cuts to pool[0] and 2 cuts to pool[1].
+        fcf.add_cut(0, 0, 0, 1.0, &[1.0]);
+        fcf.add_cut(0, 0, 1, 2.0, &[0.5]);
+        fcf.add_cut(0, 0, 2, 3.0, &[0.25]);
+        fcf.add_cut(1, 0, 0, 4.0, &[1.0]);
+        fcf.add_cut(1, 0, 1, 5.0, &[0.5]);
+
+        let output = build_training_output(&result, &events, &fcf);
+
+        assert_eq!(
+            output.cut_stats.total_generated, 5,
+            "total_generated must equal the true number of cuts added (iteration 0 has no gap)"
+        );
+        assert_eq!(
+            output.cut_stats.total_active, 5,
+            "total_active must equal active cuts in all pools"
+        );
+    }
+
+    #[test]
+    fn total_generated_excludes_reserved_leading_slots() {
+        // With 1-based iterations and forward_passes > 1, the slot block
+        // [0, forward_passes) is never written, so populated_count over-counts
+        // by forward_passes per cut-receiving pool. total_generated must report
+        // the true number of cuts added, not the high-water mark.
+        let result = make_result("iteration_limit", 80.0, 100.0, 0.2, 1);
+        let events = vec![make_iteration_summary(1, 80.0, 100.0, 0.2)];
+
+        let mut fcf = FutureCostFunction::new(2, 1, 2, 10, &[0; 2]);
+        // iteration 1, forward_passes 2 -> slots 2,3 (block [0,2) stays empty).
+        fcf.add_cut(0, 1, 0, 1.0, &[1.0]);
+        fcf.add_cut(0, 1, 1, 2.0, &[1.0]);
+        // stage 1: one cut at iteration 1 -> slot 2.
+        fcf.add_cut(1, 1, 0, 3.0, &[1.0]);
+
+        let populated: u64 = fcf.pools.iter().map(|p| p.populated_count as u64).sum();
+        assert_eq!(
+            populated, 7,
+            "high-water mark includes the empty leading block"
+        );
+
+        let output = build_training_output(&result, &events, &fcf);
+        assert_eq!(
+            output.cut_stats.total_generated, 3,
+            "total_generated must count the 3 cuts actually added"
+        );
+        assert!(
+            output.cut_stats.total_generated < populated,
+            "total_generated must exclude reserved-but-empty leading slots"
+        );
+    }
+
+    #[test]
+    fn gap_percent_none_when_lb_nonpositive() {
+        let result = make_result("iteration_limit", 0.0, 10.0, 1.0, 1);
+        let events = vec![make_iteration_summary(1, 0.0, 10.0, 1.0)];
+        let fcf = make_empty_fcf();
+
+        let output = build_training_output(&result, &events, &fcf);
+
+        assert!(
+            output.final_gap_percent.is_none(),
+            "final_gap_percent must be None when final_lb <= 0"
+        );
+    }
+
+    #[test]
+    fn converged_false_for_all_other_reasons() {
+        let reasons = [
+            "iteration_limit",
+            "time_limit",
+            "graceful_shutdown",
+            "unknown",
+        ];
+        let fcf = make_empty_fcf();
+        for reason in reasons {
+            let result = make_result(reason, 100.0, 110.0, 0.1, 1);
+            let output = build_training_output(&result, &[], &fcf);
+            assert!(
+                !output.converged,
+                "converged must be false for reason = {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_events_produces_zero_records() {
+        let result = make_result("iteration_limit", 50.0, 60.0, 0.2, 0);
+        let fcf = make_empty_fcf();
+
+        let output = build_training_output(&result, &[], &fcf);
+
+        assert_eq!(output.convergence_records.len(), 0);
+        assert_eq!(output.final_lower_bound, 50.0);
+        assert_eq!(output.final_upper_bound, Some(60.0));
+        assert_eq!(output.total_time_ms, 1_000);
+        assert!(!output.converged);
+    }
+
+    #[test]
+    fn gap_percent_computed_correctly() {
+        let result = make_result("bound_stalling", 100.0, 102.0, 0.02, 3);
+        let fcf = make_empty_fcf();
+
+        let output = build_training_output(&result, &[], &fcf);
+
+        assert_eq!(output.final_gap_percent, Some(2.0));
+    }
+
+    #[test]
+    fn iteration_gap_percent_none_when_lb_zero_or_negative() {
+        let result = make_result("iteration_limit", 0.0, 10.0, 1.0, 1);
+        let events = vec![make_iteration_summary(1, 0.0, 10.0, 1.0)];
+        let fcf = make_empty_fcf();
+
+        let output = build_training_output(&result, &events, &fcf);
+
+        assert!(output.convergence_records[0].gap_percent.is_none());
+    }
+
+    #[test]
+    fn upper_bound_std_from_forward_sync_complete() {
+        let result = make_result("iteration_limit", 100.0, 110.0, 0.1, 1);
+        let events = vec![
+            make_iteration_summary(1, 100.0, 110.0, 0.1),
+            TrainingEvent::ForwardSyncComplete {
+                iteration: 1,
+                global_ub_mean: 110.0,
+                global_ub_std: 3.5,
+                sync_time_ms: 5,
+            },
+        ];
+        let fcf = make_empty_fcf();
+
+        let output = build_training_output(&result, &events, &fcf);
+
+        assert_eq!(output.convergence_records[0].upper_bound_std, 3.5);
+    }
+
+    #[test]
+    fn forward_passes_from_forward_pass_complete() {
+        let result = make_result("iteration_limit", 100.0, 110.0, 0.1, 1);
+        let events = vec![
+            make_iteration_summary(1, 100.0, 110.0, 0.1),
+            TrainingEvent::ForwardPassComplete {
+                iteration: 1,
+                scenarios: 8,
+                ub_mean: 110.0,
+                ub_std: 2.0,
+                elapsed_ms: 40,
+            },
+        ];
+        let fcf = make_empty_fcf();
+
+        let output = build_training_output(&result, &events, &fcf);
+
+        assert_eq!(output.convergence_records[0].forward_passes, 8);
+    }
+
+    #[test]
+    fn cut_fields_from_backward_and_sync_events() {
+        let result = make_result("iteration_limit", 100.0, 110.0, 0.1, 1);
+        let events = vec![
+            make_iteration_summary(1, 100.0, 110.0, 0.1),
+            TrainingEvent::BackwardPassComplete {
+                iteration: 1,
+                rows_generated: 12,
+                stages_processed: 3,
+                elapsed_ms: 80,
+                state_exchange_time_ms: 0,
+                row_batch_build_time_ms: 0,
+                setup_time_ms: 0,
+                load_imbalance_ms: 0,
+                scheduling_overhead_ms: 0,
+            },
+            TrainingEvent::PolicySyncComplete {
+                iteration: 1,
+                rows_distributed: 12,
+                rows_active: 24,
+                rows_removed: 2,
+                sync_time_ms: 4,
+            },
+        ];
+        let fcf = make_empty_fcf();
+
+        let output = build_training_output(&result, &events, &fcf);
+
+        let rec = &output.convergence_records[0];
+        assert_eq!(rec.cuts_added, 12);
+        assert_eq!(rec.cuts_removed, 2);
+        assert_eq!(rec.cuts_active, 24);
+    }
+
+    #[test]
+    fn peak_active_tracks_maximum_cuts_active() {
+        let result = make_result("iteration_limit", 100.0, 110.0, 0.1, 3);
+        let events = vec![
+            make_iteration_summary(1, 95.0, 112.0, 0.15),
+            TrainingEvent::PolicySyncComplete {
+                iteration: 1,
+                rows_distributed: 10,
+                rows_active: 10,
+                rows_removed: 0,
+                sync_time_ms: 2,
+            },
+            make_iteration_summary(2, 98.0, 111.0, 0.12),
+            TrainingEvent::PolicySyncComplete {
+                iteration: 2,
+                rows_distributed: 10,
+                rows_active: 20,
+                rows_removed: 0,
+                sync_time_ms: 2,
+            },
+            make_iteration_summary(3, 100.0, 110.0, 0.1),
+            TrainingEvent::PolicySyncComplete {
+                iteration: 3,
+                rows_distributed: 5,
+                rows_active: 18, // peak was 20 in iteration 2
+                rows_removed: 7,
+                sync_time_ms: 2,
+            },
+        ];
+        let fcf = make_empty_fcf();
+
+        let output = build_training_output(&result, &events, &fcf);
+
+        assert_eq!(output.cut_stats.peak_active, 20);
+    }
+
+    #[test]
+    fn iterations_completed_from_result() {
+        let result = make_result("iteration_limit", 80.0, 100.0, 0.2, 42);
+        let fcf = make_empty_fcf();
+
+        let output = build_training_output(&result, &[], &fcf);
+
+        assert_eq!(output.iterations_completed, 42);
+    }
+
+    #[test]
+    fn termination_reason_copied_from_result() {
+        let result = make_result("time_limit", 70.0, 100.0, 0.3, 20);
+        let fcf = make_empty_fcf();
+
+        let output = build_training_output(&result, &[], &fcf);
+
+        assert_eq!(output.termination_reason, "time_limit");
+    }
+
+    #[test]
+    fn per_phase_timing_captured_from_sync_and_selection_events() {
+        let result = make_result("iteration_limit", 100.0, 110.0, 0.1, 1);
+        let events = vec![
+            TrainingEvent::IterationSummary {
+                iteration: 1,
+                lower_bound: 100.0,
+                upper_bound: 110.0,
+                gap: 0.1,
+                wall_time_ms: 120,
+                iteration_time_ms: 120,
+                forward_ms: 40,
+                backward_ms: 50,
+                lp_solves: 60,
+                solve_time_ms: 0.0,
+                lower_bound_eval_ms: 0,
+                fwd_setup_time_ms: 0,
+                fwd_load_imbalance_ms: 0,
+                fwd_scheduling_overhead_ms: 0,
+                rows_in_lp_sum: 0,
+                rows_in_lp_count: 0,
+                rows_in_lp_max: 0,
+            },
+            TrainingEvent::ForwardSyncComplete {
+                iteration: 1,
+                global_ub_mean: 110.0,
+                global_ub_std: 2.0,
+                sync_time_ms: 7,
+            },
+            TrainingEvent::PolicySyncComplete {
+                iteration: 1,
+                rows_distributed: 10,
+                rows_active: 10,
+                rows_removed: 0,
+                sync_time_ms: 5,
+            },
+            TrainingEvent::PolicySelectionComplete {
+                iteration: 1,
+                rows_deactivated: 3,
+                stages_processed: 2,
+                selection_time_ms: 8,
+                allgatherv_time_ms: 2,
+                per_stage: vec![],
+            },
+        ];
+        let fcf = make_empty_fcf();
+
+        let output = build_training_output(&result, &events, &fcf);
+        let rec = &output.convergence_records[0];
+
+        assert_eq!(
+            rec.time_forward_wall_ms, 40,
+            "forward wall must equal forward_ms"
+        );
+        assert_eq!(
+            rec.time_backward_wall_ms, 50,
+            "backward wall must equal backward_ms"
+        );
+        assert_eq!(
+            rec.time_mpi_allreduce_ms, 7,
+            "allreduce must come from ForwardSyncComplete"
+        );
+        assert_eq!(
+            rec.time_cut_sync_ms, 5,
+            "cut_sync must come from PolicySyncComplete"
+        );
+        assert_eq!(
+            rec.time_cut_selection_ms, 8,
+            "selection must come from PolicySelectionComplete"
+        );
+    }
+
+    #[test]
+    fn overhead_ms_is_total_minus_attributed_phases() {
+        let result = make_result("iteration_limit", 100.0, 110.0, 0.1, 1);
+        // Top-level non-overlapping phases:
+        //   forward=40, backward=50, allreduce=7, selection=8,
+        //   allgatherv=2, lower_bound=3 → attributed=110
+        // total=120 → overhead=10
+        //
+        // Note: cut_sync(5) is a sub-component of backward(50) and is NOT
+        // included in the attributed sum. This was a double-counting bug
+        // in the previous version.
+        let events = vec![
+            TrainingEvent::IterationSummary {
+                iteration: 1,
+                lower_bound: 100.0,
+                upper_bound: 110.0,
+                gap: 0.1,
+                wall_time_ms: 120,
+                iteration_time_ms: 120,
+                forward_ms: 40,
+                backward_ms: 50,
+                lp_solves: 60,
+                solve_time_ms: 0.0,
+                lower_bound_eval_ms: 3,
+                fwd_setup_time_ms: 0,
+                fwd_load_imbalance_ms: 0,
+                fwd_scheduling_overhead_ms: 0,
+                rows_in_lp_sum: 0,
+                rows_in_lp_count: 0,
+                rows_in_lp_max: 0,
+            },
+            TrainingEvent::ForwardSyncComplete {
+                iteration: 1,
+                global_ub_mean: 110.0,
+                global_ub_std: 2.0,
+                sync_time_ms: 7,
+            },
+            TrainingEvent::PolicySyncComplete {
+                iteration: 1,
+                rows_distributed: 10,
+                rows_active: 10,
+                rows_removed: 0,
+                sync_time_ms: 5,
+            },
+            TrainingEvent::PolicySelectionComplete {
+                iteration: 1,
+                rows_deactivated: 3,
+                stages_processed: 2,
+                selection_time_ms: 8,
+                allgatherv_time_ms: 2,
+                per_stage: vec![],
+            },
+        ];
+        let fcf = make_empty_fcf();
+
+        let output = build_training_output(&result, &events, &fcf);
+        let rec = &output.convergence_records[0];
+
+        // attributed = forward(40) + backward(50) + selection(8) + allgatherv(2)
+        //            + allreduce(7) + lower_bound(3) = 110
+        // overhead = total(120) - attributed(110) = 10
+        assert_eq!(
+            rec.time_overhead_ms, 10,
+            "overhead_ms must equal total(120) - attributed(110) = 10"
+        );
+    }
+
+    #[test]
+    fn overhead_ms_saturates_at_zero_when_attributed_exceeds_total() {
+        // If timing measurements are slightly inconsistent, overhead must not underflow.
+        let result = make_result("iteration_limit", 100.0, 110.0, 0.1, 1);
+        // Construct events where attributed > total (e.g., total=10, forward=50+backward=50)
+        let events = vec![TrainingEvent::IterationSummary {
+            iteration: 1,
+            lower_bound: 100.0,
+            upper_bound: 110.0,
+            gap: 0.1,
+            wall_time_ms: 10,
+            iteration_time_ms: 10,
+            forward_ms: 50,
+            backward_ms: 50,
+            lp_solves: 5,
+            solve_time_ms: 0.0,
+            lower_bound_eval_ms: 0,
+            fwd_setup_time_ms: 0,
+            fwd_load_imbalance_ms: 0,
+            fwd_scheduling_overhead_ms: 0,
+            rows_in_lp_sum: 0,
+            rows_in_lp_count: 0,
+            rows_in_lp_max: 0,
+        }];
+        let fcf = make_empty_fcf();
+
+        let output = build_training_output(&result, &events, &fcf);
+        let rec = &output.convergence_records[0];
+
+        assert_eq!(
+            rec.time_overhead_ms, 0,
+            "overhead_ms must be 0 when attributed phases exceed total (saturating sub)"
+        );
+    }
+
+    #[test]
+    fn cut_selection_records_extracted_from_events() {
+        use cobre_core::StageRowSelectionRecord;
+
+        let result = make_result("iteration_limit", 100.0, 110.0, 0.1, 3);
+        let events = vec![
+            make_iteration_summary(1, 95.0, 112.0, 0.15),
+            make_iteration_summary(2, 98.0, 111.0, 0.12),
+            make_iteration_summary(3, 100.0, 110.0, 0.1),
+            TrainingEvent::PolicySelectionComplete {
+                iteration: 2,
+                rows_deactivated: 3,
+                stages_processed: 2,
+                selection_time_ms: 10,
+                allgatherv_time_ms: 0,
+                per_stage: vec![
+                    StageRowSelectionRecord {
+                        stage: 0,
+                        rows_populated: 5,
+                        rows_active_before: 5,
+                        rows_deactivated: 0,
+                        rows_reactivated: 0,
+                        rows_active_after: 5,
+                        selection_time_ms: 0.0,
+                        budget_evicted: None,
+                        active_after_budget: None,
+                        rows_in_lp: 5,
+                    },
+                    StageRowSelectionRecord {
+                        stage: 1,
+                        rows_populated: 8,
+                        rows_active_before: 8,
+                        rows_deactivated: 3,
+                        rows_reactivated: 0,
+                        rows_active_after: 5,
+                        selection_time_ms: 2.5,
+                        budget_evicted: None,
+                        active_after_budget: None,
+                        rows_in_lp: 8,
+                    },
+                ],
+            },
+        ];
+        let fcf = make_empty_fcf();
+        let output = build_training_output(&result, &events, &fcf);
+
+        assert_eq!(output.cut_selection_records.len(), 2);
+        assert_eq!(output.cut_selection_records[0].iteration, 2);
+        assert_eq!(output.cut_selection_records[0].stage, 0);
+        assert_eq!(output.cut_selection_records[0].cuts_deactivated, 0);
+        assert_eq!(output.cut_selection_records[1].stage, 1);
+        assert_eq!(output.cut_selection_records[1].cuts_deactivated, 3);
+        assert_eq!(output.cut_selection_records[1].cuts_active_after, 5);
+    }
+
+    #[test]
+    fn no_cut_selection_events_produces_empty_records() {
+        let result = make_result("iteration_limit", 100.0, 110.0, 0.1, 1);
+        let events = vec![make_iteration_summary(1, 100.0, 110.0, 0.1)];
+        let fcf = make_empty_fcf();
+        let output = build_training_output(&result, &events, &fcf);
+
+        assert!(output.cut_selection_records.is_empty());
+    }
+}

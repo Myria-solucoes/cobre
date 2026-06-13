@@ -414,7 +414,7 @@ fn cli_run_populates_anticipated_thermal_columns() {
              anticipated_committed_mw (matured delivery for K=1)"
         );
         let v = committed.unwrap();
-        // F3-006: bounded magnitude — must lie in the thermal's [min, max]
+        // Bounded magnitude — must lie in the thermal's [min, max]
         // generation envelope. ANTICIPATED has max_mw=100.0 in the fixture.
         assert!(
             v.is_finite() && (0.0..=100.0).contains(&v),
@@ -423,10 +423,10 @@ fn cli_run_populates_anticipated_thermal_columns() {
         );
     }
 
-    // F3-006: ring-buffer transport invariant. The decision placed at stage 0
+    // Ring-buffer transport invariant. The decision placed at stage 0
     // must equal the committed value matured at stage 1, bit-for-bit (single
     // anticipated plant, single scenario, single block — no aggregation).
-    // Catches future regressions of the F1-001 class (simulation pipeline
+    // Catches future regressions of the simulation-shift class (simulation pipeline
     // failing to shift the anticipated ring buffer).
     assert_eq!(
         stage_0_ant_rows.len(),
@@ -439,7 +439,7 @@ fn cli_run_populates_anticipated_thermal_columns() {
             .expect("stage-0 decision must be Some (asserted above)");
         let committed = rows.anticipated_committed_mw[stage_1_idx]
             .expect("stage-1 committed must be Some (asserted above)");
-        // F3-006 ring-buffer transport invariant: decision must equal committed.
+        // Ring-buffer transport invariant: decision must equal committed.
         // Bit equality is preferred but IEEE 754 +0.0 / -0.0 are numerically
         // equivalent at zero and either may surface depending on solver vertex
         // selection at an inactive anticipated slot. Treat them as equal at
@@ -449,7 +449,7 @@ fn cli_run_populates_anticipated_thermal_columns() {
         assert!(
             zero_equiv || decision.to_bits() == committed.to_bits(),
             "ring-buffer transport: stage-0 decision {decision} must equal stage-1 \
-             committed {committed} bit-for-bit (the F1-001 simulation shift contract)"
+             committed {committed} bit-for-bit (the simulation-shift contract)"
         );
     }
 }

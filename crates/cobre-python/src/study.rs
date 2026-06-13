@@ -80,14 +80,24 @@ pub struct Study {
     /// ticket).
     seed: u64,
     /// The model-provenance report. Consumed by `simulate` in a later ticket.
+    // Rationale: stored at construction time under the always-load-once
+    // contract; the `simulate` PyO3 method reads it to populate the simulation
+    // output report. Removing it would force a second expensive case load when
+    // simulate is called.
     #[allow(dead_code)]
     provenance: ModelProvenanceReport,
     /// The structural stochastic summary. Consumed by `simulate` in a later
     /// ticket.
+    // Rationale: captured once during construction so the `simulate` method
+    // can surface stochastic preprocessing metadata in its output without
+    // re-running the preprocessing pipeline.
     #[allow(dead_code)]
     stochastic_summary: StochasticSummary,
     /// The structural hydro-model summary. Consumed by `simulate` in a later
     /// ticket.
+    // Rationale: captured once during construction so the `simulate` method
+    // can include hydro-model provenance in its output report without
+    // re-running the hydro preprocessing pipeline.
     #[allow(dead_code)]
     hydro_models_summary: HydroModelSummary,
     /// Validation-pipeline warnings captured during the case load, replayed by

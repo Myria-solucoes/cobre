@@ -51,6 +51,7 @@
     clippy::doc_markdown,
     clippy::too_many_lines
 )]
+#![cfg(feature = "highs")]
 
 use std::path::Path;
 use std::sync::mpsc;

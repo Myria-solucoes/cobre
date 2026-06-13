@@ -17,10 +17,9 @@ use std::sync::Arc;
 use arrow::array::{Float64Builder, Int8Builder, Int32Builder, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use cobre_core::System;
-use parquet::arrow::ArrowWriter;
-use parquet::file::properties::WriterProperties;
 
 use crate::Config;
+use crate::output::atomic::{write_bytes_atomic, write_parquet_atomic};
 use crate::output::error::OutputError;
 use crate::output::parquet_config::ParquetWriterConfig;
 use crate::output::schemas::{
@@ -142,7 +141,7 @@ fn write_codes_json(path: &Path) -> Result<(), OutputError> {
             message: e.to_string(),
         })?;
 
-    write_json_atomic(path.join("codes.json").as_path(), &json_str)
+    write_bytes_atomic(path.join("codes.json").as_path(), json_str.as_bytes())
 }
 
 // ─── entities.csv ────────────────────────────────────────────────────────────
@@ -157,7 +156,6 @@ fn write_entities_csv(path: &Path, system: &System) -> Result<(), OutputError> {
     let mut wtr = csv::Writer::from_path(&file_path)
         .map_err(|e| OutputError::io(&file_path, std::io::Error::other(e)))?;
 
-    // Write header
     wtr.write_record([
         "entity_type_code",
         "entity_id",
@@ -330,6 +328,10 @@ fn arrow_type_str(dt: &DataType) -> &'static str {
 /// Return the physical unit string for a given (file, column) pair.
 ///
 /// Returns `""` for dimensionless columns or columns without a defined unit.
+// Rationale: the function is the single authoritative mapping from every (file, column) pair
+// in the output catalog to its physical unit string; identical arms are intentional because
+// the same unit may apply to identically named columns across different output schemas, and
+// splitting by schema or collapsing arms would degrade the catalog's clarity as a lookup table.
 #[allow(clippy::too_many_lines, clippy::match_same_arms)]
 fn unit_for(file: &str, column: &str) -> &'static str {
     // Columns whose unit is independent of which file they appear in.
@@ -390,6 +392,7 @@ fn unit_for(file: &str, column: &str) -> &'static str {
         | "immediate_cost"
         | "future_cost"
         | "thermal_cost"
+        | "anticipated_thermal_cost"
         | "contract_cost"
         | "deficit_cost"
         | "excess_cost"
@@ -434,6 +437,7 @@ fn unit_for(file: &str, column: &str) -> &'static str {
         | "fwd_load_imbalance_ms"
         | "fwd_scheduling_overhead_ms"
         | "overhead_ms"
+        | "lazy_scoring_ms"
         | "forward_time_ms"
         | "backward_time_ms"
         | "communication_time_ms"
@@ -462,6 +466,10 @@ fn unit_for(file: &str, column: &str) -> &'static str {
 /// Return a short description for a given (file, column) pair.
 ///
 /// Returns `""` for columns without a registered description.
+// Rationale: the function is the single authoritative mapping from every (file, column) pair
+// in the output catalog to its human-readable description string; identical arms are intentional
+// because the same description text may apply to the same column across multiple output schemas,
+// and collapsing arms would make additions and per-schema divergence harder to track.
 #[allow(clippy::too_many_lines, clippy::match_same_arms)]
 fn description_for(file: &str, column: &str) -> &'static str {
     match (file, column) {
@@ -473,6 +481,9 @@ fn description_for(file: &str, column: &str) -> &'static str {
         ("costs", "future_cost") => "Expected future cost (envelope value)",
         ("costs", "discount_factor") => "Discount factor applied to this stage",
         ("costs", "thermal_cost") => "Total thermal generation cost",
+        ("costs", "anticipated_thermal_cost") => {
+            "Total anticipated (forward-committed) thermal generation cost"
+        }
         ("costs", "contract_cost") => "Total contract cost",
         ("costs", "deficit_cost") => "Total load-deficit penalty cost",
         ("costs", "excess_cost") => "Total excess-generation cost",
@@ -623,6 +634,10 @@ fn description_for(file: &str, column: &str) -> &'static str {
         ("convergence", "time_total_ms") => "Total iteration wall-clock time",
         ("convergence", "forward_passes") => "Number of forward-pass scenarios",
         ("convergence", "lp_solves") => "Total LP solves in iteration",
+        ("convergence", "mean_rows_in_lp") => {
+            "Mean resident rows loaded per lazy-selection LP solve this iteration \
+             (0 when no lazy selection ran)"
+        }
         // ── iteration_timing ──────────────────────────────────────────────
         ("iteration_timing", "iteration") => "Iteration number (1-based)",
         ("iteration_timing", "rank") => {
@@ -635,7 +650,7 @@ fn description_for(file: &str, column: &str) -> &'static str {
              mpi_allreduce, cut_sync, lower_bound, state_exchange, cut_batch_build, \
              load_imbalance / scheduling_overhead, overhead). Set on per-worker \
              rows that carry parallel-region timings (forward_wall, backward_wall, \
-             fwd_setup, bwd_setup)."
+             fwd_setup, bwd_setup, lazy_scoring)."
         }
         ("iteration_timing", "forward_wall_ms") => "Forward pass wall-clock time",
         ("iteration_timing", "backward_wall_ms") => "Backward pass wall-clock time",
@@ -661,6 +676,11 @@ fn description_for(file: &str, column: &str) -> &'static str {
         }
         ("iteration_timing", "overhead_ms") => {
             "Residual iteration time not attributed to any phase"
+        }
+        ("iteration_timing", "lazy_scoring_ms") => {
+            "Per-worker time spent in lazy candidate scoring inside the \
+             lazy-selection solve; 0 when that solve path is not used. A \
+             sub-component of the forward/backward phases."
         }
         // ── rank_timing ────────────────────────────────────────────────────
         ("rank_timing", "iteration") => "Iteration number (1-based)",
@@ -740,6 +760,12 @@ fn description_for(file: &str, column: &str) -> &'static str {
 /// block_id: i32 (nullable), bound_type_code: i8, bound_value: f64`.
 ///
 /// One row per (entity, stage, `bound_type`). `block_id` is always null.
+// Rationale: five distinct entity classes (hydro, thermal, line, pumping station,
+// contract) each contribute different bound types, and all share the same
+// pre-allocated Arrow column builders; splitting into per-entity helpers would
+// require either passing six mutable builders through each helper or rebuilding
+// the builders per class, eliminating the single pre-estimated capacity
+// allocation that makes this function allocation-efficient.
 #[allow(clippy::too_many_lines)]
 fn write_bounds_parquet(
     path: &Path,
@@ -1062,52 +1088,10 @@ fn write_state_dictionary_json(path: &Path, system: &System) -> Result<(), Outpu
             message: e.to_string(),
         })?;
 
-    write_json_atomic(path.join("state_dictionary.json").as_path(), &json_str)
-}
-
-// ─── Shared helpers ───────────────────────────────────────────────────────────
-
-/// Write a JSON string atomically via a `.tmp` intermediate file.
-fn write_json_atomic(path: &Path, content: &str) -> Result<(), OutputError> {
-    let tmp_path = path.with_extension("json.tmp");
-    std::fs::write(&tmp_path, content).map_err(|e| OutputError::io(&tmp_path, e))?;
-    std::fs::rename(&tmp_path, path).map_err(|e| OutputError::io(path, e))?;
-    Ok(())
-}
-
-/// Write a `RecordBatch` to a Parquet file atomically via a `.tmp` intermediate.
-fn write_parquet_atomic(
-    path: &Path,
-    batch: &RecordBatch,
-    config: &ParquetWriterConfig,
-) -> Result<(), OutputError> {
-    let tmp_path = path.with_extension(path.extension().map_or_else(
-        || "tmp".to_string(),
-        |ext| format!("{}.tmp", ext.to_string_lossy()),
-    ));
-
-    let props = WriterProperties::builder()
-        .set_compression(config.compression)
-        .set_max_row_group_row_count(Some(config.row_group_size))
-        .set_dictionary_enabled(config.dictionary_encoding)
-        .build();
-
-    let file = std::fs::File::create(&tmp_path).map_err(|e| OutputError::io(&tmp_path, e))?;
-
-    let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props))
-        .map_err(|e| OutputError::serialization("parquet_writer", e.to_string()))?;
-
-    writer
-        .write(batch)
-        .map_err(|e| OutputError::serialization("parquet_writer", e.to_string()))?;
-
-    writer
-        .close()
-        .map_err(|e| OutputError::serialization("parquet_writer", e.to_string()))?;
-
-    std::fs::rename(&tmp_path, path).map_err(|e| OutputError::io(path, e))?;
-
-    Ok(())
+    write_bytes_atomic(
+        path.join("state_dictionary.json").as_path(),
+        json_str.as_bytes(),
+    )
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -1506,8 +1490,8 @@ mod tests {
 
         let row_count = rdr.records().count();
         assert_eq!(
-            row_count, 206,
-            "variables.csv must have exactly 206 data rows (one per column across all schemas)"
+            row_count, 209,
+            "variables.csv must have exactly 209 data rows (one per column across all schemas)"
         );
     }
 

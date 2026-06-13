@@ -36,22 +36,43 @@ jobs:
       - name: Publish all crates
         shell: bash
         run: |
+          # Retries on crates.io index-propagation lag: a freshly-published
+          # dependency (e.g. cobre-stochastic) may not yet be visible to the
+          # sparse index when a dependent crate (e.g. cobre-sddp) is published,
+          # surfacing as "failed to select a version" / "no matching package".
+          # The inter-layer sleeps below give the index a head start; this loop
+          # is the safety net when that is not enough.
           publish() {
             local crate="$1"
+            local output attempt=1
+            local max_attempts=10
             echo "::group::Publishing $crate"
-            local output
-            if output=$(cargo publish -p "$crate" 2>&1); then
-              echo "$output"
-              echo "Published $crate successfully."
-            elif echo "$output" | grep -q "already exists"; then
-              echo "$output"
-              echo "Crate $crate already published, skipping."
-            else
-              echo "$output"
-              echo "::error::Failed to publish $crate"
-              echo "::endgroup::"
-              return 1
-            fi
+            while true; do
+              if output=$(cargo publish -p "$crate" 2>&1); then
+                echo "$output"
+                echo "Published $crate successfully."
+                break
+              elif echo "$output" | grep -q "already exists"; then
+                echo "$output"
+                echo "Crate $crate already published, skipping."
+                break
+              elif echo "$output" | grep -qiE "failed to select a version|no matching package|not found in registry|failed to get .* as a dependency"; then
+                echo "$output"
+                if [[ "$attempt" -ge "$max_attempts" ]]; then
+                  echo "::error::Failed to publish $crate after $attempt attempts (dependency not visible in the crates.io index)"
+                  echo "::endgroup::"
+                  return 1
+                fi
+                echo "Dependency not yet in the crates.io index; retrying $crate ($attempt/$max_attempts) in 30s..."
+                sleep 30
+                attempt=$((attempt + 1))
+              else
+                echo "$output"
+                echo "::error::Failed to publish $crate"
+                echo "::endgroup::"
+                return 1
+              fi
+            done
             echo "::endgroup::"
           }
 

@@ -32,6 +32,7 @@
         clippy::print_stdout
     )
 )]
+#![cfg(feature = "highs")]
 
 use cobre_solver::{HighsSolver, RowBatch, SolverInterface, StageTemplate};
 

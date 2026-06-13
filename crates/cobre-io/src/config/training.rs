@@ -70,7 +70,7 @@ pub struct RowSelectionConfig {
     #[serde(default)]
     pub enabled: Option<bool>,
 
-    /// Method: `"level1"`, `"lml1"`, or `"domination"`.
+    /// Method: `"level1"`, `"lml1"`, `"domination"`, or `"dynamic"`.
     #[serde(default)]
     pub method: Option<String>,
 
@@ -108,9 +108,44 @@ pub struct RowSelectionConfig {
     #[serde(default)]
     pub domination_epsilon: Option<f64>,
 
-    /// Iterations between pruning checks.
+    /// Iterations between periodic pruning checks for the `"level1"`, `"lml1"`,
+    /// and `"domination"` methods. Must be `> 0`. Not used by `method =
+    /// "dynamic"`, which uses `active_window` for its `k2` active-set seed
+    /// window.
     #[serde(default)]
     pub check_frequency: Option<u32>,
+
+    /// First 1-based training iteration at which the dynamic lazy loop becomes
+    /// active. Ignored unless `method = "dynamic"`. Default: `2`.
+    #[serde(default)]
+    pub start_iteration: Option<u32>,
+
+    /// Active-set seed window (`k2`) for `method = "dynamic"`: the number of
+    /// most recent iterations whose cuts seed the initial active set. `0` is
+    /// valid and meaningful — it seeds only the current iteration's cuts,
+    /// matching NEWAVE's `selcor.dat`
+    /// `TAMANHO DA JANELA DE CORTES ATIVOS (k2) = 0`. Default: `5`. Ignored
+    /// unless `method = "dynamic"`.
+    #[serde(default)]
+    pub active_window: Option<u32>,
+
+    /// Candidate-recency window for `method = "dynamic"`: only candidates
+    /// generated within the last `candidate_window` iterations are scored.
+    /// `None` (the default) means an unbounded window (every pool entry is a
+    /// candidate). Ignored unless `method = "dynamic"`.
+    #[serde(default)]
+    pub candidate_window: Option<u32>,
+
+    /// Maximum number of cuts added per lazy-solve round for `method =
+    /// "dynamic"` (`>= 1`). Default: `10`. Ignored unless `method = "dynamic"`.
+    #[serde(default)]
+    pub nadic: Option<u32>,
+
+    /// Violation tolerance for accepting a candidate row under `method =
+    /// "dynamic"` (`> 0`). When absent, falls back to `tie_tolerance`. Default:
+    /// `1e-10`. Ignored unless `method = "dynamic"`.
+    #[serde(default)]
+    pub violation_tolerance: Option<f64>,
 
     /// Minimum dual multiplier magnitude for a constraint row to be counted as
     /// binding at a given solution point.
@@ -263,4 +298,53 @@ pub struct LipschitzConfig {
     /// Multiplicative safety margin applied to computed Lipschitz constants.
     #[serde(default)]
     pub scale_factor: Option<f64>,
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::TrainingConfig;
+
+    /// The four first-class dynamic cut-selection fields deserialize under
+    /// `deny_unknown_fields`.
+    #[test]
+    fn dynamic_cut_selection_fields_deserialize() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "cut_selection": {
+                "enabled": true,
+                "method": "dynamic",
+                "start_iteration": 5,
+                "candidate_window": 20,
+                "nadic": 3,
+                "violation_tolerance": 1e-9,
+                "check_frequency": 7
+            }
+        }"#;
+        let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
+        let cs = &cfg.cut_selection;
+        assert_eq!(cs.method.as_deref(), Some("dynamic"));
+        assert_eq!(cs.start_iteration, Some(5));
+        assert_eq!(cs.candidate_window, Some(20));
+        assert_eq!(cs.nadic, Some(3));
+        assert_eq!(cs.violation_tolerance, Some(1e-9));
+        assert_eq!(cs.check_frequency, Some(7));
+    }
+
+    /// Omitting the new fields leaves them `None` (backward compatible).
+    #[test]
+    fn dynamic_cut_selection_fields_default_to_none() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "cut_selection": { "enabled": true, "method": "dynamic" }
+        }"#;
+        let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
+        let cs = &cfg.cut_selection;
+        assert_eq!(cs.start_iteration, None);
+        assert_eq!(cs.candidate_window, None);
+        assert_eq!(cs.nadic, None);
+        assert_eq!(cs.violation_tolerance, None);
+    }
 }

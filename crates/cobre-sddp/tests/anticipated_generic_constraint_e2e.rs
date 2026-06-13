@@ -68,7 +68,7 @@ use cobre_io::config::{
     TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
 use cobre_sddp::{StudySetup, hydro_models::PrepareHydroModelsResult};
-use cobre_solver::highs::HighsSolver;
+use cobre_solver::ActiveSolver;
 use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
 // ---------------------------------------------------------------------------
@@ -501,10 +501,10 @@ fn anticipated_decision_constraint_raises_lb() {
     // Constrained run.
     let constrained_system = build_system(vec![constraint], generic_bounds);
     let mut constrained_setup = build_setup(constrained_system, &config);
-    let mut solver = HighsSolver::new().expect("HighsSolver::new");
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
 
     let constrained_outcome = constrained_setup
-        .train(&mut solver, &comm, 10, HighsSolver::new, None, None)
+        .train(&mut solver, &comm, 10, ActiveSolver::new, None, None)
         .expect("constrained train must not return Err");
 
     assert!(
@@ -517,14 +517,14 @@ fn anticipated_decision_constraint_raises_lb() {
     // Baseline run (no constraint).
     let baseline_system = build_system(vec![], ResolvedGenericConstraintBounds::empty());
     let mut baseline_setup = build_setup(baseline_system, &config);
-    let mut baseline_solver = HighsSolver::new().expect("HighsSolver::new baseline");
+    let mut baseline_solver = ActiveSolver::new().expect("ActiveSolver::new baseline");
 
     let baseline_outcome = baseline_setup
         .train(
             &mut baseline_solver,
             &comm,
             10,
-            HighsSolver::new,
+            ActiveSolver::new,
             None,
             None,
         )

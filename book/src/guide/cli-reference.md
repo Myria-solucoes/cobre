@@ -65,7 +65,7 @@ cobre init --template 1dtoy --force my_study
 
 Executes the full solve lifecycle for a case directory:
 
-1. **Load** — reads all input files and runs the 5-layer validation pipeline
+1. **Load** — reads all input files and runs the layered validation pipeline
 2. **Train** — trains an SDDP policy using the configured stopping rules
 3. **Simulate** — (optional) evaluates the trained policy over simulation scenarios
 4. **Write** — writes all output files to the results directory
@@ -81,12 +81,11 @@ Stochastic artifact export is controlled by `exports.stochastic` in `config.json
 
 ### Options
 
-| Option                     | Type    | Default              | Description                                                                                                                                                            |
-| -------------------------- | ------- | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--output <DIR>`           | Path    | `<CASE_DIR>/output/` | Output directory for results                                                                                                                                           |
-| `--threads <N>`            | integer | `1`                  | Number of worker threads per MPI rank. Each thread solves its own LP instances; scenarios are distributed across threads. Resolves: `--threads` > `COBRE_THREADS` > 1. |
-| `--quiet`                  | flag    | off                  | Suppress the banner and progress bars. Errors still go to stderr                                                                                                       |
-| `--enable-inside-backward` | flag    | off                  | **Experimental.** Run cut selection inside the backward pass (in-backward cut selection).                                                                              |
+| Option           | Type    | Default              | Description                                                                                                                                                            |
+| ---------------- | ------- | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--output <DIR>` | Path    | `<CASE_DIR>/output/` | Output directory for results                                                                                                                                           |
+| `--threads <N>`  | integer | `1`                  | Number of worker threads per MPI rank. Each thread solves its own LP instances; scenarios are distributed across threads. Resolves: `--threads` > `COBRE_THREADS` > 1. |
+| `--quiet`        | flag    | off                  | Suppress the banner and progress bars. Errors still go to stderr                                                                                                       |
 
 ### Config-First Principle
 
@@ -177,7 +176,7 @@ srun --cpu-bind=cores --mpi=pmi2 ./cobre-mpi run /data/case \
 
 ## `cobre validate`
 
-Runs the 5-layer validation pipeline and prints a diagnostic report to stdout.
+Runs the layered validation pipeline and prints a diagnostic report to stdout.
 
 On success, prints entity counts:
 
@@ -223,13 +222,14 @@ The output has the following top-level shape:
 {
   "output_directory": "/abs/path/to/results",
   "status": "complete",
-  "training": { "iterations": {}, "convergence": {}, "cuts": {} },
-  "simulation": { "scenarios": {} },
-  "metadata": { "run_info": {}, "configuration_snapshot": {} }
+  "bounds": { "final_lower_bound": ..., "final_upper_bound": ... },
+  "training": { "iterations": {}, "convergence": {}, "row_pool": {}, "bounds": {}, "configuration": {}, "problem_dimensions": {} },
+  "cost": { "mean_cost": ..., "std_cost": ... } | null,
+  "simulation": { "scenarios": {}, "cost": {} } | null
 }
 ```
 
-`simulation` and `metadata` are `null` when the corresponding files are absent
+`cost` and `simulation` are `null` when the corresponding files are absent
 (e.g., when simulation was disabled in `config.json`).
 
 ### Arguments
@@ -274,9 +274,9 @@ reserved for machine-readable output (see `cobre report`).
 
 | File                           | Required | Behaviour when absent                                            |
 | ------------------------------ | -------- | ---------------------------------------------------------------- |
-| `training/_manifest.json`      | Yes      | Exits with code 2 (I/O error)                                    |
-| `training/convergence.parquet` | No       | Falls back to zero-valued timing fields; gap comes from manifest |
-| `simulation/_manifest.json`    | No       | Simulation section is omitted from the output                    |
+| `training/metadata.json`      | Yes      | Exits with code 2 (I/O error)                                    |
+| `training/convergence.parquet` | No       | Falls back to zero-valued timing fields; gap comes from metadata.json |
+| `simulation/metadata.json`    | No       | Simulation section is omitted from the output                    |
 
 ### Output format
 
@@ -292,7 +292,7 @@ Simulation complete in 0.0s (200 scenarios)
   Completed: 198  Failed: 2
 ```
 
-The simulation section is omitted when `simulation/_manifest.json` is absent
+The simulation section is omitted when `simulation/metadata.json` is absent
 (e.g., when simulation was disabled in `config.json`).
 
 ### Arguments
@@ -352,7 +352,7 @@ support, host architecture, and build profile.
 ### Output Format
 
 ```
-cobre   v0.8.0
+cobre   v0.8.1
 solver: HiGHS
 comm:   local
 zstd:   enabled

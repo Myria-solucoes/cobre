@@ -32,7 +32,7 @@ use crate::types::{Basis, RowBatch, SolutionView, SolverError, SolverStatistics,
 /// - Mutating methods (`load_model`, `add_rows`, `set_row_bounds`,
 ///   `set_col_bounds`, `solve`) take `&mut self`.
 /// - Methods that write to internal scratch buffers (`get_basis`) take `&mut self`.
-/// - Read-only query methods (`statistics`, `name`) take `&self`.
+/// - Read-only query methods (`statistics`, `statistics_into`, `name`) take `&self`.
 ///
 /// # Solve-to-solve Contract
 ///
@@ -64,9 +64,8 @@ pub trait SolverInterface: Send {
     /// `ProfiledSolver` can perform delta-tracking field comparison and construct
     /// a default profile without a factory function.
     ///
-    /// For `HighsSolver`, this is [`HighsProfile`](crate::HighsProfile).
-    /// For mock solvers in tests, this is typically
-    /// [`HighsProfile`](crate::HighsProfile) (no-op impl).
+    /// Each concrete backend supplies its own profile struct (selected by
+    /// feature); in-crate test mocks use a fieldless placeholder profile.
     ///
     /// The associated-type form is deliberate: it gives each backend its **full**
     /// parameter surface with zero lowest-common-denominator loss — a backend's
@@ -172,7 +171,7 @@ pub trait SolverInterface: Send {
     /// either call `load_model` (which resets topology) or pass an explicit
     /// `Basis` via `solve(Some(&b))`.
     ///
-    /// [`crate::HighsSolver`] retains its internal simplex basis and
+    /// `HighsSolver` retains its internal simplex basis and
     /// factorization across consecutive `solve` calls as a warm-start
     /// optimization. This is the primary warm-start mechanism for backward-pass
     /// workloads where the LP shape is constant across trial points at the same
@@ -198,10 +197,13 @@ pub trait SolverInterface: Send {
     /// - [`SolverError::InternalError`] — FFI layer returned an error.
     /// - [`SolverError::BasisInconsistent`] — ONLY when `basis = Some(&b)` and
     ///   `b` fails the solver's consistency check.
+    /// - [`SolverError::BasisRowCountMismatch`] — ONLY when `basis = Some(&b)`
+    ///   and `b.row_status.len()` is smaller than the current LP's row count.
     ///
     /// # Examples
     ///
     /// ```no_run
+    /// # #[cfg(feature = "highs")] {
     /// use cobre_solver::{Basis, HighsSolver, SolverInterface};
     ///
     /// let mut solver = HighsSolver::new().expect("HiGHS init");
@@ -216,6 +218,7 @@ pub trait SolverInterface: Send {
     /// let basis: Basis = unimplemented!("previously captured");
     /// let warm = solver.solve(Some(&basis)).expect("warm solve");
     /// assert!((warm.objective - cold_obj).abs() < 1e-9);
+    /// # }
     /// ```
     ///
     /// See [Solver Interface Trait SS2.4] for the post-conditions on
@@ -243,6 +246,15 @@ pub trait SolverInterface: Send {
     /// See Solver Interface Trait SS2.8.
     fn statistics(&self) -> SolverStatistics;
 
+    /// Copy accumulated solve metrics into a caller-owned buffer, reusing its
+    /// `retry_level_histogram` allocation.
+    ///
+    /// Semantically equivalent to `*out = self.statistics()` but performs no
+    /// heap allocation when `out.retry_level_histogram` already has sufficient
+    /// capacity. All scalar fields are overwritten by value; the histogram is
+    /// `resize`d to the live length then `copy_from_slice`d.
+    fn statistics_into(&self, out: &mut SolverStatistics);
+
     /// Returns a static string identifying the solver backend (e.g., `"HiGHS"`).
     ///
     /// Used for logging, diagnostics, and checkpoint metadata.
@@ -263,49 +275,28 @@ pub trait SolverInterface: Send {
     /// A non-zero count indicates basis reconstruction is active on this solver instance.
     fn record_reconstruction_stats(&mut self) {}
 
-    /// Set the LP solver's primal feasibility tolerance.
+    /// Reset the solver's internal working state to a clean baseline between
+    /// independent solve sequences (e.g. at simulation/forward scenario
+    /// boundaries), discarding any simplex state — factorization and, crucially,
+    /// the pricing/edge-weight reference frame — carried over from prior solves.
     ///
-    /// Implementations MUST configure the underlying solver such that subsequent
-    /// solves (default attempt AND all retry levels that do not override this
-    /// value) use the supplied tolerance.
+    /// This is a **determinism** hook, not a performance one: it ensures a
+    /// scenario's result cannot depend on which scenarios a worker happened to
+    /// process before it, so output stays bit-identical across thread/rank
+    /// counts.
     ///
-    /// Called by `ProfiledSolver::set_profile` only when the corresponding
-    /// profile field changes. This is NOT a hot-path method.
-    fn set_primal_feasibility_tolerance(&mut self, value: f64);
-
-    /// Set the LP solver's dual feasibility tolerance.
-    ///
-    /// Same contract as [`Self::set_primal_feasibility_tolerance`].
-    ///
-    /// Called by `ProfiledSolver::set_profile` only when the corresponding
-    /// profile field changes. This is NOT a hot-path method.
-    fn set_dual_feasibility_tolerance(&mut self, value: f64);
-
-    /// Set the per-attempt simplex iteration cap.
-    ///
-    /// A value of [`crate::DEFAULT_PROFILE_HEURISTIC_SENTINEL`] (`0`) MUST
-    /// cause the implementor to fall back to its historical heuristic
-    /// (`num_cols * 50 max 100_000` for `HighsSolver`). Any non-zero value is
-    /// applied verbatim as the cap.
-    ///
-    /// Called by `ProfiledSolver::set_profile` only when the corresponding
-    /// profile field changes. This is NOT a hot-path method.
-    fn set_simplex_iteration_limit_profile(&mut self, value: u32);
-
-    /// Set the per-attempt IPM iteration cap.
-    ///
-    /// Any positive value is applied verbatim; zero is treated as "unbounded".
-    /// Applies to retry levels that invoke the interior-point solver.
-    ///
-    /// Called by `ProfiledSolver::set_profile` only when the corresponding
-    /// profile field changes. This is NOT a hot-path method.
-    fn set_ipm_iteration_limit_profile(&mut self, value: u32);
+    /// Default: no-op. `HighsSolver` rebuilds its full solver state on every
+    /// `load_model` (`Highs_passLp`), so it is already order-independent. The
+    /// CLP backend overrides this because `Clp_loadProblem` does **not** heal the
+    /// `ClpSimplex` rim/pricing state, leaving stale steepest-edge weights that
+    /// make the landed vertex on alternative-optima LPs order-dependent.
+    fn reset_solver_state(&mut self) {}
 }
 
 #[cfg(test)]
 mod tests {
     use super::SolverInterface;
-    use crate::HighsProfile;
+    use crate::profile::MockProfile;
 
     // Verify trait is usable as a generic bound (compile-time monomorphization).
     fn accepts_solver<S: SolverInterface>(_: &S) {}
@@ -313,9 +304,9 @@ mod tests {
     struct NoopSolver;
 
     impl SolverInterface for NoopSolver {
-        type Profile = HighsProfile;
+        type Profile = MockProfile;
 
-        fn apply_profile(&mut self, _profile: &HighsProfile) {}
+        fn apply_profile(&mut self, _profile: &MockProfile) {}
 
         fn load_model(&mut self, _template: &crate::types::StageTemplate) {}
 
@@ -341,6 +332,10 @@ mod tests {
             crate::types::SolverStatistics::default()
         }
 
+        fn statistics_into(&self, out: &mut crate::types::SolverStatistics) {
+            out.copy_from(&crate::types::SolverStatistics::default());
+        }
+
         fn name(&self) -> &'static str {
             "Noop"
         }
@@ -348,14 +343,6 @@ mod tests {
         fn solver_name_version(&self) -> String {
             "NoopSolver 0.0.0".to_string()
         }
-
-        fn set_primal_feasibility_tolerance(&mut self, _value: f64) {}
-
-        fn set_dual_feasibility_tolerance(&mut self, _value: f64) {}
-
-        fn set_simplex_iteration_limit_profile(&mut self, _value: u32) {}
-
-        fn set_ipm_iteration_limit_profile(&mut self, _value: u32) {}
     }
 
     fn assert_send<T: Send>() {}
@@ -386,6 +373,28 @@ mod tests {
         assert_eq!(stats.total_iterations, 0);
         assert_eq!(stats.retry_count, 0);
         assert_eq!(stats.total_solve_time_seconds, 0.0);
+    }
+
+    #[test]
+    fn test_noop_solver_statistics_into_initial() {
+        use crate::types::SolverStatistics;
+
+        let mut buf = SolverStatistics {
+            solve_count: 7,
+            success_count: 5,
+            failure_count: 2,
+            total_iterations: 99,
+            retry_count: 3,
+            total_solve_time_seconds: 12.5,
+            ..SolverStatistics::default()
+        };
+        NoopSolver.statistics_into(&mut buf);
+        assert_eq!(buf.solve_count, 0);
+        assert_eq!(buf.success_count, 0);
+        assert_eq!(buf.failure_count, 0);
+        assert_eq!(buf.total_iterations, 0);
+        assert_eq!(buf.retry_count, 0);
+        assert_eq!(buf.total_solve_time_seconds, 0.0);
     }
 
     #[test]
