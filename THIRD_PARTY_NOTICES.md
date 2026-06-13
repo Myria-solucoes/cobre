@@ -42,3 +42,36 @@ vendored submodule in this repository.
 
 EPL-2.0 source code is available via the upstream repository and via the
 vendored submodule in this repository.
+
+## Rust crate dependencies
+
+The C++ components above are recorded by hand because they are invisible to
+Cargo. The Rust dependency graph is handled by two cooperating mechanisms:
+
+- **License _checking_** — `deny.toml` (`[licenses] allow`) gates every crate's
+  license against an allow-list, failing CI on anything outside it.
+- **License _reproduction_** — `THIRD_PARTY_LICENSES.md` reproduces the full
+  license text of every crate that ships in a binary (CLI release artifacts and
+  Python wheels statically link them), satisfying the notice-retention clauses of
+  whatever permissive licenses are present in the graph (MIT, Apache-2.0, BSD,
+  ISC, Unicode, …). It is **generated** across all features and targets — a
+  superset of any single distributed build — not hand-maintained; regenerate
+  after any dependency change with:
+
+  ```
+  cargo about generate --all-features about.hbs -o THIRD_PARTY_LICENSES.md
+  ```
+
+  The accepted-license list in `about.toml` is kept in sync with `deny.toml`.
+
+Two obligations are not captured by the generator and are handled explicitly:
+
+- **Unicode-3.0** — `unicode-ident` is `(MIT OR Apache-2.0) AND Unicode-3.0`; the
+  conjunctive Unicode license is reproduced in `THIRD_PARTY_LICENSES.md` along
+  with the rest.
+- **Apache-2.0 §4(d) NOTICE propagation** — the `arrow`/`arrow-*` and `parquet`
+  crates ship their own `NOTICE`; that text is propagated in this repository's
+  `NOTICE` file (cargo-about does not collect upstream NOTICE files).
+
+No Rust dependency carries a copyleft license (no GPL/LGPL/MPL/EPL obligations);
+`LGPL-2.1-or-later` appears only as an unused `OR` alternative in `r-efi`.
