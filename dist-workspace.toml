@@ -23,3 +23,13 @@ changelog = true
 install-path = "CARGO_HOME"
 # Whether to install an updater program
 install-updater = false
+# Third-party attribution bundled into every CLI archive, alongside the
+# auto-included LICENSE and README — the statically-linked binary carries its
+# dependencies' notices with it. Paths are relative to the workspace root. This
+# is consumed by `dist build` at release time and does not change the generated
+# release.yml, so no `dist generate` re-run is required.
+include = [
+    "NOTICE",
+    "THIRD_PARTY_NOTICES.md",
+    "THIRD_PARTY_LICENSES.md",
+]

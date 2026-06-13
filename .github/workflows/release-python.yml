@@ -75,6 +75,10 @@ jobs:
         with:
           submodules: recursive
 
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
       - uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
@@ -102,6 +106,16 @@ jobs:
                 break
               fi
             done
+
+      # PEP 639 `license-files` cannot reference files above the project dir, and
+      # the canonical license texts live at the repo root, so inject them into
+      # each wheel's `.dist-info/licenses/` post-build (RECORD is recomputed).
+      - name: Bundle license notices into wheels
+        shell: bash
+        run: |
+          python -m pip install --quiet wheel
+          python scripts/inject_wheel_licenses.py crates/cobre-python/dist \
+            LICENSE NOTICE THIRD_PARTY_NOTICES.md THIRD_PARTY_LICENSES.md
 
       - uses: actions/upload-artifact@v4
         with:

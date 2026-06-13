@@ -114,6 +114,8 @@ jobs:
 
           mkdir -p staging
           cp target/release/cobre staging/cobre-mpi
+          # Third-party attribution travels with the statically-linked binary.
+          cp LICENSE NOTICE THIRD_PARTY_NOTICES.md THIRD_PARTY_LICENSES.md staging/
 
           cat > staging/README.txt << 'EOF'
           cobre-mpi — Cobre SDDP solver with MPI communication backend.
