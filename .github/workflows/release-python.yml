@@ -113,6 +113,13 @@ jobs:
       - name: Bundle license notices into wheels
         shell: bash
         run: |
+          # manylinux wheels are built as root inside the maturin Docker
+          # container, so the host runner (non-root) cannot rewrite them; reclaim
+          # ownership on Linux before repacking. macOS/Windows build natively, so
+          # this is a Linux-only no-op elsewhere ($RUNNER_OS is set by Actions).
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo chown -R "$(id -u):$(id -g)" crates/cobre-python/dist
+          fi
           python -m pip install --quiet wheel
           python scripts/inject_wheel_licenses.py crates/cobre-python/dist \
             LICENSE NOTICE THIRD_PARTY_NOTICES.md THIRD_PARTY_LICENSES.md
