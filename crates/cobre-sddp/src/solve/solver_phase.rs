@@ -459,23 +459,38 @@ mod highs_tests {
 
 #[cfg(all(test, feature = "clp"))]
 mod clp_tests {
-    use cobre_solver::ClpProfile;
+    use cobre_solver::{ClpAlgorithm, ClpProfile};
 
     use super::{Phase, PhaseProfiles};
 
-    /// The CLP `FORWARD`/`SIMULATION` per-phase profiles equal the tuned
-    /// deep-cut-pool profile (`BACKWARD`) and differ from [`ClpProfile::default()`]
-    /// only in `dual_pricing_mode` (`1`, full DSE) and `factorization_frequency`
-    /// (`200`).
+    /// The CLP `FORWARD` and `BACKWARD` profiles are the identical tuned
+    /// deep-cut-pool profile (dual simplex, `dual_pricing_mode = 1`,
+    /// `factorization_frequency = 200`). `SIMULATION` keeps those tuned values
+    /// but selects the **primal** simplex, so it differs from `BACKWARD` in
+    /// `algorithm` alone. All three differ from [`ClpProfile::default()`].
     #[test]
-    fn clp_phase_profiles_forward_simulation_equal_tuned_profile() {
+    fn clp_phase_profiles_tuned_with_primal_simulation() {
         let default = ClpProfile::default();
         let forward = <ClpProfile as PhaseProfiles>::FORWARD;
         let simulation = <ClpProfile as PhaseProfiles>::SIMULATION;
         let backward = <ClpProfile as PhaseProfiles>::BACKWARD;
-        // All three per-phase profiles are now identical (the tuned profile).
+        // FORWARD and BACKWARD are the identical tuned (dual) profile.
         assert_eq!(forward, backward);
-        assert_eq!(simulation, backward);
+        // SIMULATION runs the primal simplex to dodge CLP's dual
+        // false-infeasibilities on warm-started, cut-laden simulation LPs, so it
+        // differs from the tuned profile in `algorithm` ONLY.
+        assert_ne!(simulation, backward);
+        assert_eq!(forward.algorithm, ClpAlgorithm::Dual);
+        assert_eq!(backward.algorithm, ClpAlgorithm::Dual);
+        assert_eq!(simulation.algorithm, ClpAlgorithm::Primal);
+        assert_eq!(
+            ClpProfile {
+                algorithm: ClpAlgorithm::Dual,
+                ..simulation
+            },
+            backward,
+            "SIMULATION must equal the tuned profile except for the primal algorithm"
+        );
         // They differ from the default only in the tuned fields.
         assert_ne!(forward, default);
         assert_ne!(simulation, default);
