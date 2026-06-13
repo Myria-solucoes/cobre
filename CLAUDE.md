@@ -84,7 +84,7 @@ both methods together; the `broadcast_basis_cache` helper
 in `training.rs` only owns the four MPI broadcast calls.
 
 When adding new LP variables, constraints, or entity types, read:
-→ `crates/cobre-sddp/src/lp_builder/mod.rs` module docs and `crates/cobre-sddp/src/indexer.rs`
+→ `crates/cobre-sddp/src/lp/builder/mod.rs` module docs and `crates/cobre-sddp/src/lp/indexer.rs`
 
 When modifying study setup construction or scenario library building, read:
 → `crates/cobre-sddp/src/setup/mod.rs` — `setup/` is a directory module whose

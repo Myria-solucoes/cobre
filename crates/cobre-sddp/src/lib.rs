@@ -42,11 +42,9 @@ pub mod error;
 pub mod forward;
 pub(crate) mod forward_pass_state;
 pub(crate) mod gemm;
-pub(crate) mod generic_constraints;
 pub mod horizon_mode;
-pub mod indexer;
 pub mod lower_bound;
-pub mod lp_builder;
+pub mod lp;
 pub mod policy;
 pub mod production;
 pub mod setup;
@@ -86,6 +84,25 @@ pub(crate) use solve::stage_solve;
 // verbatim for the integration tests in `tests/conformance.rs`, which import
 // these submodules by qualified path.
 pub use convergence::{risk_measure, stopping_rule};
+
+// Crate-root submodule shims for the `lp/` cluster move (`indexer` /
+// `generic_constraints` / `lp_builder` were flat at the crate root; they now
+// live under `lp/`). Each shim re-exposes a moved submodule at its pre-move
+// crate-root path so consumers resolve verbatim without per-site edits:
+//
+// - `indexer` — covers the external raw-path consumers (`cobre_sddp::indexer::`
+//   in 4 integration tests + 2 benches) AND the internal `crate::indexer::`
+//   call sites across 13 files (including `lp/generic_constraints.rs` itself).
+// - `lp_builder` (alias of `lp::builder`) — keeps the 27 internal
+//   `crate::lp_builder::Symbol` references across 11 files resolving to the
+//   moved subtree without editing those files.
+// - `generic_constraints` — keeps `pub(crate)` visibility; covers the internal
+//   `crate::generic_constraints::` references in `lp/builder/matrix.rs` and
+//   `lp/builder/layout.rs`, which moved into the cluster and still reach the
+//   constraint-lowering module by its pre-move crate-root path.
+pub use lp::builder as lp_builder;
+pub(crate) use lp::generic_constraints;
+pub use lp::indexer;
 
 // Crate-root submodule shim: preserves the pre-`policy/`-relocation raw
 // `cobre_sddp::<module>::` / `crate::<module>::` paths verbatim so consumers
@@ -170,11 +187,11 @@ pub use production::hydro_models::{
     build_hydro_model_summary, prepare_hydro_models,
 };
 // ── indexer ───────────────────────────────────────────────────────────────────
-pub use indexer::{EquipmentCounts, FphaColumnLayout, StageIndexer};
+pub use lp::indexer::{EquipmentCounts, FphaColumnLayout, StageIndexer};
 // ── inflow_method ─────────────────────────────────────────────────────────────
 pub use stochastic::inflow_method::InflowNonNegativityMethod;
 // ── lp_builder ────────────────────────────────────────────────────────────────
-pub use lp_builder::{StageTemplates, build_stage_templates};
+pub use lp::builder::{StageTemplates, build_stage_templates};
 // ── policy_load ───────────────────────────────────────────────────────────────
 pub use policy::policy_load::{
     build_basis_cache_from_checkpoint, inject_boundary_cuts, load_boundary_cuts,

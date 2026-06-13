@@ -30,7 +30,7 @@ The `storage_fixing`, `lag_fixing`, and `anticipated_state_fixing` ranges in
 `StageIndexer` are permanent empty sentinels (`0..0`). Always resolve the LP
 column — for both pinning and dual extraction — via
 `StageIndexer::state_to_lp_incoming_column`; never assume a fixing-row index.
-Read: `indexer.rs`.
+Read: `lp/indexer.rs`.
 
 ## FPHA uses average storage
 
@@ -38,7 +38,7 @@ The FPHA generation constraint is
 `g ≤ γ₀ + (γᵥ/2)·(V_in + V_out) + γ_q·q (+ γ_s·s)`. The `−γᵥ/2` coefficient
 appears on **both** the incoming and outgoing storage columns — not on `V_out`
 alone. (Discovered during deterministic case D06.)
-Read: `lp_builder/matrix.rs`, `lp_builder/template.rs`.
+Read: `lp/builder/matrix.rs`, `lp/builder/template.rs`.
 
 ## Cut pool is append-only; basis matches by slot identity
 
