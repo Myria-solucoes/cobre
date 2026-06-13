@@ -42,8 +42,8 @@ pub use policy::{BoundaryPolicy, CheckpointingConfig, PolicyConfig, PolicyMode};
 pub use scenario_source::{RawClassConfigEntry, RawHistoricalYearsConfig, RawScenarioSourceConfig};
 pub use simulation::SimulationConfig;
 pub use training::{
-    LipschitzConfig, RowSelectionConfig, StoppingRuleConfig, TrainingConfig, TrainingSolverConfig,
-    UpperBoundEvaluationConfig,
+    LipschitzConfig, RowSelectionConfig, SelectionMethod, StoppingRuleConfig, TrainingConfig,
+    TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
 
 use cobre_core::scenario::{HistoricalYears, SamplingScheme, ScenarioSource};
@@ -515,6 +515,7 @@ impl Config {
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
+    clippy::expect_used,
     clippy::panic,
     clippy::too_many_lines,
     clippy::doc_markdown
@@ -625,8 +626,10 @@ mod tests {
             ],
             "stopping_mode": "any",
             "cut_selection": {
-              "enabled": true,
-              "method": "domination"
+              "selection": {
+                "method": "domination",
+                "domination_tolerance": 1e-6
+              }
             }
           },
           "upper_bound_evaluation": {
@@ -671,8 +674,16 @@ mod tests {
         let rules = cfg.training.stopping_rules.as_ref().unwrap();
         assert_eq!(rules.len(), 2);
         let cut_sel = &cfg.training.cut_selection;
-        assert_eq!(cut_sel.enabled, Some(true));
-        assert_eq!(cut_sel.method.as_deref(), Some("domination"));
+        match cut_sel.selection.as_ref().expect("selection present") {
+            SelectionMethod::Domination {
+                domination_tolerance,
+                check_frequency,
+            } => {
+                assert!((domination_tolerance - 1e-6).abs() < f64::EPSILON);
+                assert_eq!(*check_frequency, 5);
+            }
+            other => panic!("expected Domination, got {other:?}"),
+        }
 
         // Upper bound
         assert_eq!(cfg.upper_bound_evaluation.enabled, Some(true));
@@ -1209,37 +1220,32 @@ mod tests {
         );
     }
 
-    /// max_active_per_stage serde roundtrip: Some(100) serializes and deserializes correctly.
-    ///
-    /// The deprecated `basis_activity_window` field still round-trips because
-    /// the schema retains it for one release. `#[allow(deprecated)]` is needed
-    /// to read it without triggering the deprecation lint.
+    /// `RowSelectionConfig` round-trips through JSON: the parent always-on knobs
+    /// and a tagged `selection` block survive serialize → deserialize.
     #[test]
-    #[allow(deprecated)]
-    fn max_active_per_stage_serde_roundtrip() {
+    fn row_selection_config_serde_roundtrip() {
         let original = RowSelectionConfig {
-            enabled: Some(true),
-            method: Some("level1".to_string()),
-            threshold: None,
-            memory_window: None,
-            domination_epsilon: None,
-            check_frequency: None,
-            cut_activity_tolerance: None,
+            row_activity_tolerance: Some(1e-6),
             max_active_per_stage: Some(100),
-            basis_activity_window: Some(7),
-            tie_tolerance: None,
-            start_iteration: None,
-            active_window: None,
-            candidate_window: None,
-            nadic: None,
-            violation_tolerance: None,
+            selection: Some(SelectionMethod::Level1 {
+                tie_tolerance: 1e-9,
+                check_frequency: 7,
+            }),
         };
         let json = serde_json::to_string(&original).unwrap();
         let roundtripped: RowSelectionConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(roundtripped.max_active_per_stage, Some(100));
-        assert_eq!(roundtripped.enabled, Some(true));
-        assert_eq!(roundtripped.method.as_deref(), Some("level1"));
-        assert_eq!(roundtripped.basis_activity_window, Some(7));
+        assert_eq!(roundtripped.row_activity_tolerance, Some(1e-6));
+        match roundtripped.selection.expect("selection present") {
+            SelectionMethod::Level1 {
+                tie_tolerance,
+                check_frequency,
+            } => {
+                assert!((tie_tolerance - 1e-9).abs() < f64::EPSILON);
+                assert_eq!(check_frequency, 7);
+            }
+            other => panic!("expected Level1, got {other:?}"),
+        }
     }
 
     /// max_active_per_stage absent from JSON deserializes to None.
@@ -1250,7 +1256,7 @@ mod tests {
             "training": {
                 "forward_passes": 10,
                 "stopping_rules": [{"type": "iteration_limit", "limit": 5}],
-                "cut_selection": {"enabled": true, "method": "level1"}
+                "cut_selection": {"selection": {"method": "level1"}}
             }
         }"#,
         );
@@ -1352,47 +1358,6 @@ mod tests {
         let boundary = restored.boundary.unwrap();
         assert_eq!(boundary.path, "../monthly/policy");
         assert_eq!(boundary.source_stage, 5);
-    }
-
-    // ── RowSelectionConfig::threshold tests ──────────────────────────────────
-
-    /// AC: `threshold` is accepted and round-trips for `level1`.
-    #[test]
-    fn test_row_selection_threshold_accepted() {
-        let json = r#"{"threshold": 5}"#;
-        let cfg: RowSelectionConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(cfg.threshold, Some(5), "threshold must be stored");
-    }
-
-    /// AC: an existing config JSON that still carries the deprecated
-    /// `threshold` / `memory_window` keys alongside the new first-class
-    /// `active_window` key deserializes without error (the deprecated fields are
-    /// retained for `deny_unknown_fields`; `active_window` is the new k2 field).
-    #[test]
-    fn test_row_selection_deprecated_keys_and_active_window_deserialize() {
-        let json = r#"{
-            "enabled": true,
-            "method": "dynamic",
-            "threshold": 3,
-            "memory_window": 20,
-            "active_window": 0
-        }"#;
-        let cfg: RowSelectionConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            cfg.threshold,
-            Some(3),
-            "deprecated threshold must round-trip"
-        );
-        assert_eq!(
-            cfg.memory_window,
-            Some(20),
-            "deprecated memory_window must round-trip"
-        );
-        assert_eq!(
-            cfg.active_window,
-            Some(0),
-            "active_window must round-trip (0 is valid)"
-        );
     }
 
     /// Stale `exports` keys (`training`, `cuts`, `vertices`, `simulation`,

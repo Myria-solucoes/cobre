@@ -92,7 +92,7 @@ pub enum VariableRef {
     },
     /// Total outflow (turbined + spillage) for a hydro plant (m³/s).
     ///
-    /// Currently an alias for turbined + spillage. Future CEPEL formulations
+    /// Currently an alias for turbined + spillage. A future formulation
     /// may turn this into an independent variable.
     HydroOutflow {
         /// Hydro plant identifier.

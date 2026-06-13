@@ -193,13 +193,17 @@ Each entry has a `"type"` discriminator. Valid types:
 
 **`training.cut_selection` sub-section:**
 
-| Field                    | Type    | Default | Description                                             |
-| ------------------------ | ------- | ------- | ------------------------------------------------------- |
-| `enabled`                | boolean | `null`  | Enable cut pruning                                      |
-| `method`                 | string  | `null`  | Pruning method: `"level1"`, `"lml1"`, or `"domination"` |
-| `threshold`              | integer | `null`  | Minimum iterations before first pruning pass            |
-| `check_frequency`        | integer | `null`  | Iterations between pruning checks                       |
-| `cut_activity_tolerance` | number  | `null`  | Minimum dual multiplier for a cut to count as binding   |
+Two always-on knobs plus a tagged `selection` object that chooses the method
+and carries only that method's parameters. Omitting `selection` disables row
+selection. See the
+[Configuration guide](../guide/configuration.md#cut_selection) for the full
+per-method field tables.
+
+| Field                    | Type    | Default | Description                                                                                            |
+| ------------------------ | ------- | ------- | ------------------------------------------------------------------------------------------------------ |
+| `row_activity_tolerance` | number  | `0.0`   | Minimum dual multiplier for a row to count as binding                                                  |
+| `max_active_per_stage`   | integer | `null`  | Hard cap on active rows per stage; `null` = no cap                                                     |
+| `selection`              | object  | `null`  | Active method and its parameters; `method` is one of `"level1"`, `"lml1"`, `"domination"`, `"dynamic"` |
 
 **`upper_bound_evaluation` section:**
 

@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 pub struct EnergyConfig {
     /// Case-wide default fraction in `(0.0, 1.0]` used when no per-`(hydro,
     /// season)` override applies. `V_ref = V_min + fraction · (V_max − V_min)`.
-    /// Default 0.65 (NEWAVE convention).
+    /// Default 0.65 (conventional long-term reference-volume fraction).
     pub reference_volume_fraction: f64,
 }
 

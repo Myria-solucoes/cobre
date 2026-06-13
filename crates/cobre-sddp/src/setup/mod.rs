@@ -107,7 +107,7 @@ pub struct StudySetup {
     /// ID. Aligned 1:1 with [`Self::ncs_max_gen`]. `true` (default) =
     /// curtailable (LP can dispatch in `[0, max × α × factor]`); `false` =
     /// must-run (`col_lower = col_upper = max × α × factor` for every
-    /// scenario, matching NEWAVE's `geracao_usinas_nao_simuladas` pre-netting).
+    /// scenario; non-simulated aggregate generation pre-netted from load).
     pub(crate) ncs_allow_curtailment: Vec<bool>,
 
     /// Sampling schemes and pre-built libraries for training and simulation phases.
@@ -2055,8 +2055,13 @@ mod tests {
         // Configure the dynamic cut-selection method so `parse_cut_selection_config`
         // yields a `Dynamic` strategy and `simulation_ctx()` populates `dcs`.
         config.training.cut_selection = RowSelectionConfig {
-            enabled: Some(true),
-            method: Some("dynamic".to_string()),
+            selection: Some(cobre_io::config::SelectionMethod::Dynamic {
+                start_iteration: 2,
+                seed_window: 5,
+                candidate_recency: None,
+                max_added_per_round: 10,
+                violation_tolerance: 1e-10,
+            }),
             ..RowSelectionConfig::default()
         };
         let stochastic = build_stochastic_context(

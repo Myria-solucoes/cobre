@@ -19,8 +19,8 @@ use crate::EntityId;
 /// anywhere in `[0, max × α × factor]` at the cost of `curtailment_cost`
 /// per curtailed `MWh`. When `allow_curtailment == false` the LP pins
 /// dispatch to the realized availability (`col_lower = col_upper = max × α
-/// × factor`) — the **must-run** regime that mirrors NEWAVE's
-/// `geracao_usinas_nao_simuladas` pre-netting convention.
+/// × factor`) — the **must-run** regime for non-simulated aggregate
+/// generation pre-netted from load before the dispatch LP runs.
 ///
 /// Source: `system/non_controllable.json`. See Input System Entities SS1.9.8.
 #[derive(Debug, Clone, PartialEq)]
@@ -46,9 +46,9 @@ pub struct NonControllableSource {
     ///
     /// `false` — must-run: `col_lower = col_upper = max × α × factor`,
     /// dispatch is pinned to the realized availability for every scenario.
-    /// Models NEWAVE's `geracao_usinas_nao_simuladas` aggregates (PCH, PCT,
-    /// EOL, UFV, MMGD) that are pre-netted from MERC before the dispatch LP
-    /// runs.
+    /// Models non-simulated aggregate generation (small hydro, biomass,
+    /// wind, solar, distributed generation) pre-netted from load before the
+    /// dispatch LP runs.
     pub allow_curtailment: bool,
     /// Resolved cost per `MWh` of curtailed generation \[$/`MWh`\].
     ///
@@ -103,7 +103,7 @@ mod tests {
 
     #[test]
     fn test_non_controllable_must_run() {
-        // allow_curtailment == false models NEWAVE-style must-run aggregates.
+        // allow_curtailment == false models must-run (non-curtailable) aggregates.
         let source = NonControllableSource {
             id: EntityId::from(3),
             name: "PCH Aggregate NE".to_string(),

@@ -78,7 +78,7 @@
       "properties": {
         "reference_volume_fraction": {
           "default": 0.65,
-          "description": "Case-wide default fraction in `(0.0, 1.0]` used when no per-`(hydro,\nseason)` override applies. `V_ref = V_min + fraction · (V_max − V_min)`.\nDefault 0.65 (NEWAVE convention).",
+          "description": "Case-wide default fraction in `(0.0, 1.0]` used when no per-`(hydro,\nseason)` override applies. `V_ref = V_min + fraction · (V_max − V_min)`.\nDefault 0.65 (conventional long-term reference-volume fraction).",
           "format": "double",
           "type": "number"
         }
@@ -414,78 +414,11 @@
     },
     "RowSelectionConfig": {
       "additionalProperties": false,
-      "description": "Row-selection settings (`config.json → training.cut_selection`).",
+      "description": "Row-selection settings (`config.json → training.cut_selection`).\n\nRow selection bounds the per-solve LP size by limiting how many constraint\nrows from the row pool are carried into each solve. `selection` chooses the\nmethod and carries only that method's parameters; omitting it (the default)\ndisables row selection.",
       "properties": {
-        "active_window": {
-          "default": null,
-          "description": "Active-set seed window (`k2`) for `method = \"dynamic\"`: the number of\nmost recent iterations whose cuts seed the initial active set. `0` is\nvalid and meaningful — it seeds only the current iteration's cuts,\nmatching NEWAVE's `selcor.dat`\n`TAMANHO DA JANELA DE CORTES ATIVOS (k2) = 0`. Default: `5`. Ignored\nunless `method = \"dynamic\"`.",
-          "format": "uint32",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "basis_activity_window": {
-          "default": null,
-          "deprecated": true,
-          "description": "DEPRECATED. Silently ignored as of this release; will be removed in\nthe next. Retained for one release so existing config files continue\nto deserialise.\n\nPreviously controlled a sliding-window mask used during basis\nreconstruction. Reconstruction now matches stored constraint rows by\nslot identity alone, which makes the window value unobservable. See\n`CHANGELOG.md` for the deprecation announcement.",
-          "format": "uint32",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "candidate_window": {
-          "default": null,
-          "description": "Candidate-recency window for `method = \"dynamic\"`: only candidates\ngenerated within the last `candidate_window` iterations are scored.\n`None` (the default) means an unbounded window (every pool entry is a\ncandidate). Ignored unless `method = \"dynamic\"`.",
-          "format": "uint32",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "check_frequency": {
-          "default": null,
-          "description": "Iterations between periodic pruning checks for the `\"level1\"`, `\"lml1\"`,\nand `\"domination\"` methods. Must be `> 0`. Not used by `method =\n\"dynamic\"`, which uses `active_window` for its `k2` active-set seed\nwindow.",
-          "format": "uint32",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "cut_activity_tolerance": {
-          "default": null,
-          "description": "Minimum dual multiplier magnitude for a constraint row to be counted as\nbinding at a given solution point.\n\nRows whose dual value falls below this threshold are treated as inactive\nin activity-tracking computations. Increase to reduce noise from\nnear-zero duals; decrease to be more inclusive.",
-          "format": "double",
-          "type": [
-            "number",
-            "null"
-          ]
-        },
-        "domination_epsilon": {
-          "default": null,
-          "description": "Epsilon for the `\"domination\"` method.\n\nRequired when `method = \"domination\"`. Accepts fractional values\n(e.g., `1e-6`).",
-          "format": "double",
-          "type": [
-            "number",
-            "null"
-          ]
-        },
-        "enabled": {
-          "default": null,
-          "description": "Enable row pruning.",
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
         "max_active_per_stage": {
           "default": null,
-          "description": "Row budget per stage: maximum number of constraint rows allowed to be\nactive in a single stage's LP.\n\nWhen `Some(n)`, the training loop enforces a hard cap of `n` active rows\nper stage after the pruning strategy has been applied. Rows are evicted\nin order of staleness (least recently active first), tie-broken by\noverall usage frequency (least frequently active first). Rows added in\nthe current iteration are never evicted.\n\nWhen `None` (the default), no hard cap is enforced.",
+          "description": "Hard cap on active rows per stage LP, enforced after the selection\nmethod runs. Rows are evicted least-recently-active first, tie-broken by\nleast-frequently-active; rows added in the current iteration are never\nevicted. `None` (default) = no cap.",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -493,74 +426,166 @@
             "null"
           ]
         },
-        "memory_window": {
+        "row_activity_tolerance": {
           "default": null,
-          "description": "Deprecated. Silently ignored. Retained for backward compatibility with\nexisting config files.\n\nPreviously used as the memory window size for the `\"lml1\"` method.\nThe correct algorithm (Guigues 2017/2019) is value-based and uses\n`tie_tolerance` instead.",
-          "format": "uint32",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "method": {
-          "default": null,
-          "description": "Method: `\"level1\"`, `\"lml1\"`, `\"domination\"`, or `\"dynamic\"`.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "nadic": {
-          "default": null,
-          "description": "Maximum number of cuts added per lazy-solve round for `method =\n\"dynamic\"` (`>= 1`). Default: `10`. Ignored unless `method = \"dynamic\"`.",
-          "format": "uint32",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "start_iteration": {
-          "default": null,
-          "description": "First 1-based training iteration at which the dynamic lazy loop becomes\nactive. Ignored unless `method = \"dynamic\"`. Default: `2`.",
-          "format": "uint32",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "threshold": {
-          "default": null,
-          "description": "Deprecated. Silently ignored. Retained for backward compatibility with\nexisting config files.\n\nPreviously used as an activity-count threshold for the `\"level1\"`\nrow-selection method. The correct algorithm (de Matos 2015) is\nvalue-based and uses `tie_tolerance` instead.",
-          "format": "uint32",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "tie_tolerance": {
-          "default": null,
-          "description": "Tie-tolerance for the `\"level1\"` and `\"lml1\"` value-based row-selection\nmethods.\n\nA row is considered tied at an evaluation point when its value is\nwithin `tie_tolerance` of the best active row value. Default: `1e-10`.\nIgnored by the `\"domination\"` method.",
+          "description": "Minimum dual-multiplier magnitude for a constraint row to count as\nbinding at a solution point. Rows whose dual value falls below this are\ntreated as inactive in activity tracking. Default `0.0` when absent.",
           "format": "double",
           "type": [
             "number",
             "null"
           ]
         },
-        "violation_tolerance": {
+        "selection": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SelectionMethod"
+            },
+            {
+              "type": "null"
+            }
+          ],
           "default": null,
-          "description": "Violation tolerance for accepting a candidate row under `method =\n\"dynamic\"` (`> 0`). When absent, falls back to `tie_tolerance`. Default:\n`1e-10`. Ignored unless `method = \"dynamic\"`.",
-          "format": "double",
-          "type": [
-            "number",
-            "null"
-          ]
+          "description": "Active selection method and its parameters. Absent/`null` (default)\ndisables row selection."
         }
       },
       "type": "object"
+    },
+    "SelectionMethod": {
+      "description": "Row-selection method and its method-specific parameters.\n\nInternally tagged on `method`; each variant carries only the fields it uses,\nso supplying a parameter that does not belong to the chosen method is a\nload-time error under `deny_unknown_fields`, and a misspelled `method` is an\n`unknown variant` error at parse time.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Level-1: retain any row near-optimal at some visited state.",
+          "properties": {
+            "check_frequency": {
+              "default": 5,
+              "description": "Iterations between periodic pruning checks. Must be `> 0`. Default `5`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "method": {
+              "const": "level1",
+              "type": "string"
+            },
+            "tie_tolerance": {
+              "default": 1e-10,
+              "description": "Tie tolerance: a row is active at a state when within this of the\nbest row value there. Default `1e-10`.",
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "method"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Limited-memory Level-1: retain only the oldest eligible near-optimal row\nper visited state.",
+          "properties": {
+            "check_frequency": {
+              "default": 5,
+              "description": "Iterations between periodic pruning checks. Must be `> 0`. Default `5`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "method": {
+              "const": "lml1",
+              "type": "string"
+            },
+            "tie_tolerance": {
+              "default": 1e-10,
+              "description": "Tie tolerance: a row is active at a state when within this of the\nbest row value there. Default `1e-10`.",
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "method"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Domination: remove rows dominated at all visited states.",
+          "properties": {
+            "check_frequency": {
+              "default": 5,
+              "description": "Iterations between periodic pruning checks. Must be `> 0`. Default `5`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "domination_tolerance": {
+              "description": "Activity tolerance: a row survives if within this of the maximum at\nany visited state. Required (no default).",
+              "format": "double",
+              "type": "number"
+            },
+            "method": {
+              "const": "domination",
+              "type": "string"
+            }
+          },
+          "required": [
+            "method",
+            "domination_tolerance"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Dynamic: a per-solve lazy loop that loads only a small resident subset of\nrows per solve while retaining the full pool.",
+          "properties": {
+            "candidate_recency": {
+              "default": null,
+              "description": "Only rows generated within the last `candidate_recency` iterations are\nscored. `None` (default) = unbounded: every pool row is a candidate,\nwhich preserves exactness. `Some(n)` (must be `>= 1`) makes the loop\ndeliberately inexact — rows older than the window are never added.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "max_added_per_round": {
+              "default": 10,
+              "description": "Maximum rows added per lazy-solve round. Must be `>= 1`. Default `10`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "method": {
+              "const": "dynamic",
+              "type": "string"
+            },
+            "seed_window": {
+              "default": 5,
+              "description": "Number of most-recent iterations whose rows seed the initial resident\nset. `0` is valid (seeds only the current iteration). Default `5`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "start_iteration": {
+              "default": 2,
+              "description": "First 1-based iteration at which the lazy loop becomes active.\nMust be `>= 1`. Default `2`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "violation_tolerance": {
+              "default": 1e-10,
+              "description": "Violation tolerance for accepting a candidate row. Must be `> 0`.\nDefault `1e-10`.",
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "method"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "SimulationConfig": {
       "additionalProperties": false,
@@ -723,21 +748,9 @@
         "cut_selection": {
           "$ref": "#/$defs/RowSelectionConfig",
           "default": {
-            "active_window": null,
-            "basis_activity_window": null,
-            "candidate_window": null,
-            "check_frequency": null,
-            "cut_activity_tolerance": null,
-            "domination_epsilon": null,
-            "enabled": null,
             "max_active_per_stage": null,
-            "memory_window": null,
-            "method": null,
-            "nadic": null,
-            "start_iteration": null,
-            "threshold": null,
-            "tie_tolerance": null,
-            "violation_tolerance": null
+            "row_activity_tolerance": null,
+            "selection": null
           },
           "description": "Row-selection settings."
         },

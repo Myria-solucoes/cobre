@@ -35,6 +35,10 @@ pub struct TrainingConfig {
     pub stopping_mode: String,
 
     /// Row-selection settings.
+    // Rationale: the type stays algorithm-neutral (`RowSelectionConfig`) per the
+    // infrastructure genericity rule, while the serialized key uses the
+    // domain-standard term every practitioner types. The key/type divergence is
+    // deliberate, not an unfinished rename.
     #[serde(default)]
     pub cut_selection: RowSelectionConfig,
 
@@ -62,127 +66,123 @@ impl TrainingConfig {
 }
 
 /// Row-selection settings (`config.json → training.cut_selection`).
+///
+/// Row selection bounds the per-solve LP size by limiting how many constraint
+/// rows from the row pool are carried into each solve. `selection` chooses the
+/// method and carries only that method's parameters; omitting it (the default)
+/// disables row selection.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(default, deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RowSelectionConfig {
-    /// Enable row pruning.
+    /// Minimum dual-multiplier magnitude for a constraint row to count as
+    /// binding at a solution point. Rows whose dual value falls below this are
+    /// treated as inactive in activity tracking. Default `0.0` when absent.
     #[serde(default)]
-    pub enabled: Option<bool>,
+    pub row_activity_tolerance: Option<f64>,
 
-    /// Method: `"level1"`, `"lml1"`, `"domination"`, or `"dynamic"`.
-    #[serde(default)]
-    pub method: Option<String>,
-
-    /// Deprecated. Silently ignored. Retained for backward compatibility with
-    /// existing config files.
-    ///
-    /// Previously used as an activity-count threshold for the `"level1"`
-    /// row-selection method. The correct algorithm (de Matos 2015) is
-    /// value-based and uses `tie_tolerance` instead.
-    #[serde(default)]
-    pub threshold: Option<u32>,
-
-    /// Deprecated. Silently ignored. Retained for backward compatibility with
-    /// existing config files.
-    ///
-    /// Previously used as the memory window size for the `"lml1"` method.
-    /// The correct algorithm (Guigues 2017/2019) is value-based and uses
-    /// `tie_tolerance` instead.
-    #[serde(default)]
-    pub memory_window: Option<u32>,
-
-    /// Tie-tolerance for the `"level1"` and `"lml1"` value-based row-selection
-    /// methods.
-    ///
-    /// A row is considered tied at an evaluation point when its value is
-    /// within `tie_tolerance` of the best active row value. Default: `1e-10`.
-    /// Ignored by the `"domination"` method.
-    #[serde(default)]
-    pub tie_tolerance: Option<f64>,
-
-    /// Epsilon for the `"domination"` method.
-    ///
-    /// Required when `method = "domination"`. Accepts fractional values
-    /// (e.g., `1e-6`).
-    #[serde(default)]
-    pub domination_epsilon: Option<f64>,
-
-    /// Iterations between periodic pruning checks for the `"level1"`, `"lml1"`,
-    /// and `"domination"` methods. Must be `> 0`. Not used by `method =
-    /// "dynamic"`, which uses `active_window` for its `k2` active-set seed
-    /// window.
-    #[serde(default)]
-    pub check_frequency: Option<u32>,
-
-    /// First 1-based training iteration at which the dynamic lazy loop becomes
-    /// active. Ignored unless `method = "dynamic"`. Default: `2`.
-    #[serde(default)]
-    pub start_iteration: Option<u32>,
-
-    /// Active-set seed window (`k2`) for `method = "dynamic"`: the number of
-    /// most recent iterations whose cuts seed the initial active set. `0` is
-    /// valid and meaningful — it seeds only the current iteration's cuts,
-    /// matching NEWAVE's `selcor.dat`
-    /// `TAMANHO DA JANELA DE CORTES ATIVOS (k2) = 0`. Default: `5`. Ignored
-    /// unless `method = "dynamic"`.
-    #[serde(default)]
-    pub active_window: Option<u32>,
-
-    /// Candidate-recency window for `method = "dynamic"`: only candidates
-    /// generated within the last `candidate_window` iterations are scored.
-    /// `None` (the default) means an unbounded window (every pool entry is a
-    /// candidate). Ignored unless `method = "dynamic"`.
-    #[serde(default)]
-    pub candidate_window: Option<u32>,
-
-    /// Maximum number of cuts added per lazy-solve round for `method =
-    /// "dynamic"` (`>= 1`). Default: `10`. Ignored unless `method = "dynamic"`.
-    #[serde(default)]
-    pub nadic: Option<u32>,
-
-    /// Violation tolerance for accepting a candidate row under `method =
-    /// "dynamic"` (`> 0`). When absent, falls back to `tie_tolerance`. Default:
-    /// `1e-10`. Ignored unless `method = "dynamic"`.
-    #[serde(default)]
-    pub violation_tolerance: Option<f64>,
-
-    /// Minimum dual multiplier magnitude for a constraint row to be counted as
-    /// binding at a given solution point.
-    ///
-    /// Rows whose dual value falls below this threshold are treated as inactive
-    /// in activity-tracking computations. Increase to reduce noise from
-    /// near-zero duals; decrease to be more inclusive.
-    #[serde(default)]
-    pub cut_activity_tolerance: Option<f64>,
-
-    /// DEPRECATED. Silently ignored as of this release; will be removed in
-    /// the next. Retained for one release so existing config files continue
-    /// to deserialise.
-    ///
-    /// Previously controlled a sliding-window mask used during basis
-    /// reconstruction. Reconstruction now matches stored constraint rows by
-    /// slot identity alone, which makes the window value unobservable. See
-    /// `CHANGELOG.md` for the deprecation announcement.
-    #[serde(default)]
-    #[deprecated(
-        since = "0.1.0",
-        note = "field is ignored; basis reconstruction now uses slot-identity matching. Will be removed next release."
-    )]
-    pub basis_activity_window: Option<u32>,
-
-    /// Row budget per stage: maximum number of constraint rows allowed to be
-    /// active in a single stage's LP.
-    ///
-    /// When `Some(n)`, the training loop enforces a hard cap of `n` active rows
-    /// per stage after the pruning strategy has been applied. Rows are evicted
-    /// in order of staleness (least recently active first), tie-broken by
-    /// overall usage frequency (least frequently active first). Rows added in
-    /// the current iteration are never evicted.
-    ///
-    /// When `None` (the default), no hard cap is enforced.
+    /// Hard cap on active rows per stage LP, enforced after the selection
+    /// method runs. Rows are evicted least-recently-active first, tie-broken by
+    /// least-frequently-active; rows added in the current iteration are never
+    /// evicted. `None` (default) = no cap.
     #[serde(default)]
     pub max_active_per_stage: Option<u32>,
+
+    /// Active selection method and its parameters. Absent/`null` (default)
+    /// disables row selection.
+    #[serde(default)]
+    pub selection: Option<SelectionMethod>,
+}
+
+/// Row-selection method and its method-specific parameters.
+///
+/// Internally tagged on `method`; each variant carries only the fields it uses,
+/// so supplying a parameter that does not belong to the chosen method is a
+/// load-time error under `deny_unknown_fields`, and a misspelled `method` is an
+/// `unknown variant` error at parse time.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum SelectionMethod {
+    /// Level-1: retain any row near-optimal at some visited state.
+    Level1 {
+        /// Tie tolerance: a row is active at a state when within this of the
+        /// best row value there. Default `1e-10`.
+        #[serde(default = "default_tie_tolerance")]
+        tie_tolerance: f64,
+        /// Iterations between periodic pruning checks. Must be `> 0`. Default `5`.
+        #[serde(default = "default_check_frequency")]
+        check_frequency: u32,
+    },
+    /// Limited-memory Level-1: retain only the oldest eligible near-optimal row
+    /// per visited state.
+    Lml1 {
+        /// Tie tolerance: a row is active at a state when within this of the
+        /// best row value there. Default `1e-10`.
+        #[serde(default = "default_tie_tolerance")]
+        tie_tolerance: f64,
+        /// Iterations between periodic pruning checks. Must be `> 0`. Default `5`.
+        #[serde(default = "default_check_frequency")]
+        check_frequency: u32,
+    },
+    /// Domination: remove rows dominated at all visited states.
+    Domination {
+        /// Activity tolerance: a row survives if within this of the maximum at
+        /// any visited state. Required (no default).
+        domination_tolerance: f64,
+        /// Iterations between periodic pruning checks. Must be `> 0`. Default `5`.
+        #[serde(default = "default_check_frequency")]
+        check_frequency: u32,
+    },
+    /// Dynamic: a per-solve lazy loop that loads only a small resident subset of
+    /// rows per solve while retaining the full pool.
+    Dynamic {
+        /// First 1-based iteration at which the lazy loop becomes active.
+        /// Must be `>= 1`. Default `2`.
+        #[serde(default = "default_start_iteration")]
+        start_iteration: u32,
+        /// Number of most-recent iterations whose rows seed the initial resident
+        /// set. `0` is valid (seeds only the current iteration). Default `5`.
+        #[serde(default = "default_seed_window")]
+        seed_window: u32,
+        /// Only rows generated within the last `candidate_recency` iterations are
+        /// scored. `None` (default) = unbounded: every pool row is a candidate,
+        /// which preserves exactness. `Some(n)` (must be `>= 1`) makes the loop
+        /// deliberately inexact — rows older than the window are never added.
+        #[serde(default)]
+        candidate_recency: Option<u32>,
+        /// Maximum rows added per lazy-solve round. Must be `>= 1`. Default `10`.
+        #[serde(default = "default_max_added_per_round")]
+        max_added_per_round: u32,
+        /// Violation tolerance for accepting a candidate row. Must be `> 0`.
+        /// Default `1e-10`.
+        #[serde(default = "default_violation_tolerance")]
+        violation_tolerance: f64,
+    },
+}
+
+fn default_tie_tolerance() -> f64 {
+    1e-10
+}
+
+fn default_check_frequency() -> u32 {
+    5
+}
+
+fn default_start_iteration() -> u32 {
+    2
+}
+
+fn default_seed_window() -> u32 {
+    5
+}
+
+fn default_max_added_per_round() -> u32 {
+    10
+}
+
+fn default_violation_tolerance() -> f64 {
+    1e-10
 }
 
 /// LP solver retry settings (`config.json → training.solver`).
@@ -301,50 +301,134 @@ pub struct LipschitzConfig {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::TrainingConfig;
+    use super::{SelectionMethod, TrainingConfig};
 
-    /// The four first-class dynamic cut-selection fields deserialize under
-    /// `deny_unknown_fields`.
+    /// A `dynamic` selection block round-trips through the tagged enum, with
+    /// every method-specific field landing in the `Dynamic` variant.
     #[test]
-    fn dynamic_cut_selection_fields_deserialize() {
+    fn dynamic_selection_block_round_trips() {
         let json = r#"{
             "forward_passes": 4,
             "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
             "cut_selection": {
-                "enabled": true,
-                "method": "dynamic",
-                "start_iteration": 5,
-                "candidate_window": 20,
-                "nadic": 3,
-                "violation_tolerance": 1e-9,
-                "check_frequency": 7
+                "row_activity_tolerance": 1e-6,
+                "max_active_per_stage": 4000,
+                "selection": {
+                    "method": "dynamic",
+                    "start_iteration": 5,
+                    "seed_window": 0,
+                    "candidate_recency": 20,
+                    "max_added_per_round": 3,
+                    "violation_tolerance": 1e-9
+                }
             }
         }"#;
         let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
         let cs = &cfg.cut_selection;
-        assert_eq!(cs.method.as_deref(), Some("dynamic"));
-        assert_eq!(cs.start_iteration, Some(5));
-        assert_eq!(cs.candidate_window, Some(20));
-        assert_eq!(cs.nadic, Some(3));
-        assert_eq!(cs.violation_tolerance, Some(1e-9));
-        assert_eq!(cs.check_frequency, Some(7));
+        assert_eq!(cs.row_activity_tolerance, Some(1e-6));
+        assert_eq!(cs.max_active_per_stage, Some(4000));
+        match cs.selection.as_ref().expect("selection present") {
+            SelectionMethod::Dynamic {
+                start_iteration,
+                seed_window,
+                candidate_recency,
+                max_added_per_round,
+                violation_tolerance,
+            } => {
+                assert_eq!(*start_iteration, 5);
+                assert_eq!(*seed_window, 0);
+                assert_eq!(*candidate_recency, Some(20));
+                assert_eq!(*max_added_per_round, 3);
+                assert!((*violation_tolerance - 1e-9).abs() < f64::EPSILON);
+            }
+            other => panic!("expected Dynamic, got {other:?}"),
+        }
     }
 
-    /// Omitting the new fields leaves them `None` (backward compatible).
+    /// A `level1` selection block round-trips and fills the variant defaults
+    /// when its fields are omitted.
     #[test]
-    fn dynamic_cut_selection_fields_default_to_none() {
+    fn level1_selection_block_round_trips_with_defaults() {
         let json = r#"{
             "forward_passes": 4,
             "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
-            "cut_selection": { "enabled": true, "method": "dynamic" }
+            "cut_selection": { "selection": { "method": "level1" } }
         }"#;
         let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
-        let cs = &cfg.cut_selection;
-        assert_eq!(cs.start_iteration, None);
-        assert_eq!(cs.candidate_window, None);
-        assert_eq!(cs.nadic, None);
-        assert_eq!(cs.violation_tolerance, None);
+        match cfg
+            .cut_selection
+            .selection
+            .as_ref()
+            .expect("selection present")
+        {
+            SelectionMethod::Level1 {
+                tie_tolerance,
+                check_frequency,
+            } => {
+                assert!((*tie_tolerance - 1e-10).abs() < 1e-20);
+                assert_eq!(*check_frequency, 5);
+            }
+            other => panic!("expected Level1, got {other:?}"),
+        }
+    }
+
+    /// Omitting `selection` disables row selection (the default).
+    #[test]
+    fn omitting_selection_disables_row_selection() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "cut_selection": {}
+        }"#;
+        let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
+        assert!(cfg.cut_selection.selection.is_none());
+    }
+
+    /// A parameter that belongs to a different method is a deserialize error
+    /// under `deny_unknown_fields` (here `max_added_per_round` under `level1`).
+    #[test]
+    fn wrong_method_field_is_deserialize_error() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "cut_selection": {
+                "selection": { "method": "level1", "max_added_per_round": 3 }
+            }
+        }"#;
+        let result = serde_json::from_str::<TrainingConfig>(json);
+        assert!(
+            result.is_err(),
+            "a Dynamic-only field under level1 must be rejected"
+        );
+    }
+
+    /// A misspelled `method` is an unknown-variant deserialize error.
+    #[test]
+    fn bad_method_string_is_deserialize_error() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "cut_selection": { "selection": { "method": "dynmic" } }
+        }"#;
+        let result = serde_json::from_str::<TrainingConfig>(json);
+        assert!(result.is_err(), "an unknown method tag must be rejected");
+    }
+
+    /// `domination` without its required `domination_tolerance` is a
+    /// missing-field deserialize error.
+    #[test]
+    fn domination_without_tolerance_is_missing_field_error() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "cut_selection": { "selection": { "method": "domination" } }
+        }"#;
+        let result = serde_json::from_str::<TrainingConfig>(json);
+        assert!(
+            result.is_err(),
+            "domination requires domination_tolerance; absence must be rejected"
+        );
     }
 }

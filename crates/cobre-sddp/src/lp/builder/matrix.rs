@@ -165,8 +165,8 @@ fn fill_theta_column(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
 /// For constant-productivity hydros, caps turbine flow so that
 /// `productivity * turbined <= max_generation_mw` (derated capacity).
 /// Carries `turbined_cost * block_hours` in the objective on every hydro's
-/// turbine column regardless of production model — matches NEWAVE behavior
-/// where the turbined cost applies to every plant, not only FPHA hydros.
+/// turbine column regardless of production model — the turbined cost
+/// applies to every plant, not only FPHA hydros.
 fn fill_turbine_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -744,8 +744,8 @@ fn fill_generation_below_columns(
 /// solve. With `allow_curtailment == true` (the default) the column is
 /// fully curtailable (bit-identical to the pre-flag behaviour); with
 /// `allow_curtailment == false` the column is pinned to the available
-/// level on every stage (must-run, matching NEWAVE's
-/// `geracao_usinas_nao_simuladas` pre-netting convention).
+/// level on every stage (must-run: non-simulated aggregate generation
+/// pre-netted from load).
 fn fill_ncs_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,

@@ -47,7 +47,7 @@ use std::sync::mpsc;
 
 use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::scenario::ScenarioSource;
-use cobre_io::config::StoppingRuleConfig;
+use cobre_io::config::{SelectionMethod, StoppingRuleConfig};
 use cobre_sddp::{
     SolverStatsDelta, SolverStatsLogEntry, StudySetup, hydro_models::prepare_hydro_models,
     setup::prepare_stochastic,
@@ -227,11 +227,11 @@ fn basis_reconstruct_churn() {
     config.training.forward_passes = Some(3);
     config.training.stopping_rules = Some(vec![StoppingRuleConfig::IterationLimit { limit: 8 }]);
 
-    // LML1 cut selection: deactivate cuts unused for 2 iterations; check every iter.
-    config.training.cut_selection.enabled = Some(true);
-    config.training.cut_selection.method = Some("lml1".to_string());
-    config.training.cut_selection.memory_window = Some(2);
-    config.training.cut_selection.check_frequency = Some(1);
+    // LML1 cut selection: value-based oldest-at-max selection; check every iter.
+    config.training.cut_selection.selection = Some(SelectionMethod::Lml1 {
+        tie_tolerance: 1e-10,
+        check_frequency: 1,
+    });
 
     // Cut budget: 6 active cuts per stage.
     // Eviction starts after iteration 2 (2 iters × 3 fwd-passes = 6 cuts/stage).
@@ -355,7 +355,7 @@ fn test_basis_reconstruct_no_churn_full_preservation() {
     config.training.stopping_rules = Some(vec![StoppingRuleConfig::IterationLimit { limit: 3 }]);
 
     // No cut selection — cuts only grow.
-    config.training.cut_selection.enabled = Some(false);
+    config.training.cut_selection.selection = None;
     config.training.cut_selection.max_active_per_stage = None;
 
     let system = cobre_io::load_case(&case_dir).expect("load_case must succeed");
@@ -687,7 +687,7 @@ fn simulate_baked_path_zero_consistency_failures() {
     config.training.stopping_rules = Some(vec![StoppingRuleConfig::IterationLimit { limit: 2 }]);
 
     // No cut selection — cuts only grow; keeps slot tracking simple.
-    config.training.cut_selection.enabled = Some(false);
+    config.training.cut_selection.selection = None;
     config.training.cut_selection.max_active_per_stage = None;
 
     // Enable simulation so StudySetup::simulation_config() returns n_scenarios > 0.

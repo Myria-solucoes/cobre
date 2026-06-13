@@ -470,7 +470,7 @@ fn rebuild_historical_library_non_root(
             window_years.clone(),
         );
         // Pass past_inflows so the η-inversion rolling chain is seeded
-        // from the same x₀ as the forward pass (TENDENCIA HIDROLOGICA
+        // from the same x₀ as the forward pass (hydrological-tendency
         // convention). Compute stage_lag_transitions explicitly via the
         // same helper the production setup path uses, so the broadcast
         // path stays correct under non-monthly study grids should they

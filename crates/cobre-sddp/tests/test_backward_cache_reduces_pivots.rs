@@ -177,7 +177,7 @@ fn test_backward_cache_reduces_pivots() {
     // This matches the CLI run whose parquet output was used to measure the baseline.
     // Explicitly clear any cut-selection overrides to ensure the default no-selection
     // path is exercised.
-    config.training.cut_selection.enabled = Some(false);
+    config.training.cut_selection.selection = None;
     config.training.cut_selection.max_active_per_stage = None;
 
     let system = cobre_io::load_case(&case_dir).expect("load_case must succeed");

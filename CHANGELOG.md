@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING — `training.cut_selection` restructured.** Method-specific
+  parameters now live inside a tagged `selection` object instead of a flat bag
+  of fields. The top level keeps only the always-on knobs
+  (`row_activity_tolerance`, `max_active_per_stage`) plus `selection`; the chosen
+  `selection.method` (`"level1"`, `"lml1"`, `"domination"`, or `"dynamic"`)
+  carries only its own parameters. Supplying a parameter that belongs to a
+  different method, or misspelling `method`, is now a config-load error rather
+  than a silently ignored value. Omitting `selection` disables row selection.
+
+  Field renames (all now scoped to their method's `selection` block unless
+  noted):
+  - `cut_activity_tolerance` → `row_activity_tolerance` (top-level, always-on)
+  - `active_window` → `seed_window` (dynamic)
+  - `candidate_window` → `candidate_recency` (dynamic)
+  - `nadic` → `max_added_per_round` (dynamic)
+  - `domination_epsilon` → `domination_tolerance` (domination)
+
+  Under the dynamic method, `violation_tolerance` no longer falls back to a
+  level-1 tie tolerance; it defaults to `1e-10` directly.
+
+### Removed
+
+- **`training.cut_selection` legacy fields.** `enabled` and `method` are gone —
+  the presence of `selection` enables row selection and `selection.method` is the
+  discriminator. The dead fields `threshold`, `memory_window`, and
+  `basis_activity_window` are removed entirely. Existing configs that set any
+  removed or renamed key must be migrated to the `selection` block; an unmigrated
+  flat config now fails to load with a clear deserialize error.
+
 ## [0.8.1] - 2026-06-13
 
 ### Added
