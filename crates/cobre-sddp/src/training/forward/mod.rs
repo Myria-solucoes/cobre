@@ -223,21 +223,21 @@ pub(crate) struct StageKey<'a> {
 ///   single [`crate::context::StageContext`]. Contains: stage templates, base
 ///   row indices, noise scale factors, hydro and load-bus counts, load-balance
 ///   row starts, load-bus index mapping, and per-stage block counts.
+/// - `baked` — the per-stage baked all-cuts [`StageTemplate`]s.
 /// - `fcf` — Future Cost Function carrying the current Benders cut pools.
-/// - `stochastic` — pre-built stochastic pipeline (tree, seed, dim).
-/// - `local_forward_passes` — number of forward-pass scenarios assigned to this
-///   rank (the caller splits the user's total across MPI ranks).
-/// - `iteration` — current training iteration (0-based counter used for seed
-///   derivation).
-/// - `horizon` — horizon mode determining the stage count.
-/// - `initial_state` — starting state for every scenario (length `n_state`).
+/// - `training_ctx` — study-level [`crate::context::TrainingContext`] bundle.
+///   Carries `horizon` (stage count), `indexer` (LP column/row layout),
+///   `initial_state` (starting state for every scenario, length `n_state`),
+///   `stochastic` (pre-built pipeline: tree, seed, dim), and `inflow_method`
+///   (inflow non-negativity treatment — whether slack columns absorb negative
+///   inflow).
+/// - `batch` — per-iteration [`ForwardPassBatch`] config. Carries
+///   `local_forward_passes` (scenarios assigned to this rank; the caller splits
+///   the user's total across MPI ranks), `total_forward_passes`, `iteration`
+///   (0-based, for seed derivation), and `fwd_offset` (global index of this
+///   rank's first forward pass; `global_scenario = fwd_offset + m`).
 /// - `records` — pre-allocated output slice of length
 ///   `local_forward_passes * num_stages`.
-/// - `indexer` — LP column/row layout map for this stage.
-/// - `fwd_offset` — global index of this rank's first forward pass. Used for
-///   deterministic seed derivation (`global_scenario = fwd_offset + m`).
-/// - `inflow_method` — inflow non-negativity treatment. Controls whether
-///   slack columns are present in the LP for absorbing negative inflow.
 ///
 /// ## Record layout
 ///
@@ -259,23 +259,16 @@ pub(crate) struct StageKey<'a> {
 ///
 /// # Panics (debug builds only)
 ///
-/// Panics if any of the following debug preconditions are violated:
+/// Panics if a debug precondition is violated (the assertions fire inside
+/// `ForwardPassState::run`):
 ///
-/// - `records.len() != local_forward_passes * num_stages`
-/// - `initial_state.len() != indexer.n_state`
-/// - `ctx.templates.len() != num_stages`
-/// - `ctx.base_rows.len() != num_stages`
+/// - `records.len() != batch.local_forward_passes * num_stages`
+/// - `training_ctx.initial_state.len() != training_ctx.indexer.n_state`
 ///
-/// Structurally independent parameters: `workspaces` / `basis_store` are per-rank mutable,
-/// `ctx`/`baked`/`fcf` are per-stage read/write state, `training_ctx` is study-level,
-/// `batch` is per-iteration config, `records` is the trajectory output.
-/// Thin shim: delegates to `ForwardPassState::run`.
-///
-/// Callers in the test suite pass arguments in the old free-function style;
-/// the shim constructs a temporary `ForwardPassState` and
-/// `ForwardPassInputs` and calls `run` on them.
-/// Production callers use `TrainingSession::run_forward_phase` which drives
-/// `fwd_state.run(...)` directly.
+/// `run_forward_pass` is a thin shim: it constructs a temporary
+/// `ForwardPassState` + `ForwardPassInputs` and calls `run` on them. Production
+/// callers use `TrainingSession::run_forward_phase`, which drives
+/// `ForwardPassState::run` directly and bypasses this shim.
 pub fn run_forward_pass<S>(
     workspaces: &mut [SolverWorkspace<S>],
     basis_store: &mut BasisStore,

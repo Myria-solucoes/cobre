@@ -30,9 +30,9 @@
 //!
 //! where `Q` is the LP objective, `col_i = state_to_lp_incoming_column(i)` is the
 //! bound-pinned incoming-state column, and `reduced_cost[col_i]` is its `HiGHS`
-//! reduced cost (the dual of the `lb == ub` pin — equal to the legacy
-//! fixing-row dual by KKT stationarity). State fixing moved from equality rows to
-//! column bounds in the state-fixing cutover; the gradient is now a reduced cost,
+//! reduced cost (the dual of the `lb == ub` pin — equal to the
+//! fixing-row dual by KKT stationarity). State fixing uses column bounds, not
+//! equality rows; the gradient is a reduced cost,
 //! unscaled by `col_scale` (not `row_scale`). The convention is
 //! `coefficients = reduced_cost` (raw, no sign flip at extraction). Negation is
 //! applied later when building the LP cut row in
