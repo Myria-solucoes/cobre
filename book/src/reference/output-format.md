@@ -123,7 +123,7 @@ single file. Consumers should check `status` before interpreting other fields.
 
 ```json
 {
-  "cobre_version": "0.8.0",
+  "cobre_version": "0.8.1",
   "hostname": "fedora",
   "solver": "highs",
   "solver_version": "1.13.1",
@@ -706,7 +706,7 @@ LP solver statistics, and distribution information.
 
 ```json
 {
-  "cobre_version": "0.8.0",
+  "cobre_version": "0.8.1",
   "hostname": "fedora",
   "solver": "highs",
   "started_at": "2026-06-09T14:09:50Z",

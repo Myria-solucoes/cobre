@@ -9,7 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-06-13
+
 ### Added
+
+- Dynamic cut-selection method, selected with
+  `training.cut_selection.method = "dynamic"`. Rather than carrying the entire cut
+  pool into every LP, a dynamic run loads only a small resident subset of cuts per
+  solve — keeping per-solve LP size bounded as the pool grows while the full pool
+  is retained — and applies uniformly across the backward pass, forward pass, and
+  simulation. The resident set is tuned by `active_window` (the seed window `k2`,
+  below), `candidate_window`, and `nadic`, and is mutually exclusive with the
+  periodic-pruning methods (`level1` / `lml1` / `domination`).
 
 - `training.cut_selection.active_window` — a first-class config field for the
   dynamic cut-selection active-set seed window (`k2`). Applies only when
@@ -48,6 +59,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Existing builds are unaffected: the default backend remains HiGHS, and
   the CLP backend is strictly opt-in.
 
+- `anticipated_thermal_cost` — a new per-stage field in the run cost output that
+  attributes the forward-committed (anticipated) thermal commitment cost, so the
+  sum of the named cost categories reconciles to `immediate_cost`. It is zero for
+  cases with no anticipated units and is written identically by the CLI and Python
+  paths.
+
+- Dynamic cut selection now reports the per-solve resident-set size — the cuts
+  actually loaded into each LP. Surfaced as a run-level mean and max in the console
+  summary and `training/metadata.json`, and as a per-iteration `mean_rows_in_lp`
+  column in `training/convergence.parquet`. The pool `active / generated` line is
+  retained as the pool/memory-footprint figure. The metric is work-distribution
+  invariant (bit-identical across thread counts).
+
 ### Changed
 
 - `method = "dynamic"` no longer reads `check_frequency` for its `k2` window;
@@ -62,6 +86,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   candidate-recency window (`k1`) under `dynamic`; that honoring is removed. The
   fields remain accepted in config files (so existing configs still parse) but
   no longer affect behavior. Configure `nadic` and `candidate_window` directly.
+- Distributed release artifacts (CLI archives, Python wheels, MPI tarball) now
+  bundle the complete third-party license notices for the Rust dependency graph
+  (`THIRD_PARTY_LICENSES.md`), in addition to the vendored C++ solver attributions
+  already recorded in `NOTICE` and `THIRD_PARTY_NOTICES.md`.
+
+### Fixed
+
+- Per-entity hydro penalty overrides: the directional water-withdrawal and
+  evaporation violation costs (`*_violation_pos_cost` / `*_violation_neg_cost`)
+  now fall back to the entity's resolved symmetric cost when left unset, instead
+  of the global directional default. An entity that overrode only the symmetric
+  `water_withdrawal_violation_cost` / `evaporation_violation_cost` previously had
+  its directional costs silently revert to the global value.
+- PAR(p) estimation no longer panics for studies whose horizon is narrower than
+  the season cycle (for example a monthly model running only September–December).
+  Seasons that are not lag-reachable are skipped, and for PAR(p > 0) the
+  recent-past months before the study start are synthesized from history so their
+  seasonal statistics feed the pre-study lags. Studies that span the full cycle
+  (or carry no out-of-window history) are unaffected and remain bit-identical.
+- Water-withdrawal violation modeling: the under-delivery slack is now bounded so
+  realized withdrawal cannot cross zero past its target. Previously a run-of-river
+  plant could "un-withdraw" well beyond its target and inject phantom water; the
+  bound is sign-aware for negative/return targets. This affects only degenerate
+  cases — realized withdrawal now pins at the target.
 
 ## [0.8.0] - 2026-06-01
 
@@ -2001,6 +2049,7 @@ disappears from `cobre.results.load_policy` per-cut dicts.
 <!-- next-url -->
 
 [Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.8.0...HEAD
+[0.8.1]: https://github.com/cobre-rs/cobre/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/cobre-rs/cobre/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/cobre-rs/cobre/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/cobre-rs/cobre/compare/v0.6.1...v0.6.2

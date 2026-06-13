@@ -135,7 +135,7 @@ training. The 1dtoy run produces:
 
 ```json
 {
-  "cobre_version": "0.8.0",
+  "cobre_version": "0.8.1",
   "hostname": "fedora",
   "solver": "highs",
   "solver_version": "1.13.1",
