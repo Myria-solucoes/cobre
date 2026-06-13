@@ -62,7 +62,7 @@ When modifying hot-path code (`forward.rs`, `backward.rs`, `training.rs`,
 → `.claude/architecture-rules.md`
 
 When applying a stored basis at any call site, read:
-→ `crates/cobre-sddp/src/basis_reconstruct.rs` module docs.
+→ `crates/cobre-sddp/src/cut/basis_reconstruct.rs` module docs.
 Two public entry points exist — use the correct one for the path:
 
 - `reconstruct_basis` — the **baked hot path** (forward pass, simulation, baked

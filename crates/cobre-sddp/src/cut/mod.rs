@@ -32,12 +32,18 @@
 //! warm-start-specific pruning policies (e.g., exempt warm-start cuts from
 //! LML1 deactivation).
 
+pub mod basis_reconstruct;
+pub mod cut_selection;
+pub mod cut_sync;
+pub mod dcs;
 pub mod fcf;
 pub mod pool;
 pub mod row;
 pub mod row_map;
 pub mod wire;
 
+pub use cut_selection::CutSelectionStrategy;
+pub use cut_sync::CutSyncBuffers;
 pub use fcf::FutureCostFunction;
 pub use pool::{CutPool, SparsityReport};
 pub use row_map::CutRowMap;

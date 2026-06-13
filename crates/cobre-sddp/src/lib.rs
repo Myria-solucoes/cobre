@@ -31,13 +31,9 @@
 //   other workspace crates).
 pub(crate) mod backward;
 pub(crate) mod backward_pass_state;
-pub mod basis_reconstruct;
 pub mod config;
 pub mod convergence;
 pub mod cut;
-pub mod cut_selection;
-pub mod cut_sync;
-pub mod dcs;
 pub mod error;
 pub mod forward;
 pub(crate) mod forward_pass_state;
@@ -84,6 +80,32 @@ pub(crate) use solve::stage_solve;
 // verbatim for the integration tests in `tests/conformance.rs`, which import
 // these submodules by qualified path.
 pub use convergence::{risk_measure, stopping_rule};
+
+// Crate-root submodule shims for the `cut/` cluster move (`cut_selection`,
+// `cut_sync`, `dcs`, `basis_reconstruct` were flat at the crate root; they now
+// live under `cut/`). Each shim re-exposes a moved submodule at its pre-move
+// crate-root path so consumers resolve verbatim without per-site edits:
+//
+//   - `cut_selection` — `cobre_sddp::cut_selection::` in `benches/cut_selection_kernel.rs`
+//     and the integration tests `tests/{cut_selection_kernel_perf,cut_selection_determinism_realistic}.rs`,
+//     the internal `crate::cut_selection::` call sites across `backward.rs`,
+//     `backward_pass_state.rs`, `config.rs`, `cut/pool.rs`, `cut/dcs.rs`,
+//     `forward.rs`, `simulation/pipeline.rs`, `training.rs`, and
+//     `training_session/mod.rs`, plus the `crate::cut_selection::CutMetadata`
+//     intra-doc links in `cut/mod.rs`.
+//   - `cut_sync` — the internal `crate::cut_sync::CutSyncBuffers` references
+//     (reached via grouped `use crate::{ … }` imports) in `backward.rs`,
+//     `backward_pass_state.rs`, and `training_session/mod.rs`.
+//   - `dcs` — `cobre_sddp::dcs::` in `benches/dcs_batched_scoring.rs` plus the
+//     internal `crate::dcs::` call sites across `backward.rs`, `forward.rs`,
+//     `setup/{accessors,mod}.rs`, `simulation/pipeline.rs`, and
+//     `workspace/workspace.rs`.
+//   - `basis_reconstruct` — `cobre_sddp::basis_reconstruct::` in
+//     `tests/hybrid_reconstruction.rs` (plus the doc-comment intra-doc links in
+//     `tests/basis_reconstruct_churn.rs` and `cobre-python/src/run.rs`), and the
+//     internal `crate::basis_reconstruct::` call sites in `cut/dcs.rs`,
+//     `forward.rs`, and `workspace/workspace.rs`.
+pub use cut::{basis_reconstruct, cut_selection, cut_sync, dcs};
 
 // Crate-root submodule shims for the `lp/` cluster move (`indexer` /
 // `generic_constraints` / `lp_builder` were flat at the crate root; they now
@@ -168,9 +190,9 @@ pub use convergence::convergence::ConvergenceMonitor;
 pub use cut::wire::{CutWireHeader, cut_wire_size, deserialize_cut, serialize_cut};
 pub use cut::{CutPool, FutureCostFunction};
 // ── cut_selection ─────────────────────────────────────────────────────────────
-pub use cut_selection::CutSelectionStrategy;
+pub use cut::cut_selection::CutSelectionStrategy;
 // ── cut_sync ──────────────────────────────────────────────────────────────────
-pub use cut_sync::CutSyncBuffers;
+pub use cut::cut_sync::CutSyncBuffers;
 // ── cut::row ──────────────────────────────────────────────────────────────────
 pub use cut::row::build_cut_row_batch_into;
 // ── energy_conversion ─────────────────────────────────────────────────────────

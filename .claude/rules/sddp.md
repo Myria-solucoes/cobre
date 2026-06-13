@@ -49,7 +49,7 @@ encodes **only active cuts** (one row per `active_cuts()` entry), not inactive
 cuts at sentinel bounds. Warm-start basis reconstruction therefore matches stored
 cut rows to current LP rows by **`CutPool` slot identity**, never by row count.
 `reconstruct_basis` is the single hot-path entry point — never bypass it.
-Read: `cut/pool.rs`, `basis_reconstruct.rs`.
+Read: `cut/pool.rs`, `cut/basis_reconstruct.rs`.
 
 ## NCS stochastic availability is a dimensionless factor
 
