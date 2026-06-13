@@ -1,0 +1,144 @@
+//! Delta-cut `RowBatch` construction for baked-template appends.
+//!
+//! Owns `build_delta_cut_row_batch_into`: fills a pre-allocated `RowBatch` with
+//! only the cut rows generated in the current iteration, for appending to a
+//! baked template via `add_rows`.
+
+use cobre_solver::RowBatch;
+
+use crate::cut::FutureCostFunction;
+use crate::cut::row::push_scaled_coefficient;
+use crate::indexer::StageIndexer;
+
+/// Fill a pre-allocated [`RowBatch`] with only the Benders cut rows generated
+/// in `current_iteration`.
+///
+/// Clears `batch` and repopulates it with the subset of active cuts from
+/// `fcf.pools[stage]` whose `iteration_generated` metadata field equals
+/// `current_iteration`. Warm-start cuts (sentinel `iteration_generated ==
+/// u64::MAX`) are always excluded.
+///
+/// Delta-cut variant of [`build_cut_row_batch_into`](crate::cut::row::build_cut_row_batch_into)
+/// for use with baked templates.
+///
+/// When a baked template contains all cuts from previous iterations, this
+/// function builds only the new cuts from `current_iteration` for appending
+/// via `add_rows`. The CSR layout and coefficient transformation are identical
+/// to [`build_cut_row_batch_into`](crate::cut::row::build_cut_row_batch_into);
+/// when the pool contains only cuts from `current_iteration`, both functions
+/// produce byte-identical output.
+///
+/// # Panics
+///
+/// Panics if total non-zeros exceeds `i32::MAX` (`HiGHS` API limit).
+pub fn build_delta_cut_row_batch_into(
+    batch: &mut RowBatch,
+    fcf: &FutureCostFunction,
+    stage: usize,
+    indexer: &StageIndexer,
+    col_scale: &[f64],
+    current_iteration: u64,
+) {
+    batch.clear();
+
+    let n_state = indexer.n_state;
+    let theta_col = indexer.theta;
+    let mask = &indexer.nonzero_state_indices;
+    let is_sparse = !mask.is_empty();
+
+    // Count delta cuts with a lightweight scan to avoid double-iteration
+    // overhead in the common case of zero delta cuts (early return).
+    let num_cuts: usize = fcf.pools[stage]
+        .active_delta_cuts(current_iteration)
+        .count();
+
+    if num_cuts == 0 {
+        batch.row_starts.push(0_i32);
+        return;
+    }
+
+    // Sparse path: NNZ = mask.len() + 1 (nonzero state entries + theta).
+    // Dense path: NNZ = n_state + 1 (all state entries + theta).
+    let nnz_per_cut = if is_sparse {
+        mask.len() + 1
+    } else {
+        n_state + 1
+    };
+    let total_nnz = num_cuts * nnz_per_cut;
+
+    let mut nz_offset = 0;
+
+    for (_slot, intercept, coefficients) in fcf.pools[stage].active_delta_cuts(current_iteration) {
+        debug_assert_eq!(
+            coefficients.len(),
+            n_state,
+            "cut coefficients length {got} != n_state {expected}",
+            got = coefficients.len(),
+            expected = n_state,
+        );
+
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        batch.row_starts.push(nz_offset as i32);
+
+        // Unified state coefficient loop: sparse iterates over the nonzero
+        // mask, dense iterates over all state indices. Both yield (col_index,
+        // coefficient) pairs and share the same push logic.
+        //
+        // state_to_lp_column remaps outgoing-state indices to LP columns.
+        // For storage (j < N) the mapping is identity. For lag dimensions
+        // the outgoing state after shift_lag_state stores z_inflow at lag 0
+        // and shifted incoming lags at lag 1+, so the cut must reference the
+        // corresponding LP columns (z_inflow and incoming lag l−1).
+        if is_sparse {
+            for &j in mask {
+                let lp_col = indexer.state_to_lp_column(j);
+                push_scaled_coefficient(batch, lp_col, coefficients[j], col_scale);
+            }
+        } else {
+            for (j, &c) in coefficients.iter().enumerate() {
+                let lp_col = indexer.state_to_lp_column(j);
+                // Padding-slot invariant: when state_to_lp_column returns j unchanged
+                // and j falls inside the anticipated-state block, the slot is a padding
+                // slot (slot >= k_p for its plant). The INVARIANT comment in
+                // state_to_lp_column explains the 5-step chain that guarantees the
+                // corresponding cut coefficient is 0.0. Assert this in debug builds.
+                debug_assert!(
+                    !(lp_col == j
+                        && indexer.n_anticipated > 0
+                        && j >= indexer.anticipated_state.start
+                        && j < indexer.anticipated_state.start
+                            + indexer.n_anticipated * indexer.k_max)
+                        || c == 0.0,
+                    "padding-slot j={j} has non-zero cut coefficient {c}; \
+                     shift_anticipated_state must have seeded a non-zero into a padding slot"
+                );
+                push_scaled_coefficient(batch, lp_col, c, col_scale);
+            }
+        }
+
+        debug_assert!(
+            i32::try_from(theta_col).is_ok(),
+            "theta_col={theta_col} exceeds i32::MAX"
+        );
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        batch.col_indices.push(theta_col as i32);
+        let d_theta = if col_scale.is_empty() {
+            1.0
+        } else {
+            col_scale[theta_col]
+        };
+        batch.values.push(d_theta);
+
+        batch.row_lower.push(intercept);
+        batch.row_upper.push(f64::INFINITY);
+
+        nz_offset += nnz_per_cut;
+    }
+
+    #[allow(clippy::expect_used)]
+    batch.row_starts.push(
+        i32::try_from(total_nnz).expect("total_nnz exceeds i32::MAX; LP exceeds HiGHS API limit"),
+    );
+
+    batch.num_rows = num_cuts;
+}

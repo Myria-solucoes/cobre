@@ -22,7 +22,7 @@ Available context structs:
 | `SolverWorkspace`     | `cobre-sddp/src/workspace/workspace.rs`          | Solver + scratch + patch buffer                                                                | Mutable (`&mut`)        |
 | `TrainingConfig`      | `cobre-sddp/src/config.rs`                       | Forward passes, iteration limit, seed                                                          | Owned (moved in)        |
 | `SimulationConfig`    | `cobre-sddp/src/simulation/config.rs`            | Scenario count, channel capacity                                                               | Immutable (`&`)         |
-| `ForwardPassBatch`    | `cobre-sddp/src/training/forward.rs`             | Local pass count, iteration, offset                                                            | Immutable (`&`)         |
+| `ForwardPassBatch`    | `cobre-sddp/src/training/forward/mod.rs`         | Local pass count, iteration, offset                                                            | Immutable (`&`)         |
 | `LbEvalSpec`          | `cobre-sddp/src/training/lower_bound.rs`         | Template, noise scale, opening tree                                                            | Immutable (`&`)         |
 | `TrainingSession`     | `cobre-sddp/src/training/session/mod.rs`         | Owns solver, pools, sub-state structs, scratch                                                 | Owned driver            |
 | `BackwardPassState`   | `cobre-sddp/src/training/backward_pass_state.rs` | Owned scratch for backward-pass helpers                                                        | Mutable (`&mut self`)   |

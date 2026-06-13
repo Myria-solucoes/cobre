@@ -57,7 +57,7 @@ Comment & documentation rules for all `.rs` files are codified in `.claude/rules
 
 Prose documentation integrity rules (scope matrix, the single adaptation, and the six prose-only failure modes) are codified in `.claude/rules/doc-integrity.md`, which auto-loads when editing Markdown files in `book/`, `CONTRIBUTING.md`, `CHANGELOG.md`, and root-level `*.md`.
 
-When modifying hot-path code (`training/forward.rs`, `training/backward.rs`,
+When modifying hot-path code (`training/forward/`, `training/backward.rs`,
 `training/training.rs`, `simulation/pipeline.rs`, `training/lower_bound.rs`),
 read:
 → `.claude/architecture-rules.md`
