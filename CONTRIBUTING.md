@@ -307,8 +307,8 @@ The methodology specification corpus lives in the separate
 
 ### Python Parity
 
-Every output file written by the CLI (`write_outputs` in `crates/cobre-cli/src/commands/run.rs`)
-must also be written by the Python bindings (`run_inner` in `crates/cobre-python/src/run.rs`).
+Every output file written by the CLI (`write_training_outputs` / `write_simulation_outputs` in `crates/cobre-cli/src/commands/run/outputs.rs`)
+must also be written by the Python bindings (`run_via_study` / `run_training_phase_py` in `crates/cobre-python/src/run.rs`).
 When adding a new output:
 
 1. Add the `cobre_io::write_*` call in both the CLI and Python paths

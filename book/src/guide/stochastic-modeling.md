@@ -422,7 +422,7 @@ UserProvidedAll   Partial   UserAr           Full
 | Provide every parameter, including the PAR-A annual term | All three of `H`, `S`, `R` (and optionally annual file)           | 7           |
 | Pin a custom spatial correlation on any path             | Add `correlation.json`                                            | any         |
 
-The canonical implementation lives in `crates/cobre-sddp/src/estimation.rs` —
+The canonical implementation lives in `crates/cobre-sddp/src/stochastic/estimation.rs` —
 `EstimationPath::resolve` and the dispatch in `estimate_from_history` — with the
 per-path fitting logic in `run_estimation` (path 4), `run_partial_estimation`
 (path 6), and `run_user_ar_estimation` (path 5).

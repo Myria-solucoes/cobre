@@ -85,7 +85,7 @@ both methods together; the `broadcast_basis_cache` helper
 in `training/training.rs` only owns the four MPI broadcast calls.
 
 When adding new LP variables, constraints, or entity types, read:
-→ `crates/cobre-sddp/src/lp/builder/mod.rs` module docs and `crates/cobre-sddp/src/lp/indexer.rs`
+→ `crates/cobre-sddp/src/lp/builder/mod.rs` module docs and `crates/cobre-sddp/src/lp/indexer/mod.rs`
 
 When modifying study setup construction or scenario library building, read:
 → `crates/cobre-sddp/src/setup/mod.rs` — `setup/` is a directory module whose
@@ -94,7 +94,7 @@ layout and which sub-module owns each piece is mapped in
 `.claude/architecture-rules.md` → "StudySetup Sub-Structs".
 
 When adding new output files, check both CLI and Python write paths:
-→ `crates/cobre-cli/src/commands/run.rs` (`write_training_outputs` / `write_simulation_outputs` functions)
+→ `crates/cobre-cli/src/commands/run/outputs.rs` (`write_training_outputs` / `write_simulation_outputs` functions)
 → `crates/cobre-python/src/run.rs` (`run_via_study` / `run_training_phase_py` functions)
 
 ---
