@@ -30,7 +30,7 @@ The `storage_fixing`, `lag_fixing`, and `anticipated_state_fixing` ranges in
 `StageIndexer` are permanent empty sentinels (`0..0`). Always resolve the LP
 column — for both pinning and dual extraction — via
 `StageIndexer::state_to_lp_incoming_column`; never assume a fixing-row index.
-Read: `lp/indexer.rs`.
+Read: `lp/indexer/state_mapping.rs` (`lp/indexer/layout.rs` for the `0..0` sentinel field docs).
 
 ## FPHA uses average storage
 
