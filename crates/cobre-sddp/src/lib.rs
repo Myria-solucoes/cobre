@@ -184,9 +184,10 @@ pub(crate) use stochastic::{noise, stochastic_summary};
 //     `cut/row.rs`. Keeps `pub` to match its pre-move visibility.
 //   - `backward` — `crate::backward::StagedCut` in `workspace/workspace.rs`,
 //     `crate::backward::BackwardResult` in `training/session/mod.rs`, and the
-//     `crate::backward::extract_duals_from_view` intra-doc link in `cut/row.rs`.
+//     `crate::backward::duals_extraction::extract_duals_from_view` intra-doc link
+//     in `cut/row.rs`.
 //   - `backward_pass_state` — `crate::backward_pass_state::BackwardPass{State,Inputs}`
-//     in `training/backward.rs` and the doc reference in `cut/cut_selection.rs`.
+//     in `training/backward/` and the doc reference in `cut/cut_selection.rs`.
 //   - `forward_pass_state` — `crate::forward_pass_state::{ForwardPassInputs,
 //     ForwardPassState}` in `training/forward.rs`.
 //   - `lower_bound` — `crate::lower_bound::evaluate_lower_bound` intra-doc links

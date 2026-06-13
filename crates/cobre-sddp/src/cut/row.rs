@@ -4,8 +4,9 @@
 //! convention is owned here: `push_scaled_coefficient` negates the stored raw
 //! subgradient so each row reads `−∇·x + θ ≥ intercept`, yielding the Benders
 //! cut `θ ≥ Q(x̂) + π'(x − x̂)`. See `push_scaled_coefficient` for the
-//! cut-sign negation contract and `training::backward::extract_duals_from_view`
-//! for the subgradient-extraction side of the contract.
+//! cut-sign negation contract and
+//! `training::backward::duals_extraction::extract_duals_from_view` for the
+//! subgradient-extraction side of the contract.
 //!
 //! Consumers: the backward pass, simulation, lower-bound evaluation, and DCS
 //! (Dynamic Cut Selection). The forward training loop uses pre-baked templates
@@ -262,7 +263,7 @@ pub fn build_cut_row_batch(
 ///
 /// There are three production callers of [`SolverInterface::add_rows`]: this
 /// function (lower-bound LP), the backward pass delta-cut append in
-/// `cobre_sddp::backward::load_backward_lp`, and a test-only fallback path in
+/// `cobre_sddp::backward::lp_setup::load_backward_lp`, and a test-only fallback path in
 /// `cobre_sddp::lower_bound`. The training-loop forward pass does not call
 /// `add_rows`; it uses pre-baked templates exclusively. The lower-bound LP
 /// grows monotonically across iterations (new cuts are appended; nothing is

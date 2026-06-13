@@ -19,7 +19,7 @@ reduced cost **divided** by `col_scale`:
 pin sets `v_scaled = v_orig / col_scale`. Cut-row construction then negates the
 gradient so the LP row reads `−∇·x + θ ≥ intercept`, yielding the Benders cut
 `θ ≥ Q(x̂) + π'(x − x̂)`.
-Read: `training/backward.rs` (`extract_duals_from_view`), `cut/fcf.rs`, and
+Read: `training/backward/duals_extraction.rs` (`extract_duals_from_view`), `cut/fcf.rs`, and
 `cut::row::push_scaled_coefficient`, where `batch.values.push(-coeff * d)`
 applies the negation.
 
