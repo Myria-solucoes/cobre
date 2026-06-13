@@ -46,6 +46,10 @@
 #   - Absolute URLs: http://, https://, mailto:, ftp://.
 #   - Any token containing the substring `cobre-docs` (the external methodology
 #     repo, absent from this tree by design).
+#   - Any token into an LP-solver submodule (`crates/cobre-solver/vendor/HiGHS`,
+#     `.../Clp`, `.../CoinUtils`) — separately-versioned external repos, absent
+#     without a recursive checkout. The authored `vendor/coin-build/` glue is in
+#     this repo and stays validated.
 #   - Any token NOT starting with a recognized prefix and not a recognized
 #     top-level filename. User-data input-file names (config.json, thermals.json,
 #     system/hydros.json, output/...) are out of scope BY CONSTRUCTION — they
@@ -97,6 +101,14 @@ readonly REPO_FILES=(
 # Substrings that disqualify a token outright (external repos).
 readonly EXCLUDED_SUBSTRINGS=(
     "cobre-docs"
+    # The LP-solver submodules are separately-versioned external repos, absent
+    # unless checked out recursively (the lightweight script gates do not). Their
+    # contents are external to this tree, so paths into them are excluded on the
+    # same basis as cobre-docs. The authored `vendor/coin-build/` glue lives in
+    # this repo and is NOT matched here, so it stays validated.
+    "crates/cobre-solver/vendor/HiGHS"
+    "crates/cobre-solver/vendor/Clp"
+    "crates/cobre-solver/vendor/CoinUtils"
 )
 
 violations=""
