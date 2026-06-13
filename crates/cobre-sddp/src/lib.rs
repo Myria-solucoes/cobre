@@ -58,7 +58,7 @@ pub use workspace::context;
 // `solve/` cluster move) at their pre-move crate-root paths, so the in-crate
 // `crate::solver_phase::Phase` use in `simulation/state.rs` and the
 // `crate::stage_solve::{fill_unscaled, fill_unscaled_dual, StageInputs,
-// run_stage_solve}` uses in `training/forward.rs`, `training/backward.rs`, and
+// run_stage_solve}` uses in `training/forward/`, `training/backward/`, and
 // `simulation/pipeline.rs` resolve verbatim without per-site edits.
 // `stage_solve` keeps `pub(crate)` visibility — it has no external raw-path
 // consumer.
@@ -78,23 +78,23 @@ pub use convergence::{risk_measure, stopping_rule};
 //
 //   - `cut_selection` — `cobre_sddp::cut_selection::` in `benches/cut_selection_kernel.rs`
 //     and the integration tests `tests/{cut_selection_kernel_perf,cut_selection_determinism_realistic}.rs`,
-//     the internal `crate::cut_selection::` call sites across `training/backward.rs`,
+//     the internal `crate::cut_selection::` call sites across `training/backward/`,
 //     `training/backward_pass_state.rs`, `config.rs`, `cut/pool.rs`, `cut/dcs.rs`,
-//     `training/forward.rs`, `simulation/pipeline.rs`, `training/training.rs`, and
+//     `training/forward/`, `simulation/pipeline.rs`, `training/training.rs`, and
 //     `training/session/mod.rs`, plus the `crate::cut_selection::CutMetadata`
 //     intra-doc links in `cut/mod.rs`.
 //   - `cut_sync` — the internal `crate::cut_sync::CutSyncBuffers` references
-//     (reached via grouped `use crate::{ … }` imports) in `training/backward.rs`,
+//     (reached via grouped `use crate::{ … }` imports) in `training/backward/`,
 //     `training/backward_pass_state.rs`, and `training/session/mod.rs`.
 //   - `dcs` — `cobre_sddp::dcs::` in `benches/dcs_batched_scoring.rs` plus the
-//     internal `crate::dcs::` call sites across `training/backward.rs`,
-//     `training/forward.rs`, `setup/{accessors,mod}.rs`, `simulation/pipeline.rs`,
+//     internal `crate::dcs::` call sites across `training/backward/`,
+//     `training/forward/`, `setup/{accessors,mod}.rs`, `simulation/pipeline.rs`,
 //     and `workspace/workspace.rs`.
 //   - `basis_reconstruct` — `cobre_sddp::basis_reconstruct::` in
 //     `tests/hybrid_reconstruction.rs` (plus the doc-comment intra-doc links in
 //     `tests/basis_reconstruct_churn.rs` and `cobre-python/src/run.rs`), and the
 //     internal `crate::basis_reconstruct::` call sites in `cut/dcs.rs`,
-//     `training/forward.rs`, and `workspace/workspace.rs`.
+//     `training/forward/`, and `workspace/workspace.rs`.
 pub use cut::{basis_reconstruct, cut_selection, cut_sync, dcs};
 
 // Crate-root submodule shims for the `lp/` cluster move (`indexer` /
@@ -157,7 +157,7 @@ pub use production::{energy_conversion, hydro_models};
 //   - `estimation` — `crate::estimation::` in `error.rs`,
 //     `policy/{orchestration,provenance}.rs`, and
 //     `setup/stochastic_pipeline.rs`.
-//   - `inflow_method` — `crate::inflow_method::` in `indexer.rs`, `training/forward.rs`,
+//   - `inflow_method` — `crate::inflow_method::` in `indexer.rs`, `training/forward/`,
 //     and `lp_builder/{template,matrix}.rs`, `simulation/pipeline.rs`.
 //   - `lag_transition` — `cobre_sddp::lag_transition::precompute_stage_lag_transitions`
 //     in `cobre-cli/src/commands/run/setup.rs` (this symbol is intentionally NOT
@@ -165,7 +165,7 @@ pub use production::{energy_conversion, hydro_models};
 //     `crate::lag_transition::` uses in `workspace/context.rs` and
 //     `setup/{stochastic_pipeline,stage_data,mod}.rs`.
 //   - `noise_key_diag` — `crate::noise_key_diag::` in `setup/mod.rs`.
-//   - `noise` — `crate::noise::` in `workspace/context.rs`, `training/forward.rs`, and
+//   - `noise` — `crate::noise::` in `workspace/context.rs`, `training/forward/`, and
 //     `simulation/pipeline.rs`; `pub(crate)` keeps its crate-private visibility.
 //   - `stochastic_summary` — `crate::stochastic_summary::` in
 //     `policy/orchestration.rs`; `pub(crate)` keeps its crate-private visibility.
@@ -189,12 +189,13 @@ pub(crate) use stochastic::{noise, stochastic_summary};
 //   - `backward_pass_state` — `crate::backward_pass_state::BackwardPass{State,Inputs}`
 //     in `training/backward/` and the doc reference in `cut/cut_selection.rs`.
 //   - `forward_pass_state` — `crate::forward_pass_state::{ForwardPassInputs,
-//     ForwardPassState}` in `training/forward.rs`.
+//     ForwardPassState}` in `training/forward/`.
 //   - `lower_bound` — `crate::lower_bound::evaluate_lower_bound` intra-doc links
 //     in `convergence/convergence.rs`. Keeps `pub` to match its pre-move visibility.
-//   - `state_exchange` — no current `crate::state_exchange::` consumer; re-exported
-//     for symmetry with the other pass modules.
-//   - `trajectory` — `crate::trajectory::TrajectoryRecord` in `training/forward.rs`
+//   - `state_exchange` — `crate::state_exchange::ExchangeBuffers` in
+//     `training/backward_pass_state.rs`, `training/backward/trial_point.rs`, and
+//     `training/session/mod.rs` (load-bearing; do not remove).
+//   - `trajectory` — `crate::trajectory::TrajectoryRecord` in `training/forward/`
 //     and `training/state_exchange.rs`.
 //   - `visited_states` — `crate::visited_states::VisitedStatesArchive` in
 //     `training/training.rs`, `training/session/mod.rs`, and `policy/policy_export.rs`.

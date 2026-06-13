@@ -87,8 +87,7 @@ pub use backends::clp;
 #[cfg(feature = "highs")]
 pub use backends::highs;
 
-// Active backend selection (compile-time type alias). Per-item docs below carry
-// the mutual-exclusivity and "no alias when neither feature is enabled" rules.
+// Active backend selection (compile-time type alias).
 
 /// The compile-time-selected active LP solver backend.
 ///

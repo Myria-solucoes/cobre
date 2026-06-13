@@ -46,15 +46,17 @@ pub mod stats;
 pub mod system;
 pub mod topology;
 
-// Crate-root submodule shim: preserves the pre-move `crate::resolved::` /
+// Crate-root module-alias re-exports: make `crate::resolved::` /
 // `crate::scenario::` / `crate::temporal::` / `crate::parameters::` /
-// `crate::penalty::` paths verbatim for in-crate callers (system.rs,
-// scenario.rs) and external `cobre_core::<module>::Symbol` consumers.
+// `crate::penalty::` valid module paths for in-crate callers (system.rs,
+// scenario.rs) and external `cobre_core::<module>::Symbol` consumers. The
+// canonical sources are the `model::{...}` submodules.
 pub use model::{parameters, penalty, resolved, scenario, temporal};
 
-// Crate-root submodule shim: preserves the pre-move
-// `cobre_core::generic_constraint::` / `cobre_core::initial_conditions::` /
-// `cobre_core::training_event::` paths verbatim for external consumers.
+// Crate-root module-alias re-exports: make `cobre_core::generic_constraint::` /
+// `cobre_core::initial_conditions::` / `cobre_core::training_event::` valid
+// module paths for external consumers. Canonical source: the `constraints::`
+// submodules.
 pub use constraints::{generic_constraint, initial_conditions, training_event};
 
 pub use constraints::generic_constraint::{
