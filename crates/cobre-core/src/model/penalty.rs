@@ -282,19 +282,25 @@ pub fn resolve_hydro_penalties(
                     .unwrap_or(g.generation_violation_below_cost),
                 evaporation_violation_cost: evap_cost,
                 water_withdrawal_violation_cost: withdrawal_cost,
-                // Directional costs: entity override > global directional > symmetric
+                // Directional cost fallback: entity directional override, else the
+                // resolved symmetric cost — per the `*_pos_cost` / `*_neg_cost`
+                // field docs on `HydroPenaltyOverrides` ("`None` = use symmetric").
+                // Falling back to the GLOBAL directional default (`g.*_pos_cost`)
+                // instead would make an entity's symmetric override unreachable for
+                // the directional fields (an entity setting only
+                // `water_withdrawal_violation_cost` would be silently ignored here).
                 water_withdrawal_violation_pos_cost: ov
                     .water_withdrawal_violation_pos_cost
-                    .unwrap_or(g.water_withdrawal_violation_pos_cost),
+                    .unwrap_or(withdrawal_cost),
                 water_withdrawal_violation_neg_cost: ov
                     .water_withdrawal_violation_neg_cost
-                    .unwrap_or(g.water_withdrawal_violation_neg_cost),
+                    .unwrap_or(withdrawal_cost),
                 evaporation_violation_pos_cost: ov
                     .evaporation_violation_pos_cost
-                    .unwrap_or(g.evaporation_violation_pos_cost),
+                    .unwrap_or(evap_cost),
                 evaporation_violation_neg_cost: ov
                     .evaporation_violation_neg_cost
-                    .unwrap_or(g.evaporation_violation_neg_cost),
+                    .unwrap_or(evap_cost),
                 inflow_nonnegativity_cost: ov
                     .inflow_nonnegativity_cost
                     .unwrap_or(g.inflow_nonnegativity_cost),
@@ -457,7 +463,8 @@ mod tests {
         assert!((result.generation_violation_below_cost - 6.0).abs() < f64::EPSILON);
         assert!((result.evaporation_violation_cost - 7.0).abs() < f64::EPSILON);
         assert!((result.water_withdrawal_violation_cost - 8.0).abs() < f64::EPSILON);
-        // Directional costs default to global directional (which equals symmetric)
+        // Directional costs default to the resolved symmetric cost (`None` override
+        // -> symmetric); here the symmetric cost equals the global default (8.0 / 7.0).
         assert!((result.water_withdrawal_violation_pos_cost - 8.0).abs() < f64::EPSILON);
         assert!((result.water_withdrawal_violation_neg_cost - 8.0).abs() < f64::EPSILON);
         assert!((result.evaporation_violation_pos_cost - 7.0).abs() < f64::EPSILON);
@@ -534,11 +541,12 @@ mod tests {
             ..Default::default()
         };
         let result = resolve_hydro_penalties(&Some(overrides), &global);
-        // Pos overridden, neg falls back to global directional (== symmetric)
+        // Pos overridden; neg (`None`) falls back to the resolved symmetric cost,
+        // which here equals the global symmetric default of 8.0.
         assert!((result.water_withdrawal_violation_pos_cost - 9999.0).abs() < f64::EPSILON);
         assert!(
             (result.water_withdrawal_violation_neg_cost - 8.0).abs() < f64::EPSILON,
-            "neg should fall back to global directional"
+            "neg should fall back to the resolved symmetric cost"
         );
         // Symmetric unchanged
         assert!((result.water_withdrawal_violation_cost - 8.0).abs() < f64::EPSILON);
@@ -581,5 +589,57 @@ mod tests {
             (result.evaporation_violation_neg_cost - result.evaporation_violation_cost).abs()
                 < f64::EPSILON
         );
+    }
+
+    #[test]
+    fn test_resolve_hydro_directional_inherits_entity_symmetric_override() {
+        let global = make_global();
+
+        // Entity overrides ONLY the symmetric withdrawal cost (global directional
+        // default is 8.0). Per the `*_pos_cost` / `*_neg_cost` field contract
+        // ("`None` = use symmetric"), the directional fields must inherit the
+        // entity's 999.0 — not the global directional default of 8.0.
+        let overrides = HydroPenaltyOverrides {
+            water_withdrawal_violation_cost: Some(999.0),
+            ..Default::default()
+        };
+        let result = resolve_hydro_penalties(&Some(overrides), &global);
+        assert!((result.water_withdrawal_violation_cost - 999.0).abs() < f64::EPSILON);
+        assert!(
+            (result.water_withdrawal_violation_pos_cost - 999.0).abs() < f64::EPSILON,
+            "pos must inherit the entity symmetric override, not global directional 8.0"
+        );
+        assert!(
+            (result.water_withdrawal_violation_neg_cost - 999.0).abs() < f64::EPSILON,
+            "neg must inherit the entity symmetric override, not global directional 8.0"
+        );
+
+        // Same contract for evaporation (global directional default is 7.0).
+        let overrides = HydroPenaltyOverrides {
+            evaporation_violation_cost: Some(555.0),
+            ..Default::default()
+        };
+        let result = resolve_hydro_penalties(&Some(overrides), &global);
+        assert!((result.evaporation_violation_cost - 555.0).abs() < f64::EPSILON);
+        assert!(
+            (result.evaporation_violation_pos_cost - 555.0).abs() < f64::EPSILON,
+            "evap pos must inherit the entity symmetric override, not global directional 7.0"
+        );
+        assert!(
+            (result.evaporation_violation_neg_cost - 555.0).abs() < f64::EPSILON,
+            "evap neg must inherit the entity symmetric override, not global directional 7.0"
+        );
+
+        // A directional override still wins over the symmetric tier: setting both
+        // symmetric (999.0) and pos (7777.0) leaves pos at 7777.0 while neg (`None`)
+        // inherits the symmetric 999.0.
+        let overrides = HydroPenaltyOverrides {
+            water_withdrawal_violation_cost: Some(999.0),
+            water_withdrawal_violation_pos_cost: Some(7777.0),
+            ..Default::default()
+        };
+        let result = resolve_hydro_penalties(&Some(overrides), &global);
+        assert!((result.water_withdrawal_violation_pos_cost - 7777.0).abs() < f64::EPSILON);
+        assert!((result.water_withdrawal_violation_neg_cost - 999.0).abs() < f64::EPSILON);
     }
 }

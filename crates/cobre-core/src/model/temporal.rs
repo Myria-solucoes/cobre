@@ -477,7 +477,10 @@ impl SeasonMap {
     /// model estimation from historical inflow data that predates the study.
     ///
     /// Returns `None` only for `Custom` cycle types where the date does not
-    /// fall within any defined season range.
+    /// fall within any defined season range. For a well-formed `Monthly` or
+    /// `Weekly` map every in-range calendar date resolves; in particular a
+    /// `Weekly` map treats the year as 52 buckets and folds the ISO-8601 53rd
+    /// week into week 52 (see the `Weekly` arm), so it never returns `None`.
     #[must_use]
     pub fn season_for_date(&self, date: NaiveDate) -> Option<usize> {
         match self.cycle_type {
@@ -489,6 +492,15 @@ impl SeasonMap {
                     .map(|s| s.id)
             }
             SeasonCycleType::Weekly => {
+                // Weekly seasons are a fixed 52-bucket year (`id` 0..=51). ISO-8601
+                // long years (2020, 2026, …) carry a 53rd week of trailing
+                // late-December days; `.min(51)` deliberately folds those into week
+                // 52 — the adjacent same-time-of-year bucket. This is a contract,
+                // NOT `None` and NOT week 1: returning `None` would silently drop
+                // those end-of-year observations from PAR estimation (every caller
+                // skips `None` dates), and week 1 (early January) is the wrong
+                // season for a late-December date. `saturating_sub(1)` guards the
+                // unreachable week-0 case so the index can never underflow.
                 let iso_week = date.iso_week().week();
                 let week_idx = (iso_week.saturating_sub(1)).min(51) as usize;
                 self.seasons.iter().find(|s| s.id == week_idx).map(|s| s.id)
@@ -751,6 +763,45 @@ mod tests {
         assert_eq!(season_map.seasons[11].label, "December");
         assert_eq!(season_map.seasons[0].month_start, 1);
         assert_eq!(season_map.seasons[11].month_start, 12);
+    }
+
+    #[test]
+    fn test_weekly_season_iso_week_53_folds_into_week_52() {
+        // 52-bucket weekly map (ids 0..=51). `month_start` is unused for `Weekly`
+        // resolution but must be a valid month.
+        let seasons: Vec<SeasonDefinition> = (0..52)
+            .map(|i| SeasonDefinition {
+                id: i,
+                label: format!("W{:02}", i + 1),
+                month_start: 1,
+                day_start: None,
+                month_end: None,
+                day_end: None,
+            })
+            .collect();
+        let season_map = SeasonMap {
+            cycle_type: SeasonCycleType::Weekly,
+            seasons,
+        };
+
+        // 2020 is an ISO long year: 2020-12-30 falls in ISO week 53. The contract
+        // folds week 53 into week 52 (id 51) — explicitly NOT `None` and NOT week 1.
+        let week53_date = NaiveDate::from_ymd_opt(2020, 12, 30).unwrap();
+        assert_eq!(
+            week53_date.iso_week().week(),
+            53,
+            "precondition: ISO week 53"
+        );
+        assert_eq!(
+            season_map.season_for_date(week53_date),
+            Some(51),
+            "ISO week 53 must fold into week 52 (id 51), not None or week 1 (id 0)"
+        );
+
+        // A normal week resolves to its own bucket: 2021-01-11 is ISO week 2 -> id 1.
+        let week2_date = NaiveDate::from_ymd_opt(2021, 1, 11).unwrap();
+        assert_eq!(week2_date.iso_week().week(), 2, "precondition: ISO week 2");
+        assert_eq!(season_map.season_for_date(week2_date), Some(1));
     }
 
     #[cfg(feature = "serde")]
