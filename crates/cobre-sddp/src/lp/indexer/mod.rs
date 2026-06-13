@@ -120,8 +120,8 @@
 //!   [`EquipmentCounts`], [`FphaColumnLayout`], [`EvapConfig`]), the small
 //!   layout accessors, and the compile-time `Send + Sync` assertion.
 //! - `state_mapping` — the state-vector-to-LP-column resolvers
-//!   ([`StageIndexer::state_to_lp_column`], `finalize_state_column_map`,
-//!   `lp_column_for_state`, and the state-pinning entry point
+//!   ([`StageIndexer::state_to_lp_column`], [`StageIndexer::finalize_state_column_map`],
+//!   [`StageIndexer::lp_column_for_state`], and the state-pinning entry point
 //!   [`StageIndexer::state_to_lp_incoming_column`]).
 //! - `anticipated` — the per-stage anticipated-thermal iterators and predicates.
 //! - `sparse_state` — the nonzero-state mask builder `set_nonzero_mask`.

@@ -23,11 +23,12 @@
 //! The orchestration entry point `fit_fpha_planes` and its result `FphaFitResult`
 //! live here in `mod`, co-located with the re-export surface.
 //!
-//! Six symbols are re-exported as `pub(crate)` so the `crate::fpha_fitting::Symbol`
-//! module path resolves verbatim for every cross-cluster consumer: `FphaFittingError`,
-//! `ForebayTable`, `evaluate_losses`, `evaluate_tailrace`, `FphaFitResult`, and
-//! `fit_fpha_planes`. Every re-exported item is `pub(crate)`, so this doc names them
-//! with backtick spans rather than intra-doc links (a `pub(crate)` module linking to
+//! Six `pub(crate)` symbols form the `crate::fpha_fitting::Symbol` surface that
+//! resolves verbatim for every cross-cluster consumer: four are re-exported from
+//! submodules (`FphaFittingError`, `ForebayTable`, `evaluate_losses`,
+//! `evaluate_tailrace`) and two are defined here in `mod` (`FphaFitResult`,
+//! `fit_fpha_planes`). All six are `pub(crate)`, so this doc names them with
+//! backtick spans rather than intra-doc links (a `pub(crate)` module linking to
 //! `pub(crate)` items would otherwise risk `rustdoc::private_intra_doc_links`).
 
 use cobre_core::Hydro;
