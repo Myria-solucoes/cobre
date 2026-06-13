@@ -814,6 +814,25 @@ mod tests {
     }
 
     #[test]
+    fn test_duplicate_stage_id_error() {
+        // Two stages with the same id must yield an Err — build_stage_index
+        // would otherwise silently overwrite the colliding stage.
+        let result = SystemBuilder::new()
+            .stages(vec![make_stage(0), make_stage(0)])
+            .build();
+
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ValidationError::DuplicateId {
+                entity_type: "Stage",
+                id: EntityId(0),
+            }
+        )));
+    }
+
+    #[test]
     fn test_multiple_duplicate_errors() {
         // Duplicates in both buses (id=0) and thermals (id=5) must both be reported.
         let result = SystemBuilder::new()

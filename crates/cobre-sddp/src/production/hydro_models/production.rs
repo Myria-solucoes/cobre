@@ -99,23 +99,18 @@ pub fn resolve_production_models_from_artifacts(
     system: &System,
     artifacts: &cobre_io::CaseArtifacts,
 ) -> Result<ResolveProductionResult, SddpError> {
-    // ── Step 1b: build the per-(hydro, stage) ρ_eq override from the
-    //            already-parsed rows.
     let override_table = crate::energy_conversion::build_hydro_energy_productivity_override(
-        artifacts.hydro_energy_productivity.clone(),
+        &artifacts.hydro_energy_productivity,
     )
     .map_err(|e| SddpError::Validation(e.to_string()))?;
 
-    // ── Step 2: production model configs ─────────────────────────────────────
     // Borrow from the artifacts bundle; no clone of the config rows is
     // needed because the per-hydro maps below only need references.
     let prod_configs: &[ProductionModelConfig] = &artifacts.production_models;
 
-    // ── Step 3: build O(1) lookup: hydro_id → config ─────────────────────────
     let config_map: HashMap<EntityId, &ProductionModelConfig> =
         prod_configs.iter().map(|c| (c.hydro_id, c)).collect();
 
-    // ── Step 4/5/6: index precomputed FPHA hyperplane rows ───────────────────
     let mut hyperplane_map: HashMap<(EntityId, Option<i32>), Vec<&FphaHyperplaneRow>> =
         HashMap::new();
     if prod_configs.iter().any(config_uses_precomputed_fpha) {
@@ -127,7 +122,6 @@ pub fn resolve_production_models_from_artifacts(
         }
     }
 
-    // ── Step 4b/5b/6b: index geometry rows for computed-source hydros ───────
     let geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> =
         if prod_configs.iter().any(config_uses_computed_fpha) {
             build_geometry_map(&artifacts.hydro_geometry)
@@ -135,13 +129,12 @@ pub fn resolve_production_models_from_artifacts(
             HashMap::new()
         };
 
-    // ── Step 7: collect study stages (id >= 0) in canonical order ────────────
+    // Study stages only (id >= 0), in canonical order.
     let study_stages: Vec<&cobre_core::temporal::Stage> =
         system.stages().iter().filter(|s| s.id >= 0).collect();
     let n_stages = study_stages.len();
     let n_hydros = system.hydros().len();
 
-    // ── Step 8: resolve per-hydro per-stage model ─────────────────────────────
     let mut all_models: Vec<Vec<ResolvedProductionModel>> = Vec::with_capacity(n_hydros);
     let mut provenance: Vec<(EntityId, ProductionModelSource)> = Vec::with_capacity(n_hydros);
     let mut export_rows: Vec<cobre_io::FphaHyperplaneRow> = Vec::new();
@@ -163,6 +156,10 @@ pub fn resolve_production_models_from_artifacts(
                 }
                 for (plane_id, plane) in fit_result.planes.iter().enumerate() {
                     let raw_gamma_0 = plane.intercept / fit_result.kappa;
+                    // Rationale: plane_id comes from enumerate() over the fitting
+                    // result; plane counts are bounded by max_planes_per_hydro
+                    // (default <= 30), far below i32::MAX, so truncation and wrap
+                    // are unreachable.
                     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
                     export_rows.push(cobre_io::FphaHyperplaneRow {
                         hydro_id: hydro.id,
@@ -391,9 +388,8 @@ fn determine_source(
     config_entry: Option<&ProductionModelConfig>,
 ) -> Result<ProductionModelSource, SddpError> {
     if let Some(config) = config_entry {
-        // Config present: determine from the selection mode.
-        // We look at whether any range/season uses "precomputed" or "computed".
-        // "computed" is rejected immediately.
+        // A "computed" source short-circuits to ComputedFromGeometry, so no
+        // further range/season scan for "precomputed" is needed below.
         let computed_range = match &config.selection_mode {
             SelectionMode::StageRanges { ranges } => ranges
                 .iter()
@@ -1495,18 +1491,17 @@ mod tests {
             },
         };
         let empty_map = std::collections::HashMap::new();
-        let override_table =
-            crate::energy_conversion::build_hydro_energy_productivity_override(vec![
-                cobre_io::HydroEnergyProductivityRow {
-                    hydro_id: EntityId::from(0),
-                    stage_id: Some(0),
-                    equivalent_productivity_mw_per_m3s: Some(0.42),
-                    reference_volume_hm3: None,
-                    reference_outflow_m3s: None,
-                    specific_productivity_mw_per_m3s_per_m: None,
-                },
-            ])
-            .expect("override builds");
+        let override_table = crate::energy_conversion::build_hydro_energy_productivity_override(&[
+            cobre_io::HydroEnergyProductivityRow {
+                hydro_id: EntityId::from(0),
+                stage_id: Some(0),
+                equivalent_productivity_mw_per_m3s: Some(0.42),
+                reference_volume_hm3: None,
+                reference_outflow_m3s: None,
+                specific_productivity_mw_per_m3s_per_m: None,
+            },
+        ])
+        .expect("override builds");
 
         let model = super::resolve_stage_model(
             &hydro,

@@ -11,8 +11,8 @@ use std::collections::HashSet;
 
 use super::System;
 use super::validate::{
-    CrossRefEntities, build_index, build_stage_index, check_duplicates, validate_cross_references,
-    validate_filling_configs,
+    CrossRefEntities, build_index, build_stage_index, check_duplicate_stages, check_duplicates,
+    validate_cross_references, validate_filling_configs,
 };
 use crate::{
     Bus, CascadeTopology, CorrelationModel, EnergyContract, EntityId, ExternalLoadRow,
@@ -84,8 +84,8 @@ impl Default for SystemBuilder {
 impl SystemBuilder {
     /// Create a new empty builder. All entity collections start empty.
     ///
-    /// New fields default to empty/default values so that
-    /// pre-existing tests continue to work without modification.
+    /// Omitting a setter leaves the corresponding field at its empty/default
+    /// value — never uninitialized.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -358,7 +358,7 @@ impl SystemBuilder {
     /// # Errors
     ///
     /// Returns `Err(Vec<ValidationError>)` if:
-    /// - Duplicate IDs are detected in any entity collection.
+    /// - Duplicate IDs are detected in any entity collection or in the stage collection.
     /// - Any cross-reference field refers to an entity ID that does not exist.
     /// - The hydro cascade graph contains a cycle.
     /// - Any hydro filling configuration is invalid (non-positive inflow or missing
@@ -396,6 +396,7 @@ impl SystemBuilder {
             "NonControllableSource",
             &mut errors,
         );
+        check_duplicate_stages(&self.stages, &mut errors);
 
         if !errors.is_empty() {
             return Err(errors);

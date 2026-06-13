@@ -66,7 +66,6 @@ pub fn build_hydro_model_summary(
             | ProductionModelSource::ComputedFromGeometry => {
                 n_fpha += 1;
 
-                // Resolve plane count from the representative study stage.
                 let n_planes = if study_stages.is_empty() {
                     0
                 } else {
@@ -78,7 +77,6 @@ pub fn build_hydro_model_summary(
 
                 total_planes += n_planes;
 
-                // Look up the hydro name from the system entity list.
                 let name = system
                     .hydros()
                     .iter()
@@ -599,6 +597,9 @@ mod tests {
     /// Acceptance criterion: 2 constant + 2 FPHA (10 planes) + 3 evaporation / 1 without.
 
     #[test]
+    // Rationale: acceptance test exercises constant + FPHA + evaporation counts
+    // in a single fixture; splitting into helpers would obscure the coverage
+    // contract.
     #[allow(clippy::too_many_lines)]
     fn build_hydro_model_summary_acceptance_criterion() {
         // IDs 1,2 constant; IDs 3,4 FPHA with 5 planes each.

@@ -89,7 +89,17 @@ impl ResolvedLoadFactors {
 
     /// Look up the load factor for a `(bus_idx, stage_idx, block_idx)` triple.
     ///
-    /// Returns `1.0` when the index is out of bounds or the table is empty.
+    /// Returns `1.0` when the table is empty or the computed flat index falls
+    /// past `Vec::len`.
+    ///
+    /// Contract: the `1.0` identity fallback is only guaranteed when the flat
+    /// index `(bus_idx * n_stages + stage_idx) * max_blocks + block_idx` lands
+    /// past the end of the backing `Vec`. A per-dimension overflow that stays
+    /// within `Vec::len` — e.g. `block_idx >= max_blocks` while `bus_idx` is
+    /// small — aliases into a neighbouring cell rather than returning `1.0`.
+    /// Callers (`lp/builder/matrix.rs`) only pass in-range dimensions, so this
+    /// is unreachable in practice; do not rely on the fallback for arbitrary
+    /// out-of-range dimension combinations.
     #[inline]
     #[must_use]
     pub fn factor(&self, bus_idx: usize, stage_idx: usize, block_idx: usize) -> f64 {
@@ -185,7 +195,13 @@ impl ResolvedExchangeFactors {
     /// Look up the exchange factors for a `(line_idx, stage_idx, block_idx)` triple.
     ///
     /// Returns `(direct_factor, reverse_factor)`. Returns `(1.0, 1.0)` when the
-    /// index is out of bounds or the table is empty.
+    /// table is empty or the computed flat index falls past `Vec::len`.
+    ///
+    /// Contract: the `(1.0, 1.0)` fallback is only guaranteed when the flat
+    /// index lands past the end of the backing `Vec`. A per-dimension overflow
+    /// that stays within `Vec::len` aliases into a neighbouring cell rather than
+    /// returning the identity. Callers only pass in-range dimensions, so this is
+    /// unreachable in practice.
     #[inline]
     #[must_use]
     pub fn factors(&self, line_idx: usize, stage_idx: usize, block_idx: usize) -> (f64, f64) {
@@ -381,7 +397,14 @@ impl ResolvedNcsFactors {
 
     /// Look up the NCS factor for a `(ncs_idx, stage_idx, block_idx)` triple.
     ///
-    /// Returns `1.0` when the index is out of bounds or the table is empty.
+    /// Returns `1.0` when the table is empty or the computed flat index falls
+    /// past `Vec::len`.
+    ///
+    /// Contract: the `1.0` identity fallback is only guaranteed when the flat
+    /// index lands past the end of the backing `Vec`. A per-dimension overflow
+    /// that stays within `Vec::len` aliases into a neighbouring cell rather than
+    /// returning `1.0`. Callers only pass in-range dimensions, so this is
+    /// unreachable in practice.
     #[inline]
     #[must_use]
     pub fn factor(&self, ncs_idx: usize, stage_idx: usize, block_idx: usize) -> f64 {

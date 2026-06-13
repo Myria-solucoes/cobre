@@ -5,7 +5,7 @@
 //! Solvers and LP builders then query resolved values in constant time via direct
 //! array indexing — no re-evaluation of the cascade at solve time.
 //!
-//! The storage layout for both `ResolvedPenalties` and `ResolvedBounds` uses a
+//! The storage layout for both [`ResolvedPenalties`] and [`ResolvedBounds`] uses a
 //! flat `Vec<T>` with manual 2D indexing:
 //! `data[entity_idx * n_stages + stage_idx]`
 //!
@@ -21,18 +21,19 @@
 //!
 //! Bus deficit segments are **not** stage-varying (see Penalty System spec SS3).
 //! The piecewise structure is too complex for per-stage override. Therefore
-//! `BusStagePenalties` contains only `excess_cost`.
+//! [`BusStagePenalties`] contains only `excess_cost`.
 //!
 //! # Submodule layout
 //!
 //! - `penalties` — the four per-`(entity, stage)` penalty structs and the
-//!   `ResolvedPenalties` table.
+//!   [`ResolvedPenalties`] table.
 //! - `bounds` — the five per-`(entity, stage)` bound structs and the
-//!   `ResolvedBounds` table (including the padded thermal stage axis).
-//! - `generic` — `ResolvedGenericConstraintBounds`, the sparse RHS table for
+//!   [`ResolvedBounds`] table (including the padded thermal stage axis).
+//! - `generic` — [`ResolvedGenericConstraintBounds`], the sparse RHS table for
 //!   user-defined linear constraints, plus its private deterministic wire format.
-//! - `factors` — the dense per-block factor tables and the
-//!   non-controllable-source availability/factor family.
+//! - `factors` — the dense per-block factor tables ([`ResolvedLoadFactors`],
+//!   [`ResolvedExchangeFactors`]) and the non-controllable-source
+//!   availability/factor family ([`ResolvedNcsBounds`], [`ResolvedNcsFactors`]).
 //!
 //! Every public symbol is re-exported here so both the curated flat surface in
 //! `lib.rs` and the `cobre_core::resolved::Symbol` module path resolve to the

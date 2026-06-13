@@ -99,7 +99,7 @@ impl HydroEnergyProductivityOverride {
 /// `field = "hydro_energy_productivity.duplicate_entry"` when the same
 /// `(hydro_id, stage_id)` key appears more than once in `rows`.
 pub fn build_hydro_energy_productivity_override(
-    rows: Vec<HydroEnergyProductivityRow>,
+    rows: &[HydroEnergyProductivityRow],
 ) -> Result<HydroEnergyProductivityOverride, LoadError> {
     let mut seen: HashSet<(EntityId, Option<i32>)> = HashSet::with_capacity(rows.len());
     let mut out = HydroEnergyProductivityOverride {
@@ -203,7 +203,7 @@ mod tests {
                 specific_productivity_mw_per_m3s_per_m: None,
             },
         ];
-        let o = build_hydro_energy_productivity_override(rows).expect("override builds");
+        let o = build_hydro_energy_productivity_override(&rows).expect("override builds");
         assert_eq!(o.equivalent_productivity(EntityId(1), 0), Some(3.6));
         assert_eq!(o.equivalent_productivity(EntityId(1), 1), Some(4.0));
         assert_eq!(o.equivalent_productivity(EntityId(2), 0), Some(5.0));
@@ -238,7 +238,7 @@ mod tests {
                 specific_productivity_mw_per_m3s_per_m: None,
             },
         ];
-        let err = build_hydro_energy_productivity_override(rows).unwrap_err();
+        let err = build_hydro_energy_productivity_override(&rows).unwrap_err();
         match err {
             cobre_io::LoadError::SchemaError { field, .. } => {
                 assert_eq!(field, "hydro_energy_productivity.duplicate_entry");
@@ -267,7 +267,7 @@ mod tests {
                 specific_productivity_mw_per_m3s_per_m: None,
             },
         ];
-        let o = build_hydro_energy_productivity_override(rows).expect("override builds");
+        let o = build_hydro_energy_productivity_override(&rows).expect("override builds");
         assert_eq!(o.equivalent_productivity(EntityId(1), 0), Some(3.0));
         assert_eq!(o.equivalent_productivity(EntityId(1), 1), Some(2.0));
     }

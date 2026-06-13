@@ -79,7 +79,7 @@ pub fn prepare_hydro_models(
 ///
 /// Use this from any pipeline that has already called
 /// [`cobre_io::load_case_with_artifacts`]; it avoids the duplicate parsing
-/// and parallel validation paths the audit (CR-3) flagged.
+/// and parallel validation paths.
 ///
 /// # Errors
 ///
@@ -117,6 +117,10 @@ pub fn prepare_hydro_models_from_artifacts(
 fn load_artifacts_for_hydro_models(case_dir: &Path) -> Result<cobre_io::CaseArtifacts, SddpError> {
     let mut ctx = cobre_io::ValidationContext::new();
     let manifest = cobre_io::validate_structure(case_dir, &mut ctx);
+    // Propagate structural validation errors before attempting any file loads;
+    // a malformed layout must fail here rather than surface as a confusing
+    // parse error (or silent default) downstream.
+    ctx.into_result().map_err(SddpError::from)?;
 
     let prod_path = if manifest.system_hydro_production_models_json {
         Some(case_dir.join("system").join("hydro_production_models.json"))

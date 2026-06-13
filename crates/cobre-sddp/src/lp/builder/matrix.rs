@@ -2099,7 +2099,7 @@ mod parameter_resolution_tests {
         let stage_to_season: Vec<i32> = vec![0; n_stages];
         let ec = EnergyConversionSet::new(vec![], vec![], 0, n_stages);
         let override_table =
-            build_hydro_energy_productivity_override(vec![]).expect("empty override table");
+            build_hydro_energy_productivity_override(&[]).expect("empty override table");
         build_resolved_parameters(&[], &ec, &override_table, &[], &stage_to_season, n_stages)
             .expect("empty_resolved_params: valid")
     }
@@ -2113,7 +2113,7 @@ mod parameter_resolution_tests {
         let stage_to_season: Vec<i32> = vec![0; n_stages];
         let ec = EnergyConversionSet::new(vec![], vec![], 0, n_stages);
         let override_table =
-            build_hydro_energy_productivity_override(vec![]).expect("empty override table");
+            build_hydro_energy_productivity_override(&[]).expect("empty override table");
         let params = vec![ScalarParameter {
             id: param_id,
             name: format!("p{}", param_id.0),
@@ -2139,7 +2139,7 @@ mod parameter_resolution_tests {
         let stage_to_season: Vec<i32> = vec![0; n_stages];
         let ec = EnergyConversionSet::new(vec![], vec![], 0, n_stages);
         let override_table =
-            build_hydro_energy_productivity_override(vec![]).expect("empty override table");
+            build_hydro_energy_productivity_override(&[]).expect("empty override table");
         let params = vec![ScalarParameter {
             id: param_id,
             name: format!("p{}", param_id.0),

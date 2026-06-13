@@ -82,8 +82,7 @@ mod serde_generic_bounds {
 
     impl Serialize for ResolvedGenericConstraintBounds {
         fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-            // Collect all keys from the index, sort for deterministic output, then
-            // emit each group as a `WireEntry`.
+            // Sort keys for deterministic output regardless of HashMap iteration order.
             let mut keys: Vec<(usize, i32)> = self.index.keys().copied().collect();
             keys.sort_unstable();
 
@@ -114,6 +113,11 @@ mod serde_generic_bounds {
                 let start = entries.len();
                 entries.extend_from_slice(&entry.pairs);
                 let end = entries.len();
+                // An empty-pairs group indexes no entries and is intentionally
+                // dropped (no key inserted) — mirroring `new`, which likewise
+                // commits a key only when its range is non-empty. Inserting an
+                // empty range would make `is_active` report `true` for a stage
+                // with no bounds, contradicting the sparse-table contract.
                 if end > start {
                     index.insert((entry.constraint_idx, entry.stage_id), start..end);
                 }
@@ -186,6 +190,7 @@ impl ResolvedGenericConstraintBounds {
     /// assert_eq!(slice.len(), 1);
     /// assert_eq!(slice[0], (None, 500.0));
     /// ```
+    #[must_use]
     pub fn new<I>(constraint_id_to_idx: &HashMap<i32, usize>, raw_bounds: I) -> Self
     where
         I: Iterator<Item = (i32, i32, Option<i32>, f64)>,

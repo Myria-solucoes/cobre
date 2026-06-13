@@ -1155,7 +1155,7 @@ mod tests {
         let cascade = CascadeTopology::build(&hydros);
         let resolver = constant_resolver(&hydros, 0.65, 3);
         let override_table =
-            build_hydro_energy_productivity_override(vec![HydroEnergyProductivityRow {
+            build_hydro_energy_productivity_override(&[HydroEnergyProductivityRow {
                 hydro_id: hydros[0].id,
                 stage_id: None,
                 equivalent_productivity_mw_per_m3s: Some(2.5),
@@ -1286,7 +1286,7 @@ mod tests {
         // this layer (such an inconsistency would be caught upstream by
         // `cobre_io::validation::productivity_resolution`).
         let override_table =
-            build_hydro_energy_productivity_override(vec![HydroEnergyProductivityRow {
+            build_hydro_energy_productivity_override(&[HydroEnergyProductivityRow {
                 hydro_id: hydros[0].id,
                 stage_id: Some(0),
                 equivalent_productivity_mw_per_m3s: Some(0.42),

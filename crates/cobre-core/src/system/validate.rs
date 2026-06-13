@@ -76,6 +76,12 @@ pub(crate) fn build_stage_index(stages: &[Stage]) -> HashMap<i32, usize> {
     index
 }
 
+/// Detect duplicate entity IDs in a **sorted** slice by scanning adjacent pairs.
+///
+/// Contract: the caller must sort `entities` by `entity_id()` ascending before
+/// calling (the builder sorts every collection in `build`). On unsorted input
+/// the adjacent-pair scan silently misses non-adjacent duplicates, letting a
+/// colliding id slip past validation.
 pub(crate) fn check_duplicates<T: HasId>(
     entities: &[T],
     entity_type: &'static str,
@@ -91,14 +97,30 @@ pub(crate) fn check_duplicates<T: HasId>(
     }
 }
 
-/// Validate all cross-reference fields across entity collections.
+/// Detect duplicate stage IDs in a slice already sorted ascending by `Stage::id`.
 ///
-/// Checks every entity field that references another entity by [`EntityId`]
-/// against the appropriate index. All invalid references are appended to
-/// `errors` — no short-circuiting on first error.
+/// Stages key on a domain-level `i32` id (negative for pre-study stages) rather
+/// than [`EntityId`], so they cannot reuse the [`HasId`]-generic
+/// [`check_duplicates`]; this is the parallel i32-keyed scan. The duplicate id
+/// is reported via [`ValidationError::DuplicateId`] with `entity_type: "Stage"`,
+/// wrapping the stage id in [`EntityId`] purely as the error's id carrier.
 ///
-/// This function runs after duplicate checking passes and after indices are
-/// built, but before topology construction.
+/// Contract: `stages` must be sorted ascending by `id` (the caller sorts in
+/// [`SystemBuilder::build`](super::SystemBuilder::build) before calling). The
+/// adjacent-pair scan misses non-adjacent duplicates on unsorted input, which
+/// would let `build_stage_index` silently overwrite a colliding stage and
+/// produce a broken index with no validation error.
+pub(crate) fn check_duplicate_stages(stages: &[Stage], errors: &mut Vec<ValidationError>) {
+    for window in stages.windows(2) {
+        if window[0].id == window[1].id {
+            errors.push(ValidationError::DuplicateId {
+                entity_type: "Stage",
+                id: EntityId(window[0].id),
+            });
+        }
+    }
+}
+
 /// Bundles entity slices needed for cross-reference validation.
 pub(crate) struct CrossRefEntities<'a> {
     pub(crate) lines: &'a [Line],
@@ -109,6 +131,14 @@ pub(crate) struct CrossRefEntities<'a> {
     pub(crate) non_controllable_sources: &'a [NonControllableSource],
 }
 
+/// Validate all cross-reference fields across entity collections.
+///
+/// Checks every entity field that references another entity by [`EntityId`]
+/// against the appropriate index. All invalid references are appended to
+/// `errors` — no short-circuiting on first error.
+///
+/// This function runs after duplicate checking passes and after indices are
+/// built, but before topology construction.
 pub(crate) fn validate_cross_references(
     entities: &CrossRefEntities<'_>,
     bus_index: &HashMap<EntityId, usize>,

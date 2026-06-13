@@ -97,13 +97,11 @@ pub fn resolve_evaporation_models_from_artifacts(
     ),
     SddpError,
 > {
-    // ── Step 1: scan for any hydro that needs evaporation ─────────────────────
     let any_evaporation = system
         .hydros()
         .iter()
         .any(|h| h.evaporation_coefficients_mm.is_some());
 
-    // ── Step 2: early return when no hydro has evaporation ────────────────────
     if !any_evaporation {
         let models = system
             .hydros()
@@ -127,10 +125,8 @@ pub fn resolve_evaporation_models_from_artifacts(
         ));
     }
 
-    // ── Step 3: use pre-parsed hydro_geometry rows from the artifacts bundle ─
     let geometry_rows: &[HydroGeometryRow] = &artifacts.hydro_geometry;
 
-    // ── Step 4: group geometry rows by hydro_id ───────────────────────────────
     let mut geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
         HashMap::new();
     for row in geometry_rows {
@@ -142,11 +138,9 @@ pub fn resolve_evaporation_models_from_artifacts(
         rows.sort_by(|a, b| a.volume_hm3.total_cmp(&b.volume_hm3));
     }
 
-    // ── Step 5: collect study stages (id >= 0) ────────────────────────────────
     let study_stages: Vec<&cobre_core::temporal::Stage> =
         system.stages().iter().filter(|s| s.id >= 0).collect();
 
-    // ── Step 6: delegate to core logic (testable without disk I/O) ───────────
     resolve_evaporation_core(system.hydros(), &geometry_map, &study_stages)
 }
 
@@ -193,7 +187,6 @@ fn resolve_evaporation_core(
             continue;
         };
 
-        // ── Look up geometry rows ─────────────────────────────────────────────
         let geo_rows: &[&cobre_io::extensions::HydroGeometryRow] =
             geometry_map.get(&hydro.id).map_or(&[], Vec::as_slice);
 
@@ -206,7 +199,6 @@ fn resolve_evaporation_core(
             )));
         }
 
-        // ── Verify area_km2 values are not all zero ───────────────────────────
         let all_zero_area = geo_rows.iter().all(|r| r.area_km2 == 0.0);
         if all_zero_area {
             return Err(SddpError::Validation(format!(
@@ -217,7 +209,6 @@ fn resolve_evaporation_core(
             )));
         }
 
-        // ── Determine reference volume strategy ───────────────────────────────
         // When the hydro supplies per-season reference volumes, use them per
         // stage (compute A and dA/dv inside the loop). Otherwise fall back to
         // the midpoint once outside the loop.
@@ -242,7 +233,6 @@ fn resolve_evaporation_core(
             0.0 // unused; per-season path computes per stage
         };
 
-        // ── Compute per-stage coefficients ────────────────────────────────────
         let mut stage_coefficients: Vec<LinearizedEvaporation> = Vec::with_capacity(n_stages);
         let mut stage_ref_volumes: Vec<f64> = Vec::with_capacity(n_stages);
 

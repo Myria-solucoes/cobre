@@ -284,6 +284,10 @@ impl ResolvedPenalties {
     }
 
     /// Return the resolved penalties for a hydro plant at a specific stage.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `hydro_index >= n_hydros` or `stage_index >= n_stages`.
     #[inline]
     #[must_use]
     pub fn hydro_penalties(&self, hydro_index: usize, stage_index: usize) -> HydroStagePenalties {
@@ -291,6 +295,10 @@ impl ResolvedPenalties {
     }
 
     /// Return the resolved penalties for a bus at a specific stage.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `bus_index >= n_buses` or `stage_index >= n_stages`.
     #[inline]
     #[must_use]
     pub fn bus_penalties(&self, bus_index: usize, stage_index: usize) -> BusStagePenalties {
@@ -298,6 +306,10 @@ impl ResolvedPenalties {
     }
 
     /// Return the resolved penalties for a line at a specific stage.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `line_index >= n_lines` or `stage_index >= n_stages`.
     #[inline]
     #[must_use]
     pub fn line_penalties(&self, line_index: usize, stage_index: usize) -> LineStagePenalties {
@@ -305,6 +317,10 @@ impl ResolvedPenalties {
     }
 
     /// Return the resolved penalties for a non-controllable source at a specific stage.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `ncs_index >= n_ncs` or `stage_index >= n_stages`.
     #[inline]
     #[must_use]
     pub fn ncs_penalties(&self, ncs_index: usize, stage_index: usize) -> NcsStagePenalties {
@@ -314,47 +330,59 @@ impl ResolvedPenalties {
     /// Return a mutable reference to the hydro penalty cell for in-place update.
     ///
     /// Used by `cobre-io` during penalty cascade resolution to set resolved values.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `hydro_index >= n_hydros` or `stage_index >= n_stages`.
     #[inline]
     pub fn hydro_penalties_mut(
         &mut self,
         hydro_index: usize,
         stage_index: usize,
     ) -> &mut HydroStagePenalties {
-        let idx = hydro_index * self.n_stages + stage_index;
-        &mut self.hydro[idx]
+        &mut self.hydro[hydro_index * self.n_stages + stage_index]
     }
 
     /// Return a mutable reference to the bus penalty cell for in-place update.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `bus_index >= n_buses` or `stage_index >= n_stages`.
     #[inline]
     pub fn bus_penalties_mut(
         &mut self,
         bus_index: usize,
         stage_index: usize,
     ) -> &mut BusStagePenalties {
-        let idx = bus_index * self.n_stages + stage_index;
-        &mut self.bus[idx]
+        &mut self.bus[bus_index * self.n_stages + stage_index]
     }
 
     /// Return a mutable reference to the line penalty cell for in-place update.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `line_index >= n_lines` or `stage_index >= n_stages`.
     #[inline]
     pub fn line_penalties_mut(
         &mut self,
         line_index: usize,
         stage_index: usize,
     ) -> &mut LineStagePenalties {
-        let idx = line_index * self.n_stages + stage_index;
-        &mut self.line[idx]
+        &mut self.line[line_index * self.n_stages + stage_index]
     }
 
     /// Return a mutable reference to the NCS penalty cell for in-place update.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `ncs_index >= n_ncs` or `stage_index >= n_stages`.
     #[inline]
     pub fn ncs_penalties_mut(
         &mut self,
         ncs_index: usize,
         stage_index: usize,
     ) -> &mut NcsStagePenalties {
-        let idx = ncs_index * self.n_stages + stage_index;
-        &mut self.ncs[idx]
+        &mut self.ncs[ncs_index * self.n_stages + stage_index]
     }
 
     /// Return the number of stages in this table.

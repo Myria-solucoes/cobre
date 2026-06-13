@@ -225,6 +225,7 @@ pub struct ContractStageBounds {
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(try_from = "ResolvedBoundsWire"))]
 pub struct ResolvedBounds {
     /// Total number of stages. Used to compute flat indices.
     n_stages: usize,
@@ -232,7 +233,13 @@ pub struct ResolvedBounds {
     ///
     /// Stored as a denormalized scalar so the hot-path accessors do not need
     /// to recompute it from a `BoundsCountsSpec` (which is not retained).
-    #[cfg_attr(feature = "serde", serde(default))]
+    ///
+    /// Contract: this field is **required** on the wire — it is never defaulted.
+    /// A payload that omits it, or that supplies `0` while `thermal` is
+    /// non-empty, is rejected by [`ResolvedBoundsWire`]'s `TryFrom`. Defaulting a
+    /// missing field to `0` would alias every thermal to thermal 0's stage block
+    /// (the divisor in `thermal_idx * thermal_stage_axis_len + stage_idx`
+    /// collapses to `stage_idx`), silently returning wrong bounds.
     thermal_stage_axis_len: usize,
     /// Flat `n_hydros * n_stages` array indexed `[hydro_idx * n_stages + stage_idx]`.
     hydro: Vec<HydroStageBounds>,
@@ -251,6 +258,49 @@ pub struct ResolvedBounds {
     pumping: Vec<PumpingStageBounds>,
     /// Flat `n_contracts * n_stages` array indexed `[contract_idx * n_stages + stage_idx]`.
     contract: Vec<ContractStageBounds>,
+}
+
+/// Deserialization shadow for [`ResolvedBounds`].
+///
+/// Mirrors the serialized field layout exactly so round-trips are lossless, but
+/// crucially does **not** apply `serde(default)` to `thermal_stage_axis_len`: a
+/// payload missing that field fails at the field level rather than aliasing
+/// every thermal to thermal 0. The `TryFrom` below additionally rejects a
+/// present-but-zero stride when the thermal table is non-empty.
+#[cfg(feature = "serde")]
+#[derive(serde::Deserialize)]
+struct ResolvedBoundsWire {
+    n_stages: usize,
+    thermal_stage_axis_len: usize,
+    hydro: Vec<HydroStageBounds>,
+    thermal: Vec<ThermalStageBounds>,
+    line: Vec<LineStageBounds>,
+    pumping: Vec<PumpingStageBounds>,
+    contract: Vec<ContractStageBounds>,
+}
+
+#[cfg(feature = "serde")]
+impl TryFrom<ResolvedBoundsWire> for ResolvedBounds {
+    type Error = String;
+
+    fn try_from(wire: ResolvedBoundsWire) -> Result<Self, Self::Error> {
+        if !wire.thermal.is_empty() && wire.thermal_stage_axis_len == 0 {
+            return Err(
+                "thermal_stage_axis_len must be > 0 when the thermal table is non-empty; \
+                 a zero stride aliases every thermal to thermal 0"
+                    .to_string(),
+            );
+        }
+        Ok(Self {
+            n_stages: wire.n_stages,
+            thermal_stage_axis_len: wire.thermal_stage_axis_len,
+            hydro: wire.hydro,
+            thermal: wire.thermal,
+            line: wire.line,
+            pumping: wire.pumping,
+            contract: wire.contract,
+        })
+    }
 }
 
 /// Entity counts for constructing a [`ResolvedBounds`] table.
@@ -326,6 +376,10 @@ impl ResolvedBounds {
     /// * `defaults` — default per-stage bound values grouped into [`BoundsDefaults`]
     #[must_use]
     pub fn new(counts: &BoundsCountsSpec, defaults: &BoundsDefaults) -> Self {
+        debug_assert!(
+            counts.n_stages > 0,
+            "ResolvedBounds::new: n_stages must be > 0 (got 0)"
+        );
         let thermal_axis = counts.n_stages + counts.k_max;
         Self {
             n_stages: counts.n_stages,
@@ -359,6 +413,10 @@ impl ResolvedBounds {
     #[inline]
     #[must_use]
     pub fn thermal_bounds(&self, thermal_index: usize, stage_index: usize) -> ThermalStageBounds {
+        debug_assert!(
+            self.thermal.is_empty() || self.thermal_stage_axis_len > 0,
+            "thermal_stage_axis_len must be > 0 when the thermal table is non-empty"
+        );
         self.thermal[thermal_index * self.thermal_stage_axis_len + stage_index]
     }
 
@@ -396,8 +454,7 @@ impl ResolvedBounds {
         hydro_index: usize,
         stage_index: usize,
     ) -> &mut HydroStageBounds {
-        let idx = hydro_index * self.n_stages + stage_index;
-        &mut self.hydro[idx]
+        &mut self.hydro[hydro_index * self.n_stages + stage_index]
     }
 
     /// Return a mutable reference to the thermal bounds cell for in-place update.
@@ -411,8 +468,11 @@ impl ResolvedBounds {
         thermal_index: usize,
         stage_index: usize,
     ) -> &mut ThermalStageBounds {
-        let idx = thermal_index * self.thermal_stage_axis_len + stage_index;
-        &mut self.thermal[idx]
+        debug_assert!(
+            self.thermal.is_empty() || self.thermal_stage_axis_len > 0,
+            "thermal_stage_axis_len must be > 0 when the thermal table is non-empty"
+        );
+        &mut self.thermal[thermal_index * self.thermal_stage_axis_len + stage_index]
     }
 
     /// Return a mutable reference to the line bounds cell for in-place update.
@@ -422,8 +482,7 @@ impl ResolvedBounds {
         line_index: usize,
         stage_index: usize,
     ) -> &mut LineStageBounds {
-        let idx = line_index * self.n_stages + stage_index;
-        &mut self.line[idx]
+        &mut self.line[line_index * self.n_stages + stage_index]
     }
 
     /// Return a mutable reference to the pumping bounds cell for in-place update.
@@ -433,8 +492,7 @@ impl ResolvedBounds {
         pumping_index: usize,
         stage_index: usize,
     ) -> &mut PumpingStageBounds {
-        let idx = pumping_index * self.n_stages + stage_index;
-        &mut self.pumping[idx]
+        &mut self.pumping[pumping_index * self.n_stages + stage_index]
     }
 
     /// Return a mutable reference to the contract bounds cell for in-place update.
@@ -444,8 +502,7 @@ impl ResolvedBounds {
         contract_index: usize,
         stage_index: usize,
     ) -> &mut ContractStageBounds {
-        let idx = contract_index * self.n_stages + stage_index;
-        &mut self.contract[idx]
+        &mut self.contract[contract_index * self.n_stages + stage_index]
     }
 
     /// Return the number of stages in this table.
@@ -473,7 +530,10 @@ impl ResolvedBounds {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        BoundsCountsSpec, BoundsDefaults, ContractStageBounds, HydroStageBounds, LineStageBounds,
+        PumpingStageBounds, ResolvedBounds, ThermalStageBounds,
+    };
 
     fn make_hydro_bounds() -> HydroStageBounds {
         HydroStageBounds {
@@ -867,11 +927,17 @@ mod tests {
     /// a 3 x 4 x 3 grid of configurations. The coverage gate at the end
     /// confirms every combination was reached.
     mod bounds_padding_invariants {
-        use super::*;
+        use super::{
+            BoundsCountsSpec, BoundsDefaults, ContractStageBounds, LineStageBounds,
+            PumpingStageBounds, ResolvedBounds, T_DEFAULT, zero_hydro_default_for_tests,
+        };
 
         #[test]
         fn axis_len_matches_n_plus_k_max() {
-            let n_stages_grid = [0_usize, 1, 5];
+            // n_stages starts at 1: ResolvedBounds::new debug-asserts n_stages > 0,
+            // so the 0 case is exercised separately by
+            // new_with_zero_n_stages_panics_in_debug.
+            let n_stages_grid = [1_usize, 5, 12];
             let k_max_grid = [0_usize, 1, 3, 10];
             let n_thermals_grid = [0_usize, 1, 5];
 
@@ -1071,5 +1137,97 @@ mod tests {
             "thermal_stage_axis_len must survive serde roundtrip"
         );
         assert_eq!(original, restored);
+    }
+
+    /// A JSON payload that omits `thermal_stage_axis_len` while the thermal
+    /// table is non-empty must be **rejected**, not silently defaulted to `0`.
+    /// A zero stride would alias every thermal to thermal 0's stage block; the
+    /// `serde(try_from = "ResolvedBoundsWire")` path errors instead.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn deserialize_missing_thermal_axis_len_with_thermals_is_rejected() {
+        // One thermal, one stage: the thermal table is non-empty, so the
+        // absent stride must trigger a deserialization error.
+        let json = r#"{
+            "n_stages": 1,
+            "hydro": [],
+            "thermal": [{"min_generation_mw": 0.0, "max_generation_mw": 100.0, "cost_per_mwh": 50.0}],
+            "line": [],
+            "pumping": [],
+            "contract": []
+        }"#;
+        let result: Result<ResolvedBounds, _> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "deserializing a non-empty thermal table without thermal_stage_axis_len \
+             must error, got Ok"
+        );
+    }
+
+    /// A present-but-zero `thermal_stage_axis_len` with a non-empty thermal
+    /// table is also rejected by the `TryFrom` cross-field check.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn deserialize_zero_thermal_axis_len_with_thermals_is_rejected() {
+        let json = r#"{
+            "n_stages": 1,
+            "thermal_stage_axis_len": 0,
+            "hydro": [],
+            "thermal": [{"min_generation_mw": 0.0, "max_generation_mw": 100.0, "cost_per_mwh": 50.0}],
+            "line": [],
+            "pumping": [],
+            "contract": []
+        }"#;
+        let result: Result<ResolvedBounds, _> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "deserializing a non-empty thermal table with thermal_stage_axis_len=0 \
+             must error, got Ok"
+        );
+    }
+
+    /// `ResolvedBounds::new` documents `n_stages > 0` as a precondition and
+    /// enforces it with a `debug_assert!`. Verify the debug-build panic.
+    #[test]
+    #[cfg(debug_assertions)]
+    fn new_with_zero_n_stages_panics_in_debug() {
+        let result = std::panic::catch_unwind(|| {
+            ResolvedBounds::new(
+                &BoundsCountsSpec {
+                    n_hydros: 1,
+                    n_thermals: 1,
+                    n_lines: 1,
+                    n_pumping: 1,
+                    n_contracts: 1,
+                    n_stages: 0,
+                    k_max: 0,
+                },
+                &BoundsDefaults {
+                    hydro: zero_hydro_default_for_tests(),
+                    thermal: ThermalStageBounds {
+                        min_generation_mw: 0.0,
+                        max_generation_mw: 0.0,
+                        cost_per_mwh: 0.0,
+                    },
+                    line: LineStageBounds {
+                        direct_mw: 0.0,
+                        reverse_mw: 0.0,
+                    },
+                    pumping: PumpingStageBounds {
+                        min_flow_m3s: 0.0,
+                        max_flow_m3s: 0.0,
+                    },
+                    contract: ContractStageBounds {
+                        min_mw: 0.0,
+                        max_mw: 0.0,
+                        price_per_mwh: 0.0,
+                    },
+                },
+            )
+        });
+        assert!(
+            result.is_err(),
+            "ResolvedBounds::new(n_stages=0) must panic in debug builds"
+        );
     }
 }

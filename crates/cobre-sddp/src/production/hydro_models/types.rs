@@ -27,13 +27,6 @@ use serde::{Deserialize, Serialize};
 /// multiplied by the nominal head factor). The LP builder adds this directly
 /// to the right-hand side of the hyperplane inequality constraint without
 /// further scaling.
-///
-/// # Fields
-///
-/// - `intercept` — pre-scaled intercept (`gamma_0 * kappa`)
-/// - `gamma_v` — storage (volume) coefficient
-/// - `gamma_q` — turbined-flow coefficient
-/// - `gamma_s` — spillage coefficient
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FphaPlane {
     /// Pre-scaled intercept (`gamma_0 * kappa`).
@@ -413,18 +406,16 @@ impl PrepareHydroModelsResult {
     /// that reconstruct the result independently).
     #[must_use]
     pub fn default_from_system(system: &System) -> Self {
-        let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
-        let n_stages = study_stages.len();
+        let n_stages = system.stages().iter().filter(|s| s.id >= 0).count();
         let n_hydros = system.hydros().len();
 
         let production_models: Vec<Vec<ResolvedProductionModel>> = system
             .hydros()
             .iter()
             .map(|_hydro| {
-                // Non-FPHA entity models have no inline productivity after the
-                // HydroGenerationModel refactor; the coefficient lives solely in
-                // hydro_production_models.json. Use 0.0 as a placeholder — this
-                // factory is only used in tests and on non-root MPI ranks that
+                // Non-FPHA entity models carry no inline productivity; the coefficient
+                // lives solely in hydro_production_models.json. Use 0.0 as a placeholder —
+                // this factory is only used in tests and on non-root MPI ranks that
                 // reconstruct the result from a broadcast payload (not from scratch).
                 vec![ResolvedProductionModel::ConstantProductivity { productivity: 0.0 }; n_stages]
             })
