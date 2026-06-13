@@ -2,7 +2,7 @@
 //!
 //! Each backend implements the same [`crate::SolverInterface`] contract:
 //!
-//! - [`highs`] — the default `HiGHS` backend (`highs` feature).
+//! - `highs` — the default `HiGHS` backend (`highs` feature).
 //! - `clp` — the optional CLP/`CoinUtils` backend (`clp` feature).
 //! - [`profiled`] — a backend-agnostic wrapper that records per-solve
 //!   statistics around any inner backend.
