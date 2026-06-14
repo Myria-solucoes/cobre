@@ -223,4 +223,101 @@ mod tests {
             "fpha_export_rows must be bit-identical across ranks (deterministic preprocessing)"
         );
     }
+
+    // ── thread-count determinism gate ─────────────────────────────────────────
+
+    /// The per-hydro FPHA fit loop in `resolve_production_models_from_artifacts`
+    /// is a `par_iter().collect()`, so its output must not depend on the rayon
+    /// pool size. This gate fits the computed-FPHA case d07-fpha-computed under
+    /// pools of 1, 2, and 4 threads and asserts the resolved `fpha_export_rows`
+    /// are `to_bits`-identical across all three — the `(hydro_id, stage_id,
+    /// plane_id)` ordering and every gamma coefficient must match bit-for-bit
+    /// regardless of thread scheduling. A regression that collected into a shared
+    /// `Mutex<Vec>` or pushed rows from worker threads would reorder the stream
+    /// and fail here.
+    #[test]
+    fn fit_is_thread_count_invariant() {
+        let case_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("cobre-sddp parent dir must exist")
+            .parent()
+            .expect("crates parent dir must exist")
+            .join("examples/deterministic/d07-fpha-computed");
+
+        let system =
+            cobre_io::load_case(&case_dir).expect("d07-fpha-computed must load successfully");
+
+        // Resolve the FPHA export rows inside a fixed-size rayon pool so the fit
+        // loop runs under exactly `n` worker threads.
+        let resolve_under_pool = |n: usize| -> Vec<cobre_io::FphaHyperplaneRow> {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(n)
+                .build()
+                .expect("rayon pool must build")
+                .install(|| {
+                    super::prepare_hydro_models(&system, &case_dir)
+                        .expect("prepare_hydro_models must succeed")
+                        .fpha_export_rows
+                })
+        };
+
+        let thread_counts = [1usize, 2, 4];
+        let rows: Vec<Vec<cobre_io::FphaHyperplaneRow>> = thread_counts
+            .iter()
+            .map(|&n| resolve_under_pool(n))
+            .collect();
+
+        assert!(
+            !rows[0].is_empty(),
+            "the computed-FPHA case must export at least one plane for the fit path to run"
+        );
+
+        // Bit-exact equality across pool sizes: ids, stage/plane ordering, and the
+        // gamma coefficients (compared via `to_bits`, not float `==`).
+        let assert_bit_identical = |a: &[cobre_io::FphaHyperplaneRow],
+                                    b: &[cobre_io::FphaHyperplaneRow],
+                                    threads_a: usize,
+                                    threads_b: usize| {
+            assert_eq!(
+                a.len(),
+                b.len(),
+                "row count must match across {threads_a}- and {threads_b}-thread pools"
+            );
+            for (ra, rb) in a.iter().zip(b) {
+                assert_eq!(ra.hydro_id, rb.hydro_id, "hydro_id must match");
+                assert_eq!(ra.stage_id, rb.stage_id, "stage_id must match");
+                assert_eq!(ra.plane_id, rb.plane_id, "plane_id must match");
+                assert_eq!(
+                    ra.gamma_0.to_bits(),
+                    rb.gamma_0.to_bits(),
+                    "gamma_0 must be bit-identical across pool sizes"
+                );
+                assert_eq!(
+                    ra.gamma_v.to_bits(),
+                    rb.gamma_v.to_bits(),
+                    "gamma_v must be bit-identical across pool sizes"
+                );
+                assert_eq!(
+                    ra.gamma_q.to_bits(),
+                    rb.gamma_q.to_bits(),
+                    "gamma_q must be bit-identical across pool sizes"
+                );
+                assert_eq!(
+                    ra.gamma_s.to_bits(),
+                    rb.gamma_s.to_bits(),
+                    "gamma_s must be bit-identical across pool sizes"
+                );
+                assert_eq!(
+                    ra.kappa.to_bits(),
+                    rb.kappa.to_bits(),
+                    "kappa must be bit-identical across pool sizes"
+                );
+            }
+        };
+
+        // Compare every pool size against the single-thread baseline.
+        for (rows_n, &n) in rows.iter().zip(&thread_counts).skip(1) {
+            assert_bit_identical(&rows[0], rows_n, thread_counts[0], n);
+        }
+    }
 }

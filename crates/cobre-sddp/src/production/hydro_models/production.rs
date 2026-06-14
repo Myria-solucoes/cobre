@@ -10,6 +10,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use rayon::prelude::*;
+
 use cobre_core::{EntityId, System, entities::hydro::HydroGenerationModel};
 use cobre_io::HydroReferenceVolumeFractions;
 use cobre_io::extensions::{
@@ -203,60 +205,45 @@ pub fn resolve_production_models_from_artifacts(
     let mut provenance: Vec<(EntityId, ProductionModelSource)> = Vec::with_capacity(n_hydros);
     let mut export_rows: Vec<cobre_io::FphaHyperplaneRow> = Vec::new();
 
-    for hydro in system.hydros() {
-        let config_entry = config_map.get(&hydro.id).copied();
-
-        let source = determine_source(hydro, config_entry)?;
-        provenance.push((hydro.id, source));
-
-        // Computed FPHA fits once per `SelectionMode` entry (range or season),
-        // not once per hydro: a hydro whose stages span ranges/seasons with
-        // distinct `fpha_config`s yields a distinct plane set per entry. The
-        // per-stage planes here carry, for each study stage, the plane set of
-        // the entry covering it; a single-config hydro collapses to one fit via
-        // the dedup in `fit_computed_planes_per_stage`.
-        let computed_planes_per_stage: Option<Vec<Vec<FphaPlane>>> =
-            if source == ProductionModelSource::ComputedFromGeometry {
-                // Per-hydro long-term mean inflow drives the lateral-secant
-                // `S_max = 2·MLT`; computed once here (the only scope with
-                // `system`) and threaded into the fit. A history-less hydro
-                // yields `mlt = 0.0`, falling back to `2 × max_turbined`.
-                let mlt = long_term_mean_inflow(system, hydro.id);
-                let per_stage = fit_computed_planes_per_stage(
-                    hydro,
-                    config_entry,
-                    &geometry_map,
-                    &families_map,
-                    &reference_volume_fractions,
-                    system,
-                    &study_stages,
-                    mlt,
-                    plane_reduction,
-                    &mut export_rows,
-                )?;
-                Some(per_stage)
-            } else {
-                None
-            };
-
-        let mut stage_models: Vec<ResolvedProductionModel> = Vec::with_capacity(n_stages);
-        for (stage_idx, stage) in study_stages.iter().enumerate() {
-            let cached_stage_planes = computed_planes_per_stage
-                .as_ref()
-                .map(|per_stage| per_stage[stage_idx].as_slice());
-            let model = resolve_stage_model(
+    // Per-hydro FPHA fit, parallelized over the canonical hydro slice. Each
+    // `fit_one_hydro` reads only shared immutable `&` state (`System` is `Send +
+    // Sync` by the compile-time assert in `cobre_core::System`; every borrowed map
+    // holds `Sync` data) and returns a self-owned `PerHydroFit`, so the fit carries
+    // NO thread/rank/clock input: the per-hydro dedup cache is function-local to
+    // `fit_computed_planes_per_stage`, and the plane-reduction seed is the
+    // pure-identity `fnv1a64(hydro_id, entry_level_bits, tail_slot, candidate_slot)`
+    // (verified in `fpha_fitting::reduction` / `fpha_fitting::rng`). `par_iter()` +
+    // `collect::<Result<Vec<_>, _>>()` therefore reassembles the fits in canonical
+    // (input) hydro order regardless of thread scheduling and short-circuits on the
+    // first error, after which the SEQUENTIAL in-order flatten below preserves the
+    // `(hydro_id, stage_id, plane_id)` export-row ordering bit-for-bit. Collecting
+    // into a shared `Mutex<Vec>` (or pushing rows from worker threads), or keying
+    // the reduction seed on merge history, would reorder the export stream and
+    // break bit-determinism — the same per-entity idiom proven deterministic in
+    // `cobre_stochastic::par::fitting::correlation::compute_hydro_residuals`.
+    let fits: Vec<PerHydroFit> = system
+        .hydros()
+        .par_iter()
+        .map(|hydro| {
+            fit_one_hydro(
                 hydro,
-                stage,
-                config_entry,
-                source,
+                &config_map,
+                &geometry_map,
+                &families_map,
+                &reference_volume_fractions,
                 &hyperplane_map,
-                cached_stage_planes,
-                Some(&override_table),
-            )?;
-            stage_models.push(model);
-        }
-
-        all_models.push(stage_models);
+                &override_table,
+                &study_stages,
+                plane_reduction,
+                system,
+                n_stages,
+            )
+        })
+        .collect::<Result<Vec<_>, SddpError>>()?;
+    for fit in fits {
+        provenance.push(fit.provenance);
+        export_rows.extend(fit.export_rows);
+        all_models.push(fit.stage_models);
     }
 
     let set = ProductionModelSet::new(all_models, n_hydros, n_stages);
@@ -267,6 +254,115 @@ pub fn resolve_production_models_from_artifacts(
         export_rows,
         reference_volumes_hm3,
     ))
+}
+
+/// The three per-hydro outputs `fit_one_hydro` returns to its caller, kept local
+/// so the per-hydro fit owns no `&mut` of the shared `all_models` / `provenance`
+/// / `export_rows` accumulators. The caller concatenates these in
+/// `system.hydros()` order, so the assembled result is declaration-order
+/// invariant: `stage_models` is one `all_models` entry, `provenance` is this
+/// hydro's `(id, source)` pair, and `export_rows` carries only this hydro's
+/// `(stage_id, plane_id)`-ordered FPHA rows.
+struct PerHydroFit {
+    stage_models: Vec<ResolvedProductionModel>,
+    provenance: (EntityId, ProductionModelSource),
+    export_rows: Vec<cobre_io::FphaHyperplaneRow>,
+}
+
+/// Resolve every study-stage production model for ONE hydro, returning the
+/// per-hydro result by value with no shared `&mut` capture.
+///
+/// Pure over its shared/`Copy` inputs: it owns a function-local `export_rows`
+/// `Vec` (the only target the `fit_computed_planes_per_stage` `&mut` now points
+/// at) and returns it, so the caller can concatenate per-hydro results in any
+/// loop shape without aliasing a shared accumulator. `system` stays a shared `&`
+/// (it is `Sync`) — the per-hydro MLT is read from it here, never cloned.
+///
+/// # Errors
+///
+/// Propagates the first [`SddpError`] from `determine_source`,
+/// `fit_computed_planes_per_stage`, or `resolve_stage_model` for this hydro.
+#[allow(clippy::too_many_arguments)]
+// Rationale: every argument is a distinct, already-resolved upstream-owned datum
+// the per-hydro fit reads (the hydro, the config/geometry/families/reference/
+// hyperplane maps, the productivity override, the study stages, the file-level
+// plane reduction, the system for the MLT, and the stage count). Bundling them
+// into a context struct would only relocate the same fields; it mirrors the same
+// allowance on `fit_computed_planes_per_stage`.
+fn fit_one_hydro(
+    hydro: &cobre_core::entities::hydro::Hydro,
+    config_map: &HashMap<EntityId, &ProductionModelConfig>,
+    geometry_map: &HashMap<EntityId, Vec<&HydroGeometryRow>>,
+    families_map: &HashMap<EntityId, TailraceFamilies>,
+    reference_volume_fractions: &HydroReferenceVolumeFractions,
+    hyperplane_map: &HashMap<(EntityId, Option<i32>), Vec<&FphaHyperplaneRow>>,
+    override_table: &crate::energy_conversion::HydroEnergyProductivityOverride,
+    study_stages: &[&cobre_core::temporal::Stage],
+    plane_reduction: Option<&cobre_io::extensions::PlaneReductionConfig>,
+    system: &System,
+    n_stages: usize,
+) -> Result<PerHydroFit, SddpError> {
+    let config_entry = config_map.get(&hydro.id).copied();
+
+    let source = determine_source(hydro, config_entry)?;
+
+    // This hydro's export rows only; owned here and returned. The caller
+    // concatenates per hydro in canonical order, so the assembled stream stays
+    // ordered by `(hydro_id, stage_id, plane_id)`.
+    let mut export_rows: Vec<cobre_io::FphaHyperplaneRow> = Vec::new();
+
+    // Computed FPHA fits once per `SelectionMode` entry (range or season),
+    // not once per hydro: a hydro whose stages span ranges/seasons with
+    // distinct `fpha_config`s yields a distinct plane set per entry. The
+    // per-stage planes here carry, for each study stage, the plane set of
+    // the entry covering it; a single-config hydro collapses to one fit via
+    // the dedup in `fit_computed_planes_per_stage`.
+    let computed_planes_per_stage: Option<Vec<Vec<FphaPlane>>> =
+        if source == ProductionModelSource::ComputedFromGeometry {
+            // Per-hydro long-term mean inflow drives the lateral-secant
+            // `S_max = 2·MLT`; computed here from the shared `system` borrow and
+            // threaded into the fit. A history-less hydro yields `mlt = 0.0`,
+            // falling back to `2 × max_turbined`.
+            let mlt = long_term_mean_inflow(system, hydro.id);
+            let per_stage = fit_computed_planes_per_stage(
+                hydro,
+                config_entry,
+                geometry_map,
+                families_map,
+                reference_volume_fractions,
+                system,
+                study_stages,
+                mlt,
+                plane_reduction,
+                &mut export_rows,
+            )?;
+            Some(per_stage)
+        } else {
+            None
+        };
+
+    let mut stage_models: Vec<ResolvedProductionModel> = Vec::with_capacity(n_stages);
+    for (stage_idx, stage) in study_stages.iter().enumerate() {
+        let cached_stage_planes = computed_planes_per_stage
+            .as_ref()
+            .map(|per_stage| per_stage[stage_idx].as_slice());
+        let model = resolve_stage_model(
+            hydro,
+            stage,
+            config_entry,
+            source,
+            hyperplane_map,
+            cached_stage_planes,
+            Some(override_table),
+        )?;
+        stage_models.push(model);
+    }
+
+    Ok(PerHydroFit {
+        stage_models,
+        provenance: (hydro.id, source),
+        export_rows,
+    })
 }
 
 /// Build an `O(1)` geometry map: `hydro_id → sorted geometry row references`.
