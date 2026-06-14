@@ -137,6 +137,9 @@ pub struct StageRange {
     pub model: String,
     /// FPHA configuration, required when `model == "fpha"`.
     pub fpha_config: Option<FphaColumnLayout>,
+    /// Optional reference operating volume, a sibling of `fpha_config`. `None`
+    /// when not declared; a default is applied later in resolution, not here.
+    pub reference_volume: Option<ReferenceVolume>,
     /// Per-stage productivity coefficient [MW/(m³/s)].
     ///
     /// Optional for `"constant_productivity"` and `"linearized_head"` models. When `None`,
@@ -156,6 +159,9 @@ pub struct SeasonConfig {
     pub model: String,
     /// FPHA configuration, required when `model == "fpha"`.
     pub fpha_config: Option<FphaColumnLayout>,
+    /// Optional reference operating volume, a sibling of `fpha_config`. `None`
+    /// when not declared; a default is applied later in resolution, not here.
+    pub reference_volume: Option<ReferenceVolume>,
     /// Per-season productivity coefficient [MW/(m³/s)].
     ///
     /// Optional for `"constant_productivity"` and `"linearized_head"` models. When `None`,
@@ -223,6 +229,20 @@ pub struct FittingWindow {
     pub volume_min_percentile: Option<f64>,
     /// Maximum as percentile of the operating range. Mutually exclusive with `volume_max_hm3`.
     pub volume_max_percentile: Option<f64>,
+}
+
+/// Reference operating volume for a stage range or season.
+///
+/// The input declares the reference volume either as an absolute storage value
+/// (hm³) or as a percentile of the plant's operating range; the two are mutually
+/// exclusive. Resolution of the percentile form to an absolute value happens in a
+/// later stage, not here.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReferenceVolume {
+    /// Absolute reference volume [hm³]. Finite and `> 0.0`.
+    AbsoluteHm3(f64),
+    /// Reference volume as a percentile of the operating range, in `[0.0, 1.0]`.
+    Percentile(f64),
 }
 
 /// Per-hydro production model configuration loaded from
@@ -311,6 +331,11 @@ struct RawStageRange {
     /// FPHA configuration. Required when `model` is `"fpha"`. Absent or null
     /// otherwise.
     fpha_config: Option<RawFphaColumnLayout>,
+    /// Reference operating volume for this stage range, a sibling of
+    /// `fpha_config` (not nested). Set exactly one of `volume_hm3` (absolute,
+    /// hm³) or `percentile` (`[0.0, 1.0]`). Absent or null = no reference volume
+    /// declared.
+    reference_volume: Option<RawReferenceVolume>,
     /// Per-stage productivity coefficient [MW/(m³/s)]. Optional for
     /// `"constant_productivity"` and `"linearized_head"` models; when absent or
     /// null the value is expected from `system/hydro_energy_productivity.parquet`.
@@ -330,6 +355,11 @@ struct RawSeasonConfig {
     /// FPHA configuration. Required when `model` is `"fpha"`. Absent or null
     /// otherwise.
     fpha_config: Option<RawFphaColumnLayout>,
+    /// Reference operating volume for this season, a sibling of `fpha_config`
+    /// (not nested). Set exactly one of `volume_hm3` (absolute, hm³) or
+    /// `percentile` (`[0.0, 1.0]`). Absent or null = no reference volume
+    /// declared.
+    reference_volume: Option<RawReferenceVolume>,
     /// Per-season productivity coefficient [MW/(m³/s)]. Optional for
     /// `"constant_productivity"` and `"linearized_head"` models; when absent or
     /// null the value is expected from `system/hydro_energy_productivity.parquet`.
@@ -416,6 +446,24 @@ struct RawFittingWindow {
     /// Maximum as a percentile of the operating range. Mutually exclusive
     /// with `volume_max_hm3`.
     volume_max_percentile: Option<f64>,
+}
+
+/// Reference operating volume declared on a stage range or season.
+///
+/// Set exactly one of `volume_hm3` (absolute, hm³) or `percentile` (a fraction
+/// of the operating range). The two are mutually exclusive; setting both, or
+/// neither, is rejected during validation.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawReferenceVolume {
+    /// Absolute reference volume [hm³]. Mutually exclusive with `percentile`.
+    /// When present must be finite and `> 0.0`.
+    volume_hm3: Option<f64>,
+    /// Reference volume as a percentile of the operating range. Mutually
+    /// exclusive with `volume_hm3`. When present must be finite and in
+    /// `[0.0, 1.0]`.
+    percentile: Option<f64>,
 }
 
 // ── Parser ────────────────────────────────────────────────────────────────────
@@ -563,6 +611,16 @@ fn validate_production_models(
                             path,
                         )?;
                     }
+
+                    if let Some(rv) = &season.reference_volume {
+                        validate_reference_volume(
+                            rv,
+                            &format!(
+                                "production_models[{entry_idx}].seasons[{season_idx}].reference_volume"
+                            ),
+                            path,
+                        )?;
+                    }
                 }
             }
         }
@@ -637,6 +695,15 @@ fn validate_stage_range(
         )?;
     }
 
+    // Validate reference_volume if present.
+    if let Some(rv) = &range.reference_volume {
+        validate_reference_volume(
+            rv,
+            &format!("production_models[{entry_idx}].stage_ranges[{range_idx}].reference_volume"),
+            path,
+        )?;
+    }
+
     Ok(())
 }
 
@@ -670,6 +737,59 @@ fn validate_fitting_window(
             message: "mutually exclusive bounds: volume_max_hm3 and volume_max_percentile \
                       cannot both be set; use absolute bounds OR percentiles, not both"
                 .to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+/// Validate a reference-volume entry's absolute-XOR-percentile invariant.
+///
+/// Exactly one of `volume_hm3` or `percentile` must be set. An absolute volume
+/// must be finite and `> 0.0`; a percentile must be finite and in `[0.0, 1.0]`.
+/// Validation runs before conversion, so a value that passes here has exactly
+/// one field `Some`.
+fn validate_reference_volume(
+    rv: &RawReferenceVolume,
+    field_prefix: &str,
+    path: &Path,
+) -> Result<(), LoadError> {
+    if rv.volume_hm3.is_some() && rv.percentile.is_some() {
+        return Err(LoadError::SchemaError {
+            path: path.to_path_buf(),
+            field: field_prefix.to_string(),
+            message: "mutually exclusive fields: volume_hm3 and percentile cannot both be \
+                      set; use an absolute volume OR a percentile, not both"
+                .to_string(),
+        });
+    }
+
+    if rv.volume_hm3.is_none() && rv.percentile.is_none() {
+        return Err(LoadError::SchemaError {
+            path: path.to_path_buf(),
+            field: field_prefix.to_string(),
+            message: "reference_volume must set exactly one of volume_hm3 or percentile"
+                .to_string(),
+        });
+    }
+
+    if let Some(vol) = rv.volume_hm3
+        && (!vol.is_finite() || vol <= 0.0)
+    {
+        return Err(LoadError::SchemaError {
+            path: path.to_path_buf(),
+            field: field_prefix.to_string(),
+            message: format!("volume_hm3 must be finite and > 0.0, got {vol}"),
+        });
+    }
+
+    if let Some(pct) = rv.percentile
+        && (!pct.is_finite() || !(0.0..=1.0).contains(&pct))
+    {
+        return Err(LoadError::SchemaError {
+            path: path.to_path_buf(),
+            field: field_prefix.to_string(),
+            message: format!("percentile must be finite and in [0.0, 1.0], got {pct}"),
         });
     }
 
@@ -752,6 +872,7 @@ fn convert_stage_range(raw: RawStageRange) -> StageRange {
         end_stage_id: raw.end_stage_id,
         model: raw.model,
         fpha_config: raw.fpha_config.map(convert_fpha_column_layout),
+        reference_volume: raw.reference_volume.as_ref().map(convert_reference_volume),
         productivity_mw_per_m3s: raw.productivity_mw_per_m3s,
     }
 }
@@ -761,7 +882,22 @@ fn convert_season_config(raw: RawSeasonConfig) -> SeasonConfig {
         season_id: raw.season_id,
         model: raw.model,
         fpha_config: raw.fpha_config.map(convert_fpha_column_layout),
+        reference_volume: raw.reference_volume.as_ref().map(convert_reference_volume),
         productivity_mw_per_m3s: raw.productivity_mw_per_m3s,
+    }
+}
+
+/// Pick the public variant from whichever field is `Some`.
+///
+/// `validate_reference_volume` runs first and enforces that exactly one field is
+/// `Some`, so `volume_hm3` taking priority is unambiguous: it is `Some` only when
+/// `percentile` is `None`, and the `percentile` branch is reached only when
+/// `volume_hm3` is `None`. The `unwrap_or` default is unreachable under that
+/// contract; it exists solely to keep this conversion total without a panic.
+fn convert_reference_volume(raw: &RawReferenceVolume) -> ReferenceVolume {
+    match raw.volume_hm3 {
+        Some(vol) => ReferenceVolume::AbsoluteHm3(vol),
+        None => ReferenceVolume::Percentile(raw.percentile.unwrap_or_default()),
     }
 }
 
@@ -1732,6 +1868,229 @@ mod tests {
                 LoadError::SchemaError { .. } | LoadError::ParseError { .. }
             ),
             "a foreign field alongside the required one must be rejected by deny_unknown_fields, got: {err:?}"
+        );
+    }
+
+    // ── reference_volume ──────────────────────────────────────────────────────
+
+    /// `{ volume_hm3 }` on a stage range parses to the absolute-volume variant.
+    #[test]
+    fn reference_volume_absolute_parses() {
+        let json = r#"{
+          "production_models": [{
+            "hydro_id": 0,
+            "selection_mode": "stage_ranges",
+            "stage_ranges": [{
+              "start_stage_id": 0, "end_stage_id": null,
+              "model": "constant_productivity",
+              "productivity_mw_per_m3s": 0.9,
+              "reference_volume": { "volume_hm3": 1234.5 }
+            }]
+          }]
+        }"#;
+        let f = write_json(json);
+        let models = parse_production_models(f.path()).unwrap().configs;
+        match &models[0].selection_mode {
+            SelectionMode::StageRanges { ranges } => {
+                assert_eq!(
+                    ranges[0].reference_volume,
+                    Some(ReferenceVolume::AbsoluteHm3(1234.5))
+                );
+            }
+            other => panic!("expected StageRanges, got: {other:?}"),
+        }
+    }
+
+    /// `{ percentile }` on a stage range parses to the percentile variant.
+    #[test]
+    fn reference_volume_percentile_parses() {
+        let json = r#"{
+          "production_models": [{
+            "hydro_id": 0,
+            "selection_mode": "stage_ranges",
+            "stage_ranges": [{
+              "start_stage_id": 0, "end_stage_id": null,
+              "model": "constant_productivity",
+              "productivity_mw_per_m3s": 0.9,
+              "reference_volume": { "percentile": 0.5 }
+            }]
+          }]
+        }"#;
+        let f = write_json(json);
+        let models = parse_production_models(f.path()).unwrap().configs;
+        match &models[0].selection_mode {
+            SelectionMode::StageRanges { ranges } => {
+                assert_eq!(
+                    ranges[0].reference_volume,
+                    Some(ReferenceVolume::Percentile(0.5))
+                );
+            }
+            other => panic!("expected StageRanges, got: {other:?}"),
+        }
+    }
+
+    /// Both `volume_hm3` and `percentile` set (on a season entry) -> SchemaError
+    /// whose message contains "mutually exclusive" and whose field names seasons.
+    #[test]
+    fn reference_volume_both_set_is_rejected() {
+        let json = r#"{
+          "production_models": [{
+            "hydro_id": 0,
+            "selection_mode": "seasonal",
+            "default_model": "constant_productivity",
+            "seasons": [{
+              "season_id": 0,
+              "model": "constant_productivity",
+              "productivity_mw_per_m3s": 0.9,
+              "reference_volume": { "volume_hm3": 1.0, "percentile": 0.5 }
+            }]
+          }]
+        }"#;
+        let f = write_json(json);
+        let err = parse_production_models(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert!(
+                    message.contains("mutually exclusive"),
+                    "message should contain 'mutually exclusive', got: {message}"
+                );
+                assert!(
+                    field.contains("seasons"),
+                    "field should name seasons, got: {field}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// An empty `reference_volume: {}` (neither field set) -> SchemaError.
+    #[test]
+    fn reference_volume_neither_set_is_rejected() {
+        let json = r#"{
+          "production_models": [{
+            "hydro_id": 0,
+            "selection_mode": "stage_ranges",
+            "stage_ranges": [{
+              "start_stage_id": 0, "end_stage_id": null,
+              "model": "constant_productivity",
+              "productivity_mw_per_m3s": 0.9,
+              "reference_volume": {}
+            }]
+          }]
+        }"#;
+        let f = write_json(json);
+        let err = parse_production_models(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { message, .. } => {
+                assert!(
+                    message.contains("exactly one"),
+                    "message should require exactly one field, got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// `percentile` outside `[0.0, 1.0]` -> SchemaError naming the range.
+    #[test]
+    fn reference_volume_percentile_out_of_range_is_rejected() {
+        let json = r#"{
+          "production_models": [{
+            "hydro_id": 0,
+            "selection_mode": "stage_ranges",
+            "stage_ranges": [{
+              "start_stage_id": 0, "end_stage_id": null,
+              "model": "constant_productivity",
+              "productivity_mw_per_m3s": 0.9,
+              "reference_volume": { "percentile": 1.5 }
+            }]
+          }]
+        }"#;
+        let f = write_json(json);
+        let err = parse_production_models(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { message, .. } => {
+                assert!(
+                    message.contains("[0.0, 1.0]"),
+                    "message should cite the [0.0, 1.0] range, got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// `volume_hm3` of `0.0` (and negative) -> SchemaError.
+    #[test]
+    fn reference_volume_nonpositive_volume_is_rejected() {
+        for bad in ["0.0", "-5.0"] {
+            let json = format!(
+                r#"{{
+              "production_models": [{{
+                "hydro_id": 0,
+                "selection_mode": "stage_ranges",
+                "stage_ranges": [{{
+                  "start_stage_id": 0, "end_stage_id": null,
+                  "model": "constant_productivity",
+                  "productivity_mw_per_m3s": 0.9,
+                  "reference_volume": {{ "volume_hm3": {bad} }}
+                }}]
+              }}]
+            }}"#
+            );
+            let f = write_json(&json);
+            let err = parse_production_models(f.path()).unwrap_err();
+            match &err {
+                LoadError::SchemaError { message, .. } => {
+                    assert!(
+                        message.contains("> 0.0"),
+                        "message should require > 0.0, got: {message}"
+                    );
+                }
+                other => panic!("expected SchemaError for volume_hm3={bad}, got: {other:?}"),
+            }
+        }
+    }
+
+    /// `{ volume_hm3 }` on a season entry parses to the absolute-volume variant.
+    #[test]
+    fn reference_volume_on_season_entry_parses() {
+        let json = r#"{
+          "production_models": [{
+            "hydro_id": 7,
+            "selection_mode": "seasonal",
+            "default_model": "constant_productivity",
+            "seasons": [{
+              "season_id": 0,
+              "model": "constant_productivity",
+              "productivity_mw_per_m3s": 0.9,
+              "reference_volume": { "volume_hm3": 800.0 }
+            }]
+          }]
+        }"#;
+        let f = write_json(json);
+        let models = parse_production_models(f.path()).unwrap().configs;
+        match &models[0].selection_mode {
+            SelectionMode::Seasonal { seasons, .. } => {
+                assert_eq!(
+                    seasons[0].reference_volume,
+                    Some(ReferenceVolume::AbsoluteHm3(800.0))
+                );
+            }
+            other => panic!("expected Seasonal, got: {other:?}"),
+        }
+    }
+
+    /// With the `schema` feature, the generated schema for `RawProductionModelFile`
+    /// exposes a `reference_volume` property under both entry schemas.
+    #[cfg(feature = "schema")]
+    #[test]
+    fn reference_volume_appears_in_generated_schema() {
+        let schema = schemars::schema_for!(RawProductionModelFile);
+        let value = serde_json::to_value(&schema).unwrap();
+        let text = serde_json::to_string(&value).unwrap();
+        assert!(
+            text.contains("reference_volume"),
+            "generated schema must expose the reference_volume property"
         );
     }
 }

@@ -13,7 +13,8 @@ use std::path::Path;
 use cobre_core::{EntityId, System, entities::hydro::HydroGenerationModel};
 use cobre_io::HydroReferenceVolumeFractions;
 use cobre_io::extensions::{
-    FphaColumnLayout, FphaHyperplaneRow, HydroGeometryRow, ProductionModelConfig, SelectionMode,
+    FphaColumnLayout, FphaHyperplaneRow, HydroGeometryRow, ProductionModelConfig, ReferenceVolume,
+    SelectionMode,
 };
 
 use super::load_artifacts_for_hydro_models;
@@ -658,6 +659,80 @@ fn find_fpha_config_for_stage<'a>(
     }
 }
 
+/// Default reference operating volume as a fraction of the `[v_min, v_max]`
+/// operating band [dimensionless, in `[0, 1]`], applied when no entry declares a
+/// `reference_volume`. The sole owner of this literal: changing it shifts every
+/// undeclared plant's resolved reference volume.
+// Intent/Seam: read only by `resolve_reference_volume_hm3`, which the reference-
+// volume consumers are not yet wired to; the lint reactivates when that resolver
+// is called at the `resolve_downstream_level` and `build_energy_conversion_set`
+// call sites in this crate.
+#[allow(dead_code)]
+const DEFAULT_REFERENCE_VOLUME_FRACTION: f64 = 0.65;
+
+/// Extract the [`ReferenceVolume`] that applies to a given stage from a [`ProductionModelConfig`].
+///
+/// Mirrors [`find_fpha_config_for_stage`]: walks the selection mode, finds the
+/// entry covering `stage`, and returns its `reference_volume`. Returns `None`
+/// when no stage range or season entry covers the stage, or when the covering
+/// entry has no `reference_volume`.
+// Intent/Seam: the reference-volume consumers (`resolve_downstream_level`,
+// `build_energy_conversion_set`) are not yet wired to this finder; the lint
+// reactivates when that wiring lands.
+#[allow(dead_code)]
+fn find_reference_volume_for_stage<'a>(
+    config: &'a ProductionModelConfig,
+    stage: &cobre_core::temporal::Stage,
+) -> Option<&'a ReferenceVolume> {
+    match &config.selection_mode {
+        SelectionMode::StageRanges { ranges } => {
+            for range in ranges {
+                let after_start = stage.id >= range.start_stage_id;
+                let before_end = range.end_stage_id.is_none_or(|end| stage.id <= end);
+                if after_start && before_end {
+                    return range.reference_volume.as_ref();
+                }
+            }
+            None
+        }
+        SelectionMode::Seasonal {
+            default_model: _,
+            seasons,
+        } => {
+            if let Some(season_id) = stage.season_id {
+                for season in seasons {
+                    if i32::try_from(season_id).is_ok_and(|sid| sid == season.season_id) {
+                        return season.reference_volume.as_ref();
+                    }
+                }
+            }
+            None
+        }
+    }
+}
+
+/// Resolve a [`ReferenceVolume`] to an absolute storage value [hm³] against the
+/// plant's `[v_min, v_max]` operating band.
+///
+/// - `Some(AbsoluteHm3(v))` → `v` unchanged;
+/// - `Some(Percentile(p))` → `v_min + p·(v_max − v_min)`;
+/// - `None` → `v_min + DEFAULT_REFERENCE_VOLUME_FRACTION·(v_max − v_min)`.
+///
+/// The percentile and default arms multiply the span `(v_max − v_min)` rather
+/// than dividing it — multiplication, never division — so a degenerate
+/// `v_max == v_min` band yields `v_min` for any percentile or the default,
+/// instead of a `0/0` NaN.
+// Intent/Seam: the reference-volume consumers are not yet wired to this resolver;
+// the lint reactivates when that wiring lands.
+#[allow(dead_code)]
+fn resolve_reference_volume_hm3(rv: Option<&ReferenceVolume>, v_min: f64, v_max: f64) -> f64 {
+    match rv {
+        Some(ReferenceVolume::AbsoluteHm3(volume_hm3)) => *volume_hm3,
+        Some(ReferenceVolume::Percentile(percentile)) => v_min + percentile * (v_max - v_min),
+        None => v_min + DEFAULT_REFERENCE_VOLUME_FRACTION * (v_max - v_min),
+    }
+}
+
 /// Validate that a hydro with `source: "computed"` has all required model fields and geometry.
 ///
 /// Checks that `tailrace`, `hydraulic_losses`, and `efficiency` are all `Some`, and
@@ -1132,6 +1207,7 @@ mod tests {
                         max_planes_per_hydro: None,
                         fitting_window: None,
                     }),
+                    reference_volume: None,
                     productivity_mw_per_m3s: None,
                 }],
             },
@@ -1154,6 +1230,7 @@ mod tests {
                         max_planes_per_hydro: None,
                         fitting_window: None,
                     }),
+                    reference_volume: None,
                     productivity_mw_per_m3s: None,
                 }],
             },
@@ -1325,6 +1402,7 @@ mod tests {
                         max_planes_per_hydro: None,
                         fitting_window: None,
                     }),
+                    reference_volume: None,
                     productivity_mw_per_m3s: None,
                 }],
             },
@@ -1642,6 +1720,7 @@ mod tests {
                     end_stage_id: Some(10),
                     model: "fpha".to_string(),
                     fpha_config: None,
+                    reference_volume: None,
                     productivity_mw_per_m3s: None,
                 }],
             },
@@ -1665,6 +1744,7 @@ mod tests {
                     end_stage_id: None,
                     model: "constant_productivity".to_string(),
                     fpha_config: None,
+                    reference_volume: None,
                     productivity_mw_per_m3s: None,
                 }],
             },
@@ -1695,6 +1775,7 @@ mod tests {
                     end_stage_id: None,
                     model: "constant_productivity".to_string(),
                     fpha_config: None,
+                    reference_volume: None,
                     productivity_mw_per_m3s: Some(0.55),
                 }],
             },
@@ -1742,6 +1823,7 @@ mod tests {
                     end_stage_id: None,
                     model: "constant_productivity".to_string(),
                     fpha_config: None,
+                    reference_volume: None,
                     productivity_mw_per_m3s: None,
                 }],
             },
@@ -1821,6 +1903,7 @@ mod tests {
                     end_stage_id: None,
                     model: "constant_productivity".to_string(),
                     fpha_config: None,
+                    reference_volume: None,
                     productivity_mw_per_m3s: None,
                 }],
             },
@@ -1933,6 +2016,7 @@ mod tests {
                     end_stage_id: None,
                     model: "constant_productivity".to_string(),
                     fpha_config: None,
+                    reference_volume: None,
                     productivity_mw_per_m3s: Some(0.75),
                 }],
             },
@@ -1957,6 +2041,7 @@ mod tests {
                     season_id: 1,
                     model: "constant_productivity".to_string(),
                     fpha_config: None,
+                    reference_volume: None,
                     productivity_mw_per_m3s: Some(0.60),
                 }],
             },
@@ -2518,6 +2603,7 @@ mod tests {
                         end_stage_id: Some(1),
                         model: "fpha".to_string(),
                         fpha_config: Some(computed_layout_with_window(Some(100.0), Some(8_000.0))),
+                        reference_volume: None,
                         productivity_mw_per_m3s: None,
                     },
                     StageRange {
@@ -2525,6 +2611,7 @@ mod tests {
                         end_stage_id: None,
                         model: "fpha".to_string(),
                         fpha_config: Some(computed_layout_with_window(Some(100.0), Some(20_000.0))),
+                        reference_volume: None,
                         productivity_mw_per_m3s: None,
                     },
                 ],
@@ -2578,12 +2665,14 @@ mod tests {
                         season_id: 0,
                         model: "fpha".to_string(),
                         fpha_config: Some(computed_layout_with_window(Some(100.0), Some(8_000.0))),
+                        reference_volume: None,
                         productivity_mw_per_m3s: None,
                     },
                     SeasonConfig {
                         season_id: 1,
                         model: "fpha".to_string(),
                         fpha_config: Some(computed_layout_with_window(Some(100.0), Some(20_000.0))),
+                        reference_volume: None,
                         productivity_mw_per_m3s: None,
                     },
                 ],
@@ -2747,6 +2836,7 @@ mod tests {
                     end_stage_id: Some(1),
                     model: "fpha".to_string(),
                     fpha_config: Some(computed_layout_with_window(None, None)),
+                    reference_volume: None,
                     productivity_mw_per_m3s: None,
                 }],
             },
@@ -3230,5 +3320,98 @@ mod tests {
             assert_eq!(a.gamma_q.to_bits(), b.gamma_q.to_bits());
             assert_eq!(a.gamma_s.to_bits(), b.gamma_s.to_bits());
         }
+    }
+
+    // ── reference_volume resolution ─────────────────────────────────────────
+
+    /// Build a single-`StageRange` config covering `[0, ∞)` with the given
+    /// `reference_volume`.
+    fn config_with_reference_volume(rv: Option<ReferenceVolume>) -> ProductionModelConfig {
+        ProductionModelConfig {
+            hydro_id: EntityId::from(1),
+            selection_mode: SelectionMode::StageRanges {
+                ranges: vec![StageRange {
+                    start_stage_id: 0,
+                    end_stage_id: None,
+                    model: "constant_productivity".to_string(),
+                    fpha_config: None,
+                    reference_volume: rv,
+                    productivity_mw_per_m3s: Some(0.5),
+                }],
+            },
+        }
+    }
+
+    #[test]
+    fn find_reference_volume_for_stage_returns_covering_entry_value() {
+        let config = config_with_reference_volume(Some(ReferenceVolume::AbsoluteHm3(800.0)));
+        let stage0 = make_stage(0);
+        assert_eq!(
+            find_reference_volume_for_stage(&config, &stage0),
+            Some(&ReferenceVolume::AbsoluteHm3(800.0))
+        );
+    }
+
+    #[test]
+    fn find_reference_volume_for_stage_returns_none_when_unset() {
+        let config = config_with_reference_volume(None);
+        let stage0 = make_stage(0);
+        assert_eq!(find_reference_volume_for_stage(&config, &stage0), None);
+    }
+
+    #[test]
+    fn find_reference_volume_for_stage_returns_none_outside_coverage() {
+        // Range covers stages [5, 10]; stage 0 is uncovered, so the finder
+        // returns `None` exactly as `find_fpha_config_for_stage` does.
+        let config = ProductionModelConfig {
+            hydro_id: EntityId::from(1),
+            selection_mode: SelectionMode::StageRanges {
+                ranges: vec![StageRange {
+                    start_stage_id: 5,
+                    end_stage_id: Some(10),
+                    model: "constant_productivity".to_string(),
+                    fpha_config: None,
+                    reference_volume: Some(ReferenceVolume::AbsoluteHm3(800.0)),
+                    productivity_mw_per_m3s: Some(0.5),
+                }],
+            },
+        };
+        let stage0 = make_stage(0);
+        assert_eq!(find_reference_volume_for_stage(&config, &stage0), None);
+    }
+
+    #[test]
+    fn resolve_reference_volume_hm3_absolute_passthrough() {
+        let rv = ReferenceVolume::AbsoluteHm3(800.0);
+        let resolved = resolve_reference_volume_hm3(Some(&rv), 100.0, 2000.0);
+        assert_eq!(resolved, 800.0);
+    }
+
+    #[test]
+    fn resolve_reference_volume_hm3_percentile_against_band() {
+        let rv = ReferenceVolume::Percentile(0.5);
+        let resolved = resolve_reference_volume_hm3(Some(&rv), 100.0, 200.0);
+        assert!((resolved - 150.0).abs() <= f64::EPSILON);
+    }
+
+    #[test]
+    fn resolve_reference_volume_hm3_none_reproduces_065_fraction() {
+        let v_min = 100.0_f64;
+        let v_max = 200.0_f64;
+        let resolved = resolve_reference_volume_hm3(None, v_min, v_max);
+        // Bit-identical to the legacy inline `0.65`-fraction formula: this is the
+        // byte-identity guarantee the consumer rewrite relies on.
+        let expected = v_min + 0.65 * (v_max - v_min);
+        assert_eq!(resolved.to_bits(), expected.to_bits());
+    }
+
+    #[test]
+    fn resolve_reference_volume_hm3_degenerate_band_is_not_nan() {
+        // A `v_max == v_min` band must collapse to `v_min` via multiplication,
+        // never produce a `0/0` NaN from a division-based percentile conversion.
+        let rv = ReferenceVolume::Percentile(0.5);
+        let resolved = resolve_reference_volume_hm3(Some(&rv), 50.0, 50.0);
+        assert!(!resolved.is_nan());
+        assert_eq!(resolved, 50.0);
     }
 }
