@@ -32,9 +32,10 @@ use crate::{
         load_penalty_overrides_ncs, load_pumping_bounds, load_thermal_bounds,
     },
     extensions::{
-        FphaHyperplaneRow, HydroEnergyProductivityRow, HydroGeometryRow, ProductionModelConfig,
-        load_fpha_hyperplanes, load_hydro_energy_productivity, load_production_models,
-        parse_hydro_geometry, parse_scalar_parameters_json,
+        FphaHyperplaneRow, HydroEnergyProductivityRow, HydroGeometryRow, PlaneReductionConfig,
+        ProductionModelConfig, ProductionModelFile, load_fpha_hyperplanes,
+        load_hydro_energy_productivity, load_production_models, parse_hydro_geometry,
+        parse_scalar_parameters_json,
     },
     initial_conditions::parse_initial_conditions,
     penalties::parse_penalties,
@@ -103,6 +104,9 @@ pub(crate) struct ParsedData {
     pub(crate) hydro_geometry: Vec<HydroGeometryRow>,
     /// Parsed `system/hydro_production_models.json`. Empty when absent.
     pub(crate) production_models: Vec<ProductionModelConfig>,
+    /// File-level FPHA plane-reduction block from
+    /// `system/hydro_production_models.json`. `None` when absent or unset.
+    pub(crate) plane_reduction: Option<PlaneReductionConfig>,
     /// Parsed `system/hydro_energy_productivity.parquet`. Empty when absent.
     ///
     /// Consumed by `validation::productivity_resolution` to enforce that exactly
@@ -371,10 +375,13 @@ pub(crate) fn validate_schema(
         ctx,
     );
 
-    let production_models = optional_or_error(
+    let ProductionModelFile {
+        configs: production_models,
+        plane_reduction,
+    } = optional_or_error(
         manifest.system_hydro_production_models_json,
         || load_production_models(Some(&case_root.join("system/hydro_production_models.json"))),
-        Vec::new,
+        ProductionModelFile::default,
         "system/hydro_production_models.json",
         ctx,
     );
@@ -729,6 +736,7 @@ pub(crate) fn validate_schema(
         energy_contracts,
         hydro_geometry,
         production_models,
+        plane_reduction,
         hydro_energy_productivity_rows,
         fpha_hyperplanes,
         scalar_parameters,

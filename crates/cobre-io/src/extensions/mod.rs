@@ -41,8 +41,8 @@ pub use hydro_reference_volumes::{
     build_hydro_reference_volume_fractions, parse_hydro_reference_volume_fractions,
 };
 pub use production_models::{
-    FittingWindow, FphaColumnLayout, ProductionModelConfig, SeasonConfig, SelectionMode,
-    StageRange, parse_production_models,
+    FittingWindow, FphaColumnLayout, PlaneReductionConfig, ProductionModelConfig,
+    ProductionModelFile, SeasonConfig, SelectionMode, StageRange, parse_production_models,
 };
 pub use scalar_parameters::{load_scalar_parameters_json, parse_scalar_parameters_json};
 pub use tailrace_curves::{TailraceCurveRow, parse_tailrace_curves};
@@ -78,11 +78,12 @@ pub fn load_hydro_geometry(path: Option<&Path>) -> Result<Vec<HydroGeometryRow>,
 }
 
 /// Load `system/hydro_production_models.json` when the path is known, or return
-/// an empty `Vec` when the file is absent (optional file).
+/// an empty [`ProductionModelFile`] when the file is absent (optional file).
 ///
 /// This wrapper is the standard entry point used by the loading pipeline. When
 /// `path` is `None` (the structural validation step found no file at the expected
-/// location), it returns `Ok(Vec::new())` without touching the filesystem.
+/// location), it returns `Ok(ProductionModelFile::default())` (empty configs, no
+/// reduction) without touching the filesystem.
 ///
 /// # Errors
 ///
@@ -93,15 +94,14 @@ pub fn load_hydro_geometry(path: Option<&Path>) -> Result<Vec<HydroGeometryRow>,
 /// ```
 /// use cobre_io::extensions::load_production_models;
 ///
-/// // No file present — returns empty vec.
-/// let models = load_production_models(None).expect("no file is fine");
-/// assert!(models.is_empty());
+/// // No file present — empty configs, no plane reduction.
+/// let file = load_production_models(None).expect("no file is fine");
+/// assert!(file.configs.is_empty());
+/// assert!(file.plane_reduction.is_none());
 /// ```
-pub fn load_production_models(
-    path: Option<&Path>,
-) -> Result<Vec<ProductionModelConfig>, LoadError> {
+pub fn load_production_models(path: Option<&Path>) -> Result<ProductionModelFile, LoadError> {
     match path {
-        None => Ok(Vec::new()),
+        None => Ok(ProductionModelFile::default()),
         Some(p) => parse_production_models(p),
     }
 }
@@ -211,11 +211,19 @@ pub fn load_tailrace_curves(path: Option<&Path>) -> Result<Vec<TailraceCurveRow>
 mod tests {
     use super::*;
 
-    /// `load_production_models(None)` returns `Ok(Vec::new())` without I/O.
+    /// `load_production_models(None)` returns an empty file (no configs, no
+    /// reduction) without I/O.
     #[test]
     fn test_load_production_models_none_returns_empty() {
-        let result = load_production_models(None).unwrap();
-        assert!(result.is_empty(), "expected empty vec for None path");
+        let file = load_production_models(None).unwrap();
+        assert!(
+            file.configs.is_empty(),
+            "expected empty configs for None path"
+        );
+        assert!(
+            file.plane_reduction.is_none(),
+            "expected no plane reduction for None path"
+        );
     }
 
     /// `load_fpha_hyperplanes(None)` returns `Ok(Vec::new())` without I/O.

@@ -110,6 +110,14 @@ pub fn resolve_production_models_from_artifacts(
     // needed because the per-hydro maps below only need references.
     let prod_configs: &[ProductionModelConfig] = &artifacts.production_models;
 
+    // The file-level similar-hyperplane reduction config, applied uniformly to
+    // every computed-FPHA plant after fitting. `None` means no reduction — the
+    // fit then literally skips the merge pass. Threaded by reference into the
+    // per-stage fit; it is fixed for the whole study, so it is never stored
+    // per-entry.
+    let plane_reduction: Option<&cobre_io::extensions::PlaneReductionConfig> =
+        artifacts.plane_reduction.as_ref();
+
     let config_map: HashMap<EntityId, &ProductionModelConfig> =
         prod_configs.iter().map(|c| (c.hydro_id, c)).collect();
 
@@ -201,6 +209,7 @@ pub fn resolve_production_models_from_artifacts(
                     system,
                     &study_stages,
                     mlt,
+                    plane_reduction,
                     &mut export_rows,
                 )?;
                 Some(per_stage)
@@ -348,12 +357,22 @@ fn long_term_mean_inflow(system: &System, hydro_id: EntityId) -> f64 {
 /// table, else [`TailraceSource::Entity`] (the inert fallback). It is consumed by
 /// the production-function sampler and changes only the `h_jus` the secant reads —
 /// never the hull/α/secant procedure.
+///
+/// `plane_reduction` is the optional file-level similar-hyperplane reduction
+/// config, forwarded verbatim to `fit_fpha_planes`. `None` skips the merge pass.
+///
+/// `entry_level_bits` is the per-entry downstream-level bits (the same dedup-key
+/// component the caller computes), forwarded as the stable seed identity for the
+/// `Distance` reduction arm together with `hydro.id.0`. The angle arm and the
+/// `None` skip ignore it.
 fn fit_planes_for_hydro(
     hydro: &cobre_core::entities::hydro::Hydro,
     config: &FphaColumnLayout,
     geometry_map: &HashMap<EntityId, Vec<&HydroGeometryRow>>,
     mlt: f64,
     tailrace_source: TailraceSource,
+    plane_reduction: Option<&cobre_io::extensions::PlaneReductionConfig>,
+    entry_level_bits: u64,
 ) -> Result<FphaFitResult, SddpError> {
     validate_computed_prerequisites(hydro, geometry_map)?;
 
@@ -371,6 +390,9 @@ fn fit_planes_for_hydro(
         config,
         mlt,
         tailrace_source,
+        plane_reduction,
+        hydro.id.0,
+        entry_level_bits,
     )?)
 }
 
@@ -468,6 +490,7 @@ fn fit_computed_planes_per_stage(
     system: &System,
     study_stages: &[&cobre_core::temporal::Stage],
     mlt: f64,
+    plane_reduction: Option<&cobre_io::extensions::PlaneReductionConfig>,
     export_rows: &mut Vec<cobre_io::FphaHyperplaneRow>,
 ) -> Result<Vec<Vec<FphaPlane>>, SddpError> {
     // Cache of distinct fits keyed by `(config, downstream-level bits)`. Linear
@@ -511,8 +534,18 @@ fn fit_computed_planes_per_stage(
         let planes = if let Some((_, planes)) = fitted.iter().find(|(k, _)| *k == key) {
             planes.clone()
         } else {
-            let fit_result =
-                fit_planes_for_hydro(hydro, config, geometry_map, mlt, tailrace_source)?;
+            let fit_result = fit_planes_for_hydro(
+                hydro,
+                config,
+                geometry_map,
+                mlt,
+                tailrace_source,
+                plane_reduction,
+                // The dedup-key level bits double as the per-entry seed identity
+                // for the Distance reduction arm. `None` (entity fallback /
+                // unresolved level) maps to 0, mirroring the dedup-key `None`.
+                level_bits.unwrap_or(0),
+            )?;
             fitted.push((key, fit_result.planes.clone()));
             fit_result.planes
         };
@@ -2026,6 +2059,8 @@ mod tests {
             &geometry_map,
             0.0,
             super::TailraceSource::Entity(hydro.tailrace.clone()),
+            None,
+            0,
         )
         .expect("fit_planes_for_hydro must succeed for valid Sobradinho-style input");
         let planes = &fit_result.planes;
@@ -2118,6 +2153,7 @@ mod tests {
             &system,
             &stage_refs,
             0.0,
+            None,
             &mut export_rows,
         )
         .expect("per-stage fit must succeed");
@@ -2222,6 +2258,8 @@ mod tests {
             &geometry_map,
             0.0,
             super::TailraceSource::Entity(hydro1.tailrace.clone()),
+            None,
+            0,
         )
         .expect("fit_planes_for_hydro must succeed for hydro 1");
 
@@ -2298,6 +2336,8 @@ mod tests {
             &geometry_map,
             0.0,
             super::TailraceSource::Entity(hydro.tailrace.clone()),
+            None,
+            0,
         )
         .expect("fit_planes_for_hydro must succeed");
 
@@ -2506,6 +2546,7 @@ mod tests {
             &system,
             &stage_refs,
             0.0,
+            None,
             &mut export_rows,
         )
         .expect("per-stage fit must succeed");
@@ -2568,6 +2609,7 @@ mod tests {
             &system,
             &stage_refs,
             0.0,
+            None,
             &mut export_rows,
         )
         .expect("per-season fit must succeed");
@@ -2605,6 +2647,7 @@ mod tests {
             &system,
             &stage_refs,
             0.0,
+            None,
             &mut export_rows,
         )
         .expect("single-config fit must succeed");
@@ -2651,6 +2694,7 @@ mod tests {
             &system,
             &stage_refs,
             0.0,
+            None,
             &mut export_rows,
         )
         .expect("fit must succeed");
@@ -2723,6 +2767,7 @@ mod tests {
             &system,
             &stage_refs,
             0.0,
+            None,
             &mut export_rows,
         )
         .expect_err("a coverage gap must error, not silently drop the stage");
@@ -3085,6 +3130,7 @@ mod tests {
             &system,
             &stage_refs,
             0.0,
+            None,
             &mut export_rows,
         )
         .expect("per-stage fit succeeds");

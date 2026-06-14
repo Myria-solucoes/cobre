@@ -93,6 +93,20 @@ pub struct ProductionModelConfig {
     pub selection_mode: SelectionMode,
 }
 
+/// Parsed contents of `system/hydro_production_models.json`.
+///
+/// Bundles the per-hydro production model configs with the optional file-level
+/// FPHA plane-reduction block. `plane_reduction` is `None` when the file carries
+/// no `fpha_plane_reduction` key (the off-by-default case).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ProductionModelFile {
+    /// Per-hydro production model configurations, sorted by `hydro_id` ascending.
+    pub configs: Vec<ProductionModelConfig>,
+    /// File-level similar-hyperplane reduction config, applied uniformly to
+    /// every plant. `None` ⇒ no reduction.
+    pub plane_reduction: Option<PlaneReductionConfig>,
+}
+
 /// Model selection strategy for a hydro plant.
 ///
 /// The two variants are mutually exclusive within a single hydro entry.
@@ -169,6 +183,32 @@ pub struct FphaColumnLayout {
     pub fitting_window: Option<FittingWindow>,
 }
 
+/// Similar-hyperplane reduction configuration for FPHA planes.
+///
+/// Selects how near-parallel / near-coincident FPHA planes are merged into
+/// their mean hyperplane to shrink the LP. The two variants are mutually
+/// exclusive (the input picks one `method`); both are applied uniformly to
+/// every plant. Absent in the input means no reduction.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlaneReductionConfig {
+    /// Merge planes whose normal vectors lie within `tolerance_deg` of each
+    /// other. `tolerance_deg` is an angle in degrees, in `[0.0, 90.0]`.
+    Angle {
+        /// Maximum angle (degrees) between plane normals to treat them as
+        /// parallel.
+        tolerance_deg: f64,
+    },
+    /// Merge planes whose mean-squared distance over `n_samples` sampled points
+    /// stays within `tolerance_pct`.
+    Distance {
+        /// Maximum relative MSE distance (fraction) to treat two planes as
+        /// coincident.
+        tolerance_pct: f64,
+        /// Number of sample points used to estimate the distance.
+        n_samples: u32,
+    },
+}
+
 /// Volume fitting window for computed FPHA hyperplanes.
 ///
 /// Absolute bounds (`volume_min_hm3` / `volume_max_hm3`) and percentile bounds
@@ -209,6 +249,12 @@ pub(crate) struct RawProductionModelFile {
     /// Array of per-hydro production model configurations. Each `hydro_id`
     /// must be unique.
     production_models: Vec<RawProductionModel>,
+
+    /// Optional file-level FPHA plane-reduction block, applied uniformly to
+    /// every plant. Absent ⇒ no reduction. Carries a `method` tag selecting
+    /// the `angle` or `distance` reduction method and its tolerance.
+    #[serde(default)]
+    fpha_plane_reduction: Option<RawPlaneReductionConfig>,
 }
 
 /// Production model configuration for one hydro plant.
@@ -316,6 +362,37 @@ struct RawFphaColumnLayout {
     fitting_window: Option<RawFittingWindow>,
 }
 
+/// File-level FPHA plane-reduction block, discriminated by the `method` JSON
+/// field.
+///
+/// An internally-tagged union: `{ "method": "angle", "tolerance_deg": <f64> }`
+/// merges planes whose normals are within `tolerance_deg` degrees, while
+/// `{ "method": "distance", "tolerance_pct": <f64>, "n_samples": <u32> }` merges
+/// planes whose sampled mean-squared distance stays within `tolerance_pct`. The
+/// tag selects exactly one method; `deny_unknown_fields` rejects a tolerance
+/// field belonging to the other method.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Deserialize)]
+#[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
+enum RawPlaneReductionConfig {
+    /// Normal-vector angle method. Merges planes whose normals lie within
+    /// `tolerance_deg` of each other.
+    Angle {
+        /// Maximum angle (degrees) between plane normals to treat them as
+        /// parallel. Must be finite and in `[0.0, 90.0]` inclusive.
+        tolerance_deg: f64,
+    },
+    /// Mean-squared-distance method. Merges planes whose sampled MSE distance
+    /// stays within `tolerance_pct`.
+    Distance {
+        /// Maximum relative MSE distance (fraction) to treat two planes as
+        /// coincident. Must be finite and `>= 0.0`.
+        tolerance_pct: f64,
+        /// Number of sample points used to estimate the distance. Must be `>= 1`.
+        n_samples: u32,
+    },
+}
+
 /// Volume fitting window restricting the range used for FPHA hyperplane
 /// computation.
 ///
@@ -343,11 +420,11 @@ struct RawFittingWindow {
 
 // ── Parser ────────────────────────────────────────────────────────────────────
 
-/// Parse `system/hydro_production_models.json` and return a sorted list of
-/// per-hydro production model configurations.
+/// Parse `system/hydro_production_models.json` into a [`ProductionModelFile`].
 ///
 /// Reads the JSON file, deserializes through intermediate serde types, validates
-/// all invariants, then returns results sorted by `hydro_id` ascending.
+/// all invariants, then returns the per-hydro configs sorted by `hydro_id`
+/// ascending plus the optional file-level plane-reduction block.
 ///
 /// # Errors
 ///
@@ -358,6 +435,7 @@ struct RawFittingWindow {
 /// | Duplicate `hydro_id`                                        | [`LoadError::SchemaError`] |
 /// | `start_stage_id > end_stage_id` (when `end_stage_id` set)  | [`LoadError::SchemaError`] |
 /// | Both absolute and percentile fitting bounds set             | [`LoadError::SchemaError`] |
+/// | `fpha_plane_reduction` tolerance out of range / `n_samples < 1` | [`LoadError::SchemaError`] |
 ///
 /// # Examples
 ///
@@ -365,11 +443,11 @@ struct RawFittingWindow {
 /// use cobre_io::extensions::parse_production_models;
 /// use std::path::Path;
 ///
-/// let models = parse_production_models(Path::new("system/hydro_production_models.json"))
+/// let file = parse_production_models(Path::new("system/hydro_production_models.json"))
 ///     .expect("valid production models file");
-/// println!("loaded {} hydro model configs", models.len());
+/// println!("loaded {} hydro model configs", file.configs.len());
 /// ```
-pub fn parse_production_models(path: &Path) -> Result<Vec<ProductionModelConfig>, LoadError> {
+pub fn parse_production_models(path: &Path) -> Result<ProductionModelFile, LoadError> {
     // Step 1: Read file.
     let raw_text = std::fs::read_to_string(path).map_err(|e| LoadError::io(path, e))?;
 
@@ -387,8 +465,12 @@ pub fn parse_production_models(path: &Path) -> Result<Vec<ProductionModelConfig>
         }
     })?;
 
-    // Step 3: Validate cross-entry constraints.
-    validate_production_models(&raw.production_models, path)?;
+    // Step 3: Validate cross-entry constraints and the file-level reduction block.
+    validate_production_models(
+        &raw.production_models,
+        raw.fpha_plane_reduction.as_ref(),
+        path,
+    )?;
 
     // Step 4: Convert and sort.
     let mut configs: Vec<ProductionModelConfig> = raw
@@ -399,13 +481,25 @@ pub fn parse_production_models(path: &Path) -> Result<Vec<ProductionModelConfig>
 
     configs.sort_by_key(|c| c.hydro_id.0);
 
-    Ok(configs)
+    let plane_reduction = raw
+        .fpha_plane_reduction
+        .as_ref()
+        .map(convert_plane_reduction);
+
+    Ok(ProductionModelFile {
+        configs,
+        plane_reduction,
+    })
 }
 
 // ── Validation ────────────────────────────────────────────────────────────────
 
 /// Validate all cross-entry and per-entry constraints on raw production model data.
-fn validate_production_models(models: &[RawProductionModel], path: &Path) -> Result<(), LoadError> {
+fn validate_production_models(
+    models: &[RawProductionModel],
+    plane_reduction: Option<&RawPlaneReductionConfig>,
+    path: &Path,
+) -> Result<(), LoadError> {
     let mut seen_ids: HashSet<i32> = HashSet::new();
 
     for (entry_idx, model) in models.iter().enumerate() {
@@ -472,6 +566,11 @@ fn validate_production_models(models: &[RawProductionModel], path: &Path) -> Res
                 }
             }
         }
+    }
+
+    // File-level reduction block: validated once, not per entry.
+    if let Some(reduction) = plane_reduction {
+        validate_plane_reduction(reduction, path)?;
     }
 
     Ok(())
@@ -577,6 +676,53 @@ fn validate_fitting_window(
     Ok(())
 }
 
+/// Validate the per-method tolerance ranges of the file-level plane-reduction
+/// block.
+///
+/// Method exclusivity is already enforced structurally by serde's `method` tag
+/// and `deny_unknown_fields`; this is the config-layer range check.
+fn validate_plane_reduction(
+    reduction: &RawPlaneReductionConfig,
+    path: &Path,
+) -> Result<(), LoadError> {
+    match reduction {
+        RawPlaneReductionConfig::Angle { tolerance_deg } => {
+            if !tolerance_deg.is_finite() || *tolerance_deg < 0.0 || *tolerance_deg > 90.0 {
+                return Err(LoadError::SchemaError {
+                    path: path.to_path_buf(),
+                    field: "fpha_plane_reduction".to_string(),
+                    message: format!(
+                        "angle tolerance_deg must be finite and in [0, 90], got {tolerance_deg}"
+                    ),
+                });
+            }
+        }
+        RawPlaneReductionConfig::Distance {
+            tolerance_pct,
+            n_samples,
+        } => {
+            if !tolerance_pct.is_finite() || *tolerance_pct < 0.0 {
+                return Err(LoadError::SchemaError {
+                    path: path.to_path_buf(),
+                    field: "fpha_plane_reduction".to_string(),
+                    message: format!(
+                        "distance tolerance_pct must be finite and >= 0, got {tolerance_pct}"
+                    ),
+                });
+            }
+            if *n_samples < 1 {
+                return Err(LoadError::SchemaError {
+                    path: path.to_path_buf(),
+                    field: "fpha_plane_reduction".to_string(),
+                    message: format!("distance n_samples must be >= 1, got {n_samples}"),
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
 // ── Conversion ────────────────────────────────────────────────────────────────
 
 /// Convert a validated raw production model entry into the public type.
@@ -635,6 +781,21 @@ fn convert_fpha_column_layout(raw: RawFphaColumnLayout) -> FphaColumnLayout {
     }
 }
 
+fn convert_plane_reduction(raw: &RawPlaneReductionConfig) -> PlaneReductionConfig {
+    match raw {
+        RawPlaneReductionConfig::Angle { tolerance_deg } => PlaneReductionConfig::Angle {
+            tolerance_deg: *tolerance_deg,
+        },
+        RawPlaneReductionConfig::Distance {
+            tolerance_pct,
+            n_samples,
+        } => PlaneReductionConfig::Distance {
+            tolerance_pct: *tolerance_pct,
+            n_samples: *n_samples,
+        },
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -689,7 +850,7 @@ mod tests {
           }]
         }"#;
         let f = write_json(json);
-        let models = parse_production_models(f.path()).unwrap();
+        let models = parse_production_models(f.path()).unwrap().configs;
 
         assert_eq!(models.len(), 1);
         let m = &models[0];
@@ -744,7 +905,7 @@ mod tests {
           }]
         }"#;
         let f = write_json(json);
-        let models = parse_production_models(f.path()).unwrap();
+        let models = parse_production_models(f.path()).unwrap().configs;
 
         assert_eq!(models.len(), 1);
         let m = &models[0];
@@ -800,7 +961,7 @@ mod tests {
           ]
         }"#;
         let f = write_json(json);
-        let models = parse_production_models(f.path()).unwrap();
+        let models = parse_production_models(f.path()).unwrap().configs;
 
         assert_eq!(models.len(), 2);
         // Sorted by hydro_id ascending
@@ -1061,7 +1222,7 @@ mod tests {
     fn test_empty_array_returns_empty_vec() {
         let json = r#"{ "production_models": [] }"#;
         let f = write_json(json);
-        let models = parse_production_models(f.path()).unwrap();
+        let models = parse_production_models(f.path()).unwrap().configs;
         assert!(models.is_empty());
     }
 
@@ -1092,8 +1253,8 @@ mod tests {
         }"#;
         let f_asc = write_json(json_asc);
         let f_desc = write_json(json_desc);
-        let models_asc = parse_production_models(f_asc.path()).unwrap();
-        let models_desc = parse_production_models(f_desc.path()).unwrap();
+        let models_asc = parse_production_models(f_asc.path()).unwrap().configs;
+        let models_desc = parse_production_models(f_desc.path()).unwrap().configs;
 
         let ids_asc: Vec<i32> = models_asc.iter().map(|m| m.hydro_id.0).collect();
         let ids_desc: Vec<i32> = models_desc.iter().map(|m| m.hydro_id.0).collect();
@@ -1121,7 +1282,7 @@ mod tests {
           }]
         }"#;
         let f = write_json(json);
-        let models = parse_production_models(f.path()).unwrap();
+        let models = parse_production_models(f.path()).unwrap().configs;
         assert_eq!(models.len(), 1);
         match &models[0].selection_mode {
             SelectionMode::StageRanges { ranges } => {
@@ -1153,7 +1314,7 @@ mod tests {
           }]
         }"#;
         let f = write_json(json);
-        let models = parse_production_models(f.path()).unwrap();
+        let models = parse_production_models(f.path()).unwrap().configs;
         match &models[0].selection_mode {
             SelectionMode::StageRanges { ranges } => {
                 assert_eq!(ranges[0].productivity_mw_per_m3s, Some(0.85));
@@ -1179,7 +1340,7 @@ mod tests {
           }]
         }"#;
         let f = write_json(json);
-        let models = parse_production_models(f.path()).unwrap();
+        let models = parse_production_models(f.path()).unwrap().configs;
         match &models[0].selection_mode {
             SelectionMode::StageRanges { ranges } => {
                 assert!(
@@ -1210,7 +1371,7 @@ mod tests {
           }]
         }"#;
         let f = write_json(json);
-        let models = parse_production_models(f.path()).unwrap();
+        let models = parse_production_models(f.path()).unwrap().configs;
         match &models[0].selection_mode {
             SelectionMode::StageRanges { ranges } => {
                 assert!(
@@ -1300,7 +1461,8 @@ mod tests {
         }"#;
         let f = write_json(json);
         let parsed = parse_production_models(f.path())
-            .expect("zero productivity must be accepted as a planned-outage marker");
+            .expect("zero productivity must be accepted as a planned-outage marker")
+            .configs;
         let SelectionMode::StageRanges { ranges } = &parsed[0].selection_mode else {
             panic!("expected StageRanges");
         };
@@ -1325,7 +1487,7 @@ mod tests {
           }]
         }"#;
         let f = write_json(json);
-        let models = parse_production_models(f.path()).unwrap();
+        let models = parse_production_models(f.path()).unwrap().configs;
         match &models[0].selection_mode {
             SelectionMode::Seasonal { seasons, .. } => {
                 assert_eq!(seasons[0].productivity_mw_per_m3s, Some(0.75));
@@ -1352,7 +1514,7 @@ mod tests {
           }]
         }"#;
         let f = write_json(json);
-        let models = parse_production_models(f.path()).unwrap();
+        let models = parse_production_models(f.path()).unwrap().configs;
         match &models[0].selection_mode {
             SelectionMode::Seasonal { seasons, .. } => {
                 assert!(
@@ -1422,5 +1584,154 @@ mod tests {
             }
             other => panic!("expected SchemaError, got: {other:?}"),
         }
+    }
+
+    // ── fpha_plane_reduction tests ────────────────────────────────────────────
+
+    /// A file with no `fpha_plane_reduction` key parses to `plane_reduction == None`.
+    #[test]
+    fn test_plane_reduction_absent_is_none() {
+        let json = r#"{
+          "production_models": [{
+            "hydro_id": 0,
+            "selection_mode": "stage_ranges",
+            "stage_ranges": [{ "start_stage_id": 0, "end_stage_id": null, "model": "fpha", "fpha_config": { "source": "computed" } }]
+          }]
+        }"#;
+        let f = write_json(json);
+        let file = parse_production_models(f.path()).unwrap();
+        assert!(
+            file.plane_reduction.is_none(),
+            "absent block must resolve to None, got: {:?}",
+            file.plane_reduction
+        );
+        assert_eq!(file.configs.len(), 1);
+    }
+
+    /// A valid `angle` block parses to `Some(Angle { tolerance_deg })`.
+    #[test]
+    fn test_plane_reduction_angle_valid() {
+        let json = r#"{
+          "production_models": [],
+          "fpha_plane_reduction": { "method": "angle", "tolerance_deg": 5.0 }
+        }"#;
+        let f = write_json(json);
+        let file = parse_production_models(f.path()).unwrap();
+        assert_eq!(
+            file.plane_reduction,
+            Some(PlaneReductionConfig::Angle { tolerance_deg: 5.0 })
+        );
+    }
+
+    /// A valid `distance` block parses to `Some(Distance { tolerance_pct, n_samples })`.
+    #[test]
+    fn test_plane_reduction_distance_valid() {
+        let json = r#"{
+          "production_models": [],
+          "fpha_plane_reduction": { "method": "distance", "tolerance_pct": 0.5, "n_samples": 64 }
+        }"#;
+        let f = write_json(json);
+        let file = parse_production_models(f.path()).unwrap();
+        assert_eq!(
+            file.plane_reduction,
+            Some(PlaneReductionConfig::Distance {
+                tolerance_pct: 0.5,
+                n_samples: 64
+            })
+        );
+    }
+
+    /// `angle` with `tolerance_deg = 95.0` is rejected with a SchemaError naming the range.
+    #[test]
+    fn test_plane_reduction_angle_out_of_range() {
+        let json = r#"{
+          "production_models": [],
+          "fpha_plane_reduction": { "method": "angle", "tolerance_deg": 95.0 }
+        }"#;
+        let f = write_json(json);
+        let err = parse_production_models(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert_eq!(field, "fpha_plane_reduction");
+                assert!(
+                    message.contains("[0, 90]"),
+                    "message should name the [0, 90] range, got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// `distance` with negative `tolerance_pct` is rejected with a SchemaError.
+    #[test]
+    fn test_plane_reduction_distance_negative_tolerance() {
+        let json = r#"{
+          "production_models": [],
+          "fpha_plane_reduction": { "method": "distance", "tolerance_pct": -1.0, "n_samples": 64 }
+        }"#;
+        let f = write_json(json);
+        let err = parse_production_models(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, .. } => {
+                assert_eq!(field, "fpha_plane_reduction");
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// `distance` with `n_samples = 0` is rejected with a SchemaError.
+    #[test]
+    fn test_plane_reduction_distance_zero_samples() {
+        let json = r#"{
+          "production_models": [],
+          "fpha_plane_reduction": { "method": "distance", "tolerance_pct": 0.5, "n_samples": 0 }
+        }"#;
+        let f = write_json(json);
+        let err = parse_production_models(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, .. } => {
+                assert_eq!(field, "fpha_plane_reduction");
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// A distance field on an `angle` method is rejected by serde `deny_unknown_fields`.
+    #[test]
+    fn test_plane_reduction_cross_method_field_rejected() {
+        let json = r#"{
+          "production_models": [],
+          "fpha_plane_reduction": { "method": "angle", "tolerance_pct": 5.0 }
+        }"#;
+        let f = write_json(json);
+        let err = parse_production_models(f.path()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LoadError::SchemaError { .. } | LoadError::ParseError { .. }
+            ),
+            "cross-method field must be rejected, got: {err:?}"
+        );
+    }
+
+    /// An `angle` method carrying BOTH its own required `tolerance_deg` AND the
+    /// foreign `tolerance_pct` is rejected — isolating the `deny_unknown_fields`
+    /// guarantee from the missing-required-field path (both fields are present,
+    /// so the only rejection reason is the unknown `tolerance_pct`).
+    #[test]
+    fn test_plane_reduction_foreign_field_alongside_required_is_rejected() {
+        let json = r#"{
+          "production_models": [],
+          "fpha_plane_reduction": { "method": "angle", "tolerance_deg": 2.0, "tolerance_pct": 5.0 }
+        }"#;
+        let f = write_json(json);
+        let err = parse_production_models(f.path()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LoadError::SchemaError { .. } | LoadError::ParseError { .. }
+            ),
+            "a foreign field alongside the required one must be rejected by deny_unknown_fields, got: {err:?}"
+        );
     }
 }

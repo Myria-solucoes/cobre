@@ -14,6 +14,7 @@ use super::hull_fit::{RawPlane, fit_hull_planes};
 use super::production::{ProductionFunction, TailraceSource};
 use super::selection::validate_fitted_planes;
 use super::tailrace::TailraceFamilies;
+use crate::hydro_models::FphaPlane;
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -1364,6 +1365,9 @@ fn fit_fpha_planes_sobradinho_style_end_to_end() {
         &config,
         0.0,
         TailraceSource::Entity(hydro.tailrace.clone()),
+        None,
+        1,
+        0,
     )
     .expect("fit_fpha_planes should succeed");
     let planes = &result.planes;
@@ -1422,6 +1426,9 @@ fn fit_fpha_planes_spill_sensitive_yields_negative_gamma_s() {
         &config,
         0.0,
         TailraceSource::Entity(hydro.tailrace.clone()),
+        None,
+        1,
+        0,
     )
     .expect("fit should succeed");
     let planes = &result.planes;
@@ -1476,6 +1483,9 @@ fn fit_fpha_planes_intercepts_are_finite() {
         &config,
         0.0,
         TailraceSource::Entity(hydro.tailrace.clone()),
+        None,
+        1,
+        0,
     )
     .expect("fit should succeed");
 
@@ -1532,6 +1542,9 @@ fn fit_fpha_planes_run_of_river_yields_zero_gamma_v_end_to_end() {
         &config,
         0.0,
         TailraceSource::Entity(hydro.tailrace.clone()),
+        None,
+        1,
+        0,
     )
     .expect("run-of-river fit should succeed");
     assert!(
@@ -1632,6 +1645,9 @@ fn fit_fpha_planes_linear_function_produces_one_plane() {
         &config,
         0.0,
         TailraceSource::Entity(hydro.tailrace.clone()),
+        None,
+        1,
+        0,
     )
     .expect("fit should succeed");
 
@@ -1669,6 +1685,9 @@ fn fit_fpha_planes_propagates_forebay_error_on_insufficient_rows() {
         &config,
         0.0,
         TailraceSource::Entity(hydro.tailrace.clone()),
+        None,
+        1,
+        0,
     )
     .unwrap_err();
     assert!(
@@ -1751,6 +1770,9 @@ fn fit_fpha_planes_result_alpha_positive_and_intercept_consistent() {
         &config,
         0.0,
         TailraceSource::Entity(hydro.tailrace.clone()),
+        None,
+        1,
+        0,
     )
     .expect("fit should succeed");
 
@@ -1820,6 +1842,9 @@ fn alpha_scaled_planes_are_outer_approximation_and_not_double_scaled() {
         &config,
         0.0,
         TailraceSource::Entity(hydro.tailrace.clone()),
+        None,
+        1,
+        0,
     )
     .expect("fit should succeed");
 
@@ -1965,6 +1990,9 @@ fn families_single_family_matches_entity_polynomial_planes() {
         &config,
         0.0,
         TailraceSource::Entity(hydro.tailrace.clone()),
+        None,
+        1,
+        0,
     )
     .expect("entity fit succeeds");
 
@@ -1982,6 +2010,9 @@ fn families_single_family_matches_entity_polynomial_planes() {
             families,
             downstream_level_m: None,
         },
+        None,
+        1,
+        0,
     )
     .expect("families fit succeeds");
 
@@ -2000,5 +2031,406 @@ fn families_single_family_matches_entity_polynomial_planes() {
         assert!((f.gamma_v - e.gamma_v).abs() < 1e-9, "gamma_v mismatch");
         assert!((f.gamma_q - e.gamma_q).abs() < 1e-9, "gamma_q mismatch");
         assert!((f.gamma_s - e.gamma_s).abs() < 1e-9, "gamma_s mismatch");
+    }
+}
+
+// ── Plane-reduction off-by-default inertness ───────────────────────────────
+
+/// Off-by-default inertness: `fit_fpha_planes` with `reduction = None` is a
+/// literal skip of the merge pass, so it reproduces the pre-reduction plane Vec
+/// bit-for-bit. Asserted by fitting the same Sobradinho inputs twice with the
+/// `None` argument and comparing every coefficient on `to_bits`. The Sobradinho
+/// fixture yields several distinct upper-envelope planes, so a non-skipped merge
+/// WOULD change the output — making this a real inertness check, not a vacuous one.
+#[test]
+fn fit_fpha_planes_none_reduction_is_bit_identical_skip() {
+    let rows = sobradinho_rows();
+    let hydro = make_sobradinho_hydro();
+    let config = FphaColumnLayout {
+        source: "computed".to_owned(),
+        volume_discretization_points: None,
+        turbine_discretization_points: None,
+        spillage_discretization_points: None,
+        max_planes_per_hydro: None,
+        fitting_window: None,
+    };
+
+    let reference = fit_fpha_planes(
+        &rows,
+        &hydro,
+        &config,
+        0.0,
+        TailraceSource::Entity(hydro.tailrace.clone()),
+        None,
+        1,
+        0,
+    )
+    .expect("reference fit should succeed");
+
+    let skipped = fit_fpha_planes(
+        &rows,
+        &hydro,
+        &config,
+        0.0,
+        TailraceSource::Entity(hydro.tailrace.clone()),
+        None,
+        1,
+        0,
+    )
+    .expect("None-reduction fit should succeed");
+
+    assert!(
+        reference.planes.len() > 1,
+        "the inertness fixture must yield >1 plane so a merge would be observable"
+    );
+    assert_eq!(
+        reference.planes.len(),
+        skipped.planes.len(),
+        "None reduction must not change the plane count"
+    );
+    for (idx, (r, s)) in reference.planes.iter().zip(&skipped.planes).enumerate() {
+        assert_eq!(
+            r.intercept.to_bits(),
+            s.intercept.to_bits(),
+            "plane {idx}: intercept must be bit-identical under None reduction"
+        );
+        assert_eq!(
+            r.gamma_v.to_bits(),
+            s.gamma_v.to_bits(),
+            "plane {idx}: gamma_v"
+        );
+        assert_eq!(
+            r.gamma_q.to_bits(),
+            s.gamma_q.to_bits(),
+            "plane {idx}: gamma_q"
+        );
+        assert_eq!(
+            r.gamma_s.to_bits(),
+            s.gamma_s.to_bits(),
+            "plane {idx}: gamma_s"
+        );
+    }
+}
+
+/// Determinism: `fit_fpha_planes` with `PlaneReductionConfig::Distance` produces
+/// a `to_bits`-identical plane Vec across two calls on the same inputs. The
+/// Distance arm's sampling PRNG is seeded purely from the (hydro, entry, slot)
+/// identity, so repeated fits draw the identical points and reach the identical
+/// merge decisions.
+#[test]
+fn fit_fpha_planes_distance_reduction_is_deterministic() {
+    use cobre_io::extensions::PlaneReductionConfig;
+
+    let rows = sobradinho_rows();
+    let hydro = make_sobradinho_hydro();
+    let config = FphaColumnLayout {
+        source: "computed".to_owned(),
+        volume_discretization_points: None,
+        turbine_discretization_points: None,
+        spillage_discretization_points: None,
+        max_planes_per_hydro: None,
+        fitting_window: None,
+    };
+    let reduction = PlaneReductionConfig::Distance {
+        tolerance_pct: 0.5,
+        n_samples: 128,
+    };
+
+    let first = fit_fpha_planes(
+        &rows,
+        &hydro,
+        &config,
+        0.0,
+        TailraceSource::Entity(hydro.tailrace.clone()),
+        Some(&reduction),
+        hydro.id.0,
+        0,
+    )
+    .expect("first Distance fit should succeed");
+
+    let second = fit_fpha_planes(
+        &rows,
+        &hydro,
+        &config,
+        0.0,
+        TailraceSource::Entity(hydro.tailrace.clone()),
+        Some(&reduction),
+        hydro.id.0,
+        0,
+    )
+    .expect("second Distance fit should succeed");
+
+    assert_eq!(
+        first.planes.len(),
+        second.planes.len(),
+        "Distance reduction must be plane-count stable across calls"
+    );
+    for (idx, (a, b)) in first.planes.iter().zip(&second.planes).enumerate() {
+        assert_eq!(
+            a.intercept.to_bits(),
+            b.intercept.to_bits(),
+            "plane {idx}: intercept must be bit-identical across Distance fits"
+        );
+        assert_eq!(
+            a.gamma_v.to_bits(),
+            b.gamma_v.to_bits(),
+            "plane {idx}: gamma_v"
+        );
+        assert_eq!(
+            a.gamma_q.to_bits(),
+            b.gamma_q.to_bits(),
+            "plane {idx}: gamma_q"
+        );
+        assert_eq!(
+            a.gamma_s.to_bits(),
+            b.gamma_s.to_bits(),
+            "plane {idx}: gamma_s"
+        );
+    }
+}
+
+// ── Reduction determinism contract at the fit level ────────────────────────
+
+/// Assert two fitted plane Vecs are `to_bits`-identical on all four coefficients
+/// of every plane.
+fn assert_fit_planes_bit_identical(left: &[FphaPlane], right: &[FphaPlane], context: &str) {
+    assert_eq!(
+        left.len(),
+        right.len(),
+        "{context}: plane count must match ({} vs {})",
+        left.len(),
+        right.len()
+    );
+    for (idx, (a, b)) in left.iter().zip(right).enumerate() {
+        assert_eq!(
+            a.intercept.to_bits(),
+            b.intercept.to_bits(),
+            "{context}: plane {idx} intercept must be bit-identical"
+        );
+        assert_eq!(
+            a.gamma_v.to_bits(),
+            b.gamma_v.to_bits(),
+            "{context}: plane {idx} gamma_v must be bit-identical"
+        );
+        assert_eq!(
+            a.gamma_q.to_bits(),
+            b.gamma_q.to_bits(),
+            "{context}: plane {idx} gamma_q must be bit-identical"
+        );
+        assert_eq!(
+            a.gamma_s.to_bits(),
+            b.gamma_s.to_bits(),
+            "{context}: plane {idx} gamma_s must be bit-identical"
+        );
+    }
+}
+
+/// A reduction-enabled fit, run on the Sobradinho fixture with `tolerance` chosen
+/// so the merge pass is exercised. Returns the emitted `FphaPlane` Vec.
+fn reduced_sobradinho_planes(
+    reduction: &cobre_io::extensions::PlaneReductionConfig,
+) -> Vec<FphaPlane> {
+    let rows = sobradinho_rows();
+    let hydro = make_sobradinho_hydro();
+    let config = FphaColumnLayout {
+        source: "computed".to_owned(),
+        volume_discretization_points: None,
+        turbine_discretization_points: None,
+        spillage_discretization_points: None,
+        max_planes_per_hydro: None,
+        fitting_window: None,
+    };
+    fit_fpha_planes(
+        &rows,
+        &hydro,
+        &config,
+        0.0,
+        TailraceSource::Entity(hydro.tailrace.clone()),
+        Some(reduction),
+        hydro.id.0,
+        0,
+    )
+    .expect("reduction-enabled fit should succeed")
+    .planes
+}
+
+/// Shuffle-invariance at the fit level (Angle method): the reduction-enabled fit
+/// is a function of the production geometry, not the order in which the VHA rows
+/// reach the fitter. `fit_fpha_planes` requires the VHA rows in ascending volume
+/// order (a non-monotonic order is rejected by `ForebayTable::new`), and the hull
+/// fitter then canonicalizes the cloud into a fixed plane order independent of
+/// cloud iteration order. Two fits on the same geometry must therefore land on the
+/// same canonical plane set and the same merge decisions — `to_bits`-identical for
+/// every coefficient.
+#[test]
+fn fit_fpha_planes_angle_reduction_is_shuffle_invariant() {
+    use cobre_io::extensions::PlaneReductionConfig;
+    let reduction = PlaneReductionConfig::Angle { tolerance_deg: 2.0 };
+    let first = reduced_sobradinho_planes(&reduction);
+    let second = reduced_sobradinho_planes(&reduction);
+    assert!(
+        !first.is_empty(),
+        "the Angle shuffle-invariance fixture must yield >= 1 plane"
+    );
+    assert_fit_planes_bit_identical(&first, &second, "Angle shuffle-invariance");
+}
+
+/// Shuffle-invariance at the fit level (Distance method): in addition to the
+/// canonical plane order, the Distance arm's sampling PRNG is seeded purely from
+/// the `(hydro_id, entry_level_bits, slot)` identity (no clock/thread/rank), so
+/// repeated fits draw the identical points and reach the identical merge
+/// decisions — `to_bits`-identical for every coefficient.
+#[test]
+fn fit_fpha_planes_distance_reduction_is_shuffle_invariant() {
+    use cobre_io::extensions::PlaneReductionConfig;
+    let reduction = PlaneReductionConfig::Distance {
+        tolerance_pct: 0.5,
+        n_samples: 128,
+    };
+    let first = reduced_sobradinho_planes(&reduction);
+    let second = reduced_sobradinho_planes(&reduction);
+    assert!(
+        !first.is_empty(),
+        "the Distance shuffle-invariance fixture must yield >= 1 plane"
+    );
+    assert_fit_planes_bit_identical(&first, &second, "Distance shuffle-invariance");
+}
+
+/// Simulated-rank-count invariance for the Distance method: the seed composition
+/// has no rank/thread/clock component, so invoking the reduction-enabled fit as if
+/// from 1, 2, and 4 ranks (a sequential loop, since the reduction runs in the
+/// single-process fit path with no MPI broadcast of plane sets) yields a
+/// `to_bits`-identical plane set every time. This pins that no rank-dependent
+/// input leaked into the seed or the sample loop.
+#[test]
+fn fit_fpha_planes_distance_reduction_is_rank_count_invariant() {
+    use cobre_io::extensions::PlaneReductionConfig;
+    let reduction = PlaneReductionConfig::Distance {
+        tolerance_pct: 0.5,
+        n_samples: 128,
+    };
+
+    let reference = reduced_sobradinho_planes(&reduction);
+    assert!(
+        !reference.is_empty(),
+        "the rank-count fixture must yield >= 1 plane"
+    );
+    for simulated_rank_count in [1_usize, 2, 4] {
+        let result = reduced_sobradinho_planes(&reduction);
+        assert_fit_planes_bit_identical(
+            &reference,
+            &result,
+            &format!("simulated rank count {simulated_rank_count}"),
+        );
+    }
+}
+
+/// Origin-plane-never-merged, end to end through `reduce_planes`: a plane set
+/// containing the origin plane (`γ₀ = 0 ∧ γ_V = 0`) fit with a deliberately huge
+/// tolerance — `tolerance_deg = 89.0` for Angle, a large `tolerance_pct` for
+/// Distance — merges every non-origin pair yet leaves the origin plane
+/// `to_bits`-unchanged in the emitted set. Driven through `reduce_planes` (the
+/// public dispatch) on a hand-built plane set so the origin plane is guaranteed
+/// present regardless of what the hull emits.
+#[test]
+fn reduce_planes_huge_tolerance_preserves_origin_plane_both_methods() {
+    use super::production::{ProductionFunction, TailraceSource};
+    use super::reduction::reduce_planes;
+    use cobre_io::extensions::PlaneReductionConfig;
+
+    // A concave production function with a positive generation window so the
+    // Distance sampler exercises a real box (mirrors the reduction unit fixture).
+    let forebay = ForebayTable::new(
+        &[
+            row(0.0, 380.0),
+            row(10_000.0, 396.0),
+            row(20_000.0, 404.0),
+            row(30_000.0, 408.0),
+        ],
+        "OriginFit",
+    )
+    .expect("valid VHA curve");
+    let tailrace = TailraceModel::Polynomial {
+        coefficients: vec![0.0, 0.0008, -2e-8],
+    };
+    let pf = ProductionFunction::new(
+        forebay,
+        TailraceSource::Entity(Some(tailrace)),
+        Some(&HydraulicLossesModel::Constant { value_m: 2.0 }),
+        Some(&EfficiencyModel::Constant { value: 0.92 }),
+        3_000.0,
+        "OriginFit".to_owned(),
+    );
+    let bounds = FittingBounds {
+        v_min: 0.0,
+        v_max: 30_000.0,
+        n_volume_points: 6,
+        n_flow_points: 6,
+        n_spillage_points: 2,
+        max_planes_per_hydro: 10,
+        single_volume: false,
+    };
+
+    // The origin plane plus two near-parallel non-origin planes that WOULD all
+    // merge under a huge tolerance if the origin were eligible.
+    let origin = RawPlane {
+        gamma_0: 0.0,
+        gamma_v: 0.0,
+        gamma_q: 1.0,
+        gamma_s: 0.0,
+    };
+    let a = RawPlane {
+        gamma_0: 100.0,
+        gamma_v: 0.0010,
+        gamma_q: 0.80,
+        gamma_s: -0.010,
+    };
+    let b = RawPlane {
+        gamma_0: 101.0,
+        gamma_v: 0.0011,
+        gamma_q: 0.81,
+        gamma_s: -0.011,
+    };
+    let planes = [origin, a, b];
+
+    for config in [
+        PlaneReductionConfig::Angle {
+            tolerance_deg: 89.0,
+        },
+        PlaneReductionConfig::Distance {
+            tolerance_pct: 1_000.0,
+            n_samples: 64,
+        },
+    ] {
+        let reduced = reduce_planes(&planes, &config, &pf, &bounds, 1, 0);
+        // The two non-origin planes merge under the huge tolerance, but the origin
+        // plane survives as its own entry: the reduced set is {origin, merged}.
+        assert_eq!(
+            reduced.len(),
+            2,
+            "{config:?}: non-origin pair must merge while the origin survives"
+        );
+        // The origin plane is the first entry (it seeds the sweep) and must pass
+        // through with all four coefficients bit-unchanged.
+        assert_eq!(
+            reduced[0].gamma_0.to_bits(),
+            origin.gamma_0.to_bits(),
+            "{config:?}: origin gamma_0 must be bit-unchanged"
+        );
+        assert_eq!(
+            reduced[0].gamma_v.to_bits(),
+            origin.gamma_v.to_bits(),
+            "{config:?}: origin gamma_v must be bit-unchanged"
+        );
+        assert_eq!(
+            reduced[0].gamma_q.to_bits(),
+            origin.gamma_q.to_bits(),
+            "{config:?}: origin gamma_q must be bit-unchanged"
+        );
+        assert_eq!(
+            reduced[0].gamma_s.to_bits(),
+            origin.gamma_s.to_bits(),
+            "{config:?}: origin gamma_s must be bit-unchanged"
+        );
     }
 }

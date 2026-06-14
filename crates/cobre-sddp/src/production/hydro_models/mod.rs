@@ -150,10 +150,13 @@ fn load_artifacts_for_hydro_models(case_dir: &Path) -> Result<cobre_io::CaseArti
         None
     };
 
+    let production_file = cobre_io::extensions::load_production_models(prod_path.as_deref())?;
+
     Ok(cobre_io::CaseArtifacts {
         file_manifest: manifest,
         hydro_geometry: cobre_io::extensions::load_hydro_geometry(geom_path.as_deref())?,
-        production_models: cobre_io::extensions::load_production_models(prod_path.as_deref())?,
+        production_models: production_file.configs,
+        plane_reduction: production_file.plane_reduction,
         hydro_energy_productivity: cobre_io::load_hydro_energy_productivity(prod_eff_path_opt)?,
         fpha_hyperplanes: cobre_io::extensions::load_fpha_hyperplanes(fpha_path.as_deref())?,
         scalar_parameters: Vec::new(),

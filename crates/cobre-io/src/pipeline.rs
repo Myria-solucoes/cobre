@@ -226,6 +226,7 @@ pub(crate) fn run_pipeline_with_artifacts(
         file_manifest: manifest,
         hydro_geometry: data.hydro_geometry,
         production_models: data.production_models,
+        plane_reduction: data.plane_reduction,
         hydro_energy_productivity: data.hydro_energy_productivity_rows,
         fpha_hyperplanes: data.fpha_hyperplanes,
         scalar_parameters: data.scalar_parameters,

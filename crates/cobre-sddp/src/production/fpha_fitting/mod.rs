@@ -45,6 +45,8 @@ mod geometry;
 mod grid;
 mod hull_fit;
 mod production;
+mod reduction;
+mod rng;
 mod secant;
 mod selection;
 mod tailrace;
@@ -60,10 +62,13 @@ mod tailrace;
 )]
 mod tests;
 
+use cobre_io::extensions::PlaneReductionConfig;
+
 use alpha::{compute_alpha_fpha, scale_plane_affine};
 use geometry::resolve_fitting_bounds;
 use hull_fit::{RawPlane, fit_hull_planes};
 use production::ProductionFunction;
+use reduction::reduce_planes;
 use secant::fit_gamma_s_for_planes;
 use selection::validate_fitted_planes;
 
@@ -154,12 +159,27 @@ pub(crate) struct FphaFitResult {
 ///   per (hydro, entry): [`TailraceSource::Families`] when the plant has a
 ///   `tailrace_curves` table, else [`TailraceSource::Entity`] mirroring the
 ///   entity-level model (the inert fallback).
+/// - `reduction` — the optional file-level similar-hyperplane reduction config.
+///   `Some(cfg)` runs the post-fit merge of near-parallel planes after the first
+///   `validate_fitted_planes` and before the `FphaPlane` conversion; `None` is a
+///   literal skip — the validated `scaled` set is converted unchanged, so the
+///   fit is bit-identical to a run without any reduction config.
+/// - `hydro_id` — the plant's `EntityId` `i32` (stable identity). Used only by
+///   the `Distance` reduction arm to seed its sampling PRNG; the `Angle` arm and
+///   the `None` skip ignore it.
+/// - `entry_level_bits` — the per-`SelectionMode`-entry downstream-level bits
+///   (`downstream_level_m.map(f64::to_bits).unwrap_or(0)`), the same dedup-key
+///   component that identifies the stage/entry. Part of the `Distance` arm's
+///   stable seed identity; ignored by the `Angle` arm and the `None` skip.
 pub(crate) fn fit_fpha_planes(
     forebay_rows: &[HydroGeometryRow],
     hydro: &Hydro,
     config: &FphaColumnLayout,
     mlt: f64,
     tailrace_source: TailraceSource,
+    reduction: Option<&PlaneReductionConfig>,
+    hydro_id: i32,
+    entry_level_bits: u64,
 ) -> Result<FphaFitResult, FphaFittingError> {
     let forebay = ForebayTable::new(forebay_rows, &hydro.name)?;
 
@@ -214,9 +234,25 @@ pub(crate) fn fit_fpha_planes(
     // to ≤ 0, so the scaled planes satisfy the same sign contract as the raw set.
     validate_fitted_planes(&scaled, alpha, &hydro.name)?;
 
+    // Similar-hyperplane reduction. `None` is a LITERAL SKIP — the validated
+    // `scaled` set is converted unchanged, so a run without a reduction config is
+    // bit-identical to the pre-reduction pipeline (no call into `reduction`). With
+    // `Some(cfg)` the merge runs on the α-scaled, γ_S-fitted, sign-validated set,
+    // and the reduced set is re-validated: the component-wise mean of two
+    // sign-valid planes is itself sign-valid, so this guard cannot fail for
+    // well-formed input, but it is cheap and makes the contract explicit.
+    let reduced = match reduction {
+        Some(cfg) => {
+            let merged = reduce_planes(&scaled, cfg, &pf, &bounds, hydro_id, entry_level_bits);
+            validate_fitted_planes(&merged, alpha, &hydro.name)?;
+            merged
+        }
+        None => scaled,
+    };
+
     // Conversion: each plane is the α-scaled whole affine function α·FPHA_0 with
     // the fitted γ_S. The intercept AND the γ_v / γ_q gradients carry the α factor.
-    let planes = scaled
+    let planes = reduced
         .iter()
         .map(|scaled_plane| FphaPlane {
             intercept: scaled_plane.gamma_0,

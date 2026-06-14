@@ -82,12 +82,12 @@ pub use error::LoadError;
 pub use extensions::{
     FittingWindow, FphaColumnLayout, FphaHyperplaneRow, HydroEnergyProductivityRow,
     HydroGeometryRow, HydroReferenceVolumeFractionRow, HydroReferenceVolumeFractions,
-    ProductionModelConfig, SeasonConfig, SelectionMode, StageRange,
-    build_hydro_reference_volume_fractions, load_fpha_hyperplanes, load_hydro_energy_productivity,
-    load_hydro_geometry, load_hydro_reference_volume_fractions, load_production_models,
-    load_scalar_parameters_json, parse_fpha_hyperplanes, parse_hydro_energy_productivity,
-    parse_hydro_geometry, parse_hydro_reference_volume_fractions, parse_production_models,
-    parse_scalar_parameters_json,
+    PlaneReductionConfig, ProductionModelConfig, ProductionModelFile, SeasonConfig, SelectionMode,
+    StageRange, build_hydro_reference_volume_fractions, load_fpha_hyperplanes,
+    load_hydro_energy_productivity, load_hydro_geometry, load_hydro_reference_volume_fractions,
+    load_production_models, load_scalar_parameters_json, parse_fpha_hyperplanes,
+    parse_hydro_energy_productivity, parse_hydro_geometry, parse_hydro_reference_volume_fractions,
+    parse_production_models, parse_scalar_parameters_json,
 };
 pub use initial_conditions::parse_initial_conditions;
 pub use output::policy::{
@@ -161,6 +161,12 @@ pub struct CaseArtifacts {
     /// Entries from `system/hydro_production_models.json`. Empty when the
     /// file is absent.
     pub production_models: Vec<extensions::ProductionModelConfig>,
+
+    /// File-level FPHA plane-reduction block from
+    /// `system/hydro_production_models.json`. `None` when the file is absent or
+    /// carries no `fpha_plane_reduction` key. Carried for the post-fit
+    /// plane-reduction pass; no behavior depends on it yet.
+    pub plane_reduction: Option<extensions::PlaneReductionConfig>,
 
     /// Rows from `system/hydro_energy_productivity.parquet`. Empty when the
     /// file is absent.
@@ -278,4 +284,17 @@ pub fn validate_case_with_artifacts(
     path: &Path,
 ) -> Result<(LoadedCase, ValidationReport), LoadError> {
     pipeline::run_pipeline_with_artifacts(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::CaseArtifacts;
+
+    /// `CaseArtifacts` exposes a `plane_reduction` field that defaults to `None`
+    /// (the off-by-default carried-but-unconsumed plane-reduction config).
+    #[test]
+    fn case_artifacts_plane_reduction_defaults_to_none() {
+        let artifacts = CaseArtifacts::default();
+        assert!(artifacts.plane_reduction.is_none());
+    }
 }
