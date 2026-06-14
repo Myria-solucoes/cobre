@@ -5,7 +5,11 @@
 `book/`, schemas, `CHANGELOG.md`
 **Author:** design loop, 2026-06-04; **revised 2026-06-13** — verified line-by-line
 against the CEPEL LIBS manual (all equations transcribed from the source pages,
-not paraphrased); scope decisions E–H resolved.
+not paraphrased); scope decisions E–H resolved. **Revised 2026-06-14** — validated
+against real NEWAVE FPHA output (a reference case with 151 plants over 64 periods)
+and added decisions J (defer the explicit external-lateral `Qlat` coefficient to a
+future version) and K (run-of-river / single-volume `NPTV = 1` hull handling). See
+"Validation against reference FPHA output".
 
 **Source of truth (CEPEL LIBS manual, read in full):**
 
@@ -34,7 +38,11 @@ fronts:
 4. **General `Q_jus` lateral-flow composition** (WS4) — own turbine/spill,
    upstream defluences, and post incremental inflows with participation factors,
    **designed so smart defaults collapse to `Q_jus = Q + S`** — simple plants need
-   zero new input and behave exactly as today.
+   zero new input and behave exactly as today. **v1 models only the own-spill
+   secant** (`γ_S` = own spillage = the reference output's `Qver`); the explicit
+   **external-lateral `Qlat`** coefficient (upstream defluences + post inflows) is
+   **deferred** (Decision J) — in the reference case `Qlat` is zero for every plant,
+   so v1 emits no `Qlat` term.
 5. **Mandatory similar-hyperplane simplification** (WS5) — a post-fit pass that
    merges near-parallel / near-coincident planes, implementing **both** CEPEL
    methods (normal-vector **angle** and MSE **distance**). This is a hard
@@ -57,9 +65,20 @@ any separate ρ-unification design.
   GAM grids (CEPEL cards `HIDRELETRICA-PRODUTIBILIDADE-ESPECIFICA-GRADE` /
   `HIDRELETRICA-PERDA-HIDRAULICA-GRADE`). v1 keeps constant `ρ_esp` and the
   existing constant/factor losses.
+- **Explicit external-lateral `Qlat` coefficient** (Decision J) — the reference
+  FPHA cut carries two distinct lateral coefficients: `Qver` (the plant's OWN
+  spillage) and `Qlat` (EXTERNAL lateral = upstream defluences + post incremental
+  inflows). v1 fits and wires **only the own-spill secant** (`γ_S` = `Qver`); the
+  external `Qlat` term (the WS4b/c work) is **deferred to a future version**, gated
+  on detecting that a plant actually has lateral-inflow contributions. In the
+  reference case `Qlat` is zero for all 151 plants (no lateral-flow plants), so the
+  common case emits no `Qlat` term — and v1 needs no new LP term for it.
 - **Tangent-in-volume FPHA variant** (DESSEM weekly/monthly reservoirs) — cobre
-  uses the full 3-D hull; the tangent-in-volume mode is documented for context
-  only, not implemented.
+  uses the full 3-D hull for genuinely volume-varying plants; the
+  tangent-in-volume construction is **promoted from out-of-scope to the candidate
+  mechanism for the run-of-river / single-volume case** (Decision K, see WS2): two
+  volume points 1% of useful volume apart keep the 3-D hull non-degenerate while
+  yielding `γ_V ≈ 0`. It is otherwise not used for multi-volume reservoirs.
 - **FPHAD (dynamic/iterative FPHA)** — CEPEL's iterative cut introduction is
   conceptually cobre's dynamic cut selection (DCS); no new work here.
 
@@ -355,6 +374,25 @@ update` (no maintained vendor script).
 **Validation revisions.** `kappa` is retired; keep `γ_v ≥ 0` and `γ_s ≤ 0`; add
 `α_FPHA > 0`. (`α` is a least-squares balance that can be ≷ 1, unlike `kappa ≤ 1`.)
 
+**Run-of-river / single-volume (`NPTV = 1`) handling (Decision K).** Validation
+against the reference output showed run-of-river plants are fit with `Npt_V = 1`
+(`Vmin = Vmax` → a single volume point) and `Coef.Vutil = 0`; in the reference
+case 89 of 151 plants are run-of-river. A single-volume cloud is **coplanar in
+`V`**, which the 3-D hull cannot fit as posed: cobre's current
+`resolve_fitting_bounds` rejects it at the `v_min >= v_max` guard
+(`EmptyFittingWindow`) and the `n_volume_points >= 2` guard
+(`InsufficientDiscretization`), and even past those guards a degenerate (zero-`V`-
+range) cloud returns `HullError::Degenerate`. So a run-of-river plant cannot be fit
+on the computed hull path as-is — it errors. v1 adds an explicit single-volume
+path that yields clean `γ_V = 0` planes. The mechanism is the **tangent-in-volume
+trick** — split the single volume into two points 1% of useful volume apart so the
+3-D hull stays non-degenerate while the `V` slope collapses to ≈ 0 — promoted here
+from the out-of-scope list (a 2-D `(Q, GH)` hull yielding explicit `γ_V = 0` planes
+is the alternative). The run-of-river fitter must still produce a valid concave
+over-approximation in `Q` and pass the determinism gate. This must land before the
+computed-FPHA re-bless, since re-bless cannot pass while run-of-river plants fail
+to fit.
+
 **Dead code to remove** (with tests/orphaned imports): `sample_tangent_planes`,
 `compute_tangent_plane`, `RawHyperplane`'s tangent role,
 `ProductionFunction::partial_derivatives`; `eliminate_redundant`, `select_planes`,
@@ -408,8 +446,19 @@ not volume (Decision C); representation = **standalone optional parquet**, not a
 
 ### WS4 — General `Q_jus` lateral-flow composition (smart defaults)
 
-**Principle (Decision E): model CEPEL's full composition, but make defaults
-collapse to today's behavior with zero new input.**
+**Principle (Decision E, revised 2026-06-14): v1 models only the own-spill secant
+(`γ_S` = own spillage = the reference output's `Qver`); the external-lateral `Qlat`
+coefficient (upstream defluences + post incremental inflows, the WS4b/c work) is
+deferred to a future version (Decision J), gated on detecting that a plant actually
+has lateral-inflow contributions. When absent — the common case — no `Qlat` term is
+emitted.** The original Decision E ("full CEPEL `Q_jus` composition with smart
+defaults collapsing to `Q_jus = Q + S`") remains the eventual target shape; the
+revision narrows v1 to the own-spill axis because validation against the reference
+case found `Coef.Qlat = 0` for all 151 plants. The LP already carries a `γ_s·s`
+spill term in the FPHA average-storage form (`g ≤ γ₀ + (γᵥ/2)·(V_in+V_out) + γ_q·q +
+γ_s·s`); the own-spill secant feeds that existing coefficient, so **v1 needs no new
+LP term** — the own-spill secant (`γ_S`) and its existing spill term are already in
+place. The richer composition below documents the deferred future shape.
 
 **Data model.** An optional config (parquet or production-model-config section),
 per hydro:
@@ -504,6 +553,8 @@ LP build:  FPHA row gains the Q_lat term (own spill, upstream defluences,  (WS4)
 | **G** | Hydric-balance completion      | **Out of scope / separate track**; consume existing same-stage upstream `Q + S` as `Q_def`                                                                                                                                                                                                                          |
 | **H** | Variable ρ / ρ-unification dep | **Dropped**; constant `ρ_esp` for v1; variable `ρ(Q,h)` / `f_PerdH(Q)` is a future increment                                                                                                                                                                                                                        |
 | **I** | qhull integration              | **Hand-rolled FFI at `gemm.rs` scale** (no wrapper crate, no `bindgen`): `cc`-built `libqhull_r` from a **git submodule** (`crates/cobre-sddp/vendor/qhull` @ `2020.2`, mirroring the solver submodules), **inline in `cobre-sddp`** under its existing `unsafe` override; Qhull license → `THIRD_PARTY_NOTICES.md` |
+| **J** | External-lateral `Qlat` scope  | **Deferred to a future version.** v1 fits/wires only the own-spill secant (`γ_S` = own spillage = reference output's `Qver`); the external `Qlat` coefficient (upstream defluences + post inflows, WS4b/c) is gated on detecting a plant has lateral-inflow contributions. Reference case: `Qlat = 0` for all 151 plants, so the common case emits no `Qlat` term and v1 needs no new LP term. |
+| **K** | Run-of-river / single-volume   | **Add an explicit single-volume (`NPTV = 1`, `Vmin = Vmax`) fitting path** yielding clean `γ_V = 0` planes; current code errors (`EmptyFittingWindow` / `InsufficientDiscretization` guards, then `HullError::Degenerate`). Mechanism = the tangent-in-volume trick (two volume points 1% of useful volume apart), promoted from out-of-scope; must precede the computed-FPHA re-bless. |
 
 ## Dependencies & sequencing
 
@@ -538,6 +589,54 @@ cobre covers `Q_inc, Q_ev, Q_out (withdrawal), M_i (same-stage), M_dv (diversion
 `Q_def` feeding `Q_jus` (WS4). There is also an optional **per-block balance** for
 run-of-river plants (CEPEL `HIDRELETRICA-BALANCO-HIDRICO-PATAMAR`) — noted, not in
 scope.
+
+## Validation against reference FPHA output
+
+The design was checked against real NEWAVE FPHA output for a reference case
+(151 plants, 64 periods): a fitted-cuts report and a config-echo report. The check
+confirmed the approach is largely on-track and pinned two adjustments (Decisions J
+and K above).
+
+**Confirmed on-track:**
+
+- **Per-period cuts** — the reference fits a separate FPHA per period, matching
+  cobre's per-stage fitting (WS1).
+- **Coefficient mapping** — the reference columns map to cobre's coefficients:
+  `FCorrec` = `α` (the least-squares correction), `RHS` = `γ₀`, `Coef.Vutil` =
+  `γ_V`, `Coef.Qtur` = `γ_Q`, `Coef.Qver` = the own-spill secant (cobre's `γ_S`).
+- **Signs** — `γ_q ≥ 0`, the own-spill/lateral coefficient `≤ 0`, `γ_v ≥ 0`,
+  consistent with cobre's validation rules.
+- **`α` (FCorrec) range** — observed in `[0.971, 1.0]`, i.e. mostly `≤ 1` (FPH
+  mostly concave), but cobre's `α` may be `≷ 1` and that is fine (the few cases
+  where FPH is locally non-concave pull `α` above 1).
+
+**Adjustments pinned:**
+
+- **Decision J** — the reference cut carries two lateral coefficients, `Coef.Qver`
+  (own spill) and `Coef.Qlat` (external lateral). `Coef.Qlat` is **zero for all 151
+  plants** (no lateral-flow plants in a typical case), so v1 models only the
+  own-spill secant and defers the explicit `Qlat` coefficient.
+- **Decision K** — run-of-river plants are fit with `Npt_V = 1` (single volume
+  point, `Vmin = Vmax`) and `Coef.Vutil = 0`; 89 of 151 plants are run-of-river.
+  v1 adds an explicit single-volume hull path (see WS2).
+
+**Discretization sizing.** The reference grid is small — `NPTQ = 5`, `NPTV = 5` for
+reservoirs and `NPTV = 1` for run-of-river. cobre's **default discretization should
+be ~5** to keep cut counts compact: in the reference the per-plant·period cut count
+has a median of 4 and a maximum of 22. (cobre's current default is `5` per axis,
+which matches.)
+
+**Distance-method `gh_max`.** For the WS5 distance-method merge, `gh_max` is the
+per-plant **generation-window upper bound** (the reference's "Janela GH"), not a
+global constant.
+
+**Output-schema forward consideration (kappa-retirement / export-row work).** To
+enable a direct diff against the reference cuts, the FPHA export should carry
+`alpha` (= `FCorrec`), `gamma_v`, `gamma_q`, and `gamma_qver` (own spill, = today's
+`gamma_s`), and **drop `kappa`** (retired in the kappa-retirement work). The
+external `gamma_qlat` column is deferred with Decision J. This is a forward
+consideration for the kappa-retirement step and any export-row schema work — no
+code change is made here.
 
 ## Validation & testing
 
@@ -574,12 +673,18 @@ the project Python-parity rule.
 - **Variable productivity / losses** — `ρ(Q, h_liq)` and `h_PerdH(Q)` GAM grids
   (CEPEL cards `HIDRELETRICA-PRODUTIBILIDADE-ESPECIFICA-GRADE` /
   `HIDRELETRICA-PERDA-HIDRAULICA-GRADE`); bilinear/linear grid interpolation.
-- **Tangent-in-volume FPHA** variant (DESSEM weekly/monthly reservoirs).
+- **Explicit external-lateral `Qlat` coefficient** (Decision J) — upstream
+  defluences + post incremental inflows; gated on detecting a plant has
+  lateral-inflow contributions. Reference case has `Qlat = 0` for all plants.
+- **Tangent-in-volume FPHA for multi-volume reservoirs** (DESSEM weekly/monthly
+  reservoirs). Note: the tangent-in-volume construction is **used** in v1 for the
+  run-of-river / single-volume case (Decision K, WS2) — only its use for genuinely
+  volume-varying reservoirs is out of scope.
 - **FPHAD** (dynamic/iterative cut introduction) — conceptually cobre's DCS.
 
 ## Next step
 
-Decisions A–H are settled. The first planning spike is **qhull determinism +
+Decisions A–K are settled. The first planning spike is **qhull determinism +
 build integration** (gates WS2, adds a C-library dependency). Then generate the
 implementation plan into `plans/` via `/plan`. The `Q_lat` secant-axis definition
 (WS4 default `Q_lat = S`) must be fixed before WS2's secant is implemented, even

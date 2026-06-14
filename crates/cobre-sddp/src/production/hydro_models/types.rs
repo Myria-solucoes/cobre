@@ -340,11 +340,6 @@ pub struct HydroModelSummary {
     pub n_user_supplied_ref: usize,
     /// Number of hydro plants with evaporation that used the default midpoint reference volume.
     pub n_default_midpoint_ref: usize,
-    /// Low-kappa warnings for hydros whose FPHA envelope kappa < 0.95.
-    ///
-    /// Each entry is `(hydro_name, kappa)`.  An empty vector means all fitted
-    /// FPHA envelopes had kappa >= 0.95 (no warnings).
-    pub kappa_warnings: Vec<(String, f64)>,
 }
 
 // ── Pipeline result ───────────────────────────────────────────────────────────
@@ -376,12 +371,6 @@ pub struct PrepareHydroModelsResult {
     pub evaporation: EvaporationModelSet,
     /// Provenance records for all hydro plants.
     pub provenance: HydroModelProvenance,
-    /// Low-kappa warnings collected during computed FPHA fitting.
-    ///
-    /// Each entry is `(hydro_name, kappa)` for hydros whose fitted FPHA
-    /// envelope had kappa < 0.95.  An empty vector means no warnings were
-    /// generated.
-    pub kappa_warnings: Vec<(String, f64)>,
     /// Hyperplane rows produced by the computed-FPHA fitting pipeline.
     ///
     /// Non-empty only when at least one hydro uses `source: "computed"`.
@@ -457,7 +446,6 @@ impl PrepareHydroModelsResult {
                 evaporation_sources,
                 evaporation_reference_sources,
             },
-            kappa_warnings: Vec::new(),
             fpha_export_rows: Vec::new(),
         }
     }
@@ -615,7 +603,6 @@ mod tests {
             n_no_evaporation: 2,
             n_user_supplied_ref: 1,
             n_default_midpoint_ref: 1,
-            kappa_warnings: Vec::new(),
         };
         let _ = format!("{summary:?}");
 
@@ -643,7 +630,6 @@ mod tests {
                 crate::energy_conversion::HydroEnergyProductivityOverride::default(),
             evaporation: evap_set,
             provenance: prov,
-            kappa_warnings: Vec::new(),
             fpha_export_rows: Vec::new(),
         };
         let _ = format!("{result:?}");
@@ -868,7 +854,6 @@ mod tests {
             n_no_evaporation: 4,
             n_user_supplied_ref: 1,
             n_default_midpoint_ref: 0,
-            kappa_warnings: vec![("Reservoir B".to_string(), 0.91)],
         }
     }
 
@@ -939,7 +924,6 @@ mod tests {
             assert_eq!(got.source, want.source);
             assert_eq!(got.n_planes, want.n_planes);
         }
-        assert_eq!(back.kappa_warnings, summary.kappa_warnings);
         assert_eq!(
             back.fpha_details[0].source,
             ProductionModelSource::PrecomputedHyperplanes

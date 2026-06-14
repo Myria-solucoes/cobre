@@ -1206,7 +1206,6 @@ mod tests {
             n_no_evaporation: 1,
             n_user_supplied_ref: 0,
             n_default_midpoint_ref: 3,
-            kappa_warnings: Vec::new(),
         }
     }
 
@@ -1220,7 +1219,6 @@ mod tests {
             n_no_evaporation: 4,
             n_user_supplied_ref: 0,
             n_default_midpoint_ref: 0,
-            kappa_warnings: Vec::new(),
         }
     }
 
@@ -1234,7 +1232,6 @@ mod tests {
             n_no_evaporation: 3,
             n_user_supplied_ref: 0,
             n_default_midpoint_ref: 162,
-            kappa_warnings: Vec::new(),
         }
     }
 
@@ -1309,7 +1306,6 @@ mod tests {
             n_no_evaporation: 2,
             n_user_supplied_ref: 0,
             n_default_midpoint_ref: 0,
-            kappa_warnings: Vec::new(),
         };
         let s = format_hydro_model_summary_string(&summary);
 
@@ -1401,7 +1397,6 @@ mod tests {
             n_no_evaporation: 1,
             n_user_supplied_ref: 1,
             n_default_midpoint_ref: 0,
-            kappa_warnings: Vec::new(),
         };
         let s = format_hydro_model_summary_string(&summary);
 
@@ -1472,7 +1467,6 @@ mod tests {
             n_no_evaporation: 0,
             n_user_supplied_ref: 0,
             n_default_midpoint_ref: 2,
-            kappa_warnings: Vec::new(),
         };
         let s = format_hydro_model_summary_string(&summary);
         assert!(
@@ -1501,7 +1495,6 @@ mod tests {
             n_no_evaporation: 1,
             n_user_supplied_ref: 3,
             n_default_midpoint_ref: 0,
-            kappa_warnings: Vec::new(),
         };
         let s = format_hydro_model_summary_string(&summary);
         assert!(
@@ -1534,7 +1527,6 @@ mod tests {
             n_no_evaporation: 1,
             n_user_supplied_ref: 2,
             n_default_midpoint_ref: 1,
-            kappa_warnings: Vec::new(),
         };
         let s = format_hydro_model_summary_string(&summary);
         assert!(

@@ -130,7 +130,6 @@ pub fn build_hydro_model_summary(
         n_no_evaporation,
         n_user_supplied_ref,
         n_default_midpoint_ref,
-        kappa_warnings: result.kappa_warnings.clone(),
     }
 }
 
@@ -298,7 +297,6 @@ mod tests {
                 evaporation_sources,
                 evaporation_reference_sources,
             },
-            kappa_warnings: Vec::new(),
             fpha_export_rows: Vec::new(),
         }
     }
@@ -375,7 +373,6 @@ mod tests {
                 evaporation_sources,
                 evaporation_reference_sources,
             },
-            kappa_warnings: Vec::new(),
             fpha_export_rows: Vec::new(),
         }
     }
@@ -443,7 +440,6 @@ mod tests {
                 evaporation_sources,
                 evaporation_reference_sources,
             },
-            kappa_warnings: Vec::new(),
             fpha_export_rows: Vec::new(),
         }
     }
@@ -510,7 +506,6 @@ mod tests {
                 evaporation_sources,
                 evaporation_reference_sources,
             },
-            kappa_warnings: Vec::new(),
             fpha_export_rows: Vec::new(),
         };
 
@@ -703,7 +698,6 @@ mod tests {
                 evaporation_sources,
                 evaporation_reference_sources,
             },
-            kappa_warnings: Vec::new(),
             fpha_export_rows: Vec::new(),
         };
 
@@ -780,7 +774,6 @@ mod tests {
                     EvaporationReferenceSource::DefaultMidpoint,
                 )],
             },
-            kappa_warnings: Vec::new(),
             fpha_export_rows: Vec::new(),
         };
 

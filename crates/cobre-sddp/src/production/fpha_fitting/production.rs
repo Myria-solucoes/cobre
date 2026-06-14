@@ -2,14 +2,12 @@
 //!
 //! Owns the head-conversion constant [`K`] and [`ProductionFunction`], the
 //! evaluable bundle of forebay table + tailrace + hydraulic-loss + efficiency that
-//! computes `phi(v, q, s)` and its analytical partial derivatives. The `tangent`,
-//! `grid`, and `selection` submodules evaluate this model over the fitting grid.
+//! computes `phi(v, q, s)`. The `hull_fit`, `grid`, `alpha`, and `secant`
+//! submodules evaluate this model over the fitting grid.
 
 use cobre_core::{EfficiencyModel, HydraulicLossesModel, TailraceModel};
 
-use super::geometry::{
-    ForebayTable, evaluate_losses, evaluate_tailrace, evaluate_tailrace_derivative,
-};
+use super::geometry::{ForebayTable, evaluate_losses, evaluate_tailrace};
 
 // ── ProductionFunction ────────────────────────────────────────────────────────
 
@@ -23,8 +21,8 @@ const K: f64 = 9.81 / 1000.0;
 ///
 /// Bundles the forebay interpolation table with the optional tailrace and hydraulic
 /// loss models and a constant turbine efficiency into a single evaluable object.
-/// Evaluation produces power output in MW; derivatives are used by the FPHA fitting
-/// algorithm to compute tangent hyperplanes.
+/// Evaluation produces power output in MW; the FPHA hull fitter samples it on the
+/// `(V, Q)` grid to build the production cloud.
 ///
 /// # Construction
 ///
@@ -34,8 +32,7 @@ const K: f64 = 9.81 / 1000.0;
 ///
 /// # Evaluation
 ///
-/// All three public methods (`net_head`, `evaluate`, `partial_derivatives`) accept
-/// `(v, q, s)` where:
+/// Both public methods (`net_head`, `evaluate`) accept `(v, q, s)` where:
 /// - `v` — reservoir volume \[hm³\]
 /// - `q` — turbined flow \[m³/s\]
 /// - `s` — spillage flow \[m³/s\]
@@ -148,75 +145,5 @@ impl ProductionFunction {
     pub(crate) fn evaluate(&self, v: f64, q: f64, s: f64) -> f64 {
         let h_net = self.net_head(v, q, s);
         K * self.efficiency * q * h_net
-    }
-
-    /// Analytical partial derivatives of the production function.
-    ///
-    /// Returns `(d_phi/dv, d_phi/dq, d_phi/ds)` evaluated at `(v, q, s)`.
-    ///
-    /// The derivative formulas depend on the loss model:
-    ///
-    /// **Constant losses or no losses** (`h_net = h_fore - h_tail - c`):
-    /// ```text
-    /// d_phi/dv = K·eta·q·dh_fore/dv
-    /// d_phi/dq = K·eta·(h_net - q·dh_tail/dq_out)
-    /// d_phi/ds = -K·eta·q·dh_tail/dq_out
-    /// ```
-    ///
-    /// **Factor losses** (`h_net = (1-k)·(h_fore - h_tail)`):
-    /// ```text
-    /// d_phi/dv = K·eta·q·(1-k)·dh_fore/dv
-    /// d_phi/dq = K·eta·(h_net - q·(1-k)·dh_tail/dq_out)
-    /// d_phi/ds = -K·eta·q·(1-k)·dh_tail/dq_out
-    /// ```
-    ///
-    /// # Sign conventions
-    ///
-    /// - `d_phi/dv > 0`: more storage raises forebay, increasing net head and power.
-    /// - `d_phi/dq > 0` when net head is positive (turbining produces power).
-    /// - `d_phi/ds <= 0`: spillage raises tailrace, reducing net head.
-    ///   Equals zero when there is no tailrace model.
-    ///
-    /// # Parameters
-    ///
-    /// - `v` — reservoir volume \[hm³\]
-    /// - `q` — turbined flow \[m³/s\]
-    /// - `s` — spillage flow \[m³/s\]
-    #[allow(clippy::similar_names)] // d_phi_dv / d_phi_dq / d_phi_ds are standard PDE notation
-    pub(crate) fn partial_derivatives(&self, v: f64, q: f64, s: f64) -> (f64, f64, f64) {
-        let h_fore = self.forebay.height(v);
-        let dh_fore_dv = self.forebay.height_derivative(v);
-        let q_out = q + s;
-
-        let h_tail = self
-            .tailrace
-            .as_ref()
-            .map_or(0.0, |m| evaluate_tailrace(m, q_out));
-        let dh_tail_dq_out = self
-            .tailrace
-            .as_ref()
-            .map_or(0.0, |m| evaluate_tailrace_derivative(m, q_out));
-
-        let ke = K * self.efficiency;
-
-        match self.hydraulic_losses {
-            Some(HydraulicLossesModel::Factor { value: k_loss }) => {
-                // h_net = (1 - k_loss) * (h_fore - h_tail)
-                let one_minus_k = 1.0 - k_loss;
-                let h_net = (one_minus_k * (h_fore - h_tail)).max(0.0);
-                let d_phi_dv = ke * q * one_minus_k * dh_fore_dv;
-                let d_phi_dq = ke * (h_net - q * one_minus_k * dh_tail_dq_out);
-                let d_phi_ds = -ke * q * one_minus_k * dh_tail_dq_out;
-                (d_phi_dv, d_phi_dq, d_phi_ds)
-            }
-            Some(HydraulicLossesModel::Constant { .. }) | None => {
-                // h_net = h_fore - h_tail - h_loss_const   (h_loss_const may be 0)
-                let h_net = self.net_head(v, q, s);
-                let d_phi_dv = ke * q * dh_fore_dv;
-                let d_phi_dq = ke * (h_net - q * dh_tail_dq_out);
-                let d_phi_ds = -ke * q * dh_tail_dq_out;
-                (d_phi_dv, d_phi_dq, d_phi_ds)
-            }
-        }
     }
 }

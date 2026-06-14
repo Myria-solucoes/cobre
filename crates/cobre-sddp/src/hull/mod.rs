@@ -8,12 +8,6 @@
 //! is a pure transform — points in, facet hyperplanes out — so determinism is
 //! the wrapper's responsibility, not the shim's.
 
-// Intent/Seam: the whole module is exercised only by its own unit tests today.
-// `convex_hull_3d` and its types are the FFI seam the FPHA tailrace-fitting
-// pipeline will call; that caller is not yet wired. When it lands, the lint
-// fires and forces this suppression current.
-#![allow(dead_code)]
-
 mod ffi;
 
 use std::os::raw::{c_double, c_int};

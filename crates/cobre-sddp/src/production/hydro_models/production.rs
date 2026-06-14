@@ -5,8 +5,7 @@
 //! hyperplanes, or FPHA hyperplanes fitted from reservoir geometry via the
 //! `crate::fpha_fitting` pipeline. Produces the `ProductionModelSet`, the
 //! per-hydro `ProductionModelSource` provenance, the `ρ_eq` override carried for
-//! energy-conversion derivation, low-kappa warnings, and the computed-FPHA
-//! export rows.
+//! energy-conversion derivation, and the computed-FPHA export rows.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -22,8 +21,8 @@ use crate::SddpError;
 use crate::fpha_fitting::{FphaFitResult, fit_fpha_planes};
 // ── FPHA production model resolution ─────────────────────────────────────────
 
-/// Return type for [`resolve_production_models`]: the model set, provenance vector,
-/// low-kappa warnings, and computed-FPHA export rows.
+/// Return type for [`resolve_production_models`]: the model set, productivity
+/// override, provenance vector, and computed-FPHA export rows.
 ///
 /// The export rows are non-empty only when at least one hydro uses
 /// `source: "computed"`.  The write site is the calling entry point;
@@ -32,7 +31,6 @@ type ResolveProductionResult = (
     ProductionModelSet,
     crate::energy_conversion::HydroEnergyProductivityOverride,
     Vec<(EntityId, ProductionModelSource)>,
-    Vec<(String, f64)>,
     Vec<cobre_io::FphaHyperplaneRow>,
 );
 
@@ -45,10 +43,10 @@ type ResolveProductionResult = (
 /// When any hydro is configured as FPHA with `source: "computed"`, also loads
 /// `system/hydro_geometry.parquet` and runs the FPHA fitting pipeline.
 ///
-/// Returns `(ProductionModelSet, provenance_vec, kappa_warnings)` where the
-/// provenance vector records the [`ProductionModelSource`] for each hydro in
-/// canonical ID order, and `kappa_warnings` contains `(name, kappa)` pairs for
-/// any computed FPHA hydro whose fitted envelope had kappa < 0.95.
+/// Returns `(ProductionModelSet, productivity_override, provenance_vec,
+/// export_rows)` where the provenance vector records the
+/// [`ProductionModelSource`] for each hydro in canonical ID order, and
+/// `export_rows` carries the computed-FPHA hyperplane rows for export.
 ///
 /// # Model resolution per hydro
 ///
@@ -138,7 +136,6 @@ pub fn resolve_production_models_from_artifacts(
     let mut all_models: Vec<Vec<ResolvedProductionModel>> = Vec::with_capacity(n_hydros);
     let mut provenance: Vec<(EntityId, ProductionModelSource)> = Vec::with_capacity(n_hydros);
     let mut export_rows: Vec<cobre_io::FphaHyperplaneRow> = Vec::new();
-    let mut kappa_warnings: Vec<(String, f64)> = Vec::new();
 
     for hydro in system.hydros() {
         let config_entry = config_map.get(&hydro.id).copied();
@@ -146,49 +143,44 @@ pub fn resolve_production_models_from_artifacts(
         let source = determine_source(hydro, config_entry)?;
         provenance.push((hydro.id, source));
 
-        // Fit computed-source planes once per hydro, reuse for each stage.
-        let cached_computed_planes: Option<Vec<FphaPlane>> =
+        // Computed FPHA fits once per `SelectionMode` entry (range or season),
+        // not once per hydro: a hydro whose stages span ranges/seasons with
+        // distinct `fpha_config`s yields a distinct plane set per entry. The
+        // per-stage planes here carry, for each study stage, the plane set of
+        // the entry covering it; a single-config hydro collapses to one fit via
+        // the dedup in `fit_computed_planes_per_stage`.
+        let computed_planes_per_stage: Option<Vec<Vec<FphaPlane>>> =
             if source == ProductionModelSource::ComputedFromGeometry {
-                let fit_result =
-                    fit_planes_for_hydro(hydro, config_entry, &geometry_map, &study_stages)?;
-                if let Some(kappa) = fit_result.low_kappa_warning {
-                    kappa_warnings.push((hydro.name.clone(), kappa));
-                }
-                for (plane_id, plane) in fit_result.planes.iter().enumerate() {
-                    let raw_gamma_0 = plane.intercept / fit_result.kappa;
-                    // Rationale: plane_id comes from enumerate() over the fitting
-                    // result; plane counts are bounded by max_planes_per_hydro
-                    // (default <= 30), far below i32::MAX, so truncation and wrap
-                    // are unreachable.
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-                    export_rows.push(cobre_io::FphaHyperplaneRow {
-                        hydro_id: hydro.id,
-                        stage_id: None,
-                        plane_id: plane_id as i32,
-                        gamma_0: raw_gamma_0,
-                        gamma_v: plane.gamma_v,
-                        gamma_q: plane.gamma_q,
-                        gamma_s: plane.gamma_s,
-                        kappa: fit_result.kappa,
-                        valid_v_min_hm3: None,
-                        valid_v_max_hm3: None,
-                        valid_q_max_m3s: None,
-                    });
-                }
-                Some(fit_result.planes)
+                // Per-hydro long-term mean inflow drives the lateral-secant
+                // `S_max = 2·MLT`; computed once here (the only scope with
+                // `system`) and threaded into the fit. A history-less hydro
+                // yields `mlt = 0.0`, falling back to `2 × max_turbined`.
+                let mlt = long_term_mean_inflow(system, hydro.id);
+                let per_stage = fit_computed_planes_per_stage(
+                    hydro,
+                    config_entry,
+                    &geometry_map,
+                    &study_stages,
+                    mlt,
+                    &mut export_rows,
+                )?;
+                Some(per_stage)
             } else {
                 None
             };
 
         let mut stage_models: Vec<ResolvedProductionModel> = Vec::with_capacity(n_stages);
-        for stage in &study_stages {
+        for (stage_idx, stage) in study_stages.iter().enumerate() {
+            let cached_stage_planes = computed_planes_per_stage
+                .as_ref()
+                .map(|per_stage| per_stage[stage_idx].as_slice());
             let model = resolve_stage_model(
                 hydro,
                 stage,
                 config_entry,
                 source,
                 &hyperplane_map,
-                cached_computed_planes.as_deref(),
+                cached_stage_planes,
                 Some(&override_table),
             )?;
             stage_models.push(model);
@@ -198,7 +190,7 @@ pub fn resolve_production_models_from_artifacts(
     }
 
     let set = ProductionModelSet::new(all_models, n_hydros, n_stages);
-    Ok((set, override_table, provenance, kappa_warnings, export_rows))
+    Ok((set, override_table, provenance, export_rows))
 }
 
 /// Build an `O(1)` geometry map: `hydro_id → sorted geometry row references`.
@@ -215,35 +207,59 @@ fn build_geometry_map(
     geometry_map
 }
 
-/// Fit FPHA planes from geometry for a computed-source hydro.
-/// Validates prerequisites (tailrace, losses, efficiency present), then calls
-/// `fit_fpha_planes`. Returns planes, kappa, and warnings for caching per hydro.
+/// Per-hydro long-term mean natural inflow (MLT) in m³/s, or `0.0` when the hydro
+/// has no inflow history.
+///
+/// MLT (média de longo termo) is the canonical-order mean of the hydro's
+/// `scenarios/inflow_history.parquet` `value_m3s` series. It feeds the
+/// lateral-secant `S_max = 2·MLT`; a hydro with no history returns `0.0`, which
+/// the secant's `resolve_s_max` maps to the `2 × max_turbined` fallback.
+///
+/// # Determinism — canonical-order mean (Voice 1 / D5)
+///
+/// The sum walks `System::inflow_history()` in its STORED slice order and divides
+/// by the matching-row count. Reordering the rows, or summing per declaration
+/// order of any other entity, must not change the result — `inflow_history()` is
+/// already in a fixed canonical order, so a single sequential pass over the rows
+/// whose `hydro_id` matches yields a value independent of input ordering. Summing
+/// into a partitioned-then-reduced parallel accumulator would reorder the adds and
+/// break bit-determinism; the sequential pass is deliberate.
+fn long_term_mean_inflow(system: &System, hydro_id: EntityId) -> f64 {
+    let mut sum = 0.0_f64;
+    let mut count = 0_u64;
+    for row in system.inflow_history() {
+        if row.hydro_id == hydro_id {
+            sum += row.value_m3s;
+            count += 1;
+        }
+    }
+    if count == 0 {
+        0.0
+    } else {
+        #[allow(clippy::cast_precision_loss)]
+        let n = count as f64;
+        sum / n
+    }
+}
+
+/// Fit FPHA planes for one `SelectionMode` entry's `FphaColumnLayout`.
+///
+/// This is the per-entry fit unit: one call fits the plane set for a single
+/// range or season config. The caller (`fit_computed_planes_per_stage`) invokes
+/// it once per distinct config and expands the result across the stages that
+/// config covers. Validates prerequisites (tailrace, losses, efficiency
+/// present), then calls `fit_fpha_planes`.
+///
+/// `mlt` is the per-hydro long-term mean inflow driving the lateral-secant
+/// `S_max`; it is fixed within a hydro, so the per-config dedup in the caller is
+/// unaffected by it.
 fn fit_planes_for_hydro(
     hydro: &cobre_core::entities::hydro::Hydro,
-    config_entry: Option<&ProductionModelConfig>,
+    config: &FphaColumnLayout,
     geometry_map: &HashMap<EntityId, Vec<&HydroGeometryRow>>,
-    study_stages: &[&cobre_core::temporal::Stage],
+    mlt: f64,
 ) -> Result<FphaFitResult, SddpError> {
     validate_computed_prerequisites(hydro, geometry_map)?;
-
-    // Use the first study stage as representative for FphaColumnLayout lookup.
-    // In the MVP, the fitting result is stage-independent.
-    let representative_stage = study_stages.first().ok_or_else(|| {
-        SddpError::Validation(format!(
-            "hydro {} (id={}) has source: \"computed\" but the system has no study stages",
-            hydro.name, hydro.id.0
-        ))
-    })?;
-
-    let config = config_entry
-        .and_then(|c| find_fpha_config_for_stage(c, representative_stage))
-        .ok_or_else(|| {
-            SddpError::Validation(format!(
-                "hydro {} (id={}) has source: \"computed\" but no FphaColumnLayout \
-                 was found in hydro_production_models.json",
-                hydro.name, hydro.id.0
-            ))
-        })?;
 
     // Clone geometry rows from map to satisfy fit_fpha_planes signature.
     let geo_rows_owned: Vec<HydroGeometryRow> = geometry_map
@@ -253,7 +269,105 @@ fn fit_planes_for_hydro(
         .map(|r| (*r).clone())
         .collect();
 
-    Ok(fit_fpha_planes(&geo_rows_owned, hydro, config)?)
+    Ok(fit_fpha_planes(&geo_rows_owned, hydro, config, mlt)?)
+}
+
+/// Fit computed-FPHA planes per study stage for one hydro, deduplicating
+/// identical `SelectionMode` entries and emitting per-stage export rows.
+///
+/// Returns one plane set per study stage (parallel to `study_stages` order):
+/// each stage carries the plane set of the `SelectionMode` entry covering it.
+///
+/// # Dedup
+///
+/// Stages whose covering entry resolves to an identical `FphaColumnLayout` share
+/// a single fit. The cache key is the resolved `FphaColumnLayout` value
+/// (`PartialEq`): the geometry and hydro entity are fixed within a hydro, so the
+/// config is the sole varying fit input. A hydro whose `SelectionMode` collapses
+/// to one config across all stages is therefore fitted exactly once.
+///
+/// # Export rows
+///
+/// Emits a `FphaHyperplaneRow` with `stage_id = Some(stage.id)` for every
+/// covered study stage, appended in `(stage_id, plane_id)` order. Because the
+/// outer caller iterates hydros in canonical ID order and this function iterates
+/// stages in canonical ID order, `export_rows` ends up ordered by
+/// `(hydro_id, stage_id, plane_id)` — upholding declaration-order invariance.
+///
+/// # Errors
+///
+/// - A stage mapping to no `fpha_config` (coverage gap) → [`SddpError::Validation`];
+///   stages are never silently dropped.
+/// - Fitting errors propagate via [`fit_planes_for_hydro`] as
+///   [`SddpError::Validation`], naming the hydro.
+fn fit_computed_planes_per_stage(
+    hydro: &cobre_core::entities::hydro::Hydro,
+    config_entry: Option<&ProductionModelConfig>,
+    geometry_map: &HashMap<EntityId, Vec<&HydroGeometryRow>>,
+    study_stages: &[&cobre_core::temporal::Stage],
+    mlt: f64,
+    export_rows: &mut Vec<cobre_io::FphaHyperplaneRow>,
+) -> Result<Vec<Vec<FphaPlane>>, SddpError> {
+    // Cache of distinct fits keyed by the resolved config value. Linear scan
+    // over `PartialEq` rather than a hash map: `FphaColumnLayout` holds f64
+    // fields (no `Eq`/`Hash`), and the entry count per hydro is small.
+    let mut fitted: Vec<(&FphaColumnLayout, Vec<FphaPlane>)> = Vec::new();
+    let mut per_stage: Vec<Vec<FphaPlane>> = Vec::with_capacity(study_stages.len());
+
+    for stage in study_stages {
+        let config = config_entry
+            .and_then(|c| find_fpha_config_for_stage(c, stage))
+            .ok_or_else(|| {
+                SddpError::Validation(format!(
+                    "hydro {} (id={}) has source: \"computed\" but no FphaColumnLayout \
+                     covers stage {} in hydro_production_models.json",
+                    hydro.name, hydro.id.0, stage.id
+                ))
+            })?;
+
+        let planes = if let Some((_, planes)) = fitted.iter().find(|(cfg, _)| **cfg == *config) {
+            planes.clone()
+        } else {
+            let fit_result = fit_planes_for_hydro(hydro, config, geometry_map, mlt)?;
+            fitted.push((config, fit_result.planes.clone()));
+            fit_result.planes
+        };
+
+        for (plane_id, plane) in planes.iter().enumerate() {
+            // The in-memory plane is already the α-scaled whole affine function
+            // α·FPHA_0. The exported row stores those α-scaled coefficients
+            // VERBATIM with `kappa = 1.0`, so the precomputed read-back
+            // (`intercept = gamma_0 * kappa`) reproduces α·FPHA_0 exactly and the
+            // gradients pass through unchanged. The `kappa` column carries 1.0
+            // because the planes are already fully corrected: it keeps the column
+            // inside the validated (0, 1] range even when α > 1, and it must NOT
+            // re-scale the already-α-scaled coefficients on read-back (that would
+            // double-correct).
+            //
+            // Rationale: plane_id comes from enumerate() over the fitting
+            // result; plane counts are bounded by max_planes_per_hydro
+            // (default <= 30), far below i32::MAX, so truncation and wrap
+            // are unreachable.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            export_rows.push(cobre_io::FphaHyperplaneRow {
+                hydro_id: hydro.id,
+                stage_id: Some(stage.id),
+                plane_id: plane_id as i32,
+                gamma_0: plane.intercept,
+                gamma_v: plane.gamma_v,
+                gamma_q: plane.gamma_q,
+                gamma_s: plane.gamma_s,
+                kappa: 1.0,
+                valid_v_min_hm3: None,
+                valid_v_max_hm3: None,
+                valid_q_max_m3s: None,
+            });
+        }
+
+        per_stage.push(planes);
+    }
+
+    Ok(per_stage)
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -665,6 +779,7 @@ fn validate_hyperplane_row(
     clippy::doc_markdown,
     clippy::match_wildcard_for_single_variants,
     clippy::cast_precision_loss,
+    clippy::float_cmp,
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic
@@ -674,7 +789,8 @@ mod tests {
 
     use chrono::NaiveDate;
     use cobre_core::{
-        EfficiencyModel, EntityId, HydraulicLossesModel, TailraceModel,
+        EfficiencyModel, EntityId, HydraulicLossesModel, InflowHistoryRow, SystemBuilder,
+        TailraceModel,
         entities::hydro::{HydroGenerationModel, HydroPenalties},
         temporal::{
             Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
@@ -682,8 +798,8 @@ mod tests {
         },
     };
     use cobre_io::extensions::{
-        FphaColumnLayout, FphaHyperplaneRow, HydroGeometryRow, ProductionModelConfig, SeasonConfig,
-        SelectionMode, StageRange,
+        FittingWindow, FphaColumnLayout, FphaHyperplaneRow, HydroGeometryRow,
+        ProductionModelConfig, SeasonConfig, SelectionMode, StageRange,
     };
 
     use super::*;
@@ -1715,19 +1831,21 @@ mod tests {
         let mut geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
         geometry_map.insert(EntityId::from(0), geo_refs);
 
-        let study_stages = [stage.clone()];
-        let stage_refs: Vec<&cobre_core::temporal::Stage> = study_stages.iter().collect();
-
-        // Fit planes once (simulating the outer loop in resolve_production_models).
-        let fit_result =
-            super::fit_planes_for_hydro(&hydro, Some(&config), &geometry_map, &stage_refs)
-                .expect("fit_planes_for_hydro must succeed for valid Sobradinho-style input");
+        // Fit planes once (simulating the per-entry fit in resolve_production_models).
+        let layout =
+            find_fpha_config_for_stage(&config, &stage).expect("computed config covers stage 0");
+        let fit_result = super::fit_planes_for_hydro(&hydro, layout, &geometry_map, 0.0)
+            .expect("fit_planes_for_hydro must succeed for valid Sobradinho-style input");
         let planes = &fit_result.planes;
 
-        // Plane count must be within the expected range for default FphaColumnLayout.
+        // The fitter derives planes from the convex hull of the production cloud,
+        // so the count is the number of distinct upper-envelope hull faces rather
+        // than a dense tangent candidate set. The hull-based invariant is at least
+        // one plane with valid coefficient signs (migrated from the former
+        // tangent-derived 3–10 count).
         assert!(
-            (3..=10).contains(&planes.len()),
-            "expected 3–10 planes, got {}",
+            !planes.is_empty(),
+            "expected at least one plane, got {}",
             planes.len()
         );
 
@@ -1778,6 +1896,80 @@ mod tests {
         }
     }
 
+    /// Round-trip: computed-FPHA export rows written to parquet and re-read via
+    /// `parse_fpha_hyperplanes` reconstruct the fitted planes to within 1e-9.
+    ///
+    /// The computed path writes the α-scaled coefficients verbatim with the IO
+    /// `kappa` column pinned to 1.0, so the precomputed reader's reconstruction
+    /// (`intercept = gamma_0 * kappa`, gradients pass through) reproduces the
+    /// fitted planes exactly — proving the kappa column round-trips without
+    /// re-scaling the already-corrected coefficients.
+    #[test]
+    fn computed_export_rows_round_trip_through_parquet() {
+        let hydro = make_sobradinho_computed_hydro(0);
+        let config = computed_fpha_config(0);
+        let rows = make_sobradinho_geometry_rows(0);
+        let geometry_map = sobradinho_geometry_map(&rows);
+
+        let stages = [make_stage(0)];
+        let stage_refs: Vec<&Stage> = stages.iter().collect();
+
+        let mut export_rows = Vec::new();
+        let per_stage = super::fit_computed_planes_per_stage(
+            &hydro,
+            Some(&config),
+            &geometry_map,
+            &stage_refs,
+            0.0,
+            &mut export_rows,
+        )
+        .expect("per-stage fit must succeed");
+
+        let fitted_planes = &per_stage[0];
+        assert!(!export_rows.is_empty(), "export rows must be non-empty");
+        assert_eq!(
+            export_rows.len(),
+            fitted_planes.len(),
+            "one export row per fitted plane"
+        );
+        for row in &export_rows {
+            assert_eq!(row.kappa, 1.0, "computed rows pin kappa = 1.0");
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("fpha_hyperplanes.parquet");
+        cobre_io::output::write_fpha_hyperplanes(&path, &export_rows)
+            .expect("write_fpha_hyperplanes must succeed");
+
+        let read_rows =
+            cobre_io::extensions::parse_fpha_hyperplanes(&path).expect("re-read must succeed");
+        assert_eq!(
+            read_rows.len(),
+            fitted_planes.len(),
+            "re-read row count must match fitted plane count"
+        );
+
+        // Reconstruct each plane exactly as the precomputed reader does:
+        // intercept = gamma_0 * kappa; the gradients pass through unchanged.
+        for (row, fitted) in read_rows.iter().zip(fitted_planes) {
+            let reconstructed = FphaPlane {
+                intercept: row.gamma_0 * row.kappa,
+                gamma_v: row.gamma_v,
+                gamma_q: row.gamma_q,
+                gamma_s: row.gamma_s,
+            };
+            assert!(
+                (reconstructed.intercept - fitted.intercept).abs() < 1e-9,
+                "intercept mismatch: {} vs {}",
+                reconstructed.intercept,
+                fitted.intercept
+            );
+            assert!((reconstructed.gamma_v - fitted.gamma_v).abs() < 1e-9);
+            assert!((reconstructed.gamma_q - fitted.gamma_q).abs() < 1e-9);
+            assert!((reconstructed.gamma_s - fitted.gamma_s).abs() < 1e-9);
+        }
+    }
+
     /// Mixed precomputed + computed sources: both hydros resolve to valid `Fpha` models and
     /// provenance is correctly differentiated by source.
     ///
@@ -1809,8 +2001,6 @@ mod tests {
         geometry_map.insert(EntityId::from(1), geo_refs);
 
         let stage = make_stage(0);
-        let study_stages = [stage.clone()];
-        let stage_refs: Vec<&cobre_core::temporal::Stage> = study_stages.iter().collect();
 
         // Determine sources.
         let src0 = determine_source(&hydro0, Some(&config0)).expect("hydro0 source");
@@ -1827,9 +2017,10 @@ mod tests {
         );
 
         // Fit computed planes for hydro 1.
-        let computed_fit =
-            super::fit_planes_for_hydro(&hydro1, Some(&config1), &geometry_map, &stage_refs)
-                .expect("fit_planes_for_hydro must succeed for hydro 1");
+        let layout1 =
+            find_fpha_config_for_stage(&config1, &stage).expect("computed config covers stage 0");
+        let computed_fit = super::fit_planes_for_hydro(&hydro1, layout1, &geometry_map, 0.0)
+            .expect("fit_planes_for_hydro must succeed for hydro 1");
 
         // Resolve stage model for hydro 0 (precomputed path).
         let model0 = super::resolve_stage_model(
@@ -1894,12 +2085,12 @@ mod tests {
 
         // Three study stages.
         let stages = [make_stage(0), make_stage(1), make_stage(2)];
-        let stage_refs: Vec<&cobre_core::temporal::Stage> = stages.iter().collect();
 
         // Fit once.
-        let cached_fit =
-            super::fit_planes_for_hydro(&hydro, Some(&config), &geometry_map, &stage_refs)
-                .expect("fit_planes_for_hydro must succeed");
+        let layout = find_fpha_config_for_stage(&config, &stages[0])
+            .expect("computed config covers stage 0");
+        let cached_fit = super::fit_planes_for_hydro(&hydro, layout, &geometry_map, 0.0)
+            .expect("fit_planes_for_hydro must succeed");
 
         let empty_hyperplane_map: HashMap<(EntityId, Option<i32>), Vec<&FphaHyperplaneRow>> =
             HashMap::new();
@@ -2002,6 +2193,356 @@ mod tests {
             msg.contains(&hydro.name),
             "error must include hydro name '{}', got: {msg}",
             hydro.name
+        );
+    }
+
+    // ── Stage-aware per-entry fitting tests ───────────────────────────────────
+
+    /// Build a single-hydro geometry map for the Sobradinho-style fixture.
+    fn sobradinho_geometry_map(
+        rows: &[HydroGeometryRow],
+    ) -> HashMap<EntityId, Vec<&HydroGeometryRow>> {
+        let mut map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
+        map.insert(rows[0].hydro_id, rows.iter().collect());
+        map
+    }
+
+    /// FPHA layout with an explicit absolute volume window. Distinct windows
+    /// drive distinct fitting bounds and therefore distinct plane sets.
+    fn computed_layout_with_window(min: Option<f64>, max: Option<f64>) -> FphaColumnLayout {
+        FphaColumnLayout {
+            source: "computed".to_string(),
+            volume_discretization_points: None,
+            turbine_discretization_points: None,
+            spillage_discretization_points: None,
+            max_planes_per_hydro: None,
+            fitting_window: Some(FittingWindow {
+                volume_min_hm3: min,
+                volume_max_hm3: max,
+                volume_min_percentile: None,
+                volume_max_percentile: None,
+            }),
+        }
+    }
+
+    /// Per-range fits differ: two `StageRange`s carrying different
+    /// `fitting_window`s yield non-identical plane sets for stages in range A vs
+    /// range B.
+    #[test]
+    fn per_range_fits_differ_when_windows_differ() {
+        let hydro = make_sobradinho_computed_hydro(0);
+        let rows = make_sobradinho_geometry_rows(0);
+        let geometry_map = sobradinho_geometry_map(&rows);
+
+        // Range A (stages 0-1): narrow low window. Range B (stages 2-3): wide.
+        let config = ProductionModelConfig {
+            hydro_id: EntityId::from(0),
+            selection_mode: SelectionMode::StageRanges {
+                ranges: vec![
+                    StageRange {
+                        start_stage_id: 0,
+                        end_stage_id: Some(1),
+                        model: "fpha".to_string(),
+                        fpha_config: Some(computed_layout_with_window(Some(100.0), Some(8_000.0))),
+                        productivity_mw_per_m3s: None,
+                    },
+                    StageRange {
+                        start_stage_id: 2,
+                        end_stage_id: None,
+                        model: "fpha".to_string(),
+                        fpha_config: Some(computed_layout_with_window(Some(100.0), Some(20_000.0))),
+                        productivity_mw_per_m3s: None,
+                    },
+                ],
+            },
+        };
+
+        let stages = [make_stage(0), make_stage(1), make_stage(2), make_stage(3)];
+        let stage_refs: Vec<&Stage> = stages.iter().collect();
+
+        let mut export_rows = Vec::new();
+        let per_stage = super::fit_computed_planes_per_stage(
+            &hydro,
+            Some(&config),
+            &geometry_map,
+            &stage_refs,
+            0.0,
+            &mut export_rows,
+        )
+        .expect("per-stage fit must succeed");
+
+        // Stages in range A (0,1) share one plane set; stages in range B (2,3)
+        // share another. The two range plane sets must differ.
+        assert_eq!(per_stage[0], per_stage[1], "range A stages must match");
+        assert_eq!(per_stage[2], per_stage[3], "range B stages must match");
+        assert_ne!(
+            per_stage[0], per_stage[2],
+            "range A and range B plane sets must differ when windows differ"
+        );
+    }
+
+    /// Per-season fits differ: two season configs with different windows yield
+    /// distinct plane sets for stages mapping to each season.
+    #[test]
+    fn per_season_fits_differ_when_season_configs_differ() {
+        let hydro = make_sobradinho_computed_hydro(0);
+        let rows = make_sobradinho_geometry_rows(0);
+        let geometry_map = sobradinho_geometry_map(&rows);
+
+        let config = ProductionModelConfig {
+            hydro_id: EntityId::from(0),
+            selection_mode: SelectionMode::Seasonal {
+                default_model: "fpha".to_string(),
+                seasons: vec![
+                    SeasonConfig {
+                        season_id: 0,
+                        model: "fpha".to_string(),
+                        fpha_config: Some(computed_layout_with_window(Some(100.0), Some(8_000.0))),
+                        productivity_mw_per_m3s: None,
+                    },
+                    SeasonConfig {
+                        season_id: 1,
+                        model: "fpha".to_string(),
+                        fpha_config: Some(computed_layout_with_window(Some(100.0), Some(20_000.0))),
+                        productivity_mw_per_m3s: None,
+                    },
+                ],
+            },
+        };
+
+        let mut stage_s0 = make_stage(0);
+        stage_s0.season_id = Some(0);
+        let mut stage_s1 = make_stage(1);
+        stage_s1.season_id = Some(1);
+        let stages = [stage_s0, stage_s1];
+        let stage_refs: Vec<&Stage> = stages.iter().collect();
+
+        let mut export_rows = Vec::new();
+        let per_stage = super::fit_computed_planes_per_stage(
+            &hydro,
+            Some(&config),
+            &geometry_map,
+            &stage_refs,
+            0.0,
+            &mut export_rows,
+        )
+        .expect("per-season fit must succeed");
+
+        assert_ne!(
+            per_stage[0], per_stage[1],
+            "season 0 and season 1 plane sets must differ when configs differ"
+        );
+    }
+
+    /// Single-config dedup: a hydro whose `SelectionMode` resolves to one config
+    /// for all stages is fitted once — every stage carries the identical plane
+    /// set and emits per-stage export rows.
+    #[test]
+    fn single_config_dedup_yields_identical_planes_across_stages() {
+        let hydro = make_sobradinho_computed_hydro(0);
+        let rows = make_sobradinho_geometry_rows(0);
+        let geometry_map = sobradinho_geometry_map(&rows);
+
+        // One open-ended range covering all stages with one config.
+        let config = computed_fpha_config(0);
+
+        let stages = [make_stage(0), make_stage(1), make_stage(2)];
+        let stage_refs: Vec<&Stage> = stages.iter().collect();
+
+        let mut export_rows = Vec::new();
+        let per_stage = super::fit_computed_planes_per_stage(
+            &hydro,
+            Some(&config),
+            &geometry_map,
+            &stage_refs,
+            0.0,
+            &mut export_rows,
+        )
+        .expect("single-config fit must succeed");
+
+        assert_eq!(per_stage.len(), 3, "one plane set per study stage");
+        for s in 1..3 {
+            assert_eq!(
+                per_stage[0], per_stage[s],
+                "single-config hydro: stage {s} planes must be identical to stage 0 (dedup)"
+            );
+        }
+
+        // Each stage emits one export-row block, so the row count is
+        // n_stages * planes_per_stage.
+        assert_eq!(
+            export_rows.len(),
+            per_stage[0].len() * 3,
+            "export rows must cover every (stage, plane)"
+        );
+    }
+
+    /// Export rows carry `stage_id = Some(stage.id)` and are ordered canonically
+    /// by `(stage_id, plane_id)` (single-hydro fixture upholds the
+    /// `(hydro_id, stage_id, plane_id)` global order).
+    #[test]
+    fn export_rows_carry_stage_id_and_canonical_order() {
+        let hydro = make_sobradinho_computed_hydro(0);
+        let rows = make_sobradinho_geometry_rows(0);
+        let geometry_map = sobradinho_geometry_map(&rows);
+        let config = computed_fpha_config(0);
+
+        let stages = [make_stage(0), make_stage(1), make_stage(2)];
+        let stage_refs: Vec<&Stage> = stages.iter().collect();
+
+        let mut export_rows = Vec::new();
+        super::fit_computed_planes_per_stage(
+            &hydro,
+            Some(&config),
+            &geometry_map,
+            &stage_refs,
+            0.0,
+            &mut export_rows,
+        )
+        .expect("fit must succeed");
+
+        // Every row carries a concrete stage_id (never None for computed FPHA).
+        for row in &export_rows {
+            assert!(
+                row.stage_id.is_some(),
+                "computed-FPHA export row must carry stage_id = Some(...), got None"
+            );
+        }
+
+        // Rows must be sorted by (hydro_id, stage_id, plane_id).
+        let keys: Vec<(i32, Option<i32>, i32)> = export_rows
+            .iter()
+            .map(|r| (r.hydro_id.0, r.stage_id, r.plane_id))
+            .collect();
+        let mut sorted = keys.clone();
+        sorted.sort();
+        assert_eq!(
+            keys, sorted,
+            "export rows must be ordered by (hydro_id, stage_id, plane_id)"
+        );
+
+        // The covered stage ids are exactly {0, 1, 2}.
+        let mut seen_stages: Vec<i32> = export_rows.iter().filter_map(|r| r.stage_id).collect();
+        seen_stages.sort_unstable();
+        seen_stages.dedup();
+        assert_eq!(
+            seen_stages,
+            vec![0, 1, 2],
+            "every study stage must appear in the export rows"
+        );
+    }
+
+    /// A `SelectionMode` entry mapping no config to a stage (coverage gap) →
+    /// `SddpError::Validation`; stages are never silently dropped.
+    #[test]
+    fn coverage_gap_returns_validation_error() {
+        let hydro = make_sobradinho_computed_hydro(0);
+        let rows = make_sobradinho_geometry_rows(0);
+        let geometry_map = sobradinho_geometry_map(&rows);
+
+        // Range covers only stages [0, 1]; stage 2 falls in a gap.
+        let config = ProductionModelConfig {
+            hydro_id: EntityId::from(0),
+            selection_mode: SelectionMode::StageRanges {
+                ranges: vec![StageRange {
+                    start_stage_id: 0,
+                    end_stage_id: Some(1),
+                    model: "fpha".to_string(),
+                    fpha_config: Some(computed_layout_with_window(None, None)),
+                    productivity_mw_per_m3s: None,
+                }],
+            },
+        };
+
+        let stages = [make_stage(0), make_stage(1), make_stage(2)];
+        let stage_refs: Vec<&Stage> = stages.iter().collect();
+
+        let mut export_rows = Vec::new();
+        let err = super::fit_computed_planes_per_stage(
+            &hydro,
+            Some(&config),
+            &geometry_map,
+            &stage_refs,
+            0.0,
+            &mut export_rows,
+        )
+        .expect_err("a coverage gap must error, not silently drop the stage");
+        assert!(
+            matches!(err, crate::SddpError::Validation(ref msg) if msg.contains("stage 2")),
+            "expected Validation naming the uncovered stage, got {err:?}"
+        );
+    }
+
+    // ── MLT (long-term mean inflow) for the lateral secant ────────────────────
+
+    fn inflow_row(hydro_id: i32, day: u32, value_m3s: f64) -> InflowHistoryRow {
+        InflowHistoryRow {
+            hydro_id: EntityId::from(hydro_id),
+            date: NaiveDate::from_ymd_opt(2000, 1, day).unwrap(),
+            value_m3s,
+        }
+    }
+
+    /// A hydro with an inflow history yields MLT = the canonical-order mean of its
+    /// `value_m3s` series, and only its own rows are summed (other hydros ignored).
+    #[test]
+    fn long_term_mean_inflow_is_per_hydro_canonical_mean() {
+        let rows = vec![
+            inflow_row(1, 1, 100.0),
+            inflow_row(2, 1, 9_999.0), // different hydro — must be excluded
+            inflow_row(1, 2, 200.0),
+            inflow_row(1, 3, 300.0),
+        ];
+        let system = SystemBuilder::new()
+            .inflow_history(rows)
+            .build()
+            .expect("valid system");
+
+        // mean(100, 200, 300) = 200. This MLT feeds S_max = 2·MLT at the fit call
+        // site; the MLT→S_max mapping is the secant's `resolve_s_max` contract,
+        // exercised in the `fpha_fitting::secant` unit tests.
+        let mlt = super::long_term_mean_inflow(&system, EntityId::from(1));
+        assert_eq!(
+            mlt, 200.0,
+            "MLT must be the per-hydro mean of its own series"
+        );
+    }
+
+    /// A hydro with no inflow history yields MLT = 0.0 (the fallback sentinel).
+    #[test]
+    fn long_term_mean_inflow_empty_history_is_zero() {
+        let system = SystemBuilder::new().build().expect("empty system is valid");
+        let mlt = super::long_term_mean_inflow(&system, EntityId::from(1));
+        assert_eq!(mlt, 0.0, "no inflow history must yield MLT = 0");
+    }
+
+    /// Determinism: the MLT mean is independent of inflow-row declaration order.
+    #[test]
+    fn long_term_mean_inflow_is_order_independent() {
+        let ascending = vec![
+            inflow_row(1, 1, 10.0),
+            inflow_row(1, 2, 20.0),
+            inflow_row(1, 3, 60.0),
+        ];
+        let descending = vec![
+            inflow_row(1, 3, 60.0),
+            inflow_row(1, 2, 20.0),
+            inflow_row(1, 1, 10.0),
+        ];
+        let sys_asc = SystemBuilder::new()
+            .inflow_history(ascending)
+            .build()
+            .expect("valid");
+        let sys_desc = SystemBuilder::new()
+            .inflow_history(descending)
+            .build()
+            .expect("valid");
+
+        let mlt_asc = super::long_term_mean_inflow(&sys_asc, EntityId::from(1));
+        let mlt_desc = super::long_term_mean_inflow(&sys_desc, EntityId::from(1));
+        assert_eq!(
+            mlt_asc, mlt_desc,
+            "MLT must be order-independent (declaration-order invariance)"
         );
     }
 }

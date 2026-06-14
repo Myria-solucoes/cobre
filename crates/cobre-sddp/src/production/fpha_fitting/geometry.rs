@@ -2,9 +2,8 @@
 //!
 //! Owns the resolved fitting bounds ([`FittingBounds`] + [`resolve_fitting_bounds`]),
 //! the forebay interpolation table ([`ForebayTable`]), and the tailrace / hydraulic-loss
-//! evaluators ([`evaluate_tailrace`], [`evaluate_tailrace_derivative`], [`evaluate_losses`],
-//! [`evaluate_losses_factor`]). The `production` submodule reads these to assemble the
-//! complete production function.
+//! evaluators ([`evaluate_tailrace`], [`evaluate_losses`]). The `production` submodule
+//! reads these to assemble the complete production function.
 
 use cobre_core::{HydraulicLossesModel, Hydro, TailraceModel};
 use cobre_io::extensions::{FphaColumnLayout, HydroGeometryRow};
@@ -27,11 +26,52 @@ pub(crate) struct FittingBounds {
     pub n_volume_points: usize,
     /// Number of turbined-flow grid points (>= 2).
     pub n_flow_points: usize,
-    /// Number of spillage grid points (>= 2).
+    /// Number of spillage grid points (>= 2). Validated but not a fitting axis:
+    /// the cloud and α regression fix `s = 0` and the lateral secant sweeps its
+    /// own `S_max` sample, so no step builds a spillage grid axis.
+    // Intent/Seam: resolved and range-validated in `resolve_fitting_bounds` so the
+    // `spillage_discretization_points` config field round-trips, but read by no
+    // fitting step now that spillage is not a grid axis. The allow re-fires if a
+    // spillage-axis consumer is reintroduced.
+    #[allow(dead_code)]
     pub n_spillage_points: usize,
-    /// Maximum number of hyperplanes retained after heuristic selection (>= 1).
+    /// Parsed plane-count ceiling (>= 1). No longer drives fitting: the hull fitter
+    /// emits exactly the upper-envelope facets and there is no greedy selector to
+    /// cap. Plane trimming is a separate post-fit pass; the field is resolved and
+    /// validated so the config still deserializes and a later trimming pass can
+    /// repurpose it.
+    // Intent/Seam: resolved from the config and range-validated in
+    // `resolve_fitting_bounds`, but read by no fitting step now that plane
+    // selection is retired. Kept so the config field round-trips and a future
+    // trimming pass can consume it; the allow re-fires when that reader lands.
+    #[allow(dead_code)]
     pub max_planes_per_hydro: usize,
+    /// Run-of-river marker: the requested volume range collapsed to a single
+    /// point, so `[v_min, v_max]` are the two synthesized tangent-in-volume
+    /// samples (see [`resolve_fitting_bounds`]) rather than a genuine storage
+    /// window. The hull fitter reads this to zero `γ_V` exactly on the emitted
+    /// planes — generation does not vary with storage for a run-of-river plant.
+    pub single_volume: bool,
 }
+
+/// Absolute single-point detection tolerance for the volume range (hm³).
+///
+/// A resolved range narrower than this is treated as a single point (a
+/// run-of-river plant with no useful storage) and rerouted through the
+/// single-volume fitting path, NOT rejected as an empty window. A genuinely
+/// inverted range (`v_max < v_min`) is still an error: the reroute fires only
+/// for `0 <= v_max - v_min <= V_EPS`.
+const V_EPS: f64 = 1e-9;
+
+/// Absolute fallback half-width for the synthesized volume samples (hm³).
+///
+/// When the entity's useful storage `ΔV_useful` is itself zero (the run-of-river
+/// case), the `0.005·ΔV_useful` tangent half-width collapses to nothing, so the
+/// two synthesized samples would coincide and the cloud would stay coplanar in
+/// `V`. This absolute floor opens the `V` axis just enough for a non-degenerate
+/// 3-D hull; `γ_V` is zeroed afterward, so its exact magnitude does not reach
+/// the emitted planes.
+const V_SYNTH_ABS: f64 = 1.0;
 
 /// Resolve the fitting volume range and discretization counts from configuration.
 ///
@@ -54,13 +94,25 @@ pub(crate) struct FittingBounds {
 /// Mixed modes (absolute min, percentile max or vice versa) are accepted as long
 /// as neither the min bound nor the max bound has both absolute and percentile set.
 ///
+/// # Run-of-river reroute
+///
+/// A resolved range that collapses to a single point
+/// (`0 <= v_max - v_min <= V_EPS`), or a config requesting `NPTV = 1`, is a
+/// run-of-river plant with no useful storage. Rather than rejecting it, the
+/// function synthesizes two tangent-in-volume samples `1%` of the entity's
+/// useful storage apart (clamped to the forebay table range; an absolute floor
+/// when the useful storage is itself 0), sets `n_volume_points = 2`, and flags
+/// `single_volume = true` so the hull fitter zeros `γ_V` exactly. The
+/// multi-volume discretization-count guard on `n_volume_points` does NOT apply
+/// to this path.
+///
 /// # Errors
 ///
 /// | Condition | Error variant |
 /// |-----------|---------------|
 /// | Both absolute and percentile set for the same bound (min or max) | [`FphaFittingError::ConflictingFittingWindow`] |
-/// | Resolved `v_min >= v_max` | [`FphaFittingError::EmptyFittingWindow`] |
-/// | Any discretization count < 2, or `max_planes_per_hydro` < 1 | [`FphaFittingError::InsufficientDiscretization`] |
+/// | Resolved `v_max < v_min` (inverted range, not single-point) | [`FphaFittingError::EmptyFittingWindow`] |
+/// | A turbine/spillage count < 2, `max_planes_per_hydro` < 1, or (multi-volume only) `n_volume_points` < 2 | [`FphaFittingError::InsufficientDiscretization`] |
 pub(crate) fn resolve_fitting_bounds(
     config: &FphaColumnLayout,
     hydro: &Hydro,
@@ -124,7 +176,10 @@ pub(crate) fn resolve_fitting_bounds(
 
     // ── Step 2: Validate volume range ────────────────────────────────────────
 
-    if v_min >= v_max {
+    // A genuinely inverted range is always an error. The single-point case
+    // (`0 <= v_max - v_min <= V_EPS`) is NOT inverted — it is rerouted below,
+    // so this guard fires only for a strictly negative range.
+    if v_max < v_min {
         return Err(FphaFittingError::EmptyFittingWindow {
             hydro_name: hydro_name.clone(),
             v_min,
@@ -135,7 +190,7 @@ pub(crate) fn resolve_fitting_bounds(
     // ── Step 3: Resolve discretization counts ────────────────────────────────
 
     #[allow(clippy::cast_sign_loss)]
-    let n_volume_points = config.volume_discretization_points.unwrap_or(5) as usize;
+    let requested_volume_points = config.volume_discretization_points.unwrap_or(5) as usize;
     #[allow(clippy::cast_sign_loss)]
     let n_flow_points = config.turbine_discretization_points.unwrap_or(5) as usize;
     #[allow(clippy::cast_sign_loss)]
@@ -143,6 +198,61 @@ pub(crate) fn resolve_fitting_bounds(
     #[allow(clippy::cast_sign_loss)]
     let max_planes = config.max_planes_per_hydro.unwrap_or(10) as usize;
 
+    // ── Step 4: Detect and reroute the single-volume (run-of-river) case ──────
+    //
+    // A run-of-river plant has no useful storage: its resolved volume range
+    // collapses to a single point (`v_max - v_min <= V_EPS`), or the config
+    // explicitly requests `NPTV = 1`. Either way the production cloud is
+    // coplanar in `V`, so the 3-D hull cannot be posed and the multi-volume
+    // discretization-count guards (`n_volume_points >= 2`) are inapplicable.
+    // Instead of erroring, synthesize two tangent-in-volume samples `1%` of the
+    // entity's useful storage apart, clamped to the forebay table range, and
+    // flag the bounds so the hull fitter zeros `γ_V` exactly on the result.
+    let single_volume = (v_max - v_min) <= V_EPS || requested_volume_points == 1;
+    if single_volume {
+        let v0 = v_min;
+        // ΔV_useful is the entity's storage band; for a true run-of-river plant
+        // it is itself 0, so the proportional half-width collapses and the
+        // absolute floor `V_SYNTH_ABS` takes over.
+        let useful = (hydro.max_storage_hm3 - hydro.min_storage_hm3).max(0.0);
+        let half_width = (0.005 * useful).max(V_SYNTH_ABS);
+        let v_lo = (v0 - half_width).clamp(forebay.v_min(), forebay.v_max());
+        let v_hi = (v0 + half_width).clamp(forebay.v_min(), forebay.v_max());
+
+        if n_flow_points < 2 {
+            return Err(FphaFittingError::InsufficientDiscretization {
+                hydro_name: hydro_name.clone(),
+                dimension: "turbine".to_owned(),
+                value: n_flow_points,
+            });
+        }
+        if n_spillage_points < 2 {
+            return Err(FphaFittingError::InsufficientDiscretization {
+                hydro_name: hydro_name.clone(),
+                dimension: "spillage".to_owned(),
+                value: n_spillage_points,
+            });
+        }
+        if max_planes < 1 {
+            return Err(FphaFittingError::InsufficientDiscretization {
+                hydro_name: hydro_name.clone(),
+                dimension: "max_planes_per_hydro".to_owned(),
+                value: max_planes,
+            });
+        }
+
+        return Ok(FittingBounds {
+            v_min: v_lo,
+            v_max: v_hi,
+            n_volume_points: 2,
+            n_flow_points,
+            n_spillage_points,
+            max_planes_per_hydro: max_planes,
+            single_volume: true,
+        });
+    }
+
+    let n_volume_points = requested_volume_points;
     if n_volume_points < 2 {
         return Err(FphaFittingError::InsufficientDiscretization {
             hydro_name: hydro_name.clone(),
@@ -179,6 +289,7 @@ pub(crate) fn resolve_fitting_bounds(
         n_flow_points,
         n_spillage_points,
         max_planes_per_hydro: max_planes,
+        single_volume: false,
     })
 }
 
@@ -317,22 +428,6 @@ impl ForebayTable {
         self.heights[i] + t * (self.heights[i + 1] - self.heights[i])
     }
 
-    /// Derivative of forebay height with respect to volume at `volume_hm3` (m/hm³).
-    ///
-    /// Returns the slope `(h[i+1] - h[i]) / (v[i+1] - v[i])` of the piecewise-linear
-    /// segment that contains the query volume. The query is clamped to `[v_min, v_max]`
-    /// before lookup:
-    ///
-    /// - At interior breakpoints the right-segment slope is returned.
-    /// - At `v_max` the last-segment slope is returned.
-    /// - Queries below `v_min` return the first-segment slope.
-    /// - Queries above `v_max` return the last-segment slope.
-    pub(crate) fn height_derivative(&self, volume_hm3: f64) -> f64 {
-        let v = volume_hm3.clamp(self.v_min(), self.v_max());
-        let (i, _) = self.locate(v);
-        (self.heights[i + 1] - self.heights[i]) / (self.volumes[i + 1] - self.volumes[i])
-    }
-
     /// Find the segment index `i` and the fractional position `t` within it.
     ///
     /// Returns `(i, t)` such that:
@@ -394,50 +489,6 @@ pub(crate) fn evaluate_tailrace(model: &TailraceModel, outflow_m3s: f64) -> f64 
     }
 }
 
-/// Derivative `dh_tail/dq_out` of the tailrace elevation at `outflow_m3s` (m/(m³/s)).
-///
-/// - `Polynomial`: evaluates the analytic derivative `c[1] + 2·c[2]·q + …` via
-///   Horner's method. A single-coefficient (constant) polynomial returns `0.0`.
-/// - `Piecewise`: returns the slope of the segment that contains the query outflow.
-///   The outflow is clamped before lookup; out-of-range queries return the slope
-///   of the nearest end segment.
-pub(crate) fn evaluate_tailrace_derivative(model: &TailraceModel, outflow_m3s: f64) -> f64 {
-    match model {
-        TailraceModel::Polynomial { coefficients } => {
-            // Build derivative coefficients: d[k] = (k+1) * c[k+1].
-            // Evaluate via Horner's method from the highest-degree term down.
-            let n = coefficients.len();
-            if n <= 1 {
-                return 0.0;
-            }
-            // Accumulate from the last coefficient down to index 1.
-            // d[k] = (k+1)*c[k+1], so iterating rev over indices 1..n:
-            //   term k: degree k contributes coefficient k * c[k]
-            let mut acc = 0.0_f64;
-            for k in (1..n).rev() {
-                // At each step: acc = acc * q + k * c[k]
-                // k is in 1..n; n <= coefficients.len() which is a usize bounded
-                // in practice by the number of polynomial terms (always small).
-                // We cast to u32 first to avoid clippy::cast_precision_loss.
-                #[allow(clippy::cast_possible_truncation)]
-                let k_f64 = f64::from(k as u32);
-                acc = acc * outflow_m3s + k_f64 * coefficients[k];
-            }
-            acc
-        }
-        TailraceModel::Piecewise { points } => {
-            let n = points.len();
-            if n <= 1 {
-                return 0.0;
-            }
-            let q = outflow_m3s.clamp(points[0].outflow_m3s, points[n - 1].outflow_m3s);
-            let (i, _) = locate_tailrace(points, q);
-            (points[i + 1].height_m - points[i].height_m)
-                / (points[i + 1].outflow_m3s - points[i].outflow_m3s)
-        }
-    }
-}
-
 /// Head loss `h_loss` (m) for the given `gross_head` (m) and `turbined_m3s` (m³/s).
 ///
 /// - `Factor { value }`: returns `value * gross_head` (fraction of gross head).
@@ -454,23 +505,6 @@ pub(crate) fn evaluate_losses(
     match model {
         HydraulicLossesModel::Factor { value } => value * gross_head,
         HydraulicLossesModel::Constant { value_m } => *value_m,
-    }
-}
-
-/// Dimensionless loss factor for `Factor` variants; `0.0` for `Constant` variants.
-///
-/// Used by the net-head derivative computation to analytically propagate the loss
-/// term through the production function gradient.
-///
-/// This function is retained for integration tests and future derivative-based diagnostics.
-// Rationale: used directly in this module's integration tests (`tests::` block) to verify the
-// loss-factor extraction; the production path calls `evaluate_losses` (the full model evaluator)
-// instead, so the dead_code lint fires on the production side.
-#[allow(dead_code)]
-pub(crate) fn evaluate_losses_factor(model: &HydraulicLossesModel) -> f64 {
-    match model {
-        HydraulicLossesModel::Factor { value } => *value,
-        HydraulicLossesModel::Constant { .. } => 0.0,
     }
 }
 

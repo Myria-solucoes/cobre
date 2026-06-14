@@ -88,7 +88,7 @@ pub fn prepare_hydro_models_from_artifacts(
     system: &System,
     artifacts: &cobre_io::CaseArtifacts,
 ) -> Result<PrepareHydroModelsResult, SddpError> {
-    let (production, productivity_override, production_sources, kappa_warnings, fpha_export_rows) =
+    let (production, productivity_override, production_sources, fpha_export_rows) =
         resolve_production_models_from_artifacts(system, artifacts)?;
     let (evaporation, evaporation_sources, evaporation_reference_sources) =
         resolve_evaporation_models_from_artifacts(system, artifacts)?;
@@ -102,7 +102,6 @@ pub fn prepare_hydro_models_from_artifacts(
             evaporation_sources,
             evaporation_reference_sources,
         },
-        kappa_warnings,
         fpha_export_rows,
     })
 }
