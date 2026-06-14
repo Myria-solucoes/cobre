@@ -450,7 +450,7 @@ mod tests {
     }
 
     /// A concave production function with a positive generation window, so
-    /// `compute_gh_max > 0` and the distance sampler exercises a real box.
+    /// `grid_max_gh > 0` and the distance sampler exercises a real box.
     fn test_pf() -> ProductionFunction {
         let rows = vec![
             row(0.0, 380.0),

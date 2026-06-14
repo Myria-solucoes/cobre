@@ -20,6 +20,14 @@
 //! - `grid` — the single authoritative owner of the uniform grid formula
 //!   (`GridParams` + `build_grid`), shared by the hull cloud, the α regression,
 //!   and the secant's representative-point scan.
+//! - `alpha` — `compute_alpha_fpha` + `scale_plane_affine`, the least-squares
+//!   `α_FPHA` correction and the whole-affine scaling it drives.
+//! - `secant` — `fit_gamma_s_for_planes`, the per-plane lateral-flow `γ_S` secant.
+//! - `tailrace` — `TailraceFamilies` + `build_tailrace_families_map`, the exact
+//!   piecewise-quartic backwater-coupled tailrace evaluation.
+//! - `reduction` — `reduce_planes`, the post-fit similar-hyperplane merge.
+//! - `rng` — the deterministic seeded PRNG and identity hash the `Distance`
+//!   reduction arm samples with.
 //! - `selection` — the coefficient-sign and `α_FPHA > 0` validation
 //!   (`validate_fitted_planes`).
 //!
