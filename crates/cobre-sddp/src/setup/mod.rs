@@ -53,7 +53,7 @@ use cobre_core::{
     EntityId, Stage, System,
     scenario::{SamplingScheme, ScenarioSource},
 };
-use cobre_io::build_hydro_reference_volume_fractions;
+use cobre_io::build_hydro_reference_volumes_resolved;
 use cobre_stochastic::{
     ExternalScenarioLibrary, HistoricalScenarioLibrary, StochasticContext, SweepDirection,
 };
@@ -581,12 +581,14 @@ fn build_energy_and_templates(
         .filter(|s| s.id >= 0)
         .map(|s| i32::try_from(s.season_id.unwrap_or(0)).unwrap_or(0))
         .collect();
-    let reference_volume_fractions = build_hydro_reference_volume_fractions(
-        Vec::new(),
-        0.65,
-        system.hydros(),
-        &stage_to_season,
-    )?;
+    // The JSON-sourced reference operating volume, resolved to absolute hm³ per
+    // `(plant, study-stage)` against each plant's band by the hydro-model
+    // preprocessing pipeline. The energy-conversion build reads it as the single
+    // source of truth for `reference_volume_hm3`, identical to the source the FPHA
+    // backwater path uses, so the productivity reference and the backwater level
+    // never drift.
+    let reference_volume_fractions =
+        build_hydro_reference_volumes_resolved(&hydro_models.reference_volumes_hm3, 0.0);
     let energy_conversion = build_energy_conversion_set(
         system.hydros(),
         n_stages_pre,

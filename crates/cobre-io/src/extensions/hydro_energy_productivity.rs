@@ -12,9 +12,16 @@
 //! exactly one source supplies the value for each non-FPHA `(hydro, stage)`
 //! pair — see [`crate::validation::productivity_resolution`].
 //!
-//! The other three override columns (`reference_volume_hm3`,
-//! `reference_outflow_m3s`, `specific_productivity_mw_per_m3s_per_m`) keep
-//! their existing per-row semantics independent of the generation model.
+//! The other two override columns (`reference_outflow_m3s`,
+//! `specific_productivity_mw_per_m3s_per_m`) keep their existing per-row
+//! semantics independent of the generation model.
+//!
+//! The reference operating volume is no longer carried here: it is declared in
+//! `hydro_production_models.json` (`reference_volume`), the single source of
+//! truth. A stale `reference_volume_hm3` column in an older parquet is no
+//! longer read — the parser emits a one-time deprecation notice and ignores it
+//! rather than erroring, so an old file still loads while the behavior change is
+//! surfaced.
 //!
 //! ## Parquet schema
 //!
@@ -23,7 +30,6 @@
 //! | `hydro_id`                                | INT32        | no       | Hydro plant identifier                          |
 //! | `stage_id`                                | INT32        | yes      | Stage; NULL means "applies to all stages"       |
 //! | `equivalent_productivity_mw_per_m3s`      | DOUBLE       | yes      | Direct `ρ_eq` override; finite and `>= 0.0`     |
-//! | `reference_volume_hm3`                    | DOUBLE       | yes      | `V_ref` override; finite and `> 0.0`            |
 //! | `reference_outflow_m3s`                   | DOUBLE       | yes      | `Q_ref` override; finite and `>= 0.0`           |
 //! | `specific_productivity_mw_per_m3s_per_m`  | DOUBLE       | yes      | `ρ_esp` override; finite and `>= 0.0`           |
 //!
@@ -36,12 +42,11 @@
 //!   value of `0.0` is accepted (planned outage / zero-generation stage); the LP
 //!   treats `ρ_eq` as a multiplier so zero produces zero generation without any
 //!   division-by-zero hazard.
-//! - `reference_volume_hm3`, when set, must be finite and `> 0.0`.
 //! - `reference_outflow_m3s`, when set, must be finite and `>= 0.0`.
 //! - `specific_productivity_mw_per_m3s_per_m`, when set, must be finite and `>= 0.0`. A
 //!   value of `0.0` mirrors the planned-outage marker on
 //!   `equivalent_productivity_mw_per_m3s`.
-//! - A row where all four override columns are NULL is accepted (carries no
+//! - A row where all three override columns are NULL is accepted (carries no
 //!   information but is not an error).
 //!
 //! Duplicate `(hydro_id, stage_id)` detection is performed at build time by
@@ -58,7 +63,7 @@ use crate::LoadError;
 
 /// A single row of the `system/hydro_energy_productivity.parquet` override table.
 ///
-/// All four override columns are nullable. A row where all four are `None` is
+/// All three override columns are nullable. A row where all three are `None` is
 /// accepted — it counts as a duplicate-detection key but carries no override
 /// information.
 #[derive(Debug, Clone, PartialEq)]
@@ -71,8 +76,6 @@ pub struct HydroEnergyProductivityRow {
     /// Direct `ρ_eq` override \[MW/(m³/s)\]. Finite and `>= 0.0` when set.
     /// `0.0` is accepted as a planned-outage marker.
     pub equivalent_productivity_mw_per_m3s: Option<f64>,
-    /// `V_ref` override \[hm³\]. Finite and `> 0.0` when set.
-    pub reference_volume_hm3: Option<f64>,
     /// `Q_ref` override \[m³/s\]. Finite and `>= 0.0` when set.
     pub reference_outflow_m3s: Option<f64>,
     /// `ρ_esp` override \[MW/(m³/s)/m\]. Finite and `>= 0.0` when set. `0.0`
@@ -108,11 +111,17 @@ pub fn parse_hydro_energy_productivity(
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
 
+        // Forward-compat: a stale `reference_volume_hm3` column is no longer read
+        // (the reference volume now comes from `hydro_production_models.json`).
+        // Detect it and warn once, then ignore — erroring would break an old
+        // parquet for a purely structural removal, and silently ignoring would
+        // mask the behavior change for a user who had populated the column.
+        warn_on_stale_reference_volume_column(&batch);
+
         let hydro_id_col = extract_int32_column(&batch, "hydro_id", path)?;
         let stage_id_col = extract_int32_column(&batch, "stage_id", path)?;
         let rho_eq_col =
             extract_float64_column(&batch, "equivalent_productivity_mw_per_m3s", path)?;
-        let v_ref_col = extract_float64_column(&batch, "reference_volume_hm3", path)?;
         let q_ref_col = extract_float64_column(&batch, "reference_outflow_m3s", path)?;
         let rho_esp_col =
             extract_float64_column(&batch, "specific_productivity_mw_per_m3s_per_m", path)?;
@@ -150,17 +159,6 @@ pub fn parse_hydro_energy_productivity(
                 )?)
             };
 
-            let reference_volume_hm3 = if v_ref_col.is_null(i) {
-                None
-            } else {
-                Some(validate_strictly_positive(
-                    v_ref_col.value(i),
-                    row_idx,
-                    "reference_volume_hm3",
-                    path,
-                )?)
-            };
-
             let reference_outflow_m3s = if q_ref_col.is_null(i) {
                 None
             } else {
@@ -187,7 +185,6 @@ pub fn parse_hydro_energy_productivity(
                 hydro_id,
                 stage_id,
                 equivalent_productivity_mw_per_m3s,
-                reference_volume_hm3,
                 reference_outflow_m3s,
                 specific_productivity_mw_per_m3s_per_m,
             });
@@ -248,25 +245,35 @@ fn extract_float64_column<'a>(
         })
 }
 
-// ── per-value validation helpers ───────────────────────────────────────────────
+// ── stale-column deprecation notice ─────────────────────────────────────────────
 
-/// Validates that `value` is finite and strictly positive (`> 0.0`).
-fn validate_strictly_positive(
-    value: f64,
-    row_idx: usize,
-    column: &str,
-    path: &Path,
-) -> Result<f64, LoadError> {
-    if value.is_finite() && value > 0.0 {
-        Ok(value)
-    } else {
-        Err(LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: format!("hydro_energy_productivity[{row_idx}].{column}"),
-            message: format!("value must be finite and strictly positive (> 0.0), got {value}"),
-        })
+/// Process-wide guard so the stale-column deprecation notice is emitted at most
+/// once, no matter how many files or batches carry the column.
+static STALE_REFERENCE_VOLUME_NOTICE: std::sync::Once = std::sync::Once::new();
+
+/// Emits a one-time deprecation notice when a batch still carries the retired
+/// `reference_volume_hm3` column, then returns so the caller ignores it.
+///
+/// The reference operating volume now comes from `hydro_production_models.json`;
+/// the column here is no longer read. Warn-and-ignore (not hard-error) keeps an
+/// older parquet loadable while surfacing the behavior change — a user who had
+/// populated the column would otherwise see its value silently become inert.
+fn warn_on_stale_reference_volume_column(batch: &arrow::record_batch::RecordBatch) {
+    if batch
+        .schema()
+        .column_with_name("reference_volume_hm3")
+        .is_some()
+    {
+        STALE_REFERENCE_VOLUME_NOTICE.call_once(|| {
+            tracing::warn!(
+                "reference_volume_hm3 in hydro_energy_productivity.parquet is no longer read; \
+                 declare reference_volume in hydro_production_models.json instead"
+            );
+        });
     }
 }
+
+// ── per-value validation helpers ───────────────────────────────────────────────
 
 /// Validates that `value` is finite and non-negative (`>= 0.0`).
 fn validate_nonnegative(
@@ -314,7 +321,6 @@ mod tests {
                 DataType::Float64,
                 true,
             ),
-            Field::new("reference_volume_hm3", DataType::Float64, true),
             Field::new("reference_outflow_m3s", DataType::Float64, true),
             Field::new(
                 "specific_productivity_mw_per_m3s_per_m",
@@ -328,7 +334,6 @@ mod tests {
         hydro_ids: &[i32],
         stage_ids: &[Option<i32>],
         rho_eqs: &[Option<f64>],
-        v_refs: &[Option<f64>],
         q_refs: &[Option<f64>],
         rho_esps: &[Option<f64>],
     ) -> RecordBatch {
@@ -339,7 +344,6 @@ mod tests {
                 Arc::new(Int32Array::from(hydro_ids.to_vec())),
                 Arc::new(Int32Array::from(stage_ids.to_vec())),
                 Arc::new(Float64Array::from(rho_eqs.to_vec())),
-                Arc::new(Float64Array::from(v_refs.to_vec())),
                 Arc::new(Float64Array::from(q_refs.to_vec())),
                 Arc::new(Float64Array::from(rho_esps.to_vec())),
             ],
@@ -359,9 +363,9 @@ mod tests {
     /// Round-trip: three rows matching the acceptance criterion fixture.
     ///
     /// Fixture:
-    /// - row 0: `(hydro=1, stage=0, rho_eq=3.6, V_ref=NULL, Q_ref=NULL, rho_esp=NULL)`
-    /// - row 1: `(hydro=1, stage=NULL, rho_eq=4.0, V_ref=120.0, Q_ref=NULL, rho_esp=0.009)`
-    /// - row 2: `(hydro=2, stage=NULL, rho_eq=5.0, V_ref=NULL, Q_ref=200.0, rho_esp=NULL)`
+    /// - row 0: `(hydro=1, stage=0, rho_eq=3.6, Q_ref=NULL, rho_esp=NULL)`
+    /// - row 1: `(hydro=1, stage=NULL, rho_eq=4.0, Q_ref=NULL, rho_esp=0.009)`
+    /// - row 2: `(hydro=2, stage=NULL, rho_eq=5.0, Q_ref=200.0, rho_esp=NULL)`
     ///
     /// After sort the expected order is:
     /// `(hydro=1, NULL)` → `(hydro=1, stage=0)` → `(hydro=2, NULL)`.
@@ -372,7 +376,6 @@ mod tests {
             &[1, 1, 2],
             &[Some(0), None, None],
             &[Some(3.6), Some(4.0), Some(5.0)],
-            &[None, Some(120.0), None],
             &[None, None, Some(200.0)],
             &[None, Some(0.009), None],
         );
@@ -392,7 +395,7 @@ mod tests {
     /// `equivalent_productivity_mw_per_m3s = 0.0` is accepted as a planned-outage marker.
     #[test]
     fn test_zero_rho_eq_accepted() {
-        let batch = make_batch(&[1], &[Some(0)], &[Some(0.0)], &[None], &[None], &[None]);
+        let batch = make_batch(&[1], &[Some(0)], &[Some(0.0)], &[None], &[None]);
         let tmp = write_parquet(&batch);
         let rows = parse_hydro_energy_productivity(tmp.path())
             .expect("zero ρ_eq must be accepted as a planned-outage marker");
@@ -403,7 +406,7 @@ mod tests {
     /// Negative `equivalent_productivity_mw_per_m3s` is still rejected.
     #[test]
     fn test_negative_rho_eq_rejected() {
-        let batch = make_batch(&[1], &[Some(0)], &[Some(-0.1)], &[None], &[None], &[None]);
+        let batch = make_batch(&[1], &[Some(0)], &[Some(-0.1)], &[None], &[None]);
         let tmp = write_parquet(&batch);
         let err = parse_hydro_energy_productivity(tmp.path()).unwrap_err();
         match err {
@@ -417,27 +420,81 @@ mod tests {
         }
     }
 
-    /// `reference_volume_hm3 = -1.0` must be rejected.
+    /// Builds a batch that still physically carries the retired
+    /// `reference_volume_hm3` column (6 columns) to exercise the
+    /// warn-and-ignore forward-compat path.
+    fn make_stale_batch(
+        hydro_ids: &[i32],
+        stage_ids: &[Option<i32>],
+        rho_eqs: &[Option<f64>],
+        v_refs: &[Option<f64>],
+        q_refs: &[Option<f64>],
+        rho_esps: &[Option<f64>],
+    ) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("hydro_id", DataType::Int32, false),
+            Field::new("stage_id", DataType::Int32, true),
+            Field::new(
+                "equivalent_productivity_mw_per_m3s",
+                DataType::Float64,
+                true,
+            ),
+            Field::new("reference_volume_hm3", DataType::Float64, true),
+            Field::new("reference_outflow_m3s", DataType::Float64, true),
+            Field::new(
+                "specific_productivity_mw_per_m3s_per_m",
+                DataType::Float64,
+                true,
+            ),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int32Array::from(hydro_ids.to_vec())),
+                Arc::new(Int32Array::from(stage_ids.to_vec())),
+                Arc::new(Float64Array::from(rho_eqs.to_vec())),
+                Arc::new(Float64Array::from(v_refs.to_vec())),
+                Arc::new(Float64Array::from(q_refs.to_vec())),
+                Arc::new(Float64Array::from(rho_esps.to_vec())),
+            ],
+        )
+        .expect("valid stale batch construction")
+    }
+
+    /// A parquet that still physically carries a stale `reference_volume_hm3`
+    /// column parses `Ok` (warn-and-ignore forward-compat), the column is
+    /// ignored, and the other override values survive. The one-time
+    /// deprecation notice goes to `tracing::warn!`; no tracing capture is wired
+    /// in this crate's tests, so this asserts the tolerate-and-ignore behavior
+    /// (the parser must NOT error and the row carries the kept overrides).
     #[test]
-    fn test_negative_v_ref_rejected() {
-        let batch = make_batch(&[1], &[None], &[None], &[Some(-1.0)], &[None], &[None]);
+    fn parser_warns_and_ignores_stale_reference_volume_column() {
+        let batch = make_stale_batch(
+            &[1],
+            &[Some(0)],
+            &[Some(3.6)],
+            // A populated stale column must not error and must be ignored.
+            &[Some(120.0)],
+            &[Some(200.0)],
+            &[Some(0.009)],
+        );
         let tmp = write_parquet(&batch);
-        let err = parse_hydro_energy_productivity(tmp.path()).unwrap_err();
-        match err {
-            LoadError::SchemaError { field, .. } => {
-                assert!(
-                    field.contains("reference_volume_hm3"),
-                    "field should name the column, got: {field}"
-                );
-            }
-            other => panic!("expected SchemaError, got: {other:?}"),
-        }
+        let rows = parse_hydro_energy_productivity(tmp.path())
+            .expect("a stale reference_volume_hm3 column must be ignored, not rejected");
+
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.hydro_id, EntityId::from(1));
+        assert_eq!(row.stage_id, Some(0));
+        assert_eq!(row.equivalent_productivity_mw_per_m3s, Some(3.6));
+        assert_eq!(row.reference_outflow_m3s, Some(200.0));
+        assert_eq!(row.specific_productivity_mw_per_m3s_per_m, Some(0.009));
     }
 
     /// `reference_outflow_m3s = NaN` must be rejected.
     #[test]
     fn test_nan_q_ref_rejected() {
-        let batch = make_batch(&[1], &[None], &[None], &[None], &[Some(f64::NAN)], &[None]);
+        let batch = make_batch(&[1], &[None], &[None], &[Some(f64::NAN)], &[None]);
         let tmp = write_parquet(&batch);
         let err = parse_hydro_energy_productivity(tmp.path()).unwrap_err();
         assert!(
@@ -446,10 +503,10 @@ mod tests {
         );
     }
 
-    /// A row where all four override columns are NULL is accepted.
+    /// A row where all three override columns are NULL is accepted.
     #[test]
     fn test_all_overrides_null_accepted() {
-        let batch = make_batch(&[1], &[Some(0)], &[None], &[None], &[None], &[None]);
+        let batch = make_batch(&[1], &[Some(0)], &[None], &[None], &[None]);
         let tmp = write_parquet(&batch);
         let rows = parse_hydro_energy_productivity(tmp.path()).unwrap();
         assert_eq!(rows.len(), 1);
@@ -457,7 +514,6 @@ mod tests {
         assert_eq!(row.hydro_id, EntityId::from(1));
         assert_eq!(row.stage_id, Some(0));
         assert!(row.equivalent_productivity_mw_per_m3s.is_none());
-        assert!(row.reference_volume_hm3.is_none());
         assert!(row.reference_outflow_m3s.is_none());
         assert!(row.specific_productivity_mw_per_m3s_per_m.is_none());
     }
@@ -474,7 +530,6 @@ mod tests {
                 DataType::Float64,
                 true,
             ),
-            Field::new("reference_volume_hm3", DataType::Float64, true),
             Field::new("reference_outflow_m3s", DataType::Float64, true),
             Field::new(
                 "specific_productivity_mw_per_m3s_per_m",
@@ -487,7 +542,6 @@ mod tests {
             vec![
                 Arc::new(Int32Array::from(vec![None::<i32>])),
                 Arc::new(Int32Array::from(vec![None::<i32>])),
-                Arc::new(Float64Array::from(vec![None::<f64>])),
                 Arc::new(Float64Array::from(vec![None::<f64>])),
                 Arc::new(Float64Array::from(vec![None::<f64>])),
                 Arc::new(Float64Array::from(vec![None::<f64>])),
@@ -520,7 +574,7 @@ mod tests {
     /// `reference_outflow_m3s = 0.0` must be accepted (zero outflow is valid).
     #[test]
     fn test_zero_q_ref_accepted() {
-        let batch = make_batch(&[1], &[None], &[None], &[None], &[Some(0.0)], &[None]);
+        let batch = make_batch(&[1], &[None], &[None], &[Some(0.0)], &[None]);
         let tmp = write_parquet(&batch);
         let rows = parse_hydro_energy_productivity(tmp.path()).unwrap();
         assert_eq!(rows.len(), 1);
@@ -538,7 +592,6 @@ mod tests {
             &[Some(3.6), Some(4.0)],
             &[None, None],
             &[None, None],
-            &[None, None],
         );
         let tmp = write_parquet(&batch);
         // The parser accepts both rows; builder would reject them.
@@ -553,7 +606,6 @@ mod tests {
             &[2, 1, 1],
             &[None, Some(5), None],
             &[Some(1.0), Some(2.0), Some(3.0)],
-            &[None, None, None],
             &[None, None, None],
             &[None, None, None],
         );

@@ -380,6 +380,16 @@ pub struct PrepareHydroModelsResult {
     /// reach the write site; they receive an identical copy of these rows
     /// via the same deterministic preprocessing path.
     pub fpha_export_rows: Vec<cobre_io::FphaHyperplaneRow>,
+    /// Per-`(hydro, study-stage)` reference operating volume resolved to absolute
+    /// hm³ against each plant's own `[v_min, v_max]` band.
+    ///
+    /// Carries the JSON-declared `reference_volume` (or the case default) already
+    /// resolved, so the energy-conversion build in study setup and the FPHA
+    /// backwater path read one identical source. Each tuple is
+    /// `(hydro_id, stage_index, volume_hm3)`; `stage_index` is the 0-based
+    /// study-stage index. Built deterministically in plant-then-stage canonical
+    /// order, so it is declaration-order invariant.
+    pub reference_volumes_hm3: Vec<(EntityId, usize, f64)>,
 }
 
 impl PrepareHydroModelsResult {
@@ -436,6 +446,26 @@ impl PrepareHydroModelsResult {
             .map(|h| (h.id, EvaporationReferenceSource::DefaultMidpoint))
             .collect();
 
+        // No JSON config on this path, so every `(hydro, stage)` resolves through
+        // `resolve_reference_volume_hm3(None, ..)` — the single owner of the
+        // default-fraction reference volume — against the plant's own band. Using
+        // that resolver (not an inline formula) keeps the undeclared value
+        // bit-identical to the JSON-fed path. Built in plant-then-stage canonical
+        // order, so the table is declaration-order invariant.
+        let study_stage_count = n_stages;
+        let reference_volumes_hm3: Vec<(EntityId, usize, f64)> = system
+            .hydros()
+            .iter()
+            .flat_map(|hydro| {
+                let resolved = super::production::resolve_reference_volume_hm3(
+                    None,
+                    hydro.min_storage_hm3,
+                    hydro.max_storage_hm3,
+                );
+                (0..study_stage_count).map(move |stage_index| (hydro.id, stage_index, resolved))
+            })
+            .collect();
+
         Self {
             production,
             productivity_override:
@@ -447,6 +477,7 @@ impl PrepareHydroModelsResult {
                 evaporation_reference_sources,
             },
             fpha_export_rows: Vec::new(),
+            reference_volumes_hm3,
         }
     }
 }
@@ -631,6 +662,7 @@ mod tests {
             evaporation: evap_set,
             provenance: prov,
             fpha_export_rows: Vec::new(),
+            reference_volumes_hm3: Vec::new(),
         };
         let _ = format!("{result:?}");
     }

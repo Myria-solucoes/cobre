@@ -285,7 +285,6 @@ mod tests {
             hydro_id: EntityId(hydro_id),
             stage_id,
             equivalent_productivity_mw_per_m3s: rho_eq,
-            reference_volume_hm3: None,
             reference_outflow_m3s: None,
             specific_productivity_mw_per_m3s_per_m: None,
         }

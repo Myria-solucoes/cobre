@@ -298,6 +298,7 @@ mod tests {
                 evaporation_reference_sources,
             },
             fpha_export_rows: Vec::new(),
+            reference_volumes_hm3: Vec::new(),
         }
     }
 
@@ -374,6 +375,7 @@ mod tests {
                 evaporation_reference_sources,
             },
             fpha_export_rows: Vec::new(),
+            reference_volumes_hm3: Vec::new(),
         }
     }
 
@@ -441,6 +443,7 @@ mod tests {
                 evaporation_reference_sources,
             },
             fpha_export_rows: Vec::new(),
+            reference_volumes_hm3: Vec::new(),
         }
     }
 
@@ -507,6 +510,7 @@ mod tests {
                 evaporation_reference_sources,
             },
             fpha_export_rows: Vec::new(),
+            reference_volumes_hm3: Vec::new(),
         };
 
         let summary = build_hydro_model_summary(&result, &system);
@@ -699,6 +703,7 @@ mod tests {
                 evaporation_reference_sources,
             },
             fpha_export_rows: Vec::new(),
+            reference_volumes_hm3: Vec::new(),
         };
 
         let summary = build_hydro_model_summary(&result, &system);
@@ -775,6 +780,7 @@ mod tests {
                 )],
             },
             fpha_export_rows: Vec::new(),
+            reference_volumes_hm3: Vec::new(),
         };
 
         let summary = build_hydro_model_summary(&result, &system);

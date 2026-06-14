@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 /// Controls reservoir reference-volume computation for FPHA hydros.
 /// `V_ref = V_min + fraction · (V_max − V_min)` is the reference storage
 /// used to evaluate the equivalent head `h_eq` (and thereby `ρ_eq`).
-/// Per-plant per-season overrides are loaded from
-/// `system/hydro_reference_volume_fractions.parquet`.
+/// Per-`(plant, stage)` reference volumes declared in the production-model
+/// configuration override this case-wide default.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

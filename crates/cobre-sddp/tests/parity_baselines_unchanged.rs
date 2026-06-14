@@ -96,6 +96,14 @@ const EXPECTED_HASHES: &[(&str, &str)] = &[
         "D17",
         "01033bd40ad2d858eb0c03b2efd462ea43c6854e1a557b274b8a6e9001278a9a",
     ),
+    // Cascade case whose downstream plant declares a `reference_volume`. The
+    // reference-volume *default* (0.65) path is covered by the unchanged
+    // D05/D06/D07 baselines (none declare a `reference_volume`); D31 covers the
+    // *declared* path end-to-end under both backends.
+    (
+        "D31",
+        "c1c65867d463414ca37b0e7b90020d6d0bd1f90371b8b0a6ea5ac6965c3891e2",
+    ),
 ];
 
 // ---------------------------------------------------------------------------

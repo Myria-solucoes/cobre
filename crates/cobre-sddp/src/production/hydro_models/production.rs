@@ -14,7 +14,7 @@ use cobre_core::{EntityId, System, entities::hydro::HydroGenerationModel};
 use cobre_io::HydroReferenceVolumeFractions;
 use cobre_io::extensions::{
     FphaColumnLayout, FphaHyperplaneRow, HydroGeometryRow, ProductionModelConfig, ReferenceVolume,
-    SelectionMode,
+    SelectionMode, build_hydro_reference_volumes_resolved,
 };
 
 use super::load_artifacts_for_hydro_models;
@@ -37,6 +37,7 @@ type ResolveProductionResult = (
     crate::energy_conversion::HydroEnergyProductivityOverride,
     Vec<(EntityId, ProductionModelSource)>,
     Vec<cobre_io::FphaHyperplaneRow>,
+    Vec<(EntityId, usize, f64)>,
 );
 
 /// Resolve per-hydro per-stage production models from the case directory.
@@ -161,22 +162,42 @@ pub fn resolve_production_models_from_artifacts(
     let n_stages = study_stages.len();
     let n_hydros = system.hydros().len();
 
-    // Reference-volume fractions resolver for the downstream backwater level.
-    // Built with the case default fraction (no parquet source exists for it on
-    // `CaseArtifacts`), mirroring the energy-conversion construction in
-    // `setup::build_energy_and_templates` so the backwater level and the
-    // productivity reference share one convention.
-    let stage_to_season: Vec<i32> = study_stages
+    // Reference operating volume resolver for the downstream backwater level,
+    // built from the JSON-declared `reference_volume` (or the default) resolved to
+    // absolute hm³ per `(plant, study-stage)` against each plant's own
+    // `[v_min, v_max]` band. The same resolved table feeds the energy-conversion
+    // reference in `setup::build_energy_and_templates`, so the backwater level and
+    // the productivity reference share one source of truth. A plant/stage with no
+    // declared value flows through `resolve_reference_volume_hm3(None, ..)` — the
+    // single owner of the default fraction — keeping the undeclared value
+    // bit-identical to the prior inline `v_min + 0.65·(v_max − v_min)`.
+    let reference_volumes_hm3: Vec<(EntityId, usize, f64)> = system
+        .hydros()
         .iter()
-        .map(|s| i32::try_from(s.season_id.unwrap_or(0)).unwrap_or(0))
+        .flat_map(|hydro| {
+            study_stages.iter().enumerate().map(|(stage_pos, stage)| {
+                let rv = config_map
+                    .get(&hydro.id)
+                    .and_then(|config| find_reference_volume_for_stage(config, stage));
+                let resolved =
+                    resolve_reference_volume_hm3(rv, hydro.min_storage_hm3, hydro.max_storage_hm3);
+                // Keyed by the 0-based position within `study_stages`, NOT by
+                // `stage.index` (the global index, offset whenever pre-study
+                // stages precede the horizon). Both consumers — the backwater
+                // `resolve_downstream_level` and `build_energy_conversion_set` —
+                // query this resolver by the same 0-based study position, so the
+                // keying must match theirs; `stage.index` would shift every key by
+                // the pre-study-stage count and make the energy-conversion lookup
+                // (which counts from 0) miss and fall back to the default. The
+                // RESOLVED VALUE already encodes the stage's season via
+                // `find_reference_volume_for_stage`, so a horizon beginning in any
+                // season (not only season 0) carries the right per-stage value.
+                (hydro.id, stage_pos, resolved)
+            })
+        })
         .collect();
-    let reference_volume_fractions = cobre_io::build_hydro_reference_volume_fractions(
-        Vec::new(),
-        0.65,
-        system.hydros(),
-        &stage_to_season,
-    )
-    .map_err(|e| SddpError::Validation(e.to_string()))?;
+    let reference_volume_fractions =
+        build_hydro_reference_volumes_resolved(&reference_volumes_hm3, 0.0);
 
     let mut all_models: Vec<Vec<ResolvedProductionModel>> = Vec::with_capacity(n_hydros);
     let mut provenance: Vec<(EntityId, ProductionModelSource)> = Vec::with_capacity(n_hydros);
@@ -239,7 +260,13 @@ pub fn resolve_production_models_from_artifacts(
     }
 
     let set = ProductionModelSet::new(all_models, n_hydros, n_stages);
-    Ok((set, override_table, provenance, export_rows))
+    Ok((
+        set,
+        override_table,
+        provenance,
+        export_rows,
+        reference_volumes_hm3,
+    ))
 }
 
 /// Build an `O(1)` geometry map: `hydro_id → sorted geometry row references`.
@@ -269,18 +296,24 @@ fn build_geometry_map(
 ///   rows in `geometry_map` — the level cannot be resolved (the caller's family
 ///   evaluator then falls back to its lowest-keyed family);
 /// - `Some(level_m)` otherwise: the downstream plant's [`ForebayTable`] evaluated
-///   at its stage reference volume `v_ref = v_min + fraction·(v_max − v_min)`,
-///   where `fraction` comes from
-///   [`HydroReferenceVolumeFractions::get`]`(downstream_id, stage.index)`. The
-///   `v_ref` formula mirrors the energy-conversion reference-volume resolution so
-///   the backwater level and the productivity reference share one convention.
+///   at its stage reference operating volume `v_ref`, read directly from
+///   [`HydroReferenceVolumeFractions::get`]`(downstream_id, stage_pos)`. The
+///   resolver carries the JSON-declared (or default) reference volume already
+///   resolved to absolute hm³ against the downstream plant's band, so `v_ref` is
+///   consumed verbatim here — the `v_min + fraction·(..)` span formula is applied
+///   once, at resolver construction, never a second time at this call site. The
+///   resolver shares its source with the energy-conversion productivity reference.
 ///
-/// `stage.index` is the 0-based study-stage index — the granularity the
-/// reference-fraction resolver and the per-config FPHA fit are keyed on, so two
-/// stages with distinct downstream levels resolve distinct levels here.
+/// `stage_pos` is the 0-based position of the stage within the study horizon —
+/// NOT `stage.index` (the global index, which is offset whenever pre-study stages
+/// precede the horizon). The reference-volume resolver is keyed by this study
+/// position, and `build_energy_conversion_set` queries it by the same 0-based
+/// position, so both consumers agree; the per-stage value already reflects that
+/// stage's season (the study horizon may begin in any season, not only season 0),
+/// because the resolver value was selected per `stage.season_id` at build time.
 fn resolve_downstream_level(
     hydro: &cobre_core::entities::hydro::Hydro,
-    stage: &cobre_core::temporal::Stage,
+    stage_pos: usize,
     system: &System,
     geometry_map: &HashMap<EntityId, Vec<&HydroGeometryRow>>,
     reference_volume_fractions: &HydroReferenceVolumeFractions,
@@ -298,10 +331,10 @@ fn resolve_downstream_level(
     let geo_rows: Vec<HydroGeometryRow> = geo_refs.iter().map(|r| (*r).clone()).collect();
     let forebay = ForebayTable::new(&geo_rows, &downstream.name).ok()?;
 
-    let fraction = reference_volume_fractions.get(downstream_id, stage.index);
-    let v_min = downstream.min_storage_hm3;
-    let v_max = downstream.max_storage_hm3;
-    let v_ref = v_min + fraction * (v_max - v_min);
+    // Absolute hm³ from the resolver — already resolved against the downstream
+    // plant's band at construction; do NOT re-apply the `v_min + fraction·(..)`
+    // span formula here (that would resolve the span twice and corrupt `v_ref`).
+    let v_ref = reference_volume_fractions.get(downstream_id, stage_pos);
 
     Some(forebay.height(v_ref))
 }
@@ -408,7 +441,7 @@ fn fit_planes_for_hydro(
 /// hashmap-iteration order enters.
 fn resolve_tailrace_source(
     hydro: &cobre_core::entities::hydro::Hydro,
-    stage: &cobre_core::temporal::Stage,
+    stage_pos: usize,
     families_map: &HashMap<EntityId, TailraceFamilies>,
     geometry_map: &HashMap<EntityId, Vec<&HydroGeometryRow>>,
     reference_volume_fractions: &HydroReferenceVolumeFractions,
@@ -417,7 +450,7 @@ fn resolve_tailrace_source(
     if let Some(families) = families_map.get(&hydro.id) {
         let downstream_level_m = resolve_downstream_level(
             hydro,
-            stage,
+            stage_pos,
             system,
             geometry_map,
             reference_volume_fractions,
@@ -502,7 +535,7 @@ fn fit_computed_planes_per_stage(
     let mut fitted: Vec<FittedCacheEntry> = Vec::new();
     let mut per_stage: Vec<Vec<FphaPlane>> = Vec::with_capacity(study_stages.len());
 
-    for stage in study_stages {
+    for (stage_pos, stage) in study_stages.iter().enumerate() {
         let config = config_entry
             .and_then(|c| find_fpha_config_for_stage(c, stage))
             .ok_or_else(|| {
@@ -513,9 +546,11 @@ fn fit_computed_planes_per_stage(
                 ))
             })?;
 
+        // `stage_pos` is the 0-based study-horizon position — the key the
+        // reference-volume resolver and the energy-conversion build share.
         let tailrace_source = resolve_tailrace_source(
             hydro,
-            stage,
+            stage_pos,
             families_map,
             geometry_map,
             reference_volume_fractions,
@@ -663,12 +698,7 @@ fn find_fpha_config_for_stage<'a>(
 /// operating band [dimensionless, in `[0, 1]`], applied when no entry declares a
 /// `reference_volume`. The sole owner of this literal: changing it shifts every
 /// undeclared plant's resolved reference volume.
-// Intent/Seam: read only by `resolve_reference_volume_hm3`, which the reference-
-// volume consumers are not yet wired to; the lint reactivates when that resolver
-// is called at the `resolve_downstream_level` and `build_energy_conversion_set`
-// call sites in this crate.
-#[allow(dead_code)]
-const DEFAULT_REFERENCE_VOLUME_FRACTION: f64 = 0.65;
+pub(crate) const DEFAULT_REFERENCE_VOLUME_FRACTION: f64 = 0.65;
 
 /// Extract the [`ReferenceVolume`] that applies to a given stage from a [`ProductionModelConfig`].
 ///
@@ -676,10 +706,6 @@ const DEFAULT_REFERENCE_VOLUME_FRACTION: f64 = 0.65;
 /// entry covering `stage`, and returns its `reference_volume`. Returns `None`
 /// when no stage range or season entry covers the stage, or when the covering
 /// entry has no `reference_volume`.
-// Intent/Seam: the reference-volume consumers (`resolve_downstream_level`,
-// `build_energy_conversion_set`) are not yet wired to this finder; the lint
-// reactivates when that wiring lands.
-#[allow(dead_code)]
 fn find_reference_volume_for_stage<'a>(
     config: &'a ProductionModelConfig,
     stage: &cobre_core::temporal::Stage,
@@ -722,10 +748,11 @@ fn find_reference_volume_for_stage<'a>(
 /// than dividing it — multiplication, never division — so a degenerate
 /// `v_max == v_min` band yields `v_min` for any percentile or the default,
 /// instead of a `0/0` NaN.
-// Intent/Seam: the reference-volume consumers are not yet wired to this resolver;
-// the lint reactivates when that wiring lands.
-#[allow(dead_code)]
-fn resolve_reference_volume_hm3(rv: Option<&ReferenceVolume>, v_min: f64, v_max: f64) -> f64 {
+pub(crate) fn resolve_reference_volume_hm3(
+    rv: Option<&ReferenceVolume>,
+    v_min: f64,
+    v_max: f64,
+) -> f64 {
     match rv {
         Some(ReferenceVolume::AbsoluteHm3(volume_hm3)) => *volume_hm3,
         Some(ReferenceVolume::Percentile(percentile)) => v_min + percentile * (v_max - v_min),
@@ -1092,8 +1119,7 @@ mod tests {
     };
     use cobre_io::extensions::{
         FittingWindow, FphaColumnLayout, FphaHyperplaneRow, HydroGeometryRow,
-        HydroReferenceVolumeFractionRow, ProductionModelConfig, SeasonConfig, SelectionMode,
-        StageRange, TailraceCurveRow,
+        ProductionModelConfig, SeasonConfig, SelectionMode, StageRange, TailraceCurveRow,
     };
 
     use super::*;
@@ -1914,7 +1940,6 @@ mod tests {
                 hydro_id: EntityId::from(0),
                 stage_id: Some(0),
                 equivalent_productivity_mw_per_m3s: Some(0.42),
-                reference_volume_hm3: None,
                 reference_outflow_m3s: None,
                 specific_productivity_mw_per_m3s_per_m: None,
             },
@@ -2952,19 +2977,22 @@ mod tests {
         }
     }
 
-    /// Build a `HydroReferenceVolumeFractions` returning `default_fraction` for
-    /// every `(hydro, stage)` (no overrides).
+    /// Build a `HydroReferenceVolumeFractions` whose `get(hydro, stage)` returns
+    /// the absolute hm³ for `default_fraction` resolved against each plant's band —
+    /// the resolved-hm³ semantics the downstream-level consumer reads.
     fn flat_reference_fractions(
         default_fraction: f64,
         hydros: &[cobre_core::entities::hydro::Hydro],
     ) -> HydroReferenceVolumeFractions {
-        cobre_io::extensions::build_hydro_reference_volume_fractions(
-            Vec::new(),
-            default_fraction,
-            hydros,
-            &[0],
-        )
-        .expect("flat reference fractions build")
+        let resolved: Vec<(EntityId, usize, f64)> = hydros
+            .iter()
+            .flat_map(|h| {
+                let v =
+                    h.min_storage_hm3 + default_fraction * (h.max_storage_hm3 - h.min_storage_hm3);
+                (0..8).map(move |s| (h.id, s, v))
+            })
+            .collect();
+        cobre_io::extensions::build_hydro_reference_volumes_resolved(&resolved, 0.0)
     }
 
     /// A geometry map carrying one plant's two-point VHA rows.
@@ -2989,7 +3017,8 @@ mod tests {
         let geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
         let fractions = flat_reference_fractions(0.5, system.hydros());
 
-        let level = resolve_downstream_level(&hydro, &stage, &system, &geometry_map, &fractions);
+        let level =
+            resolve_downstream_level(&hydro, stage.index, &system, &geometry_map, &fractions);
         assert!(level.is_none(), "no downstream_id must resolve to None");
     }
 
@@ -3014,8 +3043,9 @@ mod tests {
         let fraction = 0.5;
         let fractions = flat_reference_fractions(fraction, system.hydros());
 
-        let level = resolve_downstream_level(&upstream, &stage, &system, &geometry_map, &fractions)
-            .expect("downstream level must resolve");
+        let level =
+            resolve_downstream_level(&upstream, stage.index, &system, &geometry_map, &fractions)
+                .expect("downstream level must resolve");
 
         // Independent reference: v_ref = v_min + fraction·(v_max − v_min) on the
         // downstream plant, evaluated through a freshly-built ForebayTable.
@@ -3048,7 +3078,8 @@ mod tests {
         let geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
         let fractions = flat_reference_fractions(0.5, system.hydros());
 
-        let level = resolve_downstream_level(&upstream, &stage, &system, &geometry_map, &fractions);
+        let level =
+            resolve_downstream_level(&upstream, stage.index, &system, &geometry_map, &fractions);
         assert!(
             level.is_none(),
             "missing downstream geometry must resolve to None"
@@ -3085,7 +3116,7 @@ mod tests {
 
         let source = super::resolve_tailrace_source(
             &hydro,
-            &stage,
+            stage.index,
             &families_map,
             &geometry_map,
             &fractions,
@@ -3178,25 +3209,17 @@ mod tests {
         stage0.season_id = Some(0);
         let mut stage1 = make_stage(1);
         stage1.season_id = Some(1);
-        let hydros = [upstream.clone(), downstream.clone()];
-        let fractions = cobre_io::extensions::build_hydro_reference_volume_fractions(
-            vec![
-                HydroReferenceVolumeFractionRow {
-                    hydro_id: EntityId::from(1),
-                    season_id: Some(0),
-                    fraction: 0.0001,
-                },
-                HydroReferenceVolumeFractionRow {
-                    hydro_id: EntityId::from(1),
-                    season_id: Some(1),
-                    fraction: 1.0,
-                },
+        // Downstream plant 1 band is [100, 2000]; stage 0 resolves fraction 0.0001
+        // (→ low level), stage 1 fraction 1.0 (→ high level), keyed by stage index.
+        let down_v_min = downstream.min_storage_hm3;
+        let down_span = downstream.max_storage_hm3 - downstream.min_storage_hm3;
+        let fractions = cobre_io::extensions::build_hydro_reference_volumes_resolved(
+            &[
+                (EntityId::from(1), 0, down_v_min + 0.0001 * down_span),
+                (EntityId::from(1), 1, down_v_min + 1.0 * down_span),
             ],
-            0.5,
-            &hydros,
-            &[0, 1],
-        )
-        .expect("fractions build");
+            0.0,
+        );
 
         let system = SystemBuilder::new()
             .buses(vec![make_bus()])
@@ -3226,10 +3249,12 @@ mod tests {
         .expect("per-stage fit succeeds");
 
         // Sanity: the two stages resolved distinct downstream levels.
-        let lvl0 = resolve_downstream_level(&upstream, &stage0, &system, &geometry_map, &fractions)
-            .expect("stage 0 level");
-        let lvl1 = resolve_downstream_level(&upstream, &stage1, &system, &geometry_map, &fractions)
-            .expect("stage 1 level");
+        let lvl0 =
+            resolve_downstream_level(&upstream, stage0.index, &system, &geometry_map, &fractions)
+                .expect("stage 0 level");
+        let lvl1 =
+            resolve_downstream_level(&upstream, stage1.index, &system, &geometry_map, &fractions)
+                .expect("stage 1 level");
         assert_ne!(
             lvl0.to_bits(),
             lvl1.to_bits(),
@@ -3297,9 +3322,9 @@ mod tests {
         let art_fwd = build_artifacts(vec![segment.clone()], geo_fwd);
         let art_rev = build_artifacts(vec![segment], geo_rev);
 
-        let (_, _, _, rows_fwd) =
+        let (_, _, _, rows_fwd, _) =
             resolve_production_models_from_artifacts(&system, &art_fwd).expect("forward resolve");
-        let (_, _, _, rows_rev) =
+        let (_, _, _, rows_rev, _) =
             resolve_production_models_from_artifacts(&system, &art_rev).expect("reversed resolve");
 
         assert_eq!(
@@ -3413,5 +3438,168 @@ mod tests {
         let resolved = resolve_reference_volume_hm3(Some(&rv), 50.0, 50.0);
         assert!(!resolved.is_nan());
         assert_eq!(resolved, 50.0);
+    }
+
+    // ── Resolver-wiring tests (the JSON-sourced reference volume) ─────────────
+
+    /// A single constant-productivity hydro with the given storage band, plus a
+    /// two-stage study, built for the resolver-wiring tests below.
+    fn ref_vol_system(v_min: f64, v_max: f64) -> System {
+        let mut hydro = make_hydro(0, HydroGenerationModel::ConstantProductivity);
+        hydro.min_storage_hm3 = v_min;
+        hydro.max_storage_hm3 = v_max;
+        SystemBuilder::new()
+            .buses(vec![make_bus()])
+            .hydros(vec![hydro])
+            .stages(vec![make_stage(0), make_stage(1)])
+            .build()
+            .expect("single-hydro two-stage system builds")
+    }
+
+    /// Artifacts carrying a single `StageRange` production config for hydro 0
+    /// covering `[0, ∞)` with the given `reference_volume`.
+    fn ref_vol_artifacts(rv: Option<ReferenceVolume>) -> cobre_io::CaseArtifacts {
+        cobre_io::CaseArtifacts {
+            production_models: vec![ProductionModelConfig {
+                hydro_id: EntityId::from(0),
+                selection_mode: SelectionMode::StageRanges {
+                    ranges: vec![StageRange {
+                        start_stage_id: 0,
+                        end_stage_id: None,
+                        model: "constant_productivity".to_string(),
+                        fpha_config: None,
+                        reference_volume: rv,
+                        productivity_mw_per_m3s: Some(1.0),
+                    }],
+                },
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// With no `reference_volume` declared, the resolver returns
+    /// `v_min + 0.65·(v_max − v_min)` bit-for-bit for every plant/stage — the
+    /// byte-identity guarantee the baseline regression depends on.
+    #[test]
+    fn resolver_default_path_returns_065_fraction_hm3_bit_for_bit() {
+        let v_min = 100.0_f64;
+        let v_max = 200.0_f64;
+        let system = ref_vol_system(v_min, v_max);
+        let artifacts = ref_vol_artifacts(None);
+
+        let (_, _, _, _, table) = resolve_production_models_from_artifacts(&system, &artifacts)
+            .expect("resolve succeeds");
+        let resolver = build_hydro_reference_volumes_resolved(&table, 0.0);
+
+        let expected = v_min + 0.65 * (v_max - v_min);
+        for stage_idx in [0_usize, 1] {
+            assert_eq!(
+                resolver.get(EntityId::from(0), stage_idx).to_bits(),
+                expected.to_bits(),
+                "stage {stage_idx}: undeclared reference volume must be the 0.65-fraction hm³"
+            );
+        }
+    }
+
+    /// A declared absolute `volume_hm3: 800.0` flows through the resolver `get`.
+    #[test]
+    fn resolver_declared_absolute_flows_through_get() {
+        let system = ref_vol_system(100.0, 2000.0);
+        let artifacts = ref_vol_artifacts(Some(ReferenceVolume::AbsoluteHm3(800.0)));
+
+        let (_, _, _, _, table) = resolve_production_models_from_artifacts(&system, &artifacts)
+            .expect("resolve succeeds");
+        let resolver = build_hydro_reference_volumes_resolved(&table, 0.0);
+
+        assert_eq!(resolver.get(EntityId::from(0), 0), 800.0);
+        assert_eq!(resolver.get(EntityId::from(0), 1), 800.0);
+    }
+
+    /// A declared `percentile: 0.5` on band `[100, 200]` resolves to `150.0`.
+    #[test]
+    fn resolver_declared_percentile_resolves_against_band() {
+        let system = ref_vol_system(100.0, 200.0);
+        let artifacts = ref_vol_artifacts(Some(ReferenceVolume::Percentile(0.5)));
+
+        let (_, _, _, _, table) = resolve_production_models_from_artifacts(&system, &artifacts)
+            .expect("resolve succeeds");
+        let resolver = build_hydro_reference_volumes_resolved(&table, 0.0);
+
+        assert_eq!(resolver.get(EntityId::from(0), 0), 150.0);
+    }
+
+    /// A study horizon may begin in any season — not only season 0 — and may wrap
+    /// around the seasonal cycle. With a SEASONAL `reference_volume` config, the
+    /// value stored at each 0-based study position reflects THAT stage's
+    /// `season_id` (selected by `find_reference_volume_for_stage`), and the resolver
+    /// is keyed by study position — never by `season_id` or by `stage.index`. So a
+    /// horizon starting mid-cycle resolves each stage's own season value, and the
+    /// energy-conversion build (which counts stages from 0, proven by
+    /// `per_season_override_produces_different_v_ref_per_stage`) reads them back in
+    /// order. This exercises the real `resolve_production_models_from_artifacts`
+    /// build end-to-end.
+    #[test]
+    fn seasonal_reference_volume_supports_nonzero_start_season() {
+        let (v_min, v_max) = (100.0_f64, 200.0_f64);
+
+        // Horizon begins in season 2 and wraps to season 1: study position 0 →
+        // season 2, position 1 → season 1. Neither is season 0.
+        let mut hydro = make_hydro(0, HydroGenerationModel::ConstantProductivity);
+        hydro.min_storage_hm3 = v_min;
+        hydro.max_storage_hm3 = v_max;
+        let mut stage0 = make_stage(0);
+        stage0.season_id = Some(2);
+        let mut stage1 = make_stage(1);
+        stage1.season_id = Some(1);
+        let system = SystemBuilder::new()
+            .buses(vec![make_bus()])
+            .hydros(vec![hydro])
+            .stages(vec![stage0, stage1])
+            .build()
+            .expect("two-stage non-zero-start-season system builds");
+
+        let artifacts = cobre_io::CaseArtifacts {
+            production_models: vec![ProductionModelConfig {
+                hydro_id: EntityId::from(0),
+                selection_mode: SelectionMode::Seasonal {
+                    default_model: "constant_productivity".to_string(),
+                    seasons: vec![
+                        SeasonConfig {
+                            season_id: 1,
+                            model: "constant_productivity".to_string(),
+                            fpha_config: None,
+                            reference_volume: Some(ReferenceVolume::Percentile(0.8)),
+                            productivity_mw_per_m3s: Some(1.0),
+                        },
+                        SeasonConfig {
+                            season_id: 2,
+                            model: "constant_productivity".to_string(),
+                            fpha_config: None,
+                            reference_volume: Some(ReferenceVolume::Percentile(0.2)),
+                            productivity_mw_per_m3s: Some(1.0),
+                        },
+                    ],
+                },
+            }],
+            ..Default::default()
+        };
+
+        let (_, _, _, _, table) = resolve_production_models_from_artifacts(&system, &artifacts)
+            .expect("resolve succeeds");
+        let resolver = build_hydro_reference_volumes_resolved(&table, 0.0);
+
+        // Position 0 carries season 2's value (0.2 → 120), position 1 carries
+        // season 1's (0.8 → 180). A season-keyed or stage.index-keyed lookup would
+        // mis-assign these for a horizon that does not start at season 0.
+        assert_eq!(
+            resolver.get(EntityId::from(0), 0),
+            v_min + 0.2 * (v_max - v_min),
+            "study position 0 (season 2) must resolve percentile 0.2"
+        );
+        assert_eq!(
+            resolver.get(EntityId::from(0), 1),
+            v_min + 0.8 * (v_max - v_min),
+            "study position 1 (season 1) must resolve percentile 0.8"
+        );
     }
 }

@@ -400,11 +400,20 @@ fn resolve_computed(
                 energy_conversion.accumulated_productivity(hydro_idx, t)
             }
             ComputedParameter::ReferenceVolume { .. } => {
-                override_table.reference_volume(hydro_id, t).unwrap_or(
-                    energy_conversion
-                        .conversion(hydro_idx, t)
-                        .reference_volume_hm3,
-                )
+                // The reference operating volume is JSON-sourced: it flows
+                // `hydro_production_models.json` → resolver → energy-conversion
+                // cell, which is the single owner of the resolved hm³ for every
+                // policy/LP/simulation consumer. There is intentionally NO
+                // parquet `v_ref` override tier here — unlike the sibling
+                // `ReferenceTurbine` below, which still consults the productivity
+                // parquet's `q_ref` override. Re-adding an
+                // `override_table.reference_volume(...).unwrap_or(...)` wrapper
+                // "for symmetry" with `q_ref` would resurrect the retired
+                // second source of truth and silently let a stale parquet column
+                // shadow the JSON value.
+                energy_conversion
+                    .conversion(hydro_idx, t)
+                    .reference_volume_hm3
             }
             ComputedParameter::ReferenceTurbine { .. } => {
                 override_table.reference_outflow(hydro_id, t).unwrap_or(
@@ -585,8 +594,12 @@ mod tests {
         entities::hydro::{HydroGenerationModel, HydroPenalties},
     };
 
+    use cobre_io::HydroEnergyProductivityRow;
+
     use super::*;
-    use crate::energy_conversion::{EnergyConversion, EnergyConversionSet};
+    use crate::energy_conversion::{
+        EnergyConversion, EnergyConversionSet, build_hydro_energy_productivity_override,
+    };
 
     // -------------------------------------------------------------------------
     // Shared test helpers
@@ -812,6 +825,100 @@ mod tests {
                 (table.get(EntityId(0), t) - exp_t).abs() < 1e-12,
                 "stage {t}: expected {exp_t}, got {}",
                 table.get(EntityId(0), t)
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // ReferenceVolume reads the JSON-sourced energy-conversion cell directly
+    // (no parquet `v_ref` override tier) — the surviving half of the asymmetry.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn reference_volume_reads_energy_conversion_cell() {
+        let n_stages = 4;
+        let (hydros, energy_conversion, override_table, stage_to_season) =
+            make_setup_inputs(n_stages);
+
+        let params = vec![make_param(
+            0,
+            ParameterKind::Computed {
+                computed_spec: ComputedParameter::ReferenceVolume {
+                    hydro_id: EntityId(1),
+                },
+            },
+        )];
+
+        let table = build_resolved_parameters(
+            &params,
+            &energy_conversion,
+            &override_table,
+            &hydros,
+            &stage_to_season,
+            n_stages,
+        )
+        .unwrap();
+
+        // For every stage the resolved value is bit-for-bit the energy-conversion
+        // cell — there is no override branch that could shadow it.
+        for t in 0..n_stages {
+            let expected = energy_conversion.conversion(1, t).reference_volume_hm3;
+            assert_eq!(
+                table.get(EntityId(0), t).to_bits(),
+                expected.to_bits(),
+                "stage {t}: ReferenceVolume must equal the energy-conversion cell"
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // ReferenceTurbine STILL consults the parquet `q_ref` override (the other
+    // half of the intentional asymmetry documented at the resolution site).
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn reference_turbine_consults_parquet_override() {
+        let n_stages = 3;
+        let (hydros, energy_conversion, _default_override, stage_to_season) =
+            make_setup_inputs(n_stages);
+
+        // A per-hydro-default q_ref override that differs from every
+        // energy-conversion `reference_outflow_m3s` cell.
+        let override_q_ref = 12_345.0;
+        let override_table =
+            build_hydro_energy_productivity_override(&[HydroEnergyProductivityRow {
+                hydro_id: EntityId(1),
+                stage_id: None,
+                equivalent_productivity_mw_per_m3s: None,
+                reference_outflow_m3s: Some(override_q_ref),
+                specific_productivity_mw_per_m3s_per_m: None,
+            }])
+            .unwrap();
+
+        let params = vec![make_param(
+            0,
+            ParameterKind::Computed {
+                computed_spec: ComputedParameter::ReferenceTurbine {
+                    hydro_id: EntityId(1),
+                },
+            },
+        )];
+
+        let table = build_resolved_parameters(
+            &params,
+            &energy_conversion,
+            &override_table,
+            &hydros,
+            &stage_to_season,
+            n_stages,
+        )
+        .unwrap();
+
+        for t in 0..n_stages {
+            assert_eq!(
+                table.get(EntityId(0), t).to_bits(),
+                override_q_ref.to_bits(),
+                "stage {t}: ReferenceTurbine must honor the parquet q_ref override"
             );
         }
     }

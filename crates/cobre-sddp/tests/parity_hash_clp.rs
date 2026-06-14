@@ -1,5 +1,6 @@
-//! CLP parity hash harness for deterministic cases D01–D17 (D12 and D16 are
-//! absent).
+//! CLP parity hash harness for the deterministic cases enumerated in `case_dir`
+//! (the D01–D17 core plus the D31 backwater reference-volume case; gaps in the
+//! index reflect retired/absent cases).
 //!
 //! This harness drives the CLP backend and reads/writes its own baseline set
 //! under `tests/fixtures/parity_baselines_clp/`. It shares the same field
@@ -217,6 +218,9 @@ fn case_dir(label: &str) -> std::path::PathBuf {
         "D14" => "d14-block-factors",
         "D15" => "d15-non-controllable-source",
         "D17" => "d17-evaporation-mixed-sign",
+        // Cascade case whose downstream plant declares a `reference_volume`,
+        // shifting the upstream computed-FPHA plant's backwater family.
+        "D31" => "d31-backwater-reference-volume",
         other => panic!("unknown case label: {other}"),
     };
     // Integration tests run from the crate root; fixtures live at
@@ -481,4 +485,13 @@ fn parity_hash_d15() {
 )]
 fn parity_hash_d17() {
     run_case("D17");
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+fn parity_hash_d31() {
+    run_case("D31");
 }
