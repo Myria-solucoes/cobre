@@ -72,19 +72,6 @@
       },
       "type": "object"
     },
-    "EnergyConfig": {
-      "additionalProperties": false,
-      "description": "Energy conversion settings (`config.json → energy`).\n\nControls reservoir reference-volume computation for FPHA hydros.\n`V_ref = V_min + fraction · (V_max − V_min)` is the reference storage\nused to evaluate the equivalent head `h_eq` (and thereby `ρ_eq`).\nPer-`(plant, stage)` reference volumes declared in the production-model\nconfiguration override this case-wide default.",
-      "properties": {
-        "reference_volume_fraction": {
-          "default": 0.65,
-          "description": "Case-wide default fraction in `(0.0, 1.0]` used when no per-`(hydro,\nseason)` override applies. `V_ref = V_min + fraction · (V_max − V_min)`.\nDefault 0.65 (conventional long-term reference-volume fraction).",
-          "format": "double",
-          "type": "number"
-        }
-      },
-      "type": "object"
-    },
     "EstimationConfig": {
       "additionalProperties": false,
       "description": "Time series estimation settings (`config.json → estimation`).\n\nControls automatic parameter estimation when historical inflow data is\nprovided without explicit model statistics or coefficients.",
@@ -890,13 +877,6 @@
         "string",
         "null"
       ]
-    },
-    "energy": {
-      "$ref": "#/$defs/EnergyConfig",
-      "default": {
-        "reference_volume_fraction": 0.65
-      },
-      "description": "Energy conversion settings (reference volume fraction for FPHA hydros)."
     },
     "estimation": {
       "$ref": "#/$defs/EstimationConfig",

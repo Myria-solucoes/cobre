@@ -1675,7 +1675,6 @@ mod tests {
             simulation: IoSimulationConfig::default(),
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
-            energy: cobre_io::EnergyConfig::default(),
         }
     }
 
@@ -2458,7 +2457,6 @@ mod tests {
             simulation: IoSimulationConfig::default(),
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
-            energy: cobre_io::EnergyConfig::default(),
         };
 
         let params = StudyParams::from_config(&config).expect("from_config");
@@ -2544,7 +2542,6 @@ mod tests {
             },
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
-            energy: cobre_io::EnergyConfig::default(),
         };
 
         let params = StudyParams::from_config(&config).expect("from_config");
@@ -2628,7 +2625,6 @@ mod tests {
             simulation: IoSimulationConfig::default(),
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
-            energy: cobre_io::EnergyConfig::default(),
         }
     }
 

@@ -524,7 +524,6 @@ mod tests {
             simulation: SimulationConfig::default(),
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
-            energy: crate::EnergyConfig::default(),
         };
 
         ParsedData {

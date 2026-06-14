@@ -536,7 +536,6 @@ fn build_config() -> Config {
         },
         exports: ExportsConfig::default(),
         estimation: EstimationConfig::default(),
-        energy: cobre_io::EnergyConfig::default(),
     }
 }
 

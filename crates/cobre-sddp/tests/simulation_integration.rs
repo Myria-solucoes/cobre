@@ -424,7 +424,6 @@ fn make_config() -> Config {
         },
         exports: ExportsConfig::default(),
         estimation: cobre_io::EstimationConfig::default(),
-        energy: cobre_io::EnergyConfig::default(),
     }
 }
 

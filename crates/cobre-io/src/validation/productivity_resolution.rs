@@ -186,7 +186,7 @@ mod tests {
     use super::{find_productivity_for_stage, validate_productivity_resolution};
     use crate::{
         config::{
-            Config, EnergyConfig, EstimationConfig, ExportsConfig, ModelingConfig, PolicyConfig,
+            Config, EstimationConfig, ExportsConfig, ModelingConfig, PolicyConfig,
             RowSelectionConfig, SimulationConfig, StoppingRuleConfig, TrainingConfig,
             TrainingSolverConfig, UpperBoundEvaluationConfig,
         },
@@ -327,7 +327,6 @@ mod tests {
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
             policy: PolicyConfig::default(),
-            energy: EnergyConfig::default(),
         };
 
         let global_penalties = GlobalPenaltyDefaults {
