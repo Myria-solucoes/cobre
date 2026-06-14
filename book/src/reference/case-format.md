@@ -700,21 +700,33 @@ plant and is identified by a unique `hydro_id`. Results are loaded in
 matching `[start_stage_id, end_stage_id]` range. `end_stage_id` may be `null`
 to mean "until end of horizon".
 
-| Field within each range   | Required | Description                                                                                                                                                                                                                                                                  |
-| ------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `start_stage_id`          | Yes      | First stage (inclusive) to which this entry applies                                                                                                                                                                                                                          |
-| `end_stage_id`            | Yes      | Last stage (inclusive); `null` means open-ended                                                                                                                                                                                                                              |
-| `model`                   | Yes      | Model name: `"constant_productivity"`, `"linearized_head"`, or `"fpha"`                                                                                                                                                                                                      |
-| `fpha_config`             | No       | Required when `model` is `"fpha"`. See FPHA config fields below.                                                                                                                                                                                                             |
-| `productivity_mw_per_m3s` | No       | Positive when present; rejected on `"fpha"`. Optional for `constant_productivity` and `linearized_head` — when omitted, supply the value via `system/hydro_energy_productivity.parquet`. Exactly one source per `(hydro, stage)` is required; both is rejected at load time. |
+| Field within each range   | Required | Description                                                                                                                                                                                                                                                                                                                                                    |
+| ------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `start_stage_id`          | Yes      | First stage (inclusive) to which this entry applies                                                                                                                                                                                                                                                                                                            |
+| `end_stage_id`            | Yes      | Last stage (inclusive); `null` means open-ended                                                                                                                                                                                                                                                                                                                |
+| `model`                   | Yes      | Model name: `"constant_productivity"`, `"linearized_head"`, or `"fpha"`                                                                                                                                                                                                                                                                                        |
+| `fpha_config`             | No       | Required when `model` is `"fpha"`. See FPHA config fields below.                                                                                                                                                                                                                                                                                               |
+| `reference_volume`        | No       | Reference operating volume V_ref, a sibling of `fpha_config` (not nested). Set exactly one of `volume_hm3` (absolute, hm³, `> 0.0`) or `percentile` (a fraction of the operating range, `[0.0, 1.0]`); both or neither is rejected. Absent ⇒ the case-wide default fraction. Applies to any plant in either selection mode. See reference-volume fields below. |
+| `productivity_mw_per_m3s` | No       | Positive when present; rejected on `"fpha"`. Optional for `constant_productivity` and `linearized_head` — when omitted, supply the value via `system/hydro_energy_productivity.parquet`. Exactly one source per `(hydro, stage)` is required; both is rejected at load time.                                                                                   |
 
 **`seasonal` mode.** The model for a stage is determined by its `season_id`.
 Stages whose season is not listed use `default_model`.
 
-| Field           | Required | Description                                                                                        |
-| --------------- | -------- | -------------------------------------------------------------------------------------------------- |
-| `default_model` | Yes      | Fallback model name for unlisted seasons                                                           |
-| `seasons`       | Yes      | Array of season overrides: `season_id`, `model`, optional `fpha_config`, `productivity_mw_per_m3s` |
+| Field           | Required | Description                                                                                                            |
+| --------------- | -------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `default_model` | Yes      | Fallback model name for unlisted seasons                                                                               |
+| `seasons`       | Yes      | Array of season overrides: `season_id`, `model`, optional `fpha_config`, `reference_volume`, `productivity_mw_per_m3s` |
+
+**`reference_volume` fields (optional sibling of `fpha_config`):**
+
+| Field        | Required | Description                                                                                                                    |
+| ------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `volume_hm3` | No       | Absolute reference volume [hm³]; finite and `> 0.0`. Mutually exclusive with `percentile`.                                     |
+| `percentile` | No       | Reference volume as a fraction of the `[V_min, V_max]` band; finite and in `[0.0, 1.0]`. Mutually exclusive with `volume_hm3`. |
+
+The reference operating volume V_ref feeds the FPHA backwater (downstream
+forebay) level and the energy-equivalent productivity ρ_eq. It is the single
+source of truth for V_ref: when absent, the case-wide default fraction is used.
 
 **`fpha_config` fields (required when `model` is `"fpha"`):**
 
@@ -849,7 +861,6 @@ by a stage-specific row.
 | `hydro_id`                               | INT32        | no       | Hydro plant identifier                                                                   |
 | `stage_id`                               | INT32        | yes      | Stage; NULL means "applies to all stages"                                                |
 | `equivalent_productivity_mw_per_m3s`     | DOUBLE       | yes      | Direct ρ_eq override [MW/(m³/s)]; finite and >= 0.0 (`0.0` marks a planned-outage stage) |
-| `reference_volume_hm3`                   | DOUBLE       | yes      | V_ref override [hm³]; finite and > 0.0                                                   |
 | `reference_outflow_m3s`                  | DOUBLE       | yes      | Q_ref override [m³/s]; finite and >= 0.0                                                 |
 | `specific_productivity_mw_per_m3s_per_m` | DOUBLE       | yes      | ρ_esp override [MW/(m³/s)/m]; finite and > 0.0                                           |
 
@@ -858,12 +869,15 @@ by a stage-specific row.
 - `hydro_id` must not be null.
 - `equivalent_productivity_mw_per_m3s`, when set, must be finite and >= 0.0;
   `0.0` is accepted as a planned-outage marker.
-- `reference_volume_hm3`, when set, must be finite and > 0.0.
 - `reference_outflow_m3s`, when set, must be finite and >= 0.0.
 - `specific_productivity_mw_per_m3s_per_m`, when set, must be finite and >= 0.0;
   `0.0` mirrors the `equivalent_productivity_mw_per_m3s` planned-outage marker.
-- A row where all four override columns are NULL is accepted.
+- A row where all three override columns are NULL is accepted.
 - Duplicate `(hydro_id, stage_id)` pairs are rejected during case build.
+- The reference operating volume V_ref is no longer an override column here; it
+  is declared per `(plant, stage)` via `reference_volume` in
+  `system/hydro_production_models.json`. A legacy `reference_volume_hm3` column,
+  if still present, is ignored (a one-time warning is emitted).
 
 ---
 
