@@ -173,6 +173,10 @@ pub struct CaseArtifacts {
     /// Assembled scalar parameters from `system/scalar_parameters.json`.
     /// Empty when the file is absent.
     pub scalar_parameters: Vec<ScalarParameter>,
+
+    /// Rows from `system/tailrace_curves.parquet`. Empty when the file is
+    /// absent.
+    pub tailrace_curves: Vec<extensions::TailraceCurveRow>,
 }
 
 /// Fully-loaded case bundle: the validated [`System`] plus the auxiliary

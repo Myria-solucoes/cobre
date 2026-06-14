@@ -122,7 +122,7 @@ mod tests {
 
     use super::super::geometry::{FittingBounds, ForebayTable};
     use super::super::hull_fit::RawPlane;
-    use super::super::production::ProductionFunction;
+    use super::super::production::{ProductionFunction, TailraceSource};
     use super::{compute_alpha_fpha, scale_plane_affine};
 
     fn row(volume_hm3: f64, height_m: f64) -> HydroGeometryRow {
@@ -163,7 +163,7 @@ mod tests {
         };
         ProductionFunction::new(
             forebay,
-            Some(&tailrace),
+            TailraceSource::Entity(Some(tailrace)),
             Some(&HydraulicLossesModel::Constant { value_m: 2.0 }),
             Some(&EfficiencyModel::Constant { value: 0.92 }),
             3_000.0,
@@ -185,7 +185,7 @@ mod tests {
         };
         ProductionFunction::new(
             forebay,
-            Some(&tailrace),
+            TailraceSource::Entity(Some(tailrace)),
             None,
             None,
             3_000.0,

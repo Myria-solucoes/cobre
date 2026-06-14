@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use cobre_core::{EntityId, System, entities::hydro::HydroGenerationModel};
+use cobre_io::HydroReferenceVolumeFractions;
 use cobre_io::extensions::{
     FphaColumnLayout, FphaHyperplaneRow, HydroGeometryRow, ProductionModelConfig, SelectionMode,
 };
@@ -18,7 +19,10 @@ use cobre_io::extensions::{
 use super::load_artifacts_for_hydro_models;
 use super::types::{FphaPlane, ProductionModelSet, ProductionModelSource, ResolvedProductionModel};
 use crate::SddpError;
-use crate::fpha_fitting::{FphaFitResult, fit_fpha_planes};
+use crate::fpha_fitting::{
+    ForebayTable, FphaFitResult, TailraceFamilies, TailraceSource, build_tailrace_families_map,
+    fit_fpha_planes,
+};
 // ── FPHA production model resolution ─────────────────────────────────────────
 
 /// Return type for [`resolve_production_models`]: the model set, productivity
@@ -120,9 +124,24 @@ pub fn resolve_production_models_from_artifacts(
         }
     }
 
-    let geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> =
-        if prod_configs.iter().any(config_uses_computed_fpha) {
-            build_geometry_map(&artifacts.hydro_geometry)
+    let uses_computed_fpha = prod_configs.iter().any(config_uses_computed_fpha);
+
+    let geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = if uses_computed_fpha {
+        build_geometry_map(&artifacts.hydro_geometry)
+    } else {
+        HashMap::new()
+    };
+
+    // The per-plant exact-tailrace families, grouped once from
+    // `tailrace_curves` (mirrors `build_geometry_map`). A plant absent from this
+    // map has no table and falls back to its entity `TailraceModel` — the inert
+    // fallback. Only built when some hydro uses computed FPHA, since the families
+    // feed only the computed fit. A construction error (a malformed family or a
+    // keyless multi-family table) maps to `SddpError::Validation` via the
+    // `FphaFittingError` -> `SddpError` conversion, which carries the hydro id.
+    let families_map: HashMap<EntityId, TailraceFamilies> =
+        if uses_computed_fpha && !artifacts.tailrace_curves.is_empty() {
+            build_tailrace_families_map(&artifacts.tailrace_curves)?
         } else {
             HashMap::new()
         };
@@ -132,6 +151,23 @@ pub fn resolve_production_models_from_artifacts(
         system.stages().iter().filter(|s| s.id >= 0).collect();
     let n_stages = study_stages.len();
     let n_hydros = system.hydros().len();
+
+    // Reference-volume fractions resolver for the downstream backwater level.
+    // Built with the case default fraction (no parquet source exists for it on
+    // `CaseArtifacts`), mirroring the energy-conversion construction in
+    // `setup::build_energy_and_templates` so the backwater level and the
+    // productivity reference share one convention.
+    let stage_to_season: Vec<i32> = study_stages
+        .iter()
+        .map(|s| i32::try_from(s.season_id.unwrap_or(0)).unwrap_or(0))
+        .collect();
+    let reference_volume_fractions = cobre_io::build_hydro_reference_volume_fractions(
+        Vec::new(),
+        0.65,
+        system.hydros(),
+        &stage_to_season,
+    )
+    .map_err(|e| SddpError::Validation(e.to_string()))?;
 
     let mut all_models: Vec<Vec<ResolvedProductionModel>> = Vec::with_capacity(n_hydros);
     let mut provenance: Vec<(EntityId, ProductionModelSource)> = Vec::with_capacity(n_hydros);
@@ -160,6 +196,9 @@ pub fn resolve_production_models_from_artifacts(
                     hydro,
                     config_entry,
                     &geometry_map,
+                    &families_map,
+                    &reference_volume_fractions,
+                    system,
                     &study_stages,
                     mlt,
                     &mut export_rows,
@@ -205,6 +244,56 @@ fn build_geometry_map(
         rows.sort_by(|a, b| a.volume_hm3.total_cmp(&b.volume_hm3));
     }
     geometry_map
+}
+
+/// Resolve a plant's downstream reservoir level (m) at a representative stage.
+///
+/// The downstream level keys the backwater coupling of `hydro`'s tailrace: it is
+/// the forebay surface elevation of the plant `hydro` discharges into, evaluated
+/// at that downstream plant's stage reference volume.
+///
+/// Returns:
+/// - `None` when `hydro.downstream_id` is `None` (the plant's outflow leaves the
+///   system / it is a final plant) — there is no downstream reservoir to couple;
+/// - `None` when the downstream plant is absent from `system` or has no geometry
+///   rows in `geometry_map` — the level cannot be resolved (the caller's family
+///   evaluator then falls back to its lowest-keyed family);
+/// - `Some(level_m)` otherwise: the downstream plant's [`ForebayTable`] evaluated
+///   at its stage reference volume `v_ref = v_min + fraction·(v_max − v_min)`,
+///   where `fraction` comes from
+///   [`HydroReferenceVolumeFractions::get`]`(downstream_id, stage.index)`. The
+///   `v_ref` formula mirrors the energy-conversion reference-volume resolution so
+///   the backwater level and the productivity reference share one convention.
+///
+/// `stage.index` is the 0-based study-stage index — the granularity the
+/// reference-fraction resolver and the per-config FPHA fit are keyed on, so two
+/// stages with distinct downstream levels resolve distinct levels here.
+fn resolve_downstream_level(
+    hydro: &cobre_core::entities::hydro::Hydro,
+    stage: &cobre_core::temporal::Stage,
+    system: &System,
+    geometry_map: &HashMap<EntityId, Vec<&HydroGeometryRow>>,
+    reference_volume_fractions: &HydroReferenceVolumeFractions,
+) -> Option<f64> {
+    let downstream_id = hydro.downstream_id?;
+    let downstream = system.hydro(downstream_id)?;
+
+    // Build the downstream plant's forebay table from its geometry rows. An
+    // absent or empty entry, or rows that fail forebay validation, all collapse
+    // to `None`: the backwater level is simply unresolved, not an error here.
+    let geo_refs = geometry_map.get(&downstream_id)?;
+    if geo_refs.is_empty() {
+        return None;
+    }
+    let geo_rows: Vec<HydroGeometryRow> = geo_refs.iter().map(|r| (*r).clone()).collect();
+    let forebay = ForebayTable::new(&geo_rows, &downstream.name).ok()?;
+
+    let fraction = reference_volume_fractions.get(downstream_id, stage.index);
+    let v_min = downstream.min_storage_hm3;
+    let v_max = downstream.max_storage_hm3;
+    let v_ref = v_min + fraction * (v_max - v_min);
+
+    Some(forebay.height(v_ref))
 }
 
 /// Per-hydro long-term mean natural inflow (MLT) in m³/s, or `0.0` when the hydro
@@ -253,11 +342,18 @@ fn long_term_mean_inflow(system: &System, hydro_id: EntityId) -> f64 {
 /// `mlt` is the per-hydro long-term mean inflow driving the lateral-secant
 /// `S_max`; it is fixed within a hydro, so the per-config dedup in the caller is
 /// unaffected by it.
+///
+/// `tailrace_source` is the resolved [`TailraceSource`] for the (hydro, entry)
+/// pair: [`TailraceSource::Families`] when the plant has a `tailrace_curves`
+/// table, else [`TailraceSource::Entity`] (the inert fallback). It is consumed by
+/// the production-function sampler and changes only the `h_jus` the secant reads —
+/// never the hull/α/secant procedure.
 fn fit_planes_for_hydro(
     hydro: &cobre_core::entities::hydro::Hydro,
     config: &FphaColumnLayout,
     geometry_map: &HashMap<EntityId, Vec<&HydroGeometryRow>>,
     mlt: f64,
+    tailrace_source: TailraceSource,
 ) -> Result<FphaFitResult, SddpError> {
     validate_computed_prerequisites(hydro, geometry_map)?;
 
@@ -269,8 +365,54 @@ fn fit_planes_for_hydro(
         .map(|r| (*r).clone())
         .collect();
 
-    Ok(fit_fpha_planes(&geo_rows_owned, hydro, config, mlt)?)
+    Ok(fit_fpha_planes(
+        &geo_rows_owned,
+        hydro,
+        config,
+        mlt,
+        tailrace_source,
+    )?)
 }
+
+/// Resolve the [`TailraceSource`] for one (hydro, stage) pair.
+///
+/// A plant present in `families_map` uses the exact backwater families coupled to
+/// the downstream level resolved at this stage; a plant absent from the map falls
+/// back to its entity [`cobre_core::TailraceModel`] — the inert fallback that
+/// reproduces the pre-families fit bit-for-bit. The resolution is pure and
+/// deterministic: the families come from the deterministically-grouped map and
+/// the level from the pure [`resolve_downstream_level`] resolver, so no RNG or
+/// hashmap-iteration order enters.
+fn resolve_tailrace_source(
+    hydro: &cobre_core::entities::hydro::Hydro,
+    stage: &cobre_core::temporal::Stage,
+    families_map: &HashMap<EntityId, TailraceFamilies>,
+    geometry_map: &HashMap<EntityId, Vec<&HydroGeometryRow>>,
+    reference_volume_fractions: &HydroReferenceVolumeFractions,
+    system: &System,
+) -> TailraceSource {
+    if let Some(families) = families_map.get(&hydro.id) {
+        let downstream_level_m = resolve_downstream_level(
+            hydro,
+            stage,
+            system,
+            geometry_map,
+            reference_volume_fractions,
+        );
+        TailraceSource::Families {
+            families: families.clone(),
+            downstream_level_m,
+        }
+    } else {
+        TailraceSource::Entity(hydro.tailrace.clone())
+    }
+}
+
+/// One entry in the per-hydro dedup cache: the `(config, downstream-level bits)`
+/// key paired with the plane set fitted for it. The `Option<u64>` is the resolved
+/// `downstream_level_m` reduced to `f64::to_bits` (`None` for the entity fallback
+/// or an unresolved level).
+type FittedCacheEntry<'a> = ((&'a FphaColumnLayout, Option<u64>), Vec<FphaPlane>);
 
 /// Fit computed-FPHA planes per study stage for one hydro, deduplicating
 /// identical `SelectionMode` entries and emitting per-stage export rows.
@@ -280,11 +422,22 @@ fn fit_planes_for_hydro(
 ///
 /// # Dedup
 ///
-/// Stages whose covering entry resolves to an identical `FphaColumnLayout` share
-/// a single fit. The cache key is the resolved `FphaColumnLayout` value
-/// (`PartialEq`): the geometry and hydro entity are fixed within a hydro, so the
-/// config is the sole varying fit input. A hydro whose `SelectionMode` collapses
-/// to one config across all stages is therefore fitted exactly once.
+/// Stages whose covering entry resolves to an identical `FphaColumnLayout` AND an
+/// identical resolved downstream level share a single fit.
+///
+/// ## Contract — the dedup key MUST include the downstream level (Voice 1)
+///
+/// The cache key is `(FphaColumnLayout, Option<u64>)`: the resolved config value
+/// (`PartialEq`) paired with the resolved `downstream_level_m` reduced to its
+/// `f64::to_bits` (`None` for an entity-fallback or unresolved level). Keying on
+/// the `FphaColumnLayout` ALONE is the wrong-but-compiling alternative: two stages
+/// with the same config but different downstream backwater levels would then
+/// collapse to one fit, silently using one stage's tailrace for the other. The
+/// `to_bits` reduction makes the level part of the key EXACT (a `1e-9` difference
+/// forces a distinct fit) and order-invariant (no `f64` `PartialEq`/`PartialOrd`,
+/// so equal-bit levels match regardless of stage order). The geometry and hydro
+/// entity are fixed within a hydro, and `mlt` is fixed within a hydro, so config +
+/// level are the only varying fit inputs.
 ///
 /// # Export rows
 ///
@@ -300,18 +453,29 @@ fn fit_planes_for_hydro(
 ///   stages are never silently dropped.
 /// - Fitting errors propagate via [`fit_planes_for_hydro`] as
 ///   [`SddpError::Validation`], naming the hydro.
+#[allow(clippy::too_many_arguments)]
+// Rationale: every argument is an independent, already-resolved input the
+// per-stage fit needs (the hydro, its config, the geometry/families/reference
+// maps, the system for downstream resolution, the lateral-secant `mlt`, and the
+// export-row sink). Bundling them into a context struct would only relocate the
+// same fields and obscure that each is a distinct upstream-owned datum.
 fn fit_computed_planes_per_stage(
     hydro: &cobre_core::entities::hydro::Hydro,
     config_entry: Option<&ProductionModelConfig>,
     geometry_map: &HashMap<EntityId, Vec<&HydroGeometryRow>>,
+    families_map: &HashMap<EntityId, TailraceFamilies>,
+    reference_volume_fractions: &HydroReferenceVolumeFractions,
+    system: &System,
     study_stages: &[&cobre_core::temporal::Stage],
     mlt: f64,
     export_rows: &mut Vec<cobre_io::FphaHyperplaneRow>,
 ) -> Result<Vec<Vec<FphaPlane>>, SddpError> {
-    // Cache of distinct fits keyed by the resolved config value. Linear scan
-    // over `PartialEq` rather than a hash map: `FphaColumnLayout` holds f64
-    // fields (no `Eq`/`Hash`), and the entry count per hydro is small.
-    let mut fitted: Vec<(&FphaColumnLayout, Vec<FphaPlane>)> = Vec::new();
+    // Cache of distinct fits keyed by `(config, downstream-level bits)`. Linear
+    // scan over `PartialEq` rather than a hash map: `FphaColumnLayout` holds f64
+    // fields (no `Eq`/`Hash`), and the entry count per hydro is small. The level
+    // bits widen the key so two entries with the same config but distinct
+    // downstream levels do NOT collapse to one fit.
+    let mut fitted: Vec<FittedCacheEntry> = Vec::new();
     let mut per_stage: Vec<Vec<FphaPlane>> = Vec::with_capacity(study_stages.len());
 
     for stage in study_stages {
@@ -325,11 +489,31 @@ fn fit_computed_planes_per_stage(
                 ))
             })?;
 
-        let planes = if let Some((_, planes)) = fitted.iter().find(|(cfg, _)| **cfg == *config) {
+        let tailrace_source = resolve_tailrace_source(
+            hydro,
+            stage,
+            families_map,
+            geometry_map,
+            reference_volume_fractions,
+            system,
+        );
+        // The downstream-level component of the dedup key, reduced to exact bits.
+        // `None` for the entity fallback (or an unresolved level), so entity-path
+        // stages dedup on the config alone.
+        let level_bits = match &tailrace_source {
+            TailraceSource::Families {
+                downstream_level_m, ..
+            } => downstream_level_m.map(f64::to_bits),
+            TailraceSource::Entity(_) => None,
+        };
+
+        let key = (config, level_bits);
+        let planes = if let Some((_, planes)) = fitted.iter().find(|(k, _)| *k == key) {
             planes.clone()
         } else {
-            let fit_result = fit_planes_for_hydro(hydro, config, geometry_map, mlt)?;
-            fitted.push((config, fit_result.planes.clone()));
+            let fit_result =
+                fit_planes_for_hydro(hydro, config, geometry_map, mlt, tailrace_source)?;
+            fitted.push((key, fit_result.planes.clone()));
             fit_result.planes
         };
 
@@ -780,6 +964,7 @@ fn validate_hyperplane_row(
     clippy::match_wildcard_for_single_variants,
     clippy::cast_precision_loss,
     clippy::float_cmp,
+    clippy::similar_names,
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic
@@ -789,7 +974,7 @@ mod tests {
 
     use chrono::NaiveDate;
     use cobre_core::{
-        EfficiencyModel, EntityId, HydraulicLossesModel, InflowHistoryRow, SystemBuilder,
+        Bus, EfficiencyModel, EntityId, HydraulicLossesModel, InflowHistoryRow, SystemBuilder,
         TailraceModel,
         entities::hydro::{HydroGenerationModel, HydroPenalties},
         temporal::{
@@ -799,7 +984,8 @@ mod tests {
     };
     use cobre_io::extensions::{
         FittingWindow, FphaColumnLayout, FphaHyperplaneRow, HydroGeometryRow,
-        ProductionModelConfig, SeasonConfig, SelectionMode, StageRange,
+        HydroReferenceVolumeFractionRow, ProductionModelConfig, SeasonConfig, SelectionMode,
+        StageRange, TailraceCurveRow,
     };
 
     use super::*;
@@ -1834,8 +2020,14 @@ mod tests {
         // Fit planes once (simulating the per-entry fit in resolve_production_models).
         let layout =
             find_fpha_config_for_stage(&config, &stage).expect("computed config covers stage 0");
-        let fit_result = super::fit_planes_for_hydro(&hydro, layout, &geometry_map, 0.0)
-            .expect("fit_planes_for_hydro must succeed for valid Sobradinho-style input");
+        let fit_result = super::fit_planes_for_hydro(
+            &hydro,
+            layout,
+            &geometry_map,
+            0.0,
+            super::TailraceSource::Entity(hydro.tailrace.clone()),
+        )
+        .expect("fit_planes_for_hydro must succeed for valid Sobradinho-style input");
         let planes = &fit_result.planes;
 
         // The fitter derives planes from the convex hull of the production cloud,
@@ -1915,10 +2107,15 @@ mod tests {
         let stage_refs: Vec<&Stage> = stages.iter().collect();
 
         let mut export_rows = Vec::new();
+        let families_map = empty_families_map();
+        let (system, fractions) = entity_fit_context(&hydro);
         let per_stage = super::fit_computed_planes_per_stage(
             &hydro,
             Some(&config),
             &geometry_map,
+            &families_map,
+            &fractions,
+            &system,
             &stage_refs,
             0.0,
             &mut export_rows,
@@ -2019,8 +2216,14 @@ mod tests {
         // Fit computed planes for hydro 1.
         let layout1 =
             find_fpha_config_for_stage(&config1, &stage).expect("computed config covers stage 0");
-        let computed_fit = super::fit_planes_for_hydro(&hydro1, layout1, &geometry_map, 0.0)
-            .expect("fit_planes_for_hydro must succeed for hydro 1");
+        let computed_fit = super::fit_planes_for_hydro(
+            &hydro1,
+            layout1,
+            &geometry_map,
+            0.0,
+            super::TailraceSource::Entity(hydro1.tailrace.clone()),
+        )
+        .expect("fit_planes_for_hydro must succeed for hydro 1");
 
         // Resolve stage model for hydro 0 (precomputed path).
         let model0 = super::resolve_stage_model(
@@ -2089,8 +2292,14 @@ mod tests {
         // Fit once.
         let layout = find_fpha_config_for_stage(&config, &stages[0])
             .expect("computed config covers stage 0");
-        let cached_fit = super::fit_planes_for_hydro(&hydro, layout, &geometry_map, 0.0)
-            .expect("fit_planes_for_hydro must succeed");
+        let cached_fit = super::fit_planes_for_hydro(
+            &hydro,
+            layout,
+            &geometry_map,
+            0.0,
+            super::TailraceSource::Entity(hydro.tailrace.clone()),
+        )
+        .expect("fit_planes_for_hydro must succeed");
 
         let empty_hyperplane_map: HashMap<(EntityId, Option<i32>), Vec<&FphaHyperplaneRow>> =
             HashMap::new();
@@ -2207,6 +2416,31 @@ mod tests {
         map
     }
 
+    /// An empty tailrace-families map: every hydro falls back to its entity
+    /// `TailraceModel` (the inert fallback). Used by the per-entry fit tests that
+    /// exercise the config/window dedup, which is independent of the families
+    /// path.
+    fn empty_families_map() -> HashMap<EntityId, TailraceFamilies> {
+        HashMap::new()
+    }
+
+    /// A minimal single-hydro `System` plus a flat reference-fraction resolver,
+    /// the inputs `fit_computed_planes_per_stage` needs for downstream-level
+    /// resolution. The hydro has no `downstream_id`, so the resolver returns
+    /// `None` and the families path (when used) sees an unresolved level — the
+    /// fit tests below feed an empty families map, so the level is unused.
+    fn entity_fit_context(
+        hydro: &cobre_core::entities::hydro::Hydro,
+    ) -> (System, HydroReferenceVolumeFractions) {
+        let system = SystemBuilder::new()
+            .buses(vec![make_bus()])
+            .hydros(vec![hydro.clone()])
+            .build()
+            .expect("single-hydro system builds");
+        let fractions = flat_reference_fractions(0.65, system.hydros());
+        (system, fractions)
+    }
+
     /// FPHA layout with an explicit absolute volume window. Distinct windows
     /// drive distinct fitting bounds and therefore distinct plane sets.
     fn computed_layout_with_window(min: Option<f64>, max: Option<f64>) -> FphaColumnLayout {
@@ -2261,10 +2495,15 @@ mod tests {
         let stage_refs: Vec<&Stage> = stages.iter().collect();
 
         let mut export_rows = Vec::new();
+        let families_map = empty_families_map();
+        let (system, fractions) = entity_fit_context(&hydro);
         let per_stage = super::fit_computed_planes_per_stage(
             &hydro,
             Some(&config),
             &geometry_map,
+            &families_map,
+            &fractions,
+            &system,
             &stage_refs,
             0.0,
             &mut export_rows,
@@ -2318,10 +2557,15 @@ mod tests {
         let stage_refs: Vec<&Stage> = stages.iter().collect();
 
         let mut export_rows = Vec::new();
+        let families_map = empty_families_map();
+        let (system, fractions) = entity_fit_context(&hydro);
         let per_stage = super::fit_computed_planes_per_stage(
             &hydro,
             Some(&config),
             &geometry_map,
+            &families_map,
+            &fractions,
+            &system,
             &stage_refs,
             0.0,
             &mut export_rows,
@@ -2350,10 +2594,15 @@ mod tests {
         let stage_refs: Vec<&Stage> = stages.iter().collect();
 
         let mut export_rows = Vec::new();
+        let families_map = empty_families_map();
+        let (system, fractions) = entity_fit_context(&hydro);
         let per_stage = super::fit_computed_planes_per_stage(
             &hydro,
             Some(&config),
             &geometry_map,
+            &families_map,
+            &fractions,
+            &system,
             &stage_refs,
             0.0,
             &mut export_rows,
@@ -2391,10 +2640,15 @@ mod tests {
         let stage_refs: Vec<&Stage> = stages.iter().collect();
 
         let mut export_rows = Vec::new();
+        let families_map = empty_families_map();
+        let (system, fractions) = entity_fit_context(&hydro);
         super::fit_computed_planes_per_stage(
             &hydro,
             Some(&config),
             &geometry_map,
+            &families_map,
+            &fractions,
+            &system,
             &stage_refs,
             0.0,
             &mut export_rows,
@@ -2458,10 +2712,15 @@ mod tests {
         let stage_refs: Vec<&Stage> = stages.iter().collect();
 
         let mut export_rows = Vec::new();
+        let families_map = empty_families_map();
+        let (system, fractions) = entity_fit_context(&hydro);
         let err = super::fit_computed_planes_per_stage(
             &hydro,
             Some(&config),
             &geometry_map,
+            &families_map,
+            &fractions,
+            &system,
             &stage_refs,
             0.0,
             &mut export_rows,
@@ -2544,5 +2803,386 @@ mod tests {
             mlt_asc, mlt_desc,
             "MLT must be order-independent (declaration-order invariance)"
         );
+    }
+
+    // ── resolve_downstream_level tests ───────────────────────────────────────
+
+    /// The single bus (`id = 10`) every test hydro injects into.
+    fn make_bus() -> Bus {
+        Bus {
+            id: EntityId::from(10),
+            name: "Bus10".to_string(),
+            deficit_segments: Vec::new(),
+            excess_cost: 0.0,
+        }
+    }
+
+    /// Build a `HydroReferenceVolumeFractions` returning `default_fraction` for
+    /// every `(hydro, stage)` (no overrides).
+    fn flat_reference_fractions(
+        default_fraction: f64,
+        hydros: &[cobre_core::entities::hydro::Hydro],
+    ) -> HydroReferenceVolumeFractions {
+        cobre_io::extensions::build_hydro_reference_volume_fractions(
+            Vec::new(),
+            default_fraction,
+            hydros,
+            &[0],
+        )
+        .expect("flat reference fractions build")
+    }
+
+    /// A geometry map carrying one plant's two-point VHA rows.
+    fn geometry_map_for(rows: &[HydroGeometryRow]) -> HashMap<EntityId, Vec<&HydroGeometryRow>> {
+        let mut map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
+        for r in rows {
+            map.entry(r.hydro_id).or_default().push(r);
+        }
+        map
+    }
+
+    /// `downstream_id == None` ⇒ `None` (no downstream reservoir to couple).
+    #[test]
+    fn resolve_downstream_level_no_downstream_is_none() {
+        let hydro = make_hydro(0, HydroGenerationModel::Fpha); // downstream_id = None
+        let stage = make_stage(0);
+        let system = SystemBuilder::new()
+            .buses(vec![make_bus()])
+            .hydros(vec![hydro.clone()])
+            .build()
+            .expect("system");
+        let geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
+        let fractions = flat_reference_fractions(0.5, system.hydros());
+
+        let level = resolve_downstream_level(&hydro, &stage, &system, &geometry_map, &fractions);
+        assert!(level.is_none(), "no downstream_id must resolve to None");
+    }
+
+    /// A resolved downstream plant with geometry + fraction yields
+    /// `Some(forebay.height(v_ref))`, matching an independent `ForebayTable`.
+    #[test]
+    fn resolve_downstream_level_matches_independent_forebay_height() {
+        // Upstream plant 0 discharges into downstream plant 1.
+        let mut upstream = make_hydro(0, HydroGenerationModel::Fpha);
+        upstream.downstream_id = Some(EntityId::from(1));
+        let downstream = make_hydro(1, HydroGenerationModel::ConstantProductivity);
+
+        let stage = make_stage(0);
+        let system = SystemBuilder::new()
+            .buses(vec![make_bus()])
+            .hydros(vec![upstream.clone(), downstream.clone()])
+            .build()
+            .expect("system");
+
+        let geo_rows = make_geometry_rows(1);
+        let geometry_map = geometry_map_for(&geo_rows);
+        let fraction = 0.5;
+        let fractions = flat_reference_fractions(fraction, system.hydros());
+
+        let level = resolve_downstream_level(&upstream, &stage, &system, &geometry_map, &fractions)
+            .expect("downstream level must resolve");
+
+        // Independent reference: v_ref = v_min + fraction·(v_max − v_min) on the
+        // downstream plant, evaluated through a freshly-built ForebayTable.
+        let v_ref = downstream.min_storage_hm3
+            + fraction * (downstream.max_storage_hm3 - downstream.min_storage_hm3);
+        let table = ForebayTable::new(&geo_rows, &downstream.name).expect("forebay");
+        let expected = table.height(v_ref);
+
+        assert!(
+            (level - expected).abs() < 1e-9,
+            "resolved level {level} must match independent ForebayTable::height {expected}"
+        );
+    }
+
+    /// A downstream plant absent from the geometry map ⇒ `None`.
+    #[test]
+    fn resolve_downstream_level_missing_geometry_is_none() {
+        let mut upstream = make_hydro(0, HydroGenerationModel::Fpha);
+        upstream.downstream_id = Some(EntityId::from(1));
+        let downstream = make_hydro(1, HydroGenerationModel::ConstantProductivity);
+
+        let stage = make_stage(0);
+        let system = SystemBuilder::new()
+            .buses(vec![make_bus()])
+            .hydros(vec![upstream.clone(), downstream])
+            .build()
+            .expect("system");
+
+        // Empty geometry map: the downstream plant has no VHA rows.
+        let geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
+        let fractions = flat_reference_fractions(0.5, system.hydros());
+
+        let level = resolve_downstream_level(&upstream, &stage, &system, &geometry_map, &fractions);
+        assert!(
+            level.is_none(),
+            "missing downstream geometry must resolve to None"
+        );
+    }
+
+    // ── Tailrace-source resolution + dedup-key tests ──────────────────────────
+
+    /// A hydro absent from the families map resolves to `TailraceSource::Entity`
+    /// carrying the entity `TailraceModel` — the inert fallback. Per-plant
+    /// fallback: the global presence of a table for other plants is irrelevant.
+    #[test]
+    fn resolve_tailrace_source_absent_from_map_is_entity() {
+        let hydro = make_sobradinho_computed_hydro(0);
+        let stage = make_stage(0);
+        let (system, fractions) = entity_fit_context(&hydro);
+        let geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
+        // Families map populated for a DIFFERENT plant id only.
+        let other_rows = vec![TailraceCurveRow {
+            hydro_id: EntityId::from(99),
+            family_id: 1,
+            href_jus_m: None,
+            segment_id: 1,
+            q_jus_inf_m3s: 0.0,
+            q_jus_sup_m3s: 1000.0,
+            a_cf0: 5.0,
+            a_cf1: 0.0,
+            a_cf2: 0.0,
+            a_cf3: 0.0,
+            a_cf4: 0.0,
+        }];
+        let families_map =
+            super::build_tailrace_families_map(&other_rows).expect("families map builds");
+
+        let source = super::resolve_tailrace_source(
+            &hydro,
+            &stage,
+            &families_map,
+            &geometry_map,
+            &fractions,
+            &system,
+        );
+        match source {
+            TailraceSource::Entity(model) => {
+                assert_eq!(
+                    model, hydro.tailrace,
+                    "fallback must carry the entity TailraceModel unchanged"
+                );
+            }
+            TailraceSource::Families { .. } => {
+                panic!("a plant absent from the families map must resolve to Entity")
+            }
+        }
+    }
+
+    /// Two `SelectionMode` entries of one hydro whose downstream reference levels
+    /// differ (multi-family table) produce DISTINCT plane sets: the dedup cache
+    /// key includes `downstream_level_m`, so the two entries are not collapsed to
+    /// one fit. Stage 0 resolves a low downstream level (lowest family), stage 1 a
+    /// high one (highest family); the two families carry different tailrace
+    /// heights, so the fitted planes differ.
+    #[test]
+    fn dedup_key_separates_distinct_downstream_levels() {
+        // Upstream computed-FPHA plant 0 discharges into downstream plant 1.
+        let mut upstream = make_sobradinho_computed_hydro(0);
+        upstream.downstream_id = Some(EntityId::from(1));
+        let downstream = make_hydro(1, HydroGenerationModel::ConstantProductivity);
+
+        // Downstream geometry spanning heights 380 → 420 over volume 100 → 2000,
+        // so fraction 0.0 → 380 m and fraction 1.0 → 420 m.
+        let down_geo = [
+            HydroGeometryRow {
+                hydro_id: EntityId::from(1),
+                volume_hm3: 100.0,
+                height_m: 380.0,
+                area_km2: 10.0,
+            },
+            HydroGeometryRow {
+                hydro_id: EntityId::from(1),
+                volume_hm3: 2000.0,
+                height_m: 420.0,
+                area_km2: 50.0,
+            },
+        ];
+        let up_geo = make_sobradinho_geometry_rows(0);
+        let mut geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
+        geometry_map.insert(EntityId::from(0), up_geo.iter().collect());
+        geometry_map.insert(EntityId::from(1), down_geo.iter().collect());
+
+        // Two-family tailrace for the upstream plant keyed at 380 and 420 m with
+        // distinct heights (constant 2.0 vs 40.0 m), so the resolved level picks a
+        // materially different tailrace.
+        let tailrace_rows = vec![
+            TailraceCurveRow {
+                hydro_id: EntityId::from(0),
+                family_id: 1,
+                href_jus_m: Some(380.0),
+                segment_id: 1,
+                q_jus_inf_m3s: 0.0,
+                q_jus_sup_m3s: 100_000.0,
+                a_cf0: 2.0,
+                a_cf1: 0.0,
+                a_cf2: 0.0,
+                a_cf3: 0.0,
+                a_cf4: 0.0,
+            },
+            TailraceCurveRow {
+                hydro_id: EntityId::from(0),
+                family_id: 2,
+                href_jus_m: Some(420.0),
+                segment_id: 1,
+                q_jus_inf_m3s: 0.0,
+                q_jus_sup_m3s: 100_000.0,
+                a_cf0: 40.0,
+                a_cf1: 0.0,
+                a_cf2: 0.0,
+                a_cf3: 0.0,
+                a_cf4: 0.0,
+            },
+        ];
+        let families_map =
+            super::build_tailrace_families_map(&tailrace_rows).expect("families map builds");
+
+        // Stage 0 → season 0 (fraction 0.0 → level 380), stage 1 → season 1
+        // (fraction 1.0 → level 420) for the downstream plant.
+        let mut stage0 = make_stage(0);
+        stage0.season_id = Some(0);
+        let mut stage1 = make_stage(1);
+        stage1.season_id = Some(1);
+        let hydros = [upstream.clone(), downstream.clone()];
+        let fractions = cobre_io::extensions::build_hydro_reference_volume_fractions(
+            vec![
+                HydroReferenceVolumeFractionRow {
+                    hydro_id: EntityId::from(1),
+                    season_id: Some(0),
+                    fraction: 0.0001,
+                },
+                HydroReferenceVolumeFractionRow {
+                    hydro_id: EntityId::from(1),
+                    season_id: Some(1),
+                    fraction: 1.0,
+                },
+            ],
+            0.5,
+            &hydros,
+            &[0, 1],
+        )
+        .expect("fractions build");
+
+        let system = SystemBuilder::new()
+            .buses(vec![make_bus()])
+            .hydros(vec![upstream.clone(), downstream])
+            .build()
+            .expect("two-hydro system builds");
+
+        // One open-ended range → one config across both stages, so ONLY the
+        // downstream level varies between the two stages.
+        let config = computed_fpha_config(0);
+        let stages = [&stage0, &stage1];
+        let stage_refs: Vec<&Stage> = stages.to_vec();
+
+        let mut export_rows = Vec::new();
+        let per_stage = super::fit_computed_planes_per_stage(
+            &upstream,
+            Some(&config),
+            &geometry_map,
+            &families_map,
+            &fractions,
+            &system,
+            &stage_refs,
+            0.0,
+            &mut export_rows,
+        )
+        .expect("per-stage fit succeeds");
+
+        // Sanity: the two stages resolved distinct downstream levels.
+        let lvl0 = resolve_downstream_level(&upstream, &stage0, &system, &geometry_map, &fractions)
+            .expect("stage 0 level");
+        let lvl1 = resolve_downstream_level(&upstream, &stage1, &system, &geometry_map, &fractions)
+            .expect("stage 1 level");
+        assert_ne!(
+            lvl0.to_bits(),
+            lvl1.to_bits(),
+            "the two stages must resolve different downstream levels"
+        );
+
+        assert_ne!(
+            per_stage[0], per_stage[1],
+            "distinct downstream levels must yield distinct fits (dedup key includes the level)"
+        );
+    }
+
+    /// Declaration-order invariance: `resolve_production_models_from_artifacts`
+    /// yields bit-identical `export_rows` when the hydros and tailrace-curve rows
+    /// are supplied in shuffled declaration orders.
+    #[test]
+    fn export_rows_are_declaration_order_invariant_with_tailrace() {
+        // One computed-FPHA hydro (id=0) with a single-family tailrace table.
+        fn build_artifacts(
+            tailrace_rows: Vec<TailraceCurveRow>,
+            geo_rows: Vec<HydroGeometryRow>,
+        ) -> cobre_io::CaseArtifacts {
+            cobre_io::CaseArtifacts {
+                production_models: vec![computed_fpha_config(0)],
+                hydro_geometry: geo_rows,
+                tailrace_curves: tailrace_rows,
+                ..Default::default()
+            }
+        }
+
+        let hydro = make_sobradinho_computed_hydro(0);
+        let stage = make_stage(0);
+        let system = SystemBuilder::new()
+            .buses(vec![make_bus()])
+            .hydros(vec![hydro.clone()])
+            .stages(vec![stage])
+            .build()
+            .expect("single-hydro system builds");
+
+        // Geometry rows are re-sorted by `build_geometry_map` inside the resolve
+        // path, so a reversed geometry input must yield bit-identical fitted
+        // planes — the declaration-order invariance the families path must uphold.
+        let geo_fwd = make_sobradinho_geometry_rows(0);
+        let mut geo_rev = geo_fwd.clone();
+        geo_rev.reverse();
+
+        // Single-segment single family: a flat 2.0 m tailrace covering the full
+        // sampled Q_jus range. The tailrace rows are supplied in canonical
+        // `(hydro_id, family_id, segment_id)` order (as the loader produces them);
+        // the shuffled dimension here is the geometry input.
+        let segment = TailraceCurveRow {
+            hydro_id: EntityId::from(0),
+            family_id: 1,
+            href_jus_m: None,
+            segment_id: 1,
+            q_jus_inf_m3s: 0.0,
+            q_jus_sup_m3s: 100_000.0,
+            a_cf0: 2.0,
+            a_cf1: 0.0,
+            a_cf2: 0.0,
+            a_cf3: 0.0,
+            a_cf4: 0.0,
+        };
+
+        let art_fwd = build_artifacts(vec![segment.clone()], geo_fwd);
+        let art_rev = build_artifacts(vec![segment], geo_rev);
+
+        let (_, _, _, rows_fwd) =
+            resolve_production_models_from_artifacts(&system, &art_fwd).expect("forward resolve");
+        let (_, _, _, rows_rev) =
+            resolve_production_models_from_artifacts(&system, &art_rev).expect("reversed resolve");
+
+        assert_eq!(
+            rows_fwd.len(),
+            rows_rev.len(),
+            "export-row counts must match across input orderings"
+        );
+        for (a, b) in rows_fwd.iter().zip(&rows_rev) {
+            assert_eq!(a.hydro_id, b.hydro_id);
+            assert_eq!(a.stage_id, b.stage_id);
+            assert_eq!(a.plane_id, b.plane_id);
+            assert_eq!(
+                a.gamma_0.to_bits(),
+                b.gamma_0.to_bits(),
+                "gamma_0 must be bit-identical across input orderings"
+            );
+            assert_eq!(a.gamma_v.to_bits(), b.gamma_v.to_bits());
+            assert_eq!(a.gamma_q.to_bits(), b.gamma_q.to_bits());
+            assert_eq!(a.gamma_s.to_bits(), b.gamma_s.to_bits());
+        }
     }
 }

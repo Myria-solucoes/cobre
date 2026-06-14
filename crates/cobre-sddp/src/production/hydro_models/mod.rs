@@ -144,6 +144,11 @@ fn load_artifacts_for_hydro_models(case_dir: &Path) -> Result<cobre_io::CaseArti
     } else {
         None
     };
+    let tailrace_path = if manifest.system_tailrace_curves_parquet {
+        Some(case_dir.join("system").join("tailrace_curves.parquet"))
+    } else {
+        None
+    };
 
     Ok(cobre_io::CaseArtifacts {
         file_manifest: manifest,
@@ -152,6 +157,7 @@ fn load_artifacts_for_hydro_models(case_dir: &Path) -> Result<cobre_io::CaseArti
         hydro_energy_productivity: cobre_io::load_hydro_energy_productivity(prod_eff_path_opt)?,
         fpha_hyperplanes: cobre_io::extensions::load_fpha_hyperplanes(fpha_path.as_deref())?,
         scalar_parameters: Vec::new(),
+        tailrace_curves: cobre_io::extensions::load_tailrace_curves(tailrace_path.as_deref())?,
     })
 }
 

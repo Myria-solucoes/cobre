@@ -47,6 +47,7 @@ mod hull_fit;
 mod production;
 mod secant;
 mod selection;
+mod tailrace;
 
 #[cfg(test)]
 #[allow(
@@ -68,6 +69,8 @@ use selection::validate_fitted_planes;
 
 pub(crate) use error::FphaFittingError;
 pub(crate) use geometry::{ForebayTable, evaluate_losses, evaluate_tailrace};
+pub(crate) use production::TailraceSource;
+pub(crate) use tailrace::{TailraceFamilies, build_tailrace_families_map};
 
 // ── Top-level fitting pipeline ────────────────────────────────────────────────
 
@@ -147,17 +150,22 @@ pub(crate) struct FphaFitResult {
 /// - `mlt` — long-term mean natural inflow \[m³/s\] for the lateral-secant
 ///   `S_max = 2·MLT`; `0.0` (no inflow history) selects the `2 × max_turbined`
 ///   fallback (see `secant::resolve_s_max`).
+/// - `tailrace_source` — the resolved [`TailraceSource`]. The caller resolves it
+///   per (hydro, entry): [`TailraceSource::Families`] when the plant has a
+///   `tailrace_curves` table, else [`TailraceSource::Entity`] mirroring the
+///   entity-level model (the inert fallback).
 pub(crate) fn fit_fpha_planes(
     forebay_rows: &[HydroGeometryRow],
     hydro: &Hydro,
     config: &FphaColumnLayout,
     mlt: f64,
+    tailrace_source: TailraceSource,
 ) -> Result<FphaFitResult, FphaFittingError> {
     let forebay = ForebayTable::new(forebay_rows, &hydro.name)?;
 
     let pf = ProductionFunction::new(
         forebay.clone(),
-        hydro.tailrace.as_ref(),
+        tailrace_source,
         hydro.hydraulic_losses.as_ref(),
         hydro.efficiency.as_ref(),
         hydro.max_turbined_m3s,

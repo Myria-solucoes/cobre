@@ -31,6 +31,7 @@ pub mod hydro_geometry;
 pub mod hydro_reference_volumes;
 pub mod production_models;
 pub mod scalar_parameters;
+pub mod tailrace_curves;
 
 pub use fpha_hyperplanes::{FphaHyperplaneRow, parse_fpha_hyperplanes};
 pub use hydro_energy_productivity::{HydroEnergyProductivityRow, parse_hydro_energy_productivity};
@@ -44,6 +45,7 @@ pub use production_models::{
     StageRange, parse_production_models,
 };
 pub use scalar_parameters::{load_scalar_parameters_json, parse_scalar_parameters_json};
+pub use tailrace_curves::{TailraceCurveRow, parse_tailrace_curves};
 
 use crate::LoadError;
 use std::path::Path;
@@ -177,6 +179,33 @@ pub fn load_hydro_energy_productivity(
     }
 }
 
+/// Load `system/tailrace_curves.parquet` when the path is known, or return an
+/// empty `Vec` when the file is absent (optional file).
+///
+/// This wrapper is the standard entry point used by the loading pipeline. When
+/// `path` is `None` (the structural validation step found no file at the expected
+/// location), it returns `Ok(Vec::new())` without touching the filesystem.
+///
+/// # Errors
+///
+/// Propagates [`LoadError`] from [`parse_tailrace_curves`] when `path` is `Some`.
+///
+/// # Examples
+///
+/// ```
+/// use cobre_io::extensions::load_tailrace_curves;
+///
+/// // No file present — returns empty vec.
+/// let rows = load_tailrace_curves(None).expect("no file is fine");
+/// assert!(rows.is_empty());
+/// ```
+pub fn load_tailrace_curves(path: Option<&Path>) -> Result<Vec<TailraceCurveRow>, LoadError> {
+    match path {
+        None => Ok(Vec::new()),
+        Some(p) => parse_tailrace_curves(p),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::doc_markdown, clippy::unwrap_used, clippy::panic)]
 mod tests {
@@ -207,6 +236,13 @@ mod tests {
     #[test]
     fn test_load_hydro_energy_productivity_none_returns_empty() {
         let result = load_hydro_energy_productivity(None).unwrap();
+        assert!(result.is_empty(), "expected empty vec for None path");
+    }
+
+    /// `load_tailrace_curves(None)` returns `Ok(Vec::new())` without I/O.
+    #[test]
+    fn test_load_tailrace_curves_none_returns_empty() {
+        let result = load_tailrace_curves(None).unwrap();
         assert!(result.is_empty(), "expected empty vec for None path");
     }
 }

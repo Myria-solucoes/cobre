@@ -8,6 +8,42 @@
 use cobre_core::{EfficiencyModel, HydraulicLossesModel, TailraceModel};
 
 use super::geometry::{ForebayTable, evaluate_losses, evaluate_tailrace};
+use super::tailrace::TailraceFamilies;
+
+// ── Tailrace source ───────────────────────────────────────────────────────────
+
+/// Source of the tailrace elevation `h_jus(Q_jus)` the production function reads.
+///
+/// Enum dispatch (no `Box<dyn>`) over a closed two-variant set, so `net_head`
+/// branches on the variant without a vtable. Built once per fit and held by
+/// [`ProductionFunction`]; the grid loop never reconstructs it, keeping
+/// `net_head` allocation-free.
+///
+/// # Contract — the `Entity` arm is the inert fallback (Voice 1)
+///
+/// A plant WITHOUT a `tailrace_curves` table resolves to [`TailraceSource::Entity`],
+/// which reproduces the pre-families behavior EXACTLY: `net_head` evaluates the
+/// same `evaluate_tailrace(model, q + s)` it always has. This bit-for-bit
+/// equivalence is the load-bearing invariant — a plant with no table must fit to
+/// the same planes as before the families path existed. Routing a table-less plant
+/// through the `Families` arm (e.g. with an empty/synthetic family) would silently
+/// perturb its fitted γ values and is forbidden.
+#[derive(Debug, Clone)]
+pub(crate) enum TailraceSource {
+    /// The entity-level [`TailraceModel`]; `None` means constant zero tailrace.
+    /// Preserves the exact pre-families `net_head` value for plants with no table.
+    Entity(Option<TailraceModel>),
+    /// The exact piecewise-quartic backwater-coupled families for a plant that has a
+    /// `tailrace_curves` table. `downstream_level_m` is the resolved backwater
+    /// level (`None` when unresolved — the evaluator then falls back to the
+    /// lowest-keyed family).
+    Families {
+        /// The plant's ordered, validated tailrace families (built once per fit).
+        families: TailraceFamilies,
+        /// Resolved downstream reference level (m) keying the backwater coupling.
+        downstream_level_m: Option<f64>,
+    },
+}
 
 // ── ProductionFunction ────────────────────────────────────────────────────────
 
@@ -40,8 +76,10 @@ const K: f64 = 9.81 / 1000.0;
 pub(crate) struct ProductionFunction {
     /// Forebay height interpolation table.
     forebay: ForebayTable,
-    /// Tailrace elevation model. `None` means zero tailrace height for all outflows.
-    tailrace: Option<TailraceModel>,
+    /// Tailrace elevation source. [`TailraceSource::Entity`] preserves the
+    /// pre-families behavior; [`TailraceSource::Families`] couples the exact
+    /// piecewise-quartic backwater families to a resolved downstream level.
+    tailrace: TailraceSource,
     /// Hydraulic losses model. `None` means lossless penstock.
     hydraulic_losses: Option<HydraulicLossesModel>,
     /// Turbine efficiency (dimensionless, in `(0, 1]`). Defaults to `1.0` when the
@@ -66,8 +104,10 @@ impl ProductionFunction {
     /// # Parameters
     ///
     /// - `forebay` — pre-validated [`ForebayTable`] for this plant.
-    /// - `tailrace` — optional reference to the plant's [`TailraceModel`]; cloned
-    ///   into the struct. `None` = constant zero tailrace.
+    /// - `tailrace` — the resolved [`TailraceSource`]. [`TailraceSource::Entity`]
+    ///   carries the plant's [`TailraceModel`] (`None` = constant zero tailrace) and
+    ///   preserves the pre-families behavior; [`TailraceSource::Families`] carries
+    ///   the exact backwater families and the resolved downstream level.
     /// - `hydraulic_losses` — optional reference to the plant's [`HydraulicLossesModel`];
     ///   copied into the struct. `None` = lossless.
     /// - `efficiency` — optional reference to the plant's [`EfficiencyModel`]; only
@@ -76,7 +116,7 @@ impl ProductionFunction {
     /// - `hydro_name` — plant name used in diagnostic messages.
     pub(crate) fn new(
         forebay: ForebayTable,
-        tailrace: Option<&TailraceModel>,
+        tailrace: TailraceSource,
         hydraulic_losses: Option<&HydraulicLossesModel>,
         efficiency: Option<&EfficiencyModel>,
         max_turbined_m3s: f64,
@@ -88,7 +128,7 @@ impl ProductionFunction {
         };
         Self {
             forebay,
-            tailrace: tailrace.cloned(),
+            tailrace,
             hydraulic_losses: hydraulic_losses.copied(),
             efficiency: efficiency_value,
             max_turbined_m3s,
@@ -116,11 +156,22 @@ impl ProductionFunction {
     /// - `s` — spillage flow \[m³/s\]
     pub(crate) fn net_head(&self, v: f64, q: f64, s: f64) -> f64 {
         let h_fore = self.forebay.height(v);
+        // `q_out = q + s = Q_jus` is the total downstream flow the tailrace sees;
+        // the secant's `s = Q_lat` sweep flows in through `s` unchanged, so both
+        // source variants observe the identical `Q_jus`. The `Entity` arm MUST
+        // call `evaluate_tailrace(model, q_out)` verbatim — the inert-fallback
+        // contract on [`TailraceSource`] — so a table-less plant's net head is
+        // bit-for-bit the pre-families value.
         let q_out = q + s;
-        let h_tail = self
-            .tailrace
-            .as_ref()
-            .map_or(0.0, |m| evaluate_tailrace(m, q_out));
+        let h_tail = match &self.tailrace {
+            TailraceSource::Entity(model) => {
+                model.as_ref().map_or(0.0, |m| evaluate_tailrace(m, q_out))
+            }
+            TailraceSource::Families {
+                families,
+                downstream_level_m,
+            } => families.evaluate(q_out, *downstream_level_m),
+        };
         let gross_head = h_fore - h_tail;
         let h_loss = self
             .hydraulic_losses

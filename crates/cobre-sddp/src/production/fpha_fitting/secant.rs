@@ -235,7 +235,7 @@ mod tests {
 
     use super::super::geometry::{FittingBounds, ForebayTable};
     use super::super::hull_fit::RawPlane;
-    use super::super::production::ProductionFunction;
+    use super::super::production::{ProductionFunction, TailraceSource};
     use super::{
         N_QLAT_SAMPLES, fit_gamma_s_for_planes, representative_operating_point, resolve_s_max,
     };
@@ -279,7 +279,7 @@ mod tests {
         };
         ProductionFunction::new(
             forebay,
-            Some(&tailrace),
+            TailraceSource::Entity(Some(tailrace)),
             Some(&HydraulicLossesModel::Constant { value_m: 0.0 }),
             Some(&EfficiencyModel::Constant { value: 0.9 }),
             3_000.0,
@@ -297,7 +297,7 @@ mod tests {
         };
         ProductionFunction::new(
             forebay,
-            Some(&tailrace),
+            TailraceSource::Entity(Some(tailrace)),
             None,
             Some(&EfficiencyModel::Constant { value: 1.0 }),
             3_000.0,
@@ -433,7 +433,7 @@ mod tests {
         // max_turbined = 0 → with MLT = 0, S_max = 0.
         let pf = ProductionFunction::new(
             forebay,
-            Some(&tailrace),
+            TailraceSource::Entity(Some(tailrace)),
             None,
             Some(&EfficiencyModel::Constant { value: 0.9 }),
             0.0,

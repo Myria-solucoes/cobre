@@ -153,6 +153,55 @@ pub(crate) enum FphaFittingError {
         /// Human-readable description of which coefficient failed and its value.
         detail: String,
     },
+
+    /// Consecutive tailrace segments do not tile the outflow domain.
+    ///
+    /// A family's quartic segments must partition `Q_jus` without gaps or
+    /// overlaps: each segment's lower bound must meet the previous segment's
+    /// upper bound. A gap leaves `Q_jus` values with no owning segment; an
+    /// overlap makes the owning segment ambiguous. Both are rejected here.
+    TailraceGap {
+        /// Name of the hydro plant whose tailrace family was rejected.
+        hydro_name: String,
+        /// Upper bound of the lower-indexed segment (m³/s).
+        q_sup_prev: f64,
+        /// Lower bound of the higher-indexed segment (m³/s), which must equal
+        /// `q_sup_prev` within tolerance.
+        q_inf_curr: f64,
+    },
+
+    /// Consecutive tailrace segments disagree at their shared boundary.
+    ///
+    /// The piecewise quartic must be continuous (C0): the lower-indexed segment
+    /// and the higher-indexed segment must evaluate to the same tailrace
+    /// elevation at the boundary they share. A jump indicates miscalibrated
+    /// coefficients that would make the within-family evaluator discontinuous.
+    TailraceDiscontinuity {
+        /// Name of the hydro plant whose tailrace family was rejected.
+        hydro_name: String,
+        /// Shared boundary outflow at which the two segments are evaluated (m³/s).
+        boundary: f64,
+        /// Tailrace elevation from the lower-indexed segment at `boundary` (m).
+        h_left: f64,
+        /// Tailrace elevation from the higher-indexed segment at `boundary` (m).
+        h_right: f64,
+    },
+
+    /// A multi-family tailrace table has a family with no downstream reference level.
+    ///
+    /// When a plant has more than one tailrace family, every family must carry a
+    /// downstream reference level so the families can be ordered and bracketed by
+    /// that level. A `None` level is only admissible for a plant with exactly one
+    /// family (the level argument is then ignored). A multi-family table with any
+    /// keyless family is ambiguous — it cannot be bracketed — and is rejected
+    /// here rather than silently picking one family. The owning check is
+    /// [`TailraceFamilies::from_rows`](super::tailrace::TailraceFamilies::from_rows).
+    TailraceFamilyKeyMissing {
+        /// Name of the hydro plant whose tailrace family table was rejected.
+        hydro_name: String,
+        /// Number of families found for the plant (> 1 when this fires).
+        family_count: usize,
+    },
 }
 
 impl std::fmt::Display for FphaFittingError {
@@ -230,6 +279,34 @@ impl std::fmt::Display for FphaFittingError {
                 f,
                 "hydro '{hydro_name}': hyperplane {plane_index} has an invalid coefficient: \
                  {detail}"
+            ),
+            Self::TailraceGap {
+                hydro_name,
+                q_sup_prev,
+                q_inf_curr,
+            } => write!(
+                f,
+                "hydro '{hydro_name}': tailrace segments leave a gap or overlap at the \
+                 boundary: previous q_sup={q_sup_prev} does not meet next q_inf={q_inf_curr}"
+            ),
+            Self::TailraceDiscontinuity {
+                hydro_name,
+                boundary,
+                h_left,
+                h_right,
+            } => write!(
+                f,
+                "hydro '{hydro_name}': tailrace segments are discontinuous at q={boundary}: \
+                 left h_jus={h_left} != right h_jus={h_right}"
+            ),
+            Self::TailraceFamilyKeyMissing {
+                hydro_name,
+                family_count,
+            } => write!(
+                f,
+                "hydro '{hydro_name}': tailrace table has {family_count} families but at least \
+                 one carries no downstream reference level (href_jus_m); a keyless family is \
+                 only valid for a single-family plant"
             ),
         }
     }

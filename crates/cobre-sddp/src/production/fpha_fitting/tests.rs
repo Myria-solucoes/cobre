@@ -11,8 +11,9 @@ use super::geometry::{
     FittingBounds, ForebayTable, evaluate_losses, evaluate_tailrace, resolve_fitting_bounds,
 };
 use super::hull_fit::{RawPlane, fit_hull_planes};
-use super::production::ProductionFunction;
+use super::production::{ProductionFunction, TailraceSource};
 use super::selection::validate_fitted_planes;
+use super::tailrace::TailraceFamilies;
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -465,7 +466,14 @@ fn piecewise_tailrace() -> TailraceModel {
 #[test]
 fn net_head_no_tailrace_no_losses_equals_h_fore() {
     let forebay = sloped_forebay();
-    let pf = ProductionFunction::new(forebay, None, None, None, 12_600.0, "TestPlant".to_owned());
+    let pf = ProductionFunction::new(
+        forebay,
+        TailraceSource::Entity(None),
+        None,
+        None,
+        12_600.0,
+        "TestPlant".to_owned(),
+    );
     // At v=10000: h_fore = 400. h_tail = 0. h_loss = 0. h_net = 400.
     assert!((pf.net_head(10_000.0, 3000.0, 0.0) - 400.0).abs() < 1e-10);
 }
@@ -477,7 +485,7 @@ fn net_head_polynomial_tailrace_constant_losses_acceptance_criterion() {
     let losses = HydraulicLossesModel::Constant { value_m: 2.0 };
     let pf = ProductionFunction::new(
         forebay,
-        Some(&tailrace),
+        TailraceSource::Entity(Some(tailrace)),
         Some(&losses),
         Some(&EfficiencyModel::Constant { value: 0.92 }),
         12_600.0,
@@ -498,7 +506,7 @@ fn net_head_piecewise_tailrace_factor_losses() {
     let losses = HydraulicLossesModel::Factor { value: 0.03 };
     let pf = ProductionFunction::new(
         forebay,
-        Some(&tailrace),
+        TailraceSource::Entity(Some(tailrace)),
         Some(&losses),
         None,
         12_600.0,
@@ -522,7 +530,7 @@ fn net_head_clamped_to_zero_when_losses_exceed_forebay() {
     let losses = HydraulicLossesModel::Constant { value_m: 500.0 };
     let pf = ProductionFunction::new(
         forebay,
-        None,
+        TailraceSource::Entity(None),
         Some(&losses),
         None,
         12_600.0,
@@ -545,7 +553,7 @@ fn evaluate_acceptance_criterion() {
     let losses = HydraulicLossesModel::Constant { value_m: 2.0 };
     let pf = ProductionFunction::new(
         forebay,
-        Some(&tailrace),
+        TailraceSource::Entity(Some(tailrace)),
         Some(&losses),
         Some(&EfficiencyModel::Constant { value: 0.92 }),
         12_600.0,
@@ -1350,8 +1358,14 @@ fn fit_fpha_planes_sobradinho_style_end_to_end() {
         fitting_window: None,
     };
 
-    let result =
-        fit_fpha_planes(&rows, &hydro, &config, 0.0).expect("fit_fpha_planes should succeed");
+    let result = fit_fpha_planes(
+        &rows,
+        &hydro,
+        &config,
+        0.0,
+        TailraceSource::Entity(hydro.tailrace.clone()),
+    )
+    .expect("fit_fpha_planes should succeed");
     let planes = &result.planes;
 
     // The hull yields at least one upper-envelope face for a realistic hydro.
@@ -1402,7 +1416,14 @@ fn fit_fpha_planes_spill_sensitive_yields_negative_gamma_s() {
         fitting_window: None,
     };
 
-    let result = fit_fpha_planes(&rows, &hydro, &config, 0.0).expect("fit should succeed");
+    let result = fit_fpha_planes(
+        &rows,
+        &hydro,
+        &config,
+        0.0,
+        TailraceSource::Entity(hydro.tailrace.clone()),
+    )
+    .expect("fit should succeed");
     let planes = &result.planes;
     assert!(!planes.is_empty(), "expected at least one plane");
 
@@ -1449,7 +1470,14 @@ fn fit_fpha_planes_intercepts_are_finite() {
         fitting_window: None,
     };
 
-    let result = fit_fpha_planes(&rows, &hydro, &config, 0.0).expect("fit should succeed");
+    let result = fit_fpha_planes(
+        &rows,
+        &hydro,
+        &config,
+        0.0,
+        TailraceSource::Entity(hydro.tailrace.clone()),
+    )
+    .expect("fit should succeed");
 
     // All intercepts must be finite and the planes must have non-negative intercepts
     // for a physically reasonable geometry where phi > 0 at the fitting origin.
@@ -1498,8 +1526,14 @@ fn fit_fpha_planes_run_of_river_yields_zero_gamma_v_end_to_end() {
         fitting_window: None,
     };
 
-    let result =
-        fit_fpha_planes(&flat_rows, &hydro, &config, 0.0).expect("run-of-river fit should succeed");
+    let result = fit_fpha_planes(
+        &flat_rows,
+        &hydro,
+        &config,
+        0.0,
+        TailraceSource::Entity(hydro.tailrace.clone()),
+    )
+    .expect("run-of-river fit should succeed");
     assert!(
         !result.planes.is_empty(),
         "run-of-river fit must yield >= 1 plane"
@@ -1592,7 +1626,14 @@ fn fit_fpha_planes_linear_function_produces_one_plane() {
         fitting_window: None,
     };
 
-    let result = fit_fpha_planes(&flat_rows, &hydro, &config, 0.0).expect("fit should succeed");
+    let result = fit_fpha_planes(
+        &flat_rows,
+        &hydro,
+        &config,
+        0.0,
+        TailraceSource::Entity(hydro.tailrace.clone()),
+    )
+    .expect("fit should succeed");
 
     // A linear production function produces exactly 1 plane.
     assert_eq!(
@@ -1622,7 +1663,14 @@ fn fit_fpha_planes_propagates_forebay_error_on_insufficient_rows() {
         fitting_window: None,
     };
 
-    let err = fit_fpha_planes(&rows, &hydro, &config, 0.0).unwrap_err();
+    let err = fit_fpha_planes(
+        &rows,
+        &hydro,
+        &config,
+        0.0,
+        TailraceSource::Entity(hydro.tailrace.clone()),
+    )
+    .unwrap_err();
     assert!(
         matches!(err, FphaFittingError::InsufficientPoints { count: 1, .. }),
         "expected InsufficientPoints with count=1, got: {err:?}"
@@ -1697,7 +1745,14 @@ fn fit_fpha_planes_result_alpha_positive_and_intercept_consistent() {
         fitting_window: None,
     };
 
-    let result = fit_fpha_planes(&rows, &hydro, &config, 0.0).expect("fit should succeed");
+    let result = fit_fpha_planes(
+        &rows,
+        &hydro,
+        &config,
+        0.0,
+        TailraceSource::Entity(hydro.tailrace.clone()),
+    )
+    .expect("fit should succeed");
 
     // alpha must be finite and strictly positive.
     assert!(
@@ -1743,7 +1798,7 @@ fn alpha_scaled_planes_are_outer_approximation_and_not_double_scaled() {
     let forebay = ForebayTable::new(&rows, &hydro.name).expect("valid VHA curve");
     let pf = ProductionFunction::new(
         forebay.clone(),
-        hydro.tailrace.as_ref(),
+        TailraceSource::Entity(hydro.tailrace.clone()),
         hydro.hydraulic_losses.as_ref(),
         hydro.efficiency.as_ref(),
         hydro.max_turbined_m3s,
@@ -1759,7 +1814,14 @@ fn alpha_scaled_planes_are_outer_approximation_and_not_double_scaled() {
         "alpha must be finite and positive, got {alpha}"
     );
 
-    let result = fit_fpha_planes(&rows, &hydro, &config, 0.0).expect("fit should succeed");
+    let result = fit_fpha_planes(
+        &rows,
+        &hydro,
+        &config,
+        0.0,
+        TailraceSource::Entity(hydro.tailrace.clone()),
+    )
+    .expect("fit should succeed");
 
     // The α-scaled envelope must stay finite at every (V, Q) grid point
     // (spillage = 0) — FPHA(V,Q) = α·FPHA_0(V,Q) is a valid affine envelope.
@@ -1812,5 +1874,131 @@ fn alpha_scaled_planes_are_outer_approximation_and_not_double_scaled() {
             "fitted gamma_s={} must be <= 0",
             scaled.gamma_s
         );
+    }
+}
+
+// ── Tailrace-source seam ──────────────────────────────────────────────────
+
+/// Regression pin: a `TailraceSource::Entity` production function computes the
+/// EXACT pre-families net head — `h_fore − evaluate_tailrace(model, q + s) −
+/// h_loss`. The `Entity` arm must keep calling `evaluate_tailrace(model, q_out)`
+/// verbatim; any drift here means the inert fallback is no longer inert.
+#[test]
+fn entity_source_net_head_equals_evaluate_tailrace() {
+    let forebay = flat_forebay_400m();
+    let tailrace = TailraceModel::Polynomial {
+        coefficients: vec![5.0, 0.001, -2e-8],
+    };
+    let losses = HydraulicLossesModel::Constant { value_m: 2.0 };
+    let pf = ProductionFunction::new(
+        forebay,
+        TailraceSource::Entity(Some(tailrace.clone())),
+        Some(&losses),
+        Some(&EfficiencyModel::Constant { value: 0.92 }),
+        12_600.0,
+        "EntityPin".to_owned(),
+    );
+
+    // Sweep representative (q, s) pairs; q_out = q + s = Q_jus is what the
+    // tailrace sees, exactly as the secant's s = Q_lat sweep drives it.
+    for &(q, s) in &[
+        (0.0, 0.0),
+        (1500.0, 0.0),
+        (1500.0, 1500.0),
+        (3000.0, 6000.0),
+    ] {
+        let q_out = q + s;
+        let h_fore = 400.0;
+        let h_tail = evaluate_tailrace(&tailrace, q_out);
+        let gross = h_fore - h_tail;
+        let expected = (gross - 2.0).max(0.0);
+        let got = pf.net_head(0.0, q, s);
+        assert_eq!(
+            got.to_bits(),
+            expected.to_bits(),
+            "Entity net head must be bit-identical to the pre-families value at (q={q}, s={s})"
+        );
+    }
+}
+
+/// Build a single-family `TailraceFamilies` whose one quartic segment reproduces
+/// an entity `Polynomial` over `[0, q_sup]`. `coeffs[i]` and the polynomial's
+/// `coefficients[i]` share the `Q^i` Horner convention, so the two evaluators
+/// agree pointwise inside the segment domain.
+fn single_family_matching_polynomial(coeffs: [f64; 5], q_sup: f64) -> TailraceFamilies {
+    let curve_row = cobre_io::extensions::TailraceCurveRow {
+        hydro_id: EntityId::from(1),
+        family_id: 1,
+        href_jus_m: None,
+        segment_id: 1,
+        q_jus_inf_m3s: 0.0,
+        q_jus_sup_m3s: q_sup,
+        a_cf0: coeffs[0],
+        a_cf1: coeffs[1],
+        a_cf2: coeffs[2],
+        a_cf3: coeffs[3],
+        a_cf4: coeffs[4],
+    };
+    TailraceFamilies::from_rows(&[curve_row], "Sobradinho").expect("single family builds")
+}
+
+/// Equivalent tailrace ⇒ equivalent planes: a single-family quartic that
+/// reproduces the entity `Polynomial` over the full sampled `Q_jus` range yields
+/// fitted planes matching the entity-path fit to within 1e-9.
+#[test]
+fn families_single_family_matches_entity_polynomial_planes() {
+    let rows = sobradinho_rows();
+    let hydro = make_sobradinho_hydro();
+    let config = FphaColumnLayout {
+        source: "computed".to_owned(),
+        volume_discretization_points: None,
+        turbine_discretization_points: None,
+        spillage_discretization_points: None,
+        max_planes_per_hydro: None,
+        fitting_window: None,
+    };
+
+    // Entity-path fit (Sobradinho tailrace = Polynomial [0.0, 0.001]).
+    let entity = fit_fpha_planes(
+        &rows,
+        &hydro,
+        &config,
+        0.0,
+        TailraceSource::Entity(hydro.tailrace.clone()),
+    )
+    .expect("entity fit succeeds");
+
+    // Families-path fit with a quartic reproducing the same polynomial. The
+    // segment domain spans far beyond the sampled Q_jus (q <= 3000, s <= 2·MLT
+    // fallback = 2·max_turbined = 6000, so Q_jus <= 9000), so no clamp diverges
+    // from the unbounded polynomial.
+    let families = single_family_matching_polynomial([0.0, 0.001, 0.0, 0.0, 0.0], 100_000.0);
+    let families_fit = fit_fpha_planes(
+        &rows,
+        &hydro,
+        &config,
+        0.0,
+        TailraceSource::Families {
+            families,
+            downstream_level_m: None,
+        },
+    )
+    .expect("families fit succeeds");
+
+    assert_eq!(
+        families_fit.planes.len(),
+        entity.planes.len(),
+        "equivalent tailrace must yield the same plane count"
+    );
+    for (f, e) in families_fit.planes.iter().zip(&entity.planes) {
+        assert!(
+            (f.intercept - e.intercept).abs() < 1e-9,
+            "intercept: families {} vs entity {}",
+            f.intercept,
+            e.intercept
+        );
+        assert!((f.gamma_v - e.gamma_v).abs() < 1e-9, "gamma_v mismatch");
+        assert!((f.gamma_q - e.gamma_q).abs() < 1e-9, "gamma_q mismatch");
+        assert!((f.gamma_s - e.gamma_s).abs() < 1e-9, "gamma_s mismatch");
     }
 }

@@ -229,6 +229,10 @@ pub(crate) fn run_pipeline_with_artifacts(
         hydro_energy_productivity: data.hydro_energy_productivity_rows,
         fpha_hyperplanes: data.fpha_hyperplanes,
         scalar_parameters: data.scalar_parameters,
+        // The full case pipeline does not yet parse tailrace curves into
+        // `ParsedData`; the artifact defaults to empty here. The hydro-model
+        // artifact loader populates it from the manifest flag.
+        tailrace_curves: Vec::new(),
     };
 
     // ── System construction ───────────────────────────────────────────────────

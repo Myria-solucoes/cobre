@@ -242,7 +242,7 @@ mod tests {
     use cobre_io::extensions::HydroGeometryRow;
 
     use super::super::geometry::{FittingBounds, ForebayTable};
-    use super::super::production::ProductionFunction;
+    use super::super::production::{ProductionFunction, TailraceSource};
     use super::{RawPlane, build_cloud, fit_hull_planes};
     use crate::hull::HullError;
 
@@ -286,7 +286,7 @@ mod tests {
         };
         ProductionFunction::new(
             forebay,
-            Some(&tailrace),
+            TailraceSource::Entity(Some(tailrace)),
             Some(&HydraulicLossesModel::Constant { value_m: 2.0 }),
             Some(&EfficiencyModel::Constant { value: 0.92 }),
             3_000.0,
@@ -299,7 +299,14 @@ mod tests {
     fn sloped_production_function() -> ProductionFunction {
         let rows = vec![row(0.0, 380.0), row(30_000.0, 410.0)];
         let forebay = ForebayTable::new(&rows, "Sloped").expect("valid VHA curve");
-        ProductionFunction::new(forebay, None, None, None, 3_000.0, "Sloped".to_owned())
+        ProductionFunction::new(
+            forebay,
+            TailraceSource::Entity(None),
+            None,
+            None,
+            3_000.0,
+            "Sloped".to_owned(),
+        )
     }
 
     /// A constant-head flat-forebay function with no tailrace: GH = c·q,
@@ -307,7 +314,14 @@ mod tests {
     fn flat_production_function() -> ProductionFunction {
         let rows = vec![row(0.0, 400.0), row(30_000.0, 400.0)];
         let forebay = ForebayTable::new(&rows, "Flat").expect("valid VHA curve");
-        ProductionFunction::new(forebay, None, None, None, 3_000.0, "Flat".to_owned())
+        ProductionFunction::new(
+            forebay,
+            TailraceSource::Entity(None),
+            None,
+            None,
+            3_000.0,
+            "Flat".to_owned(),
+        )
     }
 
     /// A run-of-river production function: flat forebay (no storage head gain)
@@ -323,7 +337,7 @@ mod tests {
         };
         ProductionFunction::new(
             forebay,
-            Some(&tailrace),
+            TailraceSource::Entity(Some(tailrace)),
             Some(&HydraulicLossesModel::Constant { value_m: 2.0 }),
             Some(&EfficiencyModel::Constant { value: 0.92 }),
             3_000.0,
