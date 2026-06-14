@@ -35,6 +35,7 @@ pub mod cut;
 pub mod error;
 pub(crate) mod gemm;
 pub mod horizon_mode;
+pub(crate) mod hull;
 pub mod lp;
 pub mod policy;
 pub mod production;

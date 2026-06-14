@@ -602,6 +602,7 @@ name = "cobre-sddp"
 version = "0.8.1"
 dependencies = [
  "arrow",
+ "cc",
  "chrono",
  "cobre-comm",
  "cobre-core",

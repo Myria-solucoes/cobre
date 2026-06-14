@@ -60,6 +60,9 @@ serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 tracing = "0.1"
 
+[build-dependencies]
+cc = "1.2"
+
 [dev-dependencies]
 arrow = { version = "58", default-features = false, features = ["prettyprint"] }
 chrono = { version = "0.4", default-features = false, features = ["std"] }

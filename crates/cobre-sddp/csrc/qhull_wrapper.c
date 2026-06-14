@@ -1,0 +1,209 @@
+/* Thin C shim around the reentrant qhull library (libqhull_r).
+ *
+ * Computes the 3-D convex hull of a flat point array and returns the facet
+ * hyperplanes (unit normal + offset) through a stable, qhull-free C surface.
+ * See qhull_wrapper.h for the full contract (determinism options, error
+ * trapping, hyperplane convention, status codes).
+ *
+ * Every qhull call is confined to this translation unit; the public surface
+ * exposes no qhull types.
+ */
+
+#include "qhull_wrapper.h"
+
+#include <setjmp.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+/* qhull_ra.h pulls in libqhull_r.h (data types, FORALLfacets, QHULL_LIB_CHECK,
+ * qh_zero / qh_new_qhull / qh_freeqhull / qh_memfreeshort) plus the reentrant
+ * internals. The header is included by relative name; the vendored
+ * `libqhull_r/` directory is on the compiler include path (set in build.rs). */
+#include "qhull_ra.h"
+
+/* Dimension of the hull this shim computes. The flat point stride and the
+ * per-facet output width (4 = 3 normal components + 1 offset) are derived from
+ * it; only DIM == 3 is supported by the fixed [nx,ny,nz,d] output layout. */
+#define COBRE_QHULL_DIM 3
+
+/* Per-facet output width: nx, ny, nz, d. */
+#define COBRE_QHULL_PLANE_STRIDE 4
+
+/* Fixed qhull option string. "qhull" is the conventional command
+ * prefix; "Qt" triangulates the hull into simplicial facets so each facet has
+ * one unambiguous unit normal. Joggle ("QJ") is deliberately omitted — no
+ * randomized perturbation. See the header's determinism contract. */
+static const char COBRE_QHULL_FLAGS[] = "qhull Qt";
+
+/* Map a qhull errexit code (qh_ERR*, libqhull_r.h) to a shim status code.
+ * Called only on the error path (exitcode != 0). */
+static int cobre_qhull_map_error(int exitcode) {
+    switch (exitcode) {
+        case qh_ERRmem:
+            /* Insufficient memory inside qhull. */
+            return COBRE_QHULL_ERR_ALLOC;
+        case qh_ERRsingular:
+        case qh_ERRprec:
+        case qh_ERRtopology:
+        case qh_ERRwide:
+            /* Singular / precision / nearly-degenerate input: too few
+             * affinely-independent points to form a full 3-D hull, or a
+             * geometry too thin for qhull to resolve. */
+            return COBRE_QHULL_ERR_DEGENERATE;
+        case qh_ERRinput:
+        case qh_ERRqhull:
+        case qh_ERRother:
+        default:
+            /* Bad input dimensions, internal qhull error, or anything else. */
+            return COBRE_QHULL_ERR_COMPUTE;
+    }
+}
+
+int cobre_qhull_convex_hull_3d(
+    const double* points,
+    int           n_points,
+    double**      out_planes,
+    int*          out_n_facets
+) {
+    /* Establish the failure post-condition up front: on every non-OK return the
+     * out-params are NULL/0 so the caller never frees a dangling buffer. */
+    if (out_planes != NULL) {
+        *out_planes = NULL;
+    }
+    if (out_n_facets != NULL) {
+        *out_n_facets = 0;
+    }
+
+    if (points == NULL || out_planes == NULL || out_n_facets == NULL) {
+        return COBRE_QHULL_ERR_COMPUTE;
+    }
+
+    /* A 3-D hull needs at least DIM+1 = 4 points; reject smaller clouds before
+     * calling qhull so the caller gets the degenerate status without paying for
+     * a guaranteed-failing qhull run. (qhull would also reject these, mapped to
+     * the same code, but this keeps the contract explicit.) */
+    if (n_points < COBRE_QHULL_DIM + 1) {
+        return COBRE_QHULL_ERR_DEGENERATE;
+    }
+
+    /* Verify the linked libqhull_r matches the headers this shim compiled
+     * against (struct sizes / reentrant ABI). On mismatch qh_lib_check aborts;
+     * it is a build-configuration guard, not a runtime input error. */
+    QHULL_LIB_CHECK
+
+    /* Reentrant qhull instance lives on the stack — no global state, so
+     * concurrent hulls on different threads cannot interfere. */
+    qhT qh_qh;
+    qhT* qh = &qh_qh;
+    qh_zero(qh, stderr);
+
+    double* planes = NULL;
+    int     status = COBRE_QHULL_OK;
+
+    /* Install qhull's longjmp error target. A qhull error (degenerate input,
+     * precision failure, OOM, internal error) jumps back here with a non-zero
+     * exitcode instead of aborting the process. */
+    int exitcode = setjmp(qh->errexit);
+    if (!exitcode) {
+        /* errexit is now valid: clear the "no errexit available" guard so
+         * qh_errexit uses our setjmp target. */
+        qh->NOerrexit = False;
+
+        /* ismalloc = False: `points` is borrowed; qhull must not free or take
+         * ownership of it. The cast drops const because qh_new_qhull takes a
+         * non-const coordT*; qhull does not mutate the array when joggle is off
+         * (no "QJ"), so this is sound. NULL outfile suppresses result printing;
+         * stderr receives any diagnostic text. */
+        qh_new_qhull(
+            qh,
+            COBRE_QHULL_DIM,
+            n_points,
+            (coordT*)points,
+            False,
+            (char*)COBRE_QHULL_FLAGS,
+            NULL,
+            stderr
+        );
+
+        /* First pass: count hull facets. With "Qt" every facet is simplicial
+         * and carries a normal; skip any upper-Delaunay facet defensively
+         * (none arise for a plain convex hull, but the guard makes the
+         * iteration robust if options change). */
+        facetT* facet = NULL;
+        int     n_facets = 0;
+        FORALLfacets {
+            if (facet->upperdelaunay) {
+                continue;
+            }
+            n_facets++;
+        }
+
+        if (n_facets == 0) {
+            /* No full-dimensional facets: the cloud is degenerate (coplanar /
+             * collinear). Treat as insufficient input. */
+            status = COBRE_QHULL_ERR_DEGENERATE;
+        } else {
+            /* Allocate the output buffer with the shim's allocator so the Rust
+             * side releases it via cobre_qhull_free (same allocator). */
+            size_t count = (size_t)n_facets * (size_t)COBRE_QHULL_PLANE_STRIDE;
+            planes = (double*)malloc(count * sizeof(double));
+            if (planes == NULL) {
+                status = COBRE_QHULL_ERR_ALLOC;
+            } else {
+                /* Second pass: write [nx, ny, nz, d] per facet. qhull's
+                 * facet->normal is already unit-length and facet->offset is d
+                 * for the hyperplane normal·x + offset = 0, so the values are
+                 * copied through unchanged. */
+                int idx = 0;
+                FORALLfacets {
+                    if (facet->upperdelaunay) {
+                        continue;
+                    }
+                    double* dst = planes + (size_t)idx * COBRE_QHULL_PLANE_STRIDE;
+                    dst[0] = (double)facet->normal[0];
+                    dst[1] = (double)facet->normal[1];
+                    dst[2] = (double)facet->normal[2];
+                    dst[3] = (double)facet->offset;
+                    idx++;
+                }
+
+                *out_planes = planes;
+                *out_n_facets = n_facets;
+            }
+        }
+    } else {
+        /* qhull long-jumped here on error; map its exit code to a status. */
+        status = cobre_qhull_map_error(exitcode);
+    }
+
+    /* Block further longjmp-based error handling while we tear down: any error
+     * during freeing must not jump back into the (now-consumed) setjmp frame. */
+    qh->NOerrexit = True;
+
+    /* Release qhull resources on EVERY path — success and error alike — so no
+     * qhull memory leaks. qh_freeqhull frees the qhull data structures;
+     * qh_memfreeshort frees qhull's short-memory pools. !qh_ALL retains the
+     * memory-arena bookkeeping that qh_memfreeshort then reclaims. */
+    qh_freeqhull(qh, !qh_ALL);
+    int curlong = 0;
+    int totlong = 0;
+    qh_memfreeshort(qh, &curlong, &totlong);
+
+    /* If we hit an error after allocating the output buffer, drop it so we do
+     * not leak and so the out-params stay NULL/0 (set above). With the current
+     * control flow `planes` is only non-NULL on the success path, but free the
+     * buffer defensively if a future edit allocates before a later failure. */
+    if (status != COBRE_QHULL_OK && planes != NULL) {
+        free(planes);
+        *out_planes = NULL;
+        *out_n_facets = 0;
+    }
+
+    return status;
+}
+
+void cobre_qhull_free(double* planes) {
+    /* free(NULL) is a no-op, so no NULL guard is needed; the same allocator
+     * (malloc) that produced the buffer releases it here. */
+    free(planes);
+}

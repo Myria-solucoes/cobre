@@ -326,17 +326,20 @@ a third-party wrapper crate:
 
 **qhull integration (Decision I) — vendoring, placement, build.**
 
-- **Vendoring (resolved): commit a trimmed `libqhull_r/` source tree** (the
-  ~17 `.c` + headers + `COPYING.txt`) under `crates/cobre-sddp/vendor/qhull-r/`,
-  _not_ a git submodule. Rationale: we compile only `libqhull_r` with `cc` (qhull's
-  own CMake is unused); a submodule drags qhull's entire repo (C++ libs, tests,
-  docs, CI) into the **published** cobre tarball — `cargo package` _does_ ship
-  submodule files (verified: cobre-solver ships 1411 vendored files), so a smaller
-  vendored set means a leaner crate. Direct vendoring is also self-contained: no
-  `submodules: recursive`, no init friction for clones / docs.rs / maturin wheels,
-  and the exact bytes we build are pinned in-tree. A `scripts/vendor-qhull.sh`
-  refresh script keeps upgrades mechanical (qhull's C API is stable; releases are
-  rare).
+- **Vendoring (resolved): a git submodule** at `crates/cobre-sddp/vendor/qhull`
+  pinned to tag `2020.2`, mirroring how `cobre-solver` vendors HiGHS/Clp/CoinUtils;
+  `build.rs` `cc`-compiles only `src/libqhull_r/*.c`. Rationale: this matches the
+  repo's single established pattern for vendored C and adds the **fewest new
+  artifact types** (a `.gitmodules` line + a gitlink — no committed third-party
+  `.c/.h` in our tree, no bespoke refresh script, no `.gitignore` negation block).
+  An earlier draft chose a trimmed vendored copy to avoid CMake and
+  `submodules: recursive` friction, but both are **already required by the solver
+  submodules** (cmake is invoked by `cobre-solver/build.rs`; every CI workflow
+  already runs `submodules: recursive`), so those arguments do not differentiate
+  here. The submodule carries qhull's full repo (unused C++ libs/CLI/tests) — the
+  same trade the solvers already accept; `cargo package` ships submodule files, so
+  the published crate stays self-contained. Version bumps are a `git submodule
+update` (no maintained vendor script).
 - **Placement (resolved): inline in `cobre-sddp`.** The vendored source,
   `build.rs` (`cc` build of `libqhull_r`), the `qhull_wrapper.c` shim, the one
   `unsafe extern "C"`, and the safe wrapper live in `cobre-sddp`, reusing its
@@ -490,17 +493,17 @@ LP build:  FPHA row gains the Q_lat term (own spill, upstream defluences,  (WS4)
 
 ## Resolved decisions
 
-| #     | Decision                       | Resolution                                                                                                                                                                                                                   |
-| ----- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **A** | Stage-fit granularity          | Per `SelectionMode` entry (one fit per season / range), mirroring `equivalent_productivity`                                                                                                                                  |
-| **B** | Hull implementation            | Full 3-D hull via `qhull` (NEWAVE parity); deterministic via canonical sort-in/out + no joggle (`QJ`)                                                                                                                        |
-| **C** | Tailrace-family key            | Downstream **level (m)** (`HrefJus`)                                                                                                                                                                                         |
-| **D** | Tailrace-table representation  | Standalone optional parquet, **carrying piecewise-quartic coefficients + validity bounds** (not sampled points)                                                                                                              |
-| **E** | Lateral-flow scope             | **Full CEPEL `Q_jus` composition**, with **smart defaults collapsing to `Q_jus = Q + S`** (zero new input for simple plants); staged LP wiring                                                                               |
-| **F** | Similar-hyperplane reduction   | **Both** methods (angle + distance), CEPEL-parity, mutually exclusive, off by default; deterministic RNG for distance                                                                                                        |
-| **G** | Hydric-balance completion      | **Out of scope / separate track**; consume existing same-stage upstream `Q + S` as `Q_def`                                                                                                                                   |
-| **H** | Variable ρ / ρ-unification dep | **Dropped**; constant `ρ_esp` for v1; variable `ρ(Q,h)` / `f_PerdH(Q)` is a future increment                                                                                                                                 |
-| **I** | qhull integration              | **Hand-rolled FFI at `gemm.rs` scale** (no wrapper crate, no `bindgen`): `cc`-built trimmed vendored `libqhull_r`, **inline in `cobre-sddp`** under its existing `unsafe` override; Qhull license → `THIRD_PARTY_NOTICES.md` |
+| #     | Decision                       | Resolution                                                                                                                                                                                                                                                                                                          |
+| ----- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **A** | Stage-fit granularity          | Per `SelectionMode` entry (one fit per season / range), mirroring `equivalent_productivity`                                                                                                                                                                                                                         |
+| **B** | Hull implementation            | Full 3-D hull via `qhull` (NEWAVE parity); deterministic via canonical sort-in/out + no joggle (`QJ`)                                                                                                                                                                                                               |
+| **C** | Tailrace-family key            | Downstream **level (m)** (`HrefJus`)                                                                                                                                                                                                                                                                                |
+| **D** | Tailrace-table representation  | Standalone optional parquet, **carrying piecewise-quartic coefficients + validity bounds** (not sampled points)                                                                                                                                                                                                     |
+| **E** | Lateral-flow scope             | **Full CEPEL `Q_jus` composition**, with **smart defaults collapsing to `Q_jus = Q + S`** (zero new input for simple plants); staged LP wiring                                                                                                                                                                      |
+| **F** | Similar-hyperplane reduction   | **Both** methods (angle + distance), CEPEL-parity, mutually exclusive, off by default; deterministic RNG for distance                                                                                                                                                                                               |
+| **G** | Hydric-balance completion      | **Out of scope / separate track**; consume existing same-stage upstream `Q + S` as `Q_def`                                                                                                                                                                                                                          |
+| **H** | Variable ρ / ρ-unification dep | **Dropped**; constant `ρ_esp` for v1; variable `ρ(Q,h)` / `f_PerdH(Q)` is a future increment                                                                                                                                                                                                                        |
+| **I** | qhull integration              | **Hand-rolled FFI at `gemm.rs` scale** (no wrapper crate, no `bindgen`): `cc`-built `libqhull_r` from a **git submodule** (`crates/cobre-sddp/vendor/qhull` @ `2020.2`, mirroring the solver submodules), **inline in `cobre-sddp`** under its existing `unsafe` override; Qhull license → `THIRD_PARTY_NOTICES.md` |
 
 ## Dependencies & sequencing
 
