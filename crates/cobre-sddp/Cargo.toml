@@ -95,9 +95,12 @@ harness = false
 name = "dcs_batched_scoring"
 harness = false
 
-# Override unsafe_code to "allow" for this crate because the cut-selection
-# kernel calls `matrixmultiply::dgemm` (a `pub unsafe fn`) via the safe
-# wrapper in `src/gemm.rs`. All other workspace lints are manually
+# Override unsafe_code to "allow" for this crate because it has two unsafe
+# surfaces, each isolated behind a safe wrapper: (1) the cut-selection kernel
+# calls `matrixmultiply::dgemm` (a `pub unsafe fn`) via `src/gemm.rs`, and
+# (2) the convex-hull fitter binds the vendored qhull C library through the
+# `unsafe extern "C"` shim in `src/hull/ffi.rs` and the RAII/`SAFETY`-guarded
+# blocks in `src/hull/mod.rs`. All other workspace lints are manually
 # replicated here since Cargo does not permit combining
 # `lints.workspace = true` with per-lint overrides in the same crate manifest.
 [lints.rust]
