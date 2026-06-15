@@ -1654,12 +1654,28 @@ fn fit_fpha_planes_linear_function_produces_one_plane() {
     )
     .expect("fit should succeed");
 
-    // A linear production function produces exactly 1 plane.
-    assert_eq!(
-        result.planes.len(),
-        1,
-        "linear function must yield 1 plane, got {}",
-        result.planes.len()
+    // A linear production function defines a SINGLE hyperplane. With the flow axis
+    // anchored at q = 0 the cloud is exactly coplanar, so the convex hull may
+    // triangulate it into more than one facet — but every returned plane must
+    // describe the same hyperplane (identical coefficients). A flat forebay also
+    // means no volume dependence, so γ_V is zero.
+    assert!(
+        !result.planes.is_empty(),
+        "fit must produce at least one plane"
+    );
+    let first = &result.planes[0];
+    for p in &result.planes {
+        assert!(
+            (p.intercept - first.intercept).abs() < 1e-6
+                && (p.gamma_v - first.gamma_v).abs() < 1e-9
+                && (p.gamma_q - first.gamma_q).abs() < 1e-9,
+            "all planes of a linear function must be coplanar; got {p:?} vs {first:?}"
+        );
+    }
+    assert!(
+        first.gamma_v.abs() < 1e-9,
+        "a flat forebay must yield zero volume gradient, got {}",
+        first.gamma_v
     );
 }
 
@@ -1879,7 +1895,8 @@ fn alpha_scaled_planes_are_outer_approximation_and_not_double_scaled() {
         hydro.efficiency.as_ref(),
         hydro.max_turbined_m3s,
         hydro.name.clone(),
-    );
+    )
+    .with_max_generation_mw(hydro.max_generation_mw);
     let bounds = resolve_fitting_bounds(&config, &hydro, &forebay).expect("bounds resolve");
 
     let raw_planes = fit_hull_planes(&pf, &bounds).expect("hull fit succeeds");
@@ -1905,8 +1922,7 @@ fn alpha_scaled_planes_are_outer_approximation_and_not_double_scaled() {
     // The α-scaled envelope must stay finite at every (V, Q) grid point
     // (spillage = 0) — FPHA(V,Q) = α·FPHA_0(V,Q) is a valid affine envelope.
     let grid_v = [bounds.v_min, bounds.v_max];
-    let q_min = (pf.max_turbined_m3s * 0.01_f64).max(1.0_f64);
-    let grid_q = [q_min, pf.max_turbined_m3s];
+    let grid_q = [0.0_f64, pf.max_turbined_m3s];
     for &v in &grid_v {
         for &q in &grid_q {
             let envelope = result

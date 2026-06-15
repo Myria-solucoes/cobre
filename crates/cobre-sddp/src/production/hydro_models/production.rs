@@ -2282,16 +2282,19 @@ mod tests {
             planes.len()
         );
 
-        // Coefficient signs must satisfy physical constraints.
+        // Coefficient signs must satisfy physical constraints: non-negative volume
+        // and turbine gradients, non-positive lateral secant. The
+        // installed-capacity ceiling contributes a flat `GH ≤ capacity` plane with
+        // both gradients exactly zero, so the bound is `>= 0`, not strictly `> 0`.
         for (idx, plane) in planes.iter().enumerate() {
             assert!(
-                plane.gamma_v > 0.0,
-                "plane {idx}: gamma_v={} must be > 0",
+                plane.gamma_v >= 0.0,
+                "plane {idx}: gamma_v={} must be >= 0",
                 plane.gamma_v
             );
             assert!(
-                plane.gamma_q > 0.0,
-                "plane {idx}: gamma_q={} must be > 0",
+                plane.gamma_q >= 0.0,
+                "plane {idx}: gamma_q={} must be >= 0",
                 plane.gamma_q
             );
             assert!(

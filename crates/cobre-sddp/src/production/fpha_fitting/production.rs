@@ -88,6 +88,12 @@ pub(crate) struct ProductionFunction {
     /// Maximum turbined flow \[m³/s\], carried for grid construction in the fitting
     /// algorithm.
     pub(crate) max_turbined_m3s: f64,
+    /// Installed-capacity ceiling \[MW\]. [`Self::evaluate_capped`] clips the
+    /// production output to `[0, max_generation_mw]` — a plant cannot generate
+    /// beyond its installed capacity regardless of head or flow. `f64::INFINITY`
+    /// disables the ceiling (the [`Self::new`] default); [`Self::with_max_generation_mw`]
+    /// sets it from the hydro entity.
+    max_generation_mw: f64,
     /// Human-readable plant name for error messages.
     ///
     /// Retained for diagnostic use in integration tests.
@@ -132,8 +138,25 @@ impl ProductionFunction {
             hydraulic_losses: hydraulic_losses.copied(),
             efficiency: efficiency_value,
             max_turbined_m3s,
+            max_generation_mw: f64::INFINITY,
             hydro_name,
         }
+    }
+
+    /// Set the installed-capacity ceiling \[MW\] from the hydro entity.
+    ///
+    /// [`Self::evaluate_capped`] then clips the production to `[0, max_generation_mw]`,
+    /// so the cloud flattens at the ceiling and the hull yields a `GH ≤ max_generation_mw`
+    /// plane. A non-positive value leaves the ceiling disabled (`f64::INFINITY`)
+    /// rather than clamping every point to zero — a guard for a malformed entity;
+    /// a real FPHA plant always carries a positive capacity.
+    pub(crate) fn with_max_generation_mw(mut self, max_generation_mw: f64) -> Self {
+        self.max_generation_mw = if max_generation_mw > 0.0 {
+            max_generation_mw
+        } else {
+            f64::INFINITY
+        };
+        self
     }
 
     /// Net head available at the turbine \[m\].
@@ -181,12 +204,15 @@ impl ProductionFunction {
         h_net.max(0.0)
     }
 
-    /// Power output from the production function \[MW\].
+    /// Power output from the production function \[MW\], uncapped.
     ///
     /// Evaluates `phi(v, q, s) = K * eta * q * h_net(v, q, s)` where
     /// `K = 9.81 / 1000` and `eta` is the turbine efficiency.
     ///
-    /// The result is always non-negative because `q >= 0` and `h_net >= 0`.
+    /// The result is always non-negative because `q >= 0` and `h_net >= 0`. The
+    /// installed-capacity ceiling is NOT applied here — see [`Self::evaluate_capped`].
+    /// The lateral secant fits on this uncapped value so the spillage sensitivity
+    /// is read from the raw head curve and not flattened wherever the ceiling binds.
     ///
     /// # Parameters
     ///
@@ -196,5 +222,17 @@ impl ProductionFunction {
     pub(crate) fn evaluate(&self, v: f64, q: f64, s: f64) -> f64 {
         let h_net = self.net_head(v, q, s);
         K * self.efficiency * q * h_net
+    }
+
+    /// Production output clipped to the installed-capacity ceiling \[MW\]:
+    /// `min(evaluate(v, q, s), max_generation_mw)`.
+    ///
+    /// The production cloud and the α regression evaluate the model through this
+    /// method so the fitted upper envelope never exceeds installed capacity (the
+    /// hull gains a flat `GH ≤ max_generation_mw` facet where the raw output would
+    /// run past it). The lateral secant deliberately uses the uncapped
+    /// [`Self::evaluate`] instead — see that method.
+    pub(crate) fn evaluate_capped(&self, v: f64, q: f64, s: f64) -> f64 {
+        self.evaluate(v, q, s).min(self.max_generation_mw)
     }
 }

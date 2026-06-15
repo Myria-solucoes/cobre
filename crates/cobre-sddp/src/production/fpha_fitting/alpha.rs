@@ -69,14 +69,16 @@ pub(crate) fn compute_alpha_fpha(
 
     // Spillage = 0, lateral = 0: the s axis is intentionally not iterated (see the
     // spillage-only contract above). `RawPlane::evaluate(v, q, 0.0)` and
-    // `pf.evaluate(v, q, 0.0)` both pin spillage to 0.
+    // `pf.evaluate_capped(v, q, 0.0)` both pin spillage to 0. The regression uses
+    // the capped output — the same the cloud hull was built from — so the α scale
+    // balances the envelope against the model it actually approximates.
     for &v in &grid.v_points {
         for &q in &grid.q_points {
             let fpha0 = planes
                 .iter()
                 .map(|p| p.evaluate(v, q, 0.0))
                 .fold(f64::NEG_INFINITY, f64::max);
-            let fph = pf.evaluate(v, q, 0.0);
+            let fph = pf.evaluate_capped(v, q, 0.0);
             sum_fpha0_fph += fpha0 * fph;
             sum_fpha0_sq += fpha0 * fpha0;
         }
@@ -211,15 +213,16 @@ mod tests {
         }];
 
         // Independent reference accumulation over the same (V, Q) grid at s = 0.
+        // The flow axis runs from 0 to max_turbined; the regression uses the capped
+        // output, mirroring `compute_alpha_fpha`.
         let v_pts = [0.0_f64, 30_000.0];
-        let q_min = (pf.max_turbined_m3s * 0.01_f64).max(1.0_f64);
-        let q_pts = [q_min, pf.max_turbined_m3s];
+        let q_pts = [0.0_f64, pf.max_turbined_m3s];
         let mut num = 0.0_f64;
         let mut den = 0.0_f64;
         for &v in &v_pts {
             for &q in &q_pts {
                 let fpha0 = planes[0].evaluate(v, q, 0.0);
-                let fph = pf.evaluate(v, q, 0.0);
+                let fph = pf.evaluate_capped(v, q, 0.0);
                 num += fpha0 * fph;
                 den += fpha0 * fpha0;
             }

@@ -198,7 +198,8 @@ pub(crate) fn fit_fpha_planes(
         hydro.efficiency.as_ref(),
         hydro.max_turbined_m3s,
         hydro.name.clone(),
-    );
+    )
+    .with_max_generation_mw(hydro.max_generation_mw);
 
     let bounds = resolve_fitting_bounds(config, hydro, &forebay)?;
 

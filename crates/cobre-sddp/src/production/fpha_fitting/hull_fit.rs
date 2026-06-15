@@ -68,11 +68,12 @@ const GAMMA_V_EPS: f64 = 1e-6;
 /// Build the `(V, Q, GH)` production cloud at spillage = 0 and lateral = 0.
 ///
 /// Iterates the volume and flow axes from [`build_grid`] (the spillage axis is
-/// ignored — spillage is fixed at 0), evaluates `GH = pf.evaluate(v, q, 0)` at
-/// each grid point, and appends the closing point `(V̄, Q̄, 0)` where `V̄, Q̄`
-/// are the grid axis upper bounds. The closing point sits below the production
-/// surface at zero generation, closing the region under the curve so the upper
-/// hull is bounded (per the FPHA fitting procedure).
+/// ignored — spillage is fixed at 0) and evaluates the capped output
+/// `GH = pf.evaluate_capped(v, q, 0)` at each grid point. The flow axis starts at
+/// `q = 0`, where `GH = 0`, so the cloud already contains a full zero-generation
+/// column: that column anchors the region at the origin and forms its lower
+/// closure. No synthetic closing point is added — the zero-flow column already
+/// bounds the region from below.
 ///
 /// # Contract
 ///
@@ -83,21 +84,16 @@ const GAMMA_V_EPS: f64 = 1e-6;
 fn build_cloud(pf: &ProductionFunction, bounds: &FittingBounds) -> Vec<[f64; 3]> {
     let grid = build_grid(pf, bounds);
 
-    let mut cloud = Vec::with_capacity(grid.v_points.len() * grid.q_points.len() + 1);
+    let mut cloud = Vec::with_capacity(grid.v_points.len() * grid.q_points.len());
     for &v in &grid.v_points {
         for &q in &grid.q_points {
             // Spillage fixed at 0; lateral inflow is not a production-function
-            // argument and is implicitly 0.
-            let gh = pf.evaluate(v, q, 0.0);
+            // argument and is implicitly 0. Capped at installed capacity so the
+            // upper envelope cannot exceed it.
+            let gh = pf.evaluate_capped(v, q, 0.0);
             cloud.push([v, q, gh]);
         }
     }
-
-    // Closing point: maximum storage and flow at zero generation head. `V̄, Q̄`
-    // are the grid upper bounds (last axis points, inclusive endpoints).
-    let v_bar = *grid.v_points.last().unwrap_or(&bounds.v_max);
-    let q_bar = *grid.q_points.last().unwrap_or(&pf.max_turbined_m3s);
-    cloud.push([v_bar, q_bar, 0.0]);
 
     cloud
 }
@@ -415,37 +411,72 @@ mod tests {
     }
 
     #[test]
-    fn cloud_uses_spillage_zero_and_appends_closing_point() {
+    fn cloud_samples_grid_at_zero_spillage_with_zero_flow_floor() {
         let pf = concave_production_function();
         let bounds = test_bounds();
         let cloud = build_cloud(&pf, &bounds);
 
-        // Last point is the closing point (V̄, Q̄, 0).
-        let closing = *cloud.last().expect("cloud is non-empty");
-        assert_eq!(closing[2], 0.0, "closing-point GH must be 0");
-
-        // V̄, Q̄ are the grid axis upper bounds: the volume grid's inclusive upper
-        // endpoint is `bounds.v_max`; the flow grid's inclusive upper endpoint is
-        // `pf.max_turbined_m3s` (see `build_grid`).
+        // The cloud is exactly the (V, Q) grid — one node each, no synthetic
+        // closing point. The zero-flow column provides the lower closure.
         assert_eq!(
-            closing[0], bounds.v_max,
-            "closing-point V must be the grid V upper bound"
-        );
-        assert_eq!(
-            closing[1], pf.max_turbined_m3s,
-            "closing-point Q must be the grid Q upper bound"
+            cloud.len(),
+            bounds.n_volume_points * bounds.n_flow_points,
+            "cloud must be exactly the grid nodes, with no appended point"
         );
 
-        // Every interior cloud point's GH equals pf.evaluate at spillage = 0,
+        // Every cloud point's GH equals the CAPPED production at spillage = 0,
         // confirming spillage is fixed (and lateral is implicitly 0).
-        for point in &cloud[..cloud.len() - 1] {
-            let [v, q, gh] = *point;
+        for &[v, q, gh] in &cloud {
             assert_eq!(
                 gh,
-                pf.evaluate(v, q, 0.0),
-                "cloud GH at (v={v}, q={q}) must be evaluated at spillage = 0"
+                pf.evaluate_capped(v, q, 0.0),
+                "cloud GH at (v={v}, q={q}) must be the capped value at spillage = 0"
             );
         }
+
+        // The flow axis starts at q = 0, where production is zero — the floor that
+        // closes the region from below.
+        let zero_flow: Vec<_> = cloud.iter().filter(|p| p[1] == 0.0).collect();
+        assert_eq!(
+            zero_flow.len(),
+            bounds.n_volume_points,
+            "one zero-flow node per volume point"
+        );
+        for p in zero_flow {
+            assert_eq!(p[2], 0.0, "production is zero at zero flow");
+        }
+    }
+
+    /// The installed-capacity ceiling clips the cloud, and the hull gains a flat
+    /// `GH ≤ capacity` plane (zero gradients) where the raw output runs past it.
+    #[test]
+    fn capacity_ceiling_clips_cloud_and_yields_flat_cap_plane() {
+        let cap = 5_000.0_f64;
+        let pf = concave_production_function().with_max_generation_mw(cap);
+        let bounds = test_bounds();
+
+        // Uncapped output exceeds the ceiling at the top corner; capped equals it.
+        let v_top = bounds.v_max;
+        let q_top = pf.max_turbined_m3s;
+        assert!(
+            pf.evaluate(v_top, q_top, 0.0) > cap,
+            "fixture must exceed the ceiling for this test to bite"
+        );
+        assert_eq!(pf.evaluate_capped(v_top, q_top, 0.0), cap);
+
+        // No cloud point exceeds the ceiling.
+        for &[_, _, gh] in &build_cloud(&pf, &bounds) {
+            assert!(gh <= cap + 1e-9, "cloud GH {gh} must not exceed cap {cap}");
+        }
+
+        // The hull includes a flat cap plane: near-zero gradients, intercept ~ cap.
+        let planes = fit_hull_planes(&pf, &bounds).expect("hull fit succeeds");
+        assert!(
+            planes.iter().any(|p| p.gamma_v.abs() < 1e-6
+                && p.gamma_q.abs() < 1e-6
+                && (p.gamma_0 - cap).abs() < 1.0),
+            "expected a flat GH <= cap plane near {cap}, got {planes:?}"
+        );
     }
 
     #[test]

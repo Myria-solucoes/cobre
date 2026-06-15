@@ -42,9 +42,10 @@ pub(crate) struct GridParams {
 /// ## Axis formulas
 ///
 /// - **Volume**: `n_volume_points` values from `bounds.v_min` to `bounds.v_max`.
-/// - **Flow**: `n_flow_points` values from `q_min` to `pf.max_turbined_m3s`,
-///   where `q_min = max(1.0, pf.max_turbined_m3s * 0.01)`.  The lower bound
-///   avoids `q = 0` where production is degenerate.
+/// - **Flow**: `n_flow_points` values from `0` to `pf.max_turbined_m3s`.
+///   The axis starts at `q = 0`, where production is zero (`GH = 0`): that column
+///   anchors the cloud at the zero-flow origin and forms its lower closure, so
+///   `hull_fit` needs no synthetic closing point.
 ///
 /// Both axes are inclusive at both endpoints. Spillage is not a grid axis: the
 /// cloud and the α regression fix `s = 0`, and the lateral secant sweeps its own
@@ -61,7 +62,7 @@ pub(crate) fn build_grid(pf: &ProductionFunction, bounds: &FittingBounds) -> Gri
     #[allow(clippy::cast_possible_truncation)]
     let v_denom = f64::from((n_v - 1) as u32);
 
-    let q_min = (pf.max_turbined_m3s * 0.01_f64).max(1.0_f64);
+    let q_min = 0.0_f64;
     let q_range = pf.max_turbined_m3s - q_min;
     #[allow(clippy::cast_possible_truncation)]
     let q_denom = f64::from((n_q - 1) as u32);
