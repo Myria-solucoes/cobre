@@ -305,6 +305,7 @@ fn fully_populated_training_metadata() -> TrainingMetadata {
             backward_solve_seconds: Some(456.75),
             parallelism: Some(8),
         },
+        setup: None,
         distribution: fully_populated_distribution(),
     }
 }

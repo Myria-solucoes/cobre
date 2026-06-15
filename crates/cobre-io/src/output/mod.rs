@@ -36,7 +36,7 @@ pub use manifest::{
     DistributionInfo, HostLayout, MetadataBounds, MetadataConfiguration, MetadataConvergence,
     MetadataCost, MetadataIterations, MetadataProblemDimensions, MetadataRowPool,
     MetadataScenarios, MetadataSimulationSolveStats, MetadataTrainingSolveStats, OutputContext,
-    SimulationMetadata, TrainingMetadata, default_bounds, get_hostname, now_iso8601,
+    SetupTimings, SimulationMetadata, TrainingMetadata, default_bounds, get_hostname, now_iso8601,
     read_simulation_metadata, read_training_metadata, write_simulation_metadata,
     write_training_metadata,
 };

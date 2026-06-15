@@ -873,6 +873,7 @@ fn train_simulate_write_cycle() {
             slurm_job_id: None,
             hosts: Vec::new(),
         },
+        setup: None,
     };
     write_results(
         output_dir,

@@ -43,6 +43,22 @@ mod types;
 pub use evaporation::{resolve_evaporation_models, resolve_evaporation_models_from_artifacts};
 pub use production::{resolve_production_models, resolve_production_models_from_artifacts};
 pub use summary::build_hydro_model_summary;
+
+/// Wall-clock split of the two hydro-model fitting steps run by
+/// [`prepare_hydro_models_from_artifacts`].
+///
+/// Production fitting (constant-productivity/FPHA resolution) and evaporation
+/// fitting are timed independently because an operator wants each surfaced on
+/// its own. Populated only when a caller passes a `&mut` borrow to
+/// [`prepare_hydro_models_from_artifacts`]; callers that pass `None` pay no
+/// measurement and the resolver logic is identical in both cases.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HydroFitTimings {
+    /// Wall-clock seconds spent in [`resolve_production_models_from_artifacts`].
+    pub production_fit_seconds: f64,
+    /// Wall-clock seconds spent in [`resolve_evaporation_models_from_artifacts`].
+    pub evaporation_fit_seconds: f64,
+}
 pub use types::{
     EvaporationModel, EvaporationModelSet, EvaporationReferenceSource, EvaporationSource,
     FphaHydroDetail, FphaPlane, HydroModelProvenance, HydroModelSummary, LinearizedEvaporation,
@@ -70,7 +86,7 @@ pub fn prepare_hydro_models(
     case_dir: &Path,
 ) -> Result<PrepareHydroModelsResult, SddpError> {
     let artifacts = load_artifacts_for_hydro_models(case_dir)?;
-    prepare_hydro_models_from_artifacts(system, &artifacts)
+    prepare_hydro_models_from_artifacts(system, &artifacts, None)
 }
 
 /// Variant of [`prepare_hydro_models`] that consumes a pre-parsed
@@ -81,13 +97,19 @@ pub fn prepare_hydro_models(
 /// [`cobre_io::load_case_with_artifacts`]; it avoids the duplicate parsing
 /// and parallel validation paths.
 ///
+/// When `timings` is `Some`, the wall time of each of the two fitting steps is
+/// recorded into the supplied [`HydroFitTimings`]. Passing `None` skips the
+/// measurement; the resolver calls and their results are identical either way.
+///
 /// # Errors
 ///
 /// Same conditions as [`prepare_hydro_models`].
 pub fn prepare_hydro_models_from_artifacts(
     system: &System,
     artifacts: &cobre_io::CaseArtifacts,
+    timings: Option<&mut HydroFitTimings>,
 ) -> Result<PrepareHydroModelsResult, SddpError> {
+    let production_start = std::time::Instant::now();
     let (
         production,
         productivity_override,
@@ -95,8 +117,17 @@ pub fn prepare_hydro_models_from_artifacts(
         fpha_export_rows,
         reference_volumes_hm3,
     ) = resolve_production_models_from_artifacts(system, artifacts)?;
+    let production_fit_seconds = production_start.elapsed().as_secs_f64();
+
+    let evaporation_start = std::time::Instant::now();
     let (evaporation, evaporation_sources, evaporation_reference_sources) =
         resolve_evaporation_models_from_artifacts(system, artifacts)?;
+    let evaporation_fit_seconds = evaporation_start.elapsed().as_secs_f64();
+
+    if let Some(timings) = timings {
+        timings.production_fit_seconds = production_fit_seconds;
+        timings.evaporation_fit_seconds = evaporation_fit_seconds;
+    }
 
     // Group the VHA geometry by plant (sorted by ascending volume, as
     // `ForebayTable::new` expects) so the energy-conversion build can derive ρ_eq

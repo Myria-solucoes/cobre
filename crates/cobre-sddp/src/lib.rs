@@ -234,8 +234,8 @@ pub use stochastic::estimation::{EstimationPath, EstimationReport, estimate_from
 pub use training::forward::SyncResult;
 // ── hydro_models ──────────────────────────────────────────────────────────────
 pub use production::hydro_models::{
-    FphaHydroDetail, HydroModelSummary, PrepareHydroModelsResult, ProductionModelSource,
-    build_hydro_model_summary, prepare_hydro_models,
+    FphaHydroDetail, HydroFitTimings, HydroModelSummary, PrepareHydroModelsResult,
+    ProductionModelSource, build_hydro_model_summary, prepare_hydro_models,
 };
 // ── indexer ───────────────────────────────────────────────────────────────────
 pub use lp::indexer::{EquipmentCounts, FphaColumnLayout, StageIndexer};

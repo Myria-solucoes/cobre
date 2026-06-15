@@ -359,6 +359,7 @@ mod tests {
                 slurm_job_id: None,
                 hosts: Vec::new(),
             },
+            setup: None,
         }
     }
 

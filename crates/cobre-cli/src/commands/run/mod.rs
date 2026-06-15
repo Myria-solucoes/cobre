@@ -126,6 +126,7 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
         root_estimation_path,
         training_enabled,
         policy_mode,
+        setup_timings,
     } = broadcast_and_build_setup(ctx, args)?;
 
     // Pre-training outputs (estimation artifacts, scaling report) run
@@ -137,6 +138,7 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
         root_config.as_ref(),
         root_estimation_report.as_ref(),
         root_estimation_path,
+        setup_timings.as_ref(),
     )?;
 
     // Shared runtime context for metadata output files.
@@ -162,6 +164,10 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
                 started_at: training_started_at,
                 completed_at: training_completed_at,
                 distribution: build_distribution_info(&ctx.topology, ctx.n_threads, mpi_world_size),
+                // Rank-0 setup timings flow into `training/metadata.json` via the
+                // output context. This branch is rank-0-only, so the value is the
+                // `Some(..)` collected during load/broadcast.
+                setup: setup_timings,
             };
             write_training_outputs(&WriteTrainingArgs {
                 output_dir: &ctx.output_dir,

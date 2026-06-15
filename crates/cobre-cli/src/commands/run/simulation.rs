@@ -194,6 +194,8 @@ fn write_sim_outputs_on_root(
         started_at: sim_started_at,
         completed_at: cobre_io::now_iso8601(),
         distribution: build_distribution_info(&ctx.topology, ctx.n_threads, mpi_world_size),
+        // Simulation metadata has no setup section.
+        setup: None,
     };
     write_simulation_outputs(&WriteSimulationArgs {
         output_dir: &ctx.output_dir,

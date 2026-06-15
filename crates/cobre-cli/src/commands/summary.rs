@@ -388,6 +388,7 @@ mod tests {
                 backward_solve_seconds: Some(456.75),
                 parallelism: Some(8),
             },
+            setup: None,
             distribution: DistributionInfo {
                 backend: "local".to_string(),
                 world_size: 1,

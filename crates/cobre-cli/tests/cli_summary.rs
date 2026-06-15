@@ -103,6 +103,7 @@ fn write_training_fixture(dir: &Path) {
             backward_solve_seconds: Some(4.5),
             parallelism: Some(1),
         },
+        setup: None,
         distribution: local_distribution(),
     };
 

@@ -522,6 +522,10 @@ pub(crate) fn write_training_artifacts(
                 ranks: vec![0],
             }],
         },
+        // Python single-process path collects no setup-phase timings, so the
+        // metadata `setup` section is absent (CLI-only). Matches the CLI shape via
+        // `skip_serializing_if = "Option::is_none"`.
+        setup: None,
     };
     cobre_io::write_training_results(output_dir, &training.output, system, config, &training_ctx)
         .map_err(|e| format!("output write error: training results output: {e}"))?;
@@ -697,6 +701,8 @@ pub(crate) fn run_simulation_phase_py(
                 ranks: vec![0],
             }],
         },
+        // Simulation metadata has no setup section.
+        setup: None,
     };
     cobre_io::write_simulation_results(output_dir, &sim_out, &sim_ctx)
         .map_err(|e| format!("output write error: simulation results output: {e}"))?;
@@ -812,7 +818,7 @@ pub(crate) fn build_study_setup(
     let estimation_path = result.estimation_path;
 
     let hydro_models_result =
-        cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts(&system, &artifacts)
+        cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts(&system, &artifacts, None)
             .map_err(|e| format!("hydro model preprocessing error: {e}"))?;
 
     let simulation_source = config

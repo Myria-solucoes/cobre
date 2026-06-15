@@ -110,6 +110,7 @@ pub fn write_training_results(
             final_upper_bound_std: training_output.final_upper_bound_std,
         },
         solve_stats: training_output.training_solve_stats.clone(),
+        setup: ctx.setup.clone(),
         distribution: ctx.distribution.clone(),
     };
     write_training_metadata(&output_dir.join("training/metadata.json"), &metadata)?;
@@ -348,6 +349,7 @@ mod tests {
                 slurm_job_id: None,
                 hosts: Vec::new(),
             },
+            setup: None,
         }
     }
 

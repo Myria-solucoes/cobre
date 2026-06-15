@@ -297,7 +297,7 @@ pub fn validate(
 
     // Phase 10: prepare_hydro_models_from_artifacts — resolves production and
     // evaporation models. Uses the pre-parsed artifacts bundle from phases 1–6.
-    if let Err(ref err) = prepare_hydro_models_from_artifacts(&prepared.system, &artifacts) {
+    if let Err(ref err) = prepare_hydro_models_from_artifacts(&prepared.system, &artifacts, None) {
         let (kind, file_label) = prep_phase_metadata(PrepPhase::HydroModels, err);
         return_error!(kind, format!("{file_label}: {err}"));
     }
