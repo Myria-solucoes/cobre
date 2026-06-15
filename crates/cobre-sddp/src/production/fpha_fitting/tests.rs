@@ -109,17 +109,20 @@ fn insufficient_points_zero_rows() {
     }
 }
 
-// ── AC: insufficient points (1 point) ────────────────────────────────────
+// ── AC: single point is accepted as a constant (run-of-river) forebay ─────
 
 #[test]
-fn insufficient_points_one_row() {
-    let err = ForebayTable::new(&[row(0.0, 386.5)], "Itaipu").unwrap_err();
-    match err {
-        FphaFittingError::InsufficientPoints { count, .. } => {
-            assert_eq!(count, 1);
-        }
-        other => panic!("expected InsufficientPoints, got: {other:?}"),
-    }
+fn single_row_builds_constant_forebay() {
+    // A run-of-river plant has one operating volume → one VHA row → a CONSTANT
+    // forebay. The table must build and return that elevation for ANY query
+    // (below, at, and above the single point), never panicking in `height`.
+    let table =
+        ForebayTable::new(&[row(1500.0, 386.5)], "RunOfRiver").expect("single row is valid");
+    assert_eq!(table.v_min(), 1500.0);
+    assert_eq!(table.v_max(), 1500.0);
+    assert_eq!(table.height(0.0), 386.5);
+    assert_eq!(table.height(1500.0), 386.5);
+    assert_eq!(table.height(9999.0), 386.5);
 }
 
 // ── AC: non-monotonic volume (duplicate) ──────────────────────────────────
@@ -1660,15 +1663,10 @@ fn fit_fpha_planes_linear_function_produces_one_plane() {
     );
 }
 
-/// AC: fit_fpha_planes propagates ForebayTable construction errors (e.g., 1 row).
+/// AC: fit_fpha_planes propagates ForebayTable construction errors (empty rows).
 #[test]
-fn fit_fpha_planes_propagates_forebay_error_on_insufficient_rows() {
-    let rows = vec![HydroGeometryRow {
-        hydro_id: EntityId::from(1),
-        volume_hm3: 0.0,
-        height_m: 386.5,
-        area_km2: 0.0,
-    }];
+fn fit_fpha_planes_propagates_forebay_error_on_empty_rows() {
+    let rows: Vec<HydroGeometryRow> = Vec::new();
     let hydro = make_sobradinho_hydro();
     let config = FphaColumnLayout {
         source: "computed".to_owned(),
@@ -1691,9 +1689,65 @@ fn fit_fpha_planes_propagates_forebay_error_on_insufficient_rows() {
     )
     .unwrap_err();
     assert!(
-        matches!(err, FphaFittingError::InsufficientPoints { count: 1, .. }),
-        "expected InsufficientPoints with count=1, got: {err:?}"
+        matches!(err, FphaFittingError::InsufficientPoints { count: 0, .. }),
+        "expected InsufficientPoints with count=0, got: {err:?}"
     );
+}
+
+/// AC: a run-of-river plant — ONE VHA row at a single operating volume — fits
+/// end-to-end through the single-volume path and yields `γ_V = 0` exactly.
+///
+/// This exercises the full chain a bridge-converted run-of-river plant takes:
+/// 1-row geometry → `ForebayTable` (constant) → `resolve_fitting_bounds` detects
+/// the single-volume case → synthesis spreads two distinct V samples (unclamped
+/// past the degenerate forebay) → hull fit → `γ_V = 0`. No `InsufficientPoints`,
+/// no `DegenerateProductionCloud`.
+#[test]
+fn single_volume_run_of_river_fits_with_zero_gamma_v() {
+    let rows = vec![HydroGeometryRow {
+        hydro_id: EntityId::from(1),
+        volume_hm3: 1500.0,
+        height_m: 386.5,
+        area_km2: 0.0,
+    }];
+    let hydro = make_sobradinho_hydro();
+    let config = FphaColumnLayout {
+        source: "computed".to_owned(),
+        volume_discretization_points: None,
+        turbine_discretization_points: None,
+        spillage_discretization_points: None,
+        max_planes_per_hydro: None,
+        fitting_window: None,
+    };
+
+    let result = fit_fpha_planes(
+        &rows,
+        &hydro,
+        &config,
+        0.0,
+        TailraceSource::Entity(hydro.tailrace.clone()),
+        None,
+        1,
+        0,
+    )
+    .expect("single-volume run-of-river plant must fit");
+
+    assert!(
+        !result.planes.is_empty(),
+        "fit must yield at least one plane"
+    );
+    for plane in &result.planes {
+        assert_eq!(
+            plane.gamma_v, 0.0,
+            "constant forebay must yield exactly zero volume gradient, got {}",
+            plane.gamma_v
+        );
+        assert!(
+            plane.gamma_q >= 0.0,
+            "turbine gradient must stay non-negative, got {}",
+            plane.gamma_q
+        );
+    }
 }
 
 // ── FphaFittingError Display messages for new variants ────────────────────

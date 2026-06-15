@@ -905,19 +905,15 @@ mod tests {
 
     #[test]
     fn fpha_propagates_forebay_table_error() {
-        // 1-row VHA fails ForebayTable::new (InsufficientPoints).
+        // An EMPTY VHA fails ForebayTable::new (InsufficientPoints). A single row
+        // is now valid (constant run-of-river forebay), so only the zero-row case
+        // still propagates as ForebayTableInvalid.
         let hydro = fpha_hydro_for_tests(7);
         let hydros = vec![hydro];
         let cascade = CascadeTopology::build(&hydros);
         let resolver = constant_resolver(&hydros, 0.65, 1);
-        let rows = vec![HydroGeometryRow {
-            hydro_id: hydros[0].id,
-            volume_hm3: 0.0,
-            height_m: 400.0,
-            area_km2: 1.0,
-        }];
         let mut map = HashMap::new();
-        map.insert(hydros[0].id, rows);
+        map.insert(hydros[0].id, Vec::<HydroGeometryRow>::new());
 
         let err = build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &map, None, None)
             .unwrap_err();

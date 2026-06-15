@@ -216,8 +216,22 @@ pub(crate) fn resolve_fitting_bounds(
         // absolute floor `V_SYNTH_ABS` takes over.
         let useful = (hydro.max_storage_hm3 - hydro.min_storage_hm3).max(0.0);
         let half_width = (0.005 * useful).max(V_SYNTH_ABS);
-        let v_lo = (v0 - half_width).clamp(forebay.v_min(), forebay.v_max());
-        let v_hi = (v0 + half_width).clamp(forebay.v_min(), forebay.v_max());
+        // Spread two tangent-in-volume samples around `v0`. When the forebay table
+        // itself spans a range, clamp to it. But when the table is a SINGLE POINT
+        // (`v_min == v_max`, the genuine run-of-river case), clamping to `[v0, v0]`
+        // would collapse `v_lo == v_hi == v0` — a coplanar cloud the hull rejects
+        // as degenerate. `height()` clamps queries internally, so spreading beyond
+        // the degenerate forebay range is safe: both samples evaluate to the same
+        // constant elevation, giving a GH cloud that is flat in V and yields
+        // `γ_V = 0` exactly. Only clamp when the forebay actually spans a range.
+        let (v_lo, v_hi) = if (forebay.v_max() - forebay.v_min()) <= V_EPS {
+            (v0 - half_width, v0 + half_width)
+        } else {
+            (
+                (v0 - half_width).clamp(forebay.v_min(), forebay.v_max()),
+                (v0 + half_width).clamp(forebay.v_min(), forebay.v_max()),
+            )
+        };
 
         if n_flow_points < 2 {
             return Err(FphaFittingError::InsufficientDiscretization {
@@ -334,19 +348,26 @@ impl ForebayTable {
     ///   by ascending `volume_hm3` (as returned by `cobre_io::extensions::parse_hydro_geometry`).
     /// - `hydro_name` — human-readable plant name used in error messages.
     ///
+    /// A single row is accepted: a run-of-river plant has one operating volume
+    /// (`v_min == v_max`), so its VHA curve is one row defining a CONSTANT forebay
+    /// (`height()` returns that row's elevation for any query). Rejecting it here
+    /// would make the single-volume FPHA fit (`resolve_fitting_bounds` →
+    /// `single_volume`) unreachable end-to-end. Only an empty table is an error.
+    ///
     /// # Errors
     ///
     /// | Condition | Error variant |
     /// |-----------|---------------|
-    /// | Fewer than 2 rows | [`FphaFittingError::InsufficientPoints`] |
+    /// | Empty (zero rows) | [`FphaFittingError::InsufficientPoints`] |
     /// | `volume_hm3` not strictly increasing | [`FphaFittingError::NonMonotonicVolume`] |
     /// | `height_m` decreasing | [`FphaFittingError::NonMonotonicHeight`] |
     pub(crate) fn new(
         rows: &[HydroGeometryRow],
         hydro_name: &str,
     ) -> Result<Self, FphaFittingError> {
-        // Validate minimum point count.
-        if rows.len() < 2 {
+        // A single point defines a trivial (constant) forebay — valid for a
+        // run-of-river plant. Only the empty table has no curve to evaluate.
+        if rows.is_empty() {
             return Err(FphaFittingError::InsufficientPoints {
                 hydro_name: hydro_name.to_owned(),
                 count: rows.len(),
@@ -395,14 +416,16 @@ impl ForebayTable {
     /// Minimum volume in the table (hm³).
     #[inline]
     pub(crate) fn v_min(&self) -> f64 {
-        // INVARIANT: `volumes` has at least 2 elements (enforced by `new`).
+        // INVARIANT: `volumes` is non-empty (enforced by `new`). For a single-row
+        // run-of-river table `v_min == v_max == volumes[0]`.
         self.volumes[0]
     }
 
     /// Maximum volume in the table (hm³).
     #[inline]
     pub(crate) fn v_max(&self) -> f64 {
-        // INVARIANT: `volumes` has at least 2 elements (enforced by `new`).
+        // INVARIANT: `volumes` is non-empty (enforced by `new`). For a single-row
+        // run-of-river table `v_max == v_min == volumes[0]`.
         self.volumes[self.volumes.len() - 1]
     }
 
@@ -423,6 +446,13 @@ impl ForebayTable {
     /// // assert!((table.height(1000.0) - 388.25).abs() < 1e-10);
     /// ```
     pub(crate) fn height(&self, volume_hm3: f64) -> f64 {
+        // Single-row (run-of-river) table: a constant forebay with no segment to
+        // interpolate. Returning `heights[0]` directly is REQUIRED — `locate`
+        // computes `n - 2`, which underflows for `n == 1` and then indexes
+        // `volumes[i + 1]` out of bounds.
+        if self.volumes.len() == 1 {
+            return self.heights[0];
+        }
         let v = volume_hm3.clamp(self.v_min(), self.v_max());
         let (i, t) = self.locate(v);
         self.heights[i] + t * (self.heights[i + 1] - self.heights[i])

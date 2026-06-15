@@ -13,11 +13,11 @@
 /// interpolation.
 #[derive(Debug)]
 pub(crate) enum FphaFittingError {
-    /// Fewer than 2 VHA curve points were provided for the named hydro plant.
+    /// No VHA curve points were provided for the named hydro plant.
     ///
-    /// Linear interpolation requires at least 2 breakpoints. A single point
-    /// defines only a trivial (constant) function and cannot represent the
-    /// full volume-height relationship.
+    /// An empty table has no curve to evaluate. A single point IS accepted — it
+    /// defines a constant (run-of-river) forebay; the single-volume FPHA fit then
+    /// yields `γ_V = 0`. Only the zero-row case reaches this variant.
     InsufficientPoints {
         /// Name of the hydro plant whose curve was rejected.
         hydro_name: String,
@@ -210,7 +210,7 @@ impl std::fmt::Display for FphaFittingError {
             Self::InsufficientPoints { hydro_name, count } => write!(
                 f,
                 "hydro '{hydro_name}': VHA curve has {count} point(s); \
-                 at least 2 are required for interpolation"
+                 at least 1 is required (a single point defines a constant forebay)"
             ),
             Self::NonMonotonicVolume {
                 hydro_name,
