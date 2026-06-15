@@ -39,8 +39,13 @@ const CONTIG_EPS: f64 = 1e-6;
 /// elevations agree to within `C0_EPS`, never bit-for-bit (`==`). The two
 /// quartics are fit independently and meet only to calibration precision, so
 /// asserting bit-equality would reject every real family. The owning check is
-/// [`TailraceSegments::from_rows`].
-const C0_EPS: f64 = 1e-6;
+/// [`TailraceSegments::from_rows`]. The bound is `1e-3` m (1 mm): per-segment
+/// polynomial coefficients carry finite precision, so endpoints meet only to
+/// ~1e-4 m in practice, while a genuine data error (a wrong segment) breaks by
+/// metres — `1e-3` accepts the former and still rejects the latter. A tighter
+/// `1e-6` m rejects faithfully-converted real curves; physical tailrace levels
+/// span ~100 m, so a sub-mm break is hydraulically meaningless.
+const C0_EPS: f64 = 1e-3;
 
 /// One degree-4 piece of a family's tailrace curve.
 ///
