@@ -222,6 +222,19 @@ pub(crate) fn run_pipeline_with_artifacts(
     // Move the already-parsed/validated rows out of `ParsedData` before
     // `SystemBuilder::build` consumes the rest. Downstream consumers receive
     // these via [`CaseArtifacts`] instead of re-opening the files from disk.
+    // Tailrace-curve families back the computed-FPHA backwater coupling and the
+    // lateral-flow γ_S secant; the fit reads them via `CaseArtifacts`. Gate the
+    // load on the manifest flag and resolve the same `system/tailrace_curves.parquet`
+    // path the structural layer detected, so a case WITH the file feeds real
+    // families into the fit instead of silently collapsing to the constant
+    // entity tailrace (which zeroes γ_S and emits sub-ULP LP coefficients).
+    let tailrace_curves = if manifest.system_tailrace_curves_parquet {
+        let tailrace_path = path.join("system").join("tailrace_curves.parquet");
+        crate::extensions::load_tailrace_curves(Some(tailrace_path.as_path()))?
+    } else {
+        Vec::new()
+    };
+
     let artifacts = CaseArtifacts {
         file_manifest: manifest,
         hydro_geometry: data.hydro_geometry,
@@ -230,10 +243,7 @@ pub(crate) fn run_pipeline_with_artifacts(
         hydro_energy_productivity: data.hydro_energy_productivity_rows,
         fpha_hyperplanes: data.fpha_hyperplanes,
         scalar_parameters: data.scalar_parameters,
-        // The full case pipeline does not yet parse tailrace curves into
-        // `ParsedData`; the artifact defaults to empty here. The hydro-model
-        // artifact loader populates it from the manifest flag.
-        tailrace_curves: Vec::new(),
+        tailrace_curves,
     };
 
     // ── System construction ───────────────────────────────────────────────────
