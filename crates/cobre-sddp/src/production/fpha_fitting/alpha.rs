@@ -27,9 +27,22 @@ use super::production::ProductionFunction;
 /// Iterates the `(V, Q)` fit grid once, accumulating `Σ FPHA_0·FPH` and
 /// `Σ FPHA_0²`, then returns their ratio.
 ///
+/// # Contract — regress the MIN envelope, the one the LP consumes (Voice 1)
+///
+/// `FPHA_0(V_i,Q_j)` is the pointwise **min** over the raw hull planes, NOT the
+/// max. The LP applies the planes as `g ≤ plane_k` for every plane, so the binding
+/// cap is the minimum over planes — and for a concave production surface the
+/// upper-envelope facets already satisfy `min ≈ φ` (each facet bounds φ from above;
+/// the min is the tightest). Regressing the **max** envelope is the
+/// wrong-but-compiling alternative: for a concave φ the max envelope runs ≈1.5–1.8×φ,
+/// so the least-squares α collapses to ≈0.6 and, applied to every coefficient,
+/// shrinks the LP's min cap to ≈0.6·φ — a systematic ~30–40% under-generation that
+/// vanishes for run-of-river plants (where `min == max`, so the bug is invisible).
+/// Fitting the min envelope yields α ≈ 1 and lands the LP cap on φ.
+///
 /// # Contract — the regression is spillage = 0, lateral = 0 only (Voice 1)
 ///
-/// Both `FPHA_0(V_i,Q_j)` (the pointwise max over the raw hull planes) and
+/// Both `FPHA_0(V_i,Q_j)` (the pointwise min over the raw hull planes) and
 /// `FPH(V_i,Q_j)` (`pf.evaluate(v, q, 0.0)`) are evaluated at **spillage = 0** and
 /// lateral = 0 — there is no spill axis in the regression. The wrong-but-compiling
 /// alternative is to fold the `build_grid` spillage axis into the sum: that pulls
@@ -71,13 +84,15 @@ pub(crate) fn compute_alpha_fpha(
     // spillage-only contract above). `RawPlane::evaluate(v, q, 0.0)` and
     // `pf.evaluate_capped(v, q, 0.0)` both pin spillage to 0. The regression uses
     // the capped output — the same the cloud hull was built from — so the α scale
-    // balances the envelope against the model it actually approximates.
+    // balances the envelope against the model it actually approximates. `fpha0` is
+    // the MIN over planes — the envelope the LP applies (`g ≤ plane_k`) — not the
+    // max (see the min-envelope contract above).
     for &v in &grid.v_points {
         for &q in &grid.q_points {
             let fpha0 = planes
                 .iter()
                 .map(|p| p.evaluate(v, q, 0.0))
-                .fold(f64::NEG_INFINITY, f64::max);
+                .fold(f64::INFINITY, f64::min);
             let fph = pf.evaluate_capped(v, q, 0.0);
             sum_fpha0_fph += fpha0 * fph;
             sum_fpha0_sq += fpha0 * fpha0;

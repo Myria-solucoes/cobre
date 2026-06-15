@@ -1972,6 +1972,85 @@ fn alpha_scaled_planes_are_outer_approximation_and_not_double_scaled() {
     }
 }
 
+/// The fitted FPHA's MIN envelope — the cap the LP actually applies (`g <= plane_k`
+/// for every plane) — must track the exact production φ on a concave reservoir. The
+/// α correction is fit against this min envelope, so it lands within a few percent
+/// of φ. A regression to fitting α against the MAX envelope collapses α to ~0.6 and
+/// drives this min cap to ~0.6·φ — a ~40% under-generation this test catches (the
+/// `upper_envelope_is_outer_approximation` hull test does NOT, since it checks the
+/// max envelope, which stays an upper bound under either α).
+#[test]
+fn fitted_min_envelope_tracks_production_on_concave_reservoir() {
+    let rows = sobradinho_rows();
+    let hydro = make_sobradinho_hydro();
+    let config = FphaColumnLayout {
+        source: "computed".to_owned(),
+        volume_discretization_points: None,
+        turbine_discretization_points: None,
+        spillage_discretization_points: None,
+        max_planes_per_hydro: None,
+        fitting_window: None,
+    };
+    let forebay = ForebayTable::new(&rows, &hydro.name).expect("valid VHA curve");
+    let pf = ProductionFunction::new(
+        forebay.clone(),
+        TailraceSource::Entity(hydro.tailrace.clone()),
+        hydro.hydraulic_losses.as_ref(),
+        hydro.efficiency.as_ref(),
+        hydro.max_turbined_m3s,
+        hydro.name.clone(),
+    )
+    .with_max_generation_mw(hydro.max_generation_mw);
+    let bounds = resolve_fitting_bounds(&config, &hydro, &forebay).expect("bounds resolve");
+
+    let result = fit_fpha_planes(
+        &rows,
+        &hydro,
+        &config,
+        0.0,
+        TailraceSource::Entity(hydro.tailrace.clone()),
+        None,
+        1,
+        0,
+    )
+    .expect("fit should succeed");
+
+    // Sample interior (V, q) points and compare the LP cap (min over planes, at
+    // average storage V̄ = V) against the exact capped production. The band
+    // comfortably brackets the correct ~1.0 ratio while excluding the ~0.6 the
+    // max-envelope bug produces.
+    let q_max = pf.max_turbined_m3s;
+    let mut checked = 0;
+    for &v in &[
+        bounds.v_min,
+        0.5 * (bounds.v_min + bounds.v_max),
+        bounds.v_max,
+    ] {
+        for &q in &[0.4 * q_max, 0.7 * q_max, q_max] {
+            let phi = pf.evaluate_capped(v, q, 0.0);
+            if phi < 1.0 {
+                continue;
+            }
+            let min_env = result
+                .planes
+                .iter()
+                .map(|p| p.intercept + p.gamma_v * v + p.gamma_q * q)
+                .fold(f64::INFINITY, f64::min);
+            let ratio = min_env / phi;
+            assert!(
+                (0.88..=1.15).contains(&ratio),
+                "LP cap (min envelope) {min_env} vs φ {phi} -> ratio {ratio:.3} out of band \
+                 at (v={v}, q={q}); a ratio near 0.6 means α was fit to the max envelope"
+            );
+            checked += 1;
+        }
+    }
+    assert!(
+        checked >= 4,
+        "expected several non-degenerate sample points"
+    );
+}
+
 // ── Tailrace-source seam ──────────────────────────────────────────────────
 
 /// Regression pin: a `TailraceSource::Entity` production function computes the

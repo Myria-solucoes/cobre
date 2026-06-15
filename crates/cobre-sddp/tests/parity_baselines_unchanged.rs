@@ -62,7 +62,7 @@ const EXPECTED_HASHES: &[(&str, &str)] = &[
     ),
     (
         "D07",
-        "f023ce4da732b8a97a1ba8762462ba8a0192ad1232e931856937c7ea63358d2e",
+        "8181b12c2e0d527cf246cb77dfab169b4c39e9875c7adf3d43e0ebafa7b0cb5a",
     ),
     (
         "D08",
@@ -102,7 +102,7 @@ const EXPECTED_HASHES: &[(&str, &str)] = &[
     // *declared* path end-to-end under both backends.
     (
         "D31",
-        "7daceecf4ac73af145e0e8672c194c11ade71b8379de5e10743685b68ca6618c",
+        "29ef7566025ab1938b2d66bfbc2b4139c258ff940d0ed79cce57aedc51bd4086",
     ),
 ];
 
