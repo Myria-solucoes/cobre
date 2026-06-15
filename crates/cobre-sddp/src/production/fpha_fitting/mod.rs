@@ -19,9 +19,12 @@
 //!   Also owns `RawPlane`, the four-coefficient carrier the whole pipeline threads.
 //! - `grid` — the single authoritative owner of the uniform grid formula
 //!   (`GridParams` + `build_grid`), shared by the hull cloud, the α regression,
-//!   and the secant's representative-point scan.
+//!   the deviation diagnostic, and the secant's representative-point scan.
 //! - `alpha` — `compute_alpha_fpha` + `scale_plane_affine`, the least-squares
 //!   `α_FPHA` correction and the whole-affine scaling it drives.
+//! - `deviation` — `compute_fit_deviation` + `FphaFitDeviation`, the fit-quality
+//!   measure of the final plane set against the exact production function (the
+//!   replacement for the retired `kappa` shrink).
 //! - `secant` — `fit_gamma_s_for_planes`, the per-plane lateral-flow `γ_S` secant.
 //! - `tailrace` — `TailraceFamilies` + `build_tailrace_families_map`, the exact
 //!   piecewise-quartic backwater-coupled tailrace evaluation.
@@ -34,13 +37,14 @@
 //! The orchestration entry point `fit_fpha_planes` and its result `FphaFitResult`
 //! live here in `mod`, co-located with the re-export surface.
 //!
-//! Six `pub(crate)` symbols form the `crate::fpha_fitting::Symbol` surface that
-//! resolves verbatim for every cross-cluster consumer: four are re-exported from
-//! submodules (`FphaFittingError`, `ForebayTable`, `evaluate_losses`,
-//! `evaluate_tailrace`) and two are defined here in `mod` (`FphaFitResult`,
-//! `fit_fpha_planes`). All six are `pub(crate)`, so this doc names them with
-//! backtick spans rather than intra-doc links (a `pub(crate)` module linking to
-//! `pub(crate)` items would otherwise risk `rustdoc::private_intra_doc_links`).
+//! The `pub(crate)` symbols this module re-exports from its submodules
+//! (`FphaFittingError`, `ForebayTable`, `evaluate_losses`, `evaluate_tailrace`,
+//! `TailraceSource`, `TailraceFamilies`, `build_tailrace_families_map`,
+//! `FphaFitDeviation`) plus the two defined here in `mod` (`FphaFitResult`,
+//! `fit_fpha_planes`) form the `crate::fpha_fitting::Symbol` surface that resolves
+//! verbatim for every cross-cluster consumer. This doc names them with backtick
+//! spans rather than intra-doc links: a `pub(crate)` module linking to
+//! `pub(crate)` items would otherwise risk `rustdoc::private_intra_doc_links`.
 
 use cobre_core::Hydro;
 use cobre_io::extensions::{FphaColumnLayout, HydroGeometryRow};
@@ -48,6 +52,7 @@ use cobre_io::extensions::{FphaColumnLayout, HydroGeometryRow};
 use crate::hydro_models::FphaPlane;
 
 mod alpha;
+mod deviation;
 mod error;
 mod geometry;
 mod grid;
@@ -73,6 +78,7 @@ mod tests;
 use cobre_io::extensions::PlaneReductionConfig;
 
 use alpha::{compute_alpha_fpha, scale_plane_affine};
+use deviation::compute_fit_deviation;
 use geometry::resolve_fitting_bounds;
 use hull_fit::{RawPlane, fit_hull_planes};
 use production::ProductionFunction;
@@ -80,6 +86,7 @@ use reduction::reduce_planes;
 use secant::fit_gamma_s_for_planes;
 use selection::validate_fitted_planes;
 
+pub(crate) use deviation::FphaFitDeviation;
 pub(crate) use error::FphaFittingError;
 pub(crate) use geometry::{ForebayTable, evaluate_losses, evaluate_tailrace};
 pub(crate) use production::TailraceSource;
@@ -119,6 +126,14 @@ pub(crate) struct FphaFitResult {
     // unit tests; the allow re-fires when a non-test reader is removed.
     #[allow(dead_code)]
     pub alpha: f64,
+    /// Fit-quality deviation of the emitted plane set from the exact production
+    /// function on the spill = 0 grid.
+    ///
+    /// Measured on the FINAL (post-reduction) planes — the set the LP applies.
+    /// The resolver warns when [`FphaFitDeviation::exceeds_warn_threshold`]; this
+    /// is the operator-facing fit-quality signal that replaces the retired
+    /// low-`kappa` warning.
+    pub deviation: FphaFitDeviation,
 }
 
 /// Fit FPHA hyperplanes for a single hydro plant from its VHA curve geometry.
@@ -259,6 +274,12 @@ pub(crate) fn fit_fpha_planes(
         None => scaled,
     };
 
+    // Fit-quality diagnostic on the FINAL emitted set. Measured on `reduced`, not
+    // `scaled`, so it reflects the planes the LP actually applies after any
+    // similar-hyperplane merge — measuring the pre-reduction set would understate
+    // the gap a merge introduces.
+    let deviation = compute_fit_deviation(&reduced, &pf, &bounds);
+
     // Conversion: each plane is the α-scaled whole affine function α·FPHA_0 with
     // the fitted γ_S. The intercept AND the γ_v / γ_q gradients carry the α factor.
     let planes = reduced
@@ -271,5 +292,9 @@ pub(crate) fn fit_fpha_planes(
         })
         .collect();
 
-    Ok(FphaFitResult { planes, alpha })
+    Ok(FphaFitResult {
+        planes,
+        alpha,
+        deviation,
+    })
 }

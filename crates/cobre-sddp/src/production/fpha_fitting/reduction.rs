@@ -1,11 +1,15 @@
 //! Similar-hyperplane reduction of the fitted FPHA plane set.
 //!
-//! Collapses near-parallel consecutive planes into their mean hyperplane to
-//! shrink the LP, walking the canonical post-dedup plane order and merging by
-//! the angle between plane normals. The reduction is a pure function of the
-//! input slice and its order: no RNG, no re-sort, no allocation beyond the
-//! output `Vec`. The single public entry point [`reduce_planes`] dispatches on
-//! [`PlaneReductionConfig`] (enum dispatch, no trait object).
+//! Collapses near-parallel / near-coincident consecutive planes into their mean
+//! hyperplane to shrink the LP, walking the canonical post-dedup plane order.
+//! The single public entry point [`reduce_planes`] dispatches on
+//! [`PlaneReductionConfig`] (enum dispatch, no trait object): the `Angle` arm
+//! merges by the angle between plane normals and is RNG-free; the `Distance` arm
+//! merges by a sampled mean-squared distance drawn from a deterministically
+//! seeded PRNG (never wall-clock). Both arms are pure functions of the input
+//! slice and its order — identical input ordering and rank count yield
+//! bit-identical output — with no re-sort and no allocation beyond the output
+//! `Vec`.
 //!
 //! # Origin-plane invariant (Voice 1)
 //!

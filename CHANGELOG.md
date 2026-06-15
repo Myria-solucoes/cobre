@@ -9,7 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`system/tailrace_curves.parquet` (optional).** Exact piecewise-quartic
+  tailrace curves with backwater (`HrefJus`) families keyed by the downstream
+  reservoir's reference level. When a plant has rows here, the computed-FPHA fit
+  evaluates its tailrace from these quartics — selecting the segment by
+  downstream flow and interpolating between families at the downstream plant's
+  stage reference level — instead of the entity-level tailrace model. Plants
+  without a row keep the existing polynomial / piecewise-linear tailrace, so the
+  input is inert for cases that omit it.
+
+- **`reference_volume` in `system/hydro_production_models.json`.** A per-model
+  reference operating volume (sibling of `fpha_config`), declared as either
+  `volume_hm3` (absolute) or `percentile` (fraction of useful volume) —
+  mutually exclusive, set exactly one. This is now the single source of truth
+  for the reference volume the computed-FPHA fit and the equivalent-productivity
+  derivation consume.
+
+- **`fpha_plane_reduction` in the production-model config (optional).**
+  Similar-hyperplane simplification that merges near-parallel / near-coincident
+  FPHA planes into their mean hyperplane to shrink the LP. Two mutually-exclusive
+  methods: `{ "method": "angle", "tolerance_deg": <0–90> }` and
+  `{ "method": "distance", "tolerance_pct": <f64>, "n_samples": <u32> }`. Off by
+  default; the origin plane (zero generation at zero turbining) is never merged.
+  The distance method's sampling uses a deterministically seeded PRNG, so results
+  are bit-identical across input ordering and rank count.
+
+- **Computed-FPHA fit-quality warning.** When a fitted plane set deviates from
+  the exact production function by more than 5 % (relative mean absolute
+  deviation over the spill = 0 grid), the run logs a warning naming the plant and
+  stage — typically a strongly non-concave production surface no single `α`
+  correction can track. This is the operator-facing replacement for the retired
+  low-`kappa` warning. Warnings are emitted in canonical plant/stage order.
+
 ### Changed
+
+- **Computed FPHA is now fit by a 3-D convex hull.** The computed path evaluates
+  the production cloud on a `(volume, turbined)` grid at spillage = 0, takes its
+  3-D convex hull, applies a least-squares `α` correction, and fits a per-plane
+  lateral-flow secant — fully replacing the previous tangent-plane sampling,
+  greedy plane selection, and `kappa` shrink. Fits are now resolved **per stage**
+  (one per season / stage range), where they were previously stage-independent.
+  Run-of-river (single fitting volume) plants, which previously failed to fit,
+  are now supported. Computed-FPHA deterministic baselines were re-blessed to the
+  new coefficients.
+
+- **New vendored dependency: `qhull`.** The reentrant `libqhull_r` is statically
+  linked into `cobre-sddp` (git submodule pinned to tag `2020.2`); see
+  `THIRD_PARTY_NOTICES.md`. The hull input and output are canonically sorted, so
+  hyperplanes stay bit-identical regardless of input ordering and MPI rank count.
 
 - **BREAKING — `training.cut_selection` restructured.** Method-specific
   parameters now live inside a tagged `selection` object instead of a flat bag
@@ -39,6 +88,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `basis_activity_window` are removed entirely. Existing configs that set any
   removed or renamed key must be migrated to the `selection` block; an unmigrated
   flat config now fails to load with a clear deserialize error.
+
+- **Computed-FPHA `kappa` shrink and low-kappa warnings.** The computed path no
+  longer derives a `kappa` correction factor or emits low-kappa warnings (the
+  CLI display is gone): the least-squares `α` correction replaces the shrink
+  factor, and the fit-quality deviation warning (above) replaces the low-kappa
+  warning. The `kappa` column in the precomputed `fpha_hyperplanes.parquet` input
+  is retained for back-compatibility and defaults to `1.0`.
+
+- **`reference_volume_hm3` input column.** No longer read from
+  `system/hydro_energy_productivity.parquet` (a stale column is ignored with a
+  warning); declare the reference volume via the production-model
+  `reference_volume` field instead.
 
 ## [0.8.1] - 2026-06-13
 
