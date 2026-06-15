@@ -42,6 +42,17 @@ use super::production::ProductionFunction;
 /// and every run regardless of input ordering.
 const N_QLAT_SAMPLES: usize = 9;
 
+/// Magnitude below which a fitted `γ_S` secant slope is snapped to exactly 0.
+///
+/// A flat tailrace produces a physically-zero secant, but the OLS fit leaves
+/// floating-point residuals of either sign. Slopes with `|γ_S| < GAMMA_S_SNAP_EPS`
+/// are numerical zero and MUST be emitted as exactly `0.0`: a surviving near-zero
+/// structural coefficient in the spillage column otherwise wrecks LP column
+/// scaling. The bound sits well below the smallest physically-meaningful spillage
+/// sensitivity (~`1e-6` MW/(m³/s)), so no real coefficient is snapped, and at/above
+/// the `validate_fitted_planes` sign tolerance so every snapped value is sign-valid.
+const GAMMA_S_SNAP_EPS: f64 = 1e-10;
+
 /// Resolve the lateral-flow sample upper bound `S_max` for the secant fit.
 ///
 /// `S_max = 2·MLT` when the long-term mean inflow `MLT > 0`, else
@@ -176,8 +187,21 @@ fn fit_gamma_s(pf: &ProductionFunction, v_rep: f64, q_rep: f64, s_max: f64) -> f
     }
 
     let slope = cov / var_x;
-    // Clamp tiny positive round-off to 0 to uphold the γ_S ≤ 0 sign contract.
-    slope.min(0.0)
+    // Snap near-zero round-off to exactly 0. A flat tailrace region yields a
+    // physically-zero secant, but OLS leaves sub-`GAMMA_S_SNAP_EPS` noise of
+    // EITHER sign; `slope.min(0.0)` alone kills only positive noise, letting a
+    // tiny NEGATIVE residual (e.g. -3e-17) survive into the spillage column.
+    // That near-zero structural coefficient, paired with the O(1) water-balance
+    // coefficient on the same column, drives cobre's geometric-mean column scaler
+    // to an extreme factor and the scaled LP is rejected by the solver. Snapping
+    // both signs keeps every emitted `γ_S` either a real (≤ -GAMMA_S_SNAP_EPS)
+    // slope or exactly 0. The threshold sits far below the smallest physical
+    // spillage sensitivity (~1e-6 MW/(m³/s)), so no real coefficient is snapped.
+    if slope > -GAMMA_S_SNAP_EPS {
+        0.0
+    } else {
+        slope
+    }
 }
 
 /// Fit `γ_S` for every plane in place, using the smart default `Q_lat = S`.
