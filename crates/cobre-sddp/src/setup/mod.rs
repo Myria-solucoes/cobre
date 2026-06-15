@@ -594,7 +594,11 @@ fn build_energy_and_templates(
         n_stages_pre,
         system.cascade(),
         &reference_volume_fractions,
-        &std::collections::HashMap::<cobre_core::EntityId, Vec<cobre_io::HydroGeometryRow>>::new(),
+        // VHA geometry feeds the FPHA ρ_eq derivation (VHA + ρ_esp) for plants with
+        // no parquet override; the override still wins when present. Carried on the
+        // per-rank `PrepareHydroModelsResult` (never broadcast), so every rank sees
+        // the same map.
+        &hydro_models.vha_geometry_by_hydro,
         Some(&hydro_models.productivity_override),
         Some(&hydro_models.production),
     )

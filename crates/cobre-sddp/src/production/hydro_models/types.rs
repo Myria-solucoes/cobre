@@ -16,6 +16,8 @@
 //! hyperplane approximation is an SDDP concept). They must not be placed in
 //! `cobre-core`.
 
+use std::collections::HashMap;
+
 use cobre_core::{EntityId, System};
 use serde::{Deserialize, Serialize};
 
@@ -390,6 +392,16 @@ pub struct PrepareHydroModelsResult {
     /// study-stage index. Built deterministically in plant-then-stage canonical
     /// order, so it is declaration-order invariant.
     pub reference_volumes_hm3: Vec<(EntityId, usize, f64)>,
+    /// Per-hydro VHA geometry rows (volume → forebay height), grouped by hydro id
+    /// and sorted by ascending volume.
+    ///
+    /// Carried so the energy-conversion build can derive `ρ_eq` from VHA geometry +
+    /// `ρ_esp` for an FPHA plant that has no parquet `equivalent_productivity`
+    /// override — making that override genuinely optional. The parquet value still
+    /// takes priority when present; this is only the fallback source. Empty when
+    /// the case ships no `hydro_geometry`, in which case the derivation never fires
+    /// and the override remains required for FPHA plants.
+    pub vha_geometry_by_hydro: HashMap<EntityId, Vec<cobre_io::HydroGeometryRow>>,
 }
 
 impl PrepareHydroModelsResult {
@@ -478,6 +490,9 @@ impl PrepareHydroModelsResult {
             },
             fpha_export_rows: Vec::new(),
             reference_volumes_hm3,
+            // This factory models a system with no FPHA, so no plant consults the
+            // VHA-geometry ρ_eq derivation; an empty map is correct.
+            vha_geometry_by_hydro: HashMap::new(),
         }
     }
 }
@@ -663,6 +678,7 @@ mod tests {
             provenance: prov,
             fpha_export_rows: Vec::new(),
             reference_volumes_hm3: Vec::new(),
+            vha_geometry_by_hydro: std::collections::HashMap::new(),
         };
         let _ = format!("{result:?}");
     }

@@ -98,6 +98,24 @@ pub fn prepare_hydro_models_from_artifacts(
     let (evaporation, evaporation_sources, evaporation_reference_sources) =
         resolve_evaporation_models_from_artifacts(system, artifacts)?;
 
+    // Group the VHA geometry by plant (sorted by ascending volume, as
+    // `ForebayTable::new` expects) so the energy-conversion build can derive ρ_eq
+    // from VHA + ρ_esp for any FPHA plant lacking a parquet override. Cloned out
+    // of `artifacts`, which the caller drops once preprocessing returns.
+    let mut vha_geometry_by_hydro: std::collections::HashMap<
+        cobre_core::EntityId,
+        Vec<cobre_io::HydroGeometryRow>,
+    > = std::collections::HashMap::new();
+    for row in &artifacts.hydro_geometry {
+        vha_geometry_by_hydro
+            .entry(row.hydro_id)
+            .or_default()
+            .push(row.clone());
+    }
+    for rows in vha_geometry_by_hydro.values_mut() {
+        rows.sort_by(|a, b| a.volume_hm3.total_cmp(&b.volume_hm3));
+    }
+
     Ok(PrepareHydroModelsResult {
         production,
         productivity_override,
@@ -109,6 +127,7 @@ pub fn prepare_hydro_models_from_artifacts(
         },
         fpha_export_rows,
         reference_volumes_hm3,
+        vha_geometry_by_hydro,
     })
 }
 
@@ -222,6 +241,37 @@ mod tests {
             result_rank0.fpha_export_rows, result_rank1.fpha_export_rows,
             "fpha_export_rows must be bit-identical across ranks (deterministic preprocessing)"
         );
+    }
+
+    /// `prepare_hydro_models` carries the per-hydro VHA geometry on the result,
+    /// grouped by plant and sorted by ascending volume, so the energy-conversion
+    /// build can derive ρ_eq from VHA + ρ_esp for an FPHA plant with no parquet
+    /// override. A computed-FPHA case ships geometry, so the map must be populated.
+    #[test]
+    fn prepare_hydro_models_carries_sorted_vha_geometry() {
+        let case_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("cobre-sddp parent dir must exist")
+            .parent()
+            .expect("crates parent dir must exist")
+            .join("examples/deterministic/d07-fpha-computed");
+
+        let system =
+            cobre_io::load_case(&case_dir).expect("d07-fpha-computed must load successfully");
+        let result = super::prepare_hydro_models(&system, &case_dir)
+            .expect("prepare_hydro_models must succeed");
+
+        assert!(
+            !result.vha_geometry_by_hydro.is_empty(),
+            "a computed-FPHA case ships VHA geometry; the map must be populated"
+        );
+        for rows in result.vha_geometry_by_hydro.values() {
+            assert!(!rows.is_empty(), "no plant entry may be empty");
+            assert!(
+                rows.windows(2).all(|w| w[0].volume_hm3 <= w[1].volume_hm3),
+                "each plant's VHA rows must be sorted by ascending volume"
+            );
+        }
     }
 
     // ── thread-count determinism gate ─────────────────────────────────────────
