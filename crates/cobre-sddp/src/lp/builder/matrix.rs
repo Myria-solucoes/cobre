@@ -838,6 +838,12 @@ pub(super) fn fill_stage_rows(
     // The v_in contribution is encoded in the matrix entry on the v_in column,
     // so the static upper bound only needs the intercept term.
     let n_blks = layout.n_blks;
+    // Per-hydro FPHA row block start. The cumulative prefix sum over preceding
+    // FPHA hydros' (n_blks * planes) is REQUIRED: FPHA hydros carry DIFFERENT
+    // plane counts, so `local_idx * n_blks * n_planes` (this hydro's count as the
+    // stride) overlaps a later, fewer-plane hydro onto an earlier hydro's rows.
+    // Matches the indexer's `FphaRowRange::start` ordering exactly.
+    let mut fpha_block_start = layout.row_fpha_start;
     for (local_idx, &h_idx) in layout.fpha_hydro_indices.iter().enumerate() {
         if let ResolvedProductionModel::Fpha { planes, .. } =
             ctx.production_models.model(h_idx, stage_idx)
@@ -849,14 +855,12 @@ pub(super) fn fill_stage_rows(
             );
             for blk in 0..n_blks {
                 for (p_idx, plane) in planes.iter().enumerate() {
-                    let row = layout.row_fpha_start
-                        + local_idx * n_blks * n_planes
-                        + blk * n_planes
-                        + p_idx;
+                    let row = fpha_block_start + blk * n_planes + p_idx;
                     row_lower[row] = f64::NEG_INFINITY;
                     row_upper[row] = plane.intercept;
                 }
             }
+            fpha_block_start += n_blks * n_planes;
         }
     }
 
@@ -1372,6 +1376,11 @@ pub(super) fn fill_fpha_entries(
     let n_blks = layout.n_blks;
     let col_storage_in_start = layout.col_storage_in_start;
 
+    // Per-hydro FPHA row block start; cumulative prefix sum over preceding FPHA
+    // hydros' (n_blks * planes). REQUIRED because plane counts vary per hydro —
+    // see `fill_fpha_row_bounds` and the indexer's `FphaRowRange::start`. Mirrors
+    // the bounds fill exactly so coefficients and bounds land on the same rows.
+    let mut fpha_block_start = layout.row_fpha_start;
     for (local_idx, &h_idx) in layout.fpha_hydro_indices.iter().enumerate() {
         let model = ctx.production_models.model(h_idx, stage_idx);
         let planes = match model {
@@ -1396,8 +1405,7 @@ pub(super) fn fill_fpha_entries(
             let col_g = layout.col_generation_start + local_idx * n_blks + blk;
 
             for (p_idx, plane) in planes.iter().enumerate() {
-                let row =
-                    layout.row_fpha_start + local_idx * n_blks * n_planes + blk * n_planes + p_idx;
+                let row = fpha_block_start + blk * n_planes + p_idx;
 
                 // g_{h,k} column: +1.0
                 col_entries[col_g].push((row, 1.0));
@@ -1411,6 +1419,7 @@ pub(super) fn fill_fpha_entries(
                 col_entries[col_s].push((row, -plane.gamma_s));
             }
         }
+        fpha_block_start += n_blks * n_planes;
     }
 }
 
