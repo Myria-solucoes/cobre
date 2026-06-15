@@ -43,7 +43,7 @@ pub(crate) struct GridParams {
 ///
 /// - **Volume**: `n_volume_points` values from `bounds.v_min` to `bounds.v_max`.
 /// - **Flow**: `n_flow_points` values from `0` to `pf.max_turbined_m3s`.
-///   The axis starts at `q = 0`, where production is zero (`GH = 0`): that column
+///   The axis starts at `q = 0`, where production is zero (`generation = 0`): that column
 ///   anchors the cloud at the zero-flow origin and forms its lower closure, so
 ///   `hull_fit` needs no synthetic closing point.
 ///

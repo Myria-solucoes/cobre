@@ -222,7 +222,7 @@ pub(crate) fn resolve_fitting_bounds(
         // would collapse `v_lo == v_hi == v0` — a coplanar cloud the hull rejects
         // as degenerate. `height()` clamps queries internally, so spreading beyond
         // the degenerate forebay range is safe: both samples evaluate to the same
-        // constant elevation, giving a GH cloud that is flat in V and yields
+        // constant elevation, giving a generation cloud that is flat in V and yields
         // `γ_V = 0` exactly. Only clamp when the forebay actually spans a range.
         let (v_lo, v_hi) = if (forebay.v_max() - forebay.v_min()) <= V_EPS {
             (v0 - half_width, v0 + half_width)

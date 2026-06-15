@@ -175,7 +175,7 @@ pub struct StudySetup {
     /// Holds `ρ_eq` (equivalent productivity), `V_ref`, `Q_ref`, and `ρ_acum`
     /// (accumulated cascade productivity). Built once at setup time from the
     /// system's hydros, cascade topology, and reference-volume resolver.
-    /// Consumed by the energy-balance LP constraints and ENA/EARM extraction.
+    /// Consumed by the energy-balance LP constraints and inflow-energy / stored-energy extraction.
     pub(crate) energy_conversion: EnergyConversionSet,
 
     /// `V_min` (`min_storage_hm3`) per hydro, in declaration order.

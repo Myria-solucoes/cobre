@@ -4,7 +4,7 @@
 //! The case `d31-backwater-reference-volume` wires an upstream computed-FPHA
 //! plant U (`hydro_id = 0`) discharging into a downstream plant D
 //! (`hydro_id = 1`). U's tailrace carries two backwater families keyed at
-//! distinct downstream levels (`href_jus_m`), so the resolved downstream
+//! distinct downstream levels (`downstream_reference_level_m`), so the resolved downstream
 //! level — D's forebay surface evaluated at D's reference operating volume —
 //! moves the interpolated tailrace elevation and therefore U's fitted FPHA
 //! planes.

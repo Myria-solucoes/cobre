@@ -332,7 +332,7 @@ fn write_energy_productivity_override(
 ///
 /// Analytical thermal cost is `23_635_000 / 9 ≈ 2_626_111.11 $`. With
 /// `turbined_cost = 0.01 $/MWh` applied to every hydro's turbine column
-/// (matches NEWAVE, see `lp_builder/matrix.rs::fill_turbine_columns`), the
+/// (see `lp_builder/matrix.rs::fill_turbine_columns`), the
 /// deterministic LB adds a fixed regularization contribution of
 /// `5_785 / 9 ≈ 642.78 $` (= 0.01 · 730 · (25_000/657 + 50) summed across the
 /// two stages' turbined flows). Total = `23_640_785 / 9 ≈ 2_626_753.89 $`.
@@ -426,7 +426,7 @@ fn d02_single_hydro() {
 /// storage constraints yield thermal ≈ 28.09 MW.
 ///
 /// Analytical thermal + deficit cost is `4_171_000 / 3 ≈ 1_390_333.33`. With
-/// `turbined_cost` applied to every hydro's turbine column (matches NEWAVE),
+/// `turbined_cost` applied to every hydro's turbine column,
 /// the deterministic LB adds a fixed regularization contribution that lifts
 /// the total by `+1_364.4333…` (= turbined_cost × turbined MWh summed over
 /// stages and blocks for both hydros).
@@ -730,7 +730,7 @@ const D03_H0_V_INIT: f64 = 80.0;
 /// Stage-0 initial storage for D03 H1 \[hm³\] from `initial_conditions.json`.
 const D03_H1_V_INIT: f64 = 50.0;
 
-/// Verify `ENA` and `EARM` columns in `simulation/hydros` for D02 and D03.
+/// Verify the natural-inflow-energy and stored-energy columns in `simulation/hydros` for D02 and D03.
 ///
 /// Both cases use `ConstantProductivity` hydros (bypassing the FPHA gate),
 /// which makes `ρ_eq` and `ρ_acum` directly computable from `hydros.json`

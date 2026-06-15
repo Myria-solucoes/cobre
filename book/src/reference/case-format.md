@@ -501,7 +501,7 @@ hydro has PAR order > 0 and a `SeasonMap` is available.
 
 **`recent_observations`** provides observed inflow data for partial periods
 before the study start. Used to seed the lag accumulator when a study begins
-mid-season (e.g., a DECOMP study starting on January 5 needs observed inflow
+mid-season (e.g., a coupled study starting on January 5 needs observed inflow
 for January 1--4). Each entry has:
 
 | Field        | Type    | Description                                                      |

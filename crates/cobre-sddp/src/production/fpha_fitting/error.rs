@@ -128,7 +128,7 @@ pub(crate) enum FphaFittingError {
     /// The 3-D production cloud was too degenerate for a convex-hull fit.
     ///
     /// The hull primitive needs at least four affinely-independent points to
-    /// build a full-dimensional 3-D hull. A production function whose `(V, Q, GH)`
+    /// build a full-dimensional 3-D hull. A production function whose `(V, Q, generation)`
     /// cloud collapses onto a single line or plane (e.g. a constant net head with
     /// no V- or Q-dependence, so every grid point and the closing point are
     /// collinear) cannot yield even one upper-envelope facet from the hull. The
@@ -156,18 +156,18 @@ pub(crate) enum FphaFittingError {
 
     /// Consecutive tailrace segments do not tile the outflow domain.
     ///
-    /// A family's quartic segments must partition `Q_jus` without gaps or
+    /// A family's quartic segments must partition `outflow` without gaps or
     /// overlaps: each segment's lower bound must meet the previous segment's
-    /// upper bound. A gap leaves `Q_jus` values with no owning segment; an
+    /// upper bound. A gap leaves `outflow` values with no owning segment; an
     /// overlap makes the owning segment ambiguous. Both are rejected here.
     TailraceGap {
         /// Name of the hydro plant whose tailrace family was rejected.
         hydro_name: String,
         /// Upper bound of the lower-indexed segment (m³/s).
-        q_sup_prev: f64,
+        outflow_max_prev: f64,
         /// Lower bound of the higher-indexed segment (m³/s), which must equal
-        /// `q_sup_prev` within tolerance.
-        q_inf_curr: f64,
+        /// `outflow_max_prev` within tolerance.
+        outflow_min_curr: f64,
     },
 
     /// Consecutive tailrace segments disagree at their shared boundary.
@@ -282,12 +282,12 @@ impl std::fmt::Display for FphaFittingError {
             ),
             Self::TailraceGap {
                 hydro_name,
-                q_sup_prev,
-                q_inf_curr,
+                outflow_max_prev,
+                outflow_min_curr,
             } => write!(
                 f,
                 "hydro '{hydro_name}': tailrace segments leave a gap or overlap at the \
-                 boundary: previous q_sup={q_sup_prev} does not meet next q_inf={q_inf_curr}"
+                 boundary: previous outflow_max={outflow_max_prev} does not meet next outflow_min={outflow_min_curr}"
             ),
             Self::TailraceDiscontinuity {
                 hydro_name,
@@ -297,7 +297,7 @@ impl std::fmt::Display for FphaFittingError {
             } => write!(
                 f,
                 "hydro '{hydro_name}': tailrace segments are discontinuous at q={boundary}: \
-                 left h_jus={h_left} != right h_jus={h_right}"
+                 left tailrace_level={h_left} != right tailrace_level={h_right}"
             ),
             Self::TailraceFamilyKeyMissing {
                 hydro_name,
@@ -305,7 +305,7 @@ impl std::fmt::Display for FphaFittingError {
             } => write!(
                 f,
                 "hydro '{hydro_name}': tailrace table has {family_count} families but at least \
-                 one carries no downstream reference level (href_jus_m); a keyless family is \
+                 one carries no downstream reference level (downstream_reference_level_m); a keyless family is \
                  only valid for a single-family plant"
             ),
         }

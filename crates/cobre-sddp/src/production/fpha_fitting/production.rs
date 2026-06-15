@@ -12,7 +12,7 @@ use super::tailrace::TailraceFamilies;
 
 // ── Tailrace source ───────────────────────────────────────────────────────────
 
-/// Source of the tailrace elevation `h_jus(Q_jus)` the production function reads.
+/// Source of the tailrace elevation `tailrace_level(outflow)` the production function reads.
 ///
 /// Enum dispatch (no `Box<dyn>`) over a closed two-variant set, so `net_head`
 /// branches on the variant without a vtable. Built once per fit and held by
@@ -146,7 +146,7 @@ impl ProductionFunction {
     /// Set the installed-capacity ceiling \[MW\] from the hydro entity.
     ///
     /// [`Self::evaluate_capped`] then clips the production to `[0, max_generation_mw]`,
-    /// so the cloud flattens at the ceiling and the hull yields a `GH ≤ max_generation_mw`
+    /// so the cloud flattens at the ceiling and the hull yields a `generation ≤ max_generation_mw`
     /// plane. A non-positive value leaves the ceiling disabled (`f64::INFINITY`)
     /// rather than clamping every point to zero — a guard for a malformed entity;
     /// a real FPHA plant always carries a positive capacity.
@@ -179,9 +179,9 @@ impl ProductionFunction {
     /// - `s` — spillage flow \[m³/s\]
     pub(crate) fn net_head(&self, v: f64, q: f64, s: f64) -> f64 {
         let h_fore = self.forebay.height(v);
-        // `q_out = q + s = Q_jus` is the total downstream flow the tailrace sees;
-        // the secant's `s = Q_lat` sweep flows in through `s` unchanged, so both
-        // source variants observe the identical `Q_jus`. The `Entity` arm MUST
+        // `q_out = q + s = outflow` is the total downstream flow the tailrace sees;
+        // the secant's `s = lateral_flow` sweep flows in through `s` unchanged, so both
+        // source variants observe the identical `outflow`. The `Entity` arm MUST
         // call `evaluate_tailrace(model, q_out)` verbatim — the inert-fallback
         // contract on [`TailraceSource`] — so a table-less plant's net head is
         // bit-for-bit the pre-families value.
@@ -229,7 +229,7 @@ impl ProductionFunction {
     ///
     /// The production cloud and the α regression evaluate the model through this
     /// method so the fitted upper envelope never exceeds installed capacity (the
-    /// hull gains a flat `GH ≤ max_generation_mw` facet where the raw output would
+    /// hull gains a flat `generation ≤ max_generation_mw` facet where the raw output would
     /// run past it). The lateral secant deliberately uses the uncapped
     /// [`Self::evaluate`] instead — see that method.
     pub(crate) fn evaluate_capped(&self, v: f64, q: f64, s: f64) -> f64 {

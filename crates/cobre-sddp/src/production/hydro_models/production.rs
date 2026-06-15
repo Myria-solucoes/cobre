@@ -276,7 +276,7 @@ struct PerHydroFit {
 /// `Vec` (the only target the `fit_computed_planes_per_stage` `&mut` now points
 /// at) and returns it, so the caller can concatenate per-hydro results in any
 /// loop shape without aliasing a shared accumulator. `system` stays a shared `&`
-/// (it is `Sync`) — the per-hydro MLT is read from it here, never cloned.
+/// (it is `Sync`) — the per-hydro long-term mean inflow is read from it here, never cloned.
 ///
 /// # Errors
 ///
@@ -286,7 +286,7 @@ struct PerHydroFit {
 // Rationale: every argument is a distinct, already-resolved upstream-owned datum
 // the per-hydro fit reads (the hydro, the config/geometry/families/reference/
 // hyperplane maps, the productivity override, the study stages, the file-level
-// plane reduction, the system for the MLT, and the stage count). Bundling them
+// plane reduction, the system for the long-term mean inflow, and the stage count). Bundling them
 // into a context struct would only relocate the same fields; it mirrors the same
 // allowance on `fit_computed_planes_per_stage`.
 fn fit_one_hydro(
@@ -320,10 +320,10 @@ fn fit_one_hydro(
     let computed_planes_per_stage: Option<Vec<Vec<FphaPlane>>> =
         if source == ProductionModelSource::ComputedFromGeometry {
             // Per-hydro long-term mean inflow drives the lateral-secant
-            // `S_max = 2·MLT`; computed here from the shared `system` borrow and
-            // threaded into the fit. A history-less hydro yields `mlt = 0.0`,
+            // `S_max = 2·long-term mean inflow`; computed here from the shared `system` borrow and
+            // threaded into the fit. A history-less hydro yields `long_term_mean_inflow_m3s = 0.0`,
             // falling back to `2 × max_turbined`.
-            let mlt = long_term_mean_inflow(system, hydro.id);
+            let long_term_mean_inflow_m3s = long_term_mean_inflow(system, hydro.id);
             let per_stage = fit_computed_planes_per_stage(
                 hydro,
                 config_entry,
@@ -332,7 +332,7 @@ fn fit_one_hydro(
                 reference_volume_fractions,
                 system,
                 study_stages,
-                mlt,
+                long_term_mean_inflow_m3s,
                 plane_reduction,
                 &mut export_rows,
             )?;
@@ -435,12 +435,12 @@ fn resolve_downstream_level(
     Some(forebay.height(v_ref))
 }
 
-/// Per-hydro long-term mean natural inflow (MLT) in m³/s, or `0.0` when the hydro
+/// Per-hydro long-term mean natural inflow (long-term mean inflow) in m³/s, or `0.0` when the hydro
 /// has no inflow history.
 ///
-/// MLT (média de longo termo) is the canonical-order mean of the hydro's
+/// long-term mean inflow is the canonical-order mean of the hydro's
 /// `scenarios/inflow_history.parquet` `value_m3s` series. It feeds the
-/// lateral-secant `S_max = 2·MLT`; a hydro with no history returns `0.0`, which
+/// lateral-secant `S_max = 2·long-term mean inflow`; a hydro with no history returns `0.0`, which
 /// the secant's `resolve_s_max` maps to the `2 × max_turbined` fallback.
 ///
 /// # Determinism — canonical-order mean (Voice 1 / D5)
@@ -478,14 +478,14 @@ fn long_term_mean_inflow(system: &System, hydro_id: EntityId) -> f64 {
 /// config covers. Validates prerequisites (tailrace, losses, efficiency
 /// present), then calls `fit_fpha_planes`.
 ///
-/// `mlt` is the per-hydro long-term mean inflow driving the lateral-secant
+/// `long_term_mean_inflow_m3s` is the per-hydro long-term mean inflow driving the lateral-secant
 /// `S_max`; it is fixed within a hydro, so the per-config dedup in the caller is
 /// unaffected by it.
 ///
 /// `tailrace_source` is the resolved [`TailraceSource`] for the (hydro, entry)
 /// pair: [`TailraceSource::Families`] when the plant has a `tailrace_curves`
 /// table, else [`TailraceSource::Entity`] (the inert fallback). It is consumed by
-/// the production-function sampler and changes only the `h_jus` the secant reads —
+/// the production-function sampler and changes only the `tailrace_level` the secant reads —
 /// never the hull/α/secant procedure.
 ///
 /// `plane_reduction` is the optional file-level similar-hyperplane reduction
@@ -499,7 +499,7 @@ fn fit_planes_for_hydro(
     hydro: &cobre_core::entities::hydro::Hydro,
     config: &FphaColumnLayout,
     geometry_map: &HashMap<EntityId, Vec<&HydroGeometryRow>>,
-    mlt: f64,
+    long_term_mean_inflow_m3s: f64,
     tailrace_source: TailraceSource,
     plane_reduction: Option<&cobre_io::extensions::PlaneReductionConfig>,
     entry_level_bits: u64,
@@ -518,7 +518,7 @@ fn fit_planes_for_hydro(
         &geo_rows_owned,
         hydro,
         config,
-        mlt,
+        long_term_mean_inflow_m3s,
         tailrace_source,
         plane_reduction,
         hydro.id.0,
@@ -588,7 +588,7 @@ type FittedCacheEntry<'a> = ((&'a FphaColumnLayout, Option<u64>), Vec<FphaPlane>
 /// `to_bits` reduction makes the level part of the key EXACT (a `1e-9` difference
 /// forces a distinct fit) and order-invariant (no `f64` `PartialEq`/`PartialOrd`,
 /// so equal-bit levels match regardless of stage order). The geometry and hydro
-/// entity are fixed within a hydro, and `mlt` is fixed within a hydro, so config +
+/// entity are fixed within a hydro, and `long_term_mean_inflow_m3s` is fixed within a hydro, so config +
 /// level are the only varying fit inputs.
 ///
 /// # Export rows
@@ -608,7 +608,7 @@ type FittedCacheEntry<'a> = ((&'a FphaColumnLayout, Option<u64>), Vec<FphaPlane>
 #[allow(clippy::too_many_arguments)]
 // Rationale: every argument is an independent, already-resolved input the
 // per-stage fit needs (the hydro, its config, the geometry/families/reference
-// maps, the system for downstream resolution, the lateral-secant `mlt`, and the
+// maps, the system for downstream resolution, the lateral-secant `long_term_mean_inflow_m3s`, and the
 // export-row sink). Bundling them into a context struct would only relocate the
 // same fields and obscure that each is a distinct upstream-owned datum.
 fn fit_computed_planes_per_stage(
@@ -619,7 +619,7 @@ fn fit_computed_planes_per_stage(
     reference_volume_fractions: &HydroReferenceVolumeFractions,
     system: &System,
     study_stages: &[&cobre_core::temporal::Stage],
-    mlt: f64,
+    long_term_mean_inflow_m3s: f64,
     plane_reduction: Option<&cobre_io::extensions::PlaneReductionConfig>,
     export_rows: &mut Vec<cobre_io::FphaHyperplaneRow>,
 ) -> Result<Vec<Vec<FphaPlane>>, SddpError> {
@@ -670,7 +670,7 @@ fn fit_computed_planes_per_stage(
                 hydro,
                 config,
                 geometry_map,
-                mlt,
+                long_term_mean_inflow_m3s,
                 tailrace_source,
                 plane_reduction,
                 // The dedup-key level bits double as the per-entry seed identity
@@ -2284,7 +2284,7 @@ mod tests {
 
         // Coefficient signs must satisfy physical constraints: non-negative volume
         // and turbine gradients, non-positive lateral secant. The
-        // installed-capacity ceiling contributes a flat `GH ≤ capacity` plane with
+        // installed-capacity ceiling contributes a flat `generation ≤ capacity` plane with
         // both gradients exactly zero, so the bound is `>= 0`, not strictly `> 0`.
         for (idx, plane) in planes.iter().enumerate() {
             assert!(
@@ -2991,7 +2991,7 @@ mod tests {
         );
     }
 
-    // ── MLT (long-term mean inflow) for the lateral secant ────────────────────
+    // ── long-term mean inflow (long-term mean inflow) for the lateral secant ────────────────────
 
     fn inflow_row(hydro_id: i32, day: u32, value_m3s: f64) -> InflowHistoryRow {
         InflowHistoryRow {
@@ -3001,7 +3001,7 @@ mod tests {
         }
     }
 
-    /// A hydro with an inflow history yields MLT = the canonical-order mean of its
+    /// A hydro with an inflow history yields long-term mean inflow = the canonical-order mean of its
     /// `value_m3s` series, and only its own rows are summed (other hydros ignored).
     #[test]
     fn long_term_mean_inflow_is_per_hydro_canonical_mean() {
@@ -3016,25 +3016,28 @@ mod tests {
             .build()
             .expect("valid system");
 
-        // mean(100, 200, 300) = 200. This MLT feeds S_max = 2·MLT at the fit call
-        // site; the MLT→S_max mapping is the secant's `resolve_s_max` contract,
+        // mean(100, 200, 300) = 200. This long-term mean inflow feeds S_max = 2·long-term mean inflow at the fit call
+        // site; the long-term mean inflow→S_max mapping is the secant's `resolve_s_max` contract,
         // exercised in the `fpha_fitting::secant` unit tests.
-        let mlt = super::long_term_mean_inflow(&system, EntityId::from(1));
+        let long_term_mean_inflow_m3s = super::long_term_mean_inflow(&system, EntityId::from(1));
         assert_eq!(
-            mlt, 200.0,
-            "MLT must be the per-hydro mean of its own series"
+            long_term_mean_inflow_m3s, 200.0,
+            "long-term mean inflow must be the per-hydro mean of its own series"
         );
     }
 
-    /// A hydro with no inflow history yields MLT = 0.0 (the fallback sentinel).
+    /// A hydro with no inflow history yields long-term mean inflow = 0.0 (the fallback sentinel).
     #[test]
     fn long_term_mean_inflow_empty_history_is_zero() {
         let system = SystemBuilder::new().build().expect("empty system is valid");
-        let mlt = super::long_term_mean_inflow(&system, EntityId::from(1));
-        assert_eq!(mlt, 0.0, "no inflow history must yield MLT = 0");
+        let long_term_mean_inflow_m3s = super::long_term_mean_inflow(&system, EntityId::from(1));
+        assert_eq!(
+            long_term_mean_inflow_m3s, 0.0,
+            "no inflow history must yield long-term mean inflow = 0"
+        );
     }
 
-    /// Determinism: the MLT mean is independent of inflow-row declaration order.
+    /// Determinism: the long-term mean inflow mean is independent of inflow-row declaration order.
     #[test]
     fn long_term_mean_inflow_is_order_independent() {
         let ascending = vec![
@@ -3060,7 +3063,7 @@ mod tests {
         let mlt_desc = super::long_term_mean_inflow(&sys_desc, EntityId::from(1));
         assert_eq!(
             mlt_asc, mlt_desc,
-            "MLT must be order-independent (declaration-order invariance)"
+            "long-term mean inflow must be order-independent (declaration-order invariance)"
         );
     }
 
@@ -3200,15 +3203,15 @@ mod tests {
         let other_rows = vec![TailraceCurveRow {
             hydro_id: EntityId::from(99),
             family_id: 1,
-            href_jus_m: None,
+            downstream_reference_level_m: None,
             segment_id: 1,
-            q_jus_inf_m3s: 0.0,
-            q_jus_sup_m3s: 1000.0,
-            a_cf0: 5.0,
-            a_cf1: 0.0,
-            a_cf2: 0.0,
-            a_cf3: 0.0,
-            a_cf4: 0.0,
+            outflow_min_m3s: 0.0,
+            outflow_max_m3s: 1000.0,
+            coefficient_0: 5.0,
+            coefficient_1: 0.0,
+            coefficient_2: 0.0,
+            coefficient_3: 0.0,
+            coefficient_4: 0.0,
         }];
         let families_map =
             super::build_tailrace_families_map(&other_rows).expect("families map builds");
@@ -3275,28 +3278,28 @@ mod tests {
             TailraceCurveRow {
                 hydro_id: EntityId::from(0),
                 family_id: 1,
-                href_jus_m: Some(380.0),
+                downstream_reference_level_m: Some(380.0),
                 segment_id: 1,
-                q_jus_inf_m3s: 0.0,
-                q_jus_sup_m3s: 100_000.0,
-                a_cf0: 2.0,
-                a_cf1: 0.0,
-                a_cf2: 0.0,
-                a_cf3: 0.0,
-                a_cf4: 0.0,
+                outflow_min_m3s: 0.0,
+                outflow_max_m3s: 100_000.0,
+                coefficient_0: 2.0,
+                coefficient_1: 0.0,
+                coefficient_2: 0.0,
+                coefficient_3: 0.0,
+                coefficient_4: 0.0,
             },
             TailraceCurveRow {
                 hydro_id: EntityId::from(0),
                 family_id: 2,
-                href_jus_m: Some(420.0),
+                downstream_reference_level_m: Some(420.0),
                 segment_id: 1,
-                q_jus_inf_m3s: 0.0,
-                q_jus_sup_m3s: 100_000.0,
-                a_cf0: 40.0,
-                a_cf1: 0.0,
-                a_cf2: 0.0,
-                a_cf3: 0.0,
-                a_cf4: 0.0,
+                outflow_min_m3s: 0.0,
+                outflow_max_m3s: 100_000.0,
+                coefficient_0: 40.0,
+                coefficient_1: 0.0,
+                coefficient_2: 0.0,
+                coefficient_3: 0.0,
+                coefficient_4: 0.0,
             },
         ];
         let families_map =
@@ -3401,21 +3404,21 @@ mod tests {
         geo_rev.reverse();
 
         // Single-segment single family: a flat 2.0 m tailrace covering the full
-        // sampled Q_jus range. The tailrace rows are supplied in canonical
+        // sampled outflow range. The tailrace rows are supplied in canonical
         // `(hydro_id, family_id, segment_id)` order (as the loader produces them);
         // the shuffled dimension here is the geometry input.
         let segment = TailraceCurveRow {
             hydro_id: EntityId::from(0),
             family_id: 1,
-            href_jus_m: None,
+            downstream_reference_level_m: None,
             segment_id: 1,
-            q_jus_inf_m3s: 0.0,
-            q_jus_sup_m3s: 100_000.0,
-            a_cf0: 2.0,
-            a_cf1: 0.0,
-            a_cf2: 0.0,
-            a_cf3: 0.0,
-            a_cf4: 0.0,
+            outflow_min_m3s: 0.0,
+            outflow_max_m3s: 100_000.0,
+            coefficient_0: 2.0,
+            coefficient_1: 0.0,
+            coefficient_2: 0.0,
+            coefficient_3: 0.0,
+            coefficient_4: 0.0,
         };
 
         let art_fwd = build_artifacts(vec![segment.clone()], geo_fwd);

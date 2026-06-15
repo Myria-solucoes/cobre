@@ -2073,8 +2073,8 @@ fn entity_source_net_head_equals_evaluate_tailrace() {
         "EntityPin".to_owned(),
     );
 
-    // Sweep representative (q, s) pairs; q_out = q + s = Q_jus is what the
-    // tailrace sees, exactly as the secant's s = Q_lat sweep drives it.
+    // Sweep representative (q, s) pairs; q_out = q + s = outflow is what the
+    // tailrace sees, exactly as the secant's s = lateral_flow sweep drives it.
     for &(q, s) in &[
         (0.0, 0.0),
         (1500.0, 0.0),
@@ -2096,28 +2096,28 @@ fn entity_source_net_head_equals_evaluate_tailrace() {
 }
 
 /// Build a single-family `TailraceFamilies` whose one quartic segment reproduces
-/// an entity `Polynomial` over `[0, q_sup]`. `coeffs[i]` and the polynomial's
+/// an entity `Polynomial` over `[0, outflow_max]`. `coeffs[i]` and the polynomial's
 /// `coefficients[i]` share the `Q^i` Horner convention, so the two evaluators
 /// agree pointwise inside the segment domain.
-fn single_family_matching_polynomial(coeffs: [f64; 5], q_sup: f64) -> TailraceFamilies {
+fn single_family_matching_polynomial(coeffs: [f64; 5], outflow_max: f64) -> TailraceFamilies {
     let curve_row = cobre_io::extensions::TailraceCurveRow {
         hydro_id: EntityId::from(1),
         family_id: 1,
-        href_jus_m: None,
+        downstream_reference_level_m: None,
         segment_id: 1,
-        q_jus_inf_m3s: 0.0,
-        q_jus_sup_m3s: q_sup,
-        a_cf0: coeffs[0],
-        a_cf1: coeffs[1],
-        a_cf2: coeffs[2],
-        a_cf3: coeffs[3],
-        a_cf4: coeffs[4],
+        outflow_min_m3s: 0.0,
+        outflow_max_m3s: outflow_max,
+        coefficient_0: coeffs[0],
+        coefficient_1: coeffs[1],
+        coefficient_2: coeffs[2],
+        coefficient_3: coeffs[3],
+        coefficient_4: coeffs[4],
     };
     TailraceFamilies::from_rows(&[curve_row], "Sobradinho").expect("single family builds")
 }
 
 /// Equivalent tailrace ⇒ equivalent planes: a single-family quartic that
-/// reproduces the entity `Polynomial` over the full sampled `Q_jus` range yields
+/// reproduces the entity `Polynomial` over the full sampled `outflow` range yields
 /// fitted planes matching the entity-path fit to within 1e-9.
 #[test]
 fn families_single_family_matches_entity_polynomial_planes() {
@@ -2146,8 +2146,8 @@ fn families_single_family_matches_entity_polynomial_planes() {
     .expect("entity fit succeeds");
 
     // Families-path fit with a quartic reproducing the same polynomial. The
-    // segment domain spans far beyond the sampled Q_jus (q <= 3000, s <= 2·MLT
-    // fallback = 2·max_turbined = 6000, so Q_jus <= 9000), so no clamp diverges
+    // segment domain spans far beyond the sampled outflow (q <= 3000, s <= 2·long-term mean inflow
+    // fallback = 2·max_turbined = 6000, so outflow <= 9000), so no clamp diverges
     // from the unbounded polynomial.
     let families = single_family_matching_polynomial([0.0, 0.001, 0.0, 0.0, 0.0], 100_000.0);
     let families_fit = fit_fpha_planes(

@@ -445,7 +445,7 @@ terminal stage of the current study. The imported cuts are not updated by
 training — they remain fixed throughout.
 
 This enables Cobre-to-Cobre model coupling: a monthly study produces a
-policy checkpoint, and a weekly+monthly DECOMP study loads that checkpoint's
+policy checkpoint, and a weekly+monthly coupled study loads that checkpoint's
 cuts as its terminal-stage future cost function.
 
 | Field          | Type    | Description                                                     |

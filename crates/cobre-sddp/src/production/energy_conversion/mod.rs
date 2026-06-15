@@ -4,7 +4,7 @@
 //! (accumulated cascade productivity, MW per m³/s).
 //!
 //! The output [`EnergyConversionSet`] is consumed by simulation extraction
-//! and by the energy-balance constraints that compute ENA and EARM.
+//! and by the energy-balance constraints that compute natural inflow energy and stored energy.
 //!
 //! ## Derivation logic
 //!

@@ -1,9 +1,9 @@
 //! Within-family piecewise-quartic tailrace evaluation.
 //!
-//! The exact tailrace `h_jus(Q_jus)` for one family is a piecewise degree-4
-//! polynomial: the `Q_jus` domain is partitioned into contiguous segments, each
-//! valid on `[q_inf, q_sup]` and evaluated as
-//! `a_cf0 + a_cf1·Q + a_cf2·Q² + a_cf3·Q³ + a_cf4·Q⁴`. This module owns the
+//! The exact tailrace `tailrace_level(outflow)` for one family is a piecewise degree-4
+//! polynomial: the `outflow` domain is partitioned into contiguous segments, each
+//! valid on `[outflow_min, outflow_max]` and evaluated as
+//! `coefficient_0 + coefficient_1·Q + coefficient_2·Q² + coefficient_3·Q³ + coefficient_4·Q⁴`. This module owns the
 //! segment-collection construction ([`TailraceSegments::from_rows`]), the
 //! structural validation (contiguity + C0 continuity) that the IO layer
 //! deliberately defers, and the infallible within-family evaluator
@@ -11,7 +11,7 @@
 //!
 //! [`TailraceSegments`] evaluates ONE family in isolation. The backwater layer
 //! ([`TailraceFamilies`]) groups a plant's rows into families keyed by their
-//! downstream reference level (`href_jus_m`), orders them by that level, and
+//! downstream reference level (`downstream_reference_level_m`), orders them by that level, and
 //! interpolates between the two bracketing families at a resolved downstream
 //! level — collapsing to a single family (no interpolation) when the plant has
 //! one family or the level is unresolved. [`build_tailrace_families_map`] groups
@@ -26,8 +26,8 @@ use super::error::FphaFittingError;
 
 /// Absolute tolerance for the inter-segment contiguity check (m³/s).
 ///
-/// Contract (Voice 1): consecutive segments meet when `|q_inf − q_sup| <=
-/// CONTIG_EPS`, never when `q_inf == q_sup`. The source bounds are calibrated
+/// Contract (Voice 1): consecutive segments meet when `|outflow_min − outflow_max| <=
+/// CONTIG_EPS`, never when `outflow_min == outflow_max`. The source bounds are calibrated
 /// floats, so two segments that are contiguous by construction still differ in
 /// their last ULPs; an exact-equality test would reject essentially every real
 /// family. The owning check is [`TailraceSegments::from_rows`].
@@ -49,14 +49,14 @@ const C0_EPS: f64 = 1e-3;
 
 /// One degree-4 piece of a family's tailrace curve.
 ///
-/// Valid on `[q_inf, q_sup]` (m³/s). `coeffs[i]` is the coefficient of `Q^i`,
-/// so `coeffs = [a_cf0, a_cf1, a_cf2, a_cf3, a_cf4]`.
+/// Valid on `[outflow_min, outflow_max]` (m³/s). `coeffs[i]` is the coefficient of `Q^i`,
+/// so `coeffs = [coefficient_0, coefficient_1, coefficient_2, coefficient_3, coefficient_4]`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct QuarticSegment {
     /// Segment lower validity bound (m³/s).
-    pub q_inf: f64,
-    /// Segment upper validity bound (m³/s), `>= q_inf`.
-    pub q_sup: f64,
+    pub outflow_min: f64,
+    /// Segment upper validity bound (m³/s), `>= outflow_min`.
+    pub outflow_max: f64,
     /// Polynomial coefficients, `coeffs[i]` the coefficient of `Q^i`.
     pub coeffs: [f64; 5],
 }
@@ -80,7 +80,7 @@ impl QuarticSegment {
 /// regardless of call order.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TailraceSegments {
-    /// Contiguous segments ordered by ascending `q_inf` (>= 1 element).
+    /// Contiguous segments ordered by ascending `outflow_min` (>= 1 element).
     segments: Vec<QuarticSegment>,
 }
 
@@ -89,16 +89,16 @@ impl TailraceSegments {
     ///
     /// `rows` is the slice for a single `(hydro_id, family_id)` group, already
     /// sorted by ascending `segment_id` (as returned by the tailrace-curve
-    /// parser). The `href_jus_m` / `family_id` fields are not read here — the
+    /// parser). The `downstream_reference_level_m` / `family_id` fields are not read here — the
     /// caller groups by them before calling this. `hydro_name` labels errors.
     ///
     /// Validation runs in order:
     ///
     /// 1. at least one segment (`rows` non-empty);
-    /// 2. **contiguity** — for `k >= 1`, `segments[k].q_inf` meets
-    ///    `segments[k-1].q_sup` within [`CONTIG_EPS`] (the first segment's
-    ///    `q_inf` is taken as given — not forced to 0);
-    /// 3. **C0 continuity** — at each interior boundary `b = segments[k-1].q_sup`,
+    /// 2. **contiguity** — for `k >= 1`, `segments[k].outflow_min` meets
+    ///    `segments[k-1].outflow_max` within [`CONTIG_EPS`] (the first segment's
+    ///    `outflow_min` is taken as given — not forced to 0);
+    /// 3. **C0 continuity** — at each interior boundary `b = segments[k-1].outflow_max`,
     ///    the two adjacent quartics agree within [`C0_EPS`].
     ///
     /// C1 continuity is preferred but NOT checked — a derivative break does not
@@ -125,32 +125,38 @@ impl TailraceSegments {
         let segments: Vec<QuarticSegment> = rows
             .iter()
             .map(|r| QuarticSegment {
-                q_inf: r.q_jus_inf_m3s,
-                q_sup: r.q_jus_sup_m3s,
-                coeffs: [r.a_cf0, r.a_cf1, r.a_cf2, r.a_cf3, r.a_cf4],
+                outflow_min: r.outflow_min_m3s,
+                outflow_max: r.outflow_max_m3s,
+                coeffs: [
+                    r.coefficient_0,
+                    r.coefficient_1,
+                    r.coefficient_2,
+                    r.coefficient_3,
+                    r.coefficient_4,
+                ],
             })
             .collect();
 
         // Single forward pass: contiguity then C0 continuity at each interior
-        // boundary. The first segment's q_inf is accepted as supplied.
+        // boundary. The first segment's outflow_min is accepted as supplied.
         for k in 1..segments.len() {
             let prev = &segments[k - 1];
             let curr = &segments[k];
 
-            // Contiguity: prev.q_sup and curr.q_inf must coincide. A gap
-            // (curr.q_inf > prev.q_sup) and an overlap (curr.q_inf <
-            // prev.q_sup) both fail the same `<= CONTIG_EPS` test.
-            if (curr.q_inf - prev.q_sup).abs() > CONTIG_EPS {
+            // Contiguity: prev.outflow_max and curr.outflow_min must coincide. A gap
+            // (curr.outflow_min > prev.outflow_max) and an overlap (curr.outflow_min <
+            // prev.outflow_max) both fail the same `<= CONTIG_EPS` test.
+            if (curr.outflow_min - prev.outflow_max).abs() > CONTIG_EPS {
                 return Err(FphaFittingError::TailraceGap {
                     hydro_name: hydro_name.to_owned(),
-                    q_sup_prev: prev.q_sup,
-                    q_inf_curr: curr.q_inf,
+                    outflow_max_prev: prev.outflow_max,
+                    outflow_min_curr: curr.outflow_min,
                 });
             }
 
             // C0 continuity: both quartics evaluated at the shared boundary must
             // agree within tolerance.
-            let boundary = prev.q_sup;
+            let boundary = prev.outflow_max;
             let h_left = prev.eval(boundary);
             let h_right = curr.eval(boundary);
             if (h_left - h_right).abs() > C0_EPS {
@@ -166,25 +172,25 @@ impl TailraceSegments {
         Ok(Self { segments })
     }
 
-    /// Evaluate the family's tailrace elevation `h_jus` (m) at `q_jus` (m³/s).
+    /// Evaluate the family's tailrace elevation `tailrace_level` (m) at `outflow_m3s` (m³/s).
     ///
-    /// `q_jus` is clamped to `[segments[0].q_inf, segments[last].q_sup]` before
-    /// locating (below → first `q_inf`, above → last `q_sup`), then the owning
+    /// `outflow_m3s` is clamped to `[segments[0].outflow_min, segments[last].outflow_max]` before
+    /// locating (below → first `outflow_min`, above → last `outflow_max`), then the owning
     /// segment is found and its quartic evaluated at the clamped value. The
     /// method is infallible, pure, and allocation-free: validation already ran
     /// in [`TailraceSegments::from_rows`], and the segments live in `self`.
-    pub(crate) fn evaluate(&self, q_jus: f64) -> f64 {
+    pub(crate) fn evaluate(&self, outflow_m3s: f64) -> f64 {
         // INVARIANT: `segments` is non-empty (enforced by `from_rows`).
         let n = self.segments.len();
-        let q_lo = self.segments[0].q_inf;
-        let q_hi = self.segments[n - 1].q_sup;
-        let q = q_jus.clamp(q_lo, q_hi);
+        let q_lo = self.segments[0].outflow_min;
+        let q_hi = self.segments[n - 1].outflow_max;
+        let q = outflow_m3s.clamp(q_lo, q_hi);
 
-        // `partition_point` returns the first index whose `q_sup` exceeds `q`.
+        // `partition_point` returns the first index whose `outflow_max` exceeds `q`.
         // Saturate at `n - 1` so a `q` at the domain's upper edge resolves to
         // the last segment instead of running past the end (mirrors the clamped
         // locator shape used by the forebay table).
-        let idx = self.segments.partition_point(|s| s.q_sup <= q);
+        let idx = self.segments.partition_point(|s| s.outflow_max <= q);
         let i = idx.min(n - 1);
         self.segments[i].eval(q)
     }
@@ -194,14 +200,14 @@ impl TailraceSegments {
 
 /// One downstream-level-keyed family of a plant's tailrace curve.
 ///
-/// `href_jus_m` is the downstream reference level (m) that keys this family;
+/// `downstream_reference_level_m` is the downstream reference level (m) that keys this family;
 /// `None` marks a plant's single keyless family. `segments` is the within-family
 /// piecewise quartic evaluated by [`TailraceSegments::evaluate`].
 #[derive(Debug, Clone)]
 pub(crate) struct TailraceFamily {
     /// Downstream reference level keying the family (m); `None` for a
     /// single-family plant.
-    pub href_jus_m: Option<f64>,
+    pub downstream_reference_level_m: Option<f64>,
     /// The family's validated piecewise-quartic curve.
     pub segments: TailraceSegments,
 }
@@ -210,14 +216,14 @@ pub(crate) struct TailraceFamily {
 ///
 /// Built from a plant's `&[TailraceCurveRow]` slice via
 /// [`TailraceFamilies::from_rows`]. After construction the families are ordered
-/// ascending by `href_jus_m`, and [`TailraceFamilies::evaluate`] returns the
-/// effective tailrace elevation at a turbined-flow `q_jus` and a resolved
+/// ascending by `downstream_reference_level_m`, and [`TailraceFamilies::evaluate`] returns the
+/// effective tailrace elevation at a turbined-flow `outflow_m3s` and a resolved
 /// downstream level, interpolating between the two bracketing families.
 #[derive(Debug, Clone)]
 pub(crate) struct TailraceFamilies {
-    /// Families ordered ascending by `href_jus_m` (>= 1 element). A
+    /// Families ordered ascending by `downstream_reference_level_m` (>= 1 element). A
     /// single-family plant may carry one `None`-keyed family; a multi-family
-    /// plant has every `href_jus_m` populated (enforced by
+    /// plant has every `downstream_reference_level_m` populated (enforced by
     /// [`TailraceFamilies::from_rows`]).
     families: Vec<TailraceFamily>,
 }
@@ -231,14 +237,14 @@ impl TailraceFamilies {
     /// `family_id` (valid because the slice is pre-sorted), each group built
     /// into a [`TailraceSegments`] via [`TailraceSegments::from_rows`].
     ///
-    /// Families are then ordered ascending by `href_jus_m`, with the integer
-    /// `family_id` as the **primary** key and `f64::total_cmp(href_jus_m)` as a
+    /// Families are then ordered ascending by `downstream_reference_level_m`, with the integer
+    /// `family_id` as the **primary** key and `f64::total_cmp(downstream_reference_level_m)` as a
     /// **secondary** tie-break.
     ///
     /// # Family-key contract (Voice 1)
     ///
     /// A plant with **more than one** family must carry a downstream reference
-    /// level (`href_jus_m`) on **every** family — a multi-family table with any
+    /// level (`downstream_reference_level_m`) on **every** family — a multi-family table with any
     /// keyless family is rejected with
     /// [`FphaFittingError::TailraceFamilyKeyMissing`], **never** silently
     /// resolved by picking one family. The obvious-but-wrong alternative —
@@ -254,7 +260,7 @@ impl TailraceFamilies {
     /// |-----------|---------------|
     /// | A family group fails contiguity / C0 validation | propagated from [`TailraceSegments::from_rows`] |
     /// | `rows` empty | [`FphaFittingError::InsufficientPoints`] |
-    /// | Multiple families with any `None` `href_jus_m` | [`FphaFittingError::TailraceFamilyKeyMissing`] |
+    /// | Multiple families with any `None` `downstream_reference_level_m` | [`FphaFittingError::TailraceFamilyKeyMissing`] |
     pub(crate) fn from_rows(
         rows: &[TailraceCurveRow],
         hydro_name: &str,
@@ -277,12 +283,12 @@ impl TailraceFamilies {
             if at_boundary {
                 let group = &rows[group_start..k];
                 let family_id = group[0].family_id;
-                let href_jus_m = group[0].href_jus_m;
+                let downstream_reference_level_m = group[0].downstream_reference_level_m;
                 let segments = TailraceSegments::from_rows(group, hydro_name)?;
                 families.push((
                     family_id,
                     TailraceFamily {
-                        href_jus_m,
+                        downstream_reference_level_m,
                         segments,
                     },
                 ));
@@ -291,16 +297,20 @@ impl TailraceFamilies {
         }
 
         // A keyless family is admissible only for a single-family plant.
-        if families.len() > 1 && families.iter().any(|(_, f)| f.href_jus_m.is_none()) {
+        if families.len() > 1
+            && families
+                .iter()
+                .any(|(_, f)| f.downstream_reference_level_m.is_none())
+        {
             return Err(FphaFittingError::TailraceFamilyKeyMissing {
                 hydro_name: hydro_name.to_owned(),
                 family_count: families.len(),
             });
         }
 
-        // Order ascending by `href_jus_m` as the PRIMARY key, with `family_id` as
+        // Order ascending by `downstream_reference_level_m` as the PRIMARY key, with `family_id` as
         // the secondary tie-break. The level must be primary because `evaluate`
-        // clamps `L` to `[href(0), href(last)]` and brackets by level — keying on
+        // clamps `L` to `[family_level(0), family_level(last)]` and brackets by level — keying on
         // `family_id` first would leave the families out of level order whenever
         // `family_id` order does not match level order, making the clamp bounds
         // `min > max` (a panic) and the bracket indices wrong. The level key MUST
@@ -308,8 +318,8 @@ impl TailraceFamilies {
         // levels, and `family_id` breaks a shared-level tie so two families at the
         // same level keep a deterministic, declaration-order-invariant order.
         families.sort_by(|(fa, a), (fb, b)| {
-            let la = a.href_jus_m.unwrap_or(f64::NEG_INFINITY);
-            let lb = b.href_jus_m.unwrap_or(f64::NEG_INFINITY);
+            let la = a.downstream_reference_level_m.unwrap_or(f64::NEG_INFINITY);
+            let lb = b.downstream_reference_level_m.unwrap_or(f64::NEG_INFINITY);
             la.total_cmp(&lb).then_with(|| fa.cmp(fb))
         });
 
@@ -318,21 +328,21 @@ impl TailraceFamilies {
         })
     }
 
-    /// Effective tailrace elevation `h_jus` (m) at `q_jus` (m³/s) for a resolved
+    /// Effective tailrace elevation `tailrace_level` (m) at `outflow_m3s` (m³/s) for a resolved
     /// downstream level.
     ///
     /// - **single family** ⇒ evaluate it directly; `downstream_level_m` is
     ///   ignored (a single-family plant has no backwater coupling);
     /// - **multiple families + `Some(L)`** ⇒ locate the two families bracketing
-    ///   `L` by `href_jus_m`, evaluate each at `q_jus`, and linearly interpolate
+    ///   `L` by `downstream_reference_level_m`, evaluate each at `outflow_m3s`, and linearly interpolate
     ///   the two heights by `L`;
-    /// - **multiple families + `None`** ⇒ evaluate the lowest-`href_jus_m`
+    /// - **multiple families + `None`** ⇒ evaluate the lowest-`downstream_reference_level_m`
     ///   family (a documented deterministic fallback for a plant whose
     ///   downstream level could not be resolved).
     ///
     /// # Clamp-not-extrapolate contract (Voice 1)
     ///
-    /// `L` is clamped to `[href_jus_m[0], href_jus_m[last]]` before bracketing,
+    /// `L` is clamped to `[downstream_reference_level_m[0], downstream_reference_level_m[last]]` before bracketing,
     /// so a level below the lowest family resolves to that family and a level
     /// above the highest resolves to the highest — the result is **never**
     /// extrapolated past the calibrated level range. The obvious-but-wrong
@@ -342,40 +352,46 @@ impl TailraceFamilies {
     /// [`ForebayTable::height`](super::geometry::ForebayTable::height).
     ///
     /// The method is infallible, pure, and allocation-free.
-    pub(crate) fn evaluate(&self, q_jus: f64, downstream_level_m: Option<f64>) -> f64 {
+    pub(crate) fn evaluate(&self, outflow_m3s: f64, downstream_level_m: Option<f64>) -> f64 {
         // INVARIANT: `families` is non-empty (enforced by `from_rows`).
         let n = self.families.len();
         if n == 1 {
-            return self.families[0].segments.evaluate(q_jus);
+            return self.families[0].segments.evaluate(outflow_m3s);
         }
 
         // Multi-family: a resolved level brackets and interpolates; an
         // unresolved level falls back to the lowest-keyed family (index 0,
-        // which carries the minimum `href_jus_m` after the ascending sort).
+        // which carries the minimum `downstream_reference_level_m` after the ascending sort).
         let Some(level) = downstream_level_m else {
-            return self.families[0].segments.evaluate(q_jus);
+            return self.families[0].segments.evaluate(outflow_m3s);
         };
 
         // Every multi-family family carries a level (enforced by `from_rows`);
         // `NEG_INFINITY` is an unreachable sentinel kept only to make the read
         // total without an `unwrap`.
-        let href = |i: usize| self.families[i].href_jus_m.unwrap_or(f64::NEG_INFINITY);
-        let l_lo = href(0);
-        let l_hi = href(n - 1);
+        let family_level = |i: usize| {
+            self.families[i]
+                .downstream_reference_level_m
+                .unwrap_or(f64::NEG_INFINITY)
+        };
+        let l_lo = family_level(0);
+        let l_hi = family_level(n - 1);
         let l = level.clamp(l_lo, l_hi);
 
         // `partition_point` returns the first family whose level exceeds `l`.
         // Saturate the upper bracket at `n - 1` so a level at the top edge
         // resolves the last pair instead of running past the end (mirrors the
         // clamped locator shape used by the forebay table).
-        let upper = self.families.partition_point(|f| href_le(f.href_jus_m, l));
+        let upper = self
+            .families
+            .partition_point(|f| level_le(f.downstream_reference_level_m, l));
         let hi = upper.min(n - 1).max(1);
         let lo = hi - 1;
 
-        let h_lo = self.families[lo].segments.evaluate(q_jus);
-        let h_hi = self.families[hi].segments.evaluate(q_jus);
-        let level_lo = href(lo);
-        let level_hi = href(hi);
+        let h_lo = self.families[lo].segments.evaluate(outflow_m3s);
+        let h_hi = self.families[hi].segments.evaluate(outflow_m3s);
+        let level_lo = family_level(lo);
+        let level_hi = family_level(hi);
 
         // Linear interpolation in the level axis. A zero-width bracket (two
         // same-level families) collapses to the lower height, avoiding a
@@ -390,10 +406,10 @@ impl TailraceFamilies {
     }
 }
 
-/// `href_jus_m <= l`, treating a `None` key as `-∞` (sorts first).
+/// `downstream_reference_level_m <= l`, treating a `None` key as `-∞` (sorts first).
 #[inline]
-fn href_le(href_jus_m: Option<f64>, l: f64) -> bool {
-    href_jus_m.unwrap_or(f64::NEG_INFINITY) <= l
+fn level_le(downstream_reference_level_m: Option<f64>, l: f64) -> bool {
+    downstream_reference_level_m.unwrap_or(f64::NEG_INFINITY) <= l
 }
 
 /// Group a whole tailrace table into one [`TailraceFamilies`] per plant.
@@ -453,19 +469,24 @@ mod tests {
     use super::{TailraceFamilies, TailraceSegments, build_tailrace_families_map};
 
     /// Build a single segment's row with explicit bounds and coefficients.
-    fn row(segment_id: i32, q_inf: f64, q_sup: f64, coeffs: [f64; 5]) -> TailraceCurveRow {
+    fn row(
+        segment_id: i32,
+        outflow_min: f64,
+        outflow_max: f64,
+        coeffs: [f64; 5],
+    ) -> TailraceCurveRow {
         TailraceCurveRow {
             hydro_id: EntityId::from(1),
             family_id: 1,
-            href_jus_m: None,
+            downstream_reference_level_m: None,
             segment_id,
-            q_jus_inf_m3s: q_inf,
-            q_jus_sup_m3s: q_sup,
-            a_cf0: coeffs[0],
-            a_cf1: coeffs[1],
-            a_cf2: coeffs[2],
-            a_cf3: coeffs[3],
-            a_cf4: coeffs[4],
+            outflow_min_m3s: outflow_min,
+            outflow_max_m3s: outflow_max,
+            coefficient_0: coeffs[0],
+            coefficient_1: coeffs[1],
+            coefficient_2: coeffs[2],
+            coefficient_3: coeffs[3],
+            coefficient_4: coeffs[4],
         }
     }
 
@@ -501,7 +522,7 @@ mod tests {
 
     #[test]
     fn gap_between_segments_is_tailrace_gap() {
-        // segments[0].q_sup = 408.6 but segments[1].q_inf = 410.0 → gap.
+        // segments[0].outflow_max = 408.6 but segments[1].outflow_min = 410.0 → gap.
         let rows = vec![
             row(1, 0.0, 408.6, [1.0, 0.0, 0.0, 0.0, 0.0]),
             row(2, 410.0, 1000.0, [1.0, 0.0, 0.0, 0.0, 0.0]),
@@ -509,12 +530,12 @@ mod tests {
         let err = TailraceSegments::from_rows(&rows, "Plant").unwrap_err();
         match err {
             FphaFittingError::TailraceGap {
-                q_sup_prev,
-                q_inf_curr,
+                outflow_max_prev,
+                outflow_min_curr,
                 ..
             } => {
-                assert_eq!(q_sup_prev, 408.6);
-                assert_eq!(q_inf_curr, 410.0);
+                assert_eq!(outflow_max_prev, 408.6);
+                assert_eq!(outflow_min_curr, 410.0);
             }
             other => panic!("expected TailraceGap, got {other:?}"),
         }
@@ -522,7 +543,7 @@ mod tests {
 
     #[test]
     fn overlap_between_segments_is_tailrace_gap() {
-        // segments[1].q_inf (400.0) < segments[0].q_sup (408.6) → overlap.
+        // segments[1].outflow_min (400.0) < segments[0].outflow_max (408.6) → overlap.
         let rows = vec![
             row(1, 0.0, 408.6, [1.0, 0.0, 0.0, 0.0, 0.0]),
             row(2, 400.0, 1000.0, [1.0, 0.0, 0.0, 0.0, 0.0]),
@@ -530,12 +551,12 @@ mod tests {
         let err = TailraceSegments::from_rows(&rows, "Plant").unwrap_err();
         match err {
             FphaFittingError::TailraceGap {
-                q_sup_prev,
-                q_inf_curr,
+                outflow_max_prev,
+                outflow_min_curr,
                 ..
             } => {
-                assert_eq!(q_sup_prev, 408.6);
-                assert_eq!(q_inf_curr, 400.0);
+                assert_eq!(outflow_max_prev, 408.6);
+                assert_eq!(outflow_min_curr, 400.0);
             }
             other => panic!("expected TailraceGap (overlap), got {other:?}"),
         }
@@ -575,7 +596,7 @@ mod tests {
 
     #[test]
     fn genuine_quartic_with_negative_coeffs_matches_hand_horner() {
-        // Coefficients carry negative a_cf2 and a_cf3 (reference data shape).
+        // Coefficients carry negative coefficient_2 and coefficient_3 (reference data shape).
         let coeffs = [320.0, 1.0e-3, -3.1e-7, -2.0e-11, 5.0e-15];
         let rows = vec![row(1, 0.0, 1500.0, coeffs)];
         let seg = TailraceSegments::from_rows(&rows, "Plant").unwrap();
@@ -603,25 +624,25 @@ mod tests {
 
     /// Build a single-segment family row with explicit family key and constant
     /// height. The constant `h` is encoded as the degree-0 coefficient so the
-    /// family evaluates to `h` for any `q_jus`.
+    /// family evaluates to `h` for any `outflow_m3s`.
     fn family_row(
         hydro_id: i32,
         family_id: i32,
-        href_jus_m: Option<f64>,
+        downstream_reference_level_m: Option<f64>,
         h: f64,
     ) -> TailraceCurveRow {
         TailraceCurveRow {
             hydro_id: EntityId::from(hydro_id),
             family_id,
-            href_jus_m,
+            downstream_reference_level_m,
             segment_id: 1,
-            q_jus_inf_m3s: 0.0,
-            q_jus_sup_m3s: 1000.0,
-            a_cf0: h,
-            a_cf1: 0.0,
-            a_cf2: 0.0,
-            a_cf3: 0.0,
-            a_cf4: 0.0,
+            outflow_min_m3s: 0.0,
+            outflow_max_m3s: 1000.0,
+            coefficient_0: h,
+            coefficient_1: 0.0,
+            coefficient_2: 0.0,
+            coefficient_3: 0.0,
+            coefficient_4: 0.0,
         }
     }
 
@@ -669,20 +690,20 @@ mod tests {
     }
 
     #[test]
-    fn none_level_multi_family_uses_lowest_href() {
+    fn none_level_multi_family_uses_lowest_family_level() {
         let rows = vec![
             family_row(1, 1, Some(880.0), 10.0),
             family_row(1, 2, Some(890.0), 20.0),
         ];
         let fams = TailraceFamilies::from_rows(&rows, "Plant").unwrap();
 
-        // Unresolved level ⇒ the lowest-href family (880 m, height 10).
+        // Unresolved level ⇒ the lowest-family_level family (880 m, height 10).
         assert!((fams.evaluate(400.0, None) - 10.0).abs() < 1e-9);
     }
 
     #[test]
     fn keyless_multi_family_is_family_key_missing() {
-        // Two families but the second carries no href_jus_m ⇒ ambiguous.
+        // Two families but the second carries no downstream_reference_level_m ⇒ ambiguous.
         let rows = vec![
             family_row(1, 1, Some(880.0), 10.0),
             family_row(1, 2, None, 20.0),

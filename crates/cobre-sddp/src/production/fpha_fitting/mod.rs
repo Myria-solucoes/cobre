@@ -3,7 +3,7 @@
 //! Turns a hydro plant's Volume-Height-Area (VHA) curve into a set of
 //! hyperplanes approximating the production function `phi(v, q, s)`. The pipeline
 //! evaluates the production function on a uniform `(V, Q)` grid (at spillage = 0),
-//! takes the 3-D convex hull of the resulting `(V, Q, GH)` cloud, and reads its
+//! takes the 3-D convex hull of the resulting `(V, Q, generation)` cloud, and reads its
 //! upper-envelope facets as a piecewise-linear concave outer approximation.
 //!
 //! # Submodule layout
@@ -15,7 +15,7 @@
 //! - `production` — the head-conversion constant and `ProductionFunction`, the
 //!   evaluable `phi(v, q, s)` with analytical derivatives.
 //! - `hull_fit` — `fit_hull_planes`, the convex-hull fitter that builds the
-//!   `(V, Q, GH)` cloud and extracts upper-envelope planes (the production path).
+//!   `(V, Q, generation)` cloud and extracts upper-envelope planes (the production path).
 //!   Also owns `RawPlane`, the four-coefficient carrier the whole pipeline threads.
 //! - `grid` — the single authoritative owner of the uniform grid formula
 //!   (`GridParams` + `build_grid`), shared by the hull cloud, the α regression,
@@ -130,14 +130,14 @@ pub(crate) struct FphaFitResult {
 /// 2. **Production function** — build `ProductionFunction` from the forebay table
 ///    and the hydro plant's tailrace, hydraulic loss, and efficiency models.
 /// 3. **Fitting bounds** — resolve volume range and grid counts from the config.
-/// 4. **Hull fit** — build the `(V, Q, GH)` production cloud (spillage = 0,
+/// 4. **Hull fit** — build the `(V, Q, generation)` production cloud (spillage = 0,
 ///    lateral = 0) plus the closing point, take the 3-D convex hull, and read its
 ///    upper-envelope facets as raw planes.
 /// 5. **Alpha correction** — compute the least-squares `α_FPHA` on the spill = 0
 ///    grid and scale every plane's whole affine function by `α`.
 /// 6. **Lateral secant** — fit the lateral-flow secant `γ_S` over
-///    `Q_lat ∈ [0, S_max]` on the α-scaled planes (smart default `Q_lat = S`,
-///    `Q̂_lat = 0`; `S_max = 2·MLT` or the `2 × max_turbined` fallback).
+///    `lateral_flow ∈ [0, S_max]` on the α-scaled planes (smart default `lateral_flow = S`,
+///    `reference lateral flow = 0`; `S_max = 2·long-term mean inflow` or the `2 × max_turbined` fallback).
 /// 7. **Validation** — require `α_FPHA > 0` and the coefficient signs (including
 ///    the fitted `γ_S ≤ 0`).
 /// 8. **Conversion** — convert each α-scaled, `γ_S`-fitted `RawPlane` to
@@ -160,8 +160,8 @@ pub(crate) struct FphaFitResult {
 ///   `volume_hm3` (as returned by `cobre_io::extensions::parse_hydro_geometry`).
 /// - `hydro` — resolved hydro plant entity supplying physical bounds and models.
 /// - `config` — FPHA fitting configuration (grid sizes, optional fitting window).
-/// - `mlt` — long-term mean natural inflow \[m³/s\] for the lateral-secant
-///   `S_max = 2·MLT`; `0.0` (no inflow history) selects the `2 × max_turbined`
+/// - `long_term_mean_inflow_m3s` — long-term mean natural inflow \[m³/s\] for the lateral-secant
+///   `S_max = 2·long-term mean inflow`; `0.0` (no inflow history) selects the `2 × max_turbined`
 ///   fallback (see `secant::resolve_s_max`).
 /// - `tailrace_source` — the resolved [`TailraceSource`]. The caller resolves it
 ///   per (hydro, entry): [`TailraceSource::Families`] when the plant has a
@@ -183,7 +183,7 @@ pub(crate) fn fit_fpha_planes(
     forebay_rows: &[HydroGeometryRow],
     hydro: &Hydro,
     config: &FphaColumnLayout,
-    mlt: f64,
+    long_term_mean_inflow_m3s: f64,
     tailrace_source: TailraceSource,
     reduction: Option<&PlaneReductionConfig>,
     hydro_id: i32,
@@ -203,7 +203,7 @@ pub(crate) fn fit_fpha_planes(
 
     let bounds = resolve_fitting_bounds(config, hydro, &forebay)?;
 
-    // Hull-based fitter: the upper-envelope facets of the (V, Q, GH) production
+    // Hull-based fitter: the upper-envelope facets of the (V, Q, generation) production
     // cloud. Any hull failure maps to a typed FPHA error instead of panicking, so
     // one pathological hydro does not abort the whole fitting loop. The dominant
     // case is a degenerate (collinear/coplanar) cloud — e.g. a constant-head
@@ -231,11 +231,11 @@ pub(crate) fn fit_fpha_planes(
         .map(|raw| scale_plane_affine(raw, alpha))
         .collect();
 
-    // Smart default: Q_lat = S (own spill), Q̂_lat = 0. `mlt` is the per-hydro
-    // long-term mean inflow, giving `S_max = 2·MLT`; a hydro with no inflow
-    // history passes `mlt = 0.0` and falls back to `2 × max_turbined` (see
+    // Smart default: lateral_flow = S (own spill), reference lateral flow = 0. `long_term_mean_inflow_m3s` is the per-hydro
+    // long-term mean inflow, giving `S_max = 2·long-term mean inflow`; a hydro with no inflow
+    // history passes `long_term_mean_inflow_m3s = 0.0` and falls back to `2 × max_turbined` (see
     // `secant::resolve_s_max`). The secant is fit for every plant.
-    fit_gamma_s_for_planes(&mut scaled, &pf, &bounds, mlt);
+    fit_gamma_s_for_planes(&mut scaled, &pf, &bounds, long_term_mean_inflow_m3s);
 
     // Validation runs on the α-scaled, γ_S-fitted planes so the `γ_s ≤ 1e-10`
     // sign rule sees the actual emitted lateral coefficient (not the provisional

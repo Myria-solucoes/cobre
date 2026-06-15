@@ -32,20 +32,20 @@ const ORIGIN_EPS: f64 = 1e-9;
 
 /// The angle-test normal of a plane: `n = (γ_V, γ_Q, −1)`.
 ///
-/// # Contract — orientation only, in `(V, Q, GH)` (Voice 1)
+/// # Contract — orientation only, in `(V, Q, generation)` (Voice 1)
 ///
-/// The surface `GH = γ₀ + γ_V·V + γ_Q·Q` written as `γ_V·V + γ_Q·Q − GH + γ₀ = 0`
+/// The surface `generation = γ₀ + γ_V·V + γ_Q·Q` written as `γ_V·V + γ_Q·Q − generation + γ₀ = 0`
 /// has gradient-form normal `(γ_V, γ_Q, −1)`. `γ_S` (the lateral-secant slope on
 /// a separate axis) and `γ₀` (the offset, not the orientation) are EXCLUDED:
 /// folding either into the normal is the wrong-but-compiling alternative — it
 /// would compare offset or lateral slope as if it were orientation, merging
-/// planes that are parallel in `(V, Q, GH)` but differ in offset/secant. The
-/// `−1` GH component guarantees `‖n‖ ≥ 1`, so [`angle_deg`] never divides by zero.
+/// planes that are parallel in `(V, Q, generation)` but differ in offset/secant. The
+/// `−1` generation component guarantees `‖n‖ ≥ 1`, so [`angle_deg`] never divides by zero.
 fn plane_normal(plane: &RawPlane) -> [f64; 3] {
     [plane.gamma_v, plane.gamma_q, -1.0]
 }
 
-/// Angle (degrees) between the two planes' `(V, Q, GH)` normals.
+/// Angle (degrees) between the two planes' `(V, Q, generation)` normals.
 ///
 /// `θ = arccos( clamp(n₁·n₂ / (‖n₁‖·‖n₂‖), −1, 1) )`, converted to degrees.
 ///
@@ -54,7 +54,7 @@ fn plane_normal(plane: &RawPlane) -> [f64; 3] {
 /// Floating-point roundoff can push the cosine ratio just past `±1` (e.g.
 /// `1.0 + 1e-16`), making `arccos` return `NaN` and silently corrupting the
 /// `θ < tolerance` comparison. Clamping to `[−1, 1]` first is mandatory, not
-/// defensive. Both norms are `≥ 1` (the `−1` GH component of [`plane_normal`]),
+/// defensive. Both norms are `≥ 1` (the `−1` generation component of [`plane_normal`]),
 /// so the denominator is never zero.
 fn angle_deg(a: &RawPlane, b: &RawPlane) -> f64 {
     let n1 = plane_normal(a);
@@ -197,8 +197,8 @@ fn reduce_planes_angle(planes: &[RawPlane], tolerance_deg: f64) -> Vec<RawPlane>
     })
 }
 
-/// The generation-window upper bound `gh_max`: the maximum
-/// `GH = pf.evaluate(v, q, 0)` over a prebuilt fitting `(V, Q)` grid.
+/// The generation-window upper bound `generation_max`: the maximum
+/// `generation = pf.evaluate(v, q, 0)` over a prebuilt fitting `(V, Q)` grid.
 ///
 /// Takes a prebuilt grid so [`reduce_planes_distance`] can build the grid ONCE
 /// per plant and share it between this scan and the per-pair sampler — the grid
@@ -207,17 +207,17 @@ fn reduce_planes_angle(planes: &[RawPlane], tolerance_deg: f64) -> Vec<RawPlane>
 /// walks the closed-form axes in fixed `(v, q)` order — the same grid the cloud
 /// builder and the secant scan use — so the result is order-independent.
 fn grid_max_gh(pf: &ProductionFunction, grid: &GridParams) -> f64 {
-    let mut gh_max = f64::NEG_INFINITY;
+    let mut generation_max = f64::NEG_INFINITY;
     for &v in &grid.v_points {
         for &q in &grid.q_points {
             // Spillage fixed at 0: the same no-lateral surface the cloud uses.
-            let gh = pf.evaluate(v, q, 0.0);
-            if gh > gh_max {
-                gh_max = gh;
+            let generation = pf.evaluate(v, q, 0.0);
+            if generation > generation_max {
+                generation_max = generation;
             }
         }
     }
-    gh_max
+    generation_max
 }
 
 /// Derive a pair's canonical PRNG seed from a STABLE identity.
@@ -257,7 +257,7 @@ fn pair_seed(hydro_id: i32, entry_level_bits: u64, tail_slot: usize, candidate_s
 ///
 /// Draws `n_samples` `(V, Q)` points uniformly in the fitting box and returns
 /// whether the normalised mean-squared generation difference falls below the
-/// tolerance: `δ = EQM / gh²_max < tolerance_pct / 100`.
+/// tolerance: `δ = EQM / generation²_max < tolerance_pct / 100`.
 ///
 /// # Contract — sequential `Σ d²` in canonical sample order (Voice 1 / D5)
 ///
@@ -269,18 +269,18 @@ fn pair_seed(hydro_id: i32, entry_level_bits: u64, tail_slot: usize, candidate_s
 ///
 /// # Contract — `δ` is a fraction; `tolerance_pct` is a percent (Voice 1)
 ///
-/// `δ = EQM / gh²_max` is a dimensionless fraction, while `tolerance_pct` is a
+/// `δ = EQM / generation²_max` is a dimensionless fraction, while `tolerance_pct` is a
 /// percentage, so the comparison normalises the tolerance to a fraction:
 /// `δ < tolerance_pct / 100.0`. Comparing `δ` against the raw `tolerance_pct`
 /// (without the `/ 100`) is the wrong-but-compiling alternative — it would treat
 /// a `0.5 %` tolerance as `50 %` and merge far too aggressively. The caller
-/// guarantees `gh_max > 0` (the `gh_max <= 0` guard lives in
+/// guarantees `generation_max > 0` (the `generation_max <= 0` guard lives in
 /// [`reduce_planes_distance`]), so the division is well-defined here.
 fn pair_similar_distance(
     tail: &RawPlane,
     candidate: &RawPlane,
     grid: &GridParams,
-    gh_max: f64,
+    generation_max: f64,
     n_samples: u32,
     seed: u64,
     tolerance_pct: f64,
@@ -308,7 +308,7 @@ fn pair_similar_distance(
     }
 
     let eqm = sum_sq / f64::from(n_samples);
-    let delta = eqm / (gh_max * gh_max);
+    let delta = eqm / (generation_max * generation_max);
     delta < tolerance_pct / 100.0
 }
 
@@ -316,7 +316,7 @@ fn pair_similar_distance(
 /// method.
 ///
 /// Shares [`reduce_planes_with`]'s greedy sweep, supplying the sampled-distance
-/// predicate. `gh_max` is computed ONCE per plant; when it is non-positive the
+/// predicate. `generation_max` is computed ONCE per plant; when it is non-positive the
 /// normalisation is undefined, so no pair is merged (the method is inert for
 /// that plant) and the input is returned unchanged. Each pair's PRNG seed is
 /// derived from the STABLE `(hydro_id, entry_level_bits, tail_slot,
@@ -331,17 +331,17 @@ fn reduce_planes_distance(
     hydro_id: i32,
     entry_level_bits: u64,
 ) -> Vec<RawPlane> {
-    // Build the fitting grid ONCE per plant and share it between the gh_max scan
+    // Build the fitting grid ONCE per plant and share it between the generation_max scan
     // and every per-pair sampler — the grid is a pure function of `pf` + `bounds`,
     // so re-deriving it per pair would allocate identical axes on every compare.
     let grid = build_grid(pf, bounds);
-    let gh_max = grid_max_gh(pf, &grid);
+    let generation_max = grid_max_gh(pf, &grid);
 
-    // gh_max <= 0 guard: the squared normaliser gh²_max would be zero (or the
+    // generation_max <= 0 guard: the squared normaliser generation²_max would be zero (or the
     // window degenerate), making δ undefined. No pair is merged — return the
     // input unchanged rather than dividing by zero. Checked ONCE, before the
-    // sweep, since gh_max is fixed per plant.
-    if gh_max <= 0.0 {
+    // sweep, since generation_max is fixed per plant.
+    if generation_max <= 0.0 {
         return planes.to_vec();
     }
 
@@ -351,7 +351,7 @@ fn reduce_planes_distance(
             tail,
             candidate,
             &grid,
-            gh_max,
+            generation_max,
             n_samples,
             seed,
             tolerance_pct,
@@ -604,10 +604,10 @@ mod tests {
     fn grid_max_gh_is_positive_for_concave_window() {
         let pf = test_pf();
         let bounds = test_bounds();
-        let gh_max = grid_max_gh(&pf, &super::build_grid(&pf, &bounds));
+        let generation_max = grid_max_gh(&pf, &super::build_grid(&pf, &bounds));
         assert!(
-            gh_max > 0.0,
-            "the concave fixture must have a positive generation window, got {gh_max}"
+            generation_max > 0.0,
+            "the concave fixture must have a positive generation window, got {generation_max}"
         );
     }
 
@@ -619,7 +619,7 @@ mod tests {
         let pf = test_pf();
         let bounds = test_bounds();
         let grid = super::build_grid(&pf, &bounds);
-        let gh_max = grid_max_gh(&pf, &grid);
+        let generation_max = grid_max_gh(&pf, &grid);
         let tail = plane(100.0, 0.002, 0.85, -0.01);
         let candidate = plane(140.0, 0.0025, 0.90, -0.02);
         let seed = 0x1234_5678_9abc_def0_u64;
@@ -649,8 +649,24 @@ mod tests {
             "Σ d² must be bit-identical for a shared seed"
         );
 
-        let first = pair_similar_distance(&tail, &candidate, &grid, gh_max, n_samples, seed, 50.0);
-        let second = pair_similar_distance(&tail, &candidate, &grid, gh_max, n_samples, seed, 50.0);
+        let first = pair_similar_distance(
+            &tail,
+            &candidate,
+            &grid,
+            generation_max,
+            n_samples,
+            seed,
+            50.0,
+        );
+        let second = pair_similar_distance(
+            &tail,
+            &candidate,
+            &grid,
+            generation_max,
+            n_samples,
+            seed,
+            50.0,
+        );
         assert_eq!(
             first, second,
             "the predicate must be reproducible from its seed"
@@ -664,13 +680,13 @@ mod tests {
         let pf = test_pf();
         let bounds = test_bounds();
         let grid = super::build_grid(&pf, &bounds);
-        let gh_max = grid_max_gh(&pf, &grid);
+        let generation_max = grid_max_gh(&pf, &grid);
         let p = plane(120.0, 0.0015, 0.80, -0.015);
 
         // δ = 0 for coincident planes: every sampled difference is exactly 0, so
         // any positive tolerance accepts the pair.
         assert!(
-            pair_similar_distance(&p, &p, &grid, gh_max, 128, 0xabc_def, 1e-9),
+            pair_similar_distance(&p, &p, &grid, generation_max, 128, 0xabc_def, 1e-9),
             "coincident planes must be similar at any positive tolerance"
         );
 
@@ -723,29 +739,29 @@ mod tests {
         );
     }
 
-    /// `gh_max <= 0` ⇒ no merge: the method is inert and returns the input
+    /// `generation_max <= 0` ⇒ no merge: the method is inert and returns the input
     /// `to_bits`-identical. Built with a non-positive constant-head window via a
     /// fixture whose `pf.evaluate(v, q, 0)` is non-positive over the grid is hard
     /// to construct, so the contract is exercised by calling the inert guard path
-    /// directly through a degenerate `gh_max` argument on `pair_similar_distance`.
+    /// directly through a degenerate `generation_max` argument on `pair_similar_distance`.
     #[test]
     fn non_positive_gh_max_does_not_merge() {
         let pf = test_pf();
         let bounds = test_bounds();
-        // Two clearly-coincident planes: they WOULD merge with a positive gh_max,
+        // Two clearly-coincident planes: they WOULD merge with a positive generation_max,
         // so a non-merge here is attributable to the guard, not the geometry.
         let p = plane(120.0, 0.0015, 0.80, -0.015);
 
-        // The predicate itself: with gh_max = 0 the normaliser is 0 and δ is
+        // The predicate itself: with generation_max = 0 the normaliser is 0 and δ is
         // NaN/inf, so the strict `<` comparison is false — never similar.
         let grid = super::build_grid(&pf, &bounds);
         assert!(
             !pair_similar_distance(&p, &p, &grid, 0.0, 64, 1, 99.0),
-            "gh_max = 0 must make the predicate inert (no similarity)"
+            "generation_max = 0 must make the predicate inert (no similarity)"
         );
     }
 
-    /// The whole-plant `gh_max <= 0` guard returns the input unchanged. The guard
+    /// The whole-plant `generation_max <= 0` guard returns the input unchanged. The guard
     /// lives in `reduce_planes_distance` and short-circuits before the sweep, so a
     /// fixture with a non-positive window is returned `to_bits`-identical. Such a
     /// fixture is awkward to build from geometry, so the guard's behaviour is

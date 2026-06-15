@@ -275,11 +275,11 @@ mod tests {
         }
     }
 
-    /// A production-like `(V, Q, GH)` point cloud: generation-head samples on a
+    /// A production-like `(V, Q, z)` point cloud: generation-head samples on a
     /// `V × Q` storage/turbined-flow grid, plus the closing point `(V_max,
     /// Q_max, 0)`.
     ///
-    /// `gh` is a mildly concave surface (`a·√V + b·√Q − c·V·Q`) so the cloud is
+    /// `z` is a mildly concave surface (`a·√V + b·√Q − c·V·Q`) so the cloud is
     /// not a trivial box — its upper hull has several distinct facets, which is
     /// what makes it a representative determinism stress: a cloud whose hull is
     /// one or two facets would not exercise qhull's facet ordering. The closing
@@ -299,8 +299,8 @@ mod tests {
             for iq in 0..GRID {
                 let v = V_MAX * f64::from(iv) / span;
                 let q = Q_MAX * f64::from(iq) / span;
-                let gh = 0.8 * v.sqrt() + 1.2 * q.sqrt() - 0.001 * v * q;
-                cloud.push([v, q, gh]);
+                let z = 0.8 * v.sqrt() + 1.2 * q.sqrt() - 0.001 * v * q;
+                cloud.push([v, q, z]);
             }
         }
         // Closing point: maximum storage and flow at zero generation head.

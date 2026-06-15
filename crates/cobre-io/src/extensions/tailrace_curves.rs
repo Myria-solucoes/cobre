@@ -1,5 +1,5 @@
 //! Parsing for `system/tailrace_curves.parquet` — piecewise-quartic
-//! tailrace-level curves `h_jus(q_jus)`.
+//! tailrace-level curves `tailrace_level(outflow_m3s)`.
 //!
 //! [`parse_tailrace_curves`] reads `system/tailrace_curves.parquet` from the
 //! case directory and returns a flat, sorted `Vec<TailraceCurveRow>`.
@@ -10,11 +10,11 @@
 //! |---------------- |---------------- |------------------------------------------------------|
 //! | `hydro_id`      | INT32           | Plant whose tailrace this describes                  |
 //! | `family_id`     | INT32           | Family index within the plant (sequential)           |
-//! | `href_jus_m`    | DOUBLE nullable | Downstream reference level keying the family (m)      |
+//! | `downstream_reference_level_m`    | DOUBLE nullable | Downstream reference level keying the family (m)      |
 //! | `segment_id`    | INT32           | Piece index within the family                         |
-//! | `q_jus_inf_m3s` | DOUBLE          | Segment lower validity bound (m³/s)                  |
-//! | `q_jus_sup_m3s` | DOUBLE          | Segment upper validity bound (m³/s)                  |
-//! | `a_cf0`..`a_cf4`| DOUBLE          | Degree-4 polynomial coefficients (ascending power)   |
+//! | `outflow_min_m3s` | DOUBLE          | Segment lower validity bound (m³/s)                  |
+//! | `outflow_max_m3s` | DOUBLE          | Segment upper validity bound (m³/s)                  |
+//! | `coefficient_0`..`coefficient_4`| DOUBLE          | Degree-4 polynomial coefficients (ascending power)   |
 //!
 //! ## Output ordering
 //!
@@ -27,12 +27,12 @@
 //! Per-row constraints enforced by this parser:
 //!
 //! - All twelve columns must be present with the correct Arrow types
-//!   (`href_jus_m` is nullable Float64; all other columns are non-nullable).
-//! - `q_jus_inf_m3s` and `q_jus_sup_m3s` must be non-negative and finite.
-//! - `q_jus_sup_m3s >= q_jus_inf_m3s` (a segment window is non-inverted).
-//! - Each of `a_cf0`..`a_cf4` must be finite; any sign is accepted, because the
+//!   (`downstream_reference_level_m` is nullable Float64; all other columns are non-nullable).
+//! - `outflow_min_m3s` and `outflow_max_m3s` must be non-negative and finite.
+//! - `outflow_max_m3s >= outflow_min_m3s` (a segment window is non-inverted).
+//! - Each of `coefficient_0`..`coefficient_4` must be finite; any sign is accepted, because the
 //!   higher-degree coefficients are routinely negative in the source data.
-//! - `href_jus_m`, when non-null, must be non-negative and finite.
+//! - `downstream_reference_level_m`, when non-null, must be non-negative and finite.
 //!
 //! Deferred validations (not performed here):
 //!
@@ -63,15 +63,15 @@ use crate::LoadError;
 /// let row = TailraceCurveRow {
 ///     hydro_id: EntityId::from(42),
 ///     family_id: 1,
-///     href_jus_m: Some(885.3),
+///     downstream_reference_level_m: Some(885.3),
 ///     segment_id: 1,
-///     q_jus_inf_m3s: 0.0,
-///     q_jus_sup_m3s: 1500.0,
-///     a_cf0: 320.0,
-///     a_cf1: 1.0e-3,
-///     a_cf2: -3.1521e-17,
-///     a_cf3: 0.0,
-///     a_cf4: 0.0,
+///     outflow_min_m3s: 0.0,
+///     outflow_max_m3s: 1500.0,
+///     coefficient_0: 320.0,
+///     coefficient_1: 1.0e-3,
+///     coefficient_2: -3.1521e-17,
+///     coefficient_3: 0.0,
+///     coefficient_4: 0.0,
 /// };
 /// assert_eq!(row.hydro_id, EntityId::from(42));
 /// assert_eq!(row.segment_id, 1);
@@ -84,23 +84,23 @@ pub struct TailraceCurveRow {
     pub family_id: i32,
     /// Downstream reference level keying the family (m). `None` when the source
     /// carries no reference level (the plant has a single family).
-    pub href_jus_m: Option<f64>,
+    pub downstream_reference_level_m: Option<f64>,
     /// Piece index within the family.
     pub segment_id: i32,
     /// Segment lower validity bound (m³/s). Non-negative.
-    pub q_jus_inf_m3s: f64,
-    /// Segment upper validity bound (m³/s). Non-negative, `>= q_jus_inf_m3s`.
-    pub q_jus_sup_m3s: f64,
+    pub outflow_min_m3s: f64,
+    /// Segment upper validity bound (m³/s). Non-negative, `>= outflow_min_m3s`.
+    pub outflow_max_m3s: f64,
     /// Degree-0 polynomial coefficient. Any sign.
-    pub a_cf0: f64,
+    pub coefficient_0: f64,
     /// Degree-1 polynomial coefficient. Any sign.
-    pub a_cf1: f64,
+    pub coefficient_1: f64,
     /// Degree-2 polynomial coefficient. Any sign.
-    pub a_cf2: f64,
+    pub coefficient_2: f64,
     /// Degree-3 polynomial coefficient. Any sign.
-    pub a_cf3: f64,
+    pub coefficient_3: f64,
     /// Degree-4 polynomial coefficient. Any sign.
-    pub a_cf4: f64,
+    pub coefficient_4: f64,
 }
 
 /// Parse `system/tailrace_curves.parquet` and return a sorted segment table.
@@ -147,14 +147,15 @@ pub fn parse_tailrace_curves(path: &Path) -> Result<Vec<TailraceCurveRow>, LoadE
         let hydro_id_col = extract_int32_column(&batch, "hydro_id", path)?;
         let family_id_col = extract_int32_column(&batch, "family_id", path)?;
         let segment_id_col = extract_int32_column(&batch, "segment_id", path)?;
-        let href_col = extract_float64_column(&batch, "href_jus_m", path)?;
-        let q_inf_col = extract_float64_column(&batch, "q_jus_inf_m3s", path)?;
-        let q_sup_col = extract_float64_column(&batch, "q_jus_sup_m3s", path)?;
-        let a_cf0_col = extract_float64_column(&batch, "a_cf0", path)?;
-        let a_cf1_col = extract_float64_column(&batch, "a_cf1", path)?;
-        let a_cf2_col = extract_float64_column(&batch, "a_cf2", path)?;
-        let a_cf3_col = extract_float64_column(&batch, "a_cf3", path)?;
-        let a_cf4_col = extract_float64_column(&batch, "a_cf4", path)?;
+        let reference_level_col =
+            extract_float64_column(&batch, "downstream_reference_level_m", path)?;
+        let q_inf_col = extract_float64_column(&batch, "outflow_min_m3s", path)?;
+        let q_sup_col = extract_float64_column(&batch, "outflow_max_m3s", path)?;
+        let coefficient_0_col = extract_float64_column(&batch, "coefficient_0", path)?;
+        let coefficient_1_col = extract_float64_column(&batch, "coefficient_1", path)?;
+        let coefficient_2_col = extract_float64_column(&batch, "coefficient_2", path)?;
+        let coefficient_3_col = extract_float64_column(&batch, "coefficient_3", path)?;
+        let coefficient_4_col = extract_float64_column(&batch, "coefficient_4", path)?;
 
         // ── Build rows with per-row validation ───────────────────────────────
         let n = batch.num_rows();
@@ -168,59 +169,64 @@ pub fn parse_tailrace_curves(path: &Path) -> Result<Vec<TailraceCurveRow>, LoadE
             let family_id = family_id_col.value(i);
             let segment_id = segment_id_col.value(i);
 
-            // A null `href_jus_m` is a valid "single family / no reference level"
+            // A null `downstream_reference_level_m` is a valid "single family / no reference level"
             // marker; a present value must clear the non-negative-finite gate.
-            let href_jus_m = if href_col.is_null(i) {
+            let downstream_reference_level_m = if reference_level_col.is_null(i) {
                 None
             } else {
                 Some(validate_non_negative(
-                    href_col.value(i),
+                    reference_level_col.value(i),
                     row_idx,
-                    "href_jus_m",
+                    "downstream_reference_level_m",
                     path,
                 )?)
             };
 
-            let q_jus_inf_m3s =
-                validate_non_negative(q_inf_col.value(i), row_idx, "q_jus_inf_m3s", path)?;
-            let q_jus_sup_m3s =
-                validate_non_negative(q_sup_col.value(i), row_idx, "q_jus_sup_m3s", path)?;
+            let outflow_min_m3s =
+                validate_non_negative(q_inf_col.value(i), row_idx, "outflow_min_m3s", path)?;
+            let outflow_max_m3s =
+                validate_non_negative(q_sup_col.value(i), row_idx, "outflow_max_m3s", path)?;
 
-            if q_jus_sup_m3s < q_jus_inf_m3s {
+            if outflow_max_m3s < outflow_min_m3s {
                 return Err(LoadError::SchemaError {
                     path: path.to_path_buf(),
-                    field: format!("tailrace_curves[{row_idx}].q_jus_sup_m3s"),
+                    field: format!("tailrace_curves[{row_idx}].outflow_max_m3s"),
                     message: format!(
-                        "upper bound must be >= lower bound, got q_jus_sup_m3s={q_jus_sup_m3s} < q_jus_inf_m3s={q_jus_inf_m3s}"
+                        "upper bound must be >= lower bound, got outflow_max_m3s={outflow_max_m3s} < outflow_min_m3s={outflow_min_m3s}"
                     ),
                 });
             }
 
-            let a_cf0 = validate_finite(a_cf0_col.value(i), row_idx, "a_cf0", path)?;
-            let a_cf1 = validate_finite(a_cf1_col.value(i), row_idx, "a_cf1", path)?;
-            let a_cf2 = validate_finite(a_cf2_col.value(i), row_idx, "a_cf2", path)?;
-            let a_cf3 = validate_finite(a_cf3_col.value(i), row_idx, "a_cf3", path)?;
-            let a_cf4 = validate_finite(a_cf4_col.value(i), row_idx, "a_cf4", path)?;
+            let coefficient_0 =
+                validate_finite(coefficient_0_col.value(i), row_idx, "coefficient_0", path)?;
+            let coefficient_1 =
+                validate_finite(coefficient_1_col.value(i), row_idx, "coefficient_1", path)?;
+            let coefficient_2 =
+                validate_finite(coefficient_2_col.value(i), row_idx, "coefficient_2", path)?;
+            let coefficient_3 =
+                validate_finite(coefficient_3_col.value(i), row_idx, "coefficient_3", path)?;
+            let coefficient_4 =
+                validate_finite(coefficient_4_col.value(i), row_idx, "coefficient_4", path)?;
 
             rows.push(TailraceCurveRow {
                 hydro_id,
                 family_id,
-                href_jus_m,
+                downstream_reference_level_m,
                 segment_id,
-                q_jus_inf_m3s,
-                q_jus_sup_m3s,
-                a_cf0,
-                a_cf1,
-                a_cf2,
-                a_cf3,
-                a_cf4,
+                outflow_min_m3s,
+                outflow_max_m3s,
+                coefficient_0,
+                coefficient_1,
+                coefficient_2,
+                coefficient_3,
+                coefficient_4,
             });
         }
     }
 
     // ── Sort by (hydro_id, family_id, segment_id) ascending ──────────────────
     //
-    // Integer keys only — no `total_cmp` on `href_jus_m` or a coefficient. A
+    // Integer keys only — no `total_cmp` on `downstream_reference_level_m` or a coefficient. A
     // float key would make tie-ordering depend on float values and break the
     // declaration-order-invariance contract downstream consumers rely on.
     rows.sort_by(|a, b| {
@@ -353,10 +359,10 @@ mod tests {
     struct RowSpec {
         hydro_id: i32,
         family_id: i32,
-        href_jus_m: Option<f64>,
+        downstream_reference_level_m: Option<f64>,
         segment_id: i32,
-        q_jus_inf_m3s: f64,
-        q_jus_sup_m3s: f64,
+        outflow_min_m3s: f64,
+        outflow_max_m3s: f64,
         a_cf: [f64; 5],
     }
 
@@ -366,25 +372,28 @@ mod tests {
             Field::new("family_id", DataType::Int32, false),
             // The reference level is the only nullable column; a non-nullable
             // Float64 array cannot carry the NULL that "single family" needs.
-            Field::new("href_jus_m", DataType::Float64, true),
+            Field::new("downstream_reference_level_m", DataType::Float64, true),
             Field::new("segment_id", DataType::Int32, false),
-            Field::new("q_jus_inf_m3s", DataType::Float64, false),
-            Field::new("q_jus_sup_m3s", DataType::Float64, false),
-            Field::new("a_cf0", DataType::Float64, false),
-            Field::new("a_cf1", DataType::Float64, false),
-            Field::new("a_cf2", DataType::Float64, false),
-            Field::new("a_cf3", DataType::Float64, false),
-            Field::new("a_cf4", DataType::Float64, false),
+            Field::new("outflow_min_m3s", DataType::Float64, false),
+            Field::new("outflow_max_m3s", DataType::Float64, false),
+            Field::new("coefficient_0", DataType::Float64, false),
+            Field::new("coefficient_1", DataType::Float64, false),
+            Field::new("coefficient_2", DataType::Float64, false),
+            Field::new("coefficient_3", DataType::Float64, false),
+            Field::new("coefficient_4", DataType::Float64, false),
         ]))
     }
 
     fn make_batch(rows: &[RowSpec]) -> RecordBatch {
         let hydro_ids: Vec<i32> = rows.iter().map(|r| r.hydro_id).collect();
         let family_ids: Vec<i32> = rows.iter().map(|r| r.family_id).collect();
-        let hrefs: Vec<Option<f64>> = rows.iter().map(|r| r.href_jus_m).collect();
+        let reference_levels: Vec<Option<f64>> = rows
+            .iter()
+            .map(|r| r.downstream_reference_level_m)
+            .collect();
         let segment_ids: Vec<i32> = rows.iter().map(|r| r.segment_id).collect();
-        let q_infs: Vec<f64> = rows.iter().map(|r| r.q_jus_inf_m3s).collect();
-        let q_sups: Vec<f64> = rows.iter().map(|r| r.q_jus_sup_m3s).collect();
+        let q_infs: Vec<f64> = rows.iter().map(|r| r.outflow_min_m3s).collect();
+        let q_sups: Vec<f64> = rows.iter().map(|r| r.outflow_max_m3s).collect();
         let a0: Vec<f64> = rows.iter().map(|r| r.a_cf[0]).collect();
         let a1: Vec<f64> = rows.iter().map(|r| r.a_cf[1]).collect();
         let a2: Vec<f64> = rows.iter().map(|r| r.a_cf[2]).collect();
@@ -396,7 +405,7 @@ mod tests {
             vec![
                 Arc::new(Int32Array::from(hydro_ids)),
                 Arc::new(Int32Array::from(family_ids)),
-                Arc::new(Float64Array::from(hrefs)),
+                Arc::new(Float64Array::from(reference_levels)),
                 Arc::new(Int32Array::from(segment_ids)),
                 Arc::new(Float64Array::from(q_infs)),
                 Arc::new(Float64Array::from(q_sups)),
@@ -411,14 +420,19 @@ mod tests {
     }
 
     /// Compact constructor for a valid segment with a fixed coefficient set.
-    fn seg(hydro_id: i32, family_id: i32, href: Option<f64>, segment_id: i32) -> RowSpec {
+    fn seg(
+        hydro_id: i32,
+        family_id: i32,
+        reference_level: Option<f64>,
+        segment_id: i32,
+    ) -> RowSpec {
         RowSpec {
             hydro_id,
             family_id,
-            href_jus_m: href,
+            downstream_reference_level_m: reference_level,
             segment_id,
-            q_jus_inf_m3s: 0.0,
-            q_jus_sup_m3s: 1500.0,
+            outflow_min_m3s: 0.0,
+            outflow_max_m3s: 1500.0,
             a_cf: [320.0, 1.0e-3, -3.1521e-17, 0.0, 0.0],
         }
     }
@@ -459,12 +473,12 @@ mod tests {
         assert_eq!(rows[0].segment_id, 1);
         assert_eq!(rows[1].segment_id, 2);
         assert_eq!(rows[0].hydro_id, EntityId::from(1));
-        assert_eq!(rows[0].href_jus_m, Some(885.3));
+        assert_eq!(rows[0].downstream_reference_level_m, Some(885.3));
     }
 
     // ── AC: negative quartic coefficient accepted ──────────────────────────────
 
-    /// A negative `a_cf2` is preserved to bit precision (no sign constraint).
+    /// A negative `coefficient_2` is preserved to bit precision (no sign constraint).
     #[test]
     fn test_negative_coefficient_accepted() {
         let mut spec = seg(1, 1, Some(885.3), 1);
@@ -474,30 +488,30 @@ mod tests {
         let rows = parse_tailrace_curves(tmp.path()).unwrap();
 
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].a_cf2.to_bits(), (-3.1521e-17_f64).to_bits());
+        assert_eq!(rows[0].coefficient_2.to_bits(), (-3.1521e-17_f64).to_bits());
     }
 
-    // ── AC: NULL href_jus_m maps to None ───────────────────────────────────────
+    // ── AC: NULL downstream_reference_level_m maps to None ───────────────────────────────────────
 
-    /// A NULL `href_jus_m` parses to `None` and the row is otherwise accepted.
+    /// A NULL `downstream_reference_level_m` parses to `None` and the row is otherwise accepted.
     #[test]
-    fn test_null_href_maps_to_none() {
+    fn test_null_reference_level_maps_to_none() {
         let batch = make_batch(&[seg(1, 1, None, 1)]);
         let tmp = write_parquet(&batch);
         let rows = parse_tailrace_curves(tmp.path()).unwrap();
 
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].href_jus_m, None);
+        assert_eq!(rows[0].downstream_reference_level_m, None);
     }
 
     // ── AC: inverted window rejected ───────────────────────────────────────────
 
-    /// `q_jus_sup_m3s < q_jus_inf_m3s` -> SchemaError naming the column and row.
+    /// `outflow_max_m3s < outflow_min_m3s` -> SchemaError naming the column and row.
     #[test]
     fn test_inverted_window_rejected() {
         let mut spec = seg(1, 1, Some(885.3), 1);
-        spec.q_jus_inf_m3s = 1000.0;
-        spec.q_jus_sup_m3s = 500.0;
+        spec.outflow_min_m3s = 1000.0;
+        spec.outflow_max_m3s = 500.0;
         let batch = make_batch(&[spec]);
         let tmp = write_parquet(&batch);
         let err = parse_tailrace_curves(tmp.path()).unwrap_err();
@@ -505,8 +519,8 @@ mod tests {
         match err {
             LoadError::SchemaError { field, .. } => {
                 assert!(
-                    field.contains("q_jus_sup_m3s"),
-                    "field should name q_jus_sup_m3s, got: {field}"
+                    field.contains("outflow_max_m3s"),
+                    "field should name outflow_max_m3s, got: {field}"
                 );
                 assert!(
                     field.contains("[0]"),
@@ -540,28 +554,28 @@ mod tests {
         assert_eq!(rows_one, rows_two);
         // Coefficient fields match to bit precision under reordering.
         for (x, y) in rows_one.iter().zip(rows_two.iter()) {
-            assert_eq!(x.a_cf0.to_bits(), y.a_cf0.to_bits());
-            assert_eq!(x.a_cf2.to_bits(), y.a_cf2.to_bits());
+            assert_eq!(x.coefficient_0.to_bits(), y.coefficient_0.to_bits());
+            assert_eq!(x.coefficient_2.to_bits(), y.coefficient_2.to_bits());
         }
     }
 
     // ── Missing column ─────────────────────────────────────────────────────────
 
-    /// A Parquet file missing `a_cf4` -> SchemaError naming the column.
+    /// A Parquet file missing `coefficient_4` -> SchemaError naming the column.
     #[test]
     fn test_missing_coefficient_column() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("hydro_id", DataType::Int32, false),
             Field::new("family_id", DataType::Int32, false),
-            Field::new("href_jus_m", DataType::Float64, true),
+            Field::new("downstream_reference_level_m", DataType::Float64, true),
             Field::new("segment_id", DataType::Int32, false),
-            Field::new("q_jus_inf_m3s", DataType::Float64, false),
-            Field::new("q_jus_sup_m3s", DataType::Float64, false),
-            Field::new("a_cf0", DataType::Float64, false),
-            Field::new("a_cf1", DataType::Float64, false),
-            Field::new("a_cf2", DataType::Float64, false),
-            Field::new("a_cf3", DataType::Float64, false),
-            // a_cf4 deliberately omitted
+            Field::new("outflow_min_m3s", DataType::Float64, false),
+            Field::new("outflow_max_m3s", DataType::Float64, false),
+            Field::new("coefficient_0", DataType::Float64, false),
+            Field::new("coefficient_1", DataType::Float64, false),
+            Field::new("coefficient_2", DataType::Float64, false),
+            Field::new("coefficient_3", DataType::Float64, false),
+            // coefficient_4 deliberately omitted
         ]));
         let batch = RecordBatch::try_new(
             schema,
@@ -584,7 +598,7 @@ mod tests {
 
         match err {
             LoadError::SchemaError { field, message, .. } => {
-                assert_eq!(field, "a_cf4");
+                assert_eq!(field, "coefficient_4");
                 assert!(message.contains("missing column"));
             }
             other => panic!("expected SchemaError, got: {other:?}"),
@@ -599,15 +613,15 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![
             Field::new("hydro_id", DataType::Int32, false),
             Field::new("family_id", DataType::Int32, false),
-            Field::new("href_jus_m", DataType::Float64, true),
+            Field::new("downstream_reference_level_m", DataType::Float64, true),
             Field::new("segment_id", DataType::Float64, false), // wrong type
-            Field::new("q_jus_inf_m3s", DataType::Float64, false),
-            Field::new("q_jus_sup_m3s", DataType::Float64, false),
-            Field::new("a_cf0", DataType::Float64, false),
-            Field::new("a_cf1", DataType::Float64, false),
-            Field::new("a_cf2", DataType::Float64, false),
-            Field::new("a_cf3", DataType::Float64, false),
-            Field::new("a_cf4", DataType::Float64, false),
+            Field::new("outflow_min_m3s", DataType::Float64, false),
+            Field::new("outflow_max_m3s", DataType::Float64, false),
+            Field::new("coefficient_0", DataType::Float64, false),
+            Field::new("coefficient_1", DataType::Float64, false),
+            Field::new("coefficient_2", DataType::Float64, false),
+            Field::new("coefficient_3", DataType::Float64, false),
+            Field::new("coefficient_4", DataType::Float64, false),
         ]));
         let batch = RecordBatch::try_new(
             schema,
@@ -647,51 +661,53 @@ mod tests {
         let err = parse_tailrace_curves(tmp.path()).unwrap_err();
 
         match err {
-            LoadError::SchemaError { field, .. } => assert!(field.contains("a_cf3")),
+            LoadError::SchemaError { field, .. } => assert!(field.contains("coefficient_3")),
             other => panic!("expected SchemaError, got: {other:?}"),
         }
     }
 
-    /// An infinite `q_jus_inf_m3s` -> SchemaError naming the bound column.
+    /// An infinite `outflow_min_m3s` -> SchemaError naming the bound column.
     #[test]
     fn test_infinite_bound_rejected() {
         let mut spec = seg(1, 1, Some(885.3), 1);
-        spec.q_jus_inf_m3s = f64::INFINITY;
-        spec.q_jus_sup_m3s = f64::INFINITY;
+        spec.outflow_min_m3s = f64::INFINITY;
+        spec.outflow_max_m3s = f64::INFINITY;
         let batch = make_batch(&[spec]);
         let tmp = write_parquet(&batch);
         let err = parse_tailrace_curves(tmp.path()).unwrap_err();
 
         match err {
-            LoadError::SchemaError { field, .. } => assert!(field.contains("q_jus_inf_m3s")),
+            LoadError::SchemaError { field, .. } => assert!(field.contains("outflow_min_m3s")),
             other => panic!("expected SchemaError, got: {other:?}"),
         }
     }
 
-    /// A negative `q_jus_inf_m3s` -> SchemaError naming the bound column.
+    /// A negative `outflow_min_m3s` -> SchemaError naming the bound column.
     #[test]
     fn test_negative_bound_rejected() {
         let mut spec = seg(1, 1, Some(885.3), 1);
-        spec.q_jus_inf_m3s = -10.0;
+        spec.outflow_min_m3s = -10.0;
         let batch = make_batch(&[spec]);
         let tmp = write_parquet(&batch);
         let err = parse_tailrace_curves(tmp.path()).unwrap_err();
 
         match err {
-            LoadError::SchemaError { field, .. } => assert!(field.contains("q_jus_inf_m3s")),
+            LoadError::SchemaError { field, .. } => assert!(field.contains("outflow_min_m3s")),
             other => panic!("expected SchemaError, got: {other:?}"),
         }
     }
 
-    /// A negative non-null `href_jus_m` -> SchemaError naming the column.
+    /// A negative non-null `downstream_reference_level_m` -> SchemaError naming the column.
     #[test]
-    fn test_negative_href_rejected() {
+    fn test_negative_reference_level_rejected() {
         let batch = make_batch(&[seg(1, 1, Some(-5.0), 1)]);
         let tmp = write_parquet(&batch);
         let err = parse_tailrace_curves(tmp.path()).unwrap_err();
 
         match err {
-            LoadError::SchemaError { field, .. } => assert!(field.contains("href_jus_m")),
+            LoadError::SchemaError { field, .. } => {
+                assert!(field.contains("downstream_reference_level_m"));
+            }
             other => panic!("expected SchemaError, got: {other:?}"),
         }
     }

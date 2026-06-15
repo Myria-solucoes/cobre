@@ -19,7 +19,7 @@
 //! `solve_par_noise` silently miss the annual contribution at standardisation
 //! time, and forward replays with PAR(p)-A active diverged from the raw
 //! historical observation even when the initial lag state matched the window's
-//! pre-study lags exactly (about 11% on the convertido / NEWAVE 1983-anchored
+//! pre-study lags exactly (about 11% on the converted 1983-anchored
 //! comparison case — see `historical.rs` and `evaluate.rs` for details).
 //!
 //! A second bug: `standardize_historical_windows` was inverting η against the

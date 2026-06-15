@@ -1,10 +1,10 @@
 //! Convex-hull FPHA fitter: production cloud → upper-envelope hyperplanes.
 //!
 //! Owns the core of the computed-FPHA path. It evaluates the exact
-//! production function `GH(V, Q)` on the `(V, Q)` grid (at spillage = 0 and
+//! production function `generation(V, Q)` on the `(V, Q)` grid (at spillage = 0 and
 //! lateral = 0), closes the region with the point `(V̄, Q̄, 0)`, takes the 3-D
 //! convex hull via [`crate::hull::convex_hull_3d`], and reads the
-//! upper-envelope facets as planes `GH = γ₀ + γ_V·V + γ_Q·Q`.
+//! upper-envelope facets as planes `generation = γ₀ + γ_V·V + γ_Q·Q`.
 //!
 //! The grid axes come from the single grid-formula owner `super::grid::build_grid`
 //! — the spillage axis it also produces is intentionally unused here, because
@@ -15,7 +15,7 @@ use super::grid::build_grid;
 use super::production::ProductionFunction;
 use crate::hull::{HullError, Hyperplane3d, convex_hull_3d};
 
-/// An unscaled FPHA plane `GH = γ₀ + γ_V·V + γ_Q·Q (+ γ_S·s)`.
+/// An unscaled FPHA plane `generation = γ₀ + γ_V·V + γ_Q·Q (+ γ_S·s)`.
 ///
 /// The single coefficient carrier the whole fitting pipeline threads: the hull
 /// fitter emits it, the α correction scales it, the lateral secant writes its
@@ -43,11 +43,11 @@ impl RawPlane {
     }
 }
 
-/// Tolerance on the facet normal's `GH` component used to select upper-envelope
+/// Tolerance on the facet normal's `generation` component used to select upper-envelope
 /// facets and reject near-vertical facets.
 ///
 /// A facet with `|nz| ≤ EPS_NZ` is a side wall of the cloud (its plane is
-/// near-vertical in the `GH` direction) and dividing by such an `nz` would
+/// near-vertical in the `generation` direction) and dividing by such an `nz` would
 /// blow up the converted coefficients; those facets carry no concave
 /// over-approximation information and are dropped.
 const EPS_NZ: f64 = 1e-9;
@@ -65,12 +65,12 @@ const EPS_NZ: f64 = 1e-9;
 /// plane never trips it.
 const GAMMA_V_EPS: f64 = 1e-6;
 
-/// Build the `(V, Q, GH)` production cloud at spillage = 0 and lateral = 0.
+/// Build the `(V, Q, generation)` production cloud at spillage = 0 and lateral = 0.
 ///
 /// Iterates the volume and flow axes from [`build_grid`] (the spillage axis is
 /// ignored — spillage is fixed at 0) and evaluates the capped output
-/// `GH = pf.evaluate_capped(v, q, 0)` at each grid point. The flow axis starts at
-/// `q = 0`, where `GH = 0`, so the cloud already contains a full zero-generation
+/// `generation = pf.evaluate_capped(v, q, 0)` at each grid point. The flow axis starts at
+/// `q = 0`, where `generation = 0`, so the cloud already contains a full zero-generation
 /// column: that column anchors the region at the origin and forms its lower
 /// closure. No synthetic closing point is added — the zero-flow column already
 /// bounds the region from below.
@@ -90,22 +90,22 @@ fn build_cloud(pf: &ProductionFunction, bounds: &FittingBounds) -> Vec<[f64; 3]>
             // Spillage fixed at 0; lateral inflow is not a production-function
             // argument and is implicitly 0. Capped at installed capacity so the
             // upper envelope cannot exceed it.
-            let gh = pf.evaluate_capped(v, q, 0.0);
-            cloud.push([v, q, gh]);
+            let generation = pf.evaluate_capped(v, q, 0.0);
+            cloud.push([v, q, generation]);
         }
     }
 
     cloud
 }
 
-/// Convert an upper-envelope facet to a plane `GH = γ₀ + γ_V·V + γ_Q·Q`.
+/// Convert an upper-envelope facet to a plane `generation = γ₀ + γ_V·V + γ_Q·Q`.
 ///
 /// # Sign contract (Voice 1)
 ///
-/// `convex_hull_3d` returns each facet as `nx·V + ny·Q + nz·GH + offset = 0`
+/// `convex_hull_3d` returns each facet as `nx·V + ny·Q + nz·generation + offset = 0`
 /// with an OUTWARD unit normal. An upper-envelope facet — one that bounds the
-/// cloud from above in the `GH` direction — has `nz > 0` (verified empirically
-/// against a known concave cloud). Solving for `GH` divides through by `-nz`:
+/// cloud from above in the `generation` direction — has `nz > 0` (verified empirically
+/// against a known concave cloud). Solving for `generation` divides through by `-nz`:
 ///
 /// ```text
 /// γ_V = -nx / nz,   γ_Q = -ny / nz,   γ₀ = -offset / nz
@@ -130,14 +130,14 @@ fn facet_to_plane(facet: &Hyperplane3d) -> RawPlane {
 
 /// Fit upper-envelope FPHA planes from the production cloud via convex hull.
 ///
-/// Builds the `(V, Q, GH)` cloud (spillage = 0, lateral = 0) plus the closing
+/// Builds the `(V, Q, generation)` cloud (spillage = 0, lateral = 0) plus the closing
 /// point, takes the 3-D convex hull, selects the upper-envelope facets, and
-/// converts each to a `GH = γ₀ + γ_V·V + γ_Q·Q` plane (with `γ_S = 0`).
+/// converts each to a `generation = γ₀ + γ_V·V + γ_Q·Q` plane (with `γ_S = 0`).
 ///
 /// # Upper-envelope selection (Voice 1)
 ///
 /// A hull facet is part of the concave over-approximation iff its outward normal
-/// has a POSITIVE `GH` component (`nz > EPS_NZ`): such a facet bounds the cloud
+/// has a POSITIVE `generation` component (`nz > EPS_NZ`): such a facet bounds the cloud
 /// from above. The lower-envelope facets (`nz < 0`) and the near-vertical side
 /// walls (`|nz| ≤ EPS_NZ`) are dropped. Keeping the lower-envelope facets is the
 /// wrong-but-compiling alternative — it yields a convex under-approximation, the
@@ -166,7 +166,7 @@ pub(crate) fn fit_hull_planes(
     let cloud = build_cloud(pf, bounds);
     let facets = convex_hull_3d(&cloud)?;
 
-    // Upper-envelope facets only (nz > 0), converted to GH = γ₀ + γ_V·V + γ_Q·Q,
+    // Upper-envelope facets only (nz > 0), converted to generation = γ₀ + γ_V·V + γ_Q·Q,
     // in convex_hull_3d's canonical order (never re-sorted here).
     let mut planes: Vec<RawPlane> = facets
         .iter()
@@ -185,7 +185,7 @@ pub(crate) fn fit_hull_planes(
     // contract, and feed roundoff into the LP head constraint.
     //
     // Rationale (Voice 2) — mechanism choice. The synthesize-two-samples-then-zero
-    // mechanism is used instead of building a separate 2-D (Q, GH) hull for the
+    // mechanism is used instead of building a separate 2-D (Q, generation) hull for the
     // single-volume case. A dedicated 2-D path would have to reproduce the
     // upper-envelope selection, dedup, and downstream α/secant interfaces against
     // a different hull primitive; reusing the 3-D `convex_hull_3d` with a
@@ -265,7 +265,7 @@ mod tests {
         }
     }
 
-    /// A strictly concave `GH(V, Q)`: a rising-then-flattening forebay curve plus
+    /// A strictly concave `generation(V, Q)`: a rising-then-flattening forebay curve plus
     /// a polynomial tailrace whose head drops with outflow makes both the V and Q
     /// cross-sections strictly concave, so the upper hull has several distinct
     /// facets (a genuine outer-approximation stress, not a single plane).
@@ -291,7 +291,7 @@ mod tests {
     }
 
     /// A V-dependent but Q-linear production function: sloped forebay, no
-    /// tailrace. GH varies with both V and Q so the cloud stays full-dimensional.
+    /// tailrace. generation varies with both V and Q so the cloud stays full-dimensional.
     fn sloped_production_function() -> ProductionFunction {
         let rows = vec![row(0.0, 380.0), row(30_000.0, 410.0)];
         let forebay = ForebayTable::new(&rows, "Sloped").expect("valid VHA curve");
@@ -305,8 +305,8 @@ mod tests {
         )
     }
 
-    /// A constant-head flat-forebay function with no tailrace: GH = c·q,
-    /// independent of V — the degenerate-in-GH path.
+    /// A constant-head flat-forebay function with no tailrace: generation = c·q,
+    /// independent of V — the degenerate-in-generation path.
     fn flat_production_function() -> ProductionFunction {
         let rows = vec![row(0.0, 400.0), row(30_000.0, 400.0)];
         let forebay = ForebayTable::new(&rows, "Flat").expect("valid VHA curve");
@@ -323,7 +323,7 @@ mod tests {
     /// A run-of-river production function: flat forebay (no storage head gain)
     /// plus a polynomial tailrace whose head drops with outflow, making the
     /// `Q` cross-section strictly concave. With a constant forebay height the
-    /// exact `GH` is independent of `V`, so the correct single-volume fit has
+    /// exact `generation` is independent of `V`, so the correct single-volume fit has
     /// `γ_V = 0`.
     fn run_of_river_production_function() -> ProductionFunction {
         let rows = vec![row(0.0, 400.0), row(30_000.0, 400.0)];
@@ -375,14 +375,14 @@ mod tests {
             "expected at least one upper-envelope plane"
         );
 
-        // At every grid point the envelope must over-approximate GH(V, Q).
+        // At every grid point the envelope must over-approximate generation(V, Q).
         let cloud = build_cloud(&pf, &bounds);
         for point in &cloud {
-            let [v, q, gh] = *point;
+            let [v, q, generation] = *point;
             let envelope = envelope_max(&planes, v, q);
             assert!(
-                envelope >= gh - 1e-8,
-                "outer-approximation violated at (v={v}, q={q}): envelope={envelope} < gh={gh}"
+                envelope >= generation - 1e-8,
+                "outer-approximation violated at (v={v}, q={q}): envelope={envelope} < generation={generation}"
             );
         }
     }
@@ -424,13 +424,13 @@ mod tests {
             "cloud must be exactly the grid nodes, with no appended point"
         );
 
-        // Every cloud point's GH equals the CAPPED production at spillage = 0,
+        // Every cloud point's generation equals the CAPPED production at spillage = 0,
         // confirming spillage is fixed (and lateral is implicitly 0).
-        for &[v, q, gh] in &cloud {
+        for &[v, q, generation] in &cloud {
             assert_eq!(
-                gh,
+                generation,
                 pf.evaluate_capped(v, q, 0.0),
-                "cloud GH at (v={v}, q={q}) must be the capped value at spillage = 0"
+                "cloud generation at (v={v}, q={q}) must be the capped value at spillage = 0"
             );
         }
 
@@ -448,7 +448,7 @@ mod tests {
     }
 
     /// The installed-capacity ceiling clips the cloud, and the hull gains a flat
-    /// `GH ≤ capacity` plane (zero gradients) where the raw output runs past it.
+    /// `generation ≤ capacity` plane (zero gradients) where the raw output runs past it.
     #[test]
     fn capacity_ceiling_clips_cloud_and_yields_flat_cap_plane() {
         let cap = 5_000.0_f64;
@@ -465,8 +465,11 @@ mod tests {
         assert_eq!(pf.evaluate_capped(v_top, q_top, 0.0), cap);
 
         // No cloud point exceeds the ceiling.
-        for &[_, _, gh] in &build_cloud(&pf, &bounds) {
-            assert!(gh <= cap + 1e-9, "cloud GH {gh} must not exceed cap {cap}");
+        for &[_, _, generation] in &build_cloud(&pf, &bounds) {
+            assert!(
+                generation <= cap + 1e-9,
+                "cloud generation {generation} must not exceed cap {cap}"
+            );
         }
 
         // The hull includes a flat cap plane: near-zero gradients, intercept ~ cap.
@@ -475,7 +478,7 @@ mod tests {
             planes.iter().any(|p| p.gamma_v.abs() < 1e-6
                 && p.gamma_q.abs() < 1e-6
                 && (p.gamma_0 - cap).abs() < 1.0),
-            "expected a flat GH <= cap plane near {cap}, got {planes:?}"
+            "expected a flat generation <= cap plane near {cap}, got {planes:?}"
         );
     }
 
@@ -528,7 +531,7 @@ mod tests {
     #[test]
     fn sloped_function_yields_outer_approximation_planes() {
         // A sloped (V-dependent) but Q-linear production function is still
-        // non-degenerate (the GH surface varies in both V and Q), so the hull
+        // non-degenerate (the generation surface varies in both V and Q), so the hull
         // fit must produce at least one valid upper-envelope plane.
         let pf = sloped_production_function();
         let bounds = test_bounds();
@@ -538,9 +541,9 @@ mod tests {
                 assert!(!planes.is_empty(), "sloped function must yield >= 1 plane");
                 let cloud = build_cloud(&pf, &bounds);
                 for point in &cloud {
-                    let [v, q, gh] = *point;
+                    let [v, q, generation] = *point;
                     assert!(
-                        envelope_max(&planes, v, q) >= gh - 1e-8,
+                        envelope_max(&planes, v, q) >= generation - 1e-8,
                         "outer approximation violated at (v={v}, q={q})"
                     );
                 }
@@ -552,7 +555,7 @@ mod tests {
     #[test]
     fn flat_function_either_yields_a_plane_or_typed_degenerate() {
         // A constant-head flat-forebay function with no tailrace gives
-        // GH = c·q, independent of V. The (V, Q, GH) cloud plus the closing point
+        // generation = c·q, independent of V. The (V, Q, generation) cloud plus the closing point
         // may be a valid prism (>= 1 plane) or collapse to a degenerate hull. Both
         // outcomes are acceptable; a panic or an empty Ok is not.
         let pf = flat_production_function();
@@ -597,19 +600,19 @@ mod tests {
     #[test]
     fn single_volume_envelope_is_outer_approximation_in_q() {
         // The single-volume planes must still form a valid concave outer
-        // approximation of GH(v0, q) at the fixed volume: at every (v0, q) grid
-        // point, max_k(γ₀ + γ_Q·q) >= GH(v0, q) - 1e-8.
+        // approximation of generation(v0, q) at the fixed volume: at every (v0, q) grid
+        // point, max_k(γ₀ + γ_Q·q) >= generation(v0, q) - 1e-8.
         let pf = run_of_river_production_function();
         let bounds = single_volume_bounds();
         let planes = fit_hull_planes(&pf, &bounds).expect("single-volume cloud yields a hull");
 
         let cloud = build_cloud(&pf, &bounds);
         for point in &cloud {
-            let [v, q, gh] = *point;
+            let [v, q, generation] = *point;
             let envelope = envelope_max(&planes, v, q);
             assert!(
-                envelope >= gh - 1e-8,
-                "outer-approximation violated at (v={v}, q={q}): envelope={envelope} < gh={gh}"
+                envelope >= generation - 1e-8,
+                "outer-approximation violated at (v={v}, q={q}): envelope={envelope} < generation={generation}"
             );
         }
     }

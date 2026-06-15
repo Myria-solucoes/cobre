@@ -60,7 +60,7 @@ impl StudySetup {
     ///
     /// Provides `ρ_eq`, `V_ref`, `Q_ref`, and `ρ_acum` (accumulated cascade
     /// productivity) for every `(hydro, stage)` pair. Consumed by the
-    /// energy-balance LP constraints and ENA/EARM extraction.
+    /// energy-balance LP constraints and inflow-energy / stored-energy extraction.
     #[must_use]
     pub fn energy_conversion(&self) -> &EnergyConversionSet {
         &self.energy_conversion
