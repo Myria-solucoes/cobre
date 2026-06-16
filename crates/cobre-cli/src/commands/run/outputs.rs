@@ -70,6 +70,20 @@ pub(super) fn write_training_outputs(args: &WriteTrainingArgs<'_>) -> Result<(),
             .map_err(CliError::from)?;
     }
 
+    // Evaporation-model coefficients sidecar, written beside the FPHA export
+    // under `hydro_models/`. Guarded by a non-empty check so a case with no
+    // evaporation-modeled hydro produces no file, matching the FPHA "if-any"
+    // behavior. Mirrored on the Python side by `write_evaporation_models_if_any`.
+    let evaporation_rows = cobre_sddp::build_evaporation_model_rows(args.hydro_models, args.system);
+    if !evaporation_rows.is_empty() {
+        let evaporation_path = args
+            .output_dir
+            .join("hydro_models")
+            .join("evaporation_models.parquet");
+        cobre_io::output::write_evaporation_models(&evaporation_path, &evaporation_rows)
+            .map_err(CliError::from)?;
+    }
+
     // Write training solver stats to training/solver/iterations.parquet.
     if !args.training_result.solver_stats_log.is_empty() {
         let rows = cobre_sddp::solver_stats_log_to_rows(&args.training_result.solver_stats_log);

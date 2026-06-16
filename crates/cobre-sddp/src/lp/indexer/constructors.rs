@@ -259,7 +259,7 @@ impl StageIndexer {
     /// `excess` when `has_inflow_penalty == false`), one column per FPHA hydro
     /// per block.  FPHA constraint rows are placed after `load_balance`.
     ///
-    /// Evaporation columns (3 per evaporation hydro: `Q_ev`, `f_evap_plus`,
+    /// Evaporation columns (3 per evaporation hydro: evaporation outflow, `f_evap_plus`,
     /// `f_evap_minus`) are stage-level (not per-block) and come immediately after
     /// the FPHA generation columns.  Evaporation rows (1 per evaporation hydro)
     /// are placed after FPHA rows.
@@ -324,7 +324,7 @@ impl StageIndexer {
     /// Construct a [`StageIndexer`] with full equipment column ranges and evaporation.
     ///
     /// Extends [`StageIndexer::with_equipment`] with evaporation hydro indices.
-    /// Evaporation columns (3 per evaporation hydro: `Q_ev`, `f_evap_plus`,
+    /// Evaporation columns (3 per evaporation hydro: evaporation outflow, `f_evap_plus`,
     /// `f_evap_minus`) are stage-level and placed after FPHA generation columns.
     /// Evaporation rows (1 per evaporation hydro) are placed after FPHA rows.
     ///
@@ -487,7 +487,7 @@ impl StageIndexer {
         };
 
         // Evaporation columns: 3 per evap hydro (stage-level), after FPHA generation columns.
-        // Layout: Q_ev_col = evap_start+i*3, f_evap_plus = +1, f_evap_minus = +2.
+        // Layout: evaporation_flow_col = evap_start+i*3, f_evap_plus = +1, f_evap_minus = +2.
         let n_evap_hydros = evap_hydro_indices.len();
         let evap_col_start = generation_end;
 
@@ -628,7 +628,7 @@ impl StageIndexer {
     ) -> Vec<EvaporationIndices> {
         (0..n_evap_hydros)
             .map(|i| EvaporationIndices {
-                q_ev_col: col_start + i * 3,
+                evaporation_flow_col: col_start + i * 3,
                 f_evap_plus_col: col_start + i * 3 + 1,
                 f_evap_minus_col: col_start + i * 3 + 2,
                 evap_row: row_start + i,
@@ -1324,7 +1324,7 @@ mod tests {
     // deficit:   [13, 14)  (1 bus * 1 block)
     // excess:    [14, 15)
     // generation: empty (no FPHA)
-    // evap cols: [15, 18)  (3 columns: Q_ev, f_evap_plus, f_evap_minus)
+    // evap cols: [15, 18)  (3 columns: evaporation outflow, f_evap_plus, f_evap_minus)
     //
     // Row layout (Phase 1: state-fixing rows removed):
     // z_inflow rows = 0..2  (start at row 0)
@@ -1346,7 +1346,7 @@ mod tests {
 
         let ei = idx.evap_indices(0);
         // 3 columns placed after generation_end (which equals excess.end = 15)
-        assert_eq!(ei.q_ev_col, 15);
+        assert_eq!(ei.evaporation_flow_col, 15);
         assert_eq!(ei.f_evap_plus_col, 16);
         assert_eq!(ei.f_evap_minus_col, 17);
         // Row placed after load_balance.end = 5.
@@ -1391,11 +1391,11 @@ mod tests {
         let ei1 = idx.evap_indices(1);
 
         // Columns start at generation_end = 28
-        assert_eq!(ei0.q_ev_col, 28);
+        assert_eq!(ei0.evaporation_flow_col, 28);
         assert_eq!(ei0.f_evap_plus_col, 29);
         assert_eq!(ei0.f_evap_minus_col, 30);
 
-        assert_eq!(ei1.q_ev_col, 31);
+        assert_eq!(ei1.evaporation_flow_col, 31);
         assert_eq!(ei1.f_evap_plus_col, 32);
         assert_eq!(ei1.f_evap_minus_col, 33);
 

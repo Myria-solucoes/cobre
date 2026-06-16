@@ -27,10 +27,10 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Float64Builder, Int32Builder, RecordBatch};
+use arrow::array::{Float64Builder, Int32Builder, RecordBatch, StringBuilder};
 use arrow::datatypes::{DataType, Field, Schema};
 
-use crate::extensions::FphaHyperplaneRow;
+use crate::extensions::{EvaporationModelRow, FphaHyperplaneRow};
 use crate::output::atomic::{write_json_atomic, write_parquet_atomic};
 use crate::output::error::OutputError;
 use crate::output::parquet_config::ParquetWriterConfig;
@@ -166,6 +166,113 @@ fn build_fpha_hyperplanes_batch(rows: &[FphaHyperplaneRow]) -> Result<RecordBatc
     .map_err(|e| OutputError::serialization("fpha_hyperplanes", e.to_string()))
 }
 
+// ── Evaporation models ──────────────────────────────────────────────────────────
+
+/// Write a slice of [`EvaporationModelRow`] to a Parquet file at `path`.
+///
+/// The output schema is the six columns `hydro_id, stage_id, intercept_m3s,
+/// volume_slope_m3s_per_hm3, reference_volume_hm3, source`, readable by
+/// [`crate::extensions::parse_evaporation_models`] for round-trip compatibility.
+///
+/// Rows are written in the order given; the caller is responsible for sorting
+/// into canonical `(hydro_id, stage_id)` order before calling if that ordering
+/// is required.
+///
+/// The parent directory is created if it does not already exist. The write is
+/// atomic: data goes to `{path}.tmp` first, then the file is renamed to
+/// `path`. A partial `.tmp` file may remain on disk if the process is killed
+/// mid-write, but the final path is never partially written.
+///
+/// An empty slice produces a valid Parquet file with 0 rows and the correct
+/// six-column schema.
+///
+/// # Errors
+///
+/// - [`OutputError::IoError`] — directory creation, file open, or rename fails.
+/// - [`OutputError::SerializationError`] — Arrow/Parquet construction fails.
+///
+/// # Examples
+///
+/// ```no_run
+/// use cobre_io::output::write_evaporation_models;
+/// use cobre_io::extensions::EvaporationModelRow;
+/// use cobre_core::EntityId;
+/// use std::path::Path;
+///
+/// # fn main() -> Result<(), cobre_io::OutputError> {
+/// let rows = vec![
+///     EvaporationModelRow {
+///         hydro_id: EntityId::from(66),
+///         stage_id: None,
+///         intercept_m3s: 12.5,
+///         volume_slope_m3s_per_hm3: 0.0031,
+///         reference_volume_hm3: 14_500.0,
+///         source: "default_midpoint".to_string(),
+///     },
+/// ];
+/// write_evaporation_models(
+///     Path::new("/tmp/out/hydro_models/evaporation_models.parquet"),
+///     &rows,
+/// )?;
+/// # Ok(())
+/// # }
+/// ```
+pub fn write_evaporation_models(
+    path: &Path,
+    rows: &[EvaporationModelRow],
+) -> Result<(), OutputError> {
+    ensure_parent_dir(path)?;
+    let config = ParquetWriterConfig::default();
+    let batch = build_evaporation_models_batch(rows)?;
+    write_parquet_atomic(path, &batch, &config)
+}
+
+fn evaporation_models_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("hydro_id", DataType::Int32, false),
+        Field::new("stage_id", DataType::Int32, true),
+        Field::new("intercept_m3s", DataType::Float64, false),
+        Field::new("volume_slope_m3s_per_hm3", DataType::Float64, false),
+        Field::new("reference_volume_hm3", DataType::Float64, false),
+        Field::new("source", DataType::Utf8, false),
+    ])
+}
+
+fn build_evaporation_models_batch(
+    rows: &[EvaporationModelRow],
+) -> Result<RecordBatch, OutputError> {
+    let n = rows.len();
+
+    let mut hydro_id_col = Int32Builder::with_capacity(n);
+    let mut stage_id_col = Int32Builder::with_capacity(n);
+    let mut intercept_col = Float64Builder::with_capacity(n);
+    let mut volume_slope_col = Float64Builder::with_capacity(n);
+    let mut reference_volume_col = Float64Builder::with_capacity(n);
+    let mut source_col = StringBuilder::with_capacity(n, n * 16);
+
+    for row in rows {
+        hydro_id_col.append_value(row.hydro_id.0);
+        stage_id_col.append_option(row.stage_id);
+        intercept_col.append_value(row.intercept_m3s);
+        volume_slope_col.append_value(row.volume_slope_m3s_per_hm3);
+        reference_volume_col.append_value(row.reference_volume_hm3);
+        source_col.append_value(&row.source);
+    }
+
+    RecordBatch::try_new(
+        Arc::new(evaporation_models_schema()),
+        vec![
+            Arc::new(hydro_id_col.finish()),
+            Arc::new(stage_id_col.finish()),
+            Arc::new(intercept_col.finish()),
+            Arc::new(volume_slope_col.finish()),
+            Arc::new(reference_volume_col.finish()),
+            Arc::new(source_col.finish()),
+        ],
+    )
+    .map_err(|e| OutputError::serialization("evaporation_models", e.to_string()))
+}
+
 // ── Structural hydro-model summary (generic JSON sidecar) ───────────────────────
 
 /// Write a structural hydro-model summary as pretty-printed JSON.
@@ -232,7 +339,9 @@ mod tests {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use tempfile::tempdir;
 
-    use crate::extensions::parse_fpha_hyperplanes;
+    use crate::extensions::{
+        EvaporationModelRow, parse_evaporation_models, parse_fpha_hyperplanes,
+    };
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -535,6 +644,111 @@ mod tests {
             .expect("write must succeed even when parent dirs are missing");
 
         assert!(path.exists(), "file must exist after write");
+    }
+
+    // ── Evaporation models ────────────────────────────────────────────────────
+
+    /// Write two rows (one `stage_id: None`, one `stage_id: Some(3)`), read back
+    /// with parse_evaporation_models, assert field-for-field equality.
+    #[test]
+    fn evaporation_models_round_trips() {
+        let rows = vec![
+            EvaporationModelRow {
+                hydro_id: EntityId::from(66),
+                stage_id: None,
+                intercept_m3s: 12.5,
+                volume_slope_m3s_per_hm3: 0.0031,
+                reference_volume_hm3: 14_500.0,
+                source: "default_midpoint".to_string(),
+            },
+            EvaporationModelRow {
+                hydro_id: EntityId::from(66),
+                stage_id: Some(3),
+                intercept_m3s: 9.75,
+                volume_slope_m3s_per_hm3: 0.0042,
+                reference_volume_hm3: 12_000.0,
+                source: "user_supplied".to_string(),
+            },
+        ];
+
+        let tmp = tempdir().expect("tempdir");
+        let path = tmp.path().join("evaporation_models.parquet");
+
+        write_evaporation_models(&path, &rows).expect("write must succeed");
+        assert!(path.exists(), "file must exist after write");
+
+        let parsed = parse_evaporation_models(&path).expect("parse must succeed");
+        assert_eq!(parsed, rows, "parsed rows must equal input field-for-field");
+    }
+
+    /// Open the evaporation parquet and verify exactly six columns with the
+    /// expected names and nullability.
+    #[test]
+    fn evaporation_models_schema_has_expected_columns() {
+        let rows = vec![EvaporationModelRow {
+            hydro_id: EntityId::from(5),
+            stage_id: None,
+            intercept_m3s: 1.0,
+            volume_slope_m3s_per_hm3: 0.001,
+            reference_volume_hm3: 100.0,
+            source: "default_midpoint".to_string(),
+        }];
+        let tmp = tempdir().expect("tempdir");
+        let path = tmp.path().join("evaporation_models.parquet");
+
+        write_evaporation_models(&path, &rows).expect("write must succeed");
+
+        let file = std::fs::File::open(&path).unwrap();
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+        let schema = builder.schema().clone();
+
+        assert_eq!(schema.fields().len(), 6, "schema must have 6 fields");
+
+        let expected_fields: &[(&str, DataType, bool)] = &[
+            ("hydro_id", DataType::Int32, false),
+            ("stage_id", DataType::Int32, true),
+            ("intercept_m3s", DataType::Float64, false),
+            ("volume_slope_m3s_per_hm3", DataType::Float64, false),
+            ("reference_volume_hm3", DataType::Float64, false),
+            ("source", DataType::Utf8, false),
+        ];
+
+        for (i, (expected_name, expected_type, expected_nullable)) in
+            expected_fields.iter().enumerate()
+        {
+            let field = &schema.fields()[i];
+            assert_eq!(
+                field.name(),
+                *expected_name,
+                "field {i} name: expected {expected_name}, got {}",
+                field.name()
+            );
+            assert_eq!(
+                field.data_type(),
+                expected_type,
+                "field {i} ({expected_name}) type: expected {expected_type:?}, got {:?}",
+                field.data_type()
+            );
+            assert_eq!(
+                field.is_nullable(),
+                *expected_nullable,
+                "field {i} ({expected_name}) nullable: expected {expected_nullable}, got {}",
+                field.is_nullable()
+            );
+        }
+    }
+
+    /// An empty slice writes a valid parquet with zero rows.
+    #[test]
+    fn write_evaporation_models_empty_ok() {
+        let tmp = tempdir().expect("tempdir");
+        let path = tmp.path().join("evaporation_models.parquet");
+
+        write_evaporation_models(&path, &[]).expect("write must succeed for empty slice");
+        assert!(path.exists(), "file must exist after write");
+
+        let parsed = parse_evaporation_models(&path).expect("parse must succeed");
+        assert!(parsed.is_empty(), "must have 0 rows for empty input");
     }
 
     // ── Structural hydro-model summary (generic JSON sidecar) ─────────────────

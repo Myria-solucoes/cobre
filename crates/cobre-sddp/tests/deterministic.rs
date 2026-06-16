@@ -966,17 +966,17 @@ fn d_case_energy_outputs() {
 ///
 /// ## Evaporation coefficient derivation
 ///
-/// Midpoint v_ref = (0 + 200) / 2 = 100 hm3.
+/// Midpoint reference_volume = (0 + 200) / 2 = 100 hm3.
 /// a_ref = 1.0 km², da/dv = 0.005 km²/hm3.
-/// stage_hours = 730 h → zeta_evap = 1 / (3.6 × 730) = 1/2628.
-/// c_ev = 100 mm.
-/// k_evap_v = (1/2628) × 100 × 0.005 = 1/5256.
-/// k_evap0  = (1/2628) × 100 × 1.0 − (1/5256) × 100 = 25/1314.
+/// stage_hours = 730 h → mm_km2_to_m3s = 1 / (3.6 × 730) = 1/2628.
+/// monthly_evaporation_mm = 100 mm.
+/// volume_slope_m3s_per_hm3 = (1/2628) × 100 × 0.005 = 1/5256.
+/// intercept_m3s            = (1/2628) × 100 × 1.0 − (1/5256) × 100 = 25/1314.
 ///
-/// ## Water-balance model (α = κ × k_evap_v / 2 = 1/4000)
+/// ## Water-balance model (α = κ × volume_slope_m3s_per_hm3 / 2 = 1/4000)
 ///
-/// Substituting Q_ev = k_evap0 + k_evap_v/2 × (V_out + V_in) into the LP:
-///   V_out × (1 + α) = V_in × (1 − α) + κ × (q_in − q_turb) − κ × k_evap0
+/// Substituting evaporation_outflow = intercept_m3s + volume_slope_m3s_per_hm3/2 × (V_out + V_in) into the LP:
+///   V_out × (1 + α) = V_in × (1 − α) + κ × (q_in − q_turb) − κ × intercept_m3s
 ///
 /// ## Expected cost derivation (κ = 657/250 hm3/(m3/s))
 ///
@@ -986,14 +986,14 @@ fn d_case_energy_outputs() {
 ///
 /// ### Stage 0 (turb₀ = 50, V_in₀ = 100 hm3)
 ///
-/// V_out₀ = [100×(1−α) + κ×(40 − 50) − κ×k_evap0] / (1+α)
+/// V_out₀ = [100×(1−α) + κ×(40 − 50) − κ×intercept_m3s] / (1+α)
 ///         = 294580/4001 ≈ 73.627 hm3.
 /// gen_h₀ = 50 MW, gen_th₀ = 30 MW.
 /// Stage 0 cost = 30 × 50 × 730 = 1,095,000 $.
 ///
 /// ### Stage 1 (terminal, V_in₁ = V_out₀ = 294580/4001 hm3)
 ///
-/// turb₁_max = V_in₁ × (1−α) / κ + 10 − k_evap0
+/// turb₁_max = V_in₁ × (1−α) / κ + 10 − intercept_m3s
 ///           = 399452585/10514628 ≈ 37.990 m3/s  (<50, so binding).
 /// At turb₁ = turb₁_max: V_out₁ = 0.
 ///

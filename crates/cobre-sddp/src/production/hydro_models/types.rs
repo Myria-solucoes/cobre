@@ -155,23 +155,24 @@ impl ProductionModelSet {
 
 /// Linearized evaporation coefficients for one (hydro, stage) pair.
 ///
-/// The stage-averaged evaporation flow (m³/s) is approximated as:
+/// The stage-averaged evaporation outflow (m³/s) is approximated as:
 ///
 /// ```text
-/// Q_ev = k_evap0 + k_evap_v * (V - V_ref)
+/// evaporation_outflow = intercept_m3s + volume_slope_m3s_per_hm3 * (V - reference_volume)
 /// ```
 ///
-/// where `V` is the reservoir volume (hm³) and `V_ref` is the reference volume
-/// for each stage stored in [`EvaporationModel::Linearized::reference_volumes_hm3`].
-/// The coefficients absorb the `1 / (3.6 · stage_hours)` factor that converts
-/// the `c_ev · A(V)` volume per month (mm·km²/month) into the stage-averaged
-/// flow consumed by the water balance row.
+/// where `V` is the reservoir volume (hm³) and `reference_volume` is the
+/// reference volume for each stage stored in
+/// [`EvaporationModel::Linearized::reference_volumes_hm3`]. The coefficients
+/// absorb the `1 / (3.6 · stage_hours)` factor that converts the
+/// `monthly_evaporation_mm · A(V)` volume per month (mm·km²/month) into the
+/// stage-averaged flow consumed by the water balance row.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LinearizedEvaporation {
-    /// Constant term of the linearized evaporation flow (m³/s).
-    pub k_evap0: f64,
-    /// Volume-dependent slope of the linearized evaporation flow ((m³/s)/hm³).
-    pub k_evap_v: f64,
+    /// Constant term of the linearized evaporation outflow (m³/s).
+    pub intercept_m3s: f64,
+    /// Volume-dependent slope of the linearized evaporation outflow ((m³/s)/hm³).
+    pub volume_slope_m3s_per_hm3: f64,
 }
 
 // ── Evaporation model ─────────────────────────────────────────────────────────
@@ -592,11 +593,11 @@ mod tests {
     #[test]
     fn linearized_evaporation_is_copy() {
         let coeff = LinearizedEvaporation {
-            k_evap0: 0.5,
-            k_evap_v: 0.01,
+            intercept_m3s: 0.5,
+            volume_slope_m3s_per_hm3: 0.01,
         };
         let coeff2 = coeff;
-        assert_eq!(coeff.k_evap0, coeff2.k_evap0);
+        assert_eq!(coeff.intercept_m3s, coeff2.intercept_m3s);
     }
 
     #[test]
@@ -618,8 +619,8 @@ mod tests {
         let _ = format!("{model_fpha:?}");
 
         let coeff = LinearizedEvaporation {
-            k_evap0: 0.5,
-            k_evap_v: 0.01,
+            intercept_m3s: 0.5,
+            volume_slope_m3s_per_hm3: 0.01,
         };
         let _ = format!("{coeff:?}");
 
@@ -791,12 +792,12 @@ mod tests {
             EvaporationModel::Linearized {
                 coefficients: vec![
                     LinearizedEvaporation {
-                        k_evap0: 0.5,
-                        k_evap_v: 0.01,
+                        intercept_m3s: 0.5,
+                        volume_slope_m3s_per_hm3: 0.01,
                     },
                     LinearizedEvaporation {
-                        k_evap0: 0.6,
-                        k_evap_v: 0.02,
+                        intercept_m3s: 0.6,
+                        volume_slope_m3s_per_hm3: 0.02,
                     },
                 ],
                 reference_volumes_hm3: vec![200.0, 200.0],
@@ -804,8 +805,8 @@ mod tests {
             EvaporationModel::None,
             EvaporationModel::Linearized {
                 coefficients: vec![LinearizedEvaporation {
-                    k_evap0: 0.3,
-                    k_evap_v: 0.005,
+                    intercept_m3s: 0.3,
+                    volume_slope_m3s_per_hm3: 0.005,
                 }],
                 reference_volumes_hm3: vec![50.0],
             },
@@ -834,12 +835,12 @@ mod tests {
     #[test]
     fn evaporation_model_set_model_returns_correct_variant() {
         let coeff0 = LinearizedEvaporation {
-            k_evap0: 1.0,
-            k_evap_v: 0.1,
+            intercept_m3s: 1.0,
+            volume_slope_m3s_per_hm3: 0.1,
         };
         let coeff1 = LinearizedEvaporation {
-            k_evap0: 2.0,
-            k_evap_v: 0.2,
+            intercept_m3s: 2.0,
+            volume_slope_m3s_per_hm3: 0.2,
         };
 
         let set = EvaporationModelSet::new(vec![

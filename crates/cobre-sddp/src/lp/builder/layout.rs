@@ -224,7 +224,7 @@ pub(crate) struct StageLayout {
     pub(crate) row_evap_start: usize,
     /// Start of evaporation columns (after FPHA generation columns).
     ///
-    /// 3 stage-level columns per evaporation hydro (`Q_ev`, `f_evap_plus`, `f_evap_minus`).
+    /// 3 stage-level columns per evaporation hydro (evaporation outflow, `f_evap_plus`, `f_evap_minus`).
     /// Layout: `col_evap_start + local_evap_idx * 3 + {0, 1, 2}`.
     pub(crate) col_evap_start: usize,
     /// Start of under-withdrawal slack columns (after evaporation columns).

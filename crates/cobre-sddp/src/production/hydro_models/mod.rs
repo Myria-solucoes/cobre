@@ -20,6 +20,8 @@
 //! - `evaporation` — per-hydro linearized evaporation resolution from reservoir
 //!   geometry, plus the area interpolation and derivative helpers.
 //! - `summary` — the `build_hydro_model_summary` display-summary builder.
+//! - `export` — the `build_evaporation_model_rows` export-row builder that maps
+//!   the resolved evaporation models into `cobre_io::EvaporationModelRow`s.
 //!
 //! The orchestration entry points (`prepare_hydro_models`,
 //! `prepare_hydro_models_from_artifacts`) and the private
@@ -36,11 +38,13 @@ use cobre_core::System;
 use crate::SddpError;
 
 mod evaporation;
+mod export;
 mod production;
 mod summary;
 mod types;
 
 pub use evaporation::{resolve_evaporation_models, resolve_evaporation_models_from_artifacts};
+pub use export::build_evaporation_model_rows;
 pub use production::{resolve_production_models, resolve_production_models_from_artifacts};
 pub use summary::build_hydro_model_summary;
 

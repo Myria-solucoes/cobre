@@ -510,10 +510,10 @@ fn extract_hydro_no_turbine(
     let (evaporation_m3s, evaporation_violation_neg_m3s, evaporation_violation_pos_m3s) =
         if let Some(local_evap_idx) = lookup.evap[h] {
             let ei = &indexer.evap_indices[local_evap_idx];
-            let q_ev = view.primal[ei.q_ev_col];
+            let evaporation_flow = view.primal[ei.evaporation_flow_col];
             let neg = view.primal[ei.f_evap_plus_col]; // f_evap_plus = under-evaporation
             let pos = view.primal[ei.f_evap_minus_col]; // f_evap_minus = over-evaporation
-            (Some(q_ev), neg, pos)
+            (Some(evaporation_flow), neg, pos)
         } else {
             (Some(0.0), 0.0, 0.0)
         };
@@ -636,10 +636,10 @@ impl HydroStageContext {
         let (evaporation_m3s, evaporation_violation_neg_m3s, evaporation_violation_pos_m3s) =
             if let Some(lei) = local_evap {
                 let ei = &indexer.evap_indices[lei];
-                let q_ev = view.primal[ei.q_ev_col];
+                let evaporation_flow = view.primal[ei.evaporation_flow_col];
                 let neg = view.primal[ei.f_evap_plus_col];
                 let pos = view.primal[ei.f_evap_minus_col];
-                (Some(q_ev), neg, pos)
+                (Some(evaporation_flow), neg, pos)
             } else {
                 (Some(0.0), 0.0, 0.0)
             };
@@ -4390,7 +4390,7 @@ mod tests {
     /// turbine:    [4, 5)   h0→4
     /// spillage:   [5, 6)   h0→5
     /// diversion:  [6, 7)   h0→6
-    /// evap:       [7, 10)  Q_ev→7, f_plus→8, f_minus→9
+    /// evap:       [7, 10)  evaporation_flow→7, f_plus→8, f_minus→9
     /// ```
     fn make_indexer_1h_evap_1blk() -> StageIndexer {
         StageIndexer::with_equipment_and_evaporation(
@@ -4418,13 +4418,13 @@ mod tests {
         )
     }
 
-    /// Acceptance criterion: `evaporation_m3s` equals the LP `Q_ev` variable value.
+    /// Acceptance criterion: `evaporation_m3s` equals the LP evaporation-outflow variable value.
     #[test]
     fn evaporation_read_from_lp_column() {
         let indexer = make_indexer_1h_evap_1blk();
         assert_eq!(indexer.evap_hydro_indices, vec![0]);
         let ei = &indexer.evap_indices[0];
-        assert_eq!(ei.q_ev_col, 7);
+        assert_eq!(ei.evaporation_flow_col, 7);
         assert_eq!(ei.f_evap_plus_col, 8);
         assert_eq!(ei.f_evap_minus_col, 9);
 
@@ -4437,7 +4437,7 @@ mod tests {
         primal[4] = 10.0; // turbine h0 b0
         primal[5] = 0.0; // spillage h0 b0
         // primal[6] = diversion h0 b0 (zero)
-        primal[7] = 3.5; // Q_ev — acceptance criterion value
+        primal[7] = 3.5; // evaporation outflow — acceptance criterion value
 
         let obj = vec![0.0_f64; n_cols];
         let dual = vec![0.0_f64; 1];
@@ -4511,7 +4511,7 @@ mod tests {
         primal[2] = 190.0; // storage_in h0
         // primal[3] = theta = 0
         // primal[6] = diversion h0 b0 (zero)
-        primal[7] = 2.0; // Q_ev
+        primal[7] = 2.0; // evaporation outflow
         primal[8] = 0.5; // f_evap_plus (under-evaporation -> neg)
         primal[9] = 0.0; // f_evap_minus (over-evaporation -> pos)
 

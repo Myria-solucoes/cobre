@@ -30,18 +30,19 @@ use crate::SddpError;
 /// The linearized evaporation model for stage `t` is:
 ///
 /// ```text
-/// Q_ev = k_evap0 + k_evap_v * v
+/// evaporation_outflow = intercept_m3s + volume_slope_m3s_per_hm3 * v
 /// ```
 ///
 /// where:
 ///
 /// ```text
-/// zeta  = 1.0 / (3.6 * stage_hours)         -- mm·km² → m³/s
-/// k_evap_v = zeta * c_ev[month] * dA/dv|_{v_ref}
-/// k_evap0  = zeta * c_ev[month] * A(v_ref) - k_evap_v * v_ref
+/// mm_km2_to_m3s            = 1.0 / (3.6 * stage_hours)   -- mm·km² → m³/s
+/// volume_slope_m3s_per_hm3 = mm_km2_to_m3s * monthly_evaporation_mm[month] * dA/dv|_{reference_volume}
+/// intercept_m3s            = mm_km2_to_m3s * monthly_evaporation_mm[month] * A(reference_volume)
+///                            - volume_slope_m3s_per_hm3 * reference_volume
 /// ```
 ///
-/// `v_ref = (v_min + v_max) / 2` is the linearization reference volume.
+/// `reference_volume = (v_min + v_max) / 2` is the linearization reference volume.
 /// `stage_hours` is the sum of all block durations in the stage.
 /// `month` is the 0-based calendar month from `stage.season_id` (0 = January).
 ///
@@ -51,7 +52,7 @@ use crate::SddpError;
 /// | ---------------------------------------------------------------- | ------------------------- |
 /// | Hydro has evaporation coefficients but no geometry rows          | [`SddpError::Validation`] |
 /// | All geometry `area_km2` values are zero                          | [`SddpError::Validation`] |
-/// | Computed `k_evap_v` or `k_evap0` is NaN or infinite             | [`SddpError::Validation`] |
+/// | Computed slope or intercept is NaN or infinite                   | [`SddpError::Validation`] |
 /// | Stage has no `season_id` (cannot map to a month)                 | [`SddpError::Validation`] |
 /// | I/O failure loading geometry Parquet                             | [`SddpError::Io`]         |
 // Rationale: the return tuple carries three independently typed outputs of the
@@ -218,7 +219,7 @@ fn resolve_evaporation_core(
             EvaporationReferenceSource::DefaultMidpoint
         };
 
-        // For the midpoint path, pre-compute v_ref / A(v_ref) / dA/dv once.
+        // For the midpoint path, pre-compute reference_volume / A(reference_volume) / dA/dv once.
         // These are only accessed when evaporation_reference_volumes_hm3 is None,
         // so the values are always initialised before use.
         let midpoint_v = f64::midpoint(hydro.min_storage_hm3, hydro.max_storage_hm3);
@@ -255,10 +256,10 @@ fn resolve_evaporation_core(
                 )));
             }
 
-            let c_ev = coefficients_mm[month_index];
+            let monthly_evaporation_mm = coefficients_mm[month_index];
 
-            // Resolve v_ref, a_ref, da_dv for this stage.
-            let (v_ref, a_ref, da_dv) =
+            // Resolve reference_volume, a_ref, da_dv for this stage.
+            let (reference_volume, a_ref, da_dv) =
                 if let Some(ref_vols) = hydro.evaporation_reference_volumes_hm3 {
                     // Per-season path: look up the reference volume for this month.
                     let v = ref_vols[month_index];
@@ -275,29 +276,35 @@ fn resolve_evaporation_core(
             // Total stage duration in hours (sum of all block durations).
             let stage_hours: f64 = stage.blocks.iter().map(|b| b.duration_hours).sum();
 
-            let zeta_evap = 1.0 / (3.6 * stage_hours);
+            // mm·km²/month → m³/s unit-conversion factor: 1 / (3.6 · stage_hours).
+            let mm_km2_to_m3s = 1.0 / (3.6 * stage_hours);
 
-            let k_evap_v = zeta_evap * c_ev * da_dv;
-            let k_evap0 = zeta_evap * c_ev * a_ref - k_evap_v * v_ref;
+            let volume_slope_m3s_per_hm3 = mm_km2_to_m3s * monthly_evaporation_mm * da_dv;
+            let intercept_m3s = mm_km2_to_m3s * monthly_evaporation_mm * a_ref
+                - volume_slope_m3s_per_hm3 * reference_volume;
 
             // Validate finiteness (catches degenerate geometry or zero-duration stages).
-            if !k_evap_v.is_finite() {
+            if !volume_slope_m3s_per_hm3.is_finite() {
                 return Err(SddpError::Validation(format!(
-                    "hydro {} (id={}) stage {}: computed k_evap_v = {k_evap_v} is not \
-                     finite. Check geometry data for degenerate area-volume curve points.",
+                    "hydro {} (id={}) stage {}: computed volume_slope_m3s_per_hm3 = \
+                     {volume_slope_m3s_per_hm3} is not finite. Check geometry data for \
+                     degenerate area-volume curve points.",
                     hydro.name, hydro.id.0, stage.id
                 )));
             }
-            if !k_evap0.is_finite() {
+            if !intercept_m3s.is_finite() {
                 return Err(SddpError::Validation(format!(
-                    "hydro {} (id={}) stage {}: computed k_evap0 = {k_evap0} is not \
+                    "hydro {} (id={}) stage {}: computed intercept_m3s = {intercept_m3s} is not \
                      finite. Check geometry data for degenerate area-volume curve points.",
                     hydro.name, hydro.id.0, stage.id
                 )));
             }
 
-            stage_coefficients.push(LinearizedEvaporation { k_evap0, k_evap_v });
-            stage_ref_volumes.push(v_ref);
+            stage_coefficients.push(LinearizedEvaporation {
+                intercept_m3s,
+                volume_slope_m3s_per_hm3,
+            });
+            stage_ref_volumes.push(reference_volume);
         }
 
         all_models.push(EvaporationModel::Linearized {
@@ -729,19 +736,19 @@ mod tests {
         );
     }
 
-    /// resolve_evaporation_models core logic: known geometry + coefficient gives correct k_evap0 and k_evap_v.
+    /// resolve_evaporation_models core logic: known geometry + coefficient gives correct intercept and slope.
     ///
     /// Spec (acceptance criterion 2):
     ///   hydro: v_min=100, v_max=500, evaporation_coefficients_mm=[5.0; 12]
     ///   geometry: volumes [100, 200, 300, 400, 500], areas [1.0, 1.5, 2.0, 2.5, 3.0]
-    ///   v_ref = (100 + 500) / 2 = 300
+    ///   reference_volume = (100 + 500) / 2 = 300
     ///   A(300) = 2.0
     ///   dA/dv|_300 = (2.0 - 1.5) / (300 - 200) = 0.005
     ///   stage: season_id=0 (January), duration=744h
-    ///   zeta = 1 / (3.6 * 744) = 1 / 2678.4
-    ///   c_ev = 5.0
-    ///   k_evap_v = zeta * 5.0 * 0.005
-    ///   k_evap0  = zeta * 5.0 * 2.0 - k_evap_v * 300
+    ///   mm_km2_to_m3s = 1 / (3.6 * 744) = 1 / 2678.4
+    ///   monthly_evaporation_mm = 5.0
+    ///   volume_slope_m3s_per_hm3 = mm_km2_to_m3s * 5.0 * 0.005
+    ///   intercept_m3s            = mm_km2_to_m3s * 5.0 * 2.0 - volume_slope_m3s_per_hm3 * 300
     #[test]
     fn resolve_evaporation_known_geometry_produces_correct_coefficients() {
         let evap_mm = [5.0f64; 12];
@@ -782,31 +789,32 @@ mod tests {
                 );
                 assert!(
                     (reference_volumes_hm3[0] - 300.0).abs() < 1e-10,
-                    "v_ref must be (100+500)/2 = 300, got {}",
+                    "reference_volume must be (100+500)/2 = 300, got {}",
                     reference_volumes_hm3[0]
                 );
                 assert_eq!(coefficients.len(), 1);
 
-                let v_ref = 300.0_f64;
+                let reference_volume = 300.0_f64;
                 let a_ref = 2.0_f64;
                 let da_dv = 0.005_f64;
-                let c_ev = 5.0_f64;
+                let monthly_evaporation_mm = 5.0_f64;
                 let stage_hours = 744.0_f64;
-                let zeta = 1.0 / (3.6 * stage_hours);
+                let mm_km2_to_m3s = 1.0 / (3.6 * stage_hours);
 
-                let expected_k_evap_v = zeta * c_ev * da_dv;
-                let expected_k_evap0 = zeta * c_ev * a_ref - expected_k_evap_v * v_ref;
+                let expected_slope = mm_km2_to_m3s * monthly_evaporation_mm * da_dv;
+                let expected_intercept = mm_km2_to_m3s * monthly_evaporation_mm * a_ref
+                    - expected_slope * reference_volume;
 
                 let coeff = &coefficients[0];
                 assert!(
-                    (coeff.k_evap_v - expected_k_evap_v).abs() < 1e-10,
-                    "k_evap_v: expected {expected_k_evap_v}, got {}",
-                    coeff.k_evap_v
+                    (coeff.volume_slope_m3s_per_hm3 - expected_slope).abs() < 1e-10,
+                    "volume_slope_m3s_per_hm3: expected {expected_slope}, got {}",
+                    coeff.volume_slope_m3s_per_hm3
                 );
                 assert!(
-                    (coeff.k_evap0 - expected_k_evap0).abs() < 1e-10,
-                    "k_evap0: expected {expected_k_evap0}, got {}",
-                    coeff.k_evap0
+                    (coeff.intercept_m3s - expected_intercept).abs() < 1e-10,
+                    "intercept_m3s: expected {expected_intercept}, got {}",
+                    coeff.intercept_m3s
                 );
             }
             other => panic!("expected Linearized, got {other:?}"),
@@ -815,7 +823,8 @@ mod tests {
 
     /// resolve_evaporation_models core logic: negative evaporation coefficients produce valid results.
     ///
-    /// Net precipitation (negative c_ev) is physically valid. k_evap_v can be negative.
+    /// Net precipitation (negative monthly evaporation) is physically valid; the
+    /// volume slope can be negative.
     #[test]
     fn resolve_evaporation_negative_coefficient_produces_valid_results() {
         let mut evap_mm = [0.0f64; 12];
@@ -841,17 +850,17 @@ mod tests {
             EvaporationModel::Linearized { coefficients, .. } => {
                 let coeff = &coefficients[0];
                 assert!(
-                    coeff.k_evap_v.is_finite(),
-                    "k_evap_v must be finite for negative c_ev"
+                    coeff.volume_slope_m3s_per_hm3.is_finite(),
+                    "volume_slope_m3s_per_hm3 must be finite for negative monthly evaporation"
                 );
                 assert!(
-                    coeff.k_evap0.is_finite(),
-                    "k_evap0 must be finite for negative c_ev"
+                    coeff.intercept_m3s.is_finite(),
+                    "intercept_m3s must be finite for negative monthly evaporation"
                 );
-                // Negative c_ev with positive dA/dv → negative k_evap_v.
+                // Negative monthly evaporation with positive dA/dv → negative slope.
                 assert!(
-                    coeff.k_evap_v < 0.0,
-                    "k_evap_v must be negative for net precipitation scenario"
+                    coeff.volume_slope_m3s_per_hm3 < 0.0,
+                    "volume_slope_m3s_per_hm3 must be negative for net precipitation scenario"
                 );
             }
             other => panic!("expected Linearized, got {other:?}"),
@@ -957,13 +966,14 @@ mod tests {
 
         // Two rows with same volume but different areas: this is degenerate.
         // With dv=0, area_derivative returns 0.0, so no NaN there.
-        // To force NaN we need the scenario where stage_hours=0 (zeta → Inf).
-        // Test that scenario instead.
+        // To force NaN we need the scenario where stage_hours=0
+        // (mm_km2_to_m3s → Inf). Test that scenario instead.
         let mut stage_zero_duration = make_stage_with_month(0, 0);
         stage_zero_duration.blocks = vec![Block {
             index: 0,
             name: "ZERO".to_string(),
-            duration_hours: 0.0, // zero duration → zeta = Inf → k_evap_v = Inf
+            // zero duration → mm_km2_to_m3s = Inf → volume_slope_m3s_per_hm3 = Inf
+            duration_hours: 0.0,
         }];
 
         let geo_rows = make_geo_rows(&[(100.0, 1.0), (200.0, 1.5), (300.0, 2.0)]);
@@ -986,15 +996,15 @@ mod tests {
     // ── Per-season reference volume tests ────────────────────────────────────
 
     /// resolve_evaporation_core: user-supplied per-season reference volumes produce
-    /// stage coefficients derived from the month-specific v_ref.
+    /// stage coefficients derived from the month-specific reference_volume.
     ///
     /// Geometry: volumes [100, 200, 300, 400, 500], areas [1.0, 1.5, 2.0, 2.5, 3.0].
     /// ref_vols[0] = 200 (January), ref_vols[1] = 400 (February).
     /// Hydro: v_min=100, v_max=500.
     /// Stage 0: season_id=0, 744h. Stage 1: season_id=1, 672h.
     ///
-    /// For stage 0 (v_ref=200): A(200)=1.5, dA/dv=(2.0-1.5)/(300-200)=0.005
-    /// For stage 1 (v_ref=400): A(400)=2.5, dA/dv=(3.0-2.5)/(500-400)=0.005
+    /// For stage 0 (reference_volume=200): A(200)=1.5, dA/dv=(2.0-1.5)/(300-200)=0.005
+    /// For stage 1 (reference_volume=400): A(400)=2.5, dA/dv=(3.0-2.5)/(500-400)=0.005
     #[test]
     fn resolve_evaporation_per_season_ref_vols_produces_per_stage_coefficients() {
         let mut ref_vols = [0.0f64; 12];
@@ -1049,57 +1059,57 @@ mod tests {
                 assert_eq!(coefficients.len(), 2, "must have 2 stage coefficients");
                 assert_eq!(reference_volumes_hm3.len(), 2, "must have 2 ref volumes");
 
-                // Stage 0: v_ref=200
+                // Stage 0: reference_volume=200
                 assert!(
                     (reference_volumes_hm3[0] - 200.0).abs() < 1e-10,
                     "stage 0 ref vol must be 200, got {}",
                     reference_volumes_hm3[0]
                 );
 
-                // Stage 1: v_ref=400
+                // Stage 1: reference_volume=400
                 assert!(
                     (reference_volumes_hm3[1] - 400.0).abs() < 1e-10,
                     "stage 1 ref vol must be 400, got {}",
                     reference_volumes_hm3[1]
                 );
 
-                // Verify stage 0 coefficients using v_ref=200.
-                let c_ev = 5.0_f64;
+                // Verify stage 0 coefficients using reference_volume=200.
+                let monthly_evaporation_mm = 5.0_f64;
                 let da_dv = 0.005_f64; // same slope in both segments
 
-                let zeta_jan = 1.0 / (3.6 * 744.0);
+                let mm_km2_to_m3s_jan = 1.0 / (3.6 * 744.0);
                 let a_jan = 1.5_f64;
-                let v_ref_jan = 200.0_f64;
-                let expected_k_evap_v_jan = zeta_jan * c_ev * da_dv;
-                let expected_k_evap0_jan =
-                    zeta_jan * c_ev * a_jan - expected_k_evap_v_jan * v_ref_jan;
+                let reference_volume_jan = 200.0_f64;
+                let expected_slope_jan = mm_km2_to_m3s_jan * monthly_evaporation_mm * da_dv;
+                let expected_intercept_jan = mm_km2_to_m3s_jan * monthly_evaporation_mm * a_jan
+                    - expected_slope_jan * reference_volume_jan;
                 assert!(
-                    (coefficients[0].k_evap_v - expected_k_evap_v_jan).abs() < 1e-10,
-                    "stage 0 k_evap_v: expected {expected_k_evap_v_jan}, got {}",
-                    coefficients[0].k_evap_v
+                    (coefficients[0].volume_slope_m3s_per_hm3 - expected_slope_jan).abs() < 1e-10,
+                    "stage 0 volume_slope_m3s_per_hm3: expected {expected_slope_jan}, got {}",
+                    coefficients[0].volume_slope_m3s_per_hm3
                 );
                 assert!(
-                    (coefficients[0].k_evap0 - expected_k_evap0_jan).abs() < 1e-10,
-                    "stage 0 k_evap0: expected {expected_k_evap0_jan}, got {}",
-                    coefficients[0].k_evap0
+                    (coefficients[0].intercept_m3s - expected_intercept_jan).abs() < 1e-10,
+                    "stage 0 intercept_m3s: expected {expected_intercept_jan}, got {}",
+                    coefficients[0].intercept_m3s
                 );
 
-                // Verify stage 1 coefficients using v_ref=400.
-                let zeta_feb = 1.0 / (3.6 * 672.0);
+                // Verify stage 1 coefficients using reference_volume=400.
+                let mm_km2_to_m3s_feb = 1.0 / (3.6 * 672.0);
                 let a_feb = 2.5_f64;
-                let v_ref_feb = 400.0_f64;
-                let expected_k_evap_v_feb = zeta_feb * c_ev * da_dv;
-                let expected_k_evap0_feb =
-                    zeta_feb * c_ev * a_feb - expected_k_evap_v_feb * v_ref_feb;
+                let reference_volume_feb = 400.0_f64;
+                let expected_slope_feb = mm_km2_to_m3s_feb * monthly_evaporation_mm * da_dv;
+                let expected_intercept_feb = mm_km2_to_m3s_feb * monthly_evaporation_mm * a_feb
+                    - expected_slope_feb * reference_volume_feb;
                 assert!(
-                    (coefficients[1].k_evap_v - expected_k_evap_v_feb).abs() < 1e-10,
-                    "stage 1 k_evap_v: expected {expected_k_evap_v_feb}, got {}",
-                    coefficients[1].k_evap_v
+                    (coefficients[1].volume_slope_m3s_per_hm3 - expected_slope_feb).abs() < 1e-10,
+                    "stage 1 volume_slope_m3s_per_hm3: expected {expected_slope_feb}, got {}",
+                    coefficients[1].volume_slope_m3s_per_hm3
                 );
                 assert!(
-                    (coefficients[1].k_evap0 - expected_k_evap0_feb).abs() < 1e-10,
-                    "stage 1 k_evap0: expected {expected_k_evap0_feb}, got {}",
-                    coefficients[1].k_evap0
+                    (coefficients[1].intercept_m3s - expected_intercept_feb).abs() < 1e-10,
+                    "stage 1 intercept_m3s: expected {expected_intercept_feb}, got {}",
+                    coefficients[1].intercept_m3s
                 );
             }
             other => panic!("expected Linearized, got {other:?}"),
@@ -1144,7 +1154,7 @@ mod tests {
             EvaporationSource::LinearizedFromGeometry
         );
 
-        let expected_v_ref = f64::midpoint(100.0, 500.0); // 300.0
+        let expected_reference_volume = f64::midpoint(100.0, 500.0); // 300.0
 
         match models.model(0) {
             EvaporationModel::Linearized {
@@ -1158,8 +1168,8 @@ mod tests {
                 );
                 for (s, &v) in reference_volumes_hm3.iter().enumerate() {
                     assert!(
-                        (v - expected_v_ref).abs() < 1e-10,
-                        "stage {s} ref vol must be midpoint {expected_v_ref}, got {v}"
+                        (v - expected_reference_volume).abs() < 1e-10,
+                        "stage {s} ref vol must be midpoint {expected_reference_volume}, got {v}"
                     );
                 }
             }

@@ -30,7 +30,8 @@ pub use convergence_reader::{
 pub use dictionary::write_dictionaries;
 pub use error::OutputError;
 pub use hydro_models::{
-    read_hydro_model_summary, write_fpha_hyperplanes, write_hydro_model_summary,
+    read_hydro_model_summary, write_evaporation_models, write_fpha_hyperplanes,
+    write_hydro_model_summary,
 };
 pub use manifest::{
     DistributionInfo, HostLayout, MetadataBounds, MetadataConfiguration, MetadataConvergence,

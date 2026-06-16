@@ -419,8 +419,8 @@ mod tests {
                 if evap_set.contains(&id) {
                     EvaporationModel::Linearized {
                         coefficients: vec![LinearizedEvaporation {
-                            k_evap0: 1.0,
-                            k_evap_v: 0.01,
+                            intercept_m3s: 1.0,
+                            volume_slope_m3s_per_hm3: 0.01,
                         }],
                         reference_volumes_hm3: vec![500.0],
                     }
@@ -487,15 +487,15 @@ mod tests {
         let evap_models = vec![
             EvaporationModel::Linearized {
                 coefficients: vec![LinearizedEvaporation {
-                    k_evap0: 1.0,
-                    k_evap_v: 0.01,
+                    intercept_m3s: 1.0,
+                    volume_slope_m3s_per_hm3: 0.01,
                 }],
                 reference_volumes_hm3: vec![200.0],
             },
             EvaporationModel::Linearized {
                 coefficients: vec![LinearizedEvaporation {
-                    k_evap0: 1.0,
-                    k_evap_v: 0.01,
+                    intercept_m3s: 1.0,
+                    volume_slope_m3s_per_hm3: 0.01,
                 }],
                 reference_volumes_hm3: vec![300.0],
             },
@@ -681,8 +681,8 @@ mod tests {
                 if evap_set.contains(id) {
                     EvaporationModel::Linearized {
                         coefficients: vec![LinearizedEvaporation {
-                            k_evap0: 1.0,
-                            k_evap_v: 0.01,
+                            intercept_m3s: 1.0,
+                            volume_slope_m3s_per_hm3: 0.01,
                         }],
                         reference_volumes_hm3: vec![500.0],
                     }

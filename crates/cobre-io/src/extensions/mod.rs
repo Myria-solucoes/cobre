@@ -25,6 +25,7 @@
 //! their registries) is deferred to Layer 3. Monotonicity and other
 //! multi-row semantic constraints are deferred to Layer 5.
 
+pub mod evaporation_models;
 pub mod fpha_hyperplanes;
 pub mod hydro_energy_productivity;
 pub mod hydro_geometry;
@@ -33,6 +34,7 @@ pub mod production_models;
 pub mod scalar_parameters;
 pub mod tailrace_curves;
 
+pub use evaporation_models::{EvaporationModelRow, parse_evaporation_models};
 pub use fpha_hyperplanes::{FphaHyperplaneRow, parse_fpha_hyperplanes};
 pub use hydro_energy_productivity::{HydroEnergyProductivityRow, parse_hydro_energy_productivity};
 pub use hydro_geometry::{HydroGeometryRow, parse_hydro_geometry};

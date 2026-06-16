@@ -79,13 +79,14 @@ pub use constraints::{
 };
 pub use error::LoadError;
 pub use extensions::{
-    FittingWindow, FphaColumnLayout, FphaHyperplaneRow, HydroEnergyProductivityRow,
-    HydroGeometryRow, HydroReferenceVolumeFractions, PlaneReductionConfig, ProductionModelConfig,
-    ProductionModelFile, SeasonConfig, SelectionMode, StageRange,
-    build_hydro_reference_volumes_resolved, load_fpha_hyperplanes, load_hydro_energy_productivity,
-    load_hydro_geometry, load_production_models, load_scalar_parameters_json,
-    parse_fpha_hyperplanes, parse_hydro_energy_productivity, parse_hydro_geometry,
-    parse_production_models, parse_scalar_parameters_json,
+    EvaporationModelRow, FittingWindow, FphaColumnLayout, FphaHyperplaneRow,
+    HydroEnergyProductivityRow, HydroGeometryRow, HydroReferenceVolumeFractions,
+    PlaneReductionConfig, ProductionModelConfig, ProductionModelFile, SeasonConfig, SelectionMode,
+    StageRange, build_hydro_reference_volumes_resolved, load_fpha_hyperplanes,
+    load_hydro_energy_productivity, load_hydro_geometry, load_production_models,
+    load_scalar_parameters_json, parse_evaporation_models, parse_fpha_hyperplanes,
+    parse_hydro_energy_productivity, parse_hydro_geometry, parse_production_models,
+    parse_scalar_parameters_json,
 };
 pub use initial_conditions::parse_initial_conditions;
 pub use output::policy::{
@@ -103,11 +104,11 @@ pub use output::{
     RowSelectionRecord, SetupTimings, SimulationMetadata, SimulationOutput, SolverStatsRow,
     TrainingMetadata, TrainingOutput, TrainingParquetWriter, WorkerTimingRecord, get_hostname,
     now_iso8601, read_convergence_summary, read_hydro_model_summary, read_provenance_report,
-    read_simulation_metadata, read_training_metadata, write_dictionaries, write_fpha_hyperplanes,
-    write_hydro_model_summary, write_provenance_report, write_results, write_row_selection_records,
-    write_scaling_report, write_simulation_metadata, write_simulation_results,
-    write_simulation_solver_stats, write_solver_stats, write_training_metadata,
-    write_training_results,
+    read_simulation_metadata, read_training_metadata, write_dictionaries, write_evaporation_models,
+    write_fpha_hyperplanes, write_hydro_model_summary, write_provenance_report, write_results,
+    write_row_selection_records, write_scaling_report, write_simulation_metadata,
+    write_simulation_results, write_simulation_solver_stats, write_solver_stats,
+    write_training_metadata, write_training_results,
 };
 pub use penalties::parse_penalties;
 pub use report::{ReportEntry, ValidationReport, generate_report};

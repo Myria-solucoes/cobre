@@ -1,4 +1,4 @@
-//! Focused semantic regression test for the signed `Q_ev` evaporation variable.
+//! Focused semantic regression test for the signed evaporation-outflow variable.
 //!
 //! Runs D17 (`d17-evaporation-mixed-sign`) end-to-end and asserts that the
 //! simulation output reflects the mixed-sign monthly evaporation coefficients

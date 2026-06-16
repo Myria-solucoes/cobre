@@ -21,9 +21,9 @@
 //! For the `storage_in[0]` column (incoming storage, `c_j = 0`):
 //! - Water-balance row: coefficient `-1.0`
 //! - FPHA row:          coefficient `-gamma_v / 2`
-//! - Evaporation row:   coefficient `-k_evap_v / 2`
+//! - Evaporation row:   coefficient `-volume_slope_m3s_per_hm3 / 2`
 //!
-//! Therefore: `rc[storage_in[0]] = y_wb + (gamma_v/2)*y_fpha + (k_evap_v/2)*y_evap`
+//! Therefore: `rc[storage_in[0]] = y_wb + (gamma_v/2)*y_fpha + (volume_slope_m3s_per_hm3/2)*y_evap`
 //!
 //! This test solves the LP with column-bound state pinning (Phase 1 approach) and
 //! asserts the algebraic identity holds within 1e-8 absolute tolerance. It covers
@@ -36,7 +36,7 @@
 //! - 1 bus, 1 block (K=1)
 //! - No thermal plant — deficit variable absorbs any load-generation gap
 //! - FPHA: 1 plane with `gamma_v=0.002, gamma_q=0.8, gamma_0=0.0`
-//! - Evaporation: `k_evap_v=0.01, k_evap0=0.0`
+//! - Evaporation: `volume_slope_m3s_per_hm3=0.01, intercept_m3s=0.0`
 //!
 //! ## Column and row indices (Phase 1, with storage_fixing = 0..0)
 //!
@@ -54,7 +54,7 @@
 //! col 9: withdrawal_slack_neg
 //! col 10: withdrawal_slack_pos
 //! cols 11-14: 4 × operational violation slacks
-//! col 15: Q_ev (evaporation flow)
+//! col 15: evaporation outflow
 //! col 16: f_evap_plus
 //! col 17: f_evap_minus
 //! col 18: g_fpha (FPHA generation variable)
@@ -115,8 +115,8 @@ const GAMMA_Q: f64 = 0.8;
 const GAMMA_0: f64 = 0.0;
 
 /// Evaporation coefficients.
-const K_EVAP_V: f64 = 0.01;
-const K_EVAP0: f64 = 0.0;
+const VOLUME_SLOPE_M3S_PER_HM3: f64 = 0.01;
+const INTERCEPT_M3S: f64 = 0.0;
 
 /// Initial (incoming) storage value pinned via column bounds.
 const V_IN_HM3: f64 = 100.0;
@@ -128,7 +128,7 @@ const V_IN_HM3: f64 = 100.0;
 /// deficit(1) + excess(1) = col 7–8
 /// withdrawal_neg(1) + withdrawal_pos(1) = col 9–10
 /// outflow_below(1) + outflow_above(1) + turbine_below(1) + generation_below(1) = col 11–14
-/// Q_ev(1) + f_evap_plus(1) + f_evap_minus(1) = col 15–17
+/// evaporation outflow(1) + f_evap_plus(1) + f_evap_minus(1) = col 15–17
 /// g_fpha(1) = col 18
 const COL_STORAGE_IN: usize = 2;
 const ROW_WATER_BALANCE: usize = 1;
@@ -340,12 +340,12 @@ fn fpha_production() -> ProductionModelSet {
     ProductionModelSet::new(models, 1, 1)
 }
 
-/// Build the evaporation model set (1 hydro with k_evap_v > 0).
+/// Build the evaporation model set (1 hydro with volume_slope_m3s_per_hm3 > 0).
 fn fpha_evap_evaporation(system: &cobre_core::System) -> EvaporationModelSet {
     let models = vec![EvaporationModel::Linearized {
         coefficients: vec![LinearizedEvaporation {
-            k_evap0: K_EVAP0,
-            k_evap_v: K_EVAP_V,
+            intercept_m3s: INTERCEPT_M3S,
+            volume_slope_m3s_per_hm3: VOLUME_SLOPE_M3S_PER_HM3,
         }],
         reference_volumes_hm3: vec![100.0],
     }];
@@ -354,8 +354,8 @@ fn fpha_evap_evaporation(system: &cobre_core::System) -> EvaporationModelSet {
 }
 
 /// KKT parity: `reduced_costs[storage_in.start]` equals the closed-form
-/// reference `y_wb + (gamma_v/2)*y_fpha + (k_evap_v/2)*y_evap` from the
-/// same LP solve.
+/// reference `y_wb + (gamma_v/2)*y_fpha + (volume_slope_m3s_per_hm3/2)*y_evap`
+/// from the same LP solve.
 ///
 /// This confirms that `state_to_lp_incoming_column` returns the correct column
 /// for cut-subgradient extraction in the presence of both FPHA and evaporation
@@ -435,12 +435,12 @@ fn cut_subgradient_parity_with_fpha_and_evaporation() {
     // storage_in[0] participates in:
     //   water-balance row: coefficient  -1.0
     //   FPHA row:          coefficient  -gamma_v / 2
-    //   evap row:          coefficient  -k_evap_v / 2
+    //   evap row:          coefficient  -volume_slope_m3s_per_hm3 / 2
     //
     // KKT stationarity: rc[j] = c_j - sum_i( a_{i,j} * y_i )
-    //   = 0 - ( (-1.0)*y_wb + (-GAMMA_V/2)*y_fpha + (-K_EVAP_V/2)*y_evap )
-    //   = y_wb + (GAMMA_V/2)*y_fpha + (K_EVAP_V/2)*y_evap
-    let kkt_ref = y_wb + (GAMMA_V / 2.0) * y_fpha + (K_EVAP_V / 2.0) * y_evap;
+    //   = 0 - ( (-1.0)*y_wb + (-GAMMA_V/2)*y_fpha + (-VOLUME_SLOPE_M3S_PER_HM3/2)*y_evap )
+    //   = y_wb + (GAMMA_V/2)*y_fpha + (VOLUME_SLOPE_M3S_PER_HM3/2)*y_evap
+    let kkt_ref = y_wb + (GAMMA_V / 2.0) * y_fpha + (VOLUME_SLOPE_M3S_PER_HM3 / 2.0) * y_evap;
 
     assert!(
         obj.is_finite(),
@@ -457,10 +457,10 @@ fn cut_subgradient_parity_with_fpha_and_evaporation() {
          y_fpha             = {y_fpha:.12}\n  \
          y_evap             = {y_evap:.12}\n  \
          gamma_v/2          = {:.6}\n  \
-         k_evap_v/2         = {:.6}",
+         volume_slope_m3s_per_hm3/2 = {:.6}",
         (rc_storage_in - kkt_ref).abs(),
         GAMMA_V / 2.0,
-        K_EVAP_V / 2.0,
+        VOLUME_SLOPE_M3S_PER_HM3 / 2.0,
     );
 }
 

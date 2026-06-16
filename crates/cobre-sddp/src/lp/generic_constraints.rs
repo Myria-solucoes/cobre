@@ -233,7 +233,7 @@ pub(crate) fn resolve_variable_ref<S: BuildHasher>(
 /// each verified against its resolver:
 ///
 /// - [`VariableRef::HydroStorage`] → `storage.start + pos` (outgoing reservoir level)
-/// - [`VariableRef::HydroEvaporation`] → the stage-level `Q_ev` column
+/// - [`VariableRef::HydroEvaporation`] → the stage-level evaporation-outflow column
 /// - [`VariableRef::AnticipatedDecision`] → `anticipated_decision.start + local`
 ///   (a per-plant per-stage scalar, uniform across blocks)
 ///
@@ -311,7 +311,7 @@ fn resolve_hydro_storage<S: BuildHasher>(
     }
 }
 
-/// Resolve `HydroEvaporation` to the `Q_ev` column for the matching hydro.
+/// Resolve `HydroEvaporation` to the evaporation-outflow column for the matching hydro.
 ///
 /// The evaporation list uses a local index; we find it by matching the
 /// system-level hydro position. Returns empty vec when the hydro has no
@@ -327,8 +327,8 @@ fn resolve_hydro_evaporation<S: BuildHasher>(
             .iter()
             .position(|&p| p == sys_pos)
         {
-            let q_ev_col = indexer.evap_indices[local_idx].q_ev_col;
-            vec![(q_ev_col, 1.0)]
+            let evaporation_flow_col = indexer.evap_indices[local_idx].evaporation_flow_col;
+            vec![(evaporation_flow_col, 1.0)]
         } else {
             vec![]
         }
@@ -975,7 +975,7 @@ mod tests {
 
     // ── HydroEvaporation tests ────────────────────────────────────────────────
 
-    /// HydroEvaporation maps to the Q_ev column for the matching evaporation hydro.
+    /// HydroEvaporation maps to the evaporation-outflow column for the matching evaporation hydro.
     ///
     /// Use a dedicated indexer with evaporation hydros to test this path.
     ///
@@ -986,9 +986,9 @@ mod tests {
     /// diversion: [11, 13)
     /// deficit:   [13, 14)
     /// excess:    [14, 15)
-    /// evap cols: [15, 18)  → Q_ev=15, f_evap_plus=16, f_evap_minus=17
+    /// evap cols: [15, 18)  → evaporation_flow=15, f_evap_plus=16, f_evap_minus=17
     #[test]
-    fn hydro_evaporation_maps_to_q_ev_col() {
+    fn hydro_evaporation_maps_to_evaporation_flow_col() {
         let evap_indexer = StageIndexer::with_equipment_and_evaporation(
             &crate::indexer::EquipmentCounts {
                 hydro_count: 2,

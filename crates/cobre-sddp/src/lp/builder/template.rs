@@ -349,13 +349,14 @@ fn collect_load_bus_indices(system: &System, bus_pos: &HashMap<EntityId, usize>)
 ///
 /// For hydros whose evaporation model is
 /// `EvaporationModel::Linearized`,
-/// three stage-level columns are added per hydro (`Q_ev`, `f_evap_plus`,
-/// `f_evap_minus`).  `Q_ev` is bounded symmetrically `[-q_max, +q_max]`
-/// so a negative value can absorb net rainfall input on the lake surface;
-/// `f_evap_plus` and `f_evap_minus` are bounded `[0, +inf)`.  `Q_ev` carries
-/// objective coefficient 0.0; the violation slacks carry the evaporation
-/// penalty.  One equality constraint row is added per evaporation hydro with
-/// `row_lower == row_upper == k_evap0`.
+/// three stage-level columns are added per hydro (evaporation outflow,
+/// `f_evap_plus`, `f_evap_minus`).  The evaporation-outflow column is bounded
+/// symmetrically `[-q_max, +q_max]` so a negative value can absorb net rainfall
+/// input on the lake surface; `f_evap_plus` and `f_evap_minus` are bounded
+/// `[0, +inf)`.  The evaporation-outflow column carries objective coefficient
+/// 0.0; the violation slacks carry the evaporation penalty.  One equality
+/// constraint row is added per evaporation hydro with
+/// `row_lower == row_upper == intercept_m3s`.
 ///
 /// # Examples
 ///
