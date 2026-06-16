@@ -4,11 +4,7 @@
 //! files) in a tempdir, then run the real `cobre` binary against it and assert
 //! on the live end-block written to stderr, in top-to-bottom order:
 //!
-//!   Execution topology → Hydro models → Model provenance → Fit quality →
-//!   Training → Simulation
-//!
-//! Fit quality is conditional: it renders only when the training metadata carries
-//! `production_fit_deviation` (computed-FPHA runs).
+//!   Execution topology → Hydro models → Model provenance → Training → Simulation
 //!
 //! The fixture is written with the public `cobre_io` writers (training/simulation
 //! metadata) and `serde_json` (the two optional sidecars), so the JSON shapes
@@ -21,11 +17,10 @@ use std::process::Command;
 
 use assert_cmd::prelude::*;
 use cobre_io::{
-    DeviationSummary, DeviationWorstEntry, DistributionInfo, HostLayout, MetadataBounds,
-    MetadataConfiguration, MetadataConvergence, MetadataCost, MetadataIterations,
-    MetadataProblemDimensions, MetadataRowPool, MetadataScenarios, MetadataSimulationSolveStats,
-    MetadataTrainingSolveStats, SimulationMetadata, TrainingMetadata, write_simulation_metadata,
-    write_training_metadata,
+    DistributionInfo, HostLayout, MetadataBounds, MetadataConfiguration, MetadataConvergence,
+    MetadataCost, MetadataIterations, MetadataProblemDimensions, MetadataRowPool,
+    MetadataScenarios, MetadataSimulationSolveStats, MetadataTrainingSolveStats,
+    SimulationMetadata, TrainingMetadata, write_simulation_metadata, write_training_metadata,
 };
 use predicates::prelude::*;
 use serde_json::json;
@@ -53,10 +48,6 @@ fn local_distribution() -> DistributionInfo {
 }
 
 fn write_training_fixture(dir: &Path) {
-    write_training_fixture_with_deviation(dir, None);
-}
-
-fn write_training_fixture_with_deviation(dir: &Path, deviation: Option<DeviationSummary>) {
     let metadata = TrainingMetadata {
         cobre_version: "0.0.0-test".to_string(),
         hostname: "fixture-host".to_string(),
@@ -113,7 +104,7 @@ fn write_training_fixture_with_deviation(dir: &Path, deviation: Option<Deviation
             parallelism: Some(1),
         },
         setup: None,
-        production_fit_deviation: deviation,
+        production_fit_deviation: None,
         distribution: local_distribution(),
     };
 
@@ -242,72 +233,6 @@ fn summary_prints_all_five_sections_in_live_order() {
     assert_ordered(&stderr, "Hydro models", "Model provenance");
     assert_ordered(&stderr, "Model provenance", "Training complete in");
     assert_ordered(&stderr, "Training complete in", "Simulation complete");
-}
-
-#[test]
-fn summary_renders_fit_quality_from_metadata_deviation() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path();
-
-    // A computed-FPHA run persists `production_fit_deviation`; the read-back path
-    // must surface it as a Fit quality block between Model provenance and Training.
-    let deviation = DeviationSummary {
-        n_entries: 3,
-        mean_abs: 12.0,
-        max_abs: 40.0,
-        worst_relative: 0.032,
-        worst_entry: Some(DeviationWorstEntry {
-            entity_id: 12,
-            stage_id: 1,
-            relative: 0.032,
-            mean_abs: 12.0,
-            max_abs: 40.0,
-        }),
-    };
-    write_training_fixture_with_deviation(path, Some(deviation));
-    write_hydro_models_fixture(path);
-    write_provenance_fixture(path);
-
-    let output = cobre()
-        .args(["summary", path.to_str().unwrap()])
-        .assert()
-        .success()
-        .get_output()
-        .clone();
-
-    let stderr = String::from_utf8(output.stderr).unwrap();
-
-    // The Fit quality block renders, carries the worst-deviation line, and sits
-    // after Model provenance and before Training in the live block order.
-    assert!(stderr.contains("Fit quality"));
-    assert!(stderr.contains("Worst FPHA dev: 3.2% relative (12/1)"));
-    assert_ordered(&stderr, "Model provenance", "Fit quality");
-    assert_ordered(&stderr, "Fit quality", "Training complete in");
-}
-
-#[test]
-fn summary_skips_fit_quality_when_deviation_absent() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path();
-
-    // The default fixture sets `production_fit_deviation: None` (no computed FPHA).
-    write_training_fixture(path);
-    write_hydro_models_fixture(path);
-    write_provenance_fixture(path);
-
-    let output = cobre()
-        .args(["summary", path.to_str().unwrap()])
-        .assert()
-        .success()
-        .get_output()
-        .clone();
-
-    let stderr = String::from_utf8(output.stderr).unwrap();
-
-    // No deviation in metadata → the Fit quality block is skipped entirely.
-    assert!(!stderr.contains("Fit quality"));
-    assert!(stderr.contains("Model provenance"));
-    assert!(stderr.contains("Training complete in"));
 }
 
 #[test]
