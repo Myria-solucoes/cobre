@@ -55,7 +55,7 @@ fn upstream_planes(
     system: &cobre_core::System,
     artifacts: &cobre_io::CaseArtifacts,
 ) -> Vec<FphaHyperplaneRow> {
-    let prepared = prepare_hydro_models_from_artifacts(system, artifacts, None)
+    let prepared = prepare_hydro_models_from_artifacts(system, artifacts, false, None)
         .expect("hydro models must prepare");
     let mut rows: Vec<FphaHyperplaneRow> = prepared
         .fpha_export_rows

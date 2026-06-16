@@ -81,8 +81,8 @@ fn cli_writes_evaporation_models_matching_resolver() {
     // the exact source both the CLI and Python write sites serialize, so a
     // row-for-row match proves the persisted file equals the resolver output.
     let system = cobre_io::load_case(&case).expect("load D08 system");
-    let result =
-        cobre_sddp::prepare_hydro_models(&system, &case).expect("prepare hydro models for D08");
+    let result = cobre_sddp::prepare_hydro_models(&system, &case, false)
+        .expect("prepare hydro models for D08");
     let expected = cobre_sddp::build_evaporation_model_rows(&result, &system);
 
     assert_eq!(

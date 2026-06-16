@@ -300,6 +300,8 @@ mod tests {
             fpha_export_rows: Vec::new(),
             reference_volumes_hm3: Vec::new(),
             vha_geometry_by_hydro: std::collections::HashMap::new(),
+            fpha_fit_deviations: Vec::new(),
+            fpha_deviation_point_rows: Vec::new(),
         }
     }
 
@@ -378,6 +380,8 @@ mod tests {
             fpha_export_rows: Vec::new(),
             reference_volumes_hm3: Vec::new(),
             vha_geometry_by_hydro: std::collections::HashMap::new(),
+            fpha_fit_deviations: Vec::new(),
+            fpha_deviation_point_rows: Vec::new(),
         }
     }
 
@@ -447,6 +451,8 @@ mod tests {
             fpha_export_rows: Vec::new(),
             reference_volumes_hm3: Vec::new(),
             vha_geometry_by_hydro: std::collections::HashMap::new(),
+            fpha_fit_deviations: Vec::new(),
+            fpha_deviation_point_rows: Vec::new(),
         }
     }
 
@@ -515,6 +521,8 @@ mod tests {
             fpha_export_rows: Vec::new(),
             reference_volumes_hm3: Vec::new(),
             vha_geometry_by_hydro: std::collections::HashMap::new(),
+            fpha_fit_deviations: Vec::new(),
+            fpha_deviation_point_rows: Vec::new(),
         };
 
         let summary = build_hydro_model_summary(&result, &system);
@@ -709,6 +717,8 @@ mod tests {
             fpha_export_rows: Vec::new(),
             reference_volumes_hm3: Vec::new(),
             vha_geometry_by_hydro: std::collections::HashMap::new(),
+            fpha_fit_deviations: Vec::new(),
+            fpha_deviation_point_rows: Vec::new(),
         };
 
         let summary = build_hydro_model_summary(&result, &system);
@@ -787,6 +797,8 @@ mod tests {
             fpha_export_rows: Vec::new(),
             reference_volumes_hm3: Vec::new(),
             vha_geometry_by_hydro: std::collections::HashMap::new(),
+            fpha_fit_deviations: Vec::new(),
+            fpha_deviation_point_rows: Vec::new(),
         };
 
         let summary = build_hydro_model_summary(&result, &system);

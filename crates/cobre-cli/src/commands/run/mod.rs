@@ -168,6 +168,11 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
                 // output context. This branch is rank-0-only, so the value is the
                 // `Some(..)` collected during load/broadcast.
                 setup: setup_timings,
+                // Roll the computed-FPHA fit deviations up into the metadata
+                // aggregate; `None` for a run that fitted no computed model.
+                production_fit_deviation: cobre_sddp::build_deviation_summary(
+                    &setup.hydro_models.fpha_fit_deviations,
+                ),
             };
             write_training_outputs(&WriteTrainingArgs {
                 output_dir: &ctx.output_dir,

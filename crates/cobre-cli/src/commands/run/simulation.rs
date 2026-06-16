@@ -196,6 +196,8 @@ fn write_sim_outputs_on_root(
         distribution: build_distribution_info(&ctx.topology, ctx.n_threads, mpi_world_size),
         // Simulation metadata has no setup section.
         setup: None,
+        // Simulation metadata carries no production-fit deviation (training-only).
+        production_fit_deviation: None,
     };
     write_simulation_outputs(&WriteSimulationArgs {
         output_dir: &ctx.output_dir,

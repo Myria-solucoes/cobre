@@ -110,6 +110,7 @@ fn load_case_and_config(
     let hydro_models = cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts(
         &prepared.system,
         &artifacts,
+        config.exports.fpha_deviation_points,
         Some(&mut hydro_timings),
     )
     .map_err(CliError::from)?;
@@ -349,7 +350,11 @@ pub(super) fn broadcast_and_build_setup(
             message: "hydro models missing on rank 0 after successful load".to_string(),
         })?
     } else {
-        prepare_hydro_models(&system, &args.case_dir).map_err(|e| CliError::Internal {
+        // Non-root ranks reconstruct the hydro models only to build their own
+        // `StudySetup`; they never reach the deviation-points write site (only
+        // rank 0 writes outputs). Collecting the points here would be pure waste,
+        // so the opt-in is `false` regardless of the run-level export flag.
+        prepare_hydro_models(&system, &args.case_dir, false).map_err(|e| CliError::Internal {
             message: format!("hydro model preprocessing error on non-root rank: {e}"),
         })?
     };

@@ -874,6 +874,7 @@ fn train_simulate_write_cycle() {
             hosts: Vec::new(),
         },
         setup: None,
+        production_fit_deviation: None,
     };
     write_results(
         output_dir,

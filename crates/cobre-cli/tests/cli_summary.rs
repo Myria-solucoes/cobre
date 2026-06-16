@@ -104,6 +104,7 @@ fn write_training_fixture(dir: &Path) {
             parallelism: Some(1),
         },
         setup: None,
+        production_fit_deviation: None,
         distribution: local_distribution(),
     };
 

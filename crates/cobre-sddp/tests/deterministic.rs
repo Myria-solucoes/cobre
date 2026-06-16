@@ -142,7 +142,7 @@ fn run_deterministic_with_solver(case_dir: &Path) -> (cobre_sddp::TrainingResult
     let stochastic = prepare_result.stochastic;
 
     let hydro_models =
-        prepare_hydro_models(&system, case_dir).expect("prepare_hydro_models must succeed");
+        prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
 
     let mut setup = build_setup_for_case(case_dir, &config, &system, stochastic, hydro_models);
 
@@ -171,7 +171,7 @@ fn run_deterministic(case_dir: &Path) -> cobre_sddp::TrainingResult {
     let stochastic = prepare_result.stochastic;
 
     let hydro_models =
-        prepare_hydro_models(&system, case_dir).expect("prepare_hydro_models must succeed");
+        prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
 
     let mut setup = build_setup_for_case(case_dir, &config, &system, stochastic, hydro_models);
 
@@ -207,7 +207,7 @@ fn run_with_simulation(
     let stochastic = pr.stochastic;
 
     let hydro_models =
-        prepare_hydro_models(&system, case_dir).expect("prepare_hydro_models must succeed");
+        prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
 
     let mut config_with_sim = config.clone();
     config_with_sim.simulation.enabled = true;
@@ -1394,7 +1394,7 @@ fn d12_checkpoint_round_trip() {
     let stochastic = pr.stochastic;
 
     let hydro_models =
-        prepare_hydro_models(&system, case_dir).expect("prepare_hydro_models must succeed");
+        prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
 
     // ── Step 3: override simulation config ────────────────────────────────────
 
@@ -3251,7 +3251,7 @@ fn d29_weekly_par_noise_sharing() {
     let stochastic = pr.stochastic;
 
     let hydro_models =
-        prepare_hydro_models(&system, case_dir).expect("prepare_hydro_models must succeed");
+        prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
 
     let mut setup =
         StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup must build");
@@ -3361,7 +3361,7 @@ fn d30_multi_resolution_loads_and_trains() {
     let stochastic = pr.stochastic;
 
     let hydro_models =
-        prepare_hydro_models(&system, case_dir).expect("prepare_hydro_models must succeed");
+        prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
 
     let mut setup =
         StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup must build");
@@ -3425,7 +3425,7 @@ fn baked_vs_fallback_simulation_costs_are_identical() {
     let stochastic = pr.stochastic;
 
     let hydro_models =
-        prepare_hydro_models(&system, case_dir).expect("prepare_hydro_models must succeed");
+        prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
 
     let mut config_with_sim = config.clone();
     config_with_sim.simulation.enabled = true;

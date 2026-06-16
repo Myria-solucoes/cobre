@@ -345,6 +345,38 @@ pub struct HydroModelSummary {
     pub n_default_midpoint_ref: usize,
 }
 
+// ── FPHA fit deviation ──────────────────────────────────────────────────────────
+
+/// One computed-FPHA fit's deviation magnitudes, carried up the pipeline for one
+/// `(hydro, stage)` pair.
+///
+/// The four magnitudes are plain `f64`s lifted out of the `pub(crate)`
+/// `crate::fpha_fitting::FphaFitDeviation` rather than embedding it: that type is
+/// crate-internal (an algorithm detail of the fit) and must not cross into
+/// `cobre-io`'s generic metadata aggregate. The export builder maps these fields
+/// into the generic [`cobre_io::DeviationSummary`].
+///
+/// One entry per DISTINCT fit, tagged with `stage_id` = the first study stage the
+/// fitted `SelectionMode` entry covers — not one entry per covered stage. The
+/// resolver populates these in canonical `(hydro, stage)` order, so the carried
+/// vector is declaration-order invariant.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FphaFitDeviationEntry {
+    /// Entity id of the hydro plant this fit belongs to.
+    pub hydro_id: EntityId,
+    /// Domain-level stage id the fitted entry first covers.
+    pub stage_id: i32,
+    /// Mean of `|fitted − exact|` over the fit grid \[MW\].
+    pub mean_abs_mw: f64,
+    /// Maximum of `|fitted − exact|` over the fit grid \[MW\].
+    pub max_abs_mw: f64,
+    /// Mean of the signed residual `fitted − exact` over the fit grid \[MW\].
+    pub mean_signed_mw: f64,
+    /// `mean_abs_mw` relative to the grid's peak exact generation (dimensionless,
+    /// `>= 0`).
+    pub relative: f64,
+}
+
 // ── Pipeline result ───────────────────────────────────────────────────────────
 
 /// Result of the hydro model preprocessing pipeline.
@@ -403,6 +435,27 @@ pub struct PrepareHydroModelsResult {
     /// the case ships no `hydro_geometry`, in which case the derivation never fires
     /// and the override remains required for FPHA plants.
     pub vha_geometry_by_hydro: HashMap<EntityId, Vec<cobre_io::HydroGeometryRow>>,
+    /// Per-`(hydro, stage)` computed-FPHA fit deviations, one entry per distinct
+    /// fit, in canonical `(hydro, stage)` order.
+    ///
+    /// Non-empty only when at least one hydro uses `source: "computed"`. The
+    /// CLI/Python training write site rolls these up into the generic
+    /// [`cobre_io::DeviationSummary`] persisted in `training/metadata.json`; an
+    /// empty vector yields no metadata section. Built deterministically by the
+    /// resolver's sequential canonical-order flatten, so it is declaration-order
+    /// invariant.
+    pub fpha_fit_deviations: Vec<FphaFitDeviationEntry>,
+    /// Per-sampled-point computed-FPHA fit deviations, one row per
+    /// `(hydro, stage, V, Q)` grid point at spillage = 0, in canonical
+    /// `(hydro_id, stage_id, grid)` order.
+    ///
+    /// Empty unless the run opts in via `config.exports.fpha_deviation_points`
+    /// (and at least one hydro uses `source: "computed"`). The CLI/Python training
+    /// write site emits these to `hydro_models/fpha_deviation_points.parquet` only
+    /// when the opt-in flag is on AND the vector is non-empty; an empty vector
+    /// writes no file. Built deterministically by the resolver's sequential
+    /// canonical-order flatten, so it is declaration-order invariant.
+    pub fpha_deviation_point_rows: Vec<cobre_io::FphaDeviationPointRow>,
 }
 
 impl PrepareHydroModelsResult {
@@ -494,6 +547,10 @@ impl PrepareHydroModelsResult {
             // This factory models a system with no FPHA, so no plant consults the
             // VHA-geometry ρ_eq derivation; an empty map is correct.
             vha_geometry_by_hydro: HashMap::new(),
+            // No computed FPHA on this path, so no fit deviation is measured.
+            fpha_fit_deviations: Vec::new(),
+            // No computed FPHA on this path, so no per-point deviations either.
+            fpha_deviation_point_rows: Vec::new(),
         }
     }
 }
@@ -680,6 +737,8 @@ mod tests {
             fpha_export_rows: Vec::new(),
             reference_volumes_hm3: Vec::new(),
             vha_geometry_by_hydro: std::collections::HashMap::new(),
+            fpha_fit_deviations: Vec::new(),
+            fpha_deviation_point_rows: Vec::new(),
         };
         let _ = format!("{result:?}");
     }

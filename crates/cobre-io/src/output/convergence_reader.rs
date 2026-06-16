@@ -360,6 +360,7 @@ mod tests {
                 hosts: Vec::new(),
             },
             setup: None,
+            production_fit_deviation: None,
         }
     }
 

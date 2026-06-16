@@ -245,7 +245,7 @@ fn basis_reconstruct_churn() {
     let stochastic = prepare_result.stochastic;
 
     let hydro_models =
-        prepare_hydro_models(&system, &case_dir).expect("prepare_hydro_models must succeed");
+        prepare_hydro_models(&system, &case_dir, false).expect("prepare_hydro_models must succeed");
 
     let mut setup =
         StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup must build");
@@ -366,7 +366,7 @@ fn test_basis_reconstruct_no_churn_full_preservation() {
     let stochastic = prepare_result.stochastic;
 
     let hydro_models =
-        prepare_hydro_models(&system, &case_dir).expect("prepare_hydro_models must succeed");
+        prepare_hydro_models(&system, &case_dir, false).expect("prepare_hydro_models must succeed");
 
     let mut setup =
         StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup must build");
@@ -481,7 +481,7 @@ fn test_basis_reconstruct_full_churn_no_rows_preserved() {
     let stochastic = prepare_result.stochastic;
 
     let hydro_models =
-        prepare_hydro_models(&system, &case_dir).expect("prepare_hydro_models must succeed");
+        prepare_hydro_models(&system, &case_dir, false).expect("prepare_hydro_models must succeed");
 
     let mut setup = StudySetup::new(&system, &config, stochastic, hydro_models)
         .expect("StudySetup phase1 must build");
@@ -566,7 +566,7 @@ fn test_basis_reconstruct_full_churn_no_rows_preserved() {
         let system2 = prepare2.system;
         let stochastic2 = prepare2.stochastic;
         let hydro2 =
-            prepare_hydro_models(&system2, &case_dir).expect("prepare_hydro_models phase2");
+            prepare_hydro_models(&system2, &case_dir, false).expect("prepare_hydro_models phase2");
 
         let mut setup2 =
             StudySetup::new(&system2, &config, stochastic2, hydro2).expect("StudySetup phase2");
@@ -703,7 +703,7 @@ fn simulate_baked_path_zero_consistency_failures() {
     let stochastic = prepare_result.stochastic;
 
     let hydro_models =
-        prepare_hydro_models(&system, &case_dir).expect("prepare_hydro_models must succeed");
+        prepare_hydro_models(&system, &case_dir, false).expect("prepare_hydro_models must succeed");
 
     let mut setup =
         StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup must build");

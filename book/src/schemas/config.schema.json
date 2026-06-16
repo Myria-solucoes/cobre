@@ -111,6 +111,11 @@
       "additionalProperties": false,
       "description": "Export flags controlling which outputs are written to disk\n(`config.json → exports`).\n\nOnly the two active fields are accepted. Legacy keys (`training`, `cuts`,\n`vertices`, `simulation`, `forward_detail`, `backward_detail`,\n`compression`) must be removed from existing `config.json` files before\nloading — they are now rejected as unknown fields.",
       "properties": {
+        "fpha_deviation_points": {
+          "default": false,
+          "description": "Export the per-sampled-point computed-FPHA fit-deviation table to\n`output/hydro_models/fpha_deviation_points.parquet`.\n\nOpt-in (default `false`) purely for size: it emits one row per\n`(hydro, stage, V, Q)` grid point at spillage = 0. Off ⇒ no file and a\nbyte-identical run; the table is additive and never enters the parity\nhash. The values are deterministic (a pure function of geometry + config),\nso the file is reproducible when emitted.",
+          "type": "boolean"
+        },
         "states": {
           "default": false,
           "description": "Export visited forward-pass trial points to the policy checkpoint.",
@@ -891,6 +896,7 @@
     "exports": {
       "$ref": "#/$defs/ExportsConfig",
       "default": {
+        "fpha_deviation_points": false,
         "states": false,
         "stochastic": false
       },

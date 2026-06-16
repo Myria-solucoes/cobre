@@ -389,6 +389,7 @@ mod tests {
                 parallelism: Some(8),
             },
             setup: None,
+            production_fit_deviation: None,
             distribution: DistributionInfo {
                 backend: "local".to_string(),
                 world_size: 1,

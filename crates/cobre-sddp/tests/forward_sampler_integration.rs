@@ -130,7 +130,7 @@ fn run_case_from_dir(case_dir: &Path) -> cobre_sddp::TrainingResult {
     let stochastic = prepare_result.stochastic;
 
     let hydro_models =
-        prepare_hydro_models(&system, case_dir).expect("prepare_hydro_models must succeed");
+        prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
 
     let mut setup =
         StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup must build");

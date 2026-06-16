@@ -78,7 +78,7 @@ mod tests;
 use cobre_io::extensions::PlaneReductionConfig;
 
 use alpha::{compute_alpha_fpha, scale_plane_affine};
-use deviation::compute_fit_deviation;
+use deviation::{collect_fit_deviation_points, compute_fit_deviation};
 use geometry::resolve_fitting_bounds;
 use hull_fit::{RawPlane, fit_hull_planes};
 use production::ProductionFunction;
@@ -86,7 +86,7 @@ use reduction::reduce_planes;
 use secant::fit_gamma_s_for_planes;
 use selection::validate_fitted_planes;
 
-pub(crate) use deviation::FphaFitDeviation;
+pub(crate) use deviation::{FphaDeviationPoint, FphaFitDeviation};
 pub(crate) use error::FphaFittingError;
 pub(crate) use geometry::{ForebayTable, evaluate_losses, evaluate_tailrace};
 pub(crate) use production::TailraceSource;
@@ -134,6 +134,15 @@ pub(crate) struct FphaFitResult {
     /// is the operator-facing fit-quality signal that replaces the retired
     /// low-`kappa` warning.
     pub deviation: FphaFitDeviation,
+    /// Per-sampled-point residuals the [`Self::deviation`] aggregate was reduced
+    /// from, on the same spill = 0 grid — empty unless the caller requested them.
+    ///
+    /// Populated only when `collect_deviation_points` is passed to
+    /// [`fit_fpha_planes`]; otherwise empty with zero collection overhead, leaving
+    /// the fit bit-identical. Carried up so the opt-in
+    /// `fpha_deviation_points.parquet` export can plot exactly where on the grid a
+    /// fit diverges.
+    pub deviation_points: Vec<FphaDeviationPoint>,
 }
 
 /// Fit FPHA hyperplanes for a single hydro plant from its VHA curve geometry.
@@ -194,6 +203,12 @@ pub(crate) struct FphaFitResult {
 ///   (`downstream_level_m.map(f64::to_bits).unwrap_or(0)`), the same dedup-key
 ///   component that identifies the stage/entry. Part of the `Distance` arm's
 ///   stable seed identity; ignored by the `Angle` arm and the `None` skip.
+/// - `collect_deviation_points` — when `true`, after the aggregate is computed
+///   the per-sampled-point residuals are collected onto
+///   [`FphaFitResult::deviation_points`] for the opt-in deviation-points export.
+///   `false` collects nothing (the field stays empty) with zero overhead, so the
+///   fit is bit-identical regardless of the flag — the collection is read-only
+///   over the already-emitted planes and never feeds back into the fit.
 pub(crate) fn fit_fpha_planes(
     forebay_rows: &[HydroGeometryRow],
     hydro: &Hydro,
@@ -203,6 +218,7 @@ pub(crate) fn fit_fpha_planes(
     reduction: Option<&PlaneReductionConfig>,
     hydro_id: i32,
     entry_level_bits: u64,
+    collect_deviation_points: bool,
 ) -> Result<FphaFitResult, FphaFittingError> {
     let forebay = ForebayTable::new(forebay_rows, &hydro.name)?;
 
@@ -280,6 +296,17 @@ pub(crate) fn fit_fpha_planes(
     // the gap a merge introduces.
     let deviation = compute_fit_deviation(&reduced, &pf, &bounds);
 
+    // Per-sampled-point residuals, gated by `collect_deviation_points`. When
+    // `false` this is an empty Vec with NO walk over the grid — zero overhead, so
+    // the fit (and every value it returns) is bit-identical to a run with the flag
+    // off. The collection is read-only over the FINAL `reduced` set on the SAME
+    // spill = 0 grid the aggregate used, so it cannot perturb the fit.
+    let deviation_points = if collect_deviation_points {
+        collect_fit_deviation_points(&reduced, &pf, &bounds)
+    } else {
+        Vec::new()
+    };
+
     // Conversion: each plane is the α-scaled whole affine function α·FPHA_0 with
     // the fitted γ_S. The intercept AND the γ_v / γ_q gradients carry the α factor.
     let planes = reduced
@@ -296,5 +323,6 @@ pub(crate) fn fit_fpha_planes(
         planes,
         alpha,
         deviation,
+        deviation_points,
     })
 }

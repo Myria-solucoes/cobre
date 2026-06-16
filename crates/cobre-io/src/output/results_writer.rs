@@ -111,6 +111,7 @@ pub fn write_training_results(
         },
         solve_stats: training_output.training_solve_stats.clone(),
         setup: ctx.setup.clone(),
+        production_fit_deviation: ctx.production_fit_deviation.clone(),
         distribution: ctx.distribution.clone(),
     };
     write_training_metadata(&output_dir.join("training/metadata.json"), &metadata)?;
@@ -350,6 +351,7 @@ mod tests {
                 hosts: Vec::new(),
             },
             setup: None,
+            production_fit_deviation: None,
         }
     }
 

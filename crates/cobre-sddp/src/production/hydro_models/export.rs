@@ -7,9 +7,11 @@
 //! per-`(hydro, stage)` coefficient rows that capture the actual numbers.
 
 use cobre_core::System;
-use cobre_io::EvaporationModelRow;
+use cobre_io::{DeviationSummary, DeviationWorstEntry, EvaporationModelRow};
 
-use super::types::{EvaporationModel, EvaporationReferenceSource, PrepareHydroModelsResult};
+use super::types::{
+    EvaporationModel, EvaporationReferenceSource, FphaFitDeviationEntry, PrepareHydroModelsResult,
+};
 
 /// Provenance tag string for a [`EvaporationReferenceSource`].
 ///
@@ -106,6 +108,89 @@ pub fn build_evaporation_model_rows(
     }
 
     rows
+}
+
+/// Borrow the canonical-order per-sampled-point FPHA deviation rows from the
+/// pipeline result.
+///
+/// A thin pass-through: the resolver already built these rows in canonical
+/// `(hydro_id, stage_id, grid)` order during its sequential flatten, so there is
+/// nothing to recompute or re-sort here. It exists beside
+/// [`build_evaporation_model_rows`] so the CLI and Python write sites reach the
+/// rows through one accessor mirroring the evaporation recipe. Empty unless the
+/// run opted in via `config.exports.fpha_deviation_points`.
+#[must_use]
+pub fn build_fpha_deviation_point_rows(
+    result: &PrepareHydroModelsResult,
+) -> &[cobre_io::FphaDeviationPointRow] {
+    &result.fpha_deviation_point_rows
+}
+
+/// Roll up the per-`(hydro, stage)` computed-FPHA fit deviations into the generic
+/// run-level [`cobre_io::DeviationSummary`] persisted in `training/metadata.json`.
+///
+/// Returns `None` on an empty slice — a non-computed-FPHA run records no
+/// deviations, and the metadata section is then omitted. Otherwise returns the
+/// rollup:
+///
+/// - `n_entries` — the slice length,
+/// - `mean_abs` — the arithmetic mean of every entry's `mean_abs_mw`,
+/// - `max_abs` — the maximum of every entry's `max_abs_mw`,
+/// - `worst_relative` / `worst_entry` — the entry with the largest `relative`.
+///
+/// # Determinism — first-seen wins on a relative tie (Voice 1 / D5)
+///
+/// The worst-entry scan keeps the first entry reaching the running maximum
+/// (strict `>`), so a tie resolves to the earliest entry in the slice. `entries`
+/// arrives in canonical `(hydro, stage)` order from the resolver, so the chosen
+/// winner is declaration-order invariant. Using `>=` (last-seen wins) would still
+/// be deterministic but would silently flip which plant is reported on a tie;
+/// the strict `>` pins it to the canonical-first entry. The builder never
+/// re-sorts the slice — that would break the carried canonical order.
+#[must_use]
+pub fn build_deviation_summary(entries: &[FphaFitDeviationEntry]) -> Option<DeviationSummary> {
+    if entries.is_empty() {
+        return None;
+    }
+
+    // `entries` is non-empty here, so `n_entries >= 1` and the mean divisor is
+    // never zero. The count fits a `u32` — the per-distinct-fit entry count is
+    // bounded by hydros × stages, far below `u32::MAX`.
+    #[allow(clippy::cast_possible_truncation)]
+    let n_entries = entries.len() as u32;
+
+    let sum_mean_abs: f64 = entries.iter().map(|e| e.mean_abs_mw).sum();
+    #[allow(clippy::cast_precision_loss)]
+    let mean_abs = sum_mean_abs / entries.len() as f64;
+
+    let max_abs = entries
+        .iter()
+        .map(|e| e.max_abs_mw)
+        .fold(f64::NEG_INFINITY, f64::max);
+
+    // First-seen wins on a `relative` tie (strict `>`); see the contract above.
+    // Seed the fold with the first entry and fold the rest, so a one-element slice
+    // yields it directly and there is no fallible `reduce`/`unwrap` path: the
+    // `is_empty()` guard above already makes `entries[0]` safe. Using `reduce(..)
+    // .unwrap_or(entries[0])` would carry an unreachable fallback that misreads as
+    // "the scan can fail".
+    let worst = entries[1..].iter().copied().fold(entries[0], |acc, e| {
+        if e.relative > acc.relative { e } else { acc }
+    });
+
+    Some(DeviationSummary {
+        n_entries,
+        mean_abs,
+        max_abs,
+        worst_relative: worst.relative,
+        worst_entry: Some(DeviationWorstEntry {
+            entity_id: worst.hydro_id.0,
+            stage_id: worst.stage_id,
+            relative: worst.relative,
+            mean_abs: worst.mean_abs_mw,
+            max_abs: worst.max_abs_mw,
+        }),
+    })
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -284,6 +369,8 @@ mod tests {
             fpha_export_rows: Vec::new(),
             reference_volumes_hm3: Vec::new(),
             vha_geometry_by_hydro: std::collections::HashMap::new(),
+            fpha_fit_deviations: Vec::new(),
+            fpha_deviation_point_rows: Vec::new(),
         }
     }
 
@@ -393,6 +480,91 @@ mod tests {
         assert!(
             rows.windows(2).all(|w| w[0].stage_id < w[1].stage_id),
             "rows must ascend by stage_id"
+        );
+    }
+
+    // ── build_deviation_summary ────────────────────────────────────────────────
+
+    fn dev_entry(
+        hydro_id: i32,
+        stage_id: i32,
+        mean_abs_mw: f64,
+        max_abs_mw: f64,
+        mean_signed_mw: f64,
+        relative: f64,
+    ) -> FphaFitDeviationEntry {
+        FphaFitDeviationEntry {
+            hydro_id: EntityId(hydro_id),
+            stage_id,
+            mean_abs_mw,
+            max_abs_mw,
+            mean_signed_mw,
+            relative,
+        }
+    }
+
+    /// An empty slice records no deviation, so the section is omitted.
+    #[test]
+    fn build_deviation_summary_empty_is_none() {
+        assert!(build_deviation_summary(&[]).is_none());
+    }
+
+    /// A non-empty slice rolls up the count, the mean of `mean_abs_mw`, the max of
+    /// `max_abs_mw`, and the entry with the largest `relative`.
+    #[test]
+    fn build_deviation_summary_rolls_up_entries() {
+        let entries = vec![
+            dev_entry(11, 1, 2.0, 10.0, 1.0, 0.01),
+            dev_entry(12, 4, 8.0, 31.7, -2.0, 0.062),
+            dev_entry(13, 2, 4.1, 20.0, 0.5, 0.03),
+        ];
+
+        let summary =
+            build_deviation_summary(&entries).expect("non-empty slice must yield a summary");
+
+        assert_eq!(summary.n_entries, 3);
+        // mean of mean_abs_mw = (2.0 + 8.0 + 4.1) / 3.
+        assert!((summary.mean_abs - (2.0 + 8.0 + 4.1) / 3.0).abs() < 1e-12);
+        // max of max_abs_mw.
+        assert_eq!(summary.max_abs, 31.7);
+        // worst by relative is the second entry (hydro 12, stage 4).
+        assert_eq!(summary.worst_relative, 0.062);
+        let worst = summary.worst_entry.expect("worst entry must be present");
+        assert_eq!(worst.entity_id, 12);
+        assert_eq!(worst.stage_id, 4);
+        assert_eq!(worst.relative, 0.062);
+        assert_eq!(worst.mean_abs, 8.0);
+        assert_eq!(worst.max_abs, 31.7);
+    }
+
+    /// A single entry rolls up to itself: the mean equals its `mean_abs_mw`, the
+    /// max equals its `max_abs_mw`, and it is its own worst entry.
+    #[test]
+    fn build_deviation_summary_single_entry() {
+        let entries = vec![dev_entry(7, 3, 5.5, 12.5, 1.0, 0.04)];
+        let summary = build_deviation_summary(&entries).expect("single entry must yield a summary");
+        assert_eq!(summary.n_entries, 1);
+        assert_eq!(summary.mean_abs, 5.5);
+        assert_eq!(summary.max_abs, 12.5);
+        assert_eq!(summary.worst_relative, 0.04);
+        let worst = summary.worst_entry.expect("worst entry must be present");
+        assert_eq!(worst.entity_id, 7);
+        assert_eq!(worst.stage_id, 3);
+    }
+
+    /// On a `relative` tie the canonical-first entry wins (strict `>`), so the
+    /// reported worst entry is declaration-order invariant.
+    #[test]
+    fn build_deviation_summary_tie_keeps_first() {
+        let entries = vec![
+            dev_entry(20, 1, 3.0, 9.0, 0.0, 0.05),
+            dev_entry(21, 2, 7.0, 15.0, 0.0, 0.05),
+        ];
+        let summary = build_deviation_summary(&entries).expect("must yield a summary");
+        let worst = summary.worst_entry.expect("worst entry must be present");
+        assert_eq!(
+            worst.entity_id, 20,
+            "the canonical-first entry must win a relative tie"
         );
     }
 }

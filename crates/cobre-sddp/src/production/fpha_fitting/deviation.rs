@@ -56,6 +56,32 @@ pub(crate) struct FphaFitDeviation {
     pub relative: f64,
 }
 
+/// One `(V, Q)` grid point's raw FPHA-vs-exact residual at spillage = 0.
+///
+/// The per-sampled-point detail the [`FphaFitDeviation`] aggregate is reduced
+/// from: emitted (opt-in) so a modeler can plot exactly where on the grid a fit
+/// diverges. Each field carries the SAME min-envelope `fpha_fitted` and exact
+/// `fph_exact` the aggregate uses at this point; `deviation` is the signed
+/// residual `fpha_fitted − fph_exact` and `relative_to_peak` is `|deviation|`
+/// against the grid's peak exact generation (the same peak the aggregate's
+/// `relative` divides by, `0.0` when peak ≤ 0).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct FphaDeviationPoint {
+    /// Volume grid coordinate (hm³).
+    pub v: f64,
+    /// Turbined-flow grid coordinate (m³/s).
+    pub q: f64,
+    /// Exact production-function value at `(v, q, 0.0)` (MW).
+    pub fph_exact: f64,
+    /// Fitted min-envelope value at `(v, q, 0.0)` (MW).
+    pub fpha_fitted: f64,
+    /// Signed residual `fpha_fitted − fph_exact` (MW).
+    pub deviation: f64,
+    /// `|deviation|` relative to the grid's peak exact generation (dimensionless,
+    /// `≥ 0`). `0.0` when peak ≤ 0, matching [`FphaFitDeviation::relative`].
+    pub relative_to_peak: f64,
+}
+
 impl FphaFitDeviation {
     /// The neutral diagnostic of a fit with nothing to measure (empty plane set).
     ///
@@ -156,6 +182,72 @@ pub(crate) fn compute_fit_deviation(
     }
 }
 
+/// Collect the per-sampled-point FPHA-vs-exact residuals over the spill = 0 fit
+/// grid — the raw points the [`compute_fit_deviation`] aggregate is reduced from.
+///
+/// Returns one [`FphaDeviationPoint`] per `build_grid` `(V, Q)` point, in the
+/// SAME canonical `V`-outer/`Q`-inner walk order, computed identically to the
+/// aggregate: `fpha_fitted` is the pointwise min envelope `min_k plane_k(v, q,
+/// 0.0)` (the cap the LP consumes), `fph_exact` is `pf.evaluate_capped(v, q,
+/// 0.0)`, and `relative_to_peak` divides `|deviation|` by the grid's peak exact
+/// generation (`0.0` when peak ≤ 0). Reaches the grid through `build_grid` only —
+/// inlining a second axis formula would let this point grid drift from the
+/// aggregate grid; the spillage axis is intentionally not iterated (`s = 0`).
+///
+/// An empty plane set yields no points (nothing to measure), matching the
+/// aggregate's empty-plane short-circuit.
+pub(crate) fn collect_fit_deviation_points(
+    planes: &[RawPlane],
+    pf: &ProductionFunction,
+    bounds: &FittingBounds,
+) -> Vec<FphaDeviationPoint> {
+    if planes.is_empty() {
+        return Vec::new();
+    }
+
+    let grid = build_grid(pf, bounds);
+
+    // First walk: compute each point's residual AND the grid peak, in canonical
+    // order. `relative_to_peak` needs the whole-grid peak, so the division is
+    // deferred to the second walk below — keeping the peak identical to the
+    // aggregate's, which also maxes the exact value across the full grid.
+    let mut points: Vec<FphaDeviationPoint> =
+        Vec::with_capacity(grid.v_points.len() * grid.q_points.len());
+    let mut peak_fph = 0.0_f64;
+    for &v in &grid.v_points {
+        for &q in &grid.q_points {
+            let fpha_fitted = planes
+                .iter()
+                .map(|p| p.evaluate(v, q, 0.0))
+                .fold(f64::INFINITY, f64::min);
+            let fph_exact = pf.evaluate_capped(v, q, 0.0);
+            let deviation = fpha_fitted - fph_exact;
+            peak_fph = peak_fph.max(fph_exact);
+            points.push(FphaDeviationPoint {
+                v,
+                q,
+                fph_exact,
+                fpha_fitted,
+                deviation,
+                // Filled in the second walk once the grid peak is known.
+                relative_to_peak: 0.0,
+            });
+        }
+    }
+
+    // Second walk: divide each point's `|deviation|` by the grid peak, pinning
+    // `relative_to_peak` to 0 when peak ≤ 0 — the same guard
+    // `FphaFitDeviation::relative` applies, so a zero-production hydro reports a
+    // zero relative at every point rather than NaN/∞.
+    if peak_fph > 0.0 {
+        for point in &mut points {
+            point.relative_to_peak = point.deviation.abs() / peak_fph;
+        }
+    }
+
+    points
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -171,7 +263,10 @@ mod tests {
     use super::super::geometry::{FittingBounds, ForebayTable};
     use super::super::hull_fit::RawPlane;
     use super::super::production::{ProductionFunction, TailraceSource};
-    use super::{FphaFitDeviation, WARN_RELATIVE_THRESHOLD, compute_fit_deviation};
+    use super::{
+        FphaFitDeviation, WARN_RELATIVE_THRESHOLD, collect_fit_deviation_points,
+        compute_fit_deviation,
+    };
 
     fn row(volume_hm3: f64, height_m: f64) -> HydroGeometryRow {
         HydroGeometryRow {
@@ -288,6 +383,74 @@ mod tests {
         assert!((dev.max_abs_mw - max_abs).abs() < 1e-9);
         assert!((dev.mean_signed_mw - sum_signed / n).abs() < 1e-9);
         assert!((dev.relative - expected_mean_abs / peak).abs() < 1e-9);
+    }
+
+    /// The collector emits one point per `(V, Q)` grid node (grid-sized), and each
+    /// point's `fph_exact`/`fpha_fitted`/`deviation`/`relative_to_peak` matches an
+    /// independent hand recomputation on the same 2×2 grid at spillage = 0, using
+    /// the min envelope of a single plane — mirroring `matches_hand_computed_deviation`.
+    #[test]
+    fn collect_points_match_hand_computed_on_2x2_grid() {
+        let pf = concave_production_function();
+        let bounds = small_bounds();
+
+        let planes = vec![RawPlane {
+            gamma_0: 50.0,
+            gamma_v: 0.01,
+            gamma_q: 0.3,
+            gamma_s: 0.0,
+        }];
+
+        // Hand-rebuild the exact grid the single-owner `build_grid` produces for a
+        // 2-point V axis over [0, 30_000] and a 2-point Q axis over [0, max_turbined].
+        let v_pts = [0.0_f64, 30_000.0];
+        let q_pts = [0.0_f64, pf.max_turbined_m3s];
+
+        // First hand pass: residuals in canonical V-outer/Q-inner order + grid peak.
+        let mut expected: Vec<(f64, f64, f64, f64, f64)> = Vec::new(); // (v, q, exact, fitted, dev)
+        let mut peak = 0.0_f64;
+        for &v in &v_pts {
+            for &q in &q_pts {
+                let fitted = planes[0].evaluate(v, q, 0.0);
+                let exact = pf.evaluate_capped(v, q, 0.0);
+                peak = peak.max(exact);
+                expected.push((v, q, exact, fitted, fitted - exact));
+            }
+        }
+
+        let points = collect_fit_deviation_points(&planes, &pf, &bounds);
+
+        // Grid-sized: 2 × 2 = 4 points.
+        assert_eq!(
+            points.len(),
+            4,
+            "collector must emit one point per grid node"
+        );
+
+        for (point, (v, q, exact, fitted, dev)) in points.iter().zip(expected.iter()) {
+            assert!((point.v - v).abs() < 1e-9, "v mismatch");
+            assert!((point.q - q).abs() < 1e-9, "q mismatch");
+            assert!((point.fph_exact - exact).abs() < 1e-9, "fph_exact mismatch");
+            assert!(
+                (point.fpha_fitted - fitted).abs() < 1e-9,
+                "fpha_fitted mismatch"
+            );
+            assert!((point.deviation - dev).abs() < 1e-9, "deviation mismatch");
+            let expected_relative = if peak > 0.0 { dev.abs() / peak } else { 0.0 };
+            assert!(
+                (point.relative_to_peak - expected_relative).abs() < 1e-9,
+                "relative_to_peak mismatch"
+            );
+        }
+    }
+
+    /// An empty plane set has nothing to measure → no collected points, matching
+    /// the aggregate's empty-plane short-circuit.
+    #[test]
+    fn collect_points_empty_planes_yields_no_points() {
+        let pf = concave_production_function();
+        let bounds = small_bounds();
+        assert!(collect_fit_deviation_points(&[], &pf, &bounds).is_empty());
     }
 
     /// A zero-production hydro yields `peak ≤ 0`, so `relative` is pinned to 0 even

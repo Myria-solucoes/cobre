@@ -1371,6 +1371,7 @@ fn fit_fpha_planes_sobradinho_style_end_to_end() {
         None,
         1,
         0,
+        false,
     )
     .expect("fit_fpha_planes should succeed");
     let planes = &result.planes;
@@ -1432,6 +1433,7 @@ fn fit_fpha_planes_spill_sensitive_yields_negative_gamma_s() {
         None,
         1,
         0,
+        false,
     )
     .expect("fit should succeed");
     let planes = &result.planes;
@@ -1489,6 +1491,7 @@ fn fit_fpha_planes_intercepts_are_finite() {
         None,
         1,
         0,
+        false,
     )
     .expect("fit should succeed");
 
@@ -1548,6 +1551,7 @@ fn fit_fpha_planes_run_of_river_yields_zero_gamma_v_end_to_end() {
         None,
         1,
         0,
+        false,
     )
     .expect("run-of-river fit should succeed");
     assert!(
@@ -1651,6 +1655,7 @@ fn fit_fpha_planes_linear_function_produces_one_plane() {
         None,
         1,
         0,
+        false,
     )
     .expect("fit should succeed");
 
@@ -1702,6 +1707,7 @@ fn fit_fpha_planes_propagates_forebay_error_on_empty_rows() {
         None,
         1,
         0,
+        false,
     )
     .unwrap_err();
     assert!(
@@ -1745,6 +1751,7 @@ fn single_volume_run_of_river_fits_with_zero_gamma_v() {
         None,
         1,
         0,
+        false,
     )
     .expect("single-volume run-of-river plant must fit");
 
@@ -1843,6 +1850,7 @@ fn fit_fpha_planes_result_alpha_positive_and_intercept_consistent() {
         None,
         1,
         0,
+        false,
     )
     .expect("fit should succeed");
 
@@ -1916,6 +1924,7 @@ fn alpha_scaled_planes_are_outer_approximation_and_not_double_scaled() {
         None,
         1,
         0,
+        false,
     )
     .expect("fit should succeed");
 
@@ -2012,6 +2021,7 @@ fn fitted_min_envelope_tracks_production_on_concave_reservoir() {
         None,
         1,
         0,
+        false,
     )
     .expect("fit should succeed");
 
@@ -2142,6 +2152,7 @@ fn families_single_family_matches_entity_polynomial_planes() {
         None,
         1,
         0,
+        false,
     )
     .expect("entity fit succeeds");
 
@@ -2162,6 +2173,7 @@ fn families_single_family_matches_entity_polynomial_planes() {
         None,
         1,
         0,
+        false,
     )
     .expect("families fit succeeds");
 
@@ -2213,6 +2225,7 @@ fn fit_fpha_planes_none_reduction_is_bit_identical_skip() {
         None,
         1,
         0,
+        false,
     )
     .expect("reference fit should succeed");
 
@@ -2225,6 +2238,7 @@ fn fit_fpha_planes_none_reduction_is_bit_identical_skip() {
         None,
         1,
         0,
+        false,
     )
     .expect("None-reduction fit should succeed");
 
@@ -2294,6 +2308,7 @@ fn fit_fpha_planes_distance_reduction_is_deterministic() {
         Some(&reduction),
         hydro.id.0,
         0,
+        false,
     )
     .expect("first Distance fit should succeed");
 
@@ -2306,6 +2321,7 @@ fn fit_fpha_planes_distance_reduction_is_deterministic() {
         Some(&reduction),
         hydro.id.0,
         0,
+        false,
     )
     .expect("second Distance fit should succeed");
 
@@ -2398,6 +2414,7 @@ fn reduced_sobradinho_planes(
         Some(reduction),
         hydro.id.0,
         0,
+        false,
     )
     .expect("reduction-enabled fit should succeed")
     .planes

@@ -526,6 +526,12 @@ pub(crate) fn write_training_artifacts(
         // metadata `setup` section is absent (CLI-only). Matches the CLI shape via
         // `skip_serializing_if = "Option::is_none"`.
         setup: None,
+        // Roll the computed-FPHA fit deviations up into the metadata aggregate;
+        // `None` for a run that fitted no computed model. Mirrors the CLI write
+        // site so Python and CLI emit the same `production_fit_deviation` section.
+        production_fit_deviation: cobre_sddp::build_deviation_summary(
+            &setup.hydro_models.fpha_fit_deviations,
+        ),
     };
     cobre_io::write_training_results(output_dir, &training.output, system, config, &training_ctx)
         .map_err(|e| format!("output write error: training results output: {e}"))?;
@@ -574,6 +580,37 @@ pub(crate) fn write_evaporation_models_if_any(
             .join("evaporation_models.parquet");
         cobre_io::output::write_evaporation_models(&evaporation_path, &rows)
             .map_err(|e| format!("output write error: failed to write evaporation_models: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Write the per-sampled-point FPHA deviation table sidecar, when the run opted
+/// in AND the fit produced any points.
+///
+/// Mirrors [`write_evaporation_models_if_any`] with an extra opt-in gate: the
+/// file is written beside the FPHA export under `hydro_models/`, but only when
+/// `config.exports.fpha_deviation_points` is on AND the rows are non-empty (a
+/// non-computed-FPHA run produces none). Off by default, so a default run writes
+/// no file and is byte-identical to the CLI. Both Python write sites
+/// ([`run_via_study`] and `Study::train`) must call this to match the CLI's
+/// `write_fpha_deviation_points` output (the Python-parity hard rule); the shared
+/// helper is what holds them to it.
+pub(crate) fn write_fpha_deviation_points_if_any(
+    output_dir: &std::path::Path,
+    setup: &StudySetup,
+    config: &cobre_io::Config,
+) -> Result<(), String> {
+    if !config.exports.fpha_deviation_points {
+        return Ok(());
+    }
+    let rows = cobre_sddp::build_fpha_deviation_point_rows(&setup.hydro_models);
+    if !rows.is_empty() {
+        let deviation_points_path = output_dir
+            .join("hydro_models")
+            .join("fpha_deviation_points.parquet");
+        cobre_io::output::write_fpha_deviation_points(&deviation_points_path, rows).map_err(
+            |e| format!("output write error: failed to write fpha_deviation_points: {e}"),
+        )?;
     }
     Ok(())
 }
@@ -728,6 +765,8 @@ pub(crate) fn run_simulation_phase_py(
         },
         // Simulation metadata has no setup section.
         setup: None,
+        // Simulation metadata carries no production-fit deviation (training-only).
+        production_fit_deviation: None,
     };
     cobre_io::write_simulation_results(output_dir, &sim_out, &sim_ctx)
         .map_err(|e| format!("output write error: simulation results output: {e}"))?;
@@ -842,9 +881,13 @@ pub(crate) fn build_study_setup(
     let estimation_report = result.estimation_report;
     let estimation_path = result.estimation_path;
 
-    let hydro_models_result =
-        cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts(&system, &artifacts, None)
-            .map_err(|e| format!("hydro model preprocessing error: {e}"))?;
+    let hydro_models_result = cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts(
+        &system,
+        &artifacts,
+        config.exports.fpha_deviation_points,
+        None,
+    )
+    .map_err(|e| format!("hydro model preprocessing error: {e}"))?;
 
     let simulation_source = config
         .simulation_scenario_source(&case_dir.join("config.json"))
@@ -1242,6 +1285,11 @@ pub(crate) fn run_via_study(
         // Write evaporation-model coefficients after training (shared with
         // `Study::train`). Mirrors the CLI's `write_evaporation_models` call.
         write_evaporation_models_if_any(&output_dir, &setup, &system)?;
+
+        // Write the opt-in per-sampled-point FPHA deviation table after training
+        // (shared with `Study::train`). Mirrors the CLI's
+        // `write_fpha_deviation_points` block, opt-in + if-any guarded.
+        write_fpha_deviation_points_if_any(&output_dir, &setup, &config)?;
 
         // Propagate a captured callback exception (or KeyboardInterrupt) only
         // now that all training artifacts have been written, so a raising or

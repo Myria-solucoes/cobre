@@ -96,7 +96,8 @@ fn simulation_only_fcf_round_trip() {
     let system = prepare_result.system;
     let stochastic = prepare_result.stochastic;
 
-    let hydro_models = prepare_hydro_models(&system, &case_dir).expect("prepare_hydro_models");
+    let hydro_models =
+        prepare_hydro_models(&system, &case_dir, false).expect("prepare_hydro_models");
 
     let mut setup =
         StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup");

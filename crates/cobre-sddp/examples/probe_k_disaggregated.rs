@@ -162,7 +162,7 @@ fn run_probe(config_path: &Path) -> Result<(), ExitCode> {
     let system = prepared.system;
     let stochastic = prepared.stochastic;
 
-    let hydro_models = prepare_hydro_models(&system, &case_dir).map_err(|e| {
+    let hydro_models = prepare_hydro_models(&system, &case_dir, false).map_err(|e| {
         eprintln!("error: prepare_hydro_models failed: {e}");
         ExitCode::from(1)
     })?;

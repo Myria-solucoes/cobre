@@ -995,6 +995,45 @@ mod tests {
         );
     }
 
+    /// `exports.fpha_deviation_points: true` deserializes correctly.
+    ///
+    /// Verifies that a `config.json` with
+    /// `"exports": {"fpha_deviation_points": true}` round-trips the field as
+    /// `true` in `ExportsConfig`.
+    #[test]
+    fn test_exports_fpha_deviation_points_explicit_true() {
+        let f = write_config(
+            r#"{
+            "training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
+            "exports": {"fpha_deviation_points": true}
+        }"#,
+        );
+        let cfg = parse_config(f.path()).unwrap();
+        assert!(
+            cfg.exports.fpha_deviation_points,
+            "exports.fpha_deviation_points should be true when set in config"
+        );
+    }
+
+    /// `exports.fpha_deviation_points` defaults to `false` when the field is absent.
+    ///
+    /// Verifies that a `config.json` without the `fpha_deviation_points` field in
+    /// the `exports` section resolves to `false` via `#[serde(default)]`, so a
+    /// run with the flag absent produces no file and is byte-identical to today.
+    #[test]
+    fn test_exports_fpha_deviation_points_defaults_to_false() {
+        let f = write_config(
+            r#"{
+            "training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}
+        }"#,
+        );
+        let cfg = parse_config(f.path()).unwrap();
+        assert!(
+            !cfg.exports.fpha_deviation_points,
+            "exports.fpha_deviation_points should default to false when absent"
+        );
+    }
+
     // ── ScenarioSource parsing tests ──────────────────────────────────────────
 
     const MINIMAL_TRAINING: &str =
