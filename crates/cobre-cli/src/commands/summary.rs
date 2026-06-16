@@ -6,13 +6,15 @@
 //!
 //! # Behavior
 //!
-//! The five live end-block sections are reproduced in top-to-bottom order:
-//! Execution topology → Hydro models → Model provenance → Training → Simulation.
-//! Each section reuses the shared `print_*` renderer the live run uses, so the
-//! output matches the live block by construction.
+//! The live end-block sections are reproduced in top-to-bottom order:
+//! Execution topology → Hydro models → Model provenance → Fit quality →
+//! Training → Simulation. Each section reuses the shared `print_*` renderer the
+//! live run uses, so the output matches the live block by construction.
 //!
 //! - `training/metadata.json` — required; missing file returns [`CliError::Io`].
-//!   Drives the always-printed Execution topology and Training sections.
+//!   Drives the always-printed Execution topology and Training sections, and —
+//!   when `production_fit_deviation` is present (computed-FPHA runs) — the
+//!   conditional Fit quality section.
 //! - `training/convergence.parquet` — optional; missing file falls back to
 //!   zero-valued bounds (`lp_solves` and timing reported as 0).
 //! - `training/hydro_models.json` — optional; missing file skips the Hydro
@@ -44,8 +46,9 @@ use cobre_sddp::{HydroModelSummary, ModelProvenanceReport};
 use crate::{
     error::CliError,
     summary::{
-        SimulationSummary, TrainingSummary, print_execution_topology, print_hydro_model_summary,
-        print_provenance_summary, print_simulation_summary, print_training_summary,
+        SimulationSummary, TrainingSummary, print_deviation_summary, print_execution_topology,
+        print_hydro_model_summary, print_provenance_summary, print_simulation_summary,
+        print_training_summary,
     },
 };
 
@@ -75,7 +78,6 @@ pub struct SummaryArgs {
 pub fn execute(args: SummaryArgs) -> Result<(), CliError> {
     let output_dir = args.output_dir;
 
-    // Verify the output directory exists before attempting to read any files.
     if !output_dir.try_exists().map_err(|e| CliError::Io {
         source: e,
         context: "output directory".to_string(),
@@ -141,11 +143,18 @@ pub fn execute(args: SummaryArgs) -> Result<(), CliError> {
         print_provenance_summary(&stderr, report);
     }
 
-    // 4. Training — always printed.
+    // 4. Fit quality — only when the metadata carries a deviation aggregate
+    //    (present only for computed-FPHA runs).
+    if let Some(deviation) = &metadata.production_fit_deviation {
+        let _ = stderr.write_line("");
+        print_deviation_summary(&stderr, deviation);
+    }
+
+    // 5. Training — always printed.
     let _ = stderr.write_line("");
     print_training_summary(&stderr, &training_summary);
 
-    // 5. Simulation — only when the metadata was present.
+    // 6. Simulation — only when the metadata was present.
     if let Some(sim) = simulation {
         let simulation_summary = build_simulation_summary(&sim);
         let _ = stderr.write_line("");

@@ -141,7 +141,6 @@ pub fn print_execution_topology(
             let _ = stderr.write_line(&format!("  Threads:   {n_threads} {thread_word}"));
         }
         BackendKind::Mpi => {
-            // Backend line with library and standard version.
             let backend_detail = if let Some(ref mpi) = topology.mpi {
                 format!("MPI ({}, {})", mpi.library_version, mpi.standard_version)
             } else {
@@ -149,7 +148,6 @@ pub fn print_execution_topology(
             };
             let _ = stderr.write_line(&format!("  Backend:   {backend_detail}"));
 
-            // Thread level + rayon thread count.
             let thread_line = if let Some(ref mpi) = topology.mpi {
                 format!("{}, {n_threads} {thread_word} per rank", mpi.thread_level)
             } else {
@@ -157,7 +155,6 @@ pub fn print_execution_topology(
             };
             let _ = stderr.write_line(&format!("  Threads:   {thread_line}"));
 
-            // Layout: single-node or multi-node.
             let world_size = topology.world_size;
             let rank_word = if world_size == 1 { "rank" } else { "ranks" };
             let num_hosts = topology.num_hosts();
@@ -167,9 +164,8 @@ pub fn print_execution_topology(
                     topology.leader_hostname()
                 ));
             } else {
-                let node_word = if num_hosts == 1 { "node" } else { "nodes" };
                 let _ = stderr.write_line(&format!(
-                    "  Layout:    {world_size} {rank_word} across {num_hosts} {node_word}"
+                    "  Layout:    {world_size} {rank_word} across {num_hosts} nodes"
                 ));
                 for host in &topology.hosts {
                     let count = host.ranks.len();
@@ -182,10 +178,8 @@ pub fn print_execution_topology(
                 }
             }
 
-            // Optional SLURM line.
             if let Some(ref slurm) = topology.slurm {
-                let mut slurm_parts: Vec<String> = Vec::new();
-                slurm_parts.push(format!("job {}", slurm.job_id));
+                let mut slurm_parts: Vec<String> = vec![format!("job {}", slurm.job_id)];
                 if let Some(ref node_list) = slurm.node_list {
                     slurm_parts.push(format!("nodes {node_list}"));
                 }
@@ -397,6 +391,65 @@ pub fn format_provenance_summary_string(report: &ModelProvenanceReport) -> Strin
         "  Opening tree:    {}",
         report.inflow.opening_tree_source
     ));
+    lines.join("\n")
+}
+
+/// Percentage at or below which the worst FPHA deviation is shown without a
+/// `WARN` marker.
+///
+/// Shape mirror of `WARN_RELATIVE_THRESHOLD` (the `0.05` fit-quality alarm in
+/// `cobre_sddp`'s `deviation.rs`), expressed in percent because this block
+/// renders the deviation as a percentage. That constant is `pub(crate)` to its
+/// owning crate; this is a deliberate value duplication across the crate
+/// boundary, not an import, so the two stay independently visible.
+const FPHA_DEVIATION_WARN_PERCENT: f64 = 5.0;
+
+/// Format the single worst-deviation detail line for the fit-quality block.
+///
+/// Shared by [`print_deviation_summary`] and its `#[cfg(test)]` twin so the
+/// printed line and the test-asserted line cannot drift. Renders the worst
+/// relative deviation as a percentage with the `entity/stage` identifiers,
+/// appending ` — WARN` when the percentage exceeds [`FPHA_DEVIATION_WARN_PERCENT`];
+/// a `None` worst entry renders `n/a`.
+fn format_worst_dev_line(summary: &cobre_io::DeviationSummary) -> String {
+    match &summary.worst_entry {
+        Some(entry) => {
+            let percent = summary.worst_relative * 100.0;
+            let warn = if percent > FPHA_DEVIATION_WARN_PERCENT {
+                " \u{2014} WARN"
+            } else {
+                ""
+            };
+            format!(
+                "  Worst FPHA dev: {percent:.1}% relative ({}/{}){warn}",
+                entry.entity_id, entry.stage_id
+            )
+        }
+        None => "  Worst FPHA dev: n/a".to_string(),
+    }
+}
+
+/// Print the FPHA fit-quality summary to `stderr`.
+///
+/// Renders a bold `Fit quality` header followed by one indented line reporting
+/// the worst relative FPHA deviation (see [`format_worst_dev_line`]). Only the
+/// aggregate worst-deviation figure is shown; per-entity detail lives in the
+/// `fpha_deviation_points.parquet` output and the `production_fit_deviation`
+/// metadata section. Write errors are silently ignored (fire-and-forget).
+pub fn print_deviation_summary(stderr: &Term, summary: &cobre_io::DeviationSummary) {
+    let _ = stderr.write_line(&format!("{}", console::style("Fit quality").bold()));
+    let _ = stderr.write_line(&format_worst_dev_line(summary));
+}
+
+/// Render the FPHA fit-quality summary as a plain-text `String`.
+///
+/// The returned string contains no ANSI escape sequences. Color and styling
+/// are applied by [`print_deviation_summary`] when writing to the terminal.
+/// This function exists to allow unit tests to assert on summary content
+/// without requiring a real terminal.
+#[cfg(test)]
+pub fn format_deviation_summary_string(summary: &cobre_io::DeviationSummary) -> String {
+    let lines: Vec<String> = vec!["Fit quality".to_string(), format_worst_dev_line(summary)];
     lines.join("\n")
 }
 
@@ -660,7 +713,6 @@ pub fn format_summary_string(summary: &RunSummary) -> String {
 
     let mut lines: Vec<String> = Vec::new();
 
-    // Training section header
     lines.push(format!(
         "Training complete in {duration} ({} iterations, {convergence_detail})",
         t.iterations
@@ -678,7 +730,6 @@ pub fn format_summary_string(summary: &RunSummary) -> String {
     lines.extend(policy_rows_lines(t));
     lines.push(format!("  LP solves:    {}", t.total_lp_solves));
 
-    // Simulation section (optional)
     if let Some(sim) = &summary.simulation {
         let sim_duration = format_duration(sim.total_time_ms);
         lines.push(String::new());
@@ -692,7 +743,6 @@ pub fn format_summary_string(summary: &RunSummary) -> String {
         ));
     }
 
-    // Output path
     lines.push(String::new());
     lines.push(format!(
         "Output written to {}/",
@@ -1882,6 +1932,127 @@ mod tests {
             n_evaporation_ref_default_midpoint: 1,
         });
         print_provenance_summary(&Term::buffered_stderr(), &report);
+    }
+
+    // ── DeviationSummary tests ─────────────────────────────────────────────────
+
+    use super::{format_deviation_summary_string, print_deviation_summary};
+    use cobre_io::{DeviationSummary, DeviationWorstEntry};
+
+    /// Below the 5.0% display threshold: the line carries the header, the
+    /// `entity/stage` identifiers, and no `WARN` marker.
+    #[test]
+    fn format_deviation_summary_below_threshold_has_no_warn() {
+        let summary = DeviationSummary {
+            n_entries: 4,
+            mean_abs: 1.0,
+            max_abs: 2.0,
+            worst_relative: 0.032,
+            worst_entry: Some(DeviationWorstEntry {
+                entity_id: 12,
+                stage_id: 1,
+                relative: 0.032,
+                mean_abs: 1.0,
+                max_abs: 2.0,
+            }),
+        };
+        let s = format_deviation_summary_string(&summary);
+
+        assert!(
+            s.contains("Fit quality"),
+            "summary must contain the 'Fit quality' header, got: {s}"
+        );
+        assert!(
+            s.contains("Worst FPHA dev: 3.2% relative (12/1)"),
+            "summary must contain the worst-deviation line, got: {s}"
+        );
+        assert!(
+            !s.contains("WARN"),
+            "below-threshold summary must NOT contain 'WARN', got: {s}"
+        );
+    }
+
+    /// Above the 5.0% display threshold: the rendered line ends with ` — WARN`.
+    #[test]
+    fn format_deviation_summary_above_threshold_appends_warn() {
+        let summary = DeviationSummary {
+            n_entries: 4,
+            mean_abs: 5.0,
+            max_abs: 9.0,
+            worst_relative: 0.08,
+            worst_entry: Some(DeviationWorstEntry {
+                entity_id: 7,
+                stage_id: 3,
+                relative: 0.08,
+                mean_abs: 5.0,
+                max_abs: 9.0,
+            }),
+        };
+        let s = format_deviation_summary_string(&summary);
+
+        assert!(
+            s.ends_with(" \u{2014} WARN"),
+            "above-threshold summary must end with ' — WARN', got: {s}"
+        );
+    }
+
+    /// A `None` worst entry renders `n/a` and shows no percentage.
+    #[test]
+    fn format_deviation_summary_none_entry_renders_na() {
+        let summary = DeviationSummary {
+            n_entries: 0,
+            mean_abs: 0.0,
+            max_abs: 0.0,
+            worst_relative: 0.0,
+            worst_entry: None,
+        };
+        let s = format_deviation_summary_string(&summary);
+
+        assert!(
+            s.contains("Worst FPHA dev: n/a"),
+            "none-entry summary must contain 'Worst FPHA dev: n/a', got: {s}"
+        );
+        assert!(
+            !s.contains('%'),
+            "none-entry summary must contain no '%' character, got: {s}"
+        );
+    }
+
+    /// The print path does not panic for any fixture shape.
+    #[test]
+    fn print_deviation_summary_does_not_panic() {
+        let stderr = Term::buffered_stderr();
+        print_deviation_summary(
+            &stderr,
+            &DeviationSummary {
+                n_entries: 1,
+                mean_abs: 1.0,
+                max_abs: 2.0,
+                worst_relative: 0.032,
+                worst_entry: Some(DeviationWorstEntry {
+                    entity_id: 12,
+                    stage_id: 1,
+                    relative: 0.032,
+                    mean_abs: 1.0,
+                    max_abs: 2.0,
+                }),
+            },
+        );
+        print_deviation_summary(
+            &stderr,
+            &DeviationSummary {
+                worst_relative: 0.08,
+                worst_entry: Some(DeviationWorstEntry {
+                    entity_id: 7,
+                    stage_id: 3,
+                    relative: 0.08,
+                    mean_abs: 5.0,
+                    max_abs: 9.0,
+                }),
+                ..DeviationSummary::default()
+            },
+        );
+        print_deviation_summary(&stderr, &DeviationSummary::default());
     }
 
     // ── format_rank_list tests ────────────────────────────────────────────────

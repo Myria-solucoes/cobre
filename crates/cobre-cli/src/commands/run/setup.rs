@@ -654,6 +654,19 @@ pub(super) fn run_pre_training(
         })?;
     }
 
+    // Fit-quality block: the worst computed-FPHA deviation aggregate, rendered
+    // after the provenance block. `build_deviation_summary` returns `None` for a
+    // run with no computed-FPHA entries, so the block (header and separator)
+    // appears only when there is a fit to report.
+    if ctx.is_root
+        && !ctx.quiet
+        && let Some(deviation_summary) =
+            cobre_sddp::build_deviation_summary(&setup.hydro_models.fpha_fit_deviations)
+    {
+        let _ = ctx.stderr.write_line("");
+        crate::summary::print_deviation_summary(&ctx.stderr, &deviation_summary);
+    }
+
     if ctx.is_root && root_config.is_some_and(|c| c.exports.stochastic) {
         if !ctx.quiet {
             let _ = ctx.stderr.write_line("Exporting stochastic artifacts...");
