@@ -44,17 +44,10 @@ pub fn build_hydro_model_summary(
     let mut total_planes = 0usize;
     let mut fpha_details: Vec<FphaHydroDetail> = Vec::new();
 
-    // Collect study stages to determine plane counts (id >= 0).
-    let study_stages: Vec<usize> = system
-        .stages()
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| s.id >= 0)
-        .map(|(idx, _)| idx)
-        .collect();
-    // Use stage position 0 (within the study stages) as the representative stage.
+    // Plane counts are read from the first study stage (id >= 0); skip if none exist.
+    let has_study_stage = system.stages().iter().any(|s| s.id >= 0);
     // Production models are indexed by hydro position within `system.hydros()`.
-    let representative_stage = 0usize; // index into `study_stages`
+    let representative_stage = 0usize;
 
     for (hydro_pos, (entity_id, source)) in result.provenance.production_sources.iter().enumerate()
     {
@@ -66,13 +59,13 @@ pub fn build_hydro_model_summary(
             | ProductionModelSource::ComputedFromGeometry => {
                 n_fpha += 1;
 
-                let n_planes = if study_stages.is_empty() {
-                    0
-                } else {
+                let n_planes = if has_study_stage {
                     match result.production.model(hydro_pos, representative_stage) {
                         ResolvedProductionModel::Fpha { planes, .. } => planes.len(),
                         ResolvedProductionModel::ConstantProductivity { .. } => 0,
                     }
+                } else {
+                    0
                 };
 
                 total_planes += n_planes;

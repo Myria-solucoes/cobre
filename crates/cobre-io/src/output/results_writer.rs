@@ -186,7 +186,6 @@ pub fn write_results(
     Ok(())
 }
 
-/// Extract the iteration limit from the stopping rules configuration.
 fn extract_max_iterations(config: &Config) -> Option<u32> {
     config
         .training

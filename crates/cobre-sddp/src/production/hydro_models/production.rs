@@ -1284,7 +1284,6 @@ fn build_fpha_model(
     _source: ProductionModelSource,
     hyperplane_map: &HashMap<(EntityId, Option<i32>), Vec<&FphaHyperplaneRow>>,
 ) -> Result<ResolvedProductionModel, SddpError> {
-    // Prefer stage-specific rows; fall back to global (stage_id: None) rows.
     let rows: &[&FphaHyperplaneRow] = hyperplane_map
         .get(&(hydro.id, Some(stage.id)))
         .or_else(|| hyperplane_map.get(&(hydro.id, None)))

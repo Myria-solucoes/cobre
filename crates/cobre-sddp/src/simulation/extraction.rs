@@ -440,7 +440,6 @@ impl StageExtractionSpec<'_> {
     }
 }
 
-/// Extract hydro results from a raw LP solution view.
 /// Extract one hydro result for the no-turbine (stage-level aggregate) branch.
 fn extract_hydro_no_turbine(
     view: &SolutionView<'_>,

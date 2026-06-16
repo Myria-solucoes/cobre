@@ -139,9 +139,8 @@ pub struct StageTemplates {
 /// Returns the template, the row index of the water-balance block
 /// (used as `base_row` by the `PatchBuffer` noise injection), the
 /// row index of the load-balance block (used for load-noise patches),
-/// the generic constraint row entries for this stage, NCS metadata
-/// (column start, count, and active system indices), and z-inflow
-/// metadata (row start, column start).
+/// the generic constraint row entries for this stage, and NCS metadata
+/// (column start, count, and active system indices).
 // Rationale: the return tuple exposes seven independently typed outputs — the template,
 // two base-row offsets, generic-constraint metadata, NCS column start/count, and active
 // NCS indices — that the caller destructures immediately into named bindings.  A type alias

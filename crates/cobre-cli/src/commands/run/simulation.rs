@@ -133,8 +133,7 @@ pub(super) fn run_simulation_phase(
 
     // Route the aggregated simulation cost summary and solver totals into the
     // output carrier so the cobre-io writer persists them in
-    // `simulation/metadata.json`. Both are populated on the value that is
-    // actually written below.
+    // `simulation/metadata.json`.
     merged_sim_output.cost = Some(cobre_io::MetadataCost {
         mean_cost: cost_summary.mean_cost,
         std_cost: cost_summary.std_cost,

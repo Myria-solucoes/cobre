@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 /// Export flags controlling which outputs are written to disk
 /// (`config.json → exports`).
 ///
-/// Only the two active fields are accepted. Legacy keys (`training`, `cuts`,
+/// Only the active fields below are accepted. Legacy keys (`training`, `cuts`,
 /// `vertices`, `simulation`, `forward_detail`, `backward_detail`,
 /// `compression`) must be removed from existing `config.json` files before
 /// loading — they are now rejected as unknown fields.

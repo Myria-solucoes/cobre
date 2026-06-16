@@ -140,10 +140,9 @@ use std::path::Path;
 
 /// Auxiliary rows produced by the load pipeline alongside [`System`].
 ///
-/// Downstream solver crates used to re-open the same parquet/JSON files from
-/// disk after [`load_case`] returned. `CaseArtifacts` is the single-source
-/// delivery of those already-parsed-and-validated rows, eliminating the disk
-/// re-reads.
+/// `CaseArtifacts` is the single-source delivery of the already-parsed-and-validated
+/// parquet/JSON rows, so downstream solver crates do not re-open the same files
+/// from disk after [`load_case`] returns.
 ///
 /// Fields are owned `Vec`s in deterministic (canonical) order. Empty vectors
 /// indicate the optional file was absent on disk.
@@ -241,8 +240,8 @@ pub fn load_case(path: &Path) -> Result<System, LoadError> {
 ///
 /// This is the preferred entry point for solver pipelines that need the
 /// production-model / hydro-geometry / FPHA hyperplane / scalar-parameter
-/// rows: returning them here avoids the disk re-reads (and the parallel
-/// validation paths) that previously lived in downstream crates.
+/// rows: returning them here avoids the duplicate disk re-reads and parallel
+/// validation paths in downstream crates.
 ///
 /// The function runs the six-layer validation pipeline described in [`load_case`].
 ///

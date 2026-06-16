@@ -449,7 +449,6 @@ fn resolve_bus_deficit<S: BuildHasher>(
         let effective_blk = block_id.unwrap_or(block_idx);
         let s = indexer.max_deficit_segments;
         let base = indexer.deficit.start + b_pos * s * n_blks + effective_blk;
-        // Return one entry per segment (each with coefficient 1.0).
         (0..s).map(|seg| (base + seg * n_blks, 1.0)).collect()
     } else {
         vec![]
@@ -937,7 +936,7 @@ mod tests {
             &lpos,
         );
 
-        // FPHA local index 0, generation.start=67, n_blks=3, block=0
+        // FPHA local index 0, generation.start=79, n_blks=3, block=0
         assert_eq!(result, vec![(79 + 0 * 3 + 0, 1.0)]);
     }
 
@@ -969,7 +968,7 @@ mod tests {
             &lpos,
         );
 
-        // FPHA local index 1, generation.start=67, n_blks=3, block=2
+        // FPHA local index 1, generation.start=79, n_blks=3, block=2
         assert_eq!(result, vec![(79 + 1 * 3 + 2, 1.0)]);
     }
 

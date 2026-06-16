@@ -111,7 +111,6 @@ pub fn parse_fpha_deviation_points(path: &Path) -> Result<Vec<FphaDeviationPoint
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
 
-        // ── Required columns ──────────────────────────────────────────────────
         let hydro_id_col = extract_required_int32(&batch, "hydro_id", path)?;
         let v_col = extract_required_float64(&batch, "v", path)?;
         let q_col = extract_required_float64(&batch, "q", path)?;
@@ -120,10 +119,8 @@ pub fn parse_fpha_deviation_points(path: &Path) -> Result<Vec<FphaDeviationPoint
         let deviation_col = extract_required_float64(&batch, "deviation", path)?;
         let relative_col = extract_required_float64(&batch, "relative", path)?;
 
-        // ── Optional columns — check existence first ──────────────────────────
         let stage_id_col = extract_optional_int32(&batch, "stage_id", path)?;
 
-        // ── Build rows ────────────────────────────────────────────────────────
         let n = batch.num_rows();
         rows.reserve(n);
 
@@ -136,7 +133,6 @@ pub fn parse_fpha_deviation_points(path: &Path) -> Result<Vec<FphaDeviationPoint
             let deviation = deviation_col.value(i);
             let relative = relative_col.value(i);
 
-            // stage_id: None if column is absent or null at this row.
             let stage_id = stage_id_col
                 .filter(|col| !col.is_null(i))
                 .map(|col| col.value(i));
@@ -154,7 +150,6 @@ pub fn parse_fpha_deviation_points(path: &Path) -> Result<Vec<FphaDeviationPoint
         }
     }
 
-    // ── Sort by (hydro_id, stage_id) ascending ───────────────────────────────
     // Null stage_id sorts before any non-null value (None < Some(_)). A stable
     // sort preserves the within-block canonical grid order.
     rows.sort_by(|a, b| {
