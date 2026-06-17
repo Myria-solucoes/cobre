@@ -155,8 +155,9 @@ pub(crate) struct FphaFitResult {
 ///    and the hydro plant's tailrace, hydraulic loss, and efficiency models.
 /// 3. **Fitting bounds** — resolve volume range and grid counts from the config.
 /// 4. **Hull fit** — build the `(V, Q, generation)` production cloud (spillage = 0,
-///    lateral = 0) plus the closing point, take the 3-D convex hull, and read its
-///    upper-envelope facets as raw planes.
+///    lateral = 0), take the 3-D convex hull, and read its upper-envelope facets
+///    as raw planes. The zero-flow (`q = 0`) column anchors the lower closure, so
+///    no synthetic closing point is added.
 /// 5. **Alpha correction** — compute the least-squares `α_FPHA` on the spill = 0
 ///    grid and scale every plane's whole affine function by `α`.
 /// 6. **Lateral secant** — fit the lateral-flow secant `γ_S` over

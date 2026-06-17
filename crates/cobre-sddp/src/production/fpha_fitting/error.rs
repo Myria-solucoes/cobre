@@ -130,8 +130,8 @@ pub(crate) enum FphaFittingError {
     /// The hull primitive needs at least four affinely-independent points to
     /// build a full-dimensional 3-D hull. A production function whose `(V, Q, generation)`
     /// cloud collapses onto a single line or plane (e.g. a constant net head with
-    /// no V- or Q-dependence, so every grid point and the closing point are
-    /// collinear) cannot yield even one upper-envelope facet from the hull. The
+    /// no V- or Q-dependence, so every grid point is collinear) cannot yield even
+    /// one upper-envelope facet from the hull. The
     /// caller maps the hull's degenerate status to this variant rather than
     /// panicking, so one pathological hydro does not abort the whole fitting loop.
     DegenerateProductionCloud {

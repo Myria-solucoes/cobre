@@ -555,7 +555,7 @@ mod tests {
     #[test]
     fn flat_function_either_yields_a_plane_or_typed_degenerate() {
         // A constant-head flat-forebay function with no tailrace gives
-        // generation = c·q, independent of V. The (V, Q, generation) cloud plus the closing point
+        // generation = c·q, independent of V. The (V, Q, generation) cloud
         // may be a valid prism (>= 1 plane) or collapse to a degenerate hull. Both
         // outcomes are acceptable; a panic or an empty Ok is not.
         let pf = flat_production_function();

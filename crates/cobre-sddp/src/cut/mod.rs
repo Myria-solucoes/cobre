@@ -26,7 +26,8 @@
 //! - [`row_map`] — [`CutRowMap`]: slot-to-LP-row mapping that preserves cut-pool
 //!   slot identity for warm-start basis reconstruction.
 //! - [`cut_selection`] — [`CutSelectionStrategy`] (and `CutMetadata`): per-cut
-//!   activity tracking and the LML1/LML2 dominated-cut selection strategies.
+//!   activity tracking and the Level-1 / LML1 / domination periodic cut-selection
+//!   strategies.
 //! - [`dcs`] — Dynamic Cut Selection: scores all resident cuts per stage.
 //! - [`cut_sync`] — [`CutSyncBuffers`]: MPI cut-synchronization scratch space.
 //! - [`basis_reconstruct`] — warm-start basis reconstruction for the baked
