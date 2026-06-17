@@ -5,11 +5,6 @@
 //! `csrc/qhull_wrapper.h`. Use the safe wrapper in the parent module
 //! ([`super::convex_hull_3d`]) rather than calling these directly.
 
-// Intent/Seam: these bindings are reached only through the safe wrapper, which
-// is itself called only by tests until the FPHA tailrace-fitting pipeline is
-// wired. The suppression clears once that caller lands and the lint re-fires.
-#![allow(dead_code)]
-
 use std::os::raw::{c_double, c_int};
 
 // ============================================================

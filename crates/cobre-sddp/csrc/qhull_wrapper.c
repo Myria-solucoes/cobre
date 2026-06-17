@@ -29,11 +29,16 @@
 /* Per-facet output width: nx, ny, nz, d. */
 #define COBRE_QHULL_PLANE_STRIDE 4
 
-/* Fixed qhull option string. "qhull" is the conventional command
- * prefix; "Qt" triangulates the hull into simplicial facets so each facet has
- * one unambiguous unit normal. Joggle ("QJ") is deliberately omitted — no
- * randomized perturbation. See the header's determinism contract. */
-static const char COBRE_QHULL_FLAGS[] = "qhull Qt";
+/* Fixed qhull option string. "qhull" is the conventional command prefix; "Qt"
+ * triangulates the hull into simplicial facets so each facet has one
+ * unambiguous unit normal; "Pp" suppresses qhull's precision warnings (a
+ * narrow/degenerate cloud would otherwise print multi-line diagnostics to
+ * stderr from every parallel per-hydro worker — genuine errors are surfaced
+ * through the returned status instead). "Pp" is output-only and does not change
+ * the hull geometry (the determinism gate verifies the facet output stays
+ * bit-identical). Joggle ("QJ") is deliberately omitted — no randomized
+ * perturbation. See the header's determinism contract. */
+static const char COBRE_QHULL_FLAGS[] = "qhull Qt Pp";
 
 /* Map a qhull errexit code (qh_ERR*, libqhull_r.h) to a shim status code.
  * Called only on the error path (exitcode != 0). */
@@ -113,8 +118,12 @@ int cobre_qhull_convex_hull_3d(
          * ownership of it. The cast drops const because qh_new_qhull takes a
          * non-const coordT*; qhull does not mutate the array when joggle is off
          * (no "QJ"), so this is sound. NULL outfile suppresses result printing;
-         * stderr receives any diagnostic text. */
-        qh_new_qhull(
+         * stderr stays the error sink — a NULL errfile would make qhull abort
+         * the process (qh_fprintf treats a NULL file as a fatal internal error)
+         * if it ever needed to print, so it is deliberately NOT silenced that
+         * way; the "Pp" flag suppresses the common precision-warning text
+         * instead. */
+        int qhull_exit = qh_new_qhull(
             qh,
             COBRE_QHULL_DIM,
             n_points,
@@ -125,23 +134,35 @@ int cobre_qhull_convex_hull_3d(
             stderr
         );
 
-        /* First pass: count hull facets. With "Qt" every facet is simplicial
-         * and carries a normal; skip any upper-Delaunay facet defensively
-         * (none arise for a plain convex hull, but the guard makes the
-         * iteration robust if options change). */
+        /* qh_new_qhull installs its OWN setjmp over qh->errexit for the duration
+         * of hull construction and RETURNS a non-zero qh_ERR* code on failure
+         * instead of long-jumping back to the setjmp above; `qhull_exit` captures
+         * it. We do NOT reject outright on a non-zero code: a flat / coplanar
+         * cloud — e.g. a constant-head production surface, whose generation is
+         * linear in turbined flow — makes qhull raise a precision error ("initial
+         * simplex is flat") yet leaves the correct narrow-hull facet in
+         * facet_list, and that facet IS the plane the data lies in (the fit we
+         * want; deterministic case D05 depends on it). Instead we read whatever
+         * usable facets qhull produced and surface the error code only when none
+         * exist. Skipping any facet with facet->normal == NULL makes a
+         * partially-built list safe to read: a freshly allocated facet on the
+         * precision-error path has a NULL normal, and dereferencing it is the
+         * wrong-but-compiling hazard this guards. */
         facetT* facet = NULL;
         int     n_facets = 0;
         FORALLfacets {
-            if (facet->upperdelaunay) {
+            if (facet->upperdelaunay || facet->normal == NULL) {
                 continue;
             }
             n_facets++;
         }
 
         if (n_facets == 0) {
-            /* No full-dimensional facets: the cloud is degenerate (coplanar /
-             * collinear). Treat as insufficient input. */
-            status = COBRE_QHULL_ERR_DEGENERATE;
+            /* No usable hyperplane facet. If qhull reported an error, surface its
+             * mapped code; otherwise the cloud is degenerate (too thin to hull). */
+            status = (qhull_exit != 0)
+                ? cobre_qhull_map_error(qhull_exit)
+                : COBRE_QHULL_ERR_DEGENERATE;
         } else {
             /* Allocate the output buffer with the shim's allocator so the Rust
              * side releases it via cobre_qhull_free (same allocator). */
@@ -153,10 +174,11 @@ int cobre_qhull_convex_hull_3d(
                 /* Second pass: write [nx, ny, nz, d] per facet. qhull's
                  * facet->normal is already unit-length and facet->offset is d
                  * for the hyperplane normal·x + offset = 0, so the values are
-                 * copied through unchanged. */
+                 * copied through unchanged. The skip predicate matches the
+                 * counting pass so idx stays in lockstep with n_facets. */
                 int idx = 0;
                 FORALLfacets {
-                    if (facet->upperdelaunay) {
+                    if (facet->upperdelaunay || facet->normal == NULL) {
                         continue;
                     }
                     double* dst = planes + (size_t)idx * COBRE_QHULL_PLANE_STRIDE;
@@ -172,7 +194,8 @@ int cobre_qhull_convex_hull_3d(
             }
         }
     } else {
-        /* qhull long-jumped here on error; map its exit code to a status. */
+        /* An error from a qhull call OTHER than qh_new_qhull (e.g. resource
+         * teardown) long-jumped here; map its exit code to a status. */
         status = cobre_qhull_map_error(exitcode);
     }
 

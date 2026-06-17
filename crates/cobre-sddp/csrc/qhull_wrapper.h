@@ -21,11 +21,14 @@
  * ---------------------------------------------------------------------------
  * Determinism contract
  * ---------------------------------------------------------------------------
- * qhull is invoked with the fixed option string "qhull Qt":
+ * qhull is invoked with the fixed option string "qhull Qt Pp":
  *   - "Qt"  triangulates the hull, so every output facet is simplicial and
  *           carries one unambiguous unit normal. This removes the per-facet
  *           normal ambiguity that merged (non-simplicial) facets introduce and
  *           keeps the output a deterministic function of the input ordering.
+ *   - "Pp"  suppresses qhull's precision warnings. This is output-only and does
+ *           not change the hull geometry; without it a narrow/degenerate cloud
+ *           prints multi-line diagnostics to stderr from every parallel worker.
  *   - Joggle ("QJ") is deliberately ABSENT: joggle perturbs the input with a
  *     pseudo-random offset, which destroys reproducibility. No randomized
  *     perturbation of any kind is enabled.
@@ -36,10 +39,16 @@
  * Error-trapping contract
  * ---------------------------------------------------------------------------
  * qhull reports errors via a setjmp/longjmp mechanism rooted at qh->errexit.
- * The shim installs that setjmp target before invoking qhull, so any qhull
- * error (degenerate input, precision failure, out-of-memory, internal error)
- * long-jumps back into the shim, which maps it to one of the status codes below
- * and returns normally. A qhull error therefore NEVER aborts the host process.
+ * qh_new_qhull installs its own setjmp for the duration of hull construction and
+ * RETURNS a non-zero qh_ERR* code on failure rather than long-jumping out; the
+ * shim checks that return value and maps it to one of the status codes below.
+ * The shim also installs an outer setjmp target around the surrounding qhull
+ * calls (teardown), so an error there is trapped too. Recoverable qhull errors
+ * (degenerate input, precision failure, normal out-of-memory) therefore do not
+ * abort the host process — they surface as a status code. This is NOT an
+ * absolute guarantee: qhull has a few unrecoverable paths (memory-arena
+ * corruption, an error raised while already handling an error, a NULL error
+ * file) that call qh_exit() and terminate the process, as in upstream qhull.
  * qhull resources are released on every return path — success and error alike.
  *
  * ---------------------------------------------------------------------------

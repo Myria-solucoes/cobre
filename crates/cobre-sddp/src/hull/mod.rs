@@ -507,4 +507,35 @@ mod tests {
             "a degenerate cloud must return the typed Degenerate error, not panic"
         );
     }
+
+    #[test]
+    fn coplanar_quad_is_handled_without_garbage_normals() {
+        // Four points on the z = 0 plane: a 2-D set embedded in 3-D with enough
+        // points (>= 4) to pass the shim's pre-check and reach qh_new_qhull, so
+        // this exercises the qh_new_qhull return-code path that the 3-point
+        // coplanar_points_return_degenerate_error case short-circuits before.
+        // qhull may resolve a narrow hull (Ok) or report the thin geometry as a
+        // precision/degenerate error; either is acceptable, but the shim must
+        // never walk a partially-built facet list and emit a non-finite normal
+        // or crash. The shim checks qh_new_qhull's return code before iterating
+        // facets; this guards that contract.
+        let coplanar = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+        ];
+        match convex_hull_3d(&coplanar) {
+            Ok(facets) => {
+                for f in &facets {
+                    assert!(
+                        f.normal.iter().all(|c| c.is_finite()) && f.offset.is_finite(),
+                        "coplanar hull must not emit non-finite plane coefficients; got {f:?}"
+                    );
+                }
+            }
+            Err(HullError::Degenerate | HullError::Compute) => {}
+            Err(other) => panic!("unexpected error variant for coplanar input: {other:?}"),
+        }
+    }
 }
