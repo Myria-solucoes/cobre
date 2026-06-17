@@ -7,7 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- next-header -->
 
-## [Unreleased]
+## [0.8.2] - 2026-06-17
+
+> **BREAKING — config migration required.** This release changes two config
+> inputs; an existing `config.json` may fail to load until migrated:
+>
+> - **`training.cut_selection`** is restructured into a tagged `selection`
+>   object (see _Changed_). Drop `enabled`/`method` and the removed fields, and
+>   move the method parameters under `selection`.
+> - The top-level **`energy`** section is removed (see _Removed_). Delete it and
+>   declare the reference volume per production model via `reference_volume` in
+>   `system/hydro_production_models.json`.
+>
+> Per [Semantic Versioning](https://semver.org/spec/v2.0.0.html) rule 4, a 0.x
+> release may carry breaking changes outside a major bump; this release ships
+> them as 0.8.2.
 
 ### Added
 
@@ -2169,7 +2183,8 @@ disappears from `cobre.results.load_policy` per-cut dicts.
 
 <!-- next-url -->
 
-[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.8.2...HEAD
+[0.8.2]: https://github.com/cobre-rs/cobre/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/cobre-rs/cobre/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/cobre-rs/cobre/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/cobre-rs/cobre/compare/v0.6.2...v0.7.0
