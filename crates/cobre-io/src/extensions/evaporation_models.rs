@@ -122,6 +122,24 @@ pub fn parse_evaporation_models(path: &Path) -> Result<Vec<EvaporationModelRow>,
             let intercept_m3s = intercept_col.value(i);
             let volume_slope_m3s_per_hm3 = volume_slope_col.value(i);
             let reference_volume_hm3 = reference_volume_col.value(i);
+
+            // Reject non-finite coefficients, mirroring the finiteness checks the
+            // sibling parquet readers (e.g. hydro_geometry) enforce: a NaN/±Inf in
+            // any coefficient is corrupt input, not a meaningful evaporation model.
+            for (value, column) in [
+                (intercept_m3s, "intercept_m3s"),
+                (volume_slope_m3s_per_hm3, "volume_slope_m3s_per_hm3"),
+                (reference_volume_hm3, "reference_volume_hm3"),
+            ] {
+                if !value.is_finite() {
+                    return Err(LoadError::SchemaError {
+                        path: path.to_path_buf(),
+                        field: format!("evaporation_models[{i}].{column}"),
+                        message: format!("value must be finite, got {value}"),
+                    });
+                }
+            }
+
             let source = source_col.value(i).to_string();
 
             // stage_id: None if column is absent or null at this row.
