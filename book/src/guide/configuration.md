@@ -580,10 +580,11 @@ for the full explanation and a `stages.json` example of the block pattern.
 
 Controls which outputs are written to the results directory.
 
-| Field        | Type    | Default | Description                                                                     |
-| ------------ | ------- | ------- | ------------------------------------------------------------------------------- |
-| `states`     | boolean | `false` | Write visited forward-pass trial points to the policy checkpoint (FlatBuffers). |
-| `stochastic` | boolean | `false` | Export stochastic preprocessing artifacts to `output/stochastic/`.              |
+| Field                   | Type    | Default | Description                                                                                                            |
+| ----------------------- | ------- | ------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `states`                | boolean | `false` | Write visited forward-pass trial points to the policy checkpoint (FlatBuffers).                                        |
+| `stochastic`            | boolean | `false` | Export stochastic preprocessing artifacts to `output/stochastic/`.                                                     |
+| `fpha_deviation_points` | boolean | `false` | Export the per-grid-point computed-FPHA fit-deviation table to `output/hydro_models/fpha_deviation_points.parquet`. Opt-in because it emits one row per (hydro, stage, V, Q) sample point at spillage = 0. |
 
 ---
 
@@ -607,12 +608,13 @@ Controls which outputs are written to the results directory.
       "ncs": { "scheme": "in_sample" }
     },
     "cut_selection": {
-      "enabled": true,
-      "method": "level1",
-      "tie_tolerance": 1e-10,
-      "check_frequency": 5,
-      "cut_activity_tolerance": 1e-6,
-      "max_active_per_stage": null
+      "row_activity_tolerance": 1e-6,
+      "max_active_per_stage": null,
+      "selection": {
+        "method": "level1",
+        "tie_tolerance": 1e-10,
+        "check_frequency": 5
+      }
     }
   },
   "modeling": {

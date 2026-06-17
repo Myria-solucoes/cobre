@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`system/tailrace_curves.parquet` (optional).** Exact piecewise-quartic
-  tailrace curves with backwater (`HrefJus`) families keyed by the downstream
+  tailrace curves with backwater families keyed by the downstream
   reservoir's reference level. When a plant has rows here, the computed-FPHA fit
   evaluates its tailrace from these quartics — selecting the segment by
   downstream flow and interpolating between families at the downstream plant's
@@ -43,6 +43,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   correction can track. This is the operator-facing replacement for the retired
   low-`kappa` warning. Warnings are emitted in canonical plant/stage order.
 
+- **`output/hydro_models/evaporation_models.parquet`.** The resolved per-hydro
+  evaporation coefficients are now written as an output sidecar, emitted whenever
+  any hydro declares an evaporation model. Written by both the CLI and the Python
+  bindings.
+
+- **Setup-phase timings in `training/metadata.json`.** A new `setup` section
+  records the wall-clock cost of each study-setup phase (input load, stochastic
+  fit, production-model fit, evaporation fit, and MPI broadcast). The timings are
+  observational only — they are non-deterministic and never participate in any
+  parity hash.
+
 ### Changed
 
 - **Computed FPHA is now fit by a 3-D convex hull.** The computed path evaluates
@@ -59,6 +70,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   linked into `cobre-sddp` (git submodule pinned to tag `2020.2`); see
   `THIRD_PARTY_NOTICES.md`. The hull input and output are canonically sorted, so
   hyperplanes stay bit-identical regardless of input ordering and MPI rank count.
+
+- **PAR(p) per-hydro AR fit parallelized.** The initial autoregressive fit of
+  the periodic inflow model now fits each hydro in parallel (rayon). Results are
+  bit-identical regardless of thread count — per-hydro blocks reassemble in
+  canonical entity order.
+
+- **CEPEL/Portuguese identifiers replaced with cobre-native English.** Internal
+  FPHA and evaporation naming (types, fields, and doc comments) was migrated from
+  CEPEL/Portuguese terms to descriptive English. Internal cleanup only — no
+  released config or output schema changed.
 
 - **BREAKING — `training.cut_selection` restructured.** Method-specific
   parameters now live inside a tagged `selection` object instead of a flat bag
@@ -100,6 +121,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `system/hydro_energy_productivity.parquet` (a stale column is ignored with a
   warning); declare the reference volume via the production-model
   `reference_volume` field instead.
+
+- **BREAKING — `config.json` `energy` section.** The top-level `energy` block
+  (and its `reference_volume_fraction`) is removed; the reference volume is now
+  declared per production model via `reference_volume` in
+  `system/hydro_production_models.json`. Because the config rejects unknown
+  fields, an existing config that still carries an `energy` block now fails to
+  load — remove the block and migrate the reference volume to the production-model
+  field.
 
 ## [0.8.1] - 2026-06-13
 

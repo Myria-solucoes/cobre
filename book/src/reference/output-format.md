@@ -99,6 +99,8 @@ will not produce `simulation/pumping_stations/`.
       retry_histogram.parquet
   hydro_models/
     fpha_hyperplanes.parquet         (when any hydro uses source: "computed")
+    evaporation_models.parquet       (when any hydro has evaporation)
+    fpha_deviation_points.parquet    (when exports.fpha_deviation_points = true)
   stochastic/
     inflow_seasonal_stats.parquet    (when estimation was performed)
     inflow_ar_coefficients.parquet   (when estimation was performed)
@@ -284,6 +286,21 @@ single file. Consumers should check `status` before interpreting other fields.
 | `hosts`              | array         | No       | Per-host rank assignment. One entry per physical host. For local single-process runs, contains a single entry with `ranks: [0]`. |
 | `hosts[].hostname`   | string        | No       | Hostname for this entry.                                                                                                         |
 | `hosts[].ranks`      | integer array | No       | Sorted global ranks assigned to this host.                                                                                       |
+
+**`setup` fields** (absent from legacy metadata produced before setup timing was collected):
+
+| Field                      | Type   | Nullable | Description                                                                              |
+| -------------------------- | ------ | -------- | ---------------------------------------------------------------------------------------- |
+| `load_seconds`             | number | No       | Wall-clock seconds spent loading the input case.                                         |
+| `stochastic_fit_seconds`   | number | No       | Wall-clock seconds spent fitting the stochastic process.                                 |
+| `production_fit_seconds`   | number | No       | Wall-clock seconds spent fitting the production model (FPHA hyperplanes).                |
+| `evaporation_fit_seconds`  | number | No       | Wall-clock seconds spent fitting the evaporation model.                                  |
+| `broadcast_seconds`        | number | No       | Wall-clock seconds spent broadcasting setup data across MPI ranks.                       |
+
+These values are non-deterministic (informational only): they vary run-to-run with
+machine load and are excluded from any parity computation. The entire `setup` key
+is omitted from metadata produced before setup timing was introduced, and any field
+absent in such legacy metadata deserialises as `0.0`.
 
 ---
 
@@ -1097,11 +1114,11 @@ status=$(cobre report results/ | jq -r '.status')
 
 ## Hydro Model Artifacts
 
-When any hydro plant is configured with `fpha_config.source: "computed"` in
-`system/hydro_production_models.json`, Cobre fits the FPHA hyperplanes from
-`system/hydro_geometry.parquet` before training begins and writes the results to
-the `hydro_models/` directory. The directory is not written when no hydro uses
-`source: "computed"`.
+The `hydro_models/` directory is written when at least one of the following
+conditions holds: any hydro plant uses `fpha_config.source: "computed"` in
+`system/hydro_production_models.json`, any hydro plant has an evaporation model,
+or `exports.fpha_deviation_points` is `true`. The directory is omitted when none
+of these conditions are met.
 
 ### `hydro_models/fpha_hyperplanes.parquet`
 
@@ -1131,6 +1148,47 @@ be used directly as a future `source: "precomputed"` input by copying it to
 
 See [Case Format Reference — `system/fpha_hyperplanes.parquet`](./case-format.md#systemfpha_hyperplanesparquet)
 for the full column definitions and validity constraints.
+
+### `hydro_models/evaporation_models.parquet`
+
+Written when any hydro plant has an evaporation model. Contains the fitted
+evaporation coefficients for all plants that have evaporation, keyed by
+`(hydro_id, stage_id)`. Rows with `stage_id = null` are per-hydro defaults.
+
+Six columns:
+
+| Column                      | Type   | Nullable | Description                                                                      |
+| --------------------------- | ------ | -------- | -------------------------------------------------------------------------------- |
+| `hydro_id`                  | INT32  | No       | Hydro plant identifier                                                           |
+| `stage_id`                  | INT32  | Yes      | Stage; `null` = per-hydro default applicable to all stages                       |
+| `intercept_m3s`             | DOUBLE | No       | Evaporation intercept coefficient (m³/s)                                         |
+| `volume_slope_m3s_per_hm3`  | DOUBLE | No       | Volume-dependent slope coefficient (m³/s per hm³)                                |
+| `reference_volume_hm3`      | DOUBLE | No       | Reference volume used for linearisation (hm³)                                    |
+| `source`                    | STRING | No       | Derivation label (e.g. `"default_midpoint"` or `"user_supplied"`)                |
+
+### `hydro_models/fpha_deviation_points.parquet`
+
+Written only when `exports.fpha_deviation_points: true` is set in `config.json`.
+Contains one row per `(hydro, stage, V, Q)` grid point at spillage = 0, recording
+how closely the fitted FPHA plane set approximates the exact production function at
+each sample point. Opt-in because it can be large (one row per grid-point combination
+for each computed-FPHA plant and stage).
+
+Eight columns:
+
+| Column         | Type   | Nullable | Description                                                                      |
+| -------------- | ------ | -------- | -------------------------------------------------------------------------------- |
+| `hydro_id`     | INT32  | No       | Hydro plant identifier                                                           |
+| `stage_id`     | INT32  | Yes      | Stage; `null` when the fit applies to all stages                                 |
+| `v`            | DOUBLE | No       | Volume sample point (hm³)                                                        |
+| `q`            | DOUBLE | No       | Turbined-flow sample point (m³/s)                                                |
+| `fph_exact`    | DOUBLE | No       | Exact production function value at this (V, Q) point (MW)                        |
+| `fpha_fitted`  | DOUBLE | No       | Fitted FPHA approximation at this (V, Q) point (MW)                              |
+| `deviation`    | DOUBLE | No       | Absolute deviation `fpha_fitted − fph_exact` (MW)                                |
+| `relative`     | DOUBLE | No       | Relative deviation `deviation / fph_exact` (dimensionless). `0` when exact = 0. |
+
+The values are a pure function of geometry and config — the file is reproducible
+when emitted and never enters the parity hash.
 
 ---
 

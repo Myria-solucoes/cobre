@@ -31,6 +31,7 @@ my_case/
 │   ├── hydro_production_models.json         # FPHA production function configs (optional)
     ├── hydro_energy_productivity.parquet    # Per-plant, per-stage energy-conversion overrides (optional)
 │   ├── fpha_hyperplanes.parquet             # FPHA hyperplane coefficients (optional)
+│   ├── tailrace_curves.parquet              # Piecewise-quartic tailrace curves (optional)
 │   └── scalar_parameters.json              # Scalar parameters for constraint expressions (optional)
 ├── scenarios/
 │   ├── inflow_history.parquet               # Historical inflow series (optional)
@@ -80,6 +81,7 @@ my_case/
 | `system/hydro_production_models.json`           | JSON    | No       | FPHA production function configs                                                   |
 | `system/fpha_hyperplanes.parquet`               | Parquet | No       | FPHA hyperplane coefficients                                                       |
 | `system/hydro_energy_productivity.parquet`      | Parquet | No       | Per-plant, per-stage energy-conversion overrides                                   |
+| `system/tailrace_curves.parquet`                | Parquet | No       | Piecewise-quartic tailrace curves with backwater families                          |
 | `system/scalar_parameters.json`                 | JSON    | No       | Scalar parameters for constraint expressions                                       |
 | `scenarios/inflow_history.parquet`              | Parquet | No       | Historical inflow time series                                                      |
 | `scenarios/inflow_seasonal_stats.parquet`       | Parquet | No       | PAR model seasonal statistics                                                      |
@@ -878,6 +880,47 @@ by a stage-specific row.
   is declared per `(plant, stage)` via `reference_volume` in
   `system/hydro_production_models.json`. A legacy `reference_volume_hm3` column,
   if still present, is ignored (a one-time warning is emitted).
+
+---
+
+### `system/tailrace_curves.parquet`
+
+Optional piecewise-quartic tailrace-level curves that replace the entity-level
+tailrace model for any plant that has rows in this file. When a plant has rows
+here, the computed-FPHA pipeline evaluates its tailrace level from these
+piecewise-quartic curves — selecting the segment by downstream flow and
+interpolating between backwater families at the downstream plant's stage
+reference level — instead of the tailrace model declared in `hydros.json`.
+Plants without a row in this file keep their existing tailrace model; the file
+is inert (silently skipped) when absent from the case directory.
+
+Rows are sorted by `(hydro_id, family_id, segment_id)` ascending. A complete
+curve for one backwater family consists of multiple rows sharing
+`(hydro_id, family_id)`.
+
+| Column                         | Type    | Nullable | Description                                                                     |
+| ------------------------------ | ------- | -------- | ------------------------------------------------------------------------------- |
+| `hydro_id`                     | INT32   | No       | Plant whose tailrace this describes                                             |
+| `family_id`                    | INT32   | No       | Family index within the plant (sequential grouping key)                         |
+| `downstream_reference_level_m` | DOUBLE  | Yes      | Downstream reservoir reference level keying this family (m). `null` when the plant has a single family and no backwater dependency. |
+| `segment_id`                   | INT32   | No       | Piece index within the family                                                   |
+| `outflow_min_m3s`              | DOUBLE  | No       | Segment lower validity bound (m³/s). Non-negative.                              |
+| `outflow_max_m3s`              | DOUBLE  | No       | Segment upper validity bound (m³/s). Non-negative, >= `outflow_min_m3s`.        |
+| `coefficient_0`                | DOUBLE  | No       | Degree-0 polynomial coefficient. Any sign.                                      |
+| `coefficient_1`                | DOUBLE  | No       | Degree-1 polynomial coefficient. Any sign.                                      |
+| `coefficient_2`                | DOUBLE  | No       | Degree-2 polynomial coefficient. Any sign.                                      |
+| `coefficient_3`                | DOUBLE  | No       | Degree-3 polynomial coefficient. Any sign.                                      |
+| `coefficient_4`                | DOUBLE  | No       | Degree-4 polynomial coefficient. Any sign.                                      |
+
+The quartic is evaluated as `coefficient_0 + coefficient_1*x + coefficient_2*x² + coefficient_3*x³ + coefficient_4*x⁴` where `x` is the downstream outflow in m³/s. Higher-degree coefficients are routinely negative in source data; all signs are accepted.
+
+**Validation rules:**
+
+- All twelve columns must be present with the correct Arrow types.
+- `outflow_min_m3s` and `outflow_max_m3s` must be non-negative and finite.
+- `outflow_max_m3s >= outflow_min_m3s` (segments are non-inverted).
+- `coefficient_0` through `coefficient_4` must be finite.
+- `downstream_reference_level_m`, when non-null, must be non-negative and finite.
 
 ---
 

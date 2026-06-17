@@ -1,14 +1,15 @@
 # Deterministic Regression Suite
 
-The `examples/deterministic/` directory ships 29 hand-built regression cases — `d01`
-through `d30`, with index `d18` currently unoccupied — that anchor the solver against
-analytically derived expected costs. Each case has minimal stochastic structure
-(typically a single scenario per stage) so the optimal cost is computable by hand and
-used as a fixed-point reference in the test suite.
+The `examples/deterministic/` directory contains hand-built regression cases that anchor
+the solver against analytically derived expected costs. Each case has minimal stochastic
+structure (typically a single scenario per stage) so the optimal cost is computable by
+hand and used as a fixed-point reference in the test suite. One case is added per modeled
+feature; indices are sparse where a retired case left a gap (currently `d18` is
+unoccupied).
 
 These cases are not intended for production-style policy training. They are regression
 anchors: any change to the solver, LP builder, or stochastic pipeline that perturbs a
-deterministic case cost is flagged as a behavioural change. The test suite runs all 29
+deterministic case cost is flagged as a behavioural change. The test suite runs all
 cases under `cargo nextest run --workspace` and compares each result against its stored
 expected cost.
 
@@ -52,6 +53,7 @@ the sequence.
 | `d28-decomp-weekly-monthly`              | Weekly-to-monthly decomposition                   | Stage pattern with weekly substages grouped into monthly master stages.                                                                                                                                         |
 | `d29-weekly-par-noise-sharing`           | Weekly PAR(p) with noise-group sharing            | Same-month weekly stages share a single noise-group draw so PAR(p) noise is consistent within the month.                                                                                                        |
 | `d30-multi-resolution-monthly-quarterly` | Monthly-to-quarterly multi-resolution             | Multi-resolution study mixing monthly and quarterly stages; exercises downstream-lag accumulation across resolutions.                                                                                           |
+| `d31-backwater-reference-volume`         | Computed FPHA with backwater tailrace families    | Exercises the computed-FPHA + `system/tailrace_curves.parquet` + `reference_volume` pipeline end-to-end; validates that backwater families are selected by downstream stage reference level and that the fitted planes match the expected generation within tolerance. |
 
 ## Running the Suite
 

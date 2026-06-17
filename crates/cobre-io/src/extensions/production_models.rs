@@ -239,7 +239,7 @@ pub struct FittingWindow {
 /// later stage, not here.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReferenceVolume {
-    /// Absolute reference volume [hm³]. Finite and `> 0.0`.
+    /// Absolute reference volume `[hm³]`. Finite and `> 0.0`.
     AbsoluteHm3(f64),
     /// Reference volume as a percentile of the operating range, in `[0.0, 1.0]`.
     Percentile(f64),

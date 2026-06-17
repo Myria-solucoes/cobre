@@ -374,13 +374,13 @@ struct PerHydroFit {
 ///
 /// Propagates the first [`SddpError`] from `determine_source`,
 /// `fit_computed_planes_per_stage`, or `resolve_stage_model` for this hydro.
-#[allow(clippy::too_many_arguments)]
 // Rationale: every argument is a distinct, already-resolved upstream-owned datum
 // the per-hydro fit reads (the hydro, the config/geometry/families/reference/
 // hyperplane maps, the productivity override, the study stages, the file-level
 // plane reduction, the system for the long-term mean inflow, the stage count, and the
 // deviation-points opt-in). Bundling them into a context struct would only relocate
 // the same fields; it mirrors the same allowance on `fit_computed_planes_per_stage`.
+#[allow(clippy::too_many_arguments)]
 fn fit_one_hydro(
     hydro: &cobre_core::entities::hydro::Hydro,
     config_map: &HashMap<EntityId, &ProductionModelConfig>,
@@ -748,13 +748,13 @@ type FittedCacheEntry<'a> = (
 ///   stages are never silently dropped.
 /// - Fitting errors propagate via [`fit_planes_for_hydro`] as
 ///   [`SddpError::Validation`], naming the hydro.
-#[allow(clippy::too_many_arguments)]
 // Rationale: every argument is an independent, already-resolved input the
 // per-stage fit needs (the hydro, its config, the geometry/families/reference
 // maps, the system for downstream resolution, the lateral-secant `long_term_mean_inflow_m3s`, the
 // deviation-points opt-in, and the export-row / fit-quality-warning / deviation-
 // point sinks). Bundling them into a context struct would only relocate the same
 // fields and obscure that each is a distinct upstream-owned datum.
+#[allow(clippy::too_many_arguments)]
 fn fit_computed_planes_per_stage(
     hydro: &cobre_core::entities::hydro::Hydro,
     config_entry: Option<&ProductionModelConfig>,
