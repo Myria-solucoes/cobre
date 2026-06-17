@@ -55,7 +55,7 @@ def test_py_to_json_value_bool_round_trips() -> None:
 
 def test_py_to_json_value_float_round_trips() -> None:
     """A Python float converts to a JSON number accepted by a float field."""
-    result = _validate({"energy.reference_volume_fraction": 0.5})
+    result = _validate({"training.cut_selection.row_activity_tolerance": 1e-6})
     assert result["valid"] is True, (
         f"float override must validate, errors: {result['errors']}"
     )
@@ -125,13 +125,13 @@ def test_py_to_json_value_rejects_unsupported_type() -> None:
 def test_py_to_json_value_rejects_nan_float() -> None:
     """A NaN float has no JSON representation and raises ValueError."""
     with pytest.raises(ValueError):
-        _validate({"energy.reference_volume_fraction": float("nan")})
+        _validate({"training.cut_selection.row_activity_tolerance": float("nan")})
 
 
 def test_py_to_json_value_rejects_infinite_float() -> None:
     """An infinite float has no JSON representation and raises ValueError."""
     with pytest.raises(ValueError):
-        _validate({"energy.reference_volume_fraction": float("inf")})
+        _validate({"training.cut_selection.row_activity_tolerance": float("inf")})
 
 
 def test_pydict_to_json_map_rejects_nested_non_str_key() -> None:
