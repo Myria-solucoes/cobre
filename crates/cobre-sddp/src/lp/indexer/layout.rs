@@ -17,8 +17,8 @@ use std::ops::Range;
 /// a single hydro within a stage LP.  Columns are stage-level (not per-block).
 #[derive(Debug, Clone, Copy)]
 pub struct EvaporationIndices {
-    /// Column index of the stage-averaged evaporation flow variable `Q_ev_h` (m³/s).
-    pub q_ev_col: usize,
+    /// Column index of the stage-averaged evaporation-outflow variable (m³/s).
+    pub evaporation_flow_col: usize,
     /// Column index of the positive violation slack `f_evap_plus_h` (m³/s).
     pub f_evap_plus_col: usize,
     /// Column index of the negative violation slack `f_evap_minus_h` (m³/s).
@@ -759,13 +759,13 @@ mod tests {
     #[test]
     fn evap_indices_debug_clone_copy() {
         let ei = EvaporationIndices {
-            q_ev_col: 10,
+            evaporation_flow_col: 10,
             f_evap_plus_col: 11,
             f_evap_minus_col: 12,
             evap_row: 5,
         };
         let cloned = ei;
-        assert_eq!(cloned.q_ev_col, 10);
+        assert_eq!(cloned.evaporation_flow_col, 10);
         assert_eq!(cloned.evap_row, 5);
         let debug_str = format!("{ei:?}");
         assert!(debug_str.contains("EvaporationIndices"));

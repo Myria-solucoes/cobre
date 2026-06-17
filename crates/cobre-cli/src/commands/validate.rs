@@ -181,7 +181,9 @@ pub fn execute(args: ValidateArgs) -> Result<(), CliError> {
     // Phase 10: prepare_hydro_models_from_artifacts — resolves production and
     // evaporation models. Uses the already-parsed artifacts bundle from phase 1-6
     // to avoid re-reading disk.
-    if let Err(ref err) = prepare_hydro_models_from_artifacts(&prepared.system, &artifacts) {
+    if let Err(ref err) =
+        prepare_hydro_models_from_artifacts(&prepared.system, &artifacts, false, None)
+    {
         let report_msg = format_prep_error(&stdout, PrepPhase::HydroModels, err, &args.case_dir);
         return Err(CliError::Validation {
             report: report_msg,

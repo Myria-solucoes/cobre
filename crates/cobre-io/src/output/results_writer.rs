@@ -110,6 +110,8 @@ pub fn write_training_results(
             final_upper_bound_std: training_output.final_upper_bound_std,
         },
         solve_stats: training_output.training_solve_stats.clone(),
+        setup: ctx.setup.clone(),
+        production_fit_deviation: ctx.production_fit_deviation.clone(),
         distribution: ctx.distribution.clone(),
     };
     write_training_metadata(&output_dir.join("training/metadata.json"), &metadata)?;
@@ -184,7 +186,6 @@ pub fn write_results(
     Ok(())
 }
 
-/// Extract the iteration limit from the stopping rules configuration.
 fn extract_max_iterations(config: &Config) -> Option<u32> {
     config
         .training
@@ -313,7 +314,6 @@ mod tests {
             },
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
-            energy: crate::EnergyConfig::default(),
         }
     }
 
@@ -349,6 +349,8 @@ mod tests {
                 slurm_job_id: None,
                 hosts: Vec::new(),
             },
+            setup: None,
+            production_fit_deviation: None,
         }
     }
 

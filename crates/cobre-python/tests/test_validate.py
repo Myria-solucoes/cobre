@@ -168,13 +168,13 @@ def test_validate_missing_directory_returns_invalid() -> None:
 # ── Phase 8: StudyParams::from_config (ConfigValidationError) ─────────────────
 
 
-def test_validate_basis_activity_window_is_deprecated_not_rejected() -> None:
-    """basis_activity_window is deprecated (silently ignored); validate succeeds.
+def test_validate_basis_activity_window_is_rejected() -> None:
+    """basis_activity_window was removed in the cut_selection restructure.
 
-    Previously this field was validated to be in 1..=31 and any out-of-range
-    value triggered a ConfigValidationError. After soft-deprecation the field
-    is read and discarded with a tracing warning, so validate must return
-    `valid=True` for any value (including formerly out-of-range values).
+    cut_selection (RowSelectionConfig) uses deny_unknown_fields, so a config
+    that still carries the removed basis_activity_window field fails to load.
+    validate() must surface this as valid=False and name the offending field,
+    rather than silently ignoring it.
     """
     import cobre.io  # noqa: PLC0415
 
@@ -184,8 +184,6 @@ def test_validate_basis_activity_window_is_deprecated_not_rejected() -> None:
         with config_path.open() as f:
             config = json.load(f)
 
-        # A value that would have failed the old 1..=31 range check must
-        # now load successfully because the field is deprecated.
         config.setdefault("training", {}).setdefault("cut_selection", {})[
             "basis_activity_window"
         ] = 100
@@ -194,10 +192,13 @@ def test_validate_basis_activity_window_is_deprecated_not_rejected() -> None:
             json.dump(config, f, indent=2)
 
         result = cobre.io.validate(str(case_dir))
-        assert result["valid"] is True, (
-            "expected valid=True for deprecated basis_activity_window, "
-            f"got errors: {result.get('errors')!r}"
+        assert result["valid"] is False, (
+            "expected valid=False for the removed basis_activity_window field, "
+            f"got: {result!r}"
         )
+        assert any(
+            "basis_activity_window" in err["message"] for err in result["errors"]
+        ), f"an error must name the removed field, got: {result['errors']!r}"
     finally:
         shutil.rmtree(case_dir.parent, ignore_errors=True)
 
@@ -254,22 +255,24 @@ def test_validate_config_overrides_none_is_valid() -> None:
 
 
 def test_validate_config_overrides_invalid_value_surfaces_schema_error() -> None:
-    """An out-of-range override surfaces in the dict as a SchemaError, not a raise.
+    """A semantically-invalid override surfaces in the dict as a SchemaError, not a raise.
 
-    reference_volume_fraction must be in (0.0, 1.0]; 0.0 violates validate_config,
-    which `Config::with_overrides` runs identically to an edited config.json.
+    Setting `historical_years` while no scenario class uses the `historical`
+    scheme violates validate_config, which `Config::with_overrides` runs
+    identically to an edited config.json. 1dtoy uses `in_sample` for every
+    class, so the override is rejected with the offending field named.
     """
     import cobre.io  # noqa: PLC0415
 
     result = cobre.io.validate(
         VALID_CASE_1DTOY,
-        config_overrides={"energy.reference_volume_fraction": 0.0},
+        config_overrides={"training.scenario_source.historical_years": [1990, 1991]},
     )
     assert result["valid"] is False, "an invalid override must mark the case invalid"
     assert len(result["errors"]) >= 1
     err = result["errors"][0]
     assert err["kind"] == "SchemaError", f"expected SchemaError, got {err['kind']!r}"
-    assert "energy.reference_volume_fraction" in err["message"], (
+    assert "historical_years" in err["message"], (
         f"error message must name the offending field, got: {err['message']!r}"
     )
 
@@ -298,5 +301,5 @@ def test_validate_config_overrides_unsupported_value_raises_value_error() -> Non
     with pytest.raises(ValueError):
         cobre.io.validate(
             VALID_CASE_1DTOY,
-            config_overrides={"energy.reference_volume_fraction": {1, 2}},
+            config_overrides={"training.cut_selection.row_activity_tolerance": {1, 2}},
         )

@@ -280,65 +280,62 @@ size without sacrificing convergence quality. For a detailed explanation
 of each stage, see
 [Performance Accelerators](./performance-accelerators.md#cut-management-pipeline).
 
-### Core Fields
+The block has two always-on knobs at the top level plus a `selection`
+sub-object that chooses the method and carries only that method's parameters.
+Omitting `selection` (or setting it to `null`) disables row selection — that is
+the default.
 
-| Field                    | Type    | Default | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| ------------------------ | ------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `enabled`                | boolean | `false` | Enable row pruning.                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `method`                 | string  | --      | Selection method: `"level1"`, `"lml1"`, `"domination"`, or `"dynamic"`.                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `threshold`              | integer | --      | **Deprecated.** Silently ignored for every method. Retained for backward compatibility with existing config files; previously the activity-count threshold for `"level1"`. Use `tie_tolerance` instead.                                                                                                                                                                                                                                                                    |
-| `memory_window`          | integer | --      | **Deprecated.** Silently ignored for every method. Retained for backward compatibility with existing config files; previously the temporal window for `"lml1"`. Use `tie_tolerance` instead.                                                                                                                                                                                                                                                                               |
-| `domination_epsilon`     | float   | --      | Tolerance for domination comparisons. **Required** when `method = "domination"`.                                                                                                                                                                                                                                                                                                                                                                                           |
-| `tie_tolerance`          | float   | `1e-10` | Tie tolerance for `"level1"` and `"lml1"`: a cut survives at a state when its value is within `tie_tolerance` of the per-state max. Ignored by `"domination"`. Also serves as the fallback value for `violation_tolerance` when `method = "dynamic"` and `violation_tolerance` is absent from the config.                                                                  |
-| `check_frequency`        | integer | `5`     | Iterations between pruning checks (Stage 1) for `"level1"`, `"lml1"`, and `"domination"`. Must be `> 0`. Ignored by `"dynamic"`, which does not read this field.                                                                                                                                                                                                                                                                                                      |
-| `cut_activity_tolerance` | float   | `1e-6`  | Minimum dual multiplier for a row to count as binding.                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `basis_activity_window`  | integer | --      | **DEPRECATED.** Silently ignored as of this release; will be removed in the next. Previously controlled the sliding-window mask consumed by the basis-reconstruction activity classifier. The classifier has been removed; reconstruction now matches stored cut rows by slot identity alone, which makes the value unobservable. Setting the field emits a tracing `WARN` at config load. Remove the entry from `config.json` to silence the warning. See `CHANGELOG.md`. |
-| `max_active_per_stage`   | integer | `null`  | Hard cap on active rows per stage (Stage 2 budget enforcement). `null` = no budget.                                                                                                                                                                                                                                                                                                                                                                                        |
-| `active_window`          | integer | `5`     | Active-set seed window (`k2`) for `method = "dynamic"`: the number of most recent iterations whose cuts seed the initial active set. `0` seeds only the current iteration's cuts. Ignored unless `method = "dynamic"`.                                                                                                                                                                                                                                                     |
-| `nadic`                  | integer | `10`    | Maximum number of cuts added per lazy-solve round for `method = "dynamic"`. Must be `>= 1`. Ignored unless `method = "dynamic"`.                                                                                                                                                                                                                                                                                                                                           |
-| `candidate_window`       | integer | `null`  | Candidate-recency window for `method = "dynamic"`: only cuts generated within the last `candidate_window` iterations are scored. `null` (the default) means an unbounded window — every pool entry is a candidate. Must be `>= 1` when set; `0` is rejected as an error at config load (use absent or `null` to get the unbounded default). Ignored unless `method = "dynamic"`. |
-| `violation_tolerance`    | float   | `1e-10` | Violation tolerance for accepting a candidate cut under `method = "dynamic"`. When absent, falls back to `tie_tolerance`. Ignored unless `method = "dynamic"`.                                                                                                                                                                                                                                                                                                             |
-| `start_iteration`        | integer | `2`     | First 1-based training iteration at which the dynamic lazy loop becomes active. Ignored unless `method = "dynamic"`.                                                                                                                                                                                                                                                                                                                                                       |
+### Always-on fields
 
-**Methods:**
+| Field                    | Type    | Default | Description                                                                                                                                                           |
+| ------------------------ | ------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `row_activity_tolerance` | float   | `0.0`   | Minimum dual-multiplier magnitude for a constraint row to count as binding at a solution point. Rows whose dual falls below this are treated as inactive in tracking. |
+| `max_active_per_stage`   | integer | `null`  | Hard cap on active rows per stage LP, enforced after the selection method runs. `null` = no cap.                                                                      |
+| `selection`              | object  | `null`  | The active selection method and its parameters (see below). `null` (the default) disables row selection.                                                              |
 
-- `"level1"` -- evaluates all populated cuts at every visited state
-  and retains any cut whose value is within `tie_tolerance` of the
-  per-state maximum at some state. Least aggressive; preserves the
-  convergence guarantee.
-- `"lml1"` -- at each visited state, retains only the oldest eligible
-  cut within `tie_tolerance` of the per-state maximum. The final
-  selected set is the union of those per-state survivors. More
-  aggressive than `"level1"` because ties resolve to a single cut
-  per state.
-- `"domination"` -- same value-evaluation rule as `"level1"` but
-  uses `domination_epsilon` as the tolerance. Most aggressive
-  variant; `domination_epsilon` is required at config load time.
-- `"dynamic"` -- a lazy incremental scheme. On each backward-pass
-  solve, adds at most `nadic` cuts that violate the current LP
-  solution by more than `violation_tolerance`. The initial active set
-  is seeded from the `active_window` most recent iterations. Scoring
-  can be further narrowed to recently generated candidates via
-  `candidate_window`. The lazy loop is inactive for iterations before
-  `start_iteration`, allowing early iterations to populate the pool
-  normally before the incremental regime activates.
+### The `selection` object
 
-Example with both pipeline stages:
+`selection.method` is the discriminator; each method exposes only its own
+parameters. Supplying a parameter that belongs to a different method is a config
+load error, and a misspelled method is rejected with the list of valid methods.
 
-```json
-{
-  "training": {
-    "cut_selection": {
-      "enabled": true,
-      "method": "level1",
-      "tie_tolerance": 1e-10,
-      "check_frequency": 5,
-      "cut_activity_tolerance": 1e-6,
-      "max_active_per_stage": 500
-    }
-  }
-}
-```
+- `"level1"` — evaluates all populated rows at every visited state and retains
+  any row whose value is within `tie_tolerance` of the per-state maximum at some
+  state. Least aggressive; preserves the convergence guarantee.
+
+  | Field             | Type    | Default | Description                                                              |
+  | ----------------- | ------- | ------- | ------------------------------------------------------------------------ |
+  | `tie_tolerance`   | float   | `1e-10` | A row is active at a state when within this of the best row value there. |
+  | `check_frequency` | integer | `5`     | Iterations between periodic pruning checks. Must be `> 0`.               |
+
+- `"lml1"` — at each visited state, retains only the oldest eligible row within
+  `tie_tolerance` of the per-state maximum; the selected set is the union of
+  those per-state survivors. More aggressive than `"level1"`. Same fields as
+  `"level1"` (`tie_tolerance`, `check_frequency`).
+
+- `"domination"` — removes rows dominated at all visited states.
+
+  | Field                  | Type    | Default | Description                                                                      |
+  | ---------------------- | ------- | ------- | -------------------------------------------------------------------------------- |
+  | `domination_tolerance` | float   | --      | A row survives if within this of the maximum at any visited state. **Required.** |
+  | `check_frequency`      | integer | `5`     | Iterations between periodic pruning checks. Must be `> 0`.                       |
+
+- `"dynamic"` — a per-solve lazy loop that loads only a small resident subset of
+  rows per solve while retaining the full pool. The resident set is seeded from
+  the most recent iterations, and each lazy-solve round adds the most-violated
+  candidate rows.
+
+  | Field                 | Type    | Default | Description                                                                                                                                                                                                                                                                              |
+  | --------------------- | ------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | `start_iteration`     | integer | `2`     | First 1-based iteration at which the lazy loop becomes active. Must be `>= 1`.                                                                                                                                                                                                           |
+  | `seed_window`         | integer | `5`     | Number of most-recent iterations whose rows seed the initial resident set. `0` is valid (seeds only the current iteration).                                                                                                                                                              |
+  | `candidate_recency`   | integer | `null`  | Only rows generated within the last `candidate_recency` iterations are scored. `null` (the default) is unbounded — every pool row is a candidate, which preserves exactness. `Some(n)` (must be `>= 1`) makes the loop deliberately inexact: rows older than the window are never added. |
+  | `max_added_per_round` | integer | `10`    | Maximum rows added per lazy-solve round. Must be `>= 1`.                                                                                                                                                                                                                                 |
+  | `violation_tolerance` | float   | `1e-10` | Violation tolerance for accepting a candidate row. Must be `> 0`.                                                                                                                                                                                                                        |
+
+The dynamic method is mutually exclusive with the periodic-pruning methods by
+construction — choosing it from the tagged `selection` block means none of
+`level1` / `lml1` / `domination` can run.
 
 Example with the dynamic method:
 
@@ -346,12 +343,33 @@ Example with the dynamic method:
 {
   "training": {
     "cut_selection": {
-      "enabled": true,
-      "method": "dynamic",
-      "active_window": 5,
-      "nadic": 10,
-      "violation_tolerance": 1e-10,
-      "start_iteration": 2
+      "row_activity_tolerance": 1e-6,
+      "max_active_per_stage": 4000,
+      "selection": {
+        "method": "dynamic",
+        "start_iteration": 2,
+        "seed_window": 5,
+        "max_added_per_round": 10,
+        "violation_tolerance": 1e-10
+      }
+    }
+  }
+}
+```
+
+Example with the `level1` method and a per-stage budget:
+
+```json
+{
+  "training": {
+    "cut_selection": {
+      "row_activity_tolerance": 1e-6,
+      "max_active_per_stage": 500,
+      "selection": {
+        "method": "level1",
+        "tie_tolerance": 1e-10,
+        "check_frequency": 5
+      }
     }
   }
 }
@@ -427,7 +445,7 @@ terminal stage of the current study. The imported cuts are not updated by
 training — they remain fixed throughout.
 
 This enables Cobre-to-Cobre model coupling: a monthly study produces a
-policy checkpoint, and a weekly+monthly DECOMP study loads that checkpoint's
+policy checkpoint, and a weekly+monthly coupled study loads that checkpoint's
 cuts as its terminal-stage future cost function.
 
 | Field          | Type    | Description                                                     |
@@ -562,10 +580,11 @@ for the full explanation and a `stages.json` example of the block pattern.
 
 Controls which outputs are written to the results directory.
 
-| Field             | Type                           | Default | Description                                                                     |
-| ----------------- | ------------------------------ | ------- | ------------------------------------------------------------------------------- |
-| `states`          | boolean                        | `false` | Write visited forward-pass trial points to the policy checkpoint (FlatBuffers). |
-| `stochastic`      | boolean                        | `false` | Export stochastic preprocessing artifacts to `output/stochastic/`.              |
+| Field                   | Type    | Default | Description                                                                                                            |
+| ----------------------- | ------- | ------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `states`                | boolean | `false` | Write visited forward-pass trial points to the policy checkpoint (FlatBuffers).                                        |
+| `stochastic`            | boolean | `false` | Export stochastic preprocessing artifacts to `output/stochastic/`.                                                     |
+| `fpha_deviation_points` | boolean | `false` | Export the per-grid-point computed-FPHA fit-deviation table to `output/hydro_models/fpha_deviation_points.parquet`. Opt-in because it emits one row per (hydro, stage, V, Q) sample point at spillage = 0. |
 
 ---
 
@@ -589,12 +608,13 @@ Controls which outputs are written to the results directory.
       "ncs": { "scheme": "in_sample" }
     },
     "cut_selection": {
-      "enabled": true,
-      "method": "level1",
-      "tie_tolerance": 1e-10,
-      "check_frequency": 5,
-      "cut_activity_tolerance": 1e-6,
-      "max_active_per_stage": null
+      "row_activity_tolerance": 1e-6,
+      "max_active_per_stage": null,
+      "selection": {
+        "method": "level1",
+        "tie_tolerance": 1e-10,
+        "check_frequency": 5
+      }
     }
   },
   "modeling": {

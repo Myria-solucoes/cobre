@@ -336,7 +336,6 @@ mod tests {
             },
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
-            energy: crate::EnergyConfig::default(),
         }
     }
 
@@ -360,6 +359,8 @@ mod tests {
                 slurm_job_id: None,
                 hosts: Vec::new(),
             },
+            setup: None,
+            production_fit_deviation: None,
         }
     }
 

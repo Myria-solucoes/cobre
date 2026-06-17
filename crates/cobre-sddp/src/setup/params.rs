@@ -132,29 +132,8 @@ impl StudyParams {
         let cut_activity_tolerance = config
             .training
             .cut_selection
-            .cut_activity_tolerance
+            .row_activity_tolerance
             .unwrap_or(0.0);
-
-        // Emit a one-shot deprecation warning when the user-supplied TOML carries
-        // `training.cut_selection.basis_activity_window`. The field has no
-        // internal consumer; reading it here, ignoring the value, and warning
-        // preserves backward compatibility for one release. The field itself
-        // stays on `RowSelectionConfig` (with `#[deprecated]`) and is dropped
-        // from the schema in the next release.
-        #[allow(deprecated)]
-        if config
-            .training
-            .cut_selection
-            .basis_activity_window
-            .is_some()
-        {
-            tracing::warn!(
-                "training.cut_selection.basis_activity_window is deprecated and \
-                 will be removed in the next release; the value is ignored \
-                 because basis reconstruction now matches stored cut rows by \
-                 slot identity alone. Please remove the field from config.json."
-            );
-        }
 
         let budget = config.training.cut_selection.max_active_per_stage;
 
@@ -339,95 +318,6 @@ mod tests {
         fn exit(&self, _span: &span::Id) {}
     }
 
-    /// Build a minimal `cobre_io::Config` with the given
-    /// `basis_activity_window` value in `training.cut_selection`. The field
-    /// is deprecated and its value is ignored by `StudyParams::from_config`;
-    /// the helper drives the deprecation-warning tests below.
-    #[allow(deprecated)]
-    fn config_with_window(window: Option<u32>) -> Config {
-        Config {
-            schema: None,
-            modeling: ModelingConfig {
-                inflow_non_negativity: InflowNonNegativityConfig {
-                    method: CfgInflowMethod::Penalty,
-                },
-            },
-            training: TrainingConfig {
-                enabled: true,
-                tree_seed: Some(42),
-                forward_passes: Some(1),
-                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),
-                stopping_mode: "any".to_string(),
-                cut_selection: RowSelectionConfig {
-                    basis_activity_window: window,
-                    ..RowSelectionConfig::default()
-                },
-                solver: TrainingSolverConfig::default(),
-                scenario_source: None,
-            },
-            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
-            policy: PolicyConfig::default(),
-            simulation: IoSimulationConfig::default(),
-            exports: ExportsConfig::default(),
-            estimation: EstimationConfig::default(),
-            energy: cobre_io::EnergyConfig::default(),
-        }
-    }
-
-    /// `StudyParams::from_config` must emit a WARN-level tracing event
-    /// naming `basis_activity_window` whenever the user supplies the field,
-    /// regardless of the value (including formerly out-of-range values).
-    /// Construction must succeed because the value is ignored.
-    #[test]
-    fn study_params_warns_on_deprecated_basis_activity_window() {
-        for window in [Some(0), Some(5), Some(31), Some(100)] {
-            let (subscriber, messages) = WarnRecorder::new();
-            tracing::subscriber::with_default(subscriber, || {
-                StudyParams::from_config(&config_with_window(window))
-                    .expect("any basis_activity_window value must succeed (field is ignored)");
-            });
-            let recorded = messages.lock().unwrap();
-            let relevant: Vec<&str> = recorded
-                .iter()
-                .map(std::string::String::as_str)
-                .filter(|msg| msg.contains("basis_activity_window"))
-                .collect();
-            assert!(
-                !relevant.is_empty(),
-                "expected a deprecation WARN mentioning 'basis_activity_window' for value {window:?}, got: {recorded:?}"
-            );
-            assert!(
-                relevant.iter().any(|msg| msg.contains("deprecated")),
-                "deprecation WARN must contain the word 'deprecated' for value {window:?}, got: {relevant:?}"
-            );
-            assert!(
-                relevant.iter().any(|msg| msg.contains("ignored")),
-                "deprecation WARN must say the value is 'ignored' for value {window:?}, got: {relevant:?}"
-            );
-        }
-    }
-
-    /// `StudyParams::from_config` must NOT emit a `basis_activity_window`
-    /// WARN when the field is absent from the user config.
-    #[test]
-    fn study_params_silent_when_basis_activity_window_absent() {
-        let (subscriber, messages) = WarnRecorder::new();
-        tracing::subscriber::with_default(subscriber, || {
-            StudyParams::from_config(&config_with_window(None))
-                .expect("absent basis_activity_window must succeed");
-        });
-        let recorded = messages.lock().unwrap();
-        let relevant: Vec<&str> = recorded
-            .iter()
-            .map(std::string::String::as_str)
-            .filter(|msg| msg.contains("basis_activity_window"))
-            .collect();
-        assert!(
-            relevant.is_empty(),
-            "no deprecation WARN must fire when basis_activity_window is absent, got: {recorded:?}"
-        );
-    }
-
     /// Build a minimal `cobre_io::Config` with `max_active_per_stage` and
     /// `forward_passes` set so that the budget-below-forward-passes warning fires.
     fn config_with_budget_below_forward_passes() -> Config {
@@ -456,7 +346,6 @@ mod tests {
             simulation: IoSimulationConfig::default(),
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
-            energy: cobre_io::EnergyConfig::default(),
         }
     }
 
@@ -491,7 +380,6 @@ mod tests {
             simulation: IoSimulationConfig::default(),
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
-            energy: cobre_io::EnergyConfig::default(),
         }
     }
 

@@ -188,7 +188,7 @@ impl ForwardSampler<'_> {
     /// Delegates to each class sampler's `apply_initial_state`. All current
     /// variants — including `Historical` — are no-ops: the initial inflow
     /// lags are owned by the caller (sourced from
-    /// `initial_conditions.past_inflows`, analogous to NEWAVE's `vazpast.dat`)
+    /// `initial_conditions.past_inflows`)
     /// and must remain identical across all scenarios so that forward,
     /// backward, and lower-bound paths consume the same `x_0`.
     ///

@@ -259,20 +259,16 @@ fn valid_case_piped_stdout_has_no_ansi_escapes() {
 // only by the three additional phases (StudyParams::from_config, prepare_stochastic,
 // prepare_hydro_models_from_artifacts) that `validate` now exercises.
 
-/// A `config.json` that sets `basis_activity_window` must still pass
-/// `validate` because the field is deprecated — any value (including values
-/// that used to fail the old 1..=31 range check) is silently ignored after
-/// emitting a one-shot deprecation warning. This guards the soft-deprecation
-/// contract: existing user configs continue to load until the field is
-/// removed from the schema in the next release.
+/// An unknown `cut_selection` key (such as the removed `basis_activity_window`)
+/// is a hard schema error under `deny_unknown_fields` — the clean-break
+/// restructure dropped the soft-deprecation path entirely, so an unmigrated
+/// flat config fails to load rather than being silently ignored.
 #[test]
-fn deprecated_basis_activity_window_does_not_fail_validate() {
+fn removed_cut_selection_field_fails_validate() {
     let dir = TempDir::new().unwrap();
     make_valid_case(&dir);
 
-    // `basis_activity_window: 100` would have failed the previous 1..=31
-    // range check. After soft-deprecation it must succeed.
-    let deprecated_config = r#"{
+    let removed_field_config = r#"{
         "training": {
             "forward_passes": 10,
             "stopping_rules": [
@@ -282,60 +278,12 @@ fn deprecated_basis_activity_window_does_not_fail_validate() {
             "cut_selection": { "basis_activity_window": 100 }
         }
     }"#;
-    write_file(dir.path(), "config.json", deprecated_config);
+    write_file(dir.path(), "config.json", removed_field_config);
 
     cobre()
         .args(["validate", dir.path().to_str().unwrap()])
         .assert()
-        .success();
-}
-
-/// When the config sets `basis_activity_window`, the CLI must emit a
-/// deprecation warning to stderr that names the field and signals both the
-/// "deprecated" status and the "ignored" semantics. This wraps the contract
-/// that users have one release to remove the field from their TOML.
-#[test]
-fn deprecated_basis_activity_window_emits_warning_to_stderr() {
-    let dir = TempDir::new().unwrap();
-    make_valid_case(&dir);
-
-    let deprecated_config = r#"{
-        "training": {
-            "forward_passes": 10,
-            "stopping_rules": [
-                { "type": "iteration_limit", "limit": 100 }
-            ],
-            "scenario_source": { "inflow": { "scheme": "in_sample" }, "seed": 42 },
-            "cut_selection": { "basis_activity_window": 100 }
-        }
-    }"#;
-    write_file(dir.path(), "config.json", deprecated_config);
-
-    cobre()
-        .args(["validate", dir.path().to_str().unwrap()])
-        .assert()
-        .success()
-        .stderr(
-            predicate::str::contains("basis_activity_window")
-                .and(predicate::str::contains("deprecated"))
-                .and(predicate::str::contains("ignored")),
-        );
-}
-
-/// A config that does NOT set `basis_activity_window` must NOT mention the
-/// field anywhere in stderr — the deprecation warning fires only when the
-/// user-supplied field is `Some(_)`.
-#[test]
-fn absent_basis_activity_window_emits_no_deprecation_warning() {
-    let dir = TempDir::new().unwrap();
-    make_valid_case(&dir);
-    // `make_valid_case` writes a config.json that omits basis_activity_window.
-
-    cobre()
-        .args(["validate", dir.path().to_str().unwrap()])
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("basis_activity_window").not());
+        .failure();
 }
 
 /// A hydro plant configured with `"model": "fpha"` in `hydros.json` but with

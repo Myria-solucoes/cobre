@@ -403,7 +403,6 @@ fn build_config() -> Config {
         simulation: IoSimulationConfig::default(),
         exports: ExportsConfig::default(),
         estimation: EstimationConfig::default(),
-        energy: cobre_io::EnergyConfig::default(),
     }
 }
 

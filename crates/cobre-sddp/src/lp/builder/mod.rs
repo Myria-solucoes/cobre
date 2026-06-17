@@ -38,7 +38,7 @@
 //!   bus excess:          B*K columns
 //!   inflow slack:        N columns (sigma_inf_h, only when penalty method is active)
 //!   FPHA generation:     N_fpha*K columns (one per FPHA hydro per block)
-//!   evaporation:         N_evap*3 columns (Q_ev, f_evap_plus, f_evap_minus per evap hydro)
+//!   evaporation:         N_evap*3 columns (evaporation_flow, f_evap_plus, f_evap_minus per evap hydro)
 //!   withdrawal slack:    2*N columns (under-withdrawal neg, over-withdrawal pos; one per hydro each)
 //!   outflow_below slack: N*K columns (min-outflow violation, one per hydro per block)
 //!   outflow_above slack: N*K columns (max-outflow violation, one per hydro per block)
@@ -200,15 +200,15 @@ pub(crate) const M3S_TO_HM3: f64 = 3_600.0 / 1_000_000.0; // multiply by hours t
 pub(crate) const COST_SCALE_FACTOR: f64 = 1_000_000.0;
 
 /// Safety margin applied symmetrically to the magnitude bound on the evaporation
-/// flow variable `Q_ev`.  The bound is `[-q_max, +q_max]` where
-/// `q_max = |k_evap0 + k_evap_v * v_max| * margin`.  A 2x margin accounts for
-/// linearization approximation error: the actual area-volume curve may exceed
-/// the linear estimate near `v_max` in either direction, so the same factor
-/// covers both the positive case (true evaporation underestimated at high
-/// storage) and the negative case (net rainfall input underestimated at high
-/// storage).  A negative `Q_ev` value represents net rainfall input (inflow)
-/// rather than evaporative outflow.
-pub(crate) const Q_EV_SAFETY_MARGIN: f64 = 2.0;
+/// outflow variable.  The bound is `[-q_max, +q_max]` where
+/// `q_max = |intercept_m3s + volume_slope_m3s_per_hm3 * v_max| * margin`.  A 2x
+/// margin accounts for linearization approximation error: the actual area-volume
+/// curve may exceed the linear estimate near `v_max` in either direction, so the
+/// same factor covers both the positive case (true evaporation underestimated at
+/// high storage) and the negative case (net rainfall input underestimated at high
+/// storage).  A negative evaporation-outflow value represents net rainfall input
+/// (inflow) rather than evaporative outflow.
+pub(crate) const EVAPORATION_FLOW_SAFETY_MARGIN: f64 = 2.0;
 
 // ---------------------------------------------------------------------------
 // Shared types

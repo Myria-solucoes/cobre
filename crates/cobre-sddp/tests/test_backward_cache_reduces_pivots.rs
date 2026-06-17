@@ -177,7 +177,7 @@ fn test_backward_cache_reduces_pivots() {
     // This matches the CLI run whose parquet output was used to measure the baseline.
     // Explicitly clear any cut-selection overrides to ensure the default no-selection
     // path is exercised.
-    config.training.cut_selection.enabled = Some(false);
+    config.training.cut_selection.selection = None;
     config.training.cut_selection.max_active_per_stage = None;
 
     let system = cobre_io::load_case(&case_dir).expect("load_case must succeed");
@@ -188,7 +188,7 @@ fn test_backward_cache_reduces_pivots() {
     let stochastic = prepare_result.stochastic;
 
     let hydro_models =
-        prepare_hydro_models(&system, &case_dir).expect("prepare_hydro_models must succeed");
+        prepare_hydro_models(&system, &case_dir, false).expect("prepare_hydro_models must succeed");
 
     let mut setup =
         StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup must build");

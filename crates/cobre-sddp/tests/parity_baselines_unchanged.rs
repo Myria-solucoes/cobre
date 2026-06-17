@@ -62,7 +62,7 @@ const EXPECTED_HASHES: &[(&str, &str)] = &[
     ),
     (
         "D07",
-        "07051dc5cf9df08f4f7b0a613201e798ceb7cf2da673a2f26dd9e748a9e96ece",
+        "8181b12c2e0d527cf246cb77dfab169b4c39e9875c7adf3d43e0ebafa7b0cb5a",
     ),
     (
         "D08",
@@ -95,6 +95,16 @@ const EXPECTED_HASHES: &[(&str, &str)] = &[
     (
         "D17",
         "01033bd40ad2d858eb0c03b2efd462ea43c6854e1a557b274b8a6e9001278a9a",
+    ),
+    // Cascade case whose downstream plant declares a `reference_volume`. The
+    // reference-volume *default* (0.65) path is covered by the unchanged
+    // D05/D06/D07 baselines (none declare a `reference_volume`); D31 exercises the
+    // *declared* path. This fast guard only pins the checked-in `D31.sha256`
+    // against EXPECTED_HASHES; the full train+sim parity hash for D31 is verified
+    // by the slow-gated `parity_hash_d31` (HiGHS and CLP).
+    (
+        "D31",
+        "29ef7566025ab1938b2d66bfbc2b4139c258ff940d0ed79cce57aedc51bd4086",
     ),
 ];
 

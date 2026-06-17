@@ -302,6 +302,23 @@ not explicitly listed:
 
 Season indices are 0-based and match the season map defined in `stages.json`.
 
+#### `reference_volume`
+
+Each stage range and season entry may carry an optional `reference_volume`
+sibling of `fpha_config`, declaring the reference operating volume the
+computed-FPHA fit and the equivalent-productivity derivation consume. Set
+exactly one of two mutually-exclusive forms:
+
+- `volume_hm3` — an absolute storage value in hm³ (finite and `> 0.0`).
+- `percentile` — a fraction in `[0.0, 1.0]` of the plant's operating range.
+
+```json
+"reference_volume": { "percentile": 0.65 }
+```
+
+This is the single source of truth for the reference volume; it replaces the
+retired `reference_volume_hm3` column of `system/hydro_energy_productivity.parquet`.
+
 ### Hyperplane Sources
 
 When a plant is configured with `model: "fpha"`, the `fpha_config.source` field
@@ -338,24 +355,31 @@ The Parquet file must be present at `system/fpha_hyperplanes.parquet`. Its schem
 | `valid_v_max_hm3` | DOUBLE? | No       | Maximum volume where this plane is valid (hm³)         |
 | `valid_q_max_m3s` | DOUBLE? | No       | Maximum turbined flow where this plane is valid (m³/s) |
 
-Each `(hydro_id, stage_id)` group must have at least 3 planes. Rows are sorted by
+Each `(hydro_id, stage_id)` group must have at least 1 plane. Rows are sorted by
 `(hydro_id, stage_id, plane_id)` ascending; null `stage_id` sorts before any
 non-null value.
 
 #### `source: "computed"`
 
-Hyperplanes are fitted at runtime from the plant's physical geometry. Cobre reads
-the VHA (Volume-Height-Area) curve from `system/hydro_geometry.parquet`, evaluates
-the production function `phi(v, q, s)` over a discretization grid, and fits a
-piecewise-linear envelope.
+Hyperplanes are fitted at runtime from the plant's physical geometry. Cobre
+evaluates the production function `phi(v, q)` (at spillage = 0) on a
+(volume, turbined-flow) grid, takes the 3-D convex hull of the resulting
+cloud using vendored qhull, applies a least-squares α correction to the
+intercept, and then fits a per-plane lateral/spillage secant. Fits are
+resolved independently per stage (one fit per season or stage range), so
+plants whose head-efficiency characteristics change across seasons get
+stage-specific plane sets. Run-of-river plants with a single operating
+volume (constant forebay) are supported: the volume dimension collapses and
+the fit produces a valid single-volume hyperplane set.
 
 This source requires:
 
 1. The hydro plant must have `tailrace`, `hydraulic_losses`, and `efficiency` models
    defined in `hydros.json`.
-2. `system/hydro_geometry.parquet` must contain at least 2 rows for the plant, with
-   strictly increasing `volume_hm3` values and non-decreasing `height_m` and
-   `area_km2` values.
+2. `system/hydro_geometry.parquet` must contain at least 1 row for the plant.
+   A single row is valid for run-of-river plants with a constant forebay (γ_V = 0).
+   `linearized_head` still requires at least 2 rows because it fits a head slope
+   in volume; that constraint does not apply to FPHA.
 
 ```json
 "fpha_config": {
@@ -375,7 +399,7 @@ All fields except `source` are optional:
 | `volume_discretization_points`   | 5       | Number of volume grid points for fitting. Must be >= 2.                                                                |
 | `turbine_discretization_points`  | 5       | Number of turbined-flow grid points. Must be >= 2.                                                                     |
 | `spillage_discretization_points` | 5       | Number of spillage grid points. Must be >= 2.                                                                          |
-| `max_planes_per_hydro`           | 10      | Maximum planes retained after heuristic selection. Must be >= 1.                                                       |
+| `max_planes_per_hydro`           | 10      | Maximum planes to retain per (hydro, stage) after the convex-hull fit. Must be >= 1.                                   |
 | `fitting_window`                 | null    | Optional volume range for fitting. When absent, the full operating range `[min_storage_hm3, max_storage_hm3]` is used. |
 
 The `fitting_window` field restricts which portion of the operating range is used to
@@ -400,35 +424,33 @@ supported per dimension, and they are mutually exclusive:
 Do not mix absolute (`_hm3`) and percentile (`_percentile`) bounds for the same
 limit — the validator will reject the configuration.
 
-### Kappa Correction Factor
+### Fit-Quality Warning
 
-The FPHA piecewise-linear envelope never underestimates generation by construction. To ensure the LP does not systematically overestimate production, a
-correction factor kappa (κ) is applied to each hyperplane's intercept:
-
-```
-gamma_0_effective = gamma_0 * kappa
-```
-
-Kappa is computed automatically during fitting by finding the tightest scalar
-multiplier such that the scaled envelope is valid. It satisfies `0 < kappa <= 1.0`.
-
-A kappa value below 0.95 indicates that the hyperplane envelope deviates
-noticeably from the true production function over the fitted grid. When this
-occurs, a warning is emitted during case loading:
+After fitting, Cobre evaluates every fitted plane set against the exact
+production function on the spillage = 0 grid (the V/Q envelope). When the
+relative mean absolute deviation between the fitted envelope and the exact
+function exceeds 5 %, a warning is logged naming the plant and stage:
 
 ```
-Warning: hydro 'UHE Example' FPHA envelope has kappa = 0.87 (< 0.95).
+Warning: hydro 'UHE Example' stage 3 FPHA fit deviation = 6.2 % (> 5 %).
 Consider increasing discretization points or narrowing the fitting window.
 ```
 
-For `source: "precomputed"`, kappa is read from the optional `kappa` column.
-When absent or null, kappa defaults to 1.0 (the stored intercepts are used
-unchanged).
+The warning is informational — the run continues with the fitted planes. The
+threshold of 5 % is assessed on the spillage = 0 grid and reflects how well
+the V/Q envelope was captured; the spillage secant correction is applied
+separately and is not included in this check.
+
+For `source: "precomputed"`, the `kappa` column in `system/fpha_hyperplanes.parquet`
+is read as a back-compat correction factor applied to each plane's intercept.
+When the column is absent or null, kappa defaults to 1.0 (the stored intercepts are
+used unchanged). The kappa derivation and warning are removed from the computed path;
+they apply only to precomputed inputs that carry an explicit kappa value.
 
 ### Parquet Export for Round-Trip Use
 
 When hyperplanes are fitted at runtime (`source: "computed"`), the fitted
-coefficients — including the computed kappa values — are automatically written to:
+coefficients are automatically written to:
 
 ```
 output/hydro_models/fpha_hyperplanes.parquet
@@ -438,6 +460,53 @@ This file uses the same 11-column schema as the input `system/fpha_hyperplanes.p
 To switch from computed to precomputed fitting on a subsequent run, copy this file
 to `system/fpha_hyperplanes.parquet` and change `source` to `"precomputed"` in
 `hydro_production_models.json`.
+
+### Plane Reduction (`fpha_plane_reduction`)
+
+The optional file-level `fpha_plane_reduction` block in
+`system/hydro_production_models.json` merges near-parallel or near-coincident FPHA
+planes after fitting, reducing the LP column count without changing the fitted
+approximation significantly. It is off by default (absent = no reduction) and is
+applied uniformly to every plant in the file.
+
+Two mutually exclusive methods are supported, selected by the `method` field:
+
+**Angle method** — merges planes whose normal vectors are within `tolerance_deg`
+degrees of each other:
+
+```json
+"fpha_plane_reduction": {
+  "method": "angle",
+  "tolerance_deg": 2.0
+}
+```
+
+| Field           | Required | Description                                                                  |
+| --------------- | -------- | ---------------------------------------------------------------------------- |
+| `method`        | Yes      | Must be `"angle"`.                                                           |
+| `tolerance_deg` | Yes      | Maximum angle between plane normals to merge them. Finite, in `[0.0, 90.0]`. |
+
+**Distance method** — merges planes whose sampled mean-squared distance stays within
+`tolerance_pct` of each other, using `n_samples` sample points:
+
+```json
+"fpha_plane_reduction": {
+  "method": "distance",
+  "tolerance_pct": 0.01,
+  "n_samples": 200
+}
+```
+
+| Field           | Required | Description                                                                                 |
+| --------------- | -------- | ------------------------------------------------------------------------------------------- |
+| `method`        | Yes      | Must be `"distance"`.                                                                       |
+| `tolerance_pct` | Yes      | Maximum relative MSE distance (fraction) to treat two planes as coincident. Finite, >= 0.0. |
+| `n_samples`     | Yes      | Number of sample points used to estimate the distance. Must be >= 1.                        |
+
+Supplying a field that belongs to the other method is a load-time error
+(`deny_unknown_fields`). The origin plane (zero generation at zero turbining) is
+never merged into another plane. The distance method is deterministically seeded:
+its sample draws are bit-identical across input ordering and rank count.
 
 ### Per-Range and Per-Season Productivity
 
@@ -753,21 +822,21 @@ Cobre's layered validation pipeline checks the following conditions on hydro
 plants. Violations are reported as error messages with the failing plant's `id`
 and the nature of the problem.
 
-| Rule                            | Error Class          | Description                                                                                                                                                                                        |
-| ------------------------------- | -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Bus reference integrity         | Reference error      | Every `bus_id` must match an `id` in `buses.json`.                                                                                                                                                 |
-| Downstream reference integrity  | Reference error      | Every non-null `downstream_id` must match an `id` in `hydros.json`.                                                                                                                                |
-| Cascade acyclicity              | Topology error       | The directed graph of `downstream_id` links must be acyclic.                                                                                                                                       |
-| Storage bounds ordering         | Physical feasibility | `min_storage_hm3` must be less than `max_storage_hm3`.                                                                                                                                             |
-| Outflow bounds ordering         | Physical feasibility | When `max_outflow_m3s` is present, it must be greater than or equal to `min_outflow_m3s`.                                                                                                          |
-| Turbine bounds ordering         | Physical feasibility | `min_turbined_m3s` must be less than or equal to `max_turbined_m3s`.                                                                                                                               |
-| Generation bounds consistency   | Physical feasibility | `min_generation_mw` must be less than or equal to `max_generation_mw`.                                                                                                                             |
-| Initial conditions completeness | Reference error      | Every hydro plant must have exactly one entry in `initial_conditions.json` (either in `storage` or `filling_storage`, not both).                                                                   |
-| Evaporation array length        | Schema error         | When `evaporation` is present, `coefficients_mm` must have exactly 12 values. `reference_volumes_hm3`, when present, must also have exactly 12 values within `[min_storage_hm3, max_storage_hm3]`. |
-| FPHA geometry coverage          | Dimensional error    | Every plant configured with `fpha` or `linearized_head` must have at least 2 rows in `system/hydro_geometry.parquet`.                                                                              |
-| FPHA plane coverage             | Dimensional error    | Every `(hydro_id, stage_id)` group in `system/fpha_hyperplanes.parquet` must have at least 3 planes.                                                                                               |
-| FPHA coefficient signs          | Semantic error       | `gamma_v` must be positive; `gamma_s` must be non-positive.                                                                                                                                        |
-| Geometry monotonicity           | Semantic error       | `volume_hm3` must be strictly increasing; `height_m` and `area_km2` must be non-decreasing.                                                                                                        |
+| Rule                            | Error Class          | Description                                                                                                                                                                                                              |
+| ------------------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Bus reference integrity         | Reference error      | Every `bus_id` must match an `id` in `buses.json`.                                                                                                                                                                       |
+| Downstream reference integrity  | Reference error      | Every non-null `downstream_id` must match an `id` in `hydros.json`.                                                                                                                                                      |
+| Cascade acyclicity              | Topology error       | The directed graph of `downstream_id` links must be acyclic.                                                                                                                                                             |
+| Storage bounds ordering         | Physical feasibility | `min_storage_hm3` must be less than `max_storage_hm3`.                                                                                                                                                                   |
+| Outflow bounds ordering         | Physical feasibility | When `max_outflow_m3s` is present, it must be greater than or equal to `min_outflow_m3s`.                                                                                                                                |
+| Turbine bounds ordering         | Physical feasibility | `min_turbined_m3s` must be less than or equal to `max_turbined_m3s`.                                                                                                                                                     |
+| Generation bounds consistency   | Physical feasibility | `min_generation_mw` must be less than or equal to `max_generation_mw`.                                                                                                                                                   |
+| Initial conditions completeness | Reference error      | Every hydro plant must have exactly one entry in `initial_conditions.json` (either in `storage` or `filling_storage`, not both).                                                                                         |
+| Evaporation array length        | Schema error         | When `evaporation` is present, `coefficients_mm` must have exactly 12 values. `reference_volumes_hm3`, when present, must also have exactly 12 values within `[min_storage_hm3, max_storage_hm3]`.                       |
+| FPHA geometry coverage          | Dimensional error    | Every plant configured with `fpha` must have at least 1 row in `system/hydro_geometry.parquet` (a single row is valid for run-of-river plants); every plant configured with `linearized_head` must have at least 2 rows. |
+| FPHA plane coverage             | Dimensional error    | Every `(hydro_id, stage_id)` group in `system/fpha_hyperplanes.parquet` must have at least 1 plane.                                                                                                                      |
+| FPHA coefficient signs          | Semantic error       | `gamma_v` must be positive; `gamma_s` must be non-positive.                                                                                                                                                              |
+| Geometry monotonicity           | Semantic error       | `volume_hm3` must be strictly increasing; `height_m` and `area_km2` must be non-decreasing.                                                                                                                              |
 
 ---
 

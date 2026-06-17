@@ -36,7 +36,7 @@ fn prepare_hydro_models_returns_fpha_rows_without_writing_files() {
     let system = cobre_io::load_case(&case_dir).expect("load_case must succeed on d07");
 
     let result =
-        prepare_hydro_models(&system, &case_dir).expect("prepare_hydro_models must succeed");
+        prepare_hydro_models(&system, &case_dir, false).expect("prepare_hydro_models must succeed");
 
     // AC: fpha_export_rows is non-empty for a computed-source case.
     assert!(

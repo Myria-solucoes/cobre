@@ -42,6 +42,16 @@ pub struct OutputContext {
     pub completed_at: String,
     /// Execution distribution and environment information.
     pub distribution: DistributionInfo,
+    /// Per-phase setup wall time, collected on the rank that writes metadata.
+    /// `None` when the producer did not collect setup timings (e.g. the
+    /// simulation context, or a producer that has not wired collection); the
+    /// metadata `setup` section is then omitted.
+    pub setup: Option<SetupTimings>,
+    /// Run-level rollup of the per-entity production-model fit deviation.
+    /// `None` when the producer fitted no model whose deviation is measured
+    /// (e.g. the simulation context, or a run with no computed production
+    /// model); the metadata `production_fit_deviation` section is then omitted.
+    pub production_fit_deviation: Option<DeviationSummary>,
 }
 
 /// Read the system hostname.
@@ -235,6 +245,87 @@ pub struct MetadataTrainingSolveStats {
     pub parallelism: Option<u32>,
 }
 
+/// Per-phase setup wall time embedded in [`TrainingMetadata`].
+///
+/// Each field is wall-clock seconds for one setup phase. These values are
+/// **non-deterministic** (informational, never hashed): they vary run-to-run
+/// with machine load and are excluded from any parity computation. All fields
+/// are `#[serde(default)]` so metadata produced before this section existed
+/// reads back as zeros.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SetupTimings {
+    /// Wall-clock seconds spent loading the input case.
+    #[serde(default)]
+    pub load_seconds: f64,
+    /// Wall-clock seconds spent fitting the stochastic process.
+    #[serde(default)]
+    pub stochastic_fit_seconds: f64,
+    /// Wall-clock seconds spent fitting the production model.
+    #[serde(default)]
+    pub production_fit_seconds: f64,
+    /// Wall-clock seconds spent fitting the evaporation model.
+    #[serde(default)]
+    pub evaporation_fit_seconds: f64,
+    /// Wall-clock seconds spent broadcasting setup data across ranks.
+    #[serde(default)]
+    pub broadcast_seconds: f64,
+}
+
+/// Run-level rollup of a per-entity model-fit deviation, embedded in
+/// [`TrainingMetadata`].
+///
+/// A generic, informational aggregate over per-entity fit deviations: the entry
+/// count, the mean and max absolute deviation magnitudes across all entries, and
+/// the single worst entry by relative deviation. The producer maps its own
+/// per-entity deviation records into this shape; the field names carry no
+/// producer-specific meaning so the metadata struct stays free of algorithm
+/// vocabulary. All fields are `#[serde(default)]` so metadata produced before
+/// this section existed reads back as zeros / `None`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DeviationSummary {
+    /// Number of per-entity entries the rollup summarizes (`>= 1` whenever the
+    /// summary is present; the producer omits the section for an empty set).
+    #[serde(default)]
+    pub n_entries: u32,
+    /// Arithmetic mean of the per-entry mean absolute deviation magnitudes.
+    #[serde(default)]
+    pub mean_abs: f64,
+    /// Maximum of the per-entry max absolute deviation magnitudes.
+    #[serde(default)]
+    pub max_abs: f64,
+    /// Largest per-entry relative (dimensionless) deviation across all entries.
+    #[serde(default)]
+    pub worst_relative: f64,
+    /// The entry with the largest relative deviation, when any entry exists.
+    #[serde(default)]
+    pub worst_entry: Option<DeviationWorstEntry>,
+}
+
+/// The single worst per-entity entry of a [`DeviationSummary`].
+///
+/// Identifies one entity / stage pair and carries that entry's deviation
+/// magnitudes verbatim. The field names are generic (no producer-specific
+/// vocabulary); `entity_id` and `stage_id` mirror the integer identifiers the
+/// producer keys its entries by. All fields are `#[serde(default)]`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DeviationWorstEntry {
+    /// Integer identifier of the entity owning the worst entry.
+    #[serde(default)]
+    pub entity_id: i32,
+    /// Integer identifier of the stage owning the worst entry.
+    #[serde(default)]
+    pub stage_id: i32,
+    /// Relative (dimensionless) deviation of the worst entry.
+    #[serde(default)]
+    pub relative: f64,
+    /// Mean absolute deviation magnitude of the worst entry.
+    #[serde(default)]
+    pub mean_abs: f64,
+    /// Max absolute deviation magnitude of the worst entry.
+    #[serde(default)]
+    pub max_abs: f64,
+}
+
 /// Scenario counts embedded in [`SimulationMetadata`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetadataScenarios {
@@ -323,6 +414,15 @@ pub struct TrainingMetadata {
     /// Training solve statistics.
     #[serde(default)]
     pub solve_stats: MetadataTrainingSolveStats,
+    /// Per-phase setup wall time (informational, non-deterministic). Absent
+    /// when a run did not collect setup timings and from any legacy metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<SetupTimings>,
+    /// Run-level rollup of the per-entity production-model fit deviation
+    /// (informational, never hashed). Absent when a run fitted no model whose
+    /// deviation is measured and from any legacy metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub production_fit_deviation: Option<DeviationSummary>,
     /// Execution distribution and environment information.
     pub distribution: DistributionInfo,
 }
@@ -525,6 +625,8 @@ mod tests {
                 backward_solve_seconds: Some(456.75),
                 parallelism: Some(8),
             },
+            setup: None,
+            production_fit_deviation: None,
             distribution: make_distribution_info(),
         }
     }
@@ -869,6 +971,195 @@ mod tests {
         assert_eq!(decoded.bounds.final_upper_bound_std, None);
         assert_eq!(decoded.solve_stats.total_lp_solves, None);
         assert_eq!(decoded.solve_stats.parallelism, None);
+    }
+
+    #[test]
+    fn setup_timings_round_trips() {
+        let original = TrainingMetadata {
+            setup: Some(SetupTimings {
+                load_seconds: 1.5,
+                stochastic_fit_seconds: 2.25,
+                production_fit_seconds: 3.75,
+                evaporation_fit_seconds: 0.5,
+                broadcast_seconds: 0.125,
+            }),
+            ..make_training_metadata()
+        };
+
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: TrainingMetadata = serde_json::from_str(&json).unwrap();
+
+        let setup = decoded
+            .setup
+            .expect("setup must be present after round-trip");
+        assert_eq!(setup.load_seconds, 1.5);
+        assert_eq!(setup.stochastic_fit_seconds, 2.25);
+        assert_eq!(setup.production_fit_seconds, 3.75);
+        assert_eq!(setup.evaporation_fit_seconds, 0.5);
+        assert_eq!(setup.broadcast_seconds, 0.125);
+    }
+
+    #[test]
+    fn training_metadata_without_setup_reads_as_none() {
+        // Metadata that omits the `setup` key entirely (legacy or a run that did
+        // not collect timings) must deserialize with `setup == None`.
+        let without_setup = r#"{
+            "cobre_version": "0.0.0",
+            "hostname": "legacy-host",
+            "solver": "highs",
+            "started_at": "2026-01-17T08:00:00Z",
+            "completed_at": "2026-01-17T12:30:00Z",
+            "duration_seconds": 16200.0,
+            "status": "complete",
+            "configuration": {
+                "seed": 42,
+                "max_iterations": 100,
+                "forward_passes": 192,
+                "stopping_mode": "any",
+                "policy_mode": "fresh"
+            },
+            "problem_dimensions": {
+                "num_stages": 12,
+                "num_hydros": 160,
+                "num_thermals": 200,
+                "num_buses": 5,
+                "num_lines": 8
+            },
+            "iterations": {
+                "completed": 100,
+                "converged_at": 95
+            },
+            "convergence": {
+                "achieved": true,
+                "final_gap_percent": 0.45,
+                "termination_reason": "bound_stalling"
+            },
+            "row_pool": {
+                "total_generated": 1250000,
+                "total_active": 980000,
+                "peak_active": 1100000
+            },
+            "distribution": {
+                "backend": "local",
+                "world_size": 1,
+                "ranks_participated": 1,
+                "num_nodes": 1,
+                "threads_per_rank": 1
+            }
+        }"#;
+
+        let decoded: TrainingMetadata = serde_json::from_str(without_setup).unwrap();
+        assert!(decoded.setup.is_none());
+    }
+
+    // ── DeviationSummary ───────────────────────────────────────────────────────
+
+    #[test]
+    fn deviation_summary_with_worst_entry_round_trips() {
+        let original = TrainingMetadata {
+            production_fit_deviation: Some(DeviationSummary {
+                n_entries: 3,
+                mean_abs: 4.1,
+                max_abs: 31.7,
+                worst_relative: 0.062,
+                worst_entry: Some(DeviationWorstEntry {
+                    entity_id: 12,
+                    stage_id: 4,
+                    relative: 0.062,
+                    mean_abs: 8.0,
+                    max_abs: 31.7,
+                }),
+            }),
+            ..make_training_metadata()
+        };
+
+        let json = serde_json::to_string(&original).unwrap();
+        assert!(
+            json.contains(r#""production_fit_deviation""#),
+            "serialized JSON must contain the deviation section, got: {json}"
+        );
+
+        let decoded: TrainingMetadata = serde_json::from_str(&json).unwrap();
+        let summary = decoded
+            .production_fit_deviation
+            .expect("deviation summary must survive round-trip");
+        assert_eq!(summary.n_entries, 3);
+        assert_eq!(summary.mean_abs, 4.1);
+        assert_eq!(summary.max_abs, 31.7);
+        assert_eq!(summary.worst_relative, 0.062);
+        let worst = summary.worst_entry.expect("worst entry must be present");
+        assert_eq!(worst.entity_id, 12);
+        assert_eq!(worst.stage_id, 4);
+        assert_eq!(worst.relative, 0.062);
+        assert_eq!(worst.mean_abs, 8.0);
+        assert_eq!(worst.max_abs, 31.7);
+    }
+
+    #[test]
+    fn training_metadata_skips_deviation_when_none() {
+        let metadata = TrainingMetadata {
+            production_fit_deviation: None,
+            ..make_training_metadata()
+        };
+
+        let json = serde_json::to_string(&metadata).unwrap();
+        assert!(
+            !json.contains("production_fit_deviation"),
+            "the key must be omitted when None, got: {json}"
+        );
+    }
+
+    #[test]
+    fn training_metadata_without_deviation_reads_as_none() {
+        // Metadata that omits the `production_fit_deviation` key entirely (legacy
+        // or a run with no measured fit) must deserialize with the field `None`.
+        let without_deviation = r#"{
+            "cobre_version": "0.0.0",
+            "hostname": "legacy-host",
+            "solver": "highs",
+            "started_at": "2026-01-17T08:00:00Z",
+            "completed_at": "2026-01-17T12:30:00Z",
+            "duration_seconds": 16200.0,
+            "status": "complete",
+            "configuration": {
+                "seed": 42,
+                "max_iterations": 100,
+                "forward_passes": 192,
+                "stopping_mode": "any",
+                "policy_mode": "fresh"
+            },
+            "problem_dimensions": {
+                "num_stages": 12,
+                "num_hydros": 160,
+                "num_thermals": 200,
+                "num_buses": 5,
+                "num_lines": 8
+            },
+            "iterations": {
+                "completed": 100,
+                "converged_at": 95
+            },
+            "convergence": {
+                "achieved": true,
+                "final_gap_percent": 0.45,
+                "termination_reason": "bound_stalling"
+            },
+            "row_pool": {
+                "total_generated": 1250000,
+                "total_active": 980000,
+                "peak_active": 1100000
+            },
+            "distribution": {
+                "backend": "local",
+                "world_size": 1,
+                "ranks_participated": 1,
+                "num_nodes": 1,
+                "threads_per_rank": 1
+            }
+        }"#;
+
+        let decoded: TrainingMetadata = serde_json::from_str(without_deviation).unwrap();
+        assert!(decoded.production_fit_deviation.is_none());
     }
 
     // ── Writer tests ─────────────────────────────────────────────────────────

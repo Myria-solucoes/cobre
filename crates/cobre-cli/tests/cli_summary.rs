@@ -2,7 +2,7 @@
 //!
 //! These tests build a hand-crafted output-directory fixture (the four metadata
 //! files) in a tempdir, then run the real `cobre` binary against it and assert
-//! on the five-section live end-block written to stderr:
+//! on the live end-block written to stderr, in top-to-bottom order:
 //!
 //!   Execution topology → Hydro models → Model provenance → Training → Simulation
 //!
@@ -103,6 +103,8 @@ fn write_training_fixture(dir: &Path) {
             backward_solve_seconds: Some(4.5),
             parallelism: Some(1),
         },
+        setup: None,
+        production_fit_deviation: None,
         distribution: local_distribution(),
     };
 
@@ -155,8 +157,7 @@ fn write_hydro_models_fixture(dir: &Path) {
         "n_evaporation": 0,
         "n_no_evaporation": 1,
         "n_user_supplied_ref": 0,
-        "n_default_midpoint_ref": 0,
-        "kappa_warnings": []
+        "n_default_midpoint_ref": 0
     });
     std::fs::create_dir_all(dir.join("training")).unwrap();
     std::fs::write(

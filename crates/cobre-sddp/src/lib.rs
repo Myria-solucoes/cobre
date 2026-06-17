@@ -35,6 +35,7 @@ pub mod cut;
 pub mod error;
 pub(crate) mod gemm;
 pub mod horizon_mode;
+pub(crate) mod hull;
 pub mod lp;
 pub mod policy;
 pub mod production;
@@ -233,8 +234,10 @@ pub use stochastic::estimation::{EstimationPath, EstimationReport, estimate_from
 pub use training::forward::SyncResult;
 // ── hydro_models ──────────────────────────────────────────────────────────────
 pub use production::hydro_models::{
-    FphaHydroDetail, HydroModelSummary, PrepareHydroModelsResult, ProductionModelSource,
-    build_hydro_model_summary, prepare_hydro_models,
+    FphaFitDeviationEntry, FphaHydroDetail, HydroFitTimings, HydroModelSummary,
+    PrepareHydroModelsResult, ProductionModelSource, build_deviation_summary,
+    build_evaporation_model_rows, build_fpha_deviation_point_rows, build_hydro_model_summary,
+    prepare_hydro_models,
 };
 // ── indexer ───────────────────────────────────────────────────────────────────
 pub use lp::indexer::{EquipmentCounts, FphaColumnLayout, StageIndexer};

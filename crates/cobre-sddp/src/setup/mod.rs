@@ -53,7 +53,7 @@ use cobre_core::{
     EntityId, Stage, System,
     scenario::{SamplingScheme, ScenarioSource},
 };
-use cobre_io::build_hydro_reference_volume_fractions;
+use cobre_io::build_hydro_reference_volumes_resolved;
 use cobre_stochastic::{
     ExternalScenarioLibrary, HistoricalScenarioLibrary, StochasticContext, SweepDirection,
 };
@@ -107,7 +107,7 @@ pub struct StudySetup {
     /// ID. Aligned 1:1 with [`Self::ncs_max_gen`]. `true` (default) =
     /// curtailable (LP can dispatch in `[0, max × α × factor]`); `false` =
     /// must-run (`col_lower = col_upper = max × α × factor` for every
-    /// scenario, matching NEWAVE's `geracao_usinas_nao_simuladas` pre-netting).
+    /// scenario; non-simulated aggregate generation pre-netted from load).
     pub(crate) ncs_allow_curtailment: Vec<bool>,
 
     /// Sampling schemes and pre-built libraries for training and simulation phases.
@@ -175,7 +175,7 @@ pub struct StudySetup {
     /// Holds `ρ_eq` (equivalent productivity), `V_ref`, `Q_ref`, and `ρ_acum`
     /// (accumulated cascade productivity). Built once at setup time from the
     /// system's hydros, cascade topology, and reference-volume resolver.
-    /// Consumed by the energy-balance LP constraints and ENA/EARM extraction.
+    /// Consumed by the energy-balance LP constraints and inflow-energy / stored-energy extraction.
     pub(crate) energy_conversion: EnergyConversionSet,
 
     /// `V_min` (`min_storage_hm3`) per hydro, in declaration order.
@@ -581,18 +581,24 @@ fn build_energy_and_templates(
         .filter(|s| s.id >= 0)
         .map(|s| i32::try_from(s.season_id.unwrap_or(0)).unwrap_or(0))
         .collect();
-    let reference_volume_fractions = build_hydro_reference_volume_fractions(
-        Vec::new(),
-        0.65,
-        system.hydros(),
-        &stage_to_season,
-    )?;
+    // The JSON-sourced reference operating volume, resolved to absolute hm³ per
+    // `(plant, study-stage)` against each plant's band by the hydro-model
+    // preprocessing pipeline. The energy-conversion build reads it as the single
+    // source of truth for `reference_volume_hm3`, identical to the source the FPHA
+    // backwater path uses, so the productivity reference and the backwater level
+    // never drift.
+    let reference_volume_fractions =
+        build_hydro_reference_volumes_resolved(&hydro_models.reference_volumes_hm3, 0.0);
     let energy_conversion = build_energy_conversion_set(
         system.hydros(),
         n_stages_pre,
         system.cascade(),
         &reference_volume_fractions,
-        &std::collections::HashMap::<cobre_core::EntityId, Vec<cobre_io::HydroGeometryRow>>::new(),
+        // VHA geometry feeds the FPHA ρ_eq derivation (VHA + ρ_esp) for plants with
+        // no parquet override; the override still wins when present. Carried on the
+        // per-rank `PrepareHydroModelsResult` (never broadcast), so every rank sees
+        // the same map.
+        &hydro_models.vha_geometry_by_hydro,
         Some(&hydro_models.productivity_override),
         Some(&hydro_models.production),
     )
@@ -1673,7 +1679,6 @@ mod tests {
             simulation: IoSimulationConfig::default(),
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
-            energy: cobre_io::EnergyConfig::default(),
         }
     }
 
@@ -2055,8 +2060,13 @@ mod tests {
         // Configure the dynamic cut-selection method so `parse_cut_selection_config`
         // yields a `Dynamic` strategy and `simulation_ctx()` populates `dcs`.
         config.training.cut_selection = RowSelectionConfig {
-            enabled: Some(true),
-            method: Some("dynamic".to_string()),
+            selection: Some(cobre_io::config::SelectionMethod::Dynamic {
+                start_iteration: 2,
+                seed_window: 5,
+                candidate_recency: None,
+                max_added_per_round: 10,
+                violation_tolerance: 1e-10,
+            }),
             ..RowSelectionConfig::default()
         };
         let stochastic = build_stochastic_context(
@@ -2451,7 +2461,6 @@ mod tests {
             simulation: IoSimulationConfig::default(),
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
-            energy: cobre_io::EnergyConfig::default(),
         };
 
         let params = StudyParams::from_config(&config).expect("from_config");
@@ -2537,7 +2546,6 @@ mod tests {
             },
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
-            energy: cobre_io::EnergyConfig::default(),
         };
 
         let params = StudyParams::from_config(&config).expect("from_config");
@@ -2621,7 +2629,6 @@ mod tests {
             simulation: IoSimulationConfig::default(),
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
-            energy: cobre_io::EnergyConfig::default(),
         }
     }
 

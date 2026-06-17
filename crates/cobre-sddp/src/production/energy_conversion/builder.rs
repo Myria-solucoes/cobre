@@ -101,7 +101,11 @@ pub fn build_energy_conversion_set<S: std::hash::BuildHasher>(
 
         let mut row: Vec<EnergyConversion> = Vec::with_capacity(n_stages);
         for stage in 0..n_stages {
-            let fraction = reference_volume_fractions.get(hydro.id, stage);
+            // Absolute hm³ from the resolver: the JSON-declared (or default)
+            // reference volume already resolved against this plant's band. The
+            // `v_min + fraction·(..)` span is applied once, at resolver
+            // construction — never again here.
+            let reference_volume_hm3 = reference_volume_fractions.get(hydro.id, stage);
 
             // Non-FPHA hydros: read the resolved ρ_eq directly from
             // `ProductionModelSet`, which is the single source of truth after
@@ -119,7 +123,8 @@ pub fn build_energy_conversion_set<S: std::hash::BuildHasher>(
                     crate::hydro_models::ResolvedProductionModel::Fpha { .. } => 0.0,
                 })
             };
-            let mut conversion = derive_conversion_for_hydro(hydro, fraction, productivity);
+            let mut conversion =
+                derive_conversion_for_hydro(hydro, reference_volume_hm3, productivity);
 
             if matches!(hydro.generation_model, HydroGenerationModel::Fpha) {
                 // FPHA ρ_eq: override (parquet) wins over the VHA + ρ_esp
@@ -209,22 +214,28 @@ pub fn build_energy_conversion_set<S: std::hash::BuildHasher>(
     ))
 }
 
-/// Derive the per-`(hydro, fraction)` [`EnergyConversion`] cell.
+/// Derive the per-`(hydro, stage)` [`EnergyConversion`] cell.
 ///
-/// `fraction` is the resolved reference-volume fraction for the
-/// `(hydro, stage)` of interest, already obtained from the resolver. For FPHA
-/// hydros, `productivity` should be `0.0` — it is filled in by the
+/// `reference_volume_hm3` is the resolved reference operating volume (absolute
+/// hm³) for the `(hydro, stage)` of interest, already obtained from the resolver
+/// — the JSON-declared (or default) value resolved against the plant's band at
+/// resolver construction. It is stored verbatim; the `v_min + fraction·(..)` span
+/// is applied once upstream, never re-applied here, so an undeclared plant's
+/// `reference_volume_hm3` is bit-identical to the prior inline resolution.
+///
+/// This cell's `reference_volume_hm3` is the single JSON-sourced reference
+/// operating volume that the policy `ReferenceVolume` parameter and the
+/// downstream LP/simulation consumers read — there is no parquet `v_ref` tier.
+///
+/// For FPHA hydros, `productivity` should be `0.0` — it is filled in by the
 /// FPHA-specific derivation in `build_energy_conversion_set`. For non-FPHA
 /// hydros, `productivity` is the per-stage value from the resolved production
 /// model (i.e., from `hydro_production_models.json`).
 fn derive_conversion_for_hydro(
     hydro: &Hydro,
-    fraction: f64,
+    reference_volume_hm3: f64,
     productivity: f64,
 ) -> EnergyConversion {
-    let v_min = hydro.min_storage_hm3;
-    let v_max = hydro.max_storage_hm3;
-    let reference_volume_hm3 = v_min + fraction * (v_max - v_min);
     let reference_outflow_m3s = hydro.max_turbined_m3s;
     EnergyConversion {
         equivalent_productivity_mw_per_m3s: productivity,
@@ -296,7 +307,7 @@ mod tests {
     };
     use cobre_io::{
         HydroEnergyProductivityRow, HydroGeometryRow, HydroReferenceVolumeFractions,
-        build_hydro_reference_volume_fractions,
+        build_hydro_reference_volumes_resolved,
     };
 
     use super::super::productivity_override::build_hydro_energy_productivity_override;
@@ -354,9 +365,29 @@ mod tests {
         }
     }
 
+    /// Resolver returning, for every `(hydro, stage)`, the absolute hm³ for the
+    /// 0.65 default fraction resolved against each plant's band — the value the
+    /// production pipeline feeds after wiring the JSON-sourced reference volume.
     fn make_resolver(hydros: &[Hydro]) -> HydroReferenceVolumeFractions {
-        build_hydro_reference_volume_fractions(Vec::new(), 0.65, hydros, &[0, 1])
-            .expect("resolver builds")
+        resolved_resolver(hydros, 0.65, 2)
+    }
+
+    /// Build a resolver whose `get(hydro, stage)` returns the absolute hm³ for
+    /// `fraction` resolved against each plant's `[v_min, v_max]` band — the
+    /// resolved-hm³ semantics the consumers read after this wiring.
+    fn resolved_resolver(
+        hydros: &[Hydro],
+        fraction: f64,
+        n_stages: usize,
+    ) -> HydroReferenceVolumeFractions {
+        let resolved: Vec<(EntityId, usize, f64)> = hydros
+            .iter()
+            .flat_map(|h| {
+                let v = h.min_storage_hm3 + fraction * (h.max_storage_hm3 - h.min_storage_hm3);
+                (0..n_stages).map(move |s| (h.id, s, v))
+            })
+            .collect();
+        build_hydro_reference_volumes_resolved(&resolved, 0.0)
     }
 
     #[test]
@@ -413,16 +444,7 @@ mod tests {
         fraction: f64,
         n_stages: usize,
     ) -> HydroReferenceVolumeFractions {
-        let rows = hydros
-            .iter()
-            .map(|h| cobre_io::HydroReferenceVolumeFractionRow {
-                hydro_id: h.id,
-                season_id: None,
-                fraction,
-            })
-            .collect();
-        build_hydro_reference_volume_fractions(rows, 0.65, hydros, &vec![0_i32; n_stages])
-            .expect("resolver builds")
+        resolved_resolver(hydros, fraction, n_stages)
     }
 
     /// Build a `ProductionModelSet` where every (hydro, stage) cell uses
@@ -546,23 +568,16 @@ mod tests {
             None,
         )];
         let cascade = CascadeTopology::build(&hydros);
-        // 4 stages alternating between season 0 and season 1.
-        let stage_to_season = vec![0_i32, 1, 0, 1];
-        let rows = vec![
-            cobre_io::HydroReferenceVolumeFractionRow {
-                hydro_id: hydros[0].id,
-                season_id: Some(0),
-                fraction: 0.50,
-            },
-            cobre_io::HydroReferenceVolumeFractionRow {
-                hydro_id: hydros[0].id,
-                season_id: Some(1),
-                fraction: 0.70,
-            },
+        // 4 stages alternating season 0 (fraction 0.50 → 150 hm³) and season 1
+        // (fraction 0.70 → 170 hm³) on the [100, 200] band, resolved per stage.
+        let id = hydros[0].id;
+        let per_stage_hm3 = vec![
+            (id, 0, 150.0),
+            (id, 1, 170.0),
+            (id, 2, 150.0),
+            (id, 3, 170.0),
         ];
-        let resolver =
-            build_hydro_reference_volume_fractions(rows, 0.65, &hydros, &stage_to_season)
-                .expect("resolver builds");
+        let resolver = build_hydro_reference_volumes_resolved(&per_stage_hm3, 0.0);
         let pm = production_set(&[0.9], n_stages);
         let set = build_energy_conversion_set(
             &hydros,
@@ -890,19 +905,15 @@ mod tests {
 
     #[test]
     fn fpha_propagates_forebay_table_error() {
-        // 1-row VHA fails ForebayTable::new (InsufficientPoints).
+        // An EMPTY VHA fails ForebayTable::new (InsufficientPoints). A single row
+        // is now valid (constant run-of-river forebay), so only the zero-row case
+        // still propagates as ForebayTableInvalid.
         let hydro = fpha_hydro_for_tests(7);
         let hydros = vec![hydro];
         let cascade = CascadeTopology::build(&hydros);
         let resolver = constant_resolver(&hydros, 0.65, 1);
-        let rows = vec![HydroGeometryRow {
-            hydro_id: hydros[0].id,
-            volume_hm3: 0.0,
-            height_m: 400.0,
-            area_km2: 1.0,
-        }];
         let mut map = HashMap::new();
-        map.insert(hydros[0].id, rows);
+        map.insert(hydros[0].id, Vec::<HydroGeometryRow>::new());
 
         let err = build_energy_conversion_set(&hydros, 1, &cascade, &resolver, &map, None, None)
             .unwrap_err();
@@ -1159,7 +1170,6 @@ mod tests {
                 hydro_id: hydros[0].id,
                 stage_id: None,
                 equivalent_productivity_mw_per_m3s: Some(2.5),
-                reference_volume_hm3: None,
                 reference_outflow_m3s: None,
                 specific_productivity_mw_per_m3s_per_m: None,
             }])
@@ -1290,7 +1300,6 @@ mod tests {
                 hydro_id: hydros[0].id,
                 stage_id: Some(0),
                 equivalent_productivity_mw_per_m3s: Some(0.42),
-                reference_volume_hm3: None,
                 reference_outflow_m3s: None,
                 specific_productivity_mw_per_m3s_per_m: None,
             }])

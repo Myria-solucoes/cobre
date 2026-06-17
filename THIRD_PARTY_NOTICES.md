@@ -1,12 +1,13 @@
 # Third-Party Notices
 
 Cobre is licensed under the Apache License 2.0 (see `LICENSE`). It bundles the
-following third-party components as git submodules under
-`crates/cobre-solver/vendor/`. Each component retains its original license;
+following third-party components as git submodules under `crates/*/vendor/` — the
+solver libraries under `crates/cobre-solver/vendor/`, and qhull under
+`crates/cobre-sddp/vendor/`. Each component retains its original license;
 bundling does not relicense it.
 
-These components are C++ libraries compiled and statically linked by the
-`cobre-solver` build script. They are **not** Rust crates and are therefore
+These components are C/C++ libraries compiled and statically linked by the
+owning crate's build script. They are **not** Rust crates and are therefore
 **not** covered by cargo-deny's license checks (`deny.toml` governs only Cargo
 dependencies). This file is the manual record of their license obligations.
 
@@ -42,6 +43,16 @@ vendored submodule in this repository.
 
 EPL-2.0 source code is available via the upstream repository and via the
 vendored submodule in this repository.
+
+## Qhull — Qhull License
+
+- Submodule: `crates/cobre-sddp/vendor/qhull` (tag `2020.2`)
+- Upstream: <https://github.com/qhull/qhull>
+- Linked: statically into `cobre-sddp`. Only the reentrant `libqhull_r` library
+  is compiled (from `src/libqhull_r/`); the non-reentrant `libqhull`, the C++
+  `libqhullcpp`, the CLI mains, tests, and docs in the submodule are not built.
+- License: <http://www.qhull.org/COPYING.txt>
+- License text: `crates/cobre-sddp/vendor/qhull/COPYING.txt`
 
 ## Rust crate dependencies
 

@@ -96,6 +96,58 @@
       ],
       "type": "object"
     },
+    "RawPlaneReductionConfig": {
+      "description": "File-level FPHA plane-reduction block, discriminated by the `method` JSON\nfield.\n\nAn internally-tagged union: `{ \"method\": \"angle\", \"tolerance_deg\": <f64> }`\nmerges planes whose normals are within `tolerance_deg` degrees, while\n`{ \"method\": \"distance\", \"tolerance_pct\": <f64>, \"n_samples\": <u32> }` merges\nplanes whose sampled mean-squared distance stays within `tolerance_pct`. The\ntag selects exactly one method; `deny_unknown_fields` rejects a tolerance\nfield belonging to the other method.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Normal-vector angle method. Merges planes whose normals lie within\n`tolerance_deg` of each other.",
+          "properties": {
+            "method": {
+              "const": "angle",
+              "type": "string"
+            },
+            "tolerance_deg": {
+              "description": "Maximum angle (degrees) between plane normals to treat them as\nparallel. Must be finite and in `[0.0, 90.0]` inclusive.",
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "method",
+            "tolerance_deg"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Mean-squared-distance method. Merges planes whose sampled MSE distance\nstays within `tolerance_pct`.",
+          "properties": {
+            "method": {
+              "const": "distance",
+              "type": "string"
+            },
+            "n_samples": {
+              "description": "Number of sample points used to estimate the distance. Must be `>= 1`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "tolerance_pct": {
+              "description": "Maximum relative MSE distance (fraction) to treat two planes as\ncoincident. Must be finite and `>= 0.0`.",
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "method",
+            "tolerance_pct",
+            "n_samples"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "RawProductionModel": {
       "description": "Production model configuration for one hydro plant.\n\nThe `selection_mode` field discriminates between two layouts:\n`stage_ranges` carries a stage-range array, while `seasonal` carries a\n`default_model` plus a `seasons` override list.",
       "oneOf": [
@@ -159,6 +211,29 @@
       ],
       "type": "object"
     },
+    "RawReferenceVolume": {
+      "additionalProperties": false,
+      "description": "Reference operating volume declared on a stage range or season.\n\nSet exactly one of `volume_hm3` (absolute, hm³) or `percentile` (a fraction\nof the operating range). The two are mutually exclusive; setting both, or\nneither, is rejected during validation.",
+      "properties": {
+        "percentile": {
+          "description": "Reference volume as a percentile of the operating range. Mutually\nexclusive with `volume_hm3`. When present must be finite and in\n`[0.0, 1.0]`.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "volume_hm3": {
+          "description": "Absolute reference volume [hm³]. Mutually exclusive with `percentile`.\nWhen present must be finite and `> 0.0`.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "RawSeasonConfig": {
       "additionalProperties": false,
       "description": "Season-specific model descriptor for the `seasonal` selection mode.",
@@ -185,6 +260,17 @@
             "number",
             "null"
           ]
+        },
+        "reference_volume": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RawReferenceVolume"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Reference operating volume for this season, a sibling of `fpha_config`\n(not nested). Set exactly one of `volume_hm3` (absolute, hm³) or\n`percentile` (`[0.0, 1.0]`). Absent or null = no reference volume\ndeclared."
         },
         "season_id": {
           "description": "Season index (0-based, matching the `stages.json` season map).",
@@ -233,6 +319,17 @@
             "null"
           ]
         },
+        "reference_volume": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RawReferenceVolume"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Reference operating volume for this stage range, a sibling of\n`fpha_config` (not nested). Set exactly one of `volume_hm3` (absolute,\nhm³) or `percentile` (`[0.0, 1.0]`). Absent or null = no reference volume\ndeclared."
+        },
         "start_stage_id": {
           "description": "First stage (inclusive) to which this entry applies. Must be <=\n`end_stage_id` when `end_stage_id` is set.",
           "format": "int32",
@@ -256,6 +353,17 @@
         "string",
         "null"
       ]
+    },
+    "fpha_plane_reduction": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RawPlaneReductionConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Optional file-level FPHA plane-reduction block, applied uniformly to\nevery plant. Absent ⇒ no reduction. Carries a `method` tag selecting\nthe `angle` or `distance` reduction method and its tolerance."
     },
     "production_models": {
       "description": "Array of per-hydro production model configurations. Each `hydro_id`\nmust be unique.",

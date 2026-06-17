@@ -31,6 +31,7 @@ my_case/
 │   ├── hydro_production_models.json         # FPHA production function configs (optional)
     ├── hydro_energy_productivity.parquet    # Per-plant, per-stage energy-conversion overrides (optional)
 │   ├── fpha_hyperplanes.parquet             # FPHA hyperplane coefficients (optional)
+│   ├── tailrace_curves.parquet              # Piecewise-quartic tailrace curves (optional)
 │   └── scalar_parameters.json              # Scalar parameters for constraint expressions (optional)
 ├── scenarios/
 │   ├── inflow_history.parquet               # Historical inflow series (optional)
@@ -80,6 +81,7 @@ my_case/
 | `system/hydro_production_models.json`           | JSON    | No       | FPHA production function configs                                                   |
 | `system/fpha_hyperplanes.parquet`               | Parquet | No       | FPHA hyperplane coefficients                                                       |
 | `system/hydro_energy_productivity.parquet`      | Parquet | No       | Per-plant, per-stage energy-conversion overrides                                   |
+| `system/tailrace_curves.parquet`                | Parquet | No       | Piecewise-quartic tailrace curves with backwater families                          |
 | `system/scalar_parameters.json`                 | JSON    | No       | Scalar parameters for constraint expressions                                       |
 | `scenarios/inflow_history.parquet`              | Parquet | No       | Historical inflow time series                                                      |
 | `scenarios/inflow_seasonal_stats.parquet`       | Parquet | No       | PAR model seasonal statistics                                                      |
@@ -193,13 +195,17 @@ Each entry has a `"type"` discriminator. Valid types:
 
 **`training.cut_selection` sub-section:**
 
-| Field                    | Type    | Default | Description                                             |
-| ------------------------ | ------- | ------- | ------------------------------------------------------- |
-| `enabled`                | boolean | `null`  | Enable cut pruning                                      |
-| `method`                 | string  | `null`  | Pruning method: `"level1"`, `"lml1"`, or `"domination"` |
-| `threshold`              | integer | `null`  | Minimum iterations before first pruning pass            |
-| `check_frequency`        | integer | `null`  | Iterations between pruning checks                       |
-| `cut_activity_tolerance` | number  | `null`  | Minimum dual multiplier for a cut to count as binding   |
+Two always-on knobs plus a tagged `selection` object that chooses the method
+and carries only that method's parameters. Omitting `selection` disables row
+selection. See the
+[Configuration guide](../guide/configuration.md#cut_selection) for the full
+per-method field tables.
+
+| Field                    | Type    | Default | Description                                                                                            |
+| ------------------------ | ------- | ------- | ------------------------------------------------------------------------------------------------------ |
+| `row_activity_tolerance` | number  | `0.0`   | Minimum dual multiplier for a row to count as binding                                                  |
+| `max_active_per_stage`   | integer | `null`  | Hard cap on active rows per stage; `null` = no cap                                                     |
+| `selection`              | object  | `null`  | Active method and its parameters; `method` is one of `"level1"`, `"lml1"`, `"domination"`, `"dynamic"` |
 
 **`upper_bound_evaluation` section:**
 
@@ -497,7 +503,7 @@ hydro has PAR order > 0 and a `SeasonMap` is available.
 
 **`recent_observations`** provides observed inflow data for partial periods
 before the study start. Used to seed the lag accumulator when a study begins
-mid-season (e.g., a DECOMP study starting on January 5 needs observed inflow
+mid-season (e.g., a coupled study starting on January 5 needs observed inflow
 for January 1--4). Each entry has:
 
 | Field        | Type    | Description                                                      |
@@ -629,14 +635,18 @@ global default from `penalties.json` is used. The following fields are supported
 
 Thermal plant registry. Each entry defines a dispatchable generation unit.
 
-| Field                          | Required | Description                        |
-| ------------------------------ | -------- | ---------------------------------- |
-| `thermals[].id`                | Yes      | Plant identifier (integer, unique) |
-| `thermals[].name`              | Yes      | Human-readable plant name          |
-| `thermals[].bus_id`            | Yes      | Bus where generation is injected   |
-| `thermals[].min_generation_mw` | Yes      | Minimum dispatch level (MW)        |
-| `thermals[].max_generation_mw` | Yes      | Maximum dispatch level (MW)        |
-| `thermals[].cost_per_mwh`      | Yes      | Linear generation cost (USD/MWh)   |
+| Field                           | Required | Description                                                        |
+| ------------------------------- | -------- | ------------------------------------------------------------------ |
+| `thermals[].id`                 | Yes      | Plant identifier (integer, unique)                                 |
+| `thermals[].name`               | Yes      | Human-readable plant name                                          |
+| `thermals[].bus_id`             | Yes      | Bus where generation is injected                                   |
+| `thermals[].generation`         | Yes      | Dispatch-bounds object with `min_mw` and `max_mw`                  |
+| `thermals[].generation.min_mw`  | Yes      | Minimum dispatch level (MW)                                        |
+| `thermals[].generation.max_mw`  | Yes      | Maximum dispatch level (MW)                                        |
+| `thermals[].cost_per_mwh`       | Yes      | Linear generation cost (USD/MWh)                                   |
+| `thermals[].entry_stage_id`     | No       | Stage when the unit enters service (`null` = present from stage 1) |
+| `thermals[].exit_stage_id`      | No       | Stage when the unit is decommissioned (`null` = never)             |
+| `thermals[].anticipated_config` | No       | Anticipated-dispatch config (object with `lead_stages` ≥ 1)        |
 
 ---
 
@@ -696,21 +706,33 @@ plant and is identified by a unique `hydro_id`. Results are loaded in
 matching `[start_stage_id, end_stage_id]` range. `end_stage_id` may be `null`
 to mean "until end of horizon".
 
-| Field within each range   | Required | Description                                                                                                                                                                                                                                                                  |
-| ------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `start_stage_id`          | Yes      | First stage (inclusive) to which this entry applies                                                                                                                                                                                                                          |
-| `end_stage_id`            | Yes      | Last stage (inclusive); `null` means open-ended                                                                                                                                                                                                                              |
-| `model`                   | Yes      | Model name: `"constant_productivity"`, `"linearized_head"`, or `"fpha"`                                                                                                                                                                                                      |
-| `fpha_config`             | No       | Required when `model` is `"fpha"`. See FPHA config fields below.                                                                                                                                                                                                             |
-| `productivity_mw_per_m3s` | No       | Positive when present; rejected on `"fpha"`. Optional for `constant_productivity` and `linearized_head` — when omitted, supply the value via `system/hydro_energy_productivity.parquet`. Exactly one source per `(hydro, stage)` is required; both is rejected at load time. |
+| Field within each range   | Required | Description                                                                                                                                                                                                                                                                                                                                                    |
+| ------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `start_stage_id`          | Yes      | First stage (inclusive) to which this entry applies                                                                                                                                                                                                                                                                                                            |
+| `end_stage_id`            | Yes      | Last stage (inclusive); `null` means open-ended                                                                                                                                                                                                                                                                                                                |
+| `model`                   | Yes      | Model name: `"constant_productivity"`, `"linearized_head"`, or `"fpha"`                                                                                                                                                                                                                                                                                        |
+| `fpha_config`             | No       | Required when `model` is `"fpha"`. See FPHA config fields below.                                                                                                                                                                                                                                                                                               |
+| `reference_volume`        | No       | Reference operating volume V_ref, a sibling of `fpha_config` (not nested). Set exactly one of `volume_hm3` (absolute, hm³, `> 0.0`) or `percentile` (a fraction of the operating range, `[0.0, 1.0]`); both or neither is rejected. Absent ⇒ the case-wide default fraction. Applies to any plant in either selection mode. See reference-volume fields below. |
+| `productivity_mw_per_m3s` | No       | Positive when present; rejected on `"fpha"`. Optional for `constant_productivity` and `linearized_head` — when omitted, supply the value via `system/hydro_energy_productivity.parquet`. Exactly one source per `(hydro, stage)` is required; both is rejected at load time.                                                                                   |
 
 **`seasonal` mode.** The model for a stage is determined by its `season_id`.
 Stages whose season is not listed use `default_model`.
 
-| Field           | Required | Description                                                                                        |
-| --------------- | -------- | -------------------------------------------------------------------------------------------------- |
-| `default_model` | Yes      | Fallback model name for unlisted seasons                                                           |
-| `seasons`       | Yes      | Array of season overrides: `season_id`, `model`, optional `fpha_config`, `productivity_mw_per_m3s` |
+| Field           | Required | Description                                                                                                            |
+| --------------- | -------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `default_model` | Yes      | Fallback model name for unlisted seasons                                                                               |
+| `seasons`       | Yes      | Array of season overrides: `season_id`, `model`, optional `fpha_config`, `reference_volume`, `productivity_mw_per_m3s` |
+
+**`reference_volume` fields (optional sibling of `fpha_config`):**
+
+| Field        | Required | Description                                                                                                                    |
+| ------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `volume_hm3` | No       | Absolute reference volume [hm³]; finite and `> 0.0`. Mutually exclusive with `percentile`.                                     |
+| `percentile` | No       | Reference volume as a fraction of the `[V_min, V_max]` band; finite and in `[0.0, 1.0]`. Mutually exclusive with `volume_hm3`. |
+
+The reference operating volume V_ref feeds the FPHA backwater (downstream
+forebay) level and the energy-equivalent productivity ρ_eq. It is the single
+source of truth for V_ref: when absent, the case-wide default fraction is used.
 
 **`fpha_config` fields (required when `model` is `"fpha"`):**
 
@@ -845,7 +867,6 @@ by a stage-specific row.
 | `hydro_id`                               | INT32        | no       | Hydro plant identifier                                                                   |
 | `stage_id`                               | INT32        | yes      | Stage; NULL means "applies to all stages"                                                |
 | `equivalent_productivity_mw_per_m3s`     | DOUBLE       | yes      | Direct ρ_eq override [MW/(m³/s)]; finite and >= 0.0 (`0.0` marks a planned-outage stage) |
-| `reference_volume_hm3`                   | DOUBLE       | yes      | V_ref override [hm³]; finite and > 0.0                                                   |
 | `reference_outflow_m3s`                  | DOUBLE       | yes      | Q_ref override [m³/s]; finite and >= 0.0                                                 |
 | `specific_productivity_mw_per_m3s_per_m` | DOUBLE       | yes      | ρ_esp override [MW/(m³/s)/m]; finite and > 0.0                                           |
 
@@ -854,12 +875,56 @@ by a stage-specific row.
 - `hydro_id` must not be null.
 - `equivalent_productivity_mw_per_m3s`, when set, must be finite and >= 0.0;
   `0.0` is accepted as a planned-outage marker.
-- `reference_volume_hm3`, when set, must be finite and > 0.0.
 - `reference_outflow_m3s`, when set, must be finite and >= 0.0.
 - `specific_productivity_mw_per_m3s_per_m`, when set, must be finite and >= 0.0;
   `0.0` mirrors the `equivalent_productivity_mw_per_m3s` planned-outage marker.
-- A row where all four override columns are NULL is accepted.
+- A row where all three override columns are NULL is accepted.
 - Duplicate `(hydro_id, stage_id)` pairs are rejected during case build.
+- The reference operating volume V_ref is no longer an override column here; it
+  is declared per `(plant, stage)` via `reference_volume` in
+  `system/hydro_production_models.json`. A legacy `reference_volume_hm3` column,
+  if still present, is ignored (a one-time warning is emitted).
+
+---
+
+### `system/tailrace_curves.parquet`
+
+Optional piecewise-quartic tailrace-level curves that replace the entity-level
+tailrace model for any plant that has rows in this file. When a plant has rows
+here, the computed-FPHA pipeline evaluates its tailrace level from these
+piecewise-quartic curves — selecting the segment by downstream flow and
+interpolating between backwater families at the downstream plant's stage
+reference level — instead of the tailrace model declared in `hydros.json`.
+Plants without a row in this file keep their existing tailrace model; the file
+is inert (silently skipped) when absent from the case directory.
+
+Rows are sorted by `(hydro_id, family_id, segment_id)` ascending. A complete
+curve for one backwater family consists of multiple rows sharing
+`(hydro_id, family_id)`.
+
+| Column                         | Type   | Nullable | Description                                                                                                                         |
+| ------------------------------ | ------ | -------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `hydro_id`                     | INT32  | No       | Plant whose tailrace this describes                                                                                                 |
+| `family_id`                    | INT32  | No       | Family index within the plant (sequential grouping key)                                                                             |
+| `downstream_reference_level_m` | DOUBLE | Yes      | Downstream reservoir reference level keying this family (m). `null` when the plant has a single family and no backwater dependency. |
+| `segment_id`                   | INT32  | No       | Piece index within the family                                                                                                       |
+| `outflow_min_m3s`              | DOUBLE | No       | Segment lower validity bound (m³/s). Non-negative.                                                                                  |
+| `outflow_max_m3s`              | DOUBLE | No       | Segment upper validity bound (m³/s). Non-negative, >= `outflow_min_m3s`.                                                            |
+| `coefficient_0`                | DOUBLE | No       | Degree-0 polynomial coefficient. Any sign.                                                                                          |
+| `coefficient_1`                | DOUBLE | No       | Degree-1 polynomial coefficient. Any sign.                                                                                          |
+| `coefficient_2`                | DOUBLE | No       | Degree-2 polynomial coefficient. Any sign.                                                                                          |
+| `coefficient_3`                | DOUBLE | No       | Degree-3 polynomial coefficient. Any sign.                                                                                          |
+| `coefficient_4`                | DOUBLE | No       | Degree-4 polynomial coefficient. Any sign.                                                                                          |
+
+The quartic is evaluated as `coefficient_0 + coefficient_1*x + coefficient_2*x² + coefficient_3*x³ + coefficient_4*x⁴` where `x` is the downstream outflow in m³/s. Higher-degree coefficients are routinely negative in source data; all signs are accepted.
+
+**Validation rules:**
+
+- All twelve columns must be present with the correct Arrow types.
+- `outflow_min_m3s` and `outflow_max_m3s` must be non-negative and finite.
+- `outflow_max_m3s >= outflow_min_m3s` (segments are non-inverted).
+- `coefficient_0` through `coefficient_4` must be finite.
+- `downstream_reference_level_m`, when non-null, must be non-negative and finite.
 
 ---
 

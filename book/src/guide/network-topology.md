@@ -47,8 +47,9 @@ Every generator and every load must be attached to a bus. Buses are defined in
 ```
 
 This is the complete `buses.json` from the `1dtoy` example: one bus with a single
-unbounded deficit segment at 1000 $/MWh. The `excess_cost` field is optional and
-comes from the global `penalties.json` when not specified per-bus.
+unbounded deficit segment at 1000 $/MWh. Surplus-generation (excess) cost is not a
+per-bus field; it comes from the global `penalties.json` default (with per-stage
+overrides via the penalty-override path).
 
 ### Core Fields
 
@@ -57,7 +58,6 @@ comes from the global `penalties.json` when not specified per-bus.
 | `id`               | integer | Yes      | Unique non-negative integer identifier. Must be unique across all buses.                                                                          |
 | `name`             | string  | Yes      | Human-readable bus name. Used in output files, validation messages, and log output.                                                               |
 | `deficit_segments` | array   | No       | Piecewise-linear deficit cost curve. Overrides the global defaults from `penalties.json` for this bus. See [Deficit Modeling](#deficit-modeling). |
-| `excess_cost`      | number  | No       | Penalty per MWh of surplus generation absorbed by this bus ($/MWh). Overrides the global default from `penalties.json`.                           |
 
 ### Bus Balance Constraint
 
@@ -305,7 +305,7 @@ and lines. Violations are reported as error messages with the failing entity's `
 | Deficit segment ordering  | Physical feasibility | Deficit segments must be listed with ascending costs. The final segment must have `depth_mw: null`.           |
 | Unbounded final segment   | Physical feasibility | The last entry in every `deficit_segments` array must have `depth_mw: null` to guarantee LP feasibility.      |
 | Non-negative capacity     | Physical feasibility | `capacity.direct_mw` and `capacity.reverse_mw` must be non-negative.                                          |
-| Non-negative losses       | Physical feasibility | `losses_percent` must be in the range [0, 100).                                                               |
+| Non-negative losses       | Physical feasibility | `losses_percent` must be `>= 0.0`.                                                                            |
 
 When a bus ID referenced by a generator does not exist in `buses.json`, the
 validator reports the error as:

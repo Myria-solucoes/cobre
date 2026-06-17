@@ -568,8 +568,8 @@ pub(crate) struct NcsNoiseOffsets {
 ///
 /// When `allow_curtailment[i] == false` the lower bound matches the upper
 /// bound so the source is dispatched at exactly the realized availability
-/// on every scenario — the **must-run** regime that mirrors NEWAVE's
-/// `geracao_usinas_nao_simuladas` pre-netting convention. When
+/// on every scenario — the **must-run** regime for non-simulated aggregate
+/// generation pre-netted from load. When
 /// `allow_curtailment[i] == true` the lower bound is zero and the LP can
 /// curtail at `curtailment_cost` per `MWh`.
 ///

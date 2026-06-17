@@ -14,9 +14,9 @@ use cobre_io::{HydroEnergyProductivityRow, LoadError};
 /// Per-`(hydro, stage)` override table loaded from
 /// `system/hydro_energy_productivity.parquet`.
 ///
-/// Each of the four override columns (`ρ_eq`, `V_ref`, `Q_ref`, `ρ_esp`) is
-/// stored in two parallel lookup tables: one for stage-specific rows and one
-/// for per-hydro defaults (rows whose `stage_id` is NULL in the source file).
+/// Each of the three override columns (`ρ_eq`, `Q_ref`, `ρ_esp`) is stored in
+/// two parallel lookup tables: one for stage-specific rows and one for
+/// per-hydro defaults (rows whose `stage_id` is NULL in the source file).
 ///
 /// Accessors apply a per-stage → per-hydro-default → `None` fallback chain.
 /// `Default` yields an override where every accessor returns `None`.
@@ -24,8 +24,6 @@ use cobre_io::{HydroEnergyProductivityRow, LoadError};
 pub struct HydroEnergyProductivityOverride {
     rho_eq_per_hydro_stage: HashMap<(EntityId, i32), f64>,
     rho_eq_per_hydro_default: HashMap<EntityId, f64>,
-    v_ref_per_hydro_stage: HashMap<(EntityId, i32), f64>,
-    v_ref_per_hydro_default: HashMap<EntityId, f64>,
     q_ref_per_hydro_stage: HashMap<(EntityId, i32), f64>,
     q_ref_per_hydro_default: HashMap<EntityId, f64>,
     rho_esp_per_hydro_stage: HashMap<(EntityId, i32), f64>,
@@ -45,19 +43,6 @@ impl HydroEnergyProductivityOverride {
             return Some(v);
         }
         self.rho_eq_per_hydro_default.get(&hydro).copied()
-    }
-
-    /// Returns the user-supplied `V_ref` \[hm³\] for `(hydro, stage)` if any.
-    ///
-    /// Applies the same per-stage → per-hydro-default → `None` fallback as
-    /// [`equivalent_productivity`](Self::equivalent_productivity).
-    #[must_use]
-    pub fn reference_volume(&self, hydro: EntityId, stage: usize) -> Option<f64> {
-        let s = i32::try_from(stage).ok()?;
-        if let Some(&v) = self.v_ref_per_hydro_stage.get(&(hydro, s)) {
-            return Some(v);
-        }
-        self.v_ref_per_hydro_default.get(&hydro).copied()
     }
 
     /// Returns the user-supplied `Q_ref` \[m³/s\] for `(hydro, stage)` if any.
@@ -102,16 +87,7 @@ pub fn build_hydro_energy_productivity_override(
     rows: &[HydroEnergyProductivityRow],
 ) -> Result<HydroEnergyProductivityOverride, LoadError> {
     let mut seen: HashSet<(EntityId, Option<i32>)> = HashSet::with_capacity(rows.len());
-    let mut out = HydroEnergyProductivityOverride {
-        rho_eq_per_hydro_stage: HashMap::new(),
-        rho_eq_per_hydro_default: HashMap::new(),
-        v_ref_per_hydro_stage: HashMap::new(),
-        v_ref_per_hydro_default: HashMap::new(),
-        q_ref_per_hydro_stage: HashMap::new(),
-        q_ref_per_hydro_default: HashMap::new(),
-        rho_esp_per_hydro_stage: HashMap::new(),
-        rho_esp_per_hydro_default: HashMap::new(),
-    };
+    let mut out = HydroEnergyProductivityOverride::default();
 
     for row in rows {
         let key = (row.hydro_id, row.stage_id);
@@ -133,9 +109,6 @@ pub fn build_hydro_energy_productivity_override(
             if let Some(v) = row.equivalent_productivity_mw_per_m3s {
                 out.rho_eq_per_hydro_stage.insert((row.hydro_id, s), v);
             }
-            if let Some(v) = row.reference_volume_hm3 {
-                out.v_ref_per_hydro_stage.insert((row.hydro_id, s), v);
-            }
             if let Some(v) = row.reference_outflow_m3s {
                 out.q_ref_per_hydro_stage.insert((row.hydro_id, s), v);
             }
@@ -145,9 +118,6 @@ pub fn build_hydro_energy_productivity_override(
         } else {
             if let Some(v) = row.equivalent_productivity_mw_per_m3s {
                 out.rho_eq_per_hydro_default.insert(row.hydro_id, v);
-            }
-            if let Some(v) = row.reference_volume_hm3 {
-                out.v_ref_per_hydro_default.insert(row.hydro_id, v);
             }
             if let Some(v) = row.reference_outflow_m3s {
                 out.q_ref_per_hydro_default.insert(row.hydro_id, v);
@@ -176,13 +146,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_override_four_column_lookup_precedence() {
+    fn test_override_three_column_lookup_precedence() {
         let rows = vec![
             HydroEnergyProductivityRow {
                 hydro_id: EntityId(1),
                 stage_id: Some(0),
                 equivalent_productivity_mw_per_m3s: Some(3.6),
-                reference_volume_hm3: None,
                 reference_outflow_m3s: None,
                 specific_productivity_mw_per_m3s_per_m: None,
             },
@@ -190,7 +159,6 @@ mod tests {
                 hydro_id: EntityId(1),
                 stage_id: None,
                 equivalent_productivity_mw_per_m3s: Some(4.0),
-                reference_volume_hm3: Some(120.0),
                 reference_outflow_m3s: None,
                 specific_productivity_mw_per_m3s_per_m: Some(0.009),
             },
@@ -198,7 +166,6 @@ mod tests {
                 hydro_id: EntityId(2),
                 stage_id: None,
                 equivalent_productivity_mw_per_m3s: Some(5.0),
-                reference_volume_hm3: None,
                 reference_outflow_m3s: Some(200.0),
                 specific_productivity_mw_per_m3s_per_m: None,
             },
@@ -208,9 +175,6 @@ mod tests {
         assert_eq!(o.equivalent_productivity(EntityId(1), 1), Some(4.0));
         assert_eq!(o.equivalent_productivity(EntityId(2), 0), Some(5.0));
         assert_eq!(o.equivalent_productivity(EntityId(3), 0), None);
-        assert_eq!(o.reference_volume(EntityId(1), 0), Some(120.0));
-        assert_eq!(o.reference_volume(EntityId(1), 1), Some(120.0));
-        assert_eq!(o.reference_volume(EntityId(2), 0), None);
         assert_eq!(o.reference_outflow(EntityId(2), 0), Some(200.0));
         assert_eq!(o.reference_outflow(EntityId(1), 0), None);
         assert_eq!(o.specific_productivity(EntityId(1), 0), Some(0.009));
@@ -225,7 +189,6 @@ mod tests {
                 hydro_id: EntityId(1),
                 stage_id: Some(0),
                 equivalent_productivity_mw_per_m3s: Some(3.6),
-                reference_volume_hm3: None,
                 reference_outflow_m3s: None,
                 specific_productivity_mw_per_m3s_per_m: None,
             },
@@ -233,8 +196,7 @@ mod tests {
                 hydro_id: EntityId(1),
                 stage_id: Some(0),
                 equivalent_productivity_mw_per_m3s: None,
-                reference_volume_hm3: Some(120.0),
-                reference_outflow_m3s: None,
+                reference_outflow_m3s: Some(200.0),
                 specific_productivity_mw_per_m3s_per_m: None,
             },
         ];
@@ -254,7 +216,6 @@ mod tests {
                 hydro_id: EntityId(1),
                 stage_id: None,
                 equivalent_productivity_mw_per_m3s: Some(2.0),
-                reference_volume_hm3: None,
                 reference_outflow_m3s: None,
                 specific_productivity_mw_per_m3s_per_m: None,
             },
@@ -262,7 +223,6 @@ mod tests {
                 hydro_id: EntityId(1),
                 stage_id: Some(0),
                 equivalent_productivity_mw_per_m3s: Some(3.0),
-                reference_volume_hm3: None,
                 reference_outflow_m3s: None,
                 specific_productivity_mw_per_m3s_per_m: None,
             },
@@ -276,7 +236,6 @@ mod tests {
     fn test_default_override_returns_none_for_every_accessor() {
         let o = HydroEnergyProductivityOverride::default();
         assert_eq!(o.equivalent_productivity(EntityId(1), 0), None);
-        assert_eq!(o.reference_volume(EntityId(1), 0), None);
         assert_eq!(o.reference_outflow(EntityId(1), 0), None);
         assert_eq!(o.specific_productivity(EntityId(1), 0), None);
     }

@@ -5,7 +5,7 @@
 use cobre_core::EntityId;
 use thiserror::Error;
 
-/// Per-`(hydro, stage)` scalars used for ENA / EARM accounting.
+/// Per-`(hydro, stage)` scalars used for inflow-energy / stored-energy accounting.
 ///
 /// All three values are scalar reductions of the underlying production model
 /// at a representative operating point (`V_ref`, `Q_ref`). The triple is

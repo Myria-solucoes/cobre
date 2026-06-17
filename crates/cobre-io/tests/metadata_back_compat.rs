@@ -14,11 +14,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
 
 use cobre_io::{
-    DistributionInfo, HostLayout, MetadataBounds, MetadataConfiguration, MetadataConvergence,
-    MetadataCost, MetadataIterations, MetadataProblemDimensions, MetadataRowPool,
-    MetadataScenarios, MetadataSimulationSolveStats, MetadataTrainingSolveStats,
-    SimulationMetadata, TrainingMetadata, read_simulation_metadata, read_training_metadata,
-    write_simulation_metadata, write_training_metadata,
+    DeviationSummary, DeviationWorstEntry, DistributionInfo, HostLayout, MetadataBounds,
+    MetadataConfiguration, MetadataConvergence, MetadataCost, MetadataIterations,
+    MetadataProblemDimensions, MetadataRowPool, MetadataScenarios, MetadataSimulationSolveStats,
+    MetadataTrainingSolveStats, SimulationMetadata, TrainingMetadata, read_simulation_metadata,
+    read_training_metadata, write_simulation_metadata, write_training_metadata,
 };
 
 // ── Frozen legacy fixtures ─────────────────────────────────────────────────────
@@ -142,6 +142,12 @@ fn legacy_training_json_deserializes_with_defaults() {
     // `distribution.hosts` defaults to an empty vector.
     assert!(decoded.distribution.hosts.is_empty());
 
+    // `setup` and `production_fit_deviation` are optional sections that default to
+    // absent — this fixture is the regression gate that catches an accidental
+    // `#[serde(default)]` removal on either.
+    assert!(decoded.setup.is_none());
+    assert!(decoded.production_fit_deviation.is_none());
+
     // Sanity: pre-existing fields still load correctly.
     assert_eq!(decoded.iterations.completed, 100);
     assert_eq!(decoded.row_pool.total_generated, 1_250_000);
@@ -186,6 +192,14 @@ fn legacy_training_fixture_omits_new_keys() {
     assert!(
         !LEGACY_TRAINING_JSON.contains("hosts"),
         "legacy training fixture must omit the `hosts` key to exercise back-compat"
+    );
+    assert!(
+        !LEGACY_TRAINING_JSON.contains("setup"),
+        "legacy training fixture must omit the `setup` key to exercise back-compat"
+    );
+    assert!(
+        !LEGACY_TRAINING_JSON.contains("production_fit_deviation"),
+        "legacy training fixture must omit the `production_fit_deviation` key to exercise back-compat"
     );
 }
 
@@ -305,6 +319,20 @@ fn fully_populated_training_metadata() -> TrainingMetadata {
             backward_solve_seconds: Some(456.75),
             parallelism: Some(8),
         },
+        setup: None,
+        production_fit_deviation: Some(DeviationSummary {
+            n_entries: 3,
+            mean_abs: 4.1,
+            max_abs: 31.7,
+            worst_relative: 0.062,
+            worst_entry: Some(DeviationWorstEntry {
+                entity_id: 12,
+                stage_id: 4,
+                relative: 0.062,
+                mean_abs: 8.0,
+                max_abs: 31.7,
+            }),
+        }),
         distribution: fully_populated_distribution(),
     }
 }
@@ -395,6 +423,18 @@ fn training_metadata_new_fields_survive_write_read_roundtrip() {
     assert_eq!(decoded.distribution.hosts[0].ranks, vec![0, 1, 2, 3]);
     assert_eq!(decoded.distribution.hosts[1].hostname, "node02");
     assert_eq!(decoded.distribution.hosts[1].ranks, vec![4, 5, 6, 7]);
+
+    // `production_fit_deviation.*` survive, worst entry field-for-field.
+    let summary = decoded
+        .production_fit_deviation
+        .expect("deviation summary must survive round-trip");
+    assert_eq!(summary.n_entries, 3);
+    assert_eq!(summary.mean_abs, 4.1);
+    assert_eq!(summary.max_abs, 31.7);
+    assert_eq!(summary.worst_relative, 0.062);
+    let worst = summary.worst_entry.expect("worst entry must survive");
+    assert_eq!(worst.entity_id, 12);
+    assert_eq!(worst.stage_id, 4);
 }
 
 #[test]

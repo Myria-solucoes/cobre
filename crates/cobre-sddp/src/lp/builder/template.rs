@@ -139,9 +139,8 @@ pub struct StageTemplates {
 /// Returns the template, the row index of the water-balance block
 /// (used as `base_row` by the `PatchBuffer` noise injection), the
 /// row index of the load-balance block (used for load-noise patches),
-/// the generic constraint row entries for this stage, NCS metadata
-/// (column start, count, and active system indices), and z-inflow
-/// metadata (row start, column start).
+/// the generic constraint row entries for this stage, and NCS metadata
+/// (column start, count, and active system indices).
 // Rationale: the return tuple exposes seven independently typed outputs — the template,
 // two base-row offsets, generic-constraint metadata, NCS column start/count, and active
 // NCS indices — that the caller destructures immediately into named bindings.  A type alias
@@ -349,13 +348,14 @@ fn collect_load_bus_indices(system: &System, bus_pos: &HashMap<EntityId, usize>)
 ///
 /// For hydros whose evaporation model is
 /// `EvaporationModel::Linearized`,
-/// three stage-level columns are added per hydro (`Q_ev`, `f_evap_plus`,
-/// `f_evap_minus`).  `Q_ev` is bounded symmetrically `[-q_max, +q_max]`
-/// so a negative value can absorb net rainfall input on the lake surface;
-/// `f_evap_plus` and `f_evap_minus` are bounded `[0, +inf)`.  `Q_ev` carries
-/// objective coefficient 0.0; the violation slacks carry the evaporation
-/// penalty.  One equality constraint row is added per evaporation hydro with
-/// `row_lower == row_upper == k_evap0`.
+/// three stage-level columns are added per hydro (evaporation outflow,
+/// `f_evap_plus`, `f_evap_minus`).  The evaporation-outflow column is bounded
+/// symmetrically `[-q_max, +q_max]` so a negative value can absorb net rainfall
+/// input on the lake surface; `f_evap_plus` and `f_evap_minus` are bounded
+/// `[0, +inf)`.  The evaporation-outflow column carries objective coefficient
+/// 0.0; the violation slacks carry the evaporation penalty.  One equality
+/// constraint row is added per evaporation hydro with
+/// `row_lower == row_upper == intercept_m3s`.
 ///
 /// # Examples
 ///

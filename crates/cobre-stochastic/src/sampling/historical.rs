@@ -46,7 +46,7 @@
 //! ## Initial inflow lags
 //!
 //! The initial inflow lags are **NOT** stored on the library and are **NOT**
-//! injected into the solver state vector. Per NEWAVE's `TENDENCIA HIDROLOGICA`
+//! injected into the solver state vector. Following the hydrological-tendency
 //! convention, they come from `initial_conditions.past_inflows` for every
 //! scenario regardless of the historical window being replayed; η inversion
 //! uses the `past_inflows`-seeded rolling chain.

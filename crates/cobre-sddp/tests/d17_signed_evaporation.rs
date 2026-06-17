@@ -1,4 +1,4 @@
-//! Focused semantic regression test for the signed `Q_ev` evaporation variable.
+//! Focused semantic regression test for the signed evaporation-outflow variable.
 //!
 //! Runs D17 (`d17-evaporation-mixed-sign`) end-to-end and asserts that the
 //! simulation output reflects the mixed-sign monthly evaporation coefficients
@@ -113,7 +113,7 @@ fn d17_evaporation_is_signed_per_month() {
     let stochastic = pr.stochastic;
 
     let hydro_models =
-        prepare_hydro_models(&system, &dir).expect("prepare_hydro_models must succeed");
+        prepare_hydro_models(&system, &dir, false).expect("prepare_hydro_models must succeed");
 
     let mut config_with_sim = config.clone();
     config_with_sim.simulation.enabled = true;

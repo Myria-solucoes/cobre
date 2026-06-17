@@ -615,19 +615,16 @@ fn apply_column_rule(
 // Config parsing
 // ---------------------------------------------------------------------------
 
-/// Resolve the periodic-pruning cadence (`check_frequency`) for the methods that
-/// use it (`level1` / `lml1` / `domination`).
+/// Validate the periodic-pruning cadence (`check_frequency`) for the methods
+/// that use it (`level1` / `lml1` / `domination`).
 ///
-/// `0` is meaningless for a pruning cadence and is rejected. The `"dynamic"`
-/// method does not call this helper — it never reads `check_frequency` and uses
-/// its own first-class `active_window` (k2) field instead, so an explicit
-/// `check_frequency = 0` left over in a dynamic config is ignored, not rejected.
+/// `0` is meaningless for a pruning cadence and is rejected. The dynamic method
+/// does not call this helper — it carries no `check_frequency` field.
 ///
 /// # Errors
 ///
 /// Returns `Err(String)` when `check_frequency = 0`.
-fn parse_pruning_cadence(config: &cobre_io::config::RowSelectionConfig) -> Result<u32, String> {
-    let check_frequency = config.check_frequency.unwrap_or(5);
+fn validate_check_frequency(check_frequency: u32) -> Result<u32, String> {
     if check_frequency == 0 {
         return Err("cut_selection.check_frequency must be > 0".to_string());
     }
@@ -637,133 +634,105 @@ fn parse_pruning_cadence(config: &cobre_io::config::RowSelectionConfig) -> Resul
 /// Parse a [`cobre_io::config::RowSelectionConfig`] into an optional
 /// [`CutSelectionStrategy`].
 ///
-/// Returns `None` when disabled (default). Returns `Err` when explicitly
-/// enabled with invalid configuration (unknown method, `enabled = true` with no
-/// method, or `check_frequency = 0` for a method that uses it). Defaults:
-/// `check_frequency = 5`, `tie_tolerance = 1e-10`.
+/// Returns `None` when `selection` is absent (the default — row selection
+/// disabled). Otherwise maps the chosen [`SelectionMethod`] variant onto the
+/// matching [`CutSelectionStrategy`], validating the variant's numeric
+/// constraints.
 ///
-/// The `threshold` and `memory_window` fields on `RowSelectionConfig` are
-/// deprecated and silently ignored for **every** method, including
-/// `"dynamic"`. The `"dynamic"` arm reads its own first-class fields:
-/// `active_window` (k2), `candidate_window` (k1), `nadic`,
-/// `violation_tolerance` (fallback `tie_tolerance`), and `start_iteration`
-/// (see the `"dynamic"` arm for the full precedence). `check_frequency` is the
-/// periodic-pruning cadence for `"level1" | "lml1" | "domination"` only and is
-/// not consulted by `"dynamic"`.
+/// Each method carries only its own parameters, so there is no cross-method
+/// field bleed: the periodic-pruning cadence (`check_frequency`) exists only on
+/// the periodic methods, and the dynamic seed/recency/round/violation knobs
+/// exist only on the dynamic variant. Internally the dynamic variant maps onto
+/// the wire-format `Dynamic` fields `k1` (candidate recency, `None` = ∞,
+/// exactness-preserving), `k2` (seed window), `nadic` (rows added per round),
+/// `epsilon_viol`, and `start_iteration`.
 ///
 /// # Errors
 ///
-/// Returns `Err(String)` when `enabled = true` but no `method` is specified,
-/// when the `method` string is not a recognised variant, or when
-/// `check_frequency = 0` for a method that uses it
-/// (`level1` / `lml1` / `domination`).
+/// Returns `Err(String)` when a method's numeric constraint is violated:
+/// `check_frequency = 0` for a periodic method; or, for the dynamic method,
+/// `start_iteration = 0`, `candidate_recency = Some(0)`,
+/// `max_added_per_round = 0`, or `violation_tolerance <= 0`.
+///
+/// [`SelectionMethod`]: cobre_io::config::SelectionMethod
 pub fn parse_cut_selection_config(
     config: &cobre_io::config::RowSelectionConfig,
 ) -> Result<Option<CutSelectionStrategy>, String> {
-    const DEFAULT_TIE_TOLERANCE: f64 = 1e-10;
+    use cobre_io::config::SelectionMethod;
 
-    let enabled = config.enabled.unwrap_or(false);
-    if !enabled {
+    let Some(selection) = config.selection.as_ref() else {
         return Ok(None);
-    }
+    };
 
-    let method = config
-        .method
-        .as_deref()
-        .ok_or_else(|| "cut_selection.enabled is true but method is not specified".to_string())?;
-
-    match method {
-        "level1" => Ok(Some(CutSelectionStrategy::Level1 {
-            check_frequency: u64::from(parse_pruning_cadence(config)?),
-            tie_tolerance: config.tie_tolerance.unwrap_or(DEFAULT_TIE_TOLERANCE),
+    match *selection {
+        SelectionMethod::Level1 {
+            tie_tolerance,
+            check_frequency,
+        } => Ok(Some(CutSelectionStrategy::Level1 {
+            check_frequency: u64::from(validate_check_frequency(check_frequency)?),
+            tie_tolerance,
         })),
-        "lml1" => Ok(Some(CutSelectionStrategy::Lml1 {
-            check_frequency: u64::from(parse_pruning_cadence(config)?),
-            tie_tolerance: config.tie_tolerance.unwrap_or(DEFAULT_TIE_TOLERANCE),
+        SelectionMethod::Lml1 {
+            tie_tolerance,
+            check_frequency,
+        } => Ok(Some(CutSelectionStrategy::Lml1 {
+            check_frequency: u64::from(validate_check_frequency(check_frequency)?),
+            tie_tolerance,
         })),
-        "domination" => {
-            let check_frequency = parse_pruning_cadence(config)?;
-            let epsilon = config.domination_epsilon.ok_or_else(|| {
-                "cut_selection.method='domination' requires domination_epsilon to be set"
-                    .to_string()
-            })?;
-            Ok(Some(CutSelectionStrategy::Dominated {
-                threshold: epsilon,
-                check_frequency: u64::from(check_frequency),
-            }))
-        }
-        "dynamic" => {
-            // DCS hyperparameters read first-class fields, then the documented
-            // default. The deprecated `threshold` / `memory_window` aliases are
-            // NOT consulted (clean break — they are silently ignored for every
-            // method now):
-            //   k1              ← candidate_window
-            //                       (default None = ∞; Some(n) must be >= 1)
-            //   k2              ← active_window (default 5; 0 is valid)
-            //   nadic           ← nadic (default 10, must be >= 1)
-            //   epsilon_viol    ← violation_tolerance, else tie_tolerance
-            //                       (default 1e-10, must be > 0)
-            //   start_iteration ← start_iteration (default 2, must be >= 1)
-            const DEFAULT_K2: u32 = 5;
-            const DEFAULT_NADIC: u32 = 10;
-            const DEFAULT_START_ITERATION_U32: u32 = 2;
-
+        SelectionMethod::Domination {
+            domination_tolerance,
+            check_frequency,
+        } => Ok(Some(CutSelectionStrategy::Dominated {
+            threshold: domination_tolerance,
+            check_frequency: u64::from(validate_check_frequency(check_frequency)?),
+        })),
+        SelectionMethod::Dynamic {
+            start_iteration,
+            seed_window,
+            candidate_recency,
+            max_added_per_round,
+            violation_tolerance,
+        } => {
             // start_iteration is 1-based; the lazy loop never runs at iteration 0
-            // (no cuts exist yet), so Some(0) is rejected.
-            if config.start_iteration == Some(0) {
+            // (no cuts exist yet), so 0 is rejected.
+            if start_iteration == 0 {
                 return Err(
                     "cut_selection.start_iteration must be >= 1 for method='dynamic'".to_string(),
                 );
             }
-            let start_iteration = u64::from(
-                config
-                    .start_iteration
-                    .unwrap_or(DEFAULT_START_ITERATION_U32),
-            );
 
-            // k1: candidate_window. absent/None ⇒ ∞ (exactness-preserving).
-            let k1 = config.candidate_window;
-            if k1 == Some(0) {
+            // candidate_recency feeds k1: absent/None ⇒ ∞ (exactness-preserving);
+            // Some(0) is an error (use absent for the unbounded default).
+            if candidate_recency == Some(0) {
                 return Err(
-                    "cut_selection.candidate_window (k1) must be >= 1 for method='dynamic' (use absent for k1=∞)"
+                    "cut_selection.candidate_recency must be >= 1 for method='dynamic' \
+                     (omit it for the unbounded default)"
                         .to_string(),
                 );
             }
 
-            // k2: active_window. 0 is valid (seeds only the current iteration).
-            let k2 = config.active_window.unwrap_or(DEFAULT_K2);
-
-            let nadic = config.nadic.unwrap_or(DEFAULT_NADIC);
-            if nadic == 0 {
+            if max_added_per_round == 0 {
                 return Err(
-                    "cut_selection.nadic (nadic) must be >= 1 for method='dynamic'".to_string(),
+                    "cut_selection.max_added_per_round must be >= 1 for method='dynamic'"
+                        .to_string(),
                 );
             }
 
-            let epsilon_viol = config
-                .violation_tolerance
-                .or(config.tie_tolerance)
-                .unwrap_or(DEFAULT_TIE_TOLERANCE);
-            if epsilon_viol <= 0.0 {
-                let field = if config.violation_tolerance.is_some() {
-                    "violation_tolerance"
-                } else {
-                    "tie_tolerance"
-                };
-                return Err(format!(
-                    "cut_selection.{field} must be > 0 for method='dynamic'"
-                ));
+            if violation_tolerance <= 0.0 {
+                return Err(
+                    "cut_selection.violation_tolerance must be > 0 for method='dynamic'"
+                        .to_string(),
+                );
             }
 
             Ok(Some(CutSelectionStrategy::Dynamic {
-                k1,
-                k2,
-                nadic,
-                epsilon_viol,
-                start_iteration,
+                k1: candidate_recency,
+                k2: seed_window,
+                nadic: max_added_per_round,
+                epsilon_viol: violation_tolerance,
+                start_iteration: u64::from(start_iteration),
             }))
         }
-        other => Err(format!("unknown cut_selection.method: \"{other}\"")),
     }
 }
 
@@ -772,12 +741,11 @@ pub fn parse_cut_selection_config(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(deprecated)]
 mod tests {
     use super::parse_cut_selection_config;
     use super::{CutActivityUpdates, CutMetadata, CutSelectionStrategy};
     use crate::cut::CutPool;
-    use cobre_io::config::RowSelectionConfig;
+    use cobre_io::config::{RowSelectionConfig, SelectionMethod};
 
     fn make_meta(active_count: u64, last_active_iter: u64) -> CutMetadata {
         CutMetadata {
@@ -1605,29 +1573,22 @@ mod tests {
         assert!(result.is_ok());
         assert!(
             result.unwrap().is_none(),
-            "default config must produce None (disabled)"
+            "default config (no selection) must produce None (disabled)"
         );
     }
 
     #[test]
     fn test_parse_level1() {
         let cfg = RowSelectionConfig {
-            enabled: Some(true),
-            method: Some("level1".to_string()),
-            threshold: Some(0),
-            check_frequency: Some(5),
-            cut_activity_tolerance: None,
-            max_active_per_stage: None,
-            memory_window: None,
-            domination_epsilon: None,
-            tie_tolerance: Some(1e-8),
+            selection: Some(SelectionMethod::Level1 {
+                tie_tolerance: 1e-8,
+                check_frequency: 5,
+            }),
             ..RowSelectionConfig::default()
         };
-        let result = parse_cut_selection_config(&cfg);
-        assert!(result.is_ok());
-        let strategy = result
-            .unwrap()
-            .expect("must produce Some for enabled level1");
+        let strategy = parse_cut_selection_config(&cfg)
+            .expect("level1 must parse")
+            .expect("must produce Some for level1");
         assert!(
             matches!(
                 strategy,
@@ -1640,26 +1601,15 @@ mod tests {
         );
     }
 
-    /// AC: `level1` with no `tie_tolerance` uses the default 1e-10.
+    /// `level1` with serde-default fields resolves to the documented defaults
+    /// (`tie_tolerance = 1e-10`, `check_frequency = 5`).
     #[test]
     fn test_parse_level1_default_tie_tolerance() {
-        let cfg = RowSelectionConfig {
-            enabled: Some(true),
-            method: Some("level1".to_string()),
-            threshold: None,
-            check_frequency: Some(5),
-            cut_activity_tolerance: None,
-            max_active_per_stage: None,
-            memory_window: None,
-            domination_epsilon: None,
-            tie_tolerance: None,
-            ..RowSelectionConfig::default()
-        };
-        let result = parse_cut_selection_config(&cfg);
-        assert!(result.is_ok());
-        let strategy = result
-            .unwrap()
-            .expect("must produce Some for enabled level1 without tie_tolerance");
+        let json = r#"{"selection": {"method": "level1"}}"#;
+        let cfg: RowSelectionConfig = serde_json::from_str(json).expect("level1 defaults parse");
+        let strategy = parse_cut_selection_config(&cfg)
+            .expect("level1 must parse")
+            .expect("must produce Some for level1");
         assert!(
             matches!(
                 strategy,
@@ -1674,22 +1624,16 @@ mod tests {
 
     #[test]
     fn test_parse_lml1() {
-        // AC: `lml1` with explicit `tie_tolerance` uses the provided value.
         let cfg = RowSelectionConfig {
-            enabled: Some(true),
-            method: Some("lml1".to_string()),
-            threshold: None,
-            check_frequency: Some(5),
-            cut_activity_tolerance: None,
-            max_active_per_stage: None,
-            memory_window: Some(10), // deprecated; silently ignored
-            domination_epsilon: None,
-            tie_tolerance: Some(1e-8),
+            selection: Some(SelectionMethod::Lml1 {
+                tie_tolerance: 1e-8,
+                check_frequency: 5,
+            }),
             ..RowSelectionConfig::default()
         };
-        let result = parse_cut_selection_config(&cfg);
-        assert!(result.is_ok());
-        let strategy = result.unwrap().expect("must produce Some for enabled lml1");
+        let strategy = parse_cut_selection_config(&cfg)
+            .expect("lml1 must parse")
+            .expect("must produce Some for lml1");
         assert!(
             matches!(
                 strategy,
@@ -1702,31 +1646,15 @@ mod tests {
         );
     }
 
-    /// AC: `lml1` without `memory_window` and without `tie_tolerance` must succeed
-    /// and use the default `tie_tolerance` of 1e-10.
+    /// `lml1` with serde-default fields resolves to the default
+    /// `tie_tolerance = 1e-10`.
     #[test]
-    fn test_parse_lml1_missing_memory_window_succeeds() {
-        let cfg = RowSelectionConfig {
-            enabled: Some(true),
-            method: Some("lml1".to_string()),
-            threshold: None,
-            check_frequency: Some(5),
-            cut_activity_tolerance: None,
-            max_active_per_stage: None,
-            memory_window: None,
-            domination_epsilon: None,
-            tie_tolerance: None,
-            ..RowSelectionConfig::default()
-        };
-        let result = parse_cut_selection_config(&cfg);
-        assert!(
-            result.is_ok(),
-            "lml1 without memory_window must not error: {:?}",
-            result.unwrap_err()
-        );
-        let strategy = result
-            .unwrap()
-            .expect("must produce Some for enabled lml1 without memory_window");
+    fn test_parse_lml1_defaults() {
+        let json = r#"{"selection": {"method": "lml1"}}"#;
+        let cfg: RowSelectionConfig = serde_json::from_str(json).expect("lml1 defaults parse");
+        let strategy = parse_cut_selection_config(&cfg)
+            .expect("lml1 must parse")
+            .expect("must produce Some for lml1");
         assert!(
             matches!(
                 strategy,
@@ -1742,22 +1670,15 @@ mod tests {
     #[test]
     fn test_parse_domination() {
         let cfg = RowSelectionConfig {
-            enabled: Some(true),
-            method: Some("domination".to_string()),
-            threshold: None,
-            check_frequency: Some(10),
-            cut_activity_tolerance: None,
-            max_active_per_stage: None,
-            memory_window: None,
-            domination_epsilon: Some(1e-6),
-            tie_tolerance: None,
+            selection: Some(SelectionMethod::Domination {
+                domination_tolerance: 1e-6,
+                check_frequency: 10,
+            }),
             ..RowSelectionConfig::default()
         };
-        let result = parse_cut_selection_config(&cfg);
-        assert!(result.is_ok());
-        let strategy = result
-            .unwrap()
-            .expect("must produce Some for enabled domination");
+        let strategy = parse_cut_selection_config(&cfg)
+            .expect("domination must parse")
+            .expect("must produce Some for domination");
         assert!(
             matches!(
                 strategy,
@@ -1771,105 +1692,12 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_domination_missing_epsilon_errors() {
-        let cfg = RowSelectionConfig {
-            enabled: Some(true),
-            method: Some("domination".to_string()),
-            threshold: None,
-            check_frequency: Some(10),
-            cut_activity_tolerance: None,
-            max_active_per_stage: None,
-            memory_window: None,
-            domination_epsilon: None,
-            tie_tolerance: None,
-            ..RowSelectionConfig::default()
-        };
-        let result = parse_cut_selection_config(&cfg);
-        assert!(
-            result.is_err(),
-            "domination without domination_epsilon must error"
-        );
-        let msg = result.unwrap_err();
-        assert!(
-            msg.contains("domination_epsilon"),
-            "error must mention domination_epsilon, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn test_parse_unknown_method() {
-        let cfg = RowSelectionConfig {
-            enabled: Some(true),
-            method: Some("bogus".to_string()),
-            threshold: None,
-            check_frequency: None,
-            cut_activity_tolerance: None,
-            max_active_per_stage: None,
-            memory_window: None,
-            domination_epsilon: None,
-            tie_tolerance: None,
-            ..RowSelectionConfig::default()
-        };
-        let result = parse_cut_selection_config(&cfg);
-        assert!(result.is_err());
-        let msg = result.unwrap_err();
-        assert!(
-            msg.contains("bogus"),
-            "error message must contain the unrecognized method name, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn test_parse_enabled_without_method() {
-        let cfg = RowSelectionConfig {
-            enabled: Some(true),
-            method: None,
-            threshold: None,
-            check_frequency: None,
-            cut_activity_tolerance: None,
-            max_active_per_stage: None,
-            memory_window: None,
-            domination_epsilon: None,
-            tie_tolerance: None,
-            ..RowSelectionConfig::default()
-        };
-        let result = parse_cut_selection_config(&cfg);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_enabled_false_with_method_returns_none() {
-        let cfg = RowSelectionConfig {
-            enabled: Some(false),
-            method: Some("level1".to_string()),
-            threshold: None,
-            check_frequency: None,
-            cut_activity_tolerance: None,
-            max_active_per_stage: None,
-            memory_window: None,
-            domination_epsilon: None,
-            tie_tolerance: None,
-            ..RowSelectionConfig::default()
-        };
-        let result = parse_cut_selection_config(&cfg).unwrap();
-        assert!(
-            result.is_none(),
-            "enabled=false must return None even when method is set"
-        );
-    }
-
-    #[test]
     fn test_parse_zero_check_frequency() {
         let cfg = RowSelectionConfig {
-            enabled: Some(true),
-            method: Some("level1".to_string()),
-            threshold: None,
-            check_frequency: Some(0),
-            cut_activity_tolerance: None,
-            max_active_per_stage: None,
-            memory_window: None,
-            domination_epsilon: None,
-            tie_tolerance: None,
+            selection: Some(SelectionMethod::Level1 {
+                tie_tolerance: 1e-10,
+                check_frequency: 0,
+            }),
             ..RowSelectionConfig::default()
         };
         let result = parse_cut_selection_config(&cfg);
@@ -2412,17 +2240,19 @@ mod tests {
     // Dynamic (DCS) variant tests
     // -----------------------------------------------------------------------
 
-    /// `method = "dynamic"` with no overrides maps to the documented defaults.
+    /// Build a `dynamic` selection block from JSON so serde fills the
+    /// per-field defaults exactly as a user config would.
+    fn dynamic_from_json(body: &str) -> RowSelectionConfig {
+        serde_json::from_str(body).expect("dynamic selection block must parse")
+    }
+
+    /// A `dynamic` block with no parameters maps to the documented defaults.
     #[test]
     fn parse_dynamic_defaults() {
-        let cfg = RowSelectionConfig {
-            enabled: Some(true),
-            method: Some("dynamic".to_string()),
-            ..RowSelectionConfig::default()
-        };
+        let cfg = dynamic_from_json(r#"{"selection": {"method": "dynamic"}}"#);
         let strategy = parse_cut_selection_config(&cfg)
             .expect("dynamic with defaults must parse")
-            .expect("must produce Some for enabled dynamic");
+            .expect("must produce Some for dynamic");
         assert!(
             matches!(
                 strategy,
@@ -2438,23 +2268,24 @@ mod tests {
         );
     }
 
-    /// `candidate_window`/`active_window`/`nadic`/`violation_tolerance`
-    /// overrides flow into `k1`/`k2`/`nadic`/`epsilon_viol`; `start_iteration`
-    /// keeps its default.
+    /// `candidate_recency`/`seed_window`/`max_added_per_round`/
+    /// `violation_tolerance` flow into the wire-format `k1`/`k2`/`nadic`/
+    /// `epsilon_viol`; `start_iteration` keeps its default.
     #[test]
     fn parse_dynamic_overrides() {
         let cfg = RowSelectionConfig {
-            enabled: Some(true),
-            method: Some("dynamic".to_string()),
-            candidate_window: Some(20),
-            active_window: Some(7),
-            nadic: Some(3),
-            violation_tolerance: Some(1e-9),
+            selection: Some(SelectionMethod::Dynamic {
+                start_iteration: 2,
+                seed_window: 7,
+                candidate_recency: Some(20),
+                max_added_per_round: 3,
+                violation_tolerance: 1e-9,
+            }),
             ..RowSelectionConfig::default()
         };
         let strategy = parse_cut_selection_config(&cfg)
             .expect("dynamic with overrides must parse")
-            .expect("must produce Some for enabled dynamic");
+            .expect("must produce Some for dynamic");
         assert!(
             matches!(
                 strategy,
@@ -2470,78 +2301,65 @@ mod tests {
         );
     }
 
-    /// A non-positive `tie_tolerance` is rejected for `method = "dynamic"`.
+    /// A non-positive `violation_tolerance` is rejected for the dynamic method.
     #[test]
-    fn parse_dynamic_rejects_nonpositive_epsilon() {
+    fn parse_dynamic_rejects_nonpositive_violation_tolerance() {
         let cfg = RowSelectionConfig {
-            enabled: Some(true),
-            method: Some("dynamic".to_string()),
-            tie_tolerance: Some(-1.0),
+            selection: Some(SelectionMethod::Dynamic {
+                start_iteration: 2,
+                seed_window: 5,
+                candidate_recency: None,
+                max_added_per_round: 10,
+                violation_tolerance: -1.0,
+            }),
             ..RowSelectionConfig::default()
         };
         let msg = parse_cut_selection_config(&cfg)
-            .expect_err("non-positive tie_tolerance must be rejected for dynamic");
+            .expect_err("non-positive violation_tolerance must be rejected for dynamic");
         assert!(
-            msg.contains("tie_tolerance must be > 0"),
-            "error must mention the tie_tolerance constraint, got: {msg}"
+            msg.contains("violation_tolerance must be > 0"),
+            "error must mention the violation_tolerance constraint, got: {msg}"
         );
     }
 
-    /// Clean break: a zero deprecated `threshold` is NOT honored under
-    /// `method = "dynamic"`, so it does not reject; `nadic` takes its default.
+    /// `candidate_recency = Some(0)` is rejected for the dynamic method.
+    /// (Absent/`None` is valid and means the unbounded default.)
     #[test]
-    fn parse_dynamic_ignores_zero_deprecated_threshold() {
+    fn parse_dynamic_rejects_zero_candidate_recency() {
         let cfg = RowSelectionConfig {
-            enabled: Some(true),
-            method: Some("dynamic".to_string()),
-            threshold: Some(0),
-            ..RowSelectionConfig::default()
-        };
-        let strategy = parse_cut_selection_config(&cfg)
-            .expect("deprecated threshold must be ignored, not rejected, for dynamic")
-            .expect("must produce Some for enabled dynamic");
-        assert!(
-            matches!(strategy, CutSelectionStrategy::Dynamic { nadic: 10, .. }),
-            "deprecated threshold must be ignored; nadic must take its default: {strategy:?}"
-        );
-    }
-
-    /// A zero `candidate_window` (k1) is rejected for `method = "dynamic"`.
-    /// (Absent/`None` is valid and means ∞; only `Some(0)` is an error.)
-    #[test]
-    fn parse_dynamic_rejects_zero_k1() {
-        let cfg = RowSelectionConfig {
-            enabled: Some(true),
-            method: Some("dynamic".to_string()),
-            candidate_window: Some(0),
+            selection: Some(SelectionMethod::Dynamic {
+                start_iteration: 2,
+                seed_window: 5,
+                candidate_recency: Some(0),
+                max_added_per_round: 10,
+                violation_tolerance: 1e-10,
+            }),
             ..RowSelectionConfig::default()
         };
         let msg = parse_cut_selection_config(&cfg)
-            .expect_err("zero candidate_window (k1) must be rejected for dynamic");
+            .expect_err("zero candidate_recency must be rejected for dynamic");
         assert!(
-            msg.contains("candidate_window (k1) must be >= 1"),
-            "error must mention the k1 constraint, got: {msg}"
+            msg.contains("candidate_recency must be >= 1"),
+            "error must mention the candidate_recency constraint, got: {msg}"
         );
     }
 
-    /// The first-class explicit fields (`start_iteration`, `candidate_window`,
-    /// `nadic`, `violation_tolerance`, `active_window`) flow into the
-    /// `Dynamic` variant.
+    /// Every explicit dynamic field flows into the `Dynamic` variant.
     #[test]
     fn parse_dynamic_explicit_fields() {
         let cfg = RowSelectionConfig {
-            enabled: Some(true),
-            method: Some("dynamic".to_string()),
-            start_iteration: Some(5),
-            candidate_window: Some(20),
-            nadic: Some(3),
-            violation_tolerance: Some(1e-9),
-            active_window: Some(7),
+            selection: Some(SelectionMethod::Dynamic {
+                start_iteration: 5,
+                seed_window: 7,
+                candidate_recency: Some(20),
+                max_added_per_round: 3,
+                violation_tolerance: 1e-9,
+            }),
             ..RowSelectionConfig::default()
         };
         let strategy = parse_cut_selection_config(&cfg)
             .expect("dynamic with explicit fields must parse")
-            .expect("must produce Some for enabled dynamic");
+            .expect("must produce Some for dynamic");
         assert!(
             matches!(
                 strategy,
@@ -2557,48 +2375,18 @@ mod tests {
         );
     }
 
-    /// Clean break: the deprecated `memory_window` / `threshold` aliases and the
-    /// non-dynamic `check_frequency` cadence are NOT honored under
-    /// `method = "dynamic"`. `k1`/`k2`/`nadic` fall back to their defaults; only
-    /// the live `tie_tolerance` fallback feeds `epsilon_viol`. `start_iteration`
-    /// defaults to 2.
-    #[test]
-    fn parse_dynamic_ignores_deprecated_aliases() {
-        let cfg = RowSelectionConfig {
-            enabled: Some(true),
-            method: Some("dynamic".to_string()),
-            memory_window: Some(20),
-            threshold: Some(3),
-            tie_tolerance: Some(1e-9),
-            check_frequency: Some(7),
-            ..RowSelectionConfig::default()
-        };
-        let strategy = parse_cut_selection_config(&cfg)
-            .expect("dynamic with deprecated aliases must parse")
-            .expect("must produce Some for enabled dynamic");
-        assert!(
-            matches!(
-                strategy,
-                CutSelectionStrategy::Dynamic {
-                    k1: None,
-                    k2: 5,
-                    nadic: 10,
-                    epsilon_viol,
-                    start_iteration: 2,
-                } if (epsilon_viol - 1e-9).abs() < f64::EPSILON
-            ),
-            "deprecated aliases must be ignored under dynamic: {strategy:?}"
-        );
-    }
-
-    /// `start_iteration = Some(0)` is rejected with a message naming the field
-    /// and the `>= 1` constraint.
+    /// `start_iteration = 0` is rejected with a message naming the field and the
+    /// `>= 1` constraint.
     #[test]
     fn parse_dynamic_rejects_zero_start_iteration() {
         let cfg = RowSelectionConfig {
-            enabled: Some(true),
-            method: Some("dynamic".to_string()),
-            start_iteration: Some(0),
+            selection: Some(SelectionMethod::Dynamic {
+                start_iteration: 0,
+                seed_window: 5,
+                candidate_recency: None,
+                max_added_per_round: 10,
+                violation_tolerance: 1e-10,
+            }),
             ..RowSelectionConfig::default()
         };
         let msg = parse_cut_selection_config(&cfg)
@@ -2609,156 +2397,48 @@ mod tests {
         );
     }
 
-    /// Clean break: with the first-class `candidate_window` / `nadic` fields
-    /// absent and only the deprecated `memory_window` / `threshold` aliases
-    /// present, the aliases are ignored and `k1` / `nadic` take their defaults.
-    /// The live `tie_tolerance` fallback still supplies `epsilon_viol`.
+    /// A zero `max_added_per_round` is rejected with a naming message.
     #[test]
-    fn parse_dynamic_ignores_deprecated_aliases_when_first_class_absent() {
+    fn parse_dynamic_rejects_zero_max_added_per_round() {
         let cfg = RowSelectionConfig {
-            enabled: Some(true),
-            method: Some("dynamic".to_string()),
-            // first-class fields absent; only deprecated aliases present.
-            memory_window: Some(42),
-            threshold: Some(9),
-            tie_tolerance: Some(5e-8),
-            ..RowSelectionConfig::default()
-        };
-        let strategy = parse_cut_selection_config(&cfg)
-            .expect("dynamic with only deprecated aliases must parse")
-            .expect("must produce Some for enabled dynamic");
-        assert!(
-            matches!(
-                strategy,
-                CutSelectionStrategy::Dynamic {
-                    k1: None,
-                    nadic: 10,
-                    epsilon_viol,
-                    ..
-                } if (epsilon_viol - 5e-8).abs() < f64::EPSILON
-            ),
-            "deprecated aliases must be ignored; k1/nadic take defaults: {strategy:?}"
-        );
-    }
-
-    /// First-class fields stand alone: when both first-class fields and the
-    /// deprecated aliases are set with conflicting values, the first-class
-    /// fields supply `k1`/`nadic`/`epsilon_viol` and the aliases are ignored.
-    #[test]
-    fn parse_dynamic_first_class_fields_ignore_deprecated_aliases() {
-        let cfg = RowSelectionConfig {
-            enabled: Some(true),
-            method: Some("dynamic".to_string()),
-            // first-class and deprecated aliases set with conflicting values.
-            candidate_window: Some(11),
-            memory_window: Some(99),
-            nadic: Some(4),
-            threshold: Some(88),
-            violation_tolerance: Some(2e-9),
-            tie_tolerance: Some(7e-9),
-            ..RowSelectionConfig::default()
-        };
-        let strategy = parse_cut_selection_config(&cfg)
-            .expect("dynamic with first-class + deprecated aliases must parse")
-            .expect("must produce Some for enabled dynamic");
-        assert!(
-            matches!(
-                strategy,
-                CutSelectionStrategy::Dynamic {
-                    k1: Some(11),
-                    nadic: 4,
-                    epsilon_viol,
-                    ..
-                } if (epsilon_viol - 2e-9).abs() < f64::EPSILON
-            ),
-            "first-class fields must supply the values; aliases ignored: {strategy:?}"
-        );
-    }
-
-    /// A zero explicit `nadic` is rejected with a message naming `nadic`.
-    #[test]
-    fn parse_dynamic_rejects_zero_explicit_nadic() {
-        let cfg = RowSelectionConfig {
-            enabled: Some(true),
-            method: Some("dynamic".to_string()),
-            nadic: Some(0),
+            selection: Some(SelectionMethod::Dynamic {
+                start_iteration: 2,
+                seed_window: 5,
+                candidate_recency: None,
+                max_added_per_round: 0,
+                violation_tolerance: 1e-10,
+            }),
             ..RowSelectionConfig::default()
         };
         let msg = parse_cut_selection_config(&cfg)
-            .expect_err("zero explicit nadic must be rejected for dynamic");
+            .expect_err("zero max_added_per_round must be rejected for dynamic");
         assert!(
-            msg.contains("nadic") && msg.contains(">= 1"),
-            "error must name nadic and '>= 1', got: {msg}"
+            msg.contains("max_added_per_round") && msg.contains(">= 1"),
+            "error must name max_added_per_round and '>= 1', got: {msg}"
         );
     }
 
-    /// `active_window` is the first-class source of `k2`: `Some(0)` ⇒ `k2 = 0`
-    /// (valid, NEWAVE-style), and absent ⇒ the default `k2 = 5`.
+    /// `seed_window` feeds `k2`: `0` is valid (seeds only the current
+    /// iteration) and the absent default is `5`.
     #[test]
-    fn parse_dynamic_active_window_sets_k2() {
-        let cfg_zero = RowSelectionConfig {
-            enabled: Some(true),
-            method: Some("dynamic".to_string()),
-            active_window: Some(0),
-            ..RowSelectionConfig::default()
-        };
+    fn parse_dynamic_seed_window_sets_k2() {
+        let cfg_zero =
+            dynamic_from_json(r#"{"selection": {"method": "dynamic", "seed_window": 0}}"#);
         let strategy = parse_cut_selection_config(&cfg_zero)
-            .expect("active_window = 0 must parse for dynamic (0 is valid)")
-            .expect("must produce Some for enabled dynamic");
+            .expect("seed_window = 0 must parse for dynamic (0 is valid)")
+            .expect("must produce Some for dynamic");
         assert!(
             matches!(strategy, CutSelectionStrategy::Dynamic { k2: 0, .. }),
-            "active_window = Some(0) must set k2 = 0: {strategy:?}"
+            "seed_window = 0 must set k2 = 0: {strategy:?}"
         );
 
-        let cfg_absent = RowSelectionConfig {
-            enabled: Some(true),
-            method: Some("dynamic".to_string()),
-            ..RowSelectionConfig::default()
-        };
+        let cfg_absent = dynamic_from_json(r#"{"selection": {"method": "dynamic"}}"#);
         let strategy = parse_cut_selection_config(&cfg_absent)
-            .expect("absent active_window must parse for dynamic")
-            .expect("must produce Some for enabled dynamic");
+            .expect("absent seed_window must parse for dynamic")
+            .expect("must produce Some for dynamic");
         assert!(
             matches!(strategy, CutSelectionStrategy::Dynamic { k2: 5, .. }),
-            "absent active_window must default k2 to 5: {strategy:?}"
-        );
-    }
-
-    /// A `dynamic` config that omits `check_frequency` parses without error:
-    /// the dynamic arm never reads `check_frequency`, so the
-    /// `check_frequency must be > 0` guard does not apply.
-    #[test]
-    fn parse_dynamic_omitting_check_frequency_parses() {
-        let cfg = RowSelectionConfig {
-            enabled: Some(true),
-            method: Some("dynamic".to_string()),
-            check_frequency: None,
-            ..RowSelectionConfig::default()
-        };
-        let result = parse_cut_selection_config(&cfg);
-        assert!(
-            result.is_ok(),
-            "dynamic config omitting check_frequency must parse, got: {result:?}"
-        );
-    }
-
-    /// Clean break: an explicit `check_frequency = 0` left over from a non-dynamic
-    /// config is ignored under `method = "dynamic"` (not rejected). The dynamic
-    /// arm uses `active_window` for `k2`, so `k2` takes its default.
-    #[test]
-    fn parse_dynamic_ignores_zero_check_frequency() {
-        let cfg = RowSelectionConfig {
-            enabled: Some(true),
-            method: Some("dynamic".to_string()),
-            check_frequency: Some(0),
-            ..RowSelectionConfig::default()
-        };
-        let strategy = parse_cut_selection_config(&cfg)
-            .expect("check_frequency = 0 must be ignored, not rejected, for dynamic")
-            .expect("must produce Some for enabled dynamic");
-        assert!(
-            matches!(strategy, CutSelectionStrategy::Dynamic { k2: 5, .. }),
-            "check_frequency must not feed k2 under dynamic; k2 must default to 5: {strategy:?}"
+            "absent seed_window must default k2 to 5: {strategy:?}"
         );
     }
 

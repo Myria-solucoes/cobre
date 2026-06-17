@@ -7,7 +7,142 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- next-header -->
 
-## [Unreleased]
+## [0.8.2] - 2026-06-17
+
+> **BREAKING — config migration required.** This release changes two config
+> inputs; an existing `config.json` may fail to load until migrated:
+>
+> - **`training.cut_selection`** is restructured into a tagged `selection`
+>   object (see _Changed_). Drop `enabled`/`method` and the removed fields, and
+>   move the method parameters under `selection`.
+> - The top-level **`energy`** section is removed (see _Removed_). Delete it and
+>   declare the reference volume per production model via `reference_volume` in
+>   `system/hydro_production_models.json`.
+>
+> Per [Semantic Versioning](https://semver.org/spec/v2.0.0.html) rule 4, a 0.x
+> release may carry breaking changes outside a major bump; this release ships
+> them as 0.8.2.
+
+### Added
+
+- **`system/tailrace_curves.parquet` (optional).** Exact piecewise-quartic
+  tailrace curves with backwater families keyed by the downstream
+  reservoir's reference level. When a plant has rows here, the computed-FPHA fit
+  evaluates its tailrace from these quartics — selecting the segment by
+  downstream flow and interpolating between families at the downstream plant's
+  stage reference level — instead of the entity-level tailrace model. Plants
+  without a row keep the existing polynomial / piecewise-linear tailrace, so the
+  input is inert for cases that omit it.
+
+- **`reference_volume` in `system/hydro_production_models.json`.** A per-model
+  reference operating volume (sibling of `fpha_config`), declared as either
+  `volume_hm3` (absolute) or `percentile` (fraction of useful volume) —
+  mutually exclusive, set exactly one. This is now the single source of truth
+  for the reference volume the computed-FPHA fit and the equivalent-productivity
+  derivation consume.
+
+- **`fpha_plane_reduction` in the production-model config (optional).**
+  Similar-hyperplane simplification that merges near-parallel / near-coincident
+  FPHA planes into their mean hyperplane to shrink the LP. Two mutually-exclusive
+  methods: `{ "method": "angle", "tolerance_deg": <0–90> }` and
+  `{ "method": "distance", "tolerance_pct": <f64>, "n_samples": <u32> }`. Off by
+  default; the origin plane (zero generation at zero turbining) is never merged.
+  The distance method's sampling uses a deterministically seeded PRNG, so results
+  are bit-identical across input ordering and rank count.
+
+- **Computed-FPHA fit-quality warning.** When a fitted plane set deviates from
+  the exact production function by more than 5 % (relative mean absolute
+  deviation over the spill = 0 grid), the run logs a warning naming the plant and
+  stage — typically a strongly non-concave production surface no single `α`
+  correction can track. This is the operator-facing replacement for the retired
+  low-`kappa` warning. Warnings are emitted in canonical plant/stage order.
+
+- **`output/hydro_models/evaporation_models.parquet`.** The resolved per-hydro
+  evaporation coefficients are now written as an output sidecar, emitted whenever
+  any hydro declares an evaporation model. Written by both the CLI and the Python
+  bindings.
+
+- **Setup-phase timings in `training/metadata.json`.** A new `setup` section
+  records the wall-clock cost of each study-setup phase (input load, stochastic
+  fit, production-model fit, evaporation fit, and MPI broadcast). The timings are
+  observational only — they are non-deterministic and never participate in any
+  parity hash.
+
+### Changed
+
+- **Computed FPHA is now fit by a 3-D convex hull.** The computed path evaluates
+  the production cloud on a `(volume, turbined)` grid at spillage = 0, takes its
+  3-D convex hull, applies a least-squares `α` correction, and fits a per-plane
+  lateral-flow secant — fully replacing the previous tangent-plane sampling,
+  greedy plane selection, and `kappa` shrink. Fits are now resolved **per stage**
+  (one per season / stage range), where they were previously stage-independent.
+  Run-of-river (single fitting volume) plants, which previously failed to fit,
+  are now supported. Computed-FPHA deterministic baselines were re-blessed to the
+  new coefficients.
+
+- **New vendored dependency: `qhull`.** The reentrant `libqhull_r` is statically
+  linked into `cobre-sddp` (git submodule pinned to tag `2020.2`); see
+  `THIRD_PARTY_NOTICES.md`. The hull input and output are canonically sorted, so
+  hyperplanes stay bit-identical regardless of input ordering and MPI rank count.
+
+- **PAR(p) per-hydro AR fit parallelized.** The initial autoregressive fit of
+  the periodic inflow model now fits each hydro in parallel (rayon). Results are
+  bit-identical regardless of thread count — per-hydro blocks reassemble in
+  canonical entity order.
+
+- **CEPEL/Portuguese identifiers replaced with cobre-native English.** Internal
+  FPHA and evaporation naming (types, fields, and doc comments) was migrated from
+  CEPEL/Portuguese terms to descriptive English. Internal cleanup only — no
+  released config or output schema changed.
+
+- **BREAKING — `training.cut_selection` restructured.** Method-specific
+  parameters now live inside a tagged `selection` object instead of a flat bag
+  of fields. The top level keeps only the always-on knobs
+  (`row_activity_tolerance`, `max_active_per_stage`) plus `selection`; the chosen
+  `selection.method` (`"level1"`, `"lml1"`, `"domination"`, or `"dynamic"`)
+  carries only its own parameters. Supplying a parameter that belongs to a
+  different method, or misspelling `method`, is now a config-load error rather
+  than a silently ignored value. Omitting `selection` disables row selection.
+
+  Field renames (all now scoped to their method's `selection` block unless
+  noted):
+  - `cut_activity_tolerance` → `row_activity_tolerance` (top-level, always-on)
+  - `active_window` → `seed_window` (dynamic)
+  - `candidate_window` → `candidate_recency` (dynamic)
+  - `nadic` → `max_added_per_round` (dynamic)
+  - `domination_epsilon` → `domination_tolerance` (domination)
+
+  Under the dynamic method, `violation_tolerance` no longer falls back to a
+  level-1 tie tolerance; it defaults to `1e-10` directly.
+
+### Removed
+
+- **`training.cut_selection` legacy fields.** `enabled` and `method` are gone —
+  the presence of `selection` enables row selection and `selection.method` is the
+  discriminator. The dead fields `threshold`, `memory_window`, and
+  `basis_activity_window` are removed entirely. Existing configs that set any
+  removed or renamed key must be migrated to the `selection` block; an unmigrated
+  flat config now fails to load with a clear deserialize error.
+
+- **Computed-FPHA `kappa` shrink and low-kappa warnings.** The computed path no
+  longer derives a `kappa` correction factor or emits low-kappa warnings (the
+  CLI display is gone): the least-squares `α` correction replaces the shrink
+  factor, and the fit-quality deviation warning (above) replaces the low-kappa
+  warning. The `kappa` column in the precomputed `fpha_hyperplanes.parquet` input
+  is retained for back-compatibility and defaults to `1.0`.
+
+- **`reference_volume_hm3` input column.** No longer read from
+  `system/hydro_energy_productivity.parquet` (a stale column is ignored with a
+  warning); declare the reference volume via the production-model
+  `reference_volume` field instead.
+
+- **BREAKING — `config.json` `energy` section.** The top-level `energy` block
+  (and its `reference_volume_fraction`) is removed; the reference volume is now
+  declared per production model via `reference_volume` in
+  `system/hydro_production_models.json`. Because the config rejects unknown
+  fields, an existing config that still carries an `energy` block now fails to
+  load — remove the block and migrate the reference volume to the production-model
+  field.
 
 ## [0.8.1] - 2026-06-13
 
@@ -2048,7 +2183,8 @@ disappears from `cobre.results.load_policy` per-cut dicts.
 
 <!-- next-url -->
 
-[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.8.2...HEAD
+[0.8.2]: https://github.com/cobre-rs/cobre/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/cobre-rs/cobre/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/cobre-rs/cobre/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/cobre-rs/cobre/compare/v0.6.2...v0.7.0

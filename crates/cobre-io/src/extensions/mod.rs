@@ -25,25 +25,31 @@
 //! their registries) is deferred to Layer 3. Monotonicity and other
 //! multi-row semantic constraints are deferred to Layer 5.
 
+pub mod evaporation_models;
+pub mod fpha_deviation_points;
 pub mod fpha_hyperplanes;
 pub mod hydro_energy_productivity;
 pub mod hydro_geometry;
 pub mod hydro_reference_volumes;
 pub mod production_models;
 pub mod scalar_parameters;
+pub mod tailrace_curves;
 
+pub use evaporation_models::{EvaporationModelRow, parse_evaporation_models};
+pub use fpha_deviation_points::{FphaDeviationPointRow, parse_fpha_deviation_points};
 pub use fpha_hyperplanes::{FphaHyperplaneRow, parse_fpha_hyperplanes};
 pub use hydro_energy_productivity::{HydroEnergyProductivityRow, parse_hydro_energy_productivity};
 pub use hydro_geometry::{HydroGeometryRow, parse_hydro_geometry};
 pub use hydro_reference_volumes::{
-    HydroReferenceVolumeFractionRow, HydroReferenceVolumeFractions,
-    build_hydro_reference_volume_fractions, parse_hydro_reference_volume_fractions,
+    HydroReferenceVolumeFractions, build_hydro_reference_volumes_resolved,
 };
 pub use production_models::{
-    FittingWindow, FphaColumnLayout, ProductionModelConfig, SeasonConfig, SelectionMode,
-    StageRange, parse_production_models,
+    FittingWindow, FphaColumnLayout, PlaneReductionConfig, ProductionModelConfig,
+    ProductionModelFile, ReferenceVolume, SeasonConfig, SelectionMode, StageRange,
+    parse_production_models,
 };
 pub use scalar_parameters::{load_scalar_parameters_json, parse_scalar_parameters_json};
+pub use tailrace_curves::{TailraceCurveRow, parse_tailrace_curves};
 
 use crate::LoadError;
 use std::path::Path;
@@ -76,11 +82,12 @@ pub fn load_hydro_geometry(path: Option<&Path>) -> Result<Vec<HydroGeometryRow>,
 }
 
 /// Load `system/hydro_production_models.json` when the path is known, or return
-/// an empty `Vec` when the file is absent (optional file).
+/// an empty [`ProductionModelFile`] when the file is absent (optional file).
 ///
 /// This wrapper is the standard entry point used by the loading pipeline. When
 /// `path` is `None` (the structural validation step found no file at the expected
-/// location), it returns `Ok(Vec::new())` without touching the filesystem.
+/// location), it returns `Ok(ProductionModelFile::default())` (empty configs, no
+/// reduction) without touching the filesystem.
 ///
 /// # Errors
 ///
@@ -91,15 +98,14 @@ pub fn load_hydro_geometry(path: Option<&Path>) -> Result<Vec<HydroGeometryRow>,
 /// ```
 /// use cobre_io::extensions::load_production_models;
 ///
-/// // No file present — returns empty vec.
-/// let models = load_production_models(None).expect("no file is fine");
-/// assert!(models.is_empty());
+/// // No file present — empty configs, no plane reduction.
+/// let file = load_production_models(None).expect("no file is fine");
+/// assert!(file.configs.is_empty());
+/// assert!(file.plane_reduction.is_none());
 /// ```
-pub fn load_production_models(
-    path: Option<&Path>,
-) -> Result<Vec<ProductionModelConfig>, LoadError> {
+pub fn load_production_models(path: Option<&Path>) -> Result<ProductionModelFile, LoadError> {
     match path {
-        None => Ok(Vec::new()),
+        None => Ok(ProductionModelFile::default()),
         Some(p) => parse_production_models(p),
     }
 }
@@ -128,22 +134,6 @@ pub fn load_fpha_hyperplanes(path: Option<&Path>) -> Result<Vec<FphaHyperplaneRo
     match path {
         None => Ok(Vec::new()),
         Some(p) => parse_fpha_hyperplanes(p),
-    }
-}
-
-/// Load `system/hydro_reference_volume_fractions.parquet` when the path is
-/// known, or return an empty `Vec` when the file is absent (optional file).
-///
-/// # Errors
-///
-/// Propagates [`LoadError`] from
-/// [`parse_hydro_reference_volume_fractions`] when `path` is `Some`.
-pub fn load_hydro_reference_volume_fractions(
-    path: Option<&Path>,
-) -> Result<Vec<HydroReferenceVolumeFractionRow>, LoadError> {
-    match path {
-        None => Ok(Vec::new()),
-        Some(p) => parse_hydro_reference_volume_fractions(p),
     }
 }
 
@@ -177,16 +167,51 @@ pub fn load_hydro_energy_productivity(
     }
 }
 
+/// Load `system/tailrace_curves.parquet` when the path is known, or return an
+/// empty `Vec` when the file is absent (optional file).
+///
+/// This wrapper is the standard entry point used by the loading pipeline. When
+/// `path` is `None` (the structural validation step found no file at the expected
+/// location), it returns `Ok(Vec::new())` without touching the filesystem.
+///
+/// # Errors
+///
+/// Propagates [`LoadError`] from [`parse_tailrace_curves`] when `path` is `Some`.
+///
+/// # Examples
+///
+/// ```
+/// use cobre_io::extensions::load_tailrace_curves;
+///
+/// // No file present — returns empty vec.
+/// let rows = load_tailrace_curves(None).expect("no file is fine");
+/// assert!(rows.is_empty());
+/// ```
+pub fn load_tailrace_curves(path: Option<&Path>) -> Result<Vec<TailraceCurveRow>, LoadError> {
+    match path {
+        None => Ok(Vec::new()),
+        Some(p) => parse_tailrace_curves(p),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::doc_markdown, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 
-    /// `load_production_models(None)` returns `Ok(Vec::new())` without I/O.
+    /// `load_production_models(None)` returns an empty file (no configs, no
+    /// reduction) without I/O.
     #[test]
     fn test_load_production_models_none_returns_empty() {
-        let result = load_production_models(None).unwrap();
-        assert!(result.is_empty(), "expected empty vec for None path");
+        let file = load_production_models(None).unwrap();
+        assert!(
+            file.configs.is_empty(),
+            "expected empty configs for None path"
+        );
+        assert!(
+            file.plane_reduction.is_none(),
+            "expected no plane reduction for None path"
+        );
     }
 
     /// `load_fpha_hyperplanes(None)` returns `Ok(Vec::new())` without I/O.
@@ -207,6 +232,13 @@ mod tests {
     #[test]
     fn test_load_hydro_energy_productivity_none_returns_empty() {
         let result = load_hydro_energy_productivity(None).unwrap();
+        assert!(result.is_empty(), "expected empty vec for None path");
+    }
+
+    /// `load_tailrace_curves(None)` returns `Ok(Vec::new())` without I/O.
+    #[test]
+    fn test_load_tailrace_curves_none_returns_empty() {
+        let result = load_tailrace_curves(None).unwrap();
         assert!(result.is_empty(), "expected empty vec for None path");
     }
 }

@@ -233,7 +233,7 @@ pub(crate) fn resolve_variable_ref<S: BuildHasher>(
 /// each verified against its resolver:
 ///
 /// - [`VariableRef::HydroStorage`] → `storage.start + pos` (outgoing reservoir level)
-/// - [`VariableRef::HydroEvaporation`] → the stage-level `Q_ev` column
+/// - [`VariableRef::HydroEvaporation`] → the stage-level evaporation-outflow column
 /// - [`VariableRef::AnticipatedDecision`] → `anticipated_decision.start + local`
 ///   (a per-plant per-stage scalar, uniform across blocks)
 ///
@@ -311,7 +311,7 @@ fn resolve_hydro_storage<S: BuildHasher>(
     }
 }
 
-/// Resolve `HydroEvaporation` to the `Q_ev` column for the matching hydro.
+/// Resolve `HydroEvaporation` to the evaporation-outflow column for the matching hydro.
 ///
 /// The evaporation list uses a local index; we find it by matching the
 /// system-level hydro position. Returns empty vec when the hydro has no
@@ -327,8 +327,8 @@ fn resolve_hydro_evaporation<S: BuildHasher>(
             .iter()
             .position(|&p| p == sys_pos)
         {
-            let q_ev_col = indexer.evap_indices[local_idx].q_ev_col;
-            vec![(q_ev_col, 1.0)]
+            let evaporation_flow_col = indexer.evap_indices[local_idx].evaporation_flow_col;
+            vec![(evaporation_flow_col, 1.0)]
         } else {
             vec![]
         }
@@ -449,7 +449,6 @@ fn resolve_bus_deficit<S: BuildHasher>(
         let effective_blk = block_id.unwrap_or(block_idx);
         let s = indexer.max_deficit_segments;
         let base = indexer.deficit.start + b_pos * s * n_blks + effective_blk;
-        // Return one entry per segment (each with coefficient 1.0).
         (0..s).map(|seg| (base + seg * n_blks, 1.0)).collect()
     } else {
         vec![]
@@ -937,7 +936,7 @@ mod tests {
             &lpos,
         );
 
-        // FPHA local index 0, generation.start=67, n_blks=3, block=0
+        // FPHA local index 0, generation.start=79, n_blks=3, block=0
         assert_eq!(result, vec![(79 + 0 * 3 + 0, 1.0)]);
     }
 
@@ -969,13 +968,13 @@ mod tests {
             &lpos,
         );
 
-        // FPHA local index 1, generation.start=67, n_blks=3, block=2
+        // FPHA local index 1, generation.start=79, n_blks=3, block=2
         assert_eq!(result, vec![(79 + 1 * 3 + 2, 1.0)]);
     }
 
     // ── HydroEvaporation tests ────────────────────────────────────────────────
 
-    /// HydroEvaporation maps to the Q_ev column for the matching evaporation hydro.
+    /// HydroEvaporation maps to the evaporation-outflow column for the matching evaporation hydro.
     ///
     /// Use a dedicated indexer with evaporation hydros to test this path.
     ///
@@ -986,9 +985,9 @@ mod tests {
     /// diversion: [11, 13)
     /// deficit:   [13, 14)
     /// excess:    [14, 15)
-    /// evap cols: [15, 18)  → Q_ev=15, f_evap_plus=16, f_evap_minus=17
+    /// evap cols: [15, 18)  → evaporation_flow=15, f_evap_plus=16, f_evap_minus=17
     #[test]
-    fn hydro_evaporation_maps_to_q_ev_col() {
+    fn hydro_evaporation_maps_to_evaporation_flow_col() {
         let evap_indexer = StageIndexer::with_equipment_and_evaporation(
             &crate::indexer::EquipmentCounts {
                 hydro_count: 2,

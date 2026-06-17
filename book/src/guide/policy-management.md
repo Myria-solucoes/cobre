@@ -152,7 +152,7 @@ in `"warm_start"` or `"resume"` mode.
 Boundary cuts allow a Cobre study to load terminal-stage future cost function
 (FCF) approximations from a different Cobre policy checkpoint. This is the
 mechanism for **model coupling** — a short-horizon study (e.g., weekly+monthly
-DECOMP) can use the long-horizon policy (e.g., a monthly NEWAVE-equivalent)
+coupled study) can use the long-horizon policy (e.g., a monthly long-horizon model)
 as its terminal boundary condition, ensuring that end-of-horizon decisions
 account for the long-term future cost of water.
 
@@ -197,20 +197,20 @@ plants and maximum PAR order) as the current study. Cobre validates this
 automatically when `validate_compatibility` is `true`. If the dimensions
 don't match, loading fails with a descriptive error.
 
-### Production DECOMP workflow
+### Production coupling workflow
 
-The typical production DECOMP pipeline uses boundary cuts as follows:
+The typical production coupling pipeline uses boundary cuts as follows:
 
 ```text
 Monthly Cobre study (12 stages)
   └─ policy checkpoint: cuts for stages 0–11
 
-Weekly+monthly DECOMP study (W1, W2, W3, W4, M2)
+Weekly+monthly coupled study (W1, W2, W3, W4, M2)
   └─ policy.boundary.path = "../monthly/policy"
   └─ policy.boundary.source_stage = 2  (March cuts → terminal FCF)
 ```
 
-The DECOMP study's terminal stage (M2) receives the monthly model's March
+The coupled study's terminal stage (M2) receives the monthly model's March
 cuts as its future cost function. The lag accumulation mechanism ensures that
 the state vector's lag values at the terminal stage are monthly averages,
 making the imported cut coefficients evaluate correctly.
@@ -232,7 +232,7 @@ Boundary cuts and warm-start are independent features. You can combine them:
 }
 ```
 
-This loads the previous DECOMP policy's own cuts via warm-start AND loads
+This loads the previous coupled study's own cuts via warm-start AND loads
 the monthly model's boundary cuts at the terminal stage. Both sets of cuts
 contribute to the lower bound.
 

@@ -4,7 +4,7 @@ use crate::generic_constraints::resolve_variable_ref;
 use crate::hydro_models::{EvaporationModel, ResolvedProductionModel};
 
 use super::layout::{StageLayout, TemplateBuildCtx};
-use super::{M3S_TO_HM3, Q_EV_SAFETY_MARGIN};
+use super::{EVAPORATION_FLOW_SAFETY_MARGIN, M3S_TO_HM3};
 
 /// Mutable column-bound and objective buffers shared by all fill helpers.
 ///
@@ -165,8 +165,8 @@ fn fill_theta_column(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
 /// For constant-productivity hydros, caps turbine flow so that
 /// `productivity * turbined <= max_generation_mw` (derated capacity).
 /// Carries `turbined_cost * block_hours` in the objective on every hydro's
-/// turbine column regardless of production model — matches NEWAVE behavior
-/// where the turbined cost applies to every plant, not only FPHA hydros.
+/// turbine column regardless of production model — the turbined cost
+/// applies to every plant, not only FPHA hydros.
 fn fill_turbine_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -492,13 +492,15 @@ fn fill_fpha_generation_columns(
     }
 }
 
-/// Evaporation columns: 3 per evaporation hydro (`Q_ev`, `f_evap_plus`, `f_evap_minus`).
+/// Evaporation columns: 3 per evaporation hydro (evaporation outflow,
+/// `f_evap_plus`, `f_evap_minus`).
 ///
-/// All three columns are stage-level (not per-block).  `Q_ev` is bounded
-/// symmetrically `[-q_max, +q_max]` so a negative value can absorb net
-/// rainfall input on the lake surface; `f_evap_plus` and `f_evap_minus` are
-/// bounded `[0, +inf)`.  `Q_ev` carries zero objective cost (evaporation
-/// flow itself is not penalised).  `f_evap_plus` and `f_evap_minus` carry
+/// All three columns are stage-level (not per-block).  The evaporation-outflow
+/// column is bounded symmetrically `[-q_max, +q_max]` so a negative value can
+/// absorb net rainfall input on the lake surface; `f_evap_plus` and
+/// `f_evap_minus` are bounded `[0, +inf)`.  The evaporation-outflow column
+/// carries zero objective cost (evaporation flow itself is not penalised).
+/// `f_evap_plus` and `f_evap_minus` carry
 /// `evaporation_violation_cost * total_stage_hours` so that the solver is
 /// penalised for violating the linearised evaporation constraint.
 fn fill_evaporation_columns(
@@ -509,19 +511,22 @@ fn fill_evaporation_columns(
     bufs: &mut ColumnBufs<'_>,
 ) {
     for (local_idx, &h_idx) in layout.evap_hydro_indices.iter().enumerate() {
-        let col_q_ev = layout.col_evap_start + local_idx * 3;
+        let col_evaporation_flow = layout.col_evap_start + local_idx * 3;
         let col_f_plus = layout.col_evap_start + local_idx * 3 + 1;
         let col_f_minus = layout.col_evap_start + local_idx * 3 + 2;
-        // Signed flow: negative Q_ev reads as net rainfall input (inflow).
-        // Bound: [-q_max, +q_max] where q_max = |k_evap0 + k_evap_v * v_max| * margin.
+        // Signed flow: a negative evaporation outflow reads as net rainfall input (inflow).
+        // Bound: [-q_max, +q_max] where
+        // q_max = |intercept_m3s + volume_slope_m3s_per_hm3 * v_max| * margin.
         match ctx.evaporation_models.model(h_idx) {
             EvaporationModel::Linearized { coefficients, .. } => {
                 let coeff = &coefficients[stage_idx];
                 let hb = ctx.bounds.hydro_bounds(h_idx, stage_idx);
-                let q_max_abs = (coeff.k_evap0 + coeff.k_evap_v * hb.max_storage_hm3).abs()
-                    * Q_EV_SAFETY_MARGIN;
-                bufs.col_lower[col_q_ev] = -q_max_abs;
-                bufs.col_upper[col_q_ev] = q_max_abs;
+                let q_max_abs = (coeff.intercept_m3s
+                    + coeff.volume_slope_m3s_per_hm3 * hb.max_storage_hm3)
+                    .abs()
+                    * EVAPORATION_FLOW_SAFETY_MARGIN;
+                bufs.col_lower[col_evaporation_flow] = -q_max_abs;
+                bufs.col_upper[col_evaporation_flow] = q_max_abs;
             }
             EvaporationModel::None => {
                 // Should never happen: evap_hydro_indices only contains linearized hydros.
@@ -537,7 +542,7 @@ fn fill_evaporation_columns(
         bufs.col_lower[col_f_minus] = 0.0;
         bufs.col_upper[col_f_minus] = f64::INFINITY;
         // Violation cost: read directional costs from resolved penalties.
-        // Q_ev (offset 0) keeps objective = 0.0 (already the vec initialisation default).
+        // Evaporation outflow (offset 0) keeps objective = 0.0 (already the vec initialisation default).
         // f_evap_plus = under-evaporation (evaporated less than target).
         // f_evap_minus = over-evaporation (evaporated more than target).
         let hp = ctx.penalties.hydro_penalties(h_idx, stage_idx);
@@ -744,8 +749,8 @@ fn fill_generation_below_columns(
 /// solve. With `allow_curtailment == true` (the default) the column is
 /// fully curtailable (bit-identical to the pre-flag behaviour); with
 /// `allow_curtailment == false` the column is pinned to the available
-/// level on every stage (must-run, matching NEWAVE's
-/// `geracao_usinas_nao_simuladas` pre-netting convention).
+/// level on every stage (must-run: non-simulated aggregate generation
+/// pre-netted from load).
 fn fill_ncs_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -838,6 +843,12 @@ pub(super) fn fill_stage_rows(
     // The v_in contribution is encoded in the matrix entry on the v_in column,
     // so the static upper bound only needs the intercept term.
     let n_blks = layout.n_blks;
+    // Per-hydro FPHA row block start. The cumulative prefix sum over preceding
+    // FPHA hydros' (n_blks * planes) is REQUIRED: FPHA hydros carry DIFFERENT
+    // plane counts, so `local_idx * n_blks * n_planes` (this hydro's count as the
+    // stride) overlaps a later, fewer-plane hydro onto an earlier hydro's rows.
+    // Matches the indexer's `FphaRowRange::start` ordering exactly.
+    let mut fpha_block_start = layout.row_fpha_start;
     for (local_idx, &h_idx) in layout.fpha_hydro_indices.iter().enumerate() {
         if let ResolvedProductionModel::Fpha { planes, .. } =
             ctx.production_models.model(h_idx, stage_idx)
@@ -849,22 +860,21 @@ pub(super) fn fill_stage_rows(
             );
             for blk in 0..n_blks {
                 for (p_idx, plane) in planes.iter().enumerate() {
-                    let row = layout.row_fpha_start
-                        + local_idx * n_blks * n_planes
-                        + blk * n_planes
-                        + p_idx;
+                    let row = fpha_block_start + blk * n_planes + p_idx;
                     row_lower[row] = f64::NEG_INFINITY;
                     row_upper[row] = plane.intercept;
                 }
             }
+            fpha_block_start += n_blks * n_planes;
         }
     }
 
-    // Evaporation constraint rows: Q_ev = k_evap0 + k_evap_v/2*(v + v_in - 2*V_ref).
-    // The volume-dependent term `k_evap_v/2 * v` is added via the CSC matrix entry
-    // on the outgoing-storage column, so the static row bounds only encode the
-    // constant term `k_evap0`.  The constraint is an equality:
-    // row_lower == row_upper == k_evap0.
+    // Evaporation constraint rows:
+    // evaporation_outflow = intercept_m3s + volume_slope_m3s_per_hm3/2*(v + v_in - 2*reference_volume).
+    // The volume-dependent term `volume_slope_m3s_per_hm3/2 * v` is added via the
+    // CSC matrix entry on the outgoing-storage column, so the static row bounds
+    // only encode the constant term `intercept_m3s`.  The constraint is an
+    // equality: row_lower == row_upper == intercept_m3s.
     for (local_idx, &h_idx) in layout.evap_hydro_indices.iter().enumerate() {
         if let EvaporationModel::Linearized { coefficients, .. } =
             ctx.evaporation_models.model(h_idx)
@@ -874,10 +884,10 @@ pub(super) fn fill_stage_rows(
                 "stage index {stage_idx} out of bounds for evaporation coefficients (len = {})",
                 coefficients.len()
             );
-            let k_evap0 = coefficients[stage_idx].k_evap0;
+            let intercept_m3s = coefficients[stage_idx].intercept_m3s;
             let row = layout.row_evap_start + local_idx;
-            row_lower[row] = k_evap0;
-            row_upper[row] = k_evap0;
+            row_lower[row] = intercept_m3s;
+            row_upper[row] = intercept_m3s;
         }
     }
 
@@ -1219,13 +1229,13 @@ pub(super) fn fill_state_and_water_entries(
         }
     }
 
-    // Evaporation: Q_ev_h enters water balance with +ζ.
+    // Evaporation: the per-hydro evaporation-outflow column enters water balance with +ζ.
     // Evaporation is an outflow (water leaving the reservoir), so its
     // coefficient matches the turbine/spillage sign convention (positive).
     for (local_idx, &h_idx) in layout.evap_hydro_indices.iter().enumerate() {
-        let col_q_ev = layout.col_evap_start + local_idx * 3;
+        let col_evaporation_flow = layout.col_evap_start + local_idx * 3;
         let row = row_water + h_idx;
-        col_entries[col_q_ev].push((row, zeta));
+        col_entries[col_evaporation_flow].push((row, zeta));
     }
 
     // Under-withdrawal slack (neg): adds water back to the balance.
@@ -1372,6 +1382,11 @@ pub(super) fn fill_fpha_entries(
     let n_blks = layout.n_blks;
     let col_storage_in_start = layout.col_storage_in_start;
 
+    // Per-hydro FPHA row block start; cumulative prefix sum over preceding FPHA
+    // hydros' (n_blks * planes). REQUIRED because plane counts vary per hydro —
+    // see `fill_fpha_row_bounds` and the indexer's `FphaRowRange::start`. Mirrors
+    // the bounds fill exactly so coefficients and bounds land on the same rows.
+    let mut fpha_block_start = layout.row_fpha_start;
     for (local_idx, &h_idx) in layout.fpha_hydro_indices.iter().enumerate() {
         let model = ctx.production_models.model(h_idx, stage_idx);
         let planes = match model {
@@ -1396,8 +1411,7 @@ pub(super) fn fill_fpha_entries(
             let col_g = layout.col_generation_start + local_idx * n_blks + blk;
 
             for (p_idx, plane) in planes.iter().enumerate() {
-                let row =
-                    layout.row_fpha_start + local_idx * n_blks * n_planes + blk * n_planes + p_idx;
+                let row = fpha_block_start + blk * n_planes + p_idx;
 
                 // g_{h,k} column: +1.0
                 col_entries[col_g].push((row, 1.0));
@@ -1411,6 +1425,7 @@ pub(super) fn fill_fpha_entries(
                 col_entries[col_s].push((row, -plane.gamma_s));
             }
         }
+        fpha_block_start += n_blks * n_planes;
     }
 }
 
@@ -1420,17 +1435,19 @@ pub(super) fn fill_fpha_entries(
 /// `row_evap_start + local_idx` encodes:
 ///
 /// ```text
-/// Q_ev_h  column:  +1.0
-/// v_h     column:  -k_evap_v / 2      (outgoing storage)
-/// v_in_h  column:  -k_evap_v / 2      (incoming storage; fixed by storage-fixing row)
+/// evaporation_flow column:  +1.0
+/// v_h     column:  -volume_slope_m3s_per_hm3 / 2   (outgoing storage)
+/// v_in_h  column:  -volume_slope_m3s_per_hm3 / 2   (incoming storage; fixed by storage-fixing row)
 /// f_plus  column:  +1.0
 /// f_minus column:  -1.0
 /// ```
 ///
-/// These entries implement `Q_ev - k_evap_v/2*v - k_evap_v/2*v_in + f_plus - f_minus = k_evap0`,
-/// where `k_evap0` is already encoded in the row bounds set by `fill_stage_rows`.
-/// When `v_in` is fixed to value `V`, the effective RHS becomes `k_evap0 + k_evap_v/2 * V`,
-/// which matches the linearized evaporation at the average volume `(v + V) / 2`.
+/// These entries implement
+/// `evaporation_flow - volume_slope_m3s_per_hm3/2*v - volume_slope_m3s_per_hm3/2*v_in + f_plus - f_minus = intercept_m3s`,
+/// where `intercept_m3s` is already encoded in the row bounds set by
+/// `fill_stage_rows`. When `v_in` is fixed to value `V`, the effective RHS
+/// becomes `intercept_m3s + volume_slope_m3s_per_hm3/2 * V`, which matches the
+/// linearized evaporation at the average volume `(v + V) / 2`.
 pub(super) fn fill_evaporation_entries(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -1464,7 +1481,7 @@ pub(super) fn fill_evaporation_entries(
             }
         };
 
-        let col_q_ev = layout.col_evap_start + local_idx * 3;
+        let col_evaporation_flow = layout.col_evap_start + local_idx * 3;
         let col_f_plus = layout.col_evap_start + local_idx * 3 + 1;
         let col_f_minus = layout.col_evap_start + local_idx * 3 + 2;
         let col_v = h_idx;
@@ -1472,9 +1489,9 @@ pub(super) fn fill_evaporation_entries(
 
         let row = layout.row_evap_start + local_idx;
 
-        col_entries[col_q_ev].push((row, 1.0));
-        col_entries[col_v].push((row, -coeff.k_evap_v / 2.0));
-        col_entries[col_v_in].push((row, -coeff.k_evap_v / 2.0));
+        col_entries[col_evaporation_flow].push((row, 1.0));
+        col_entries[col_v].push((row, -coeff.volume_slope_m3s_per_hm3 / 2.0));
+        col_entries[col_v_in].push((row, -coeff.volume_slope_m3s_per_hm3 / 2.0));
         col_entries[col_f_plus].push((row, 1.0));
         col_entries[col_f_minus].push((row, -1.0));
     }

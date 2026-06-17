@@ -147,7 +147,7 @@ stage, expressed as an average MW over the stage:
 incremental_inflow_energy_mw = ρ_acum × incremental_inflow_m3s
 ```
 
-This is the ENA (Energia Natural Afluente) contribution of this plant's
+This is the natural-inflow-energy contribution of this plant's
 incremental inflow in MW. It measures how much firm energy the incoming water
 represents considering the full cascade downstream.
 
@@ -185,7 +185,7 @@ Same formula as `stored_energy_initial_mwh`, applied to `storage_final_hm3`:
 stored_energy_final_mwh = (storage_final_hm3 − V_min) × ρ_acum × 1e6 / 3600
 ```
 
-This column is the EARM (Energia Armazenada Reservatório Montante) at the end
+This column is the stored energy at the end
 of the stage in MWh.
 
 ---
@@ -193,8 +193,10 @@ of the stage in MWh.
 ## Productivity Override File
 
 `system/hydro_energy_productivity.parquet` is an optional file that allows you
-to override any of the four scalars (`ρ_eq`, `V_ref`, `Q_ref`, `ρ_esp`) on a
-per-`(hydro, stage)` basis. Rows with `stage_id = NULL` serve as a per-hydro
+to override any of the three scalars (`ρ_eq`, `Q_ref`, `ρ_esp`) on a
+per-`(hydro, stage)` basis. The reference operating volume `V_ref` is no longer
+an override column here — declare it per production model via `reference_volume`
+in `system/hydro_production_models.json`. Rows with `stage_id = NULL` serve as a per-hydro
 default that applies to all stages not covered by a stage-specific row.
 
 See the [Case Directory Format](../reference/case-format.md#systemhydro_energy_productivityparquet)

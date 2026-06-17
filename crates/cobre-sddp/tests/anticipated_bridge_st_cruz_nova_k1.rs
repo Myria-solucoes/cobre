@@ -32,12 +32,12 @@
 //!
 //! ## Parameter derivation
 //!
-//! The fixture parameters mirror the NEWAVE example case `example/newave_rodada`
-//! from the `cobre-bridge` repository. The bridge findings document at
+//! The fixture parameters mirror a reference example case from the
+//! `cobre-bridge` repository. The bridge findings document at
 //! `~/git/cobre-bridge/docs/findings/cobre-anticipated-thermal-pre-horizon-limitation.md`
-//! records that thermal ST.CRUZ NOVA (NEWAVE code 86, GNL configuration) has
+//! records that thermal ST.CRUZ NOVA (code 86, GNL configuration) has
 //! lag 1 (K=1) and an aggregated MW value of 204.5647 MW, computed by
-//! block-fraction weighting of per-patamar MW values (227.86, 238.37, 173.51)
+//! block-fraction weighting of per-block MW values (227.86, 238.37, 173.51)
 //! against September 2024 block fractions (0.2333, 0.2833, 0.4834).
 //!
 //! The always-active fishing predicate is implemented at
@@ -528,7 +528,6 @@ fn build_config() -> Config {
         },
         exports: ExportsConfig::default(),
         estimation: EstimationConfig::default(),
-        energy: cobre_io::EnergyConfig::default(),
     }
 }
 

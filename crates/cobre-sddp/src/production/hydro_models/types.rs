@@ -16,6 +16,8 @@
 //! hyperplane approximation is an SDDP concept). They must not be placed in
 //! `cobre-core`.
 
+use std::collections::HashMap;
+
 use cobre_core::{EntityId, System};
 use serde::{Deserialize, Serialize};
 
@@ -153,23 +155,24 @@ impl ProductionModelSet {
 
 /// Linearized evaporation coefficients for one (hydro, stage) pair.
 ///
-/// The stage-averaged evaporation flow (m³/s) is approximated as:
+/// The stage-averaged evaporation outflow (m³/s) is approximated as:
 ///
 /// ```text
-/// Q_ev = k_evap0 + k_evap_v * (V - V_ref)
+/// evaporation_outflow = intercept_m3s + volume_slope_m3s_per_hm3 * (V - reference_volume)
 /// ```
 ///
-/// where `V` is the reservoir volume (hm³) and `V_ref` is the reference volume
-/// for each stage stored in [`EvaporationModel::Linearized::reference_volumes_hm3`].
-/// The coefficients absorb the `1 / (3.6 · stage_hours)` factor that converts
-/// the `c_ev · A(V)` volume per month (mm·km²/month) into the stage-averaged
-/// flow consumed by the water balance row.
+/// where `V` is the reservoir volume (hm³) and `reference_volume` is the
+/// reference volume for each stage stored in
+/// [`EvaporationModel::Linearized::reference_volumes_hm3`]. The coefficients
+/// absorb the `1 / (3.6 · stage_hours)` factor that converts the
+/// `monthly_evaporation_mm · A(V)` volume per month (mm·km²/month) into the
+/// stage-averaged flow consumed by the water balance row.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LinearizedEvaporation {
-    /// Constant term of the linearized evaporation flow (m³/s).
-    pub k_evap0: f64,
-    /// Volume-dependent slope of the linearized evaporation flow ((m³/s)/hm³).
-    pub k_evap_v: f64,
+    /// Constant term of the linearized evaporation outflow (m³/s).
+    pub intercept_m3s: f64,
+    /// Volume-dependent slope of the linearized evaporation outflow ((m³/s)/hm³).
+    pub volume_slope_m3s_per_hm3: f64,
 }
 
 // ── Evaporation model ─────────────────────────────────────────────────────────
@@ -340,11 +343,38 @@ pub struct HydroModelSummary {
     pub n_user_supplied_ref: usize,
     /// Number of hydro plants with evaporation that used the default midpoint reference volume.
     pub n_default_midpoint_ref: usize,
-    /// Low-kappa warnings for hydros whose FPHA envelope kappa < 0.95.
-    ///
-    /// Each entry is `(hydro_name, kappa)`.  An empty vector means all fitted
-    /// FPHA envelopes had kappa >= 0.95 (no warnings).
-    pub kappa_warnings: Vec<(String, f64)>,
+}
+
+// ── FPHA fit deviation ──────────────────────────────────────────────────────────
+
+/// One computed-FPHA fit's deviation magnitudes, carried up the pipeline for one
+/// `(hydro, stage)` pair.
+///
+/// The four magnitudes are plain `f64`s lifted out of the `pub(crate)`
+/// `crate::fpha_fitting::FphaFitDeviation` rather than embedding it: that type is
+/// crate-internal (an algorithm detail of the fit) and must not cross into
+/// `cobre-io`'s generic metadata aggregate. The export builder maps these fields
+/// into the generic [`cobre_io::DeviationSummary`].
+///
+/// One entry per DISTINCT fit, tagged with `stage_id` = the first study stage the
+/// fitted `SelectionMode` entry covers — not one entry per covered stage. The
+/// resolver populates these in canonical `(hydro, stage)` order, so the carried
+/// vector is declaration-order invariant.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FphaFitDeviationEntry {
+    /// Entity id of the hydro plant this fit belongs to.
+    pub hydro_id: EntityId,
+    /// Domain-level stage id the fitted entry first covers.
+    pub stage_id: i32,
+    /// Mean of `|fitted − exact|` over the fit grid \[MW\].
+    pub mean_abs_mw: f64,
+    /// Maximum of `|fitted − exact|` over the fit grid \[MW\].
+    pub max_abs_mw: f64,
+    /// Mean of the signed residual `fitted − exact` over the fit grid \[MW\].
+    pub mean_signed_mw: f64,
+    /// `mean_abs_mw` relative to the grid's peak exact generation (dimensionless,
+    /// `>= 0`).
+    pub relative: f64,
 }
 
 // ── Pipeline result ───────────────────────────────────────────────────────────
@@ -376,12 +406,6 @@ pub struct PrepareHydroModelsResult {
     pub evaporation: EvaporationModelSet,
     /// Provenance records for all hydro plants.
     pub provenance: HydroModelProvenance,
-    /// Low-kappa warnings collected during computed FPHA fitting.
-    ///
-    /// Each entry is `(hydro_name, kappa)` for hydros whose fitted FPHA
-    /// envelope had kappa < 0.95.  An empty vector means no warnings were
-    /// generated.
-    pub kappa_warnings: Vec<(String, f64)>,
     /// Hyperplane rows produced by the computed-FPHA fitting pipeline.
     ///
     /// Non-empty only when at least one hydro uses `source: "computed"`.
@@ -391,6 +415,47 @@ pub struct PrepareHydroModelsResult {
     /// reach the write site; they receive an identical copy of these rows
     /// via the same deterministic preprocessing path.
     pub fpha_export_rows: Vec<cobre_io::FphaHyperplaneRow>,
+    /// Per-`(hydro, study-stage)` reference operating volume resolved to absolute
+    /// hm³ against each plant's own `[v_min, v_max]` band.
+    ///
+    /// Carries the JSON-declared `reference_volume` (or the case default) already
+    /// resolved, so the energy-conversion build in study setup and the FPHA
+    /// backwater path read one identical source. Each tuple is
+    /// `(hydro_id, stage_index, volume_hm3)`; `stage_index` is the 0-based
+    /// study-stage index. Built deterministically in plant-then-stage canonical
+    /// order, so it is declaration-order invariant.
+    pub reference_volumes_hm3: Vec<(EntityId, usize, f64)>,
+    /// Per-hydro VHA geometry rows (volume → forebay height), grouped by hydro id
+    /// and sorted by ascending volume.
+    ///
+    /// Carried so the energy-conversion build can derive `ρ_eq` from VHA geometry +
+    /// `ρ_esp` for an FPHA plant that has no parquet `equivalent_productivity`
+    /// override — making that override genuinely optional. The parquet value still
+    /// takes priority when present; this is only the fallback source. Empty when
+    /// the case ships no `hydro_geometry`, in which case the derivation never fires
+    /// and the override remains required for FPHA plants.
+    pub vha_geometry_by_hydro: HashMap<EntityId, Vec<cobre_io::HydroGeometryRow>>,
+    /// Per-`(hydro, stage)` computed-FPHA fit deviations, one entry per distinct
+    /// fit, in canonical `(hydro, stage)` order.
+    ///
+    /// Non-empty only when at least one hydro uses `source: "computed"`. The
+    /// CLI/Python training write site rolls these up into the generic
+    /// [`cobre_io::DeviationSummary`] persisted in `training/metadata.json`; an
+    /// empty vector yields no metadata section. Built deterministically by the
+    /// resolver's sequential canonical-order flatten, so it is declaration-order
+    /// invariant.
+    pub fpha_fit_deviations: Vec<FphaFitDeviationEntry>,
+    /// Per-sampled-point computed-FPHA fit deviations, one row per
+    /// `(hydro, stage, V, Q)` grid point at spillage = 0, in canonical
+    /// `(hydro_id, stage_id, grid)` order.
+    ///
+    /// Empty unless the run opts in via `config.exports.fpha_deviation_points`
+    /// (and at least one hydro uses `source: "computed"`). The CLI/Python training
+    /// write site emits these to `hydro_models/fpha_deviation_points.parquet` only
+    /// when the opt-in flag is on AND the vector is non-empty; an empty vector
+    /// writes no file. Built deterministically by the resolver's sequential
+    /// canonical-order flatten, so it is declaration-order invariant.
+    pub fpha_deviation_point_rows: Vec<cobre_io::FphaDeviationPointRow>,
 }
 
 impl PrepareHydroModelsResult {
@@ -447,6 +512,26 @@ impl PrepareHydroModelsResult {
             .map(|h| (h.id, EvaporationReferenceSource::DefaultMidpoint))
             .collect();
 
+        // No JSON config on this path, so every `(hydro, stage)` resolves through
+        // `resolve_reference_volume_hm3(None, ..)` — the single owner of the
+        // default-fraction reference volume — against the plant's own band. Using
+        // that resolver (not an inline formula) keeps the undeclared value
+        // bit-identical to the JSON-fed path. Built in plant-then-stage canonical
+        // order, so the table is declaration-order invariant.
+        let study_stage_count = n_stages;
+        let reference_volumes_hm3: Vec<(EntityId, usize, f64)> = system
+            .hydros()
+            .iter()
+            .flat_map(|hydro| {
+                let resolved = super::production::resolve_reference_volume_hm3(
+                    None,
+                    hydro.min_storage_hm3,
+                    hydro.max_storage_hm3,
+                );
+                (0..study_stage_count).map(move |stage_index| (hydro.id, stage_index, resolved))
+            })
+            .collect();
+
         Self {
             production,
             productivity_override:
@@ -457,8 +542,15 @@ impl PrepareHydroModelsResult {
                 evaporation_sources,
                 evaporation_reference_sources,
             },
-            kappa_warnings: Vec::new(),
             fpha_export_rows: Vec::new(),
+            reference_volumes_hm3,
+            // This factory models a system with no FPHA, so no plant consults the
+            // VHA-geometry ρ_eq derivation; an empty map is correct.
+            vha_geometry_by_hydro: HashMap::new(),
+            // No computed FPHA on this path, so no fit deviation is measured.
+            fpha_fit_deviations: Vec::new(),
+            // No computed FPHA on this path, so no per-point deviations either.
+            fpha_deviation_point_rows: Vec::new(),
         }
     }
 }
@@ -558,11 +650,11 @@ mod tests {
     #[test]
     fn linearized_evaporation_is_copy() {
         let coeff = LinearizedEvaporation {
-            k_evap0: 0.5,
-            k_evap_v: 0.01,
+            intercept_m3s: 0.5,
+            volume_slope_m3s_per_hm3: 0.01,
         };
         let coeff2 = coeff;
-        assert_eq!(coeff.k_evap0, coeff2.k_evap0);
+        assert_eq!(coeff.intercept_m3s, coeff2.intercept_m3s);
     }
 
     #[test]
@@ -584,8 +676,8 @@ mod tests {
         let _ = format!("{model_fpha:?}");
 
         let coeff = LinearizedEvaporation {
-            k_evap0: 0.5,
-            k_evap_v: 0.01,
+            intercept_m3s: 0.5,
+            volume_slope_m3s_per_hm3: 0.01,
         };
         let _ = format!("{coeff:?}");
 
@@ -615,7 +707,6 @@ mod tests {
             n_no_evaporation: 2,
             n_user_supplied_ref: 1,
             n_default_midpoint_ref: 1,
-            kappa_warnings: Vec::new(),
         };
         let _ = format!("{summary:?}");
 
@@ -643,8 +734,11 @@ mod tests {
                 crate::energy_conversion::HydroEnergyProductivityOverride::default(),
             evaporation: evap_set,
             provenance: prov,
-            kappa_warnings: Vec::new(),
             fpha_export_rows: Vec::new(),
+            reference_volumes_hm3: Vec::new(),
+            vha_geometry_by_hydro: std::collections::HashMap::new(),
+            fpha_fit_deviations: Vec::new(),
+            fpha_deviation_point_rows: Vec::new(),
         };
         let _ = format!("{result:?}");
     }
@@ -757,12 +851,12 @@ mod tests {
             EvaporationModel::Linearized {
                 coefficients: vec![
                     LinearizedEvaporation {
-                        k_evap0: 0.5,
-                        k_evap_v: 0.01,
+                        intercept_m3s: 0.5,
+                        volume_slope_m3s_per_hm3: 0.01,
                     },
                     LinearizedEvaporation {
-                        k_evap0: 0.6,
-                        k_evap_v: 0.02,
+                        intercept_m3s: 0.6,
+                        volume_slope_m3s_per_hm3: 0.02,
                     },
                 ],
                 reference_volumes_hm3: vec![200.0, 200.0],
@@ -770,8 +864,8 @@ mod tests {
             EvaporationModel::None,
             EvaporationModel::Linearized {
                 coefficients: vec![LinearizedEvaporation {
-                    k_evap0: 0.3,
-                    k_evap_v: 0.005,
+                    intercept_m3s: 0.3,
+                    volume_slope_m3s_per_hm3: 0.005,
                 }],
                 reference_volumes_hm3: vec![50.0],
             },
@@ -800,12 +894,12 @@ mod tests {
     #[test]
     fn evaporation_model_set_model_returns_correct_variant() {
         let coeff0 = LinearizedEvaporation {
-            k_evap0: 1.0,
-            k_evap_v: 0.1,
+            intercept_m3s: 1.0,
+            volume_slope_m3s_per_hm3: 0.1,
         };
         let coeff1 = LinearizedEvaporation {
-            k_evap0: 2.0,
-            k_evap_v: 0.2,
+            intercept_m3s: 2.0,
+            volume_slope_m3s_per_hm3: 0.2,
         };
 
         let set = EvaporationModelSet::new(vec![
@@ -868,7 +962,6 @@ mod tests {
             n_no_evaporation: 4,
             n_user_supplied_ref: 1,
             n_default_midpoint_ref: 0,
-            kappa_warnings: vec![("Reservoir B".to_string(), 0.91)],
         }
     }
 
@@ -939,7 +1032,6 @@ mod tests {
             assert_eq!(got.source, want.source);
             assert_eq!(got.n_planes, want.n_planes);
         }
-        assert_eq!(back.kappa_warnings, summary.kappa_warnings);
         assert_eq!(
             back.fpha_details[0].source,
             ProductionModelSource::PrecomputedHyperplanes

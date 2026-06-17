@@ -96,10 +96,10 @@ pub(crate) struct RawNcs {
     /// `[0, max_generation_mw × availability]` at `curtailment_cost`.
     ///
     /// `false` — must-run: dispatch is pinned to the realized availability
-    /// every scenario (`col_lower = col_upper`). Use this for NEWAVE-derived
-    /// `geracao_usinas_nao_simuladas` aggregates (PCH, PCT, EOL, UFV, MMGD)
-    /// that the source model pre-nets from MERC; this restores parity with
-    /// NEWAVE's dispatch convention.
+    /// every scenario (`col_lower = col_upper`). Use this for non-simulated
+    /// aggregate generation (small hydro, biomass, wind, solar, distributed
+    /// generation) that the source model pre-nets from load before the
+    /// dispatch LP runs.
     #[serde(default = "default_allow_curtailment")]
     allow_curtailment: bool,
     /// Optional entity-level curtailment cost override [$/`MWh`].
@@ -339,8 +339,8 @@ mod tests {
     }
 
     /// `allow_curtailment` is parsed through to the resolved entity when
-    /// supplied; `false` is the must-run case used for NEWAVE-derived
-    /// `geracao_usinas_nao_simuladas` aggregates.
+    /// supplied; `false` is the must-run case used for non-simulated
+    /// aggregate generation.
     #[test]
     fn test_parse_allow_curtailment() {
         let json = r#"{

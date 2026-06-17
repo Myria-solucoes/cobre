@@ -31,8 +31,8 @@ use crate::model::PySystem;
 use crate::run::{
     LoadedStudy, PhaseError, SimSummary, apply_training_policy_mode, build_study_setup,
     reconstruct_policy_from_checkpoint, run_in_scoped_pool, run_simulation_phase_py,
-    run_training_phase_py, run_training_phase_py_streaming, write_fpha_hyperplanes_if_any,
-    write_training_artifacts,
+    run_training_phase_py, run_training_phase_py_streaming, write_evaporation_models_if_any,
+    write_fpha_deviation_points_if_any, write_fpha_hyperplanes_if_any, write_training_artifacts,
 };
 
 /// Map a [`PhaseError`] to a Python exception through the single
@@ -56,45 +56,41 @@ fn phase_error_to_pyerr(err: PhaseError) -> PyErr {
 /// the front half of the solve lifecycle.
 ///
 /// Constructed once via [`Study::__new__`] (which runs
-/// [`crate::run::build_study_setup`]); `train`/`simulate` (later tickets) reuse
-/// the stored state, and [`Study::validate`] replays the captured warnings.
+/// [`crate::run::build_study_setup`]); `train`/`simulate` reuse the stored
+/// state, and [`Study::validate`] replays the captured warnings.
 /// The `output_dir` is fixed at construction time so every artifact this study
 /// writes lands in the same directory (the always-writes contract).
 // Some fields are stored at construction time but only consumed by the
-// `simulate` method added in a later ticket; they are intentionally retained
-// here (the always-load-once contract) and annotated `dead_code` until that
-// method lands.
+// `simulate` method; they are intentionally retained here (the
+// always-load-once contract) and annotated `dead_code`.
 #[pyclass(name = "Study")]
 pub struct Study {
-    /// The live, fully prepared study setup. Consumed by `train` (and
-    /// `simulate` in a later ticket).
+    /// The live, fully prepared study setup. Consumed by `train` and
+    /// `simulate`.
     setup: StudySetup,
     /// The system after stochastic preprocessing. Shared (not copied) with the
     /// `cobre.model.System` view returned by the `system` getter; `train`/
     /// `simulate` borrow `&*self.system`.
     system: Arc<cobre_core::System>,
-    /// The effective (post-override) configuration. Consumed by `train` (and
-    /// `simulate` in a later ticket).
+    /// The effective (post-override) configuration. Consumed by `train` and
+    /// `simulate`.
     config: cobre_io::Config,
-    /// The resolved tree seed. Consumed by `train` (and `simulate` in a later
-    /// ticket).
+    /// The resolved tree seed. Consumed by `train` and `simulate`.
     seed: u64,
-    /// The model-provenance report. Consumed by `simulate` in a later ticket.
+    /// The model-provenance report. Consumed by `simulate`.
     // Rationale: stored at construction time under the always-load-once
     // contract; the `simulate` PyO3 method reads it to populate the simulation
     // output report. Removing it would force a second expensive case load when
     // simulate is called.
     #[allow(dead_code)]
     provenance: ModelProvenanceReport,
-    /// The structural stochastic summary. Consumed by `simulate` in a later
-    /// ticket.
+    /// The structural stochastic summary. Consumed by `simulate`.
     // Rationale: captured once during construction so the `simulate` method
     // can surface stochastic preprocessing metadata in its output without
     // re-running the preprocessing pipeline.
     #[allow(dead_code)]
     stochastic_summary: StochasticSummary,
-    /// The structural hydro-model summary. Consumed by `simulate` in a later
-    /// ticket.
+    /// The structural hydro-model summary. Consumed by `simulate`.
     // Rationale: captured once during construction so the `simulate` method
     // can include hydro-model provenance in its output report without
     // re-running the hydro preprocessing pipeline.
@@ -114,12 +110,11 @@ pub struct Study {
 /// `Policy` carries enough state to drive `simulate` directly without reloading
 /// a checkpoint from disk: the [`TrainingResult`] (which owns the per-stage
 /// basis cache and the baked stage templates) and a clone of the trained
-/// [`FutureCostFunction`] (the cut pool). A `Policy.load`-ed handle (a later
-/// ticket) and a trained one therefore expose the same shape.
+/// [`FutureCostFunction`] (the cut pool). A `Policy.load`-ed handle and a
+/// trained one therefore expose the same shape.
 ///
 /// The read-only getters surface the headline convergence figures
-/// (`iterations`, `final_lower_bound`, `final_upper_bound`); richer accessors
-/// land in a later ticket.
+/// (`iterations`, `final_lower_bound`, `final_upper_bound`).
 #[pyclass(name = "Policy")]
 pub struct Policy {
     /// The full training result: convergence metrics, basis cache, baked
@@ -419,9 +414,9 @@ impl Study {
     fn train(&mut self, py: Python<'_>, on_iteration: Option<Py<PyAny>>) -> PyResult<Policy> {
         // Training-disabled: explicit no-op that returns a synthetic
         // zero-iteration policy. The simulation-only path loads a policy
-        // elsewhere (`simulate`/`Policy.load`, a later ticket), so there is
-        // nothing to train or write here. This mirrors the training-disabled
-        // branch of `run_via_study`.
+        // elsewhere (`simulate`/`Policy.load`), so there is nothing to train or
+        // write here. This mirrors the training-disabled branch of
+        // `run_via_study`.
         if !self.config.training.enabled {
             let synthetic = TrainingResult::new(
                 0.0,
@@ -498,6 +493,8 @@ impl Study {
                         n,
                     )?;
                     write_fpha_hyperplanes_if_any(&output_dir, setup)?;
+                    write_evaporation_models_if_any(&output_dir, setup, system)?;
+                    write_fpha_deviation_points_if_any(&output_dir, setup, config)?;
 
                     Ok::<_, PhaseError>((training, callback_error))
                 })?
@@ -602,7 +599,7 @@ impl Study {
     /// reads the policy's `baked_templates` and `basis_cache`. A trained policy
     /// carries `baked_templates = Some(...)`; a loaded one carries `None` and the
     /// study re-bakes the stage templates from the FCF at startup — exactly the
-    /// monolithic behavior (P3).
+    /// monolithic behavior.
     ///
     /// `output_dir` defaults to this study's construction-time `output_dir`.
     /// Each call writes a fresh `simulation/` output set; the method may be called

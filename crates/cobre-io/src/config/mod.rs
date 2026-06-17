@@ -23,7 +23,6 @@
 //! println!("forward_passes = {:?}", cfg.training.forward_passes);
 //! ```
 
-pub mod energy;
 pub mod estimation;
 pub mod exports;
 pub mod modeling;
@@ -34,7 +33,6 @@ pub mod training;
 
 // Re-export all public types so downstream callers continue to use
 // `cobre_io::config::Foo` without knowing which submodule owns `Foo`.
-pub use energy::EnergyConfig;
 pub use estimation::{EstimationConfig, OrderSelectionMethod};
 pub use exports::ExportsConfig;
 pub use modeling::{InflowNonNegativityConfig, InflowNonNegativityMethod, ModelingConfig};
@@ -42,8 +40,8 @@ pub use policy::{BoundaryPolicy, CheckpointingConfig, PolicyConfig, PolicyMode};
 pub use scenario_source::{RawClassConfigEntry, RawHistoricalYearsConfig, RawScenarioSourceConfig};
 pub use simulation::SimulationConfig;
 pub use training::{
-    LipschitzConfig, RowSelectionConfig, StoppingRuleConfig, TrainingConfig, TrainingSolverConfig,
-    UpperBoundEvaluationConfig,
+    LipschitzConfig, RowSelectionConfig, SelectionMethod, StoppingRuleConfig, TrainingConfig,
+    TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
 
 use cobre_core::scenario::{HistoricalYears, SamplingScheme, ScenarioSource};
@@ -90,10 +88,6 @@ pub struct Config {
     /// Time series estimation settings for automatic model parameter fitting.
     #[serde(default)]
     pub estimation: EstimationConfig,
-
-    /// Energy conversion settings (reference volume fraction for FPHA hydros).
-    #[serde(default)]
-    pub energy: EnergyConfig,
 }
 
 /// Load and validate `config.json` from `path`.
@@ -176,15 +170,6 @@ pub(crate) fn validate_config(config: &Config, path: &Path) -> Result<(), LoadEr
             path: path.to_path_buf(),
             field: "training.stopping_rules".to_string(),
             message: "required field is missing".to_string(),
-        });
-    }
-
-    let frac = config.energy.reference_volume_fraction;
-    if frac.is_nan() || frac <= 0.0 || frac > 1.0 {
-        return Err(LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: "energy.reference_volume_fraction".to_string(),
-            message: format!("must be in (0.0, 1.0] (exclusive zero, inclusive one), got {frac}"),
         });
     }
 
@@ -515,6 +500,7 @@ impl Config {
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
+    clippy::expect_used,
     clippy::panic,
     clippy::too_many_lines,
     clippy::doc_markdown
@@ -625,8 +611,10 @@ mod tests {
             ],
             "stopping_mode": "any",
             "cut_selection": {
-              "enabled": true,
-              "method": "domination"
+              "selection": {
+                "method": "domination",
+                "domination_tolerance": 1e-6
+              }
             }
           },
           "upper_bound_evaluation": {
@@ -671,8 +659,16 @@ mod tests {
         let rules = cfg.training.stopping_rules.as_ref().unwrap();
         assert_eq!(rules.len(), 2);
         let cut_sel = &cfg.training.cut_selection;
-        assert_eq!(cut_sel.enabled, Some(true));
-        assert_eq!(cut_sel.method.as_deref(), Some("domination"));
+        match cut_sel.selection.as_ref().expect("selection present") {
+            SelectionMethod::Domination {
+                domination_tolerance,
+                check_frequency,
+            } => {
+                assert!((domination_tolerance - 1e-6).abs() < f64::EPSILON);
+                assert_eq!(*check_frequency, 5);
+            }
+            other => panic!("expected Domination, got {other:?}"),
+        }
 
         // Upper bound
         assert_eq!(cfg.upper_bound_evaluation.enabled, Some(true));
@@ -999,6 +995,46 @@ mod tests {
         );
     }
 
+    /// `exports.fpha_deviation_points: true` deserializes correctly.
+    ///
+    /// Verifies that a `config.json` with
+    /// `"exports": {"fpha_deviation_points": true}` round-trips the field as
+    /// `true` in `ExportsConfig`.
+    #[test]
+    fn test_exports_fpha_deviation_points_explicit_true() {
+        let f = write_config(
+            r#"{
+            "training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
+            "exports": {"fpha_deviation_points": true}
+        }"#,
+        );
+        let cfg = parse_config(f.path()).unwrap();
+        assert!(
+            cfg.exports.fpha_deviation_points,
+            "exports.fpha_deviation_points should be true when set in config"
+        );
+    }
+
+    /// `exports.fpha_deviation_points` defaults to `false` when the field is absent.
+    ///
+    /// Verifies that a `config.json` without the `fpha_deviation_points` field in
+    /// the `exports` section resolves to `false` via `#[serde(default)]`, so a
+    /// run with the flag absent produces no deviation-points file and leaves the
+    /// rest of the run's outputs unchanged from the flag-off default.
+    #[test]
+    fn test_exports_fpha_deviation_points_defaults_to_false() {
+        let f = write_config(
+            r#"{
+            "training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}
+        }"#,
+        );
+        let cfg = parse_config(f.path()).unwrap();
+        assert!(
+            !cfg.exports.fpha_deviation_points,
+            "exports.fpha_deviation_points should default to false when absent"
+        );
+    }
+
     // ── ScenarioSource parsing tests ──────────────────────────────────────────
 
     const MINIMAL_TRAINING: &str =
@@ -1209,37 +1245,32 @@ mod tests {
         );
     }
 
-    /// max_active_per_stage serde roundtrip: Some(100) serializes and deserializes correctly.
-    ///
-    /// The deprecated `basis_activity_window` field still round-trips because
-    /// the schema retains it for one release. `#[allow(deprecated)]` is needed
-    /// to read it without triggering the deprecation lint.
+    /// `RowSelectionConfig` round-trips through JSON: the parent always-on knobs
+    /// and a tagged `selection` block survive serialize → deserialize.
     #[test]
-    #[allow(deprecated)]
-    fn max_active_per_stage_serde_roundtrip() {
+    fn row_selection_config_serde_roundtrip() {
         let original = RowSelectionConfig {
-            enabled: Some(true),
-            method: Some("level1".to_string()),
-            threshold: None,
-            memory_window: None,
-            domination_epsilon: None,
-            check_frequency: None,
-            cut_activity_tolerance: None,
+            row_activity_tolerance: Some(1e-6),
             max_active_per_stage: Some(100),
-            basis_activity_window: Some(7),
-            tie_tolerance: None,
-            start_iteration: None,
-            active_window: None,
-            candidate_window: None,
-            nadic: None,
-            violation_tolerance: None,
+            selection: Some(SelectionMethod::Level1 {
+                tie_tolerance: 1e-9,
+                check_frequency: 7,
+            }),
         };
         let json = serde_json::to_string(&original).unwrap();
         let roundtripped: RowSelectionConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(roundtripped.max_active_per_stage, Some(100));
-        assert_eq!(roundtripped.enabled, Some(true));
-        assert_eq!(roundtripped.method.as_deref(), Some("level1"));
-        assert_eq!(roundtripped.basis_activity_window, Some(7));
+        assert_eq!(roundtripped.row_activity_tolerance, Some(1e-6));
+        match roundtripped.selection.expect("selection present") {
+            SelectionMethod::Level1 {
+                tie_tolerance,
+                check_frequency,
+            } => {
+                assert!((tie_tolerance - 1e-9).abs() < f64::EPSILON);
+                assert_eq!(check_frequency, 7);
+            }
+            other => panic!("expected Level1, got {other:?}"),
+        }
     }
 
     /// max_active_per_stage absent from JSON deserializes to None.
@@ -1250,7 +1281,7 @@ mod tests {
             "training": {
                 "forward_passes": 10,
                 "stopping_rules": [{"type": "iteration_limit", "limit": 5}],
-                "cut_selection": {"enabled": true, "method": "level1"}
+                "cut_selection": {"selection": {"method": "level1"}}
             }
         }"#,
         );
@@ -1354,47 +1385,6 @@ mod tests {
         assert_eq!(boundary.source_stage, 5);
     }
 
-    // ── RowSelectionConfig::threshold tests ──────────────────────────────────
-
-    /// AC: `threshold` is accepted and round-trips for `level1`.
-    #[test]
-    fn test_row_selection_threshold_accepted() {
-        let json = r#"{"threshold": 5}"#;
-        let cfg: RowSelectionConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(cfg.threshold, Some(5), "threshold must be stored");
-    }
-
-    /// AC: an existing config JSON that still carries the deprecated
-    /// `threshold` / `memory_window` keys alongside the new first-class
-    /// `active_window` key deserializes without error (the deprecated fields are
-    /// retained for `deny_unknown_fields`; `active_window` is the new k2 field).
-    #[test]
-    fn test_row_selection_deprecated_keys_and_active_window_deserialize() {
-        let json = r#"{
-            "enabled": true,
-            "method": "dynamic",
-            "threshold": 3,
-            "memory_window": 20,
-            "active_window": 0
-        }"#;
-        let cfg: RowSelectionConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            cfg.threshold,
-            Some(3),
-            "deprecated threshold must round-trip"
-        );
-        assert_eq!(
-            cfg.memory_window,
-            Some(20),
-            "deprecated memory_window must round-trip"
-        );
-        assert_eq!(
-            cfg.active_window,
-            Some(0),
-            "active_window must round-trip (0 is valid)"
-        );
-    }
-
     /// Stale `exports` keys (`training`, `cuts`, `vertices`, `simulation`,
     /// `forward_detail`, `backward_detail`, `compression`) are now rejected
     /// because `ExportsConfig` uses `deny_unknown_fields`. Old case dirs that
@@ -1469,132 +1459,6 @@ mod tests {
             result.is_err(),
             "\"fixed\" must be rejected; expected an error"
         );
-    }
-
-    // ── EnergyConfig tests ────────────────────────────────────────────────────
-
-    /// AC: absent `energy` section → `reference_volume_fraction` defaults to 0.65.
-    #[test]
-    fn energy_config_defaults_to_065_when_absent() {
-        let f = write_config(
-            r#"{"training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}}"#,
-        );
-        let cfg = parse_config(f.path()).unwrap();
-        assert!(
-            (cfg.energy.reference_volume_fraction - 0.65).abs() < f64::EPSILON,
-            "default reference_volume_fraction should be 0.65, got: {}",
-            cfg.energy.reference_volume_fraction
-        );
-    }
-
-    /// AC: explicit `reference_volume_fraction` round-trips correctly.
-    #[test]
-    fn energy_config_round_trips_explicit_value() {
-        let f = write_config(
-            r#"{
-            "training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
-            "energy": {"reference_volume_fraction": 0.7}
-        }"#,
-        );
-        let cfg = parse_config(f.path()).unwrap();
-        assert!(
-            (cfg.energy.reference_volume_fraction - 0.7).abs() < f64::EPSILON,
-            "reference_volume_fraction should be 0.7, got: {}",
-            cfg.energy.reference_volume_fraction
-        );
-    }
-
-    /// AC: `reference_volume_fraction: 0.0` → SchemaError naming the field.
-    #[test]
-    fn energy_config_rejects_zero_fraction() {
-        let f = write_config(
-            r#"{
-            "training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
-            "energy": {"reference_volume_fraction": 0.0}
-        }"#,
-        );
-        let err = parse_config(f.path()).unwrap_err();
-        match &err {
-            LoadError::SchemaError { field, .. } => {
-                assert!(
-                    field.contains("energy.reference_volume_fraction"),
-                    "field should name energy.reference_volume_fraction, got: {field}"
-                );
-            }
-            other => panic!("expected SchemaError, got: {other:?}"),
-        }
-    }
-
-    /// AC: `reference_volume_fraction: 1.5` → SchemaError (above 1.0).
-    #[test]
-    fn energy_config_rejects_value_above_one() {
-        let f = write_config(
-            r#"{
-            "training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
-            "energy": {"reference_volume_fraction": 1.5}
-        }"#,
-        );
-        let err = parse_config(f.path()).unwrap_err();
-        assert!(
-            matches!(err, LoadError::SchemaError { .. }),
-            "expected SchemaError for fraction > 1.0, got: {err:?}"
-        );
-    }
-
-    /// AC: negative `reference_volume_fraction` → SchemaError.
-    #[test]
-    fn energy_config_rejects_negative_value() {
-        let f = write_config(
-            r#"{
-            "training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
-            "energy": {"reference_volume_fraction": -0.1}
-        }"#,
-        );
-        let err = parse_config(f.path()).unwrap_err();
-        assert!(
-            matches!(err, LoadError::SchemaError { .. }),
-            "expected SchemaError for negative fraction, got: {err:?}"
-        );
-    }
-
-    /// AC: NaN `reference_volume_fraction` → SchemaError.
-    #[test]
-    fn energy_config_rejects_nan() {
-        // JSON does not support NaN literals; we test by direct struct validation.
-        // Build an EnergyConfig with NaN and confirm validate_config catches it.
-        let cfg = Config {
-            schema: None,
-            modeling: ModelingConfig::default(),
-            training: TrainingConfig {
-                enabled: true,
-                tree_seed: None,
-                forward_passes: Some(10),
-                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 5 }]),
-                stopping_mode: "any".to_string(),
-                cut_selection: RowSelectionConfig::default(),
-                solver: TrainingSolverConfig::default(),
-                scenario_source: None,
-            },
-            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
-            policy: PolicyConfig::default(),
-            simulation: SimulationConfig::default(),
-            exports: ExportsConfig::default(),
-            estimation: EstimationConfig::default(),
-            energy: EnergyConfig {
-                reference_volume_fraction: f64::NAN,
-            },
-        };
-        let path = std::path::Path::new("config.json");
-        let err = validate_config(&cfg, path).unwrap_err();
-        match &err {
-            LoadError::SchemaError { field, .. } => {
-                assert!(
-                    field.contains("energy.reference_volume_fraction"),
-                    "field should name energy.reference_volume_fraction, got: {field}"
-                );
-            }
-            other => panic!("expected SchemaError, got: {other:?}"),
-        }
     }
 
     // ── with_overrides ────────────────────────────────────────────────────────
@@ -1694,19 +1558,19 @@ mod tests {
         assert_eq!(cfg.policy.checkpointing.enabled, Some(true));
     }
 
-    /// AC-5: a structurally-valid but semantically-invalid override fails validation.
+    /// AC-5: an override that clears a required field fails post-merge validation —
+    /// the override pipeline runs `validate_config`, not just type-checking.
     #[test]
     fn with_overrides_invalid_value_fails_validation() {
         let base = base_value(OVERRIDE_BASE_CONFIG);
-        let overrides =
-            override_map(&[("energy.reference_volume_fraction", serde_json::json!(0.0))]);
+        let overrides = override_map(&[("training.forward_passes", serde_json::Value::Null)]);
 
         let err = Config::with_overrides(&base, &overrides).unwrap_err();
         match &err {
             LoadError::SchemaError { field, .. } => {
                 assert!(
-                    field.contains("energy.reference_volume_fraction"),
-                    "field should name energy.reference_volume_fraction, got: {field}"
+                    field.contains("training.forward_passes"),
+                    "field should name training.forward_passes, got: {field}"
                 );
             }
             other => panic!("expected SchemaError, got: {other:?}"),

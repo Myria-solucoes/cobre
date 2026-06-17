@@ -471,7 +471,6 @@ fn build_config(training_iters: u32) -> Config {
         },
         exports: ExportsConfig::default(),
         estimation: EstimationConfig::default(),
-        energy: cobre_io::EnergyConfig::default(),
     }
 }
 

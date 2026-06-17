@@ -110,7 +110,8 @@ fn build_setup(case_dir: &Path, config: &cobre_io::Config) -> StudySetup {
         .expect("training_scenario_source");
     let prep =
         prepare_stochastic(system, case_dir, config, 42, &source).expect("prepare_stochastic");
-    let hydro_models = prepare_hydro_models(&prep.system, case_dir).expect("prepare_hydro_models");
+    let hydro_models =
+        prepare_hydro_models(&prep.system, case_dir, false).expect("prepare_hydro_models");
     StudySetup::new(&prep.system, config, prep.stochastic, hydro_models).expect("StudySetup::new")
 }
 

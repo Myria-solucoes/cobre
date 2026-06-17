@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use chrono::{Datelike, NaiveDate};
 use cobre_core::EntityId;
 use cobre_core::scenario::AnnualComponent;
+use rayon::prelude::*;
 
 use crate::StochasticError;
 use crate::par::contribution::{
@@ -1072,52 +1073,70 @@ fn estimate_all_hydro_ar_coefficients(
     max_order: usize,
     z_alpha: f64,
 ) -> Vec<ArCoefficientEstimate> {
-    let mut estimates: Vec<ArCoefficientEstimate> = Vec::new();
-    for &hydro_id in hydro_ids {
-        let mut obs_by_season: Vec<Vec<f64>> = vec![Vec::new(); n_seasons];
-        let mut stats_by_season: Vec<(f64, f64)> = vec![(0.0, 0.0); n_seasons];
-        for season in 0..n_seasons {
-            if let Some(obs) = group_obs.get(&(hydro_id, season)) {
-                obs_by_season[season].clone_from(obs);
+    // Each hydro's initial fit is computed independently from immutable shared
+    // inputs (`group_obs`, `stats_map`, and the `Copy` scalars), so the outer
+    // per-hydro loop is embarrassingly parallel. Each task owns its local
+    // `obs_by_season` / `stats_by_season` / `obs_refs` working vectors and the
+    // `hydro_estimates` vector it builds; `flat_map_iter`/`collect` reassembles
+    // the per-hydro blocks in canonical `hydro_ids` index order, making thread
+    // scheduling irrelevant to the output ordering (deterministic). The inner
+    // per-season accumulation — the white-noise fallback predicate and the
+    // periodic PACF → Yule-Walker solve — is reproduced verbatim so every output
+    // element is bit-identical to a single-threaded pass. `flat_map_iter` (not
+    // `flat_map`) is used because each hydro's returned `Vec` is small
+    // (`n_seasons`): the parallelism is across hydros, and each hydro's seasons
+    // are flattened sequentially — `flat_map` would nest rayon work-stealing over
+    // a ~12-element vec for no gain. Mirrors the proven [`compute_hydro_residuals`]
+    // idiom in the sibling `correlation` module.
+    hydro_ids
+        .par_iter()
+        .flat_map_iter(|&hydro_id| {
+            let mut obs_by_season: Vec<Vec<f64>> = vec![Vec::new(); n_seasons];
+            let mut stats_by_season: Vec<(f64, f64)> = vec![(0.0, 0.0); n_seasons];
+            for season in 0..n_seasons {
+                if let Some(obs) = group_obs.get(&(hydro_id, season)) {
+                    obs_by_season[season].clone_from(obs);
+                }
+                if let Some(stats) = stats_map.get(&(hydro_id, season)) {
+                    stats_by_season[season] = (stats.mean, stats.std);
+                }
             }
-            if let Some(stats) = stats_map.get(&(hydro_id, season)) {
-                stats_by_season[season] = (stats.mean, stats.std);
-            }
-        }
-        let obs_refs: Vec<&[f64]> = obs_by_season.iter().map(Vec::as_slice).collect();
-        for season in 0..n_seasons {
-            let stats_s = stats_by_season[season];
-            if stats_s.1 == 0.0 || obs_by_season[season].len() < 2 {
-                estimates.push(ArCoefficientEstimate {
+            let obs_refs: Vec<&[f64]> = obs_by_season.iter().map(Vec::as_slice).collect();
+            let mut hydro_estimates: Vec<ArCoefficientEstimate> = Vec::with_capacity(n_seasons);
+            for season in 0..n_seasons {
+                let stats_s = stats_by_season[season];
+                if stats_s.1 == 0.0 || obs_by_season[season].len() < 2 {
+                    hydro_estimates.push(ArCoefficientEstimate {
+                        hydro_id,
+                        season_id: season,
+                        coefficients: Vec::new(),
+                        residual_std_ratio: 1.0,
+                        annual: None,
+                    });
+                    continue;
+                }
+                let n_obs = obs_by_season[season].len();
+                let pacf_values =
+                    periodic_pacf(season, max_order, n_seasons, &obs_refs, &stats_by_season);
+                let pacf_result = select_order_pacf(&pacf_values, n_obs, z_alpha);
+                let yw_result = estimate_periodic_ar_coefficients(
+                    season,
+                    pacf_result.selected_order,
+                    n_seasons,
+                    &obs_refs,
+                    &stats_by_season,
+                );
+                hydro_estimates.push(ArCoefficientEstimate {
                     hydro_id,
                     season_id: season,
-                    coefficients: Vec::new(),
-                    residual_std_ratio: 1.0,
+                    coefficients: yw_result.coefficients,
+                    residual_std_ratio: yw_result.residual_std_ratio,
                     annual: None,
                 });
-                continue;
             }
-            let n_obs = obs_by_season[season].len();
-            let pacf_values =
-                periodic_pacf(season, max_order, n_seasons, &obs_refs, &stats_by_season);
-            let pacf_result = select_order_pacf(&pacf_values, n_obs, z_alpha);
-            let yw_result = estimate_periodic_ar_coefficients(
-                season,
-                pacf_result.selected_order,
-                n_seasons,
-                &obs_refs,
-                &stats_by_season,
-            );
-            estimates.push(ArCoefficientEstimate {
-                hydro_id,
-                season_id: season,
-                coefficients: yw_result.coefficients,
-                residual_std_ratio: yw_result.residual_std_ratio,
-                annual: None,
-            });
-        }
-    }
-    estimates
+            hydro_estimates
+        })
+        .collect()
 }
 
 /// PAR-fit knobs for `iterative_pacf_reduction` and its helpers.

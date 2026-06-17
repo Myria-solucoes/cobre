@@ -1,4 +1,6 @@
-//! Parity hash harness for deterministic cases D01–D17 (D12 and D16 are absent).
+//! Parity hash harness for the deterministic cases enumerated in `case_dir`
+//! (the D01–D17 core plus the D31 backwater reference-volume case; gaps in the
+//! index reflect retired/absent cases).
 //!
 //! Computes a SHA-256 digest over a whitelist of semantic fields from each
 //! case's training + simulation output. On first run with `COBRE_PARITY_REGEN=1`
@@ -29,10 +31,10 @@
 //!    Same ordering.  Duals = `water_value_per_hm3` for each hydro record,
 //!    sorted by `(block_id, hydro_id)`.
 //!
-//! ## Field-name translation from ticket spec
+//! ## Field-name translation from the schema spec
 //!
-//! The ticket spec references generic "primal trajectory" and "dual trajectory"
-//! fields.  The actual structs use:
+//! The output-schema spec references generic "primal trajectory" and "dual
+//! trajectory" fields.  The actual structs use:
 //! - `SimulationHydroResult::storage_final_hm3`  → primal state variable
 //! - `SimulationHydroResult::water_value_per_hm3` → dual of storage balance
 //! - `TrainingEvent::ConvergenceUpdate::upper_bound_std` → `upper_bound_std_f64_le`
@@ -202,6 +204,12 @@ fn case_dir(label: &str) -> std::path::PathBuf {
         "D14" => "d14-block-factors",
         "D15" => "d15-non-controllable-source",
         "D17" => "d17-evaporation-mixed-sign",
+        // Cascade case whose downstream plant declares a `reference_volume`,
+        // shifting the upstream computed-FPHA plant's backwater family. The
+        // reference-volume *default* (0.65) path is covered by the unchanged
+        // D05/D06/D07 baselines (no `reference_volume` declared there); D31
+        // exercises the *declared* path end-to-end.
+        "D31" => "d31-backwater-reference-volume",
         other => panic!("unknown case label: {other}"),
     };
     // Integration tests run from the crate root; fixtures live at
@@ -226,7 +234,7 @@ fn run_case(label: &str) {
     let stochastic = pr.stochastic;
 
     let hydro_models =
-        prepare_hydro_models(&system, &dir).expect("prepare_hydro_models must succeed");
+        prepare_hydro_models(&system, &dir, false).expect("prepare_hydro_models must succeed");
 
     // Enable simulation so we get per-scenario stage results.
     let mut config_with_sim = config.clone();
@@ -473,4 +481,13 @@ fn parity_hash_d15() {
 )]
 fn parity_hash_d17() {
     run_case("D17");
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+fn parity_hash_d31() {
+    run_case("D31");
 }

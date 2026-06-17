@@ -10,6 +10,9 @@
 //! Each function prints its section independently so the caller can display
 //! results at the right point in the execution flow.
 
+use cobre_io::SetupTimings;
+use console::Term;
+
 // Rationale: the `#[cfg(test)]` blocks in this module import
 // `HydroProductionProvenance`, `InflowProvenance`, and `ProvenanceSource` via
 // `use super::{...}`; this `pub use` is the declaration that puts those names on
@@ -19,7 +22,6 @@ pub use cobre_sddp::{
     HydroModelSummary, HydroProductionProvenance, InflowProvenance, ModelProvenanceReport,
     ProvenanceSource,
 };
-use console::Term;
 
 /// Print the hydro model preprocessing summary to `stderr`.
 ///
@@ -139,7 +141,6 @@ pub fn print_execution_topology(
             let _ = stderr.write_line(&format!("  Threads:   {n_threads} {thread_word}"));
         }
         BackendKind::Mpi => {
-            // Backend line with library and standard version.
             let backend_detail = if let Some(ref mpi) = topology.mpi {
                 format!("MPI ({}, {})", mpi.library_version, mpi.standard_version)
             } else {
@@ -147,7 +148,6 @@ pub fn print_execution_topology(
             };
             let _ = stderr.write_line(&format!("  Backend:   {backend_detail}"));
 
-            // Thread level + rayon thread count.
             let thread_line = if let Some(ref mpi) = topology.mpi {
                 format!("{}, {n_threads} {thread_word} per rank", mpi.thread_level)
             } else {
@@ -155,7 +155,6 @@ pub fn print_execution_topology(
             };
             let _ = stderr.write_line(&format!("  Threads:   {thread_line}"));
 
-            // Layout: single-node or multi-node.
             let world_size = topology.world_size;
             let rank_word = if world_size == 1 { "rank" } else { "ranks" };
             let num_hosts = topology.num_hosts();
@@ -165,9 +164,8 @@ pub fn print_execution_topology(
                     topology.leader_hostname()
                 ));
             } else {
-                let node_word = if num_hosts == 1 { "node" } else { "nodes" };
                 let _ = stderr.write_line(&format!(
-                    "  Layout:    {world_size} {rank_word} across {num_hosts} {node_word}"
+                    "  Layout:    {world_size} {rank_word} across {num_hosts} nodes"
                 ));
                 for host in &topology.hosts {
                     let count = host.ranks.len();
@@ -180,10 +178,8 @@ pub fn print_execution_topology(
                 }
             }
 
-            // Optional SLURM line.
             if let Some(ref slurm) = topology.slurm {
-                let mut slurm_parts: Vec<String> = Vec::new();
-                slurm_parts.push(format!("job {}", slurm.job_id));
+                let mut slurm_parts: Vec<String> = vec![format!("job {}", slurm.job_id)];
                 if let Some(ref node_list) = slurm.node_list {
                     slurm_parts.push(format!("nodes {node_list}"));
                 }
@@ -250,6 +246,71 @@ pub fn format_hydro_model_summary_string(summary: &HydroModelSummary) -> String 
     lines.push(format!(
         "  Evaporation:   {}",
         format_evaporation_line(summary)
+    ));
+    lines.join("\n")
+}
+
+/// Print the per-phase setup timing summary to `stderr`.
+///
+/// Renders a bold `Setup` header followed by one indented line per setup phase
+/// (`Load`, `Stochastic fit`, `Production fit`, `Evaporation fit`, `Broadcast`),
+/// each value formatted with [`format_split_duration`]. The labels are display
+/// strings; the underlying values come from the generic [`SetupTimings`] fields.
+///
+/// Write errors are silently ignored (fire-and-forget).
+pub fn print_setup_summary(stderr: &Term, timings: &SetupTimings) {
+    let _ = stderr.write_line(&format!("{}", console::style("Setup").bold()));
+    let _ = stderr.write_line(&format!(
+        "  Load:            {}",
+        format_split_duration(timings.load_seconds)
+    ));
+    let _ = stderr.write_line(&format!(
+        "  Stochastic fit:  {}",
+        format_split_duration(timings.stochastic_fit_seconds)
+    ));
+    let _ = stderr.write_line(&format!(
+        "  Production fit:  {}",
+        format_split_duration(timings.production_fit_seconds)
+    ));
+    let _ = stderr.write_line(&format!(
+        "  Evaporation fit: {}",
+        format_split_duration(timings.evaporation_fit_seconds)
+    ));
+    let _ = stderr.write_line(&format!(
+        "  Broadcast:       {}",
+        format_split_duration(timings.broadcast_seconds)
+    ));
+}
+
+/// Render the per-phase setup timing summary as a plain-text `String`.
+///
+/// The returned string contains no ANSI escape sequences. Color and styling
+/// are applied by [`print_setup_summary`] when writing to the terminal. This
+/// function exists to allow unit tests to assert on summary content without
+/// requiring a real terminal.
+#[cfg(test)]
+pub fn format_setup_summary_string(timings: &SetupTimings) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    lines.push("Setup".to_string());
+    lines.push(format!(
+        "  Load:            {}",
+        format_split_duration(timings.load_seconds)
+    ));
+    lines.push(format!(
+        "  Stochastic fit:  {}",
+        format_split_duration(timings.stochastic_fit_seconds)
+    ));
+    lines.push(format!(
+        "  Production fit:  {}",
+        format_split_duration(timings.production_fit_seconds)
+    ));
+    lines.push(format!(
+        "  Evaporation fit: {}",
+        format_split_duration(timings.evaporation_fit_seconds)
+    ));
+    lines.push(format!(
+        "  Broadcast:       {}",
+        format_split_duration(timings.broadcast_seconds)
     ));
     lines.join("\n")
 }
@@ -593,7 +654,6 @@ pub fn format_summary_string(summary: &RunSummary) -> String {
 
     let mut lines: Vec<String> = Vec::new();
 
-    // Training section header
     lines.push(format!(
         "Training complete in {duration} ({} iterations, {convergence_detail})",
         t.iterations
@@ -611,7 +671,6 @@ pub fn format_summary_string(summary: &RunSummary) -> String {
     lines.extend(policy_rows_lines(t));
     lines.push(format!("  LP solves:    {}", t.total_lp_solves));
 
-    // Simulation section (optional)
     if let Some(sim) = &summary.simulation {
         let sim_duration = format_duration(sim.total_time_ms);
         lines.push(String::new());
@@ -625,7 +684,6 @@ pub fn format_summary_string(summary: &RunSummary) -> String {
         ));
     }
 
-    // Output path
     lines.push(String::new());
     lines.push(format!(
         "Output written to {}/",
@@ -1206,7 +1264,6 @@ mod tests {
             n_no_evaporation: 1,
             n_user_supplied_ref: 0,
             n_default_midpoint_ref: 3,
-            kappa_warnings: Vec::new(),
         }
     }
 
@@ -1220,7 +1277,6 @@ mod tests {
             n_no_evaporation: 4,
             n_user_supplied_ref: 0,
             n_default_midpoint_ref: 0,
-            kappa_warnings: Vec::new(),
         }
     }
 
@@ -1234,7 +1290,6 @@ mod tests {
             n_no_evaporation: 3,
             n_user_supplied_ref: 0,
             n_default_midpoint_ref: 162,
-            kappa_warnings: Vec::new(),
         }
     }
 
@@ -1309,7 +1364,6 @@ mod tests {
             n_no_evaporation: 2,
             n_user_supplied_ref: 0,
             n_default_midpoint_ref: 0,
-            kappa_warnings: Vec::new(),
         };
         let s = format_hydro_model_summary_string(&summary);
 
@@ -1401,7 +1455,6 @@ mod tests {
             n_no_evaporation: 1,
             n_user_supplied_ref: 1,
             n_default_midpoint_ref: 0,
-            kappa_warnings: Vec::new(),
         };
         let s = format_hydro_model_summary_string(&summary);
 
@@ -1472,7 +1525,6 @@ mod tests {
             n_no_evaporation: 0,
             n_user_supplied_ref: 0,
             n_default_midpoint_ref: 2,
-            kappa_warnings: Vec::new(),
         };
         let s = format_hydro_model_summary_string(&summary);
         assert!(
@@ -1501,7 +1553,6 @@ mod tests {
             n_no_evaporation: 1,
             n_user_supplied_ref: 3,
             n_default_midpoint_ref: 0,
-            kappa_warnings: Vec::new(),
         };
         let s = format_hydro_model_summary_string(&summary);
         assert!(
@@ -1534,7 +1585,6 @@ mod tests {
             n_no_evaporation: 1,
             n_user_supplied_ref: 2,
             n_default_midpoint_ref: 1,
-            kappa_warnings: Vec::new(),
         };
         let s = format_hydro_model_summary_string(&summary);
         assert!(
@@ -1568,6 +1618,58 @@ mod tests {
             s.contains("0 linearized"),
             "zero-evaporation must contain '0 linearized', got: {s}"
         );
+    }
+
+    // ── SetupTimings tests ─────────────────────────────────────────────────
+
+    use super::{SetupTimings, format_setup_summary_string, print_setup_summary};
+
+    fn make_setup_timings() -> SetupTimings {
+        SetupTimings {
+            load_seconds: 1.2,
+            stochastic_fit_seconds: 0.5,
+            production_fit_seconds: 2.0,
+            evaporation_fit_seconds: 0.0,
+            broadcast_seconds: 0.1,
+        }
+    }
+
+    /// AC: the rendered body carries the header and every phase label.
+    #[test]
+    fn format_setup_summary_contains_phase_labels() {
+        let timings = make_setup_timings();
+        let s = format_setup_summary_string(&timings);
+
+        assert!(
+            s.contains("Setup"),
+            "output must contain 'Setup' header, got: {s}"
+        );
+        assert!(
+            s.contains("Load"),
+            "output must contain 'Load' label, got: {s}"
+        );
+        assert!(
+            s.contains("Stochastic fit"),
+            "output must contain 'Stochastic fit' label, got: {s}"
+        );
+        assert!(
+            s.contains("Production fit"),
+            "output must contain 'Production fit' label, got: {s}"
+        );
+        assert!(
+            s.contains("Evaporation fit"),
+            "output must contain 'Evaporation fit' label, got: {s}"
+        );
+        assert!(
+            s.contains("Broadcast"),
+            "output must contain 'Broadcast' label, got: {s}"
+        );
+    }
+
+    #[test]
+    fn print_setup_summary_does_not_panic() {
+        let timings = make_setup_timings();
+        print_setup_summary(&Term::buffered_stderr(), &timings);
     }
 
     // ── ModelProvenanceReport tests ───────────────────────────────────────────

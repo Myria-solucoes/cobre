@@ -6,7 +6,7 @@
       "properties": {
         "allow_curtailment": {
           "default": true,
-          "description": "Whether the LP is allowed to curtail this source.\n\n`true` (default) — the LP may curtail dispatch within\n`[0, max_generation_mw × availability]` at `curtailment_cost`.\n\n`false` — must-run: dispatch is pinned to the realized availability\nevery scenario (`col_lower = col_upper`). Use this for NEWAVE-derived\n`geracao_usinas_nao_simuladas` aggregates (PCH, PCT, EOL, UFV, MMGD)\nthat the source model pre-nets from MERC; this restores parity with\nNEWAVE's dispatch convention.",
+          "description": "Whether the LP is allowed to curtail this source.\n\n`true` (default) — the LP may curtail dispatch within\n`[0, max_generation_mw × availability]` at `curtailment_cost`.\n\n`false` — must-run: dispatch is pinned to the realized availability\nevery scenario (`col_lower = col_upper`). Use this for non-simulated\naggregate generation (small hydro, biomass, wind, solar, distributed\ngeneration) that the source model pre-nets from load before the\ndispatch LP runs.",
           "type": "boolean"
         },
         "bus_id": {

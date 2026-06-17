@@ -199,16 +199,27 @@ pub(crate) fn validate_dimensional_consistency(data: &ParsedData, ctx: &mut Vali
 
         let head_hydro_ids =
             collect_head_dependent_hydro_ids(&data.hydros, &data.production_models);
+        let fpha_hydro_ids = collect_fpha_hydro_ids(&data.hydros, &data.production_models);
 
         for &hydro_id in &head_hydro_ids {
             let count = geometry_row_counts.get(&hydro_id).copied().unwrap_or(0);
-            if count < 2 {
+            // FPHA accepts a SINGLE geometry row: a run-of-river plant has one
+            // operating volume (v_min == v_max) → a constant forebay → a valid
+            // single-volume FPHA fit (γ_V = 0). `linearized_head` still needs at
+            // least 2 rows because it fits a head SLOPE in volume, which a single
+            // point cannot define. Only an empty geometry fails for FPHA.
+            let min_required = if fpha_hydro_ids.contains(&hydro_id) {
+                1
+            } else {
+                2
+            };
+            if count < min_required {
                 ctx.add_error(
                     ErrorKind::DimensionMismatch,
                     "system/hydro_geometry.parquet",
                     Some(format!("Hydro {hydro_id}")),
                     format!(
-                        "Hydro {hydro_id} requires head-dependent model but has {count} hydro geometry row(s) (minimum 2 required)"
+                        "Hydro {hydro_id} requires head-dependent model but has {count} hydro geometry row(s) (minimum {min_required} required)"
                     ),
                 );
             }
@@ -524,7 +535,6 @@ mod tests {
             simulation: SimulationConfig::default(),
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
-            energy: crate::EnergyConfig::default(),
         };
 
         ParsedData {
@@ -576,6 +586,7 @@ mod tests {
             energy_contracts: vec![],
             hydro_geometry: vec![],
             production_models: vec![],
+            plane_reduction: None,
             hydro_energy_productivity_rows: vec![],
             fpha_hyperplanes: vec![],
             scalar_parameters: vec![],
@@ -1042,6 +1053,52 @@ mod tests {
             errors
         );
         assert_eq!(errors[0].kind, ErrorKind::DimensionMismatch);
+    }
+
+    /// An FPHA hydro with a SINGLE geometry row is accepted: a run-of-river plant
+    /// has one operating volume → a constant forebay → a valid single-volume FPHA
+    /// fit. This is the relaxation that `linearized_head` does NOT share.
+    #[test]
+    fn test_fpha_hydro_single_geometry_row_accepted() {
+        let mut data = base_parsed_data();
+        data.hydros = vec![make_hydro(1, HydroGenerationModel::Fpha, None, None)];
+        // One geometry row — valid for FPHA (constant run-of-river forebay).
+        data.hydro_geometry = vec![geometry_row(1, 100.0)];
+
+        let mut ctx = ValidationContext::new();
+        validate_dimensional_consistency(&data, &mut ctx);
+
+        assert!(
+            ctx.errors().is_empty(),
+            "a single geometry row must be valid for an FPHA plant, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// An FPHA hydro with ZERO geometry rows (while other plants have geometry) is
+    /// still rejected — there is no forebay to evaluate at all.
+    #[test]
+    fn test_fpha_hydro_zero_geometry_rows_rejected() {
+        let mut data = base_parsed_data();
+        data.hydros = vec![
+            make_hydro(1, HydroGenerationModel::Fpha, None, None),
+            make_hydro(2, HydroGenerationModel::ConstantProductivity, None, None),
+        ];
+        // Geometry present for hydro 2 only; the FPHA hydro 1 has none.
+        data.hydro_geometry = vec![geometry_row(2, 100.0), geometry_row(2, 200.0)];
+
+        let mut ctx = ValidationContext::new();
+        validate_dimensional_consistency(&data, &mut ctx);
+
+        assert!(
+            ctx.errors().iter().any(|e| {
+                e.kind == ErrorKind::DimensionMismatch
+                    && e.message.contains("Hydro 1")
+                    && e.message.contains("minimum 1 required")
+            }),
+            "FPHA hydro with zero geometry rows must fail with minimum-1, got: {:?}",
+            ctx.errors()
+        );
     }
 
     // ── AC 14: All 7 rules checked independently ─────────────────────────────

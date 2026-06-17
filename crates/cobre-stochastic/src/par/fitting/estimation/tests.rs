@@ -367,7 +367,7 @@ fn test_contribution_order_zero_fallback() {
     assert_eq!(result.max_valid_order, 0);
 }
 
-/// E2-003: Order-0 input returns valid immediately.
+/// Order-0 input returns valid immediately.
 #[test]
 fn test_contribution_order_zero_input_passes() {
     let result = validate_order_contributions(0, 1, 0, &[Vec::new()], &[10.0]);
@@ -376,7 +376,7 @@ fn test_contribution_order_zero_input_passes() {
     assert!(result.contributions.is_empty());
 }
 
-/// E2-003: Stable AR(2) model with all-positive contributions passes.
+/// Stable AR(2) model with all-positive contributions passes.
 #[test]
 fn test_contribution_stable_model_passes() {
     let result = validate_order_contributions(
@@ -391,7 +391,7 @@ fn test_contribution_stable_model_passes() {
     assert_eq!(result.contributions.len(), 2);
 }
 
-/// E2-003: apply_contribution_validation reduces an explosive model.
+/// apply_contribution_validation reduces an explosive model.
 ///
 /// Constructs AR(2) with coefficients [0.3, -0.8] for a single entity
 /// and single season. The contribution of lag 2 is negative (-0.71),
@@ -452,7 +452,7 @@ fn test_apply_contribution_validation_reduces_explosive() {
     assert_eq!(entity_reductions[0].season_id, 0);
 }
 
-/// E2-003: PIMENTAL-like scenario -- large coefficient at lag 2 in one
+/// PIMENTAL-like scenario -- large coefficient at lag 2 in one
 /// season while other seasons are benign.
 #[test]
 fn test_pimental_like_multi_season_reduction() {
@@ -528,7 +528,7 @@ fn test_pimental_like_multi_season_reduction() {
     }
 }
 
-/// E2-003: All contributions negative forces white-noise fallback.
+/// All contributions negative forces white-noise fallback.
 ///
 /// AR(1) with phi = -2.0 for all seasons -- every contribution is negative,
 /// so order drops to 0 and residual_std_ratio becomes 1.0.
@@ -781,22 +781,8 @@ fn iterative_reduction_terminates_at_zero() {
     let hydro_id = EntityId(1);
     let n_seasons = 1;
 
-    // Coefficients that produce negative contributions at order 2.
-    // phi = [0.3, -5.0] -> contribution at lag 2 = 0.3*0.3 + (-5.0) < 0
-    // After reducing max_order to 1 and re-running PACF, if PACF selects
-    // order 1, contributions at order 1 are just 0.3 (positive).
-    // But if we use coefficients that ALWAYS produce negative contributions,
-    // the order will reach 0.
-    //
-    // Use phi = [-0.5] -> phi_1 is negative, caught by phi_1 gate directly.
-    // Instead, use a scenario where contribution analysis fails at every order.
-    //
-    // We test this via the direct function with synthetic data designed
-    // so that PACF at each reduced max_order still selects an order
-    // that fails contributions.
-    //
-    // Simplest approach: use the apply_contribution_validation path
-    // (for Fixed method) to verify order-0 termination.
+    // phi = [0.3, -0.8]: contribution at lag 2 is negative, so the
+    // apply_contribution_validation (Fixed-method) path reduces the order.
     let mut estimates = vec![ArCoefficientEstimate {
         hydro_id,
         season_id: 0,
@@ -1541,4 +1527,111 @@ fn estimate_ar_with_pacf_annual_insufficient_observations_errors() {
         ),
         "error must be InsufficientData"
     );
+}
+
+// ── thread-count determinism gate ─────────────────────────────────────────
+
+/// The per-hydro initial AR fit in `estimate_all_hydro_ar_coefficients` is a
+/// `par_iter().flat_map().collect()`, so its output must not depend on the rayon
+/// pool size. This gate runs the classical PACF dispatch
+/// (`use_annual_component: false`, `max_order >= 2`) over a multi-hydro,
+/// multi-season fixture under pools of 1, 2, and 4 threads and asserts the
+/// returned `Vec<ArCoefficientEstimate>` is `to_bits`-identical across all three
+/// — the `(hydro_id, season_id)` ordering and every `coefficients[k]` and
+/// `residual_std_ratio` must match bit-for-bit regardless of thread scheduling.
+/// A regression that collected into a shared `Mutex<Vec>` or pushed estimates
+/// from worker threads would reorder the stream and fail here.
+#[test]
+fn ar_fit_is_thread_count_invariant() {
+    use crate::par::fitting::estimate_seasonal_stats_with_season_map;
+
+    let h1 = EntityId(1);
+    let h2 = EntityId(2);
+    let hydro_ids = [h1, h2];
+    let n_years = 30;
+    let stages = make_monthly_stages_for_annual(n_years);
+
+    // Two hydros with distinct synthetic monthly series so the per-season PACF +
+    // Yule-Walker fit path actually runs (not an all-white-noise degenerate case).
+    let mut obs = synthetic_monthly_obs(h1, n_years, 100.0, 5.0, 1.0);
+    obs.extend(synthetic_monthly_obs(h2, n_years, 200.0, 3.0, 0.5));
+
+    let seasonal_stats =
+        estimate_seasonal_stats_with_season_map(&obs, &stages, &hydro_ids, None).unwrap();
+
+    // Run the classical dispatch inside a fixed-size rayon pool so the fit loop
+    // runs under exactly `n` worker threads.
+    let fit_under_pool = |n: usize| -> Vec<ArCoefficientEstimate> {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build()
+            .expect("rayon pool must build")
+            .install(|| {
+                let (estimates, _report) = estimate_ar_coefficients_with_selection(
+                    &obs,
+                    &seasonal_stats,
+                    &stages,
+                    &hydro_ids,
+                    &ArEstimationConfig {
+                        max_order: 3,
+                        max_coeff_magnitude: None,
+                        season_map: None,
+                        use_annual_component: false,
+                    },
+                )
+                .expect("classical estimation must succeed");
+                estimates
+            })
+    };
+
+    let thread_counts = [1usize, 2, 4];
+    let outputs: Vec<Vec<ArCoefficientEstimate>> =
+        thread_counts.iter().map(|&n| fit_under_pool(n)).collect();
+
+    // The 1-thread baseline must have actually fitted at least one season (the
+    // PACF + YW path ran, not an all-white-noise degenerate fixture).
+    assert!(
+        outputs[0].iter().any(|e| !e.coefficients.is_empty()),
+        "the fixture must fit at least one non-empty coefficient vector"
+    );
+
+    // Bit-exact equality across pool sizes: ids, season ordering, coefficient
+    // length, and every coefficient and the residual ratio compared via
+    // `to_bits`, never float `==`.
+    let assert_bit_identical = |a: &[ArCoefficientEstimate],
+                                b: &[ArCoefficientEstimate],
+                                threads_a: usize,
+                                threads_b: usize| {
+        assert_eq!(
+            a.len(),
+            b.len(),
+            "estimate count must match across {threads_a}- and {threads_b}-thread pools"
+        );
+        for (ea, eb) in a.iter().zip(b) {
+            assert_eq!(ea.hydro_id, eb.hydro_id, "hydro_id must match");
+            assert_eq!(ea.season_id, eb.season_id, "season_id must match");
+            assert_eq!(
+                ea.coefficients.len(),
+                eb.coefficients.len(),
+                "coefficient length must match across pool sizes"
+            );
+            for (ca, cb) in ea.coefficients.iter().zip(&eb.coefficients) {
+                assert_eq!(
+                    ca.to_bits(),
+                    cb.to_bits(),
+                    "coefficient must be bit-identical across pool sizes"
+                );
+            }
+            assert_eq!(
+                ea.residual_std_ratio.to_bits(),
+                eb.residual_std_ratio.to_bits(),
+                "residual_std_ratio must be bit-identical across pool sizes"
+            );
+        }
+    };
+
+    // Compare every pool size against the single-thread baseline.
+    for (estimates_n, &n) in outputs.iter().zip(&thread_counts).skip(1) {
+        assert_bit_identical(&outputs[0], estimates_n, thread_counts[0], n);
+    }
 }

@@ -174,9 +174,9 @@ impl ClassSampler<'_> {
     /// All current variants — `InSample`, `OutOfSample`, `Historical`, and
     /// `External` — leave the caller-supplied state vector untouched. The
     /// historical-replay scheme deliberately does NOT inject window-preceding
-    /// lag values: matching NEWAVE's `TENDENCIA HIDROLOGICA` convention, the
+    /// lag values: following the hydrological-tendency convention, the
     /// initial inflow lags come from `initial_conditions.past_inflows`
-    /// (analogous to `vazpast.dat`) for every scenario regardless of which
+    /// for every scenario regardless of which
     /// historical window is being replayed. The historical window contributes
     /// only the standardized noise residuals via [`ClassSampler::fill`]; never
     /// the initial-state lags.
@@ -744,11 +744,10 @@ mod tests {
     #[test]
     fn test_historical_apply_initial_state_noop() {
         // Historical::apply_initial_state must not touch the caller-supplied
-        // state vector. Matching NEWAVE's `TENDENCIA HIDROLOGICA` convention,
+        // state vector. Following the hydrological-tendency convention,
         // the initial inflow lags come from `initial_conditions.past_inflows`
         // and are owned by the caller; the historical window contributes only
-        // standardized noise residuals via `fill`. See
-        // `docs/findings/historical-replay-lag-injection.md` in cobre-bridge.
+        // standardized noise residuals via `fill`.
         let lib = make_historical_library_with_lags();
         let sampler = ClassSampler::Historical { library: &lib };
 

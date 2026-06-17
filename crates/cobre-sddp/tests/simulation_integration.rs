@@ -424,7 +424,6 @@ fn make_config() -> Config {
         },
         exports: ExportsConfig::default(),
         estimation: cobre_io::EstimationConfig::default(),
-        energy: cobre_io::EnergyConfig::default(),
     }
 }
 
@@ -874,6 +873,8 @@ fn train_simulate_write_cycle() {
             slurm_job_id: None,
             hosts: Vec::new(),
         },
+        setup: None,
+        production_fit_deviation: None,
     };
     write_results(
         output_dir,

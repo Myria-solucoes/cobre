@@ -186,7 +186,7 @@ mod tests {
     use super::{find_productivity_for_stage, validate_productivity_resolution};
     use crate::{
         config::{
-            Config, EnergyConfig, EstimationConfig, ExportsConfig, ModelingConfig, PolicyConfig,
+            Config, EstimationConfig, ExportsConfig, ModelingConfig, PolicyConfig,
             RowSelectionConfig, SimulationConfig, StoppingRuleConfig, TrainingConfig,
             TrainingSolverConfig, UpperBoundEvaluationConfig,
         },
@@ -285,7 +285,6 @@ mod tests {
             hydro_id: EntityId(hydro_id),
             stage_id,
             equivalent_productivity_mw_per_m3s: rho_eq,
-            reference_volume_hm3: None,
             reference_outflow_m3s: None,
             specific_productivity_mw_per_m3s_per_m: None,
         }
@@ -300,6 +299,7 @@ mod tests {
                     end_stage_id: None,
                     model: "constant_productivity".to_string(),
                     fpha_config: None,
+                    reference_volume: None,
                     productivity_mw_per_m3s: productivity,
                 }],
             },
@@ -327,7 +327,6 @@ mod tests {
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),
             policy: PolicyConfig::default(),
-            energy: EnergyConfig::default(),
         };
 
         let global_penalties = GlobalPenaltyDefaults {
@@ -372,6 +371,7 @@ mod tests {
             energy_contracts: vec![],
             hydro_geometry: vec![],
             production_models: vec![],
+            plane_reduction: None,
             hydro_energy_productivity_rows: vec![],
             fpha_hyperplanes: vec![],
             scalar_parameters: vec![],
@@ -617,6 +617,7 @@ mod tests {
                     end_stage_id: Some(5),
                     model: "constant_productivity".to_string(),
                     fpha_config: None,
+                    reference_volume: None,
                     productivity_mw_per_m3s: Some(0.5),
                 }],
             },
@@ -638,6 +639,7 @@ mod tests {
                     season_id: 0,
                     model: "constant_productivity".to_string(),
                     fpha_config: None,
+                    reference_volume: None,
                     productivity_mw_per_m3s: Some(0.8),
                 }],
             },
@@ -660,6 +662,7 @@ mod tests {
                     season_id: 5,
                     model: "constant_productivity".to_string(),
                     fpha_config: None,
+                    reference_volume: None,
                     productivity_mw_per_m3s: Some(0.8),
                 }],
             },

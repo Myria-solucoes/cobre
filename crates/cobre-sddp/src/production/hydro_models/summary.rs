@@ -44,17 +44,10 @@ pub fn build_hydro_model_summary(
     let mut total_planes = 0usize;
     let mut fpha_details: Vec<FphaHydroDetail> = Vec::new();
 
-    // Collect study stages to determine plane counts (id >= 0).
-    let study_stages: Vec<usize> = system
-        .stages()
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| s.id >= 0)
-        .map(|(idx, _)| idx)
-        .collect();
-    // Use stage position 0 (within the study stages) as the representative stage.
+    // Plane counts are read from the first study stage (id >= 0); skip if none exist.
+    let has_study_stage = system.stages().iter().any(|s| s.id >= 0);
     // Production models are indexed by hydro position within `system.hydros()`.
-    let representative_stage = 0usize; // index into `study_stages`
+    let representative_stage = 0usize;
 
     for (hydro_pos, (entity_id, source)) in result.provenance.production_sources.iter().enumerate()
     {
@@ -66,13 +59,13 @@ pub fn build_hydro_model_summary(
             | ProductionModelSource::ComputedFromGeometry => {
                 n_fpha += 1;
 
-                let n_planes = if study_stages.is_empty() {
-                    0
-                } else {
+                let n_planes = if has_study_stage {
                     match result.production.model(hydro_pos, representative_stage) {
                         ResolvedProductionModel::Fpha { planes, .. } => planes.len(),
                         ResolvedProductionModel::ConstantProductivity { .. } => 0,
                     }
+                } else {
+                    0
                 };
 
                 total_planes += n_planes;
@@ -130,7 +123,6 @@ pub fn build_hydro_model_summary(
         n_no_evaporation,
         n_user_supplied_ref,
         n_default_midpoint_ref,
-        kappa_warnings: result.kappa_warnings.clone(),
     }
 }
 
@@ -298,8 +290,11 @@ mod tests {
                 evaporation_sources,
                 evaporation_reference_sources,
             },
-            kappa_warnings: Vec::new(),
             fpha_export_rows: Vec::new(),
+            reference_volumes_hm3: Vec::new(),
+            vha_geometry_by_hydro: std::collections::HashMap::new(),
+            fpha_fit_deviations: Vec::new(),
+            fpha_deviation_point_rows: Vec::new(),
         }
     }
 
@@ -375,8 +370,11 @@ mod tests {
                 evaporation_sources,
                 evaporation_reference_sources,
             },
-            kappa_warnings: Vec::new(),
             fpha_export_rows: Vec::new(),
+            reference_volumes_hm3: Vec::new(),
+            vha_geometry_by_hydro: std::collections::HashMap::new(),
+            fpha_fit_deviations: Vec::new(),
+            fpha_deviation_point_rows: Vec::new(),
         }
     }
 
@@ -418,8 +416,8 @@ mod tests {
                 if evap_set.contains(&id) {
                     EvaporationModel::Linearized {
                         coefficients: vec![LinearizedEvaporation {
-                            k_evap0: 1.0,
-                            k_evap_v: 0.01,
+                            intercept_m3s: 1.0,
+                            volume_slope_m3s_per_hm3: 0.01,
                         }],
                         reference_volumes_hm3: vec![500.0],
                     }
@@ -443,8 +441,11 @@ mod tests {
                 evaporation_sources,
                 evaporation_reference_sources,
             },
-            kappa_warnings: Vec::new(),
             fpha_export_rows: Vec::new(),
+            reference_volumes_hm3: Vec::new(),
+            vha_geometry_by_hydro: std::collections::HashMap::new(),
+            fpha_fit_deviations: Vec::new(),
+            fpha_deviation_point_rows: Vec::new(),
         }
     }
 
@@ -485,15 +486,15 @@ mod tests {
         let evap_models = vec![
             EvaporationModel::Linearized {
                 coefficients: vec![LinearizedEvaporation {
-                    k_evap0: 1.0,
-                    k_evap_v: 0.01,
+                    intercept_m3s: 1.0,
+                    volume_slope_m3s_per_hm3: 0.01,
                 }],
                 reference_volumes_hm3: vec![200.0],
             },
             EvaporationModel::Linearized {
                 coefficients: vec![LinearizedEvaporation {
-                    k_evap0: 1.0,
-                    k_evap_v: 0.01,
+                    intercept_m3s: 1.0,
+                    volume_slope_m3s_per_hm3: 0.01,
                 }],
                 reference_volumes_hm3: vec![300.0],
             },
@@ -510,8 +511,11 @@ mod tests {
                 evaporation_sources,
                 evaporation_reference_sources,
             },
-            kappa_warnings: Vec::new(),
             fpha_export_rows: Vec::new(),
+            reference_volumes_hm3: Vec::new(),
+            vha_geometry_by_hydro: std::collections::HashMap::new(),
+            fpha_fit_deviations: Vec::new(),
+            fpha_deviation_point_rows: Vec::new(),
         };
 
         let summary = build_hydro_model_summary(&result, &system);
@@ -678,8 +682,8 @@ mod tests {
                 if evap_set.contains(id) {
                     EvaporationModel::Linearized {
                         coefficients: vec![LinearizedEvaporation {
-                            k_evap0: 1.0,
-                            k_evap_v: 0.01,
+                            intercept_m3s: 1.0,
+                            volume_slope_m3s_per_hm3: 0.01,
                         }],
                         reference_volumes_hm3: vec![500.0],
                     }
@@ -703,8 +707,11 @@ mod tests {
                 evaporation_sources,
                 evaporation_reference_sources,
             },
-            kappa_warnings: Vec::new(),
             fpha_export_rows: Vec::new(),
+            reference_volumes_hm3: Vec::new(),
+            vha_geometry_by_hydro: std::collections::HashMap::new(),
+            fpha_fit_deviations: Vec::new(),
+            fpha_deviation_point_rows: Vec::new(),
         };
 
         let summary = build_hydro_model_summary(&result, &system);
@@ -780,8 +787,11 @@ mod tests {
                     EvaporationReferenceSource::DefaultMidpoint,
                 )],
             },
-            kappa_warnings: Vec::new(),
             fpha_export_rows: Vec::new(),
+            reference_volumes_hm3: Vec::new(),
+            vha_geometry_by_hydro: std::collections::HashMap::new(),
+            fpha_fit_deviations: Vec::new(),
+            fpha_deviation_point_rows: Vec::new(),
         };
 
         let summary = build_hydro_model_summary(&result, &system);

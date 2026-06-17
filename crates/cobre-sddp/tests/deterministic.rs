@@ -142,7 +142,7 @@ fn run_deterministic_with_solver(case_dir: &Path) -> (cobre_sddp::TrainingResult
     let stochastic = prepare_result.stochastic;
 
     let hydro_models =
-        prepare_hydro_models(&system, case_dir).expect("prepare_hydro_models must succeed");
+        prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
 
     let mut setup = build_setup_for_case(case_dir, &config, &system, stochastic, hydro_models);
 
@@ -171,7 +171,7 @@ fn run_deterministic(case_dir: &Path) -> cobre_sddp::TrainingResult {
     let stochastic = prepare_result.stochastic;
 
     let hydro_models =
-        prepare_hydro_models(&system, case_dir).expect("prepare_hydro_models must succeed");
+        prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
 
     let mut setup = build_setup_for_case(case_dir, &config, &system, stochastic, hydro_models);
 
@@ -207,7 +207,7 @@ fn run_with_simulation(
     let stochastic = pr.stochastic;
 
     let hydro_models =
-        prepare_hydro_models(&system, case_dir).expect("prepare_hydro_models must succeed");
+        prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
 
     let mut config_with_sim = config.clone();
     config_with_sim.simulation.enabled = true;
@@ -332,7 +332,7 @@ fn write_energy_productivity_override(
 ///
 /// Analytical thermal cost is `23_635_000 / 9 ≈ 2_626_111.11 $`. With
 /// `turbined_cost = 0.01 $/MWh` applied to every hydro's turbine column
-/// (matches NEWAVE, see `lp_builder/matrix.rs::fill_turbine_columns`), the
+/// (see `lp_builder/matrix.rs::fill_turbine_columns`), the
 /// deterministic LB adds a fixed regularization contribution of
 /// `5_785 / 9 ≈ 642.78 $` (= 0.01 · 730 · (25_000/657 + 50) summed across the
 /// two stages' turbined flows). Total = `23_640_785 / 9 ≈ 2_626_753.89 $`.
@@ -426,7 +426,7 @@ fn d02_single_hydro() {
 /// storage constraints yield thermal ≈ 28.09 MW.
 ///
 /// Analytical thermal + deficit cost is `4_171_000 / 3 ≈ 1_390_333.33`. With
-/// `turbined_cost` applied to every hydro's turbine column (matches NEWAVE),
+/// `turbined_cost` applied to every hydro's turbine column,
 /// the deterministic LB adds a fixed regularization contribution that lifts
 /// the total by `+1_364.4333…` (= turbined_cost × turbined MWh summed over
 /// stages and blocks for both hydros).
@@ -730,7 +730,7 @@ const D03_H0_V_INIT: f64 = 80.0;
 /// Stage-0 initial storage for D03 H1 \[hm³\] from `initial_conditions.json`.
 const D03_H1_V_INIT: f64 = 50.0;
 
-/// Verify `ENA` and `EARM` columns in `simulation/hydros` for D02 and D03.
+/// Verify the natural-inflow-energy and stored-energy columns in `simulation/hydros` for D02 and D03.
 ///
 /// Both cases use `ConstantProductivity` hydros (bypassing the FPHA gate),
 /// which makes `ρ_eq` and `ρ_acum` directly computable from `hydros.json`
@@ -966,17 +966,17 @@ fn d_case_energy_outputs() {
 ///
 /// ## Evaporation coefficient derivation
 ///
-/// Midpoint v_ref = (0 + 200) / 2 = 100 hm3.
+/// Midpoint reference_volume = (0 + 200) / 2 = 100 hm3.
 /// a_ref = 1.0 km², da/dv = 0.005 km²/hm3.
-/// stage_hours = 730 h → zeta_evap = 1 / (3.6 × 730) = 1/2628.
-/// c_ev = 100 mm.
-/// k_evap_v = (1/2628) × 100 × 0.005 = 1/5256.
-/// k_evap0  = (1/2628) × 100 × 1.0 − (1/5256) × 100 = 25/1314.
+/// stage_hours = 730 h → mm_km2_to_m3s = 1 / (3.6 × 730) = 1/2628.
+/// monthly_evaporation_mm = 100 mm.
+/// volume_slope_m3s_per_hm3 = (1/2628) × 100 × 0.005 = 1/5256.
+/// intercept_m3s            = (1/2628) × 100 × 1.0 − (1/5256) × 100 = 25/1314.
 ///
-/// ## Water-balance model (α = κ × k_evap_v / 2 = 1/4000)
+/// ## Water-balance model (α = κ × volume_slope_m3s_per_hm3 / 2 = 1/4000)
 ///
-/// Substituting Q_ev = k_evap0 + k_evap_v/2 × (V_out + V_in) into the LP:
-///   V_out × (1 + α) = V_in × (1 − α) + κ × (q_in − q_turb) − κ × k_evap0
+/// Substituting evaporation_outflow = intercept_m3s + volume_slope_m3s_per_hm3/2 × (V_out + V_in) into the LP:
+///   V_out × (1 + α) = V_in × (1 − α) + κ × (q_in − q_turb) − κ × intercept_m3s
 ///
 /// ## Expected cost derivation (κ = 657/250 hm3/(m3/s))
 ///
@@ -986,14 +986,14 @@ fn d_case_energy_outputs() {
 ///
 /// ### Stage 0 (turb₀ = 50, V_in₀ = 100 hm3)
 ///
-/// V_out₀ = [100×(1−α) + κ×(40 − 50) − κ×k_evap0] / (1+α)
+/// V_out₀ = [100×(1−α) + κ×(40 − 50) − κ×intercept_m3s] / (1+α)
 ///         = 294580/4001 ≈ 73.627 hm3.
 /// gen_h₀ = 50 MW, gen_th₀ = 30 MW.
 /// Stage 0 cost = 30 × 50 × 730 = 1,095,000 $.
 ///
 /// ### Stage 1 (terminal, V_in₁ = V_out₀ = 294580/4001 hm3)
 ///
-/// turb₁_max = V_in₁ × (1−α) / κ + 10 − k_evap0
+/// turb₁_max = V_in₁ × (1−α) / κ + 10 − intercept_m3s
 ///           = 399452585/10514628 ≈ 37.990 m3/s  (<50, so binding).
 /// At turb₁ = turb₁_max: V_out₁ = 0.
 ///
@@ -1394,7 +1394,7 @@ fn d12_checkpoint_round_trip() {
     let stochastic = pr.stochastic;
 
     let hydro_models =
-        prepare_hydro_models(&system, case_dir).expect("prepare_hydro_models must succeed");
+        prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
 
     // ── Step 3: override simulation config ────────────────────────────────────
 
@@ -3251,7 +3251,7 @@ fn d29_weekly_par_noise_sharing() {
     let stochastic = pr.stochastic;
 
     let hydro_models =
-        prepare_hydro_models(&system, case_dir).expect("prepare_hydro_models must succeed");
+        prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
 
     let mut setup =
         StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup must build");
@@ -3361,7 +3361,7 @@ fn d30_multi_resolution_loads_and_trains() {
     let stochastic = pr.stochastic;
 
     let hydro_models =
-        prepare_hydro_models(&system, case_dir).expect("prepare_hydro_models must succeed");
+        prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
 
     let mut setup =
         StudySetup::new(&system, &config, stochastic, hydro_models).expect("StudySetup must build");
@@ -3425,7 +3425,7 @@ fn baked_vs_fallback_simulation_costs_are_identical() {
     let stochastic = pr.stochastic;
 
     let hydro_models =
-        prepare_hydro_models(&system, case_dir).expect("prepare_hydro_models must succeed");
+        prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
 
     let mut config_with_sim = config.clone();
     config_with_sim.simulation.enabled = true;

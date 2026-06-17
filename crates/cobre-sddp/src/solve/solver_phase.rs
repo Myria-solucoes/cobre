@@ -15,8 +15,8 @@
 //! `SteepestEdge` alternatives net worse on wall time and tail latency
 //! respectively. The CLP backend mirrors this: all three phases pin full dual
 //! steepest-edge pricing (`dual_pricing_mode = 1`) and the tuned refactorization
-//! cadence (`factorization_frequency = 200`). See
-//! `docs/design/solver-tuning-results.md` for the empirical sweep.
+//! cadence (`factorization_frequency = 200`). Both backends' values were selected
+//! from an empirical solver sweep on production-scale cases.
 //!
 //! Compile-time assertions at the bottom of this module catch any future drift
 //! between the named `HiGHS` constants and the documented field values.
@@ -217,8 +217,8 @@ pub const FORWARD_PROFILE: HighsProfile = HighsProfile {
 /// |----------------------------|---------|-------|----------------------------------------------------|
 /// | `simplex_price_strategy`   | `1`     | `2`   | `RowHyperSparse`: exploits sparsity on cut-laden LPs |
 ///
-/// See `docs/design/solver-tuning-results.md` for the empirical sweep that
-/// selected this minimal override.
+/// An empirical solver sweep on production-scale cut-laden LPs selected this
+/// minimal override as the best-performing profile.
 #[cfg(feature = "highs")]
 pub const BACKWARD_PROFILE: HighsProfile = HighsProfile {
     primal_feasibility_tolerance: 1e-9,

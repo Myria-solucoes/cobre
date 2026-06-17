@@ -126,7 +126,7 @@ fn run_with_simulation(case_dir: &Path) -> Vec<SimulationScenarioResult> {
     let stochastic = pr.stochastic;
 
     let hydro_models =
-        prepare_hydro_models(&system, case_dir).expect("prepare_hydro_models must succeed");
+        prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
 
     let mut config_with_sim = config.clone();
     config_with_sim.simulation.enabled = true;

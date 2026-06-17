@@ -6,10 +6,10 @@
 //!
 //! # Behavior
 //!
-//! The five live end-block sections are reproduced in top-to-bottom order:
-//! Execution topology → Hydro models → Model provenance → Training → Simulation.
-//! Each section reuses the shared `print_*` renderer the live run uses, so the
-//! output matches the live block by construction.
+//! The live end-block sections are reproduced in top-to-bottom order:
+//! Execution topology → Hydro models → Model provenance → Training →
+//! Simulation. Each section reuses the shared `print_*` renderer the
+//! live run uses, so the output matches the live block by construction.
 //!
 //! - `training/metadata.json` — required; missing file returns [`CliError::Io`].
 //!   Drives the always-printed Execution topology and Training sections.
@@ -75,7 +75,6 @@ pub struct SummaryArgs {
 pub fn execute(args: SummaryArgs) -> Result<(), CliError> {
     let output_dir = args.output_dir;
 
-    // Verify the output directory exists before attempting to read any files.
     if !output_dir.try_exists().map_err(|e| CliError::Io {
         source: e,
         context: "output directory".to_string(),
@@ -388,6 +387,8 @@ mod tests {
                 backward_solve_seconds: Some(456.75),
                 parallelism: Some(8),
             },
+            setup: None,
+            production_fit_deviation: None,
             distribution: DistributionInfo {
                 backend: "local".to_string(),
                 world_size: 1,
