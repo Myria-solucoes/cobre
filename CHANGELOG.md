@@ -9,20 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.8.2] - 2026-06-17
 
-> **BREAKING — config migration required.** This release changes two config
-> inputs; an existing `config.json` may fail to load until migrated:
->
-> - **`training.cut_selection`** is restructured into a tagged `selection`
->   object (see _Changed_). Drop `enabled`/`method` and the removed fields, and
->   move the method parameters under `selection`.
-> - The top-level **`energy`** section is removed (see _Removed_). Delete it and
->   declare the reference volume per production model via `reference_volume` in
->   `system/hydro_production_models.json`.
->
-> Per [Semantic Versioning](https://semver.org/spec/v2.0.0.html) rule 4, a 0.x
-> release may carry breaking changes outside a major bump; this release ships
-> them as 0.8.2.
-
 ### Added
 
 - **`system/tailrace_curves.parquet` (optional).** Exact piecewise-quartic
@@ -89,11 +75,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the periodic inflow model now fits each hydro in parallel (rayon). Results are
   bit-identical regardless of thread count — per-hydro blocks reassemble in
   canonical entity order.
-
-- **CEPEL/Portuguese identifiers replaced with cobre-native English.** Internal
-  FPHA and evaporation naming (types, fields, and doc comments) was migrated from
-  CEPEL/Portuguese terms to descriptive English. Internal cleanup only — no
-  released config or output schema changed.
 
 - **BREAKING — `training.cut_selection` restructured.** Method-specific
   parameters now live inside a tagged `selection` object instead of a flat bag
