@@ -77,16 +77,20 @@ pub(crate) fn resolve_s_max(long_term_mean_inflow_m3s: f64, max_turbined_m3s: f6
 
 /// Representative operating point `(V, q)` at which a plane's `γ_S` secant is fit.
 ///
-/// # Rationale — the envelope-max grid point is the representative point (Voice 2)
+/// # Contract — anchor where the plane binds (argmin), not where it is loosest (Voice 1)
 ///
 /// The secant slope `dGH/dlateral_flow = ρ·q·d(h_net)/dlateral_flow` depends on `(V, q)`, so each
-/// plane needs one representative operating point. The chosen point is the
-/// spill = 0 fit-grid point where this plane is the *active* (tightest) upper bound
-/// and attains the largest `generation` among the points it dominates — i.e. the operating
-/// region the plane actually governs. Fitting `γ_S` there makes the lateral
-/// correction match where the plane is used. A fixed `(V_ref, q_max)` corner would
-/// be defensible but mismatched for planes that govern a low-flow or low-volume
-/// region; the active-point choice tracks each plane's own region.
+/// plane needs one representative operating point: the spill = 0 fit-grid point where
+/// this plane is the *active* (binding) upper bound and attains the largest
+/// `generation` among the points it governs. The LP applies every plane as
+/// `g ≤ plane_k`, so the binding plane at a point is the pointwise **minimum** over
+/// planes (the tightest cap) — matching the min-envelope contract in
+/// `compute_alpha_fpha`. Anchoring at the pointwise **maximum** (the loosest bound)
+/// is the wrong-but-compiling alternative: it anchors each plane where it does not
+/// govern, over-steepening `γ_S` on high-head planes and zeroing it on the planes
+/// that never attain the max. A fixed `(V_ref, q_max)` corner would be defensible
+/// but mismatched for planes that govern a low-flow or low-volume region; the
+/// active-point choice tracks each plane's own region.
 ///
 /// Determinism: the grid is the closed-form `super::grid::build_grid` grid and the
 /// scan is in fixed `(v, q)` order with a strict `>` improvement test, so ties
@@ -102,19 +106,21 @@ fn representative_operating_point(
 ) -> Option<(f64, f64)> {
     let grid = super::grid::build_grid(pf, bounds);
 
-    let mut best: Option<(f64, f64, f64)> = None; // (v, q, generation) at the active max
+    let mut best: Option<(f64, f64, f64)> = None; // (v, q, generation) at the binding point
     for &v in &grid.v_points {
         for &q in &grid.q_points {
             // Spill = 0: the representative point is on the no-lateral surface; the
             // secant then sweeps lateral_flow away from this anchor.
             let this_val = plane.evaluate(v, q, 0.0);
-            let max_val = planes
+            let min_val = planes
                 .iter()
                 .map(|p| p.evaluate(v, q, 0.0))
-                .fold(f64::NEG_INFINITY, f64::max);
+                .fold(f64::INFINITY, f64::min);
 
-            // Active iff within the same tolerance redundancy elimination uses.
-            if max_val - this_val <= 1e-8 {
+            // Active iff this plane is the binding (tightest) upper bound here, within
+            // the same tolerance redundancy elimination uses. The LP binds on the
+            // pointwise min, so the governing plane is the argmin — not the argmax.
+            if this_val - min_val <= 1e-8 {
                 let generation = pf.evaluate(v, q, 0.0);
                 if best.is_none_or(|(_, _, best_gh)| generation > best_gh) {
                     best = Some((v, q, generation));
@@ -509,5 +515,54 @@ mod tests {
                 plane.gamma_s
             );
         }
+    }
+
+    /// By-plane anchor regression: on a multi-plane concave surface the high-`γ_q`
+    /// (high-head, low-flow) plane must receive a GENTLER (smaller-magnitude) `γ_S`
+    /// than the low-`γ_q` (high-flow) plane.
+    ///
+    /// `|γ_S| ≈ ρ·q_rep·|dh_tail/dq_out|` scales with the anchor's turbined flow.
+    /// The secant is anchored at each plane's binding (argmin) region: the high-`γ_q`
+    /// plane governs the low-flow region, so it anchors at a small `q_rep` and gets
+    /// the gentle slope. The wrong-but-compiling argmax anchor (the historical bug)
+    /// inverts this — it anchors the high-`γ_q` plane at the high-flow corner and
+    /// over-steepens its `γ_S`. This test fails under that inversion, so it guards the
+    /// anchor choice directly (the single-plane secant tests cannot: one plane is the
+    /// argmin and the argmax everywhere).
+    #[test]
+    fn high_gamma_q_plane_receives_gentler_gamma_s_than_low_gamma_q() {
+        let pf = spill_sensitive_pf();
+        let bounds = small_bounds();
+        // Grid q_points = [0, 1500, 3000]. The two planes cross at q = 1500 with a
+        // shared γ_v, so the crossover is purely in q (independent of v): the high-γ_q
+        // plane is the binding (min) bound for q ≤ 1500, the low-γ_q plane for q ≥ 1500.
+        let mut planes = vec![
+            RawPlane {
+                gamma_0: 0.0,
+                gamma_v: 0.001,
+                gamma_q: 0.12, // high-γ_q (high head, governs low flow) — index 0
+                gamma_s: 0.0,
+            },
+            RawPlane {
+                gamma_0: 60.0,
+                gamma_v: 0.001,
+                gamma_q: 0.08, // low-γ_q (governs high flow) — index 1
+                gamma_s: 0.0,
+            },
+        ];
+        fit_gamma_s_for_planes(&mut planes, &pf, &bounds, 0.0);
+
+        let high_gamma_q = planes[0].gamma_s;
+        let low_gamma_q = planes[1].gamma_s;
+        assert!(
+            high_gamma_q < 0.0 && low_gamma_q < 0.0,
+            "both rising-tailrace secants must be negative; got high={high_gamma_q}, low={low_gamma_q}"
+        );
+        assert!(
+            high_gamma_q.abs() < low_gamma_q.abs(),
+            "high-γ_q plane must get the GENTLER γ_S (argmin anchor); got |high|={} >= |low|={}",
+            high_gamma_q.abs(),
+            low_gamma_q.abs()
+        );
     }
 }
