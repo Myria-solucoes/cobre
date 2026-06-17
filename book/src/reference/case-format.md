@@ -635,14 +635,18 @@ global default from `penalties.json` is used. The following fields are supported
 
 Thermal plant registry. Each entry defines a dispatchable generation unit.
 
-| Field                          | Required | Description                        |
-| ------------------------------ | -------- | ---------------------------------- |
-| `thermals[].id`                | Yes      | Plant identifier (integer, unique) |
-| `thermals[].name`              | Yes      | Human-readable plant name          |
-| `thermals[].bus_id`            | Yes      | Bus where generation is injected   |
-| `thermals[].min_generation_mw` | Yes      | Minimum dispatch level (MW)        |
-| `thermals[].max_generation_mw` | Yes      | Maximum dispatch level (MW)        |
-| `thermals[].cost_per_mwh`      | Yes      | Linear generation cost (USD/MWh)   |
+| Field                           | Required | Description                                                        |
+| ------------------------------- | -------- | ------------------------------------------------------------------ |
+| `thermals[].id`                 | Yes      | Plant identifier (integer, unique)                                 |
+| `thermals[].name`               | Yes      | Human-readable plant name                                          |
+| `thermals[].bus_id`             | Yes      | Bus where generation is injected                                   |
+| `thermals[].generation`         | Yes      | Dispatch-bounds object with `min_mw` and `max_mw`                  |
+| `thermals[].generation.min_mw`  | Yes      | Minimum dispatch level (MW)                                        |
+| `thermals[].generation.max_mw`  | Yes      | Maximum dispatch level (MW)                                        |
+| `thermals[].cost_per_mwh`       | Yes      | Linear generation cost (USD/MWh)                                   |
+| `thermals[].entry_stage_id`     | No       | Stage when the unit enters service (`null` = present from stage 1) |
+| `thermals[].exit_stage_id`      | No       | Stage when the unit is decommissioned (`null` = never)             |
+| `thermals[].anticipated_config` | No       | Anticipated-dispatch config (object with `lead_stages` ≥ 1)        |
 
 ---
 
@@ -898,19 +902,19 @@ Rows are sorted by `(hydro_id, family_id, segment_id)` ascending. A complete
 curve for one backwater family consists of multiple rows sharing
 `(hydro_id, family_id)`.
 
-| Column                         | Type    | Nullable | Description                                                                     |
-| ------------------------------ | ------- | -------- | ------------------------------------------------------------------------------- |
-| `hydro_id`                     | INT32   | No       | Plant whose tailrace this describes                                             |
-| `family_id`                    | INT32   | No       | Family index within the plant (sequential grouping key)                         |
-| `downstream_reference_level_m` | DOUBLE  | Yes      | Downstream reservoir reference level keying this family (m). `null` when the plant has a single family and no backwater dependency. |
-| `segment_id`                   | INT32   | No       | Piece index within the family                                                   |
-| `outflow_min_m3s`              | DOUBLE  | No       | Segment lower validity bound (m³/s). Non-negative.                              |
-| `outflow_max_m3s`              | DOUBLE  | No       | Segment upper validity bound (m³/s). Non-negative, >= `outflow_min_m3s`.        |
-| `coefficient_0`                | DOUBLE  | No       | Degree-0 polynomial coefficient. Any sign.                                      |
-| `coefficient_1`                | DOUBLE  | No       | Degree-1 polynomial coefficient. Any sign.                                      |
-| `coefficient_2`                | DOUBLE  | No       | Degree-2 polynomial coefficient. Any sign.                                      |
-| `coefficient_3`                | DOUBLE  | No       | Degree-3 polynomial coefficient. Any sign.                                      |
-| `coefficient_4`                | DOUBLE  | No       | Degree-4 polynomial coefficient. Any sign.                                      |
+| Column                         | Type   | Nullable | Description                                                                                                                         |
+| ------------------------------ | ------ | -------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `hydro_id`                     | INT32  | No       | Plant whose tailrace this describes                                                                                                 |
+| `family_id`                    | INT32  | No       | Family index within the plant (sequential grouping key)                                                                             |
+| `downstream_reference_level_m` | DOUBLE | Yes      | Downstream reservoir reference level keying this family (m). `null` when the plant has a single family and no backwater dependency. |
+| `segment_id`                   | INT32  | No       | Piece index within the family                                                                                                       |
+| `outflow_min_m3s`              | DOUBLE | No       | Segment lower validity bound (m³/s). Non-negative.                                                                                  |
+| `outflow_max_m3s`              | DOUBLE | No       | Segment upper validity bound (m³/s). Non-negative, >= `outflow_min_m3s`.                                                            |
+| `coefficient_0`                | DOUBLE | No       | Degree-0 polynomial coefficient. Any sign.                                                                                          |
+| `coefficient_1`                | DOUBLE | No       | Degree-1 polynomial coefficient. Any sign.                                                                                          |
+| `coefficient_2`                | DOUBLE | No       | Degree-2 polynomial coefficient. Any sign.                                                                                          |
+| `coefficient_3`                | DOUBLE | No       | Degree-3 polynomial coefficient. Any sign.                                                                                          |
+| `coefficient_4`                | DOUBLE | No       | Degree-4 polynomial coefficient. Any sign.                                                                                          |
 
 The quartic is evaluated as `coefficient_0 + coefficient_1*x + coefficient_2*x² + coefficient_3*x³ + coefficient_4*x⁴` where `x` is the downstream outflow in m³/s. Higher-degree coefficients are routinely negative in source data; all signs are accepted.
 

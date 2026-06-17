@@ -289,12 +289,12 @@ For context on the constraint file format see
 Cobre's layered validation pipeline checks the following conditions on thermal
 units. Violations are reported as error messages with the failing unit's `id`.
 
-| Rule                       | Error Class          | Description                                                                         |
-| -------------------------- | -------------------- | ----------------------------------------------------------------------------------- |
-| Bus reference integrity    | Reference error      | Every `bus_id` must match an `id` in `buses.json`.                                  |
-| Non-negative cost          | Schema error         | `cost_per_mwh` must be ≥ 0.0.                                                       |
-| Generation bounds ordering | Physical feasibility | `min_mw` must be less than or equal to `max_mw`.                                    |
-| Anticipated lead validity  | Physical feasibility | When `anticipated_config` is present, `lead_stages` must be a non-negative integer. |
+| Rule                       | Error Class          | Description                                                                              |
+| -------------------------- | -------------------- | ---------------------------------------------------------------------------------------- |
+| Bus reference integrity    | Reference error      | Every `bus_id` must match an `id` in `buses.json`.                                       |
+| Non-negative cost          | Schema error         | `cost_per_mwh` must be ≥ 0.0.                                                            |
+| Generation bounds ordering | Physical feasibility | `min_mw` must be less than or equal to `max_mw`.                                         |
+| Anticipated lead validity  | Physical feasibility | When `anticipated_config` is present, `lead_stages` must be a positive integer (`>= 1`). |
 
 ---
 

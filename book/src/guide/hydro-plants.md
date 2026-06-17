@@ -302,6 +302,23 @@ not explicitly listed:
 
 Season indices are 0-based and match the season map defined in `stages.json`.
 
+#### `reference_volume`
+
+Each stage range and season entry may carry an optional `reference_volume`
+sibling of `fpha_config`, declaring the reference operating volume the
+computed-FPHA fit and the equivalent-productivity derivation consume. Set
+exactly one of two mutually-exclusive forms:
+
+- `volume_hm3` — an absolute storage value in hm³ (finite and `> 0.0`).
+- `percentile` — a fraction in `[0.0, 1.0]` of the plant's operating range.
+
+```json
+"reference_volume": { "percentile": 0.65 }
+```
+
+This is the single source of truth for the reference volume; it replaces the
+retired `reference_volume_hm3` column of `system/hydro_energy_productivity.parquet`.
+
 ### Hyperplane Sources
 
 When a plant is configured with `model: "fpha"`, the `fpha_config.source` field
@@ -338,7 +355,7 @@ The Parquet file must be present at `system/fpha_hyperplanes.parquet`. Its schem
 | `valid_v_max_hm3` | DOUBLE? | No       | Maximum volume where this plane is valid (hm³)         |
 | `valid_q_max_m3s` | DOUBLE? | No       | Maximum turbined flow where this plane is valid (m³/s) |
 
-Each `(hydro_id, stage_id)` group must have at least 3 planes. Rows are sorted by
+Each `(hydro_id, stage_id)` group must have at least 1 plane. Rows are sorted by
 `(hydro_id, stage_id, plane_id)` ascending; null `stage_id` sorts before any
 non-null value.
 
@@ -382,7 +399,7 @@ All fields except `source` are optional:
 | `volume_discretization_points`   | 5       | Number of volume grid points for fitting. Must be >= 2.                                                                |
 | `turbine_discretization_points`  | 5       | Number of turbined-flow grid points. Must be >= 2.                                                                     |
 | `spillage_discretization_points` | 5       | Number of spillage grid points. Must be >= 2.                                                                          |
-| `max_planes_per_hydro`           | 10      | Maximum planes to retain per (hydro, stage) after the convex-hull fit. Must be >= 1. |
+| `max_planes_per_hydro`           | 10      | Maximum planes to retain per (hydro, stage) after the convex-hull fit. Must be >= 1.                                   |
 | `fitting_window`                 | null    | Optional volume range for fitting. When absent, the full operating range `[min_storage_hm3, max_storage_hm3]` is used. |
 
 The `fitting_window` field restricts which portion of the operating range is used to
@@ -480,11 +497,11 @@ degrees of each other:
 }
 ```
 
-| Field           | Required | Description                                                                           |
-| --------------- | -------- | ------------------------------------------------------------------------------------- |
-| `method`        | Yes      | Must be `"distance"`.                                                                 |
+| Field           | Required | Description                                                                                 |
+| --------------- | -------- | ------------------------------------------------------------------------------------------- |
+| `method`        | Yes      | Must be `"distance"`.                                                                       |
 | `tolerance_pct` | Yes      | Maximum relative MSE distance (fraction) to treat two planes as coincident. Finite, >= 0.0. |
-| `n_samples`     | Yes      | Number of sample points used to estimate the distance. Must be >= 1.                 |
+| `n_samples`     | Yes      | Number of sample points used to estimate the distance. Must be >= 1.                        |
 
 Supplying a field that belongs to the other method is a load-time error
 (`deny_unknown_fields`). The origin plane (zero generation at zero turbining) is
@@ -805,21 +822,21 @@ Cobre's layered validation pipeline checks the following conditions on hydro
 plants. Violations are reported as error messages with the failing plant's `id`
 and the nature of the problem.
 
-| Rule                            | Error Class          | Description                                                                                                                                                                                        |
-| ------------------------------- | -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Bus reference integrity         | Reference error      | Every `bus_id` must match an `id` in `buses.json`.                                                                                                                                                 |
-| Downstream reference integrity  | Reference error      | Every non-null `downstream_id` must match an `id` in `hydros.json`.                                                                                                                                |
-| Cascade acyclicity              | Topology error       | The directed graph of `downstream_id` links must be acyclic.                                                                                                                                       |
-| Storage bounds ordering         | Physical feasibility | `min_storage_hm3` must be less than `max_storage_hm3`.                                                                                                                                             |
-| Outflow bounds ordering         | Physical feasibility | When `max_outflow_m3s` is present, it must be greater than or equal to `min_outflow_m3s`.                                                                                                          |
-| Turbine bounds ordering         | Physical feasibility | `min_turbined_m3s` must be less than or equal to `max_turbined_m3s`.                                                                                                                               |
-| Generation bounds consistency   | Physical feasibility | `min_generation_mw` must be less than or equal to `max_generation_mw`.                                                                                                                             |
-| Initial conditions completeness | Reference error      | Every hydro plant must have exactly one entry in `initial_conditions.json` (either in `storage` or `filling_storage`, not both).                                                                   |
-| Evaporation array length        | Schema error         | When `evaporation` is present, `coefficients_mm` must have exactly 12 values. `reference_volumes_hm3`, when present, must also have exactly 12 values within `[min_storage_hm3, max_storage_hm3]`. |
-| FPHA geometry coverage          | Dimensional error    | Every plant configured with `fpha` or `linearized_head` must have at least 2 rows in `system/hydro_geometry.parquet`.                                                                              |
-| FPHA plane coverage             | Dimensional error    | Every `(hydro_id, stage_id)` group in `system/fpha_hyperplanes.parquet` must have at least 3 planes.                                                                                               |
-| FPHA coefficient signs          | Semantic error       | `gamma_v` must be positive; `gamma_s` must be non-positive.                                                                                                                                        |
-| Geometry monotonicity           | Semantic error       | `volume_hm3` must be strictly increasing; `height_m` and `area_km2` must be non-decreasing.                                                                                                        |
+| Rule                            | Error Class          | Description                                                                                                                                                                                                              |
+| ------------------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Bus reference integrity         | Reference error      | Every `bus_id` must match an `id` in `buses.json`.                                                                                                                                                                       |
+| Downstream reference integrity  | Reference error      | Every non-null `downstream_id` must match an `id` in `hydros.json`.                                                                                                                                                      |
+| Cascade acyclicity              | Topology error       | The directed graph of `downstream_id` links must be acyclic.                                                                                                                                                             |
+| Storage bounds ordering         | Physical feasibility | `min_storage_hm3` must be less than `max_storage_hm3`.                                                                                                                                                                   |
+| Outflow bounds ordering         | Physical feasibility | When `max_outflow_m3s` is present, it must be greater than or equal to `min_outflow_m3s`.                                                                                                                                |
+| Turbine bounds ordering         | Physical feasibility | `min_turbined_m3s` must be less than or equal to `max_turbined_m3s`.                                                                                                                                                     |
+| Generation bounds consistency   | Physical feasibility | `min_generation_mw` must be less than or equal to `max_generation_mw`.                                                                                                                                                   |
+| Initial conditions completeness | Reference error      | Every hydro plant must have exactly one entry in `initial_conditions.json` (either in `storage` or `filling_storage`, not both).                                                                                         |
+| Evaporation array length        | Schema error         | When `evaporation` is present, `coefficients_mm` must have exactly 12 values. `reference_volumes_hm3`, when present, must also have exactly 12 values within `[min_storage_hm3, max_storage_hm3]`.                       |
+| FPHA geometry coverage          | Dimensional error    | Every plant configured with `fpha` must have at least 1 row in `system/hydro_geometry.parquet` (a single row is valid for run-of-river plants); every plant configured with `linearized_head` must have at least 2 rows. |
+| FPHA plane coverage             | Dimensional error    | Every `(hydro_id, stage_id)` group in `system/fpha_hyperplanes.parquet` must have at least 1 plane.                                                                                                                      |
+| FPHA coefficient signs          | Semantic error       | `gamma_v` must be positive; `gamma_s` must be non-positive.                                                                                                                                                              |
+| Geometry monotonicity           | Semantic error       | `volume_hm3` must be strictly increasing; `height_m` and `area_km2` must be non-decreasing.                                                                                                                              |
 
 ---
 

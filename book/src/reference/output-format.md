@@ -240,12 +240,12 @@ single file. Consumers should check `status` before interpreting other fields.
 
 **`row_pool` fields:**
 
-| Field             | Type    | Nullable | Description                                                |
-| ----------------- | ------- | -------- | ---------------------------------------------------------- |
-| `total_generated` | integer | No       | Total cut rows generated over the entire run.              |
-| `total_active`    | integer | No       | Cut rows still active in the pool at termination.          |
-| `peak_active`     | integer | No       | Highest number of simultaneously active cut rows observed. |
-| `cuts_active`     | integer | No       | Cut rows currently active in the LP at termination.        |
+| Field                    | Type    | Nullable | Description                                                                                             |
+| ------------------------ | ------- | -------- | ------------------------------------------------------------------------------------------------------- |
+| `total_generated`        | integer | No       | Total cut rows generated over the entire run.                                                           |
+| `total_active`           | integer | No       | Cut rows still active in the pool at termination.                                                       |
+| `peak_active`            | integer | No       | Highest number of simultaneously active cut rows observed.                                              |
+| `cuts_active`            | integer | No       | Cut rows currently active in the LP at termination.                                                     |
 | `rows_in_lp_total`       | integer | No       | Sum of resident rows-in-LP over every lazy-selection solve in the run. Zero when no lazy selection ran. |
 | `rows_in_lp_solve_count` | integer | No       | Number of lazy-selection solves in the run. Zero when no lazy selection ran.                            |
 | `rows_in_lp_max`         | integer | No       | Largest resident rows-in-LP over any single lazy-selection solve. Zero when no lazy selection ran.      |
@@ -289,13 +289,13 @@ single file. Consumers should check `status` before interpreting other fields.
 
 **`setup` fields** (absent from legacy metadata produced before setup timing was collected):
 
-| Field                      | Type   | Nullable | Description                                                                              |
-| -------------------------- | ------ | -------- | ---------------------------------------------------------------------------------------- |
-| `load_seconds`             | number | No       | Wall-clock seconds spent loading the input case.                                         |
-| `stochastic_fit_seconds`   | number | No       | Wall-clock seconds spent fitting the stochastic process.                                 |
-| `production_fit_seconds`   | number | No       | Wall-clock seconds spent fitting the production model (FPHA hyperplanes).                |
-| `evaporation_fit_seconds`  | number | No       | Wall-clock seconds spent fitting the evaporation model.                                  |
-| `broadcast_seconds`        | number | No       | Wall-clock seconds spent broadcasting setup data across MPI ranks.                       |
+| Field                     | Type   | Nullable | Description                                                               |
+| ------------------------- | ------ | -------- | ------------------------------------------------------------------------- |
+| `load_seconds`            | number | No       | Wall-clock seconds spent loading the input case.                          |
+| `stochastic_fit_seconds`  | number | No       | Wall-clock seconds spent fitting the stochastic process.                  |
+| `production_fit_seconds`  | number | No       | Wall-clock seconds spent fitting the production model (FPHA hyperplanes). |
+| `evaporation_fit_seconds` | number | No       | Wall-clock seconds spent fitting the evaporation model.                   |
+| `broadcast_seconds`       | number | No       | Wall-clock seconds spent broadcasting setup data across MPI ranks.        |
 
 These values are non-deterministic (informational only): they vary run-to-run with
 machine load and are excluded from any parity computation. The entire `setup` key
@@ -689,21 +689,21 @@ they serve as a diagnostic and analysis artifact.
 Small JSON file describing the checkpoint at a high level. Human-readable and
 machine-readable by tooling that inspects policy files.
 
-| Field                  | Type    | Nullable | Description                                                                                 |
-| ---------------------- | ------- | -------- | ------------------------------------------------------------------------------------------- |
-| `cobre_version`        | string  | No       | Version of the cobre binary that wrote this checkpoint.                                     |
-| `created_at`           | string  | No       | ISO 8601 timestamp when the checkpoint was written.                                         |
-| `completed_iterations` | integer | No       | Number of training iterations completed at checkpoint time.                                 |
-| `final_lower_bound`    | number  | No       | Lower bound value after the final completed iteration.                                      |
-| `best_upper_bound`     | number  | Yes      | Best upper bound observed during training. `null` when upper bound evaluation was disabled. |
-| `state_dimension`      | integer | No       | Length of each cut's coefficient vector. Must match `state_dictionary.json`.                |
-| `num_stages`           | integer | No       | Number of stages. Must match the case configuration on resume.                              |
-| `max_iterations`       | integer | No       | Maximum iterations configured for the run.                                                  |
-| `forward_passes`       | integer | No       | Number of forward passes per iteration configured for the run.                              |
-| `warm_start_cuts`      | integer | No       | Number of cuts loaded from a previous policy at run start. `0` for fresh runs.              |
+| Field                  | Type      | Nullable | Description                                                                                                                      |
+| ---------------------- | --------- | -------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `cobre_version`        | string    | No       | Version of the cobre binary that wrote this checkpoint.                                                                          |
+| `created_at`           | string    | No       | ISO 8601 timestamp when the checkpoint was written.                                                                              |
+| `completed_iterations` | integer   | No       | Number of training iterations completed at checkpoint time.                                                                      |
+| `final_lower_bound`    | number    | No       | Lower bound value after the final completed iteration.                                                                           |
+| `best_upper_bound`     | number    | Yes      | Best upper bound observed during training. `null` when upper bound evaluation was disabled.                                      |
+| `state_dimension`      | integer   | No       | Length of each cut's coefficient vector. Must match `state_dictionary.json`.                                                     |
+| `num_stages`           | integer   | No       | Number of stages. Must match the case configuration on resume.                                                                   |
+| `max_iterations`       | integer   | No       | Maximum iterations configured for the run.                                                                                       |
+| `forward_passes`       | integer   | No       | Number of forward passes per iteration configured for the run.                                                                   |
+| `warm_start_cuts`      | integer   | No       | Number of cuts loaded from a previous policy at run start. `0` for fresh runs.                                                   |
 | `warm_start_counts`    | integer[] | No       | Per-stage warm-start cut counts (one per stage, 0-based). Empty in old checkpoints; supersedes `warm_start_cuts` when non-empty. |
-| `rng_seed`             | integer | No       | RNG seed used by the scenario sampler. Required for reproducibility.                        |
-| `total_visited_states` | integer | No       | Total number of visited state vectors across all stages. `0` when `exports.states` is off.  |
+| `rng_seed`             | integer   | No       | RNG seed used by the scenario sampler. Required for reproducibility.                                                             |
+| `total_visited_states` | integer   | No       | Total number of visited state vectors across all stages. `0` when `exports.states` is off.                                       |
 
 ---
 
@@ -1157,14 +1157,14 @@ evaporation coefficients for all plants that have evaporation, keyed by
 
 Six columns:
 
-| Column                      | Type   | Nullable | Description                                                                      |
-| --------------------------- | ------ | -------- | -------------------------------------------------------------------------------- |
-| `hydro_id`                  | INT32  | No       | Hydro plant identifier                                                           |
-| `stage_id`                  | INT32  | Yes      | Stage; `null` = per-hydro default applicable to all stages                       |
-| `intercept_m3s`             | DOUBLE | No       | Evaporation intercept coefficient (m³/s)                                         |
-| `volume_slope_m3s_per_hm3`  | DOUBLE | No       | Volume-dependent slope coefficient (m³/s per hm³)                                |
-| `reference_volume_hm3`      | DOUBLE | No       | Reference volume used for linearisation (hm³)                                    |
-| `source`                    | STRING | No       | Derivation label (e.g. `"default_midpoint"` or `"user_supplied"`)                |
+| Column                     | Type   | Nullable | Description                                                       |
+| -------------------------- | ------ | -------- | ----------------------------------------------------------------- |
+| `hydro_id`                 | INT32  | No       | Hydro plant identifier                                            |
+| `stage_id`                 | INT32  | Yes      | Stage; `null` = per-hydro default applicable to all stages        |
+| `intercept_m3s`            | DOUBLE | No       | Evaporation intercept coefficient (m³/s)                          |
+| `volume_slope_m3s_per_hm3` | DOUBLE | No       | Volume-dependent slope coefficient (m³/s per hm³)                 |
+| `reference_volume_hm3`     | DOUBLE | No       | Reference volume used for linearisation (hm³)                     |
+| `source`                   | STRING | No       | Derivation label (e.g. `"default_midpoint"` or `"user_supplied"`) |
 
 ### `hydro_models/fpha_deviation_points.parquet`
 
@@ -1176,16 +1176,16 @@ for each computed-FPHA plant and stage).
 
 Eight columns:
 
-| Column         | Type   | Nullable | Description                                                                      |
-| -------------- | ------ | -------- | -------------------------------------------------------------------------------- |
-| `hydro_id`     | INT32  | No       | Hydro plant identifier                                                           |
-| `stage_id`     | INT32  | Yes      | Stage; `null` when the fit applies to all stages                                 |
-| `v`            | DOUBLE | No       | Volume sample point (hm³)                                                        |
-| `q`            | DOUBLE | No       | Turbined-flow sample point (m³/s)                                                |
-| `fph_exact`    | DOUBLE | No       | Exact production function value at this (V, Q) point (MW)                        |
-| `fpha_fitted`  | DOUBLE | No       | Fitted FPHA approximation at this (V, Q) point (MW)                              |
-| `deviation`    | DOUBLE | No       | Absolute deviation `fpha_fitted − fph_exact` (MW)                                |
-| `relative`     | DOUBLE | No       | Relative deviation `deviation / fph_exact` (dimensionless). `0` when exact = 0. |
+| Column        | Type   | Nullable | Description                                                                                                   |
+| ------------- | ------ | -------- | ------------------------------------------------------------------------------------------------------------- |
+| `hydro_id`    | INT32  | No       | Hydro plant identifier                                                                                        |
+| `stage_id`    | INT32  | Yes      | Stage; `null` when the fit applies to all stages                                                              |
+| `v`           | DOUBLE | No       | Volume sample point (hm³)                                                                                     |
+| `q`           | DOUBLE | No       | Turbined-flow sample point (m³/s)                                                                             |
+| `fph_exact`   | DOUBLE | No       | Exact production function value at this (V, Q) point (MW)                                                     |
+| `fpha_fitted` | DOUBLE | No       | Fitted FPHA approximation at this (V, Q) point (MW)                                                           |
+| `deviation`   | DOUBLE | No       | Signed residual `fpha_fitted − fph_exact` (MW); positive = fitted cap above the exact surface                 |
+| `relative`    | DOUBLE | No       | `\|deviation\|` relative to the grid's peak exact generation (dimensionless, ≥ 0); `0` when the grid peak ≤ 0 |
 
 The values are a pure function of geometry and config — the file is reproducible
 when emitted and never enters the parity hash.

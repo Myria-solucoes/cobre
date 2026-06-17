@@ -193,8 +193,10 @@ of the stage in MWh.
 ## Productivity Override File
 
 `system/hydro_energy_productivity.parquet` is an optional file that allows you
-to override any of the four scalars (`ρ_eq`, `V_ref`, `Q_ref`, `ρ_esp`) on a
-per-`(hydro, stage)` basis. Rows with `stage_id = NULL` serve as a per-hydro
+to override any of the three scalars (`ρ_eq`, `Q_ref`, `ρ_esp`) on a
+per-`(hydro, stage)` basis. The reference operating volume `V_ref` is no longer
+an override column here — declare it per production model via `reference_volume`
+in `system/hydro_production_models.json`. Rows with `stage_id = NULL` serve as a per-hydro
 default that applies to all stages not covered by a stage-specific row.
 
 See the [Case Directory Format](../reference/case-format.md#systemhydro_energy_productivityparquet)
