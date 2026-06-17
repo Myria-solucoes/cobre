@@ -112,9 +112,20 @@ max_flow}`; all routing is **same-stage**.
   when a withdrawal is infeasible — rare in practice.
 - **Confirmed remaining real gaps:** **B1** (travel time, L) · **B4** (per-block
   run-of-river balance, M) · **B8** (filling — finish LP consumption, S–M) ·
-  **B9** (pumping — wire LP columns/rows onto the existing stub, M–L). Plus two
-  small **B6** items: **B6a** expose realized inflow as a `VariableRef` (enables
-  RHA) and **B6b** reference pumping in generic constraints (gated on B9).
+  **B9** (pumping — wire LP columns/rows onto the existing stub, M–L). Plus three
+  **B6** items: **B6a** expose realized **total** inflow as a `VariableRef`
+  (enables RHA — the incremental `z_inflow` plus immediately-upstream cascade
+  releases, turbined/spilled/diverted; block-dependent); **B6b** reference pumping
+  in generic constraints (gated on B9); and **B6c** populate the total-inflow
+  simulation output `SimulationHydroResult::inflow_m3s` from the cascade. B6c is a
+  newly-audited gap: `inflow_m3s` is currently a stub equal to
+  `incremental_inflow_m3s` (the `z_inflow` primal), so the emitted total-inflow
+  column understates true inflow for any multi-plant cascade. B6c is a post-solve
+  extraction fix (threads `CascadeTopology::upstream` into the extraction path),
+  shares the same physical definition as B6a, and — because it changes an emitted
+  output value — requires a deliberate parity-baseline re-bless plus the Python
+  output mirror. It is independent of and not bundled with the B6a constraint
+  surface.
 - **Cross-cutting sub-theme — per-block hydro bounds.** B3 and B5 are per-_stage_
   only; B4 (per-block RoR) and full RHQ (per-block flows) both want per-_block_
   bounds/balance. A per-block hydro-bounds capability would serve several items at

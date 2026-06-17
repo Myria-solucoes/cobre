@@ -1565,6 +1565,12 @@ pub(super) fn fill_generic_constraint_entries(
         bus: &ctx.bus_pos,
         line: &ctx.line_pos,
     };
+    // Cascade topology + diversion-into map for the HydroInflow total-inflow
+    // arm; both already borrowed on the build context.
+    let cascade_refs = crate::generic_constraints::CascadeRefs {
+        cascade: ctx.cascade,
+        diversion_upstream: &ctx.diversion_upstream,
+    };
 
     for (entry_idx, entry) in layout.generic_constraint_rows.iter().enumerate() {
         let row = layout.row_generic_start + entry_idx;
@@ -1605,6 +1611,7 @@ pub(super) fn fill_generic_constraint_entries(
                 &layout.indexer,
                 ctx.production_models,
                 &positions,
+                &cascade_refs,
             );
             for (col, multiplier) in pairs {
                 let coef = match term.coefficient {

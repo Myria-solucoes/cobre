@@ -10,9 +10,16 @@
 //!
 //! # Variable Reference Catalog
 //!
-//! [`VariableRef`] covers all 20 LP variable types defined in the spec (SS15).
-//! Each variant carries the entity ID and, for block-specific variables, an
-//! optional block ID (`None` = sum over all blocks, `Some(i)` = block `i`).
+//! [`VariableRef`] covers all 22 LP variable types defined in the spec (SS15).
+//! Each variant carries the entity ID and, for block-capable variables, an
+//! optional block ID. `Some(i)` references block `i`. `None` leaves block
+//! selection to the constraint's row materialization, and its meaning is **not**
+//! uniform across variants: for a block-independent expression (every term is
+//! stage-level) the LP builder collapses the bound to a single stage-level row
+//! priced by the stage's total hours; for a block-dependent expression (any
+//! block-level term, e.g. [`VariableRef::HydroInflow`]) the builder emits one row
+//! per block. `None` therefore never means "sum over blocks" — it selects between
+//! a single collapsed row and per-block replication.
 //!
 //! # Examples
 //!
@@ -56,10 +63,15 @@ use crate::EntityId;
 /// Reference to a single LP variable in a generic constraint expression.
 ///
 /// Each variant names the variable type and carries the entity ID. For
-/// block-specific variables, `block_id` is `None` to sum over all blocks or
-/// `Some(i)` to reference block `i` specifically.
+/// block-capable variables, `block_id = Some(i)` references block `i`
+/// specifically. `block_id = None` defers block selection to row
+/// materialization rather than summing: a constraint whose every term is
+/// block-independent collapses to one stage-level row, while a constraint with
+/// any block-dependent term (e.g. [`VariableRef::HydroInflow`]) expands to one
+/// row per block. See the per-variant docs and the module header for the
+/// block-independent vs block-dependent distinction.
 ///
-/// The 20 variants cover the full variable catalog defined in
+/// The 22 variants cover the full variable catalog defined in
 /// `internal-structures.md §15` (table in the "Variable References" section).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -229,6 +241,30 @@ pub enum VariableRef {
     AnticipatedDecision {
         /// Thermal unit identifier. Must satisfy `anticipated_config: Some(_)`.
         thermal_id: EntityId,
+    },
+    /// Total realized inflow into a hydro reservoir (m³/s). Block-capable.
+    ///
+    /// The value is the incremental (local) natural inflow `z_h = base + AR-lag
+    /// ψ + σ·η noise` PLUS the immediately-upstream cascade releases (turbined +
+    /// spilled + diverted) routed down to this reservoir — the inflow side of
+    /// the water balance, not the `z_inflow` column alone. Coefficients are unit
+    /// `+1.0` on every rate column (rate identity in m³/s, NOT the `−τ` volume
+    /// weighting of the storage-balance row).
+    ///
+    /// `block_id`: `None` = the LP builder expands one row per block; `Some(k)`
+    /// = block `k`. Block-dependent because the upstream releases are per-block
+    /// LP columns — a single block-dependent term makes the whole expression
+    /// block-dependent.
+    ///
+    /// **Postcard wire-format note**: appended at the END of the enum to
+    /// preserve the discriminant indices of all existing variants.
+    HydroInflow {
+        /// Hydro plant identifier.
+        hydro_id: EntityId,
+        /// Block index. `Some(i)` = block `i`. `None` = one row per block, because
+        /// `HydroInflow` is block-dependent (its upstream-release columns are
+        /// per-block); it is never collapsed to a single stage-level row.
+        block_id: Option<usize>,
     },
 }
 
@@ -503,12 +539,19 @@ mod tests {
                     thermal_id: EntityId(0),
                 },
             ),
+            (
+                "HydroInflow",
+                VariableRef::HydroInflow {
+                    hydro_id: EntityId(0),
+                    block_id: None,
+                },
+            ),
         ];
 
         assert_eq!(
             variants.len(),
-            21,
-            "VariableRef must have exactly 21 variants"
+            22,
+            "VariableRef must have exactly 22 variants"
         );
 
         for (name, variant) in variants {
@@ -518,6 +561,35 @@ mod tests {
                 "Debug output for {name} does not contain the variant name: {debug_str}"
             );
         }
+    }
+
+    /// Pins the postcard discriminant of the last-appended variant. Postcard
+    /// encodes the variant index as a varint; for discriminants `< 0x80` the
+    /// first byte equals the discriminant. `HydroInflow` is appended last
+    /// (index 21 = `0x15`) and `AnticipatedDecision` (index 20 = `0x14`) must
+    /// keep its index — a mid-enum insertion would shift both and silently
+    /// break previously serialized policies.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_variable_ref_postcard_discriminant_pin() {
+        let hydro_inflow = postcard::to_allocvec(&VariableRef::HydroInflow {
+            hydro_id: EntityId(0),
+            block_id: None,
+        })
+        .expect("HydroInflow serializes");
+        assert_eq!(
+            hydro_inflow[0], 0x15,
+            "HydroInflow must serialize to postcard discriminant 0x15"
+        );
+
+        let anticipated = postcard::to_allocvec(&VariableRef::AnticipatedDecision {
+            thermal_id: EntityId(0),
+        })
+        .expect("AnticipatedDecision serializes");
+        assert_eq!(
+            anticipated[0], 0x14,
+            "AnticipatedDecision must keep postcard discriminant 0x14"
+        );
     }
 
     #[test]

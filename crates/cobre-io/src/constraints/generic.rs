@@ -35,11 +35,13 @@
 //! Until the parameter loader is wired, callers pass `&HashMap::new()` and
 //! expressions must not contain `@name` tokens.
 //!
-//! All 21 variable names from the variable catalog are recognised. Block-specific
-//! variables accept an optional second argument; stage-only variables (`hydro_storage`,
-//! `hydro_evaporation`, `hydro_withdrawal`, `anticipated_decision`) must not have a
-//! block argument. Use `anticipated_decision(thermal_id)` to reference the per-stage
-//! commitment column of an anticipated thermal unit (no block index accepted).
+//! All 22 variable names from the variable catalog are recognised. Block-capable
+//! variables accept an optional second argument (`hydro_turbined`, `hydro_spillage`,
+//! `hydro_diversion`, `hydro_outflow`, `hydro_generation`, `hydro_inflow`, …); stage-only
+//! variables (`hydro_storage`, `hydro_evaporation`, `hydro_withdrawal`,
+//! `anticipated_decision`) must not have a block argument. Use
+//! `anticipated_decision(thermal_id)` to reference the per-stage commitment column of an
+//! anticipated thermal unit (no block index accepted).
 //!
 //! ## Validation
 //!
@@ -782,9 +784,9 @@ fn parse_variable_ref(tokens: &[Token], pos: usize) -> Result<(VariableRef, usiz
 
 /// Build a [`VariableRef`] from the parsed variable name, entity ID, and optional block ID.
 ///
-/// Returns `Err(String)` if the variable name is not one of the 20 known names, or
+/// Returns `Err(String)` if the variable name is not one of the 22 known names, or
 /// if a block argument is provided for a stage-only variable (no block argument expected).
-// Rationale: the function body is a single exhaustive match over all 21 recognized LP variable
+// Rationale: the function body is a single exhaustive match over all 22 recognized LP variable
 // name strings; each arm maps to its typed `VariableRef` variant and enforces block-vs-stage-only
 // semantics inline. Splitting by group would break the compile-time exhaustiveness check and
 // scatter the canonical variable catalog across multiple call sites.
@@ -827,6 +829,10 @@ fn build_variable_ref(
             })
         }
         // Block-capable variables.
+        "hydro_inflow" => Ok(VariableRef::HydroInflow {
+            hydro_id: entity_id,
+            block_id,
+        }),
         "hydro_turbined" => Ok(VariableRef::HydroTurbined {
             hydro_id: entity_id,
             block_id,
@@ -910,7 +916,7 @@ fn build_variable_ref(
             })
         }
         other => Err(format!(
-            "unknown variable name \"{other}\": not one of the 21 supported LP variable types"
+            "unknown variable name \"{other}\": not one of the 22 supported LP variable types"
         )),
     }
 }
@@ -1114,6 +1120,33 @@ mod tests {
         );
     }
 
+    /// `hydro_inflow` is block-capable: a bare entity id parses with `block_id: None`.
+    #[test]
+    fn test_build_hydro_inflow_no_block() {
+        let var = build_variable_ref("hydro_inflow", EntityId(3), None).unwrap();
+        assert_eq!(
+            var,
+            VariableRef::HydroInflow {
+                hydro_id: EntityId(3),
+                block_id: None,
+            }
+        );
+    }
+
+    /// `hydro_inflow` accepts a block argument: the upstream-release terms are per-block,
+    /// so `hydro_inflow(h, k)` threads `block_id: Some(k)` through.
+    #[test]
+    fn test_build_hydro_inflow_with_block() {
+        let var = build_variable_ref("hydro_inflow", EntityId(3), Some(0)).unwrap();
+        assert_eq!(
+            var,
+            VariableRef::HydroInflow {
+                hydro_id: EntityId(3),
+                block_id: Some(0),
+            }
+        );
+    }
+
     /// AC-3: Unknown variable name → error.
     #[test]
     fn test_expr_unknown_variable_name() {
@@ -1144,9 +1177,11 @@ mod tests {
         );
     }
 
-    /// All 20 variable types are recognised.
+    /// All stage-only and block-capable variable names parse to the right
+    /// [`VariableRef`]. Covers the 21 entity-keyed keywords (the stage-level
+    /// `anticipated_decision` is exercised by its own dedicated tests).
     #[test]
-    fn test_expr_all_19_variable_types_recognised() {
+    fn test_expr_all_21_entity_keyed_variable_types_recognised() {
         let cases: &[(&str, VariableRef)] = &[
             (
                 "hydro_storage(0)",
@@ -1199,6 +1234,13 @@ mod tests {
                 "hydro_withdrawal(0)",
                 VariableRef::HydroWithdrawal {
                     hydro_id: EntityId(0),
+                },
+            ),
+            (
+                "hydro_inflow(0)",
+                VariableRef::HydroInflow {
+                    hydro_id: EntityId(0),
+                    block_id: None,
                 },
             ),
             (
@@ -1287,7 +1329,7 @@ mod tests {
             ),
         ];
 
-        assert_eq!(cases.len(), 20, "must have exactly 20 variable types");
+        assert_eq!(cases.len(), 21, "must have exactly 21 variable types");
 
         for (input, expected) in cases {
             let expr = parse_expression(input, &HashMap::new())

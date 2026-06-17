@@ -31,7 +31,7 @@
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 
-use cobre_core::{ConstraintExpression, EntityId, VariableRef};
+use cobre_core::{CascadeTopology, ConstraintExpression, EntityId, VariableRef};
 
 use crate::hydro_models::{ProductionModelSet, ResolvedProductionModel};
 use crate::indexer::StageIndexer;
@@ -52,6 +52,23 @@ pub(crate) struct EntityPositionMaps<'a, S: BuildHasher = std::hash::RandomState
     pub line: &'a HashMap<EntityId, usize, S>,
 }
 
+/// Borrowed cascade context for resolving the total-inflow expression.
+///
+/// Grouped (rather than passed as two more positional arguments) so
+/// [`resolve_variable_ref`] does not trip `clippy::too_many_arguments`,
+/// mirroring the [`EntityPositionMaps`] grouping idiom. The `HydroInflow` arm is
+/// the only consumer; every other arm ignores it.
+pub(crate) struct CascadeRefs<'a, S: BuildHasher = std::hash::RandomState> {
+    /// Immediately-upstream cascade adjacency. `upstream(h)` returns
+    /// `&[EntityId]` sorted by `EntityId.0` at build time, so the resolver
+    /// iterates it in a fixed, input-ordering-independent sequence.
+    pub cascade: &'a CascadeTopology,
+    /// Target hydro id to the **system indices** of plants diverting into it,
+    /// built in canonical hydro order (the same representation `matrix.rs`
+    /// iterates for the storage-balance diversion-inflow term).
+    pub diversion_upstream: &'a HashMap<EntityId, Vec<usize>, S>,
+}
+
 /// Map a [`VariableRef`] and block index to LP column indices with multipliers.
 ///
 /// Returns a `Vec<(column_index, coefficient_multiplier)>`. The caller scales
@@ -69,6 +86,8 @@ pub(crate) struct EntityPositionMaps<'a, S: BuildHasher = std::hash::RandomState
 /// - `production_models` — resolved production model set, used to distinguish
 ///   FPHA hydros from constant-productivity hydros for `HydroGeneration`.
 /// - `positions` — entity position maps grouped into [`EntityPositionMaps`].
+/// - `cascade_refs` — cascade topology + diversion-into map grouped into
+///   [`CascadeRefs`]; consulted only by the `HydroInflow` arm.
 ///
 /// # Returns
 ///
@@ -86,6 +105,7 @@ pub(crate) fn resolve_variable_ref<S: BuildHasher>(
     indexer: &StageIndexer,
     production_models: &ProductionModelSet,
     positions: &EntityPositionMaps<'_, S>,
+    cascade_refs: &CascadeRefs<'_, S>,
 ) -> Vec<(usize, f64)> {
     let hydro_pos = positions.hydro;
     let thermal_pos = positions.thermal;
@@ -102,6 +122,16 @@ pub(crate) fn resolve_variable_ref<S: BuildHasher>(
         }
 
         // ── Block-level hydro variables ────────────────────────────────────
+        VariableRef::HydroInflow { hydro_id, block_id } => resolve_hydro_inflow(
+            *hydro_id,
+            *block_id,
+            block_idx,
+            n_blks,
+            indexer,
+            hydro_pos,
+            cascade_refs,
+        ),
+
         VariableRef::HydroTurbined { hydro_id, block_id } => resolve_block_variable(
             *hydro_id,
             *block_id,
@@ -237,12 +267,20 @@ pub(crate) fn resolve_variable_ref<S: BuildHasher>(
 /// - [`VariableRef::AnticipatedDecision`] → `anticipated_decision.start + local`
 ///   (a per-plant per-stage scalar, uniform across blocks)
 ///
+/// [`VariableRef::HydroInflow`] is **block-dependent** (in the `false` arm): its
+/// upstream-release terms (`turbine`/`spillage`/`diversion` of upstream plants)
+/// are per-block LP columns, and a single block-dependent term makes the whole
+/// expression block-dependent. Classifying it "stock" would collapse a multi-block
+/// expression to one mis-priced stage-level row that reads upstream columns at a
+/// single arbitrary block, silently dropping the other blocks' contributions.
+///
 /// Every other kind is block-level: it resolves to `col_start + pos * n_blks +
-/// block_idx` (via `resolve_block_variable` / FPHA generation / line / deficit /
-/// excess), so distinct block indices yield distinct columns. The stub kinds
-/// (withdrawal, pumping, contracts, non-controllable) resolve to no columns at
-/// all; they are conservatively treated as block-level here so that only
-/// *provably* stock variables enable the single-row collapse.
+/// block_idx` (via `resolve_block_variable` / `resolve_hydro_inflow` / FPHA
+/// generation / line / deficit / excess), so distinct block indices yield
+/// distinct columns. The stub kinds (withdrawal, pumping, contracts,
+/// non-controllable) resolve to no columns at all; they are conservatively
+/// treated as block-level here so that only *provably* stock variables enable the
+/// single-row collapse.
 ///
 /// The match is deliberately exhaustive (no wildcard arm): a future
 /// [`VariableRef`] variant forces a compile error here, defaulting nothing to
@@ -253,7 +291,8 @@ fn variable_ref_is_block_independent(var_ref: &VariableRef) -> bool {
         VariableRef::HydroStorage { .. }
         | VariableRef::HydroEvaporation { .. }
         | VariableRef::AnticipatedDecision { .. } => true,
-        VariableRef::HydroTurbined { .. }
+        VariableRef::HydroInflow { .. }
+        | VariableRef::HydroTurbined { .. }
         | VariableRef::HydroSpillage { .. }
         | VariableRef::HydroDiversion { .. }
         | VariableRef::HydroOutflow { .. }
@@ -309,6 +348,85 @@ fn resolve_hydro_storage<S: BuildHasher>(
     } else {
         vec![]
     }
+}
+
+/// Resolve `HydroInflow` to the cascade total-inflow expression at `eff_blk`.
+///
+/// This is the inflow side of the hydro water balance expressed as an
+/// instantaneous **rate** (m³/s): the incremental (local) `z_inflow` column plus
+/// the immediately-upstream cascade releases (turbine + spillage) plus the
+/// plants diverting into `h`. All coefficients are unit `+1.0` — a rate identity,
+/// **not** the `−τ`-weighted (hm³) storage-balance row. The `−τ` sign and `τ`
+/// weighting are specific to the storage-balance row and must not be copied here.
+/// `h`'s own outflows (turbine/spillage/diversion), evaporation, withdrawal
+/// slacks, AR-lag-`ψ`, and pumped inflow (a NO-OP stub until pumping columns
+/// exist) are **excluded**: they are storage/loss/outflow terms or have no LP
+/// column.
+///
+/// Column arithmetic mirrors [`resolve_block_variable`]:
+/// `col_start + pos * n_blks + eff_blk` with `eff_blk = block_id.unwrap_or(block_idx)`.
+/// The column set mirrors the cascade/diversion loops of
+/// `matrix.rs::fill_state_and_water_entries`: upstream releases iterate
+/// `cascade.upstream(h)` resolved via `hydro_pos`; diverted inflow iterates
+/// `diversion_upstream[h]`, whose values are already **system indices**. Both are
+/// in canonical (ID-sorted / canonical-hydro) order at build time, so the emitted
+/// pairs are input-ordering-independent with no extra sort here.
+///
+/// The `z_inflow.is_empty()` guard is load-bearing: `z_inflow` is empty when
+/// `hydro_count == 0` (unlike `storage`, which is non-empty whenever hydros
+/// exist), so `z_inflow.start` would be a meaningless offset there. Returns an
+/// empty vec when `hydro_count == 0` or `hydro_id` is unknown.
+fn resolve_hydro_inflow<S: BuildHasher>(
+    hydro_id: EntityId,
+    block_id: Option<usize>,
+    block_idx: usize,
+    n_blks: usize,
+    indexer: &StageIndexer,
+    hydro_pos: &HashMap<EntityId, usize, S>,
+    cascade_refs: &CascadeRefs<'_, S>,
+) -> Vec<(usize, f64)> {
+    if indexer.z_inflow.is_empty() {
+        return vec![];
+    }
+    let Some(&pos_h) = hydro_pos.get(&hydro_id) else {
+        return vec![];
+    };
+
+    let eff_blk = block_id.unwrap_or(block_idx);
+    let upstream = cascade_refs.cascade.upstream(hydro_id);
+    let diversion_into = cascade_refs
+        .diversion_upstream
+        .get(&hydro_id)
+        .map_or(&[][..], Vec::as_slice);
+
+    // Incremental term, then two per upstream plant, then one per diverting plant.
+    let mut result = Vec::with_capacity(1 + 2 * upstream.len() + diversion_into.len());
+
+    // Incremental (local) inflow: the free z_inflow column.
+    result.push((indexer.z_inflow.start + pos_h, 1.0));
+
+    // Upstream cascade releases: turbine + spillage of each immediately-upstream
+    // plant at the effective block. Same column set as the storage-balance inflow
+    // side, but with +1.0 (rate) instead of −τ (volume).
+    if !indexer.turbine.is_empty() && !indexer.spillage.is_empty() {
+        for &up_id in upstream {
+            if let Some(&pos_up) = hydro_pos.get(&up_id) {
+                result.push((indexer.turbine.start + pos_up * n_blks + eff_blk, 1.0));
+                result.push((indexer.spillage.start + pos_up * n_blks + eff_blk, 1.0));
+            }
+        }
+    }
+
+    // Diverted inflow: the diversion column of each plant diverting into `h`.
+    // `diversion_upstream[h]` already holds system indices, so no `hydro_pos`
+    // lookup is needed (mirrors the matrix.rs diversion-inflow loop).
+    if !indexer.diversion.is_empty() {
+        for &d_idx in diversion_into {
+            result.push((indexer.diversion.start + d_idx * n_blks + eff_blk, 1.0));
+        }
+    }
+
+    result
 }
 
 /// Resolve `HydroEvaporation` to the evaporation-outflow column for the matching hydro.
@@ -518,13 +636,69 @@ fn resolve_block_variable<S: BuildHasher>(
 mod tests {
     use std::collections::HashMap;
 
-    use cobre_core::{EntityId, VariableRef};
+    use cobre_core::entities::{HydroGenerationModel, HydroPenalties};
+    use cobre_core::{CascadeTopology, EntityId, Hydro, VariableRef};
 
-    use super::resolve_variable_ref;
+    use super::{CascadeRefs, resolve_variable_ref, variable_ref_is_block_independent};
     use crate::hydro_models::{FphaPlane, ProductionModelSet, ResolvedProductionModel};
     use crate::indexer::StageIndexer;
 
     // ── Test helpers ──────────────────────────────────────────────────────────
+
+    /// Minimal `Hydro` carrying only the `id`/`downstream_id` that
+    /// [`CascadeTopology::build`] reads; every other field is an inert default.
+    /// Mirrors the `make_hydro` helper in `cobre-core`'s cascade tests.
+    fn make_hydro(id: i32, downstream_id: Option<i32>) -> Hydro {
+        let zero_penalties = HydroPenalties {
+            spillage_cost: 0.0,
+            diversion_cost: 0.0,
+            turbined_cost: 0.0,
+            storage_violation_below_cost: 0.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost: 0.0,
+            outflow_violation_below_cost: 0.0,
+            outflow_violation_above_cost: 0.0,
+            generation_violation_below_cost: 0.0,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 1000.0,
+        };
+        Hydro {
+            id: EntityId(id),
+            name: String::new(),
+            bus_id: EntityId(0),
+            downstream_id: downstream_id.map(EntityId),
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 1.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 1.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 1.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: zero_penalties,
+        }
+    }
+
+    /// An empty cascade (no upstream links) for the resolver paths that ignore it.
+    fn empty_cascade() -> CascadeTopology {
+        CascadeTopology::build(&[])
+    }
 
     /// Build a `StageIndexer` with equipment for tests.
     ///
@@ -649,11 +823,46 @@ mod tests {
         bus_pos: &HashMap<EntityId, usize>,
         line_pos: &HashMap<EntityId, usize>,
     ) -> Vec<(usize, f64)> {
+        // Paths under test here ignore the cascade context; pass an empty one.
+        let cascade = empty_cascade();
+        let diversion_upstream: HashMap<EntityId, Vec<usize>> = HashMap::new();
+        call_with_cascade(
+            var_ref,
+            block_idx,
+            indexer,
+            production_models,
+            hydro_pos,
+            thermal_pos,
+            bus_pos,
+            line_pos,
+            &cascade,
+            &diversion_upstream,
+        )
+    }
+
+    /// Like [`call`], but threads an explicit cascade topology and
+    /// diversion-into map for the `HydroInflow` total-inflow tests.
+    fn call_with_cascade(
+        var_ref: VariableRef,
+        block_idx: usize,
+        indexer: &StageIndexer,
+        production_models: &ProductionModelSet,
+        hydro_pos: &HashMap<EntityId, usize>,
+        thermal_pos: &HashMap<EntityId, usize>,
+        bus_pos: &HashMap<EntityId, usize>,
+        line_pos: &HashMap<EntityId, usize>,
+        cascade: &CascadeTopology,
+        diversion_upstream: &HashMap<EntityId, Vec<usize>>,
+    ) -> Vec<(usize, f64)> {
         let positions = super::EntityPositionMaps {
             hydro: hydro_pos,
             thermal: thermal_pos,
             bus: bus_pos,
             line: line_pos,
+        };
+        let cascade_refs = CascadeRefs {
+            cascade,
+            diversion_upstream,
         };
         resolve_variable_ref(
             &var_ref,
@@ -663,6 +872,7 @@ mod tests {
             indexer,
             production_models,
             &positions,
+            &cascade_refs,
         )
     }
 
@@ -1033,6 +1243,12 @@ mod tests {
             bus: &bpos,
             line: &lpos,
         };
+        let cascade = empty_cascade();
+        let diversion_upstream: HashMap<EntityId, Vec<usize>> = HashMap::new();
+        let cascade_refs = CascadeRefs {
+            cascade: &cascade,
+            diversion_upstream: &diversion_upstream,
+        };
         let result = resolve_variable_ref(
             &VariableRef::HydroEvaporation {
                 hydro_id: EntityId(10),
@@ -1043,6 +1259,7 @@ mod tests {
             &evap_indexer,
             &prod_models,
             &positions,
+            &cascade_refs,
         );
 
         assert_eq!(result, vec![(15, 1.0)]);
@@ -1097,6 +1314,12 @@ mod tests {
             bus: &bpos,
             line: &lpos,
         };
+        let cascade = empty_cascade();
+        let diversion_upstream: HashMap<EntityId, Vec<usize>> = HashMap::new();
+        let cascade_refs = CascadeRefs {
+            cascade: &cascade,
+            diversion_upstream: &diversion_upstream,
+        };
         let result = resolve_variable_ref(
             &VariableRef::HydroEvaporation {
                 hydro_id: EntityId(20),
@@ -1107,6 +1330,7 @@ mod tests {
             &evap_indexer,
             &prod_models,
             &positions,
+            &cascade_refs,
         );
 
         assert!(result.is_empty());
@@ -1752,5 +1976,285 @@ mod tests {
         );
 
         assert_eq!(result, vec![(25 + 3 * 3 + 1, 1.0)]);
+    }
+
+    // ── HydroInflow tests ──────────────────────────────────────────────────────
+
+    /// Cascade for the total-inflow tests: EntityId(10) and EntityId(20) both
+    /// flow into EntityId(40), so `upstream(40) = [10, 20]` (ID-sorted). The
+    /// three hydros map to system positions 0, 1, 3 via `make_hydro_pos`.
+    fn make_inflow_cascade() -> CascadeTopology {
+        CascadeTopology::build(&[
+            make_hydro(10, Some(40)),
+            make_hydro(20, Some(40)),
+            make_hydro(30, None),
+            make_hydro(40, None),
+        ])
+    }
+
+    /// AC: a two-upstream hydro (no diversion-into) resolves at block `k` to the
+    /// incremental `z_inflow` column plus, in canonical upstream order, each
+    /// upstream plant's turbine + spillage column. All coefficients `+1.0`.
+    ///
+    /// Target EntityId(40) at pos_h=3; upstream [10, 20] at pos 0, 1.
+    /// z_inflow.start=4 → (4+3, 1.0)=(7, 1.0); turbine.start=13, spillage.start=25,
+    /// n_blks=3, k=2.
+    #[test]
+    fn hydro_inflow_two_upstream_canonical_order() {
+        let indexer = make_indexer();
+        let prod = make_production_models();
+        let hpos = make_hydro_pos();
+        let tpos = make_thermal_pos();
+        let bpos = make_bus_pos();
+        let lpos = make_line_pos();
+        let cascade = make_inflow_cascade();
+        let div: HashMap<EntityId, Vec<usize>> = HashMap::new();
+
+        let blk = 2;
+        let result = call_with_cascade(
+            VariableRef::HydroInflow {
+                hydro_id: EntityId(40),
+                block_id: Some(blk),
+            },
+            0, // block_idx — overridden by block_id = Some(blk)
+            &indexer,
+            &prod,
+            &hpos,
+            &tpos,
+            &bpos,
+            &lpos,
+            &cascade,
+            &div,
+        );
+
+        let z_col = 4 + 3; // z_inflow.start + pos_h
+        let turb = 13; // turbine.start
+        let spill = 25; // spillage.start
+        let nb = 3; // n_blks
+        assert_eq!(
+            result,
+            vec![
+                (z_col, 1.0),
+                (turb + 0 * nb + blk, 1.0),  // upstream 10 turbine
+                (spill + 0 * nb + blk, 1.0), // upstream 10 spillage
+                (turb + 1 * nb + blk, 1.0),  // upstream 20 turbine
+                (spill + 1 * nb + blk, 1.0), // upstream 20 spillage
+            ]
+        );
+    }
+
+    /// AC: `block_id = None` with `block_idx = k` matches `block_id = Some(k)`
+    /// (the resolver uses `eff_blk = block_id.unwrap_or(block_idx)`).
+    #[test]
+    fn hydro_inflow_none_matches_some_block_idx() {
+        let indexer = make_indexer();
+        let prod = make_production_models();
+        let hpos = make_hydro_pos();
+        let tpos = make_thermal_pos();
+        let bpos = make_bus_pos();
+        let lpos = make_line_pos();
+        let cascade = make_inflow_cascade();
+        let div: HashMap<EntityId, Vec<usize>> = HashMap::new();
+
+        let blk = 2;
+        let none_result = call_with_cascade(
+            VariableRef::HydroInflow {
+                hydro_id: EntityId(40),
+                block_id: None,
+            },
+            blk, // block_idx supplies the effective block
+            &indexer,
+            &prod,
+            &hpos,
+            &tpos,
+            &bpos,
+            &lpos,
+            &cascade,
+            &div,
+        );
+        let some_result = call_with_cascade(
+            VariableRef::HydroInflow {
+                hydro_id: EntityId(40),
+                block_id: Some(blk),
+            },
+            0,
+            &indexer,
+            &prod,
+            &hpos,
+            &tpos,
+            &bpos,
+            &lpos,
+            &cascade,
+            &div,
+        );
+
+        assert_eq!(none_result, some_result);
+    }
+
+    /// AC: a hydro that also has a plant diverting into it gets the diversion
+    /// column appended after the upstream terms.
+    ///
+    /// `diversion_upstream[40] = [2]` (system index 2). diversion.start=37,
+    /// n_blks=3, k=1 → (37 + 2*3 + 1, 1.0) = (44, 1.0).
+    #[test]
+    fn hydro_inflow_diversion_into_appends_diversion_column() {
+        let indexer = make_indexer();
+        let prod = make_production_models();
+        let hpos = make_hydro_pos();
+        let tpos = make_thermal_pos();
+        let bpos = make_bus_pos();
+        let lpos = make_line_pos();
+        let cascade = make_inflow_cascade();
+        let div: HashMap<EntityId, Vec<usize>> = [(EntityId(40), vec![2])].into_iter().collect();
+
+        let blk = 1;
+        let result = call_with_cascade(
+            VariableRef::HydroInflow {
+                hydro_id: EntityId(40),
+                block_id: Some(blk),
+            },
+            0,
+            &indexer,
+            &prod,
+            &hpos,
+            &tpos,
+            &bpos,
+            &lpos,
+            &cascade,
+            &div,
+        );
+
+        let z_col = 4 + 3;
+        let turb = 13; // turbine.start
+        let spill = 25; // spillage.start
+        let div_start = 37; // diversion.start
+        let nb = 3; // n_blks
+        assert_eq!(
+            result,
+            vec![
+                (z_col, 1.0),
+                (turb + 0 * nb + blk, 1.0),
+                (spill + 0 * nb + blk, 1.0),
+                (turb + 1 * nb + blk, 1.0),
+                (spill + 1 * nb + blk, 1.0),
+                (div_start + 2 * nb + blk, 1.0), // diversion-into, system index 2
+            ]
+        );
+    }
+
+    /// AC: a headwater hydro (no upstream, no diversion-into) resolves to exactly
+    /// the incremental `z_inflow` column.
+    ///
+    /// EntityId(30) at pos=2 is a headwater in `make_inflow_cascade`.
+    /// z_inflow.start=4 → (6, 1.0).
+    #[test]
+    fn hydro_inflow_headwater_resolves_to_z_inflow_only() {
+        let indexer = make_indexer();
+        let prod = make_production_models();
+        let hpos = make_hydro_pos();
+        let tpos = make_thermal_pos();
+        let bpos = make_bus_pos();
+        let lpos = make_line_pos();
+        let cascade = make_inflow_cascade();
+        let div: HashMap<EntityId, Vec<usize>> = HashMap::new();
+
+        for block_idx in [0, 1, 2] {
+            let result = call_with_cascade(
+                VariableRef::HydroInflow {
+                    hydro_id: EntityId(30),
+                    block_id: None,
+                },
+                block_idx,
+                &indexer,
+                &prod,
+                &hpos,
+                &tpos,
+                &bpos,
+                &lpos,
+                &cascade,
+                &div,
+            );
+            assert_eq!(result, vec![(6, 1.0)], "block_idx={block_idx}");
+        }
+    }
+
+    /// AC: `hydro_count == 0` (empty `z_inflow`) resolves to `vec![]`.
+    ///
+    /// `make_indexer_with_anticipated` has no hydros, so `z_inflow` is empty and
+    /// `z_inflow.start` is meaningless; the resolver must short-circuit to `[]`.
+    #[test]
+    fn hydro_inflow_empty_when_no_hydros() {
+        let indexer = make_indexer_with_anticipated();
+        let prod = ProductionModelSet::new(vec![], 0, 1);
+        let hpos: HashMap<EntityId, usize> = HashMap::new();
+        let tpos: HashMap<EntityId, usize> = HashMap::new();
+        let bpos: HashMap<EntityId, usize> = HashMap::new();
+        let lpos: HashMap<EntityId, usize> = HashMap::new();
+
+        assert!(
+            indexer.z_inflow.is_empty(),
+            "z_inflow must be empty with hydro_count == 0"
+        );
+
+        let result = call(
+            VariableRef::HydroInflow {
+                hydro_id: EntityId(0),
+                block_id: None,
+            },
+            0,
+            &indexer,
+            &prod,
+            &hpos,
+            &tpos,
+            &bpos,
+            &lpos,
+        );
+
+        assert!(
+            result.is_empty(),
+            "HydroInflow with hydro_count == 0 must return empty vec, got: {result:?}"
+        );
+    }
+
+    /// AC: an unknown `hydro_id` resolves to `vec![]`.
+    #[test]
+    fn hydro_inflow_unknown_id_returns_empty() {
+        let indexer = make_indexer();
+        let prod = make_production_models();
+        let hpos = make_hydro_pos();
+        let tpos = make_thermal_pos();
+        let bpos = make_bus_pos();
+        let lpos = make_line_pos();
+
+        let result = call(
+            VariableRef::HydroInflow {
+                hydro_id: EntityId(999), // unknown
+                block_id: None,
+            },
+            0,
+            &indexer,
+            &prod,
+            &hpos,
+            &tpos,
+            &bpos,
+            &lpos,
+        );
+
+        assert!(
+            result.is_empty(),
+            "HydroInflow for unknown id must return empty vec, got: {result:?}"
+        );
+    }
+
+    /// AC: `HydroInflow` is block-DEPENDENT — its upstream releases are per-block
+    /// columns, so the single-row collapse must NOT apply.
+    #[test]
+    fn hydro_inflow_is_block_dependent() {
+        assert!(!variable_ref_is_block_independent(
+            &VariableRef::HydroInflow {
+                hydro_id: EntityId(0),
+                block_id: None,
+            }
+        ));
     }
 }
