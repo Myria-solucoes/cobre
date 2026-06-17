@@ -1019,7 +1019,8 @@ mod tests {
     ///
     /// Verifies that a `config.json` without the `fpha_deviation_points` field in
     /// the `exports` section resolves to `false` via `#[serde(default)]`, so a
-    /// run with the flag absent produces no file and is byte-identical to today.
+    /// run with the flag absent produces no deviation-points file and leaves the
+    /// rest of the run's outputs unchanged from the flag-off default.
     #[test]
     fn test_exports_fpha_deviation_points_defaults_to_false() {
         let f = write_config(

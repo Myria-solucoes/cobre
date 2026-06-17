@@ -331,13 +331,16 @@ mod tests {
 
     /// The per-hydro FPHA fit loop in `resolve_production_models_from_artifacts`
     /// is a `par_iter().collect()`, so its output must not depend on the rayon
-    /// pool size. This gate fits the computed-FPHA case d07-fpha-computed under
-    /// pools of 1, 2, and 4 threads and asserts the resolved `fpha_export_rows`
-    /// are `to_bits`-identical across all three — the `(hydro_id, stage_id,
-    /// plane_id)` ordering and every gamma coefficient must match bit-for-bit
-    /// regardless of thread scheduling. A regression that collected into a shared
-    /// `Mutex<Vec>` or pushed rows from worker threads would reorder the stream
-    /// and fail here.
+    /// pool size. This gate fits the computed-FPHA case
+    /// d31-backwater-reference-volume under pools of 1, 2, and 4 threads and
+    /// asserts the resolved `fpha_export_rows` are `to_bits`-identical across all
+    /// three — the `(hydro_id, stage_id, plane_id)` ordering and every gamma
+    /// coefficient must match bit-for-bit regardless of thread scheduling. The
+    /// case has TWO hydros on purpose: a single-hydro case leaves the
+    /// `par_iter()` with one element, which never schedules concurrently and so
+    /// cannot exercise the cross-hydro `collect()` reassembly this gate exists to
+    /// protect. A regression that collected into a shared `Mutex<Vec>` or pushed
+    /// rows from worker threads would reorder the stream and fail here.
     #[test]
     fn fit_is_thread_count_invariant() {
         // The FPHA export rows AND the per-fit deviations both ride the same
@@ -353,10 +356,10 @@ mod tests {
             .expect("cobre-sddp parent dir must exist")
             .parent()
             .expect("crates parent dir must exist")
-            .join("examples/deterministic/d07-fpha-computed");
+            .join("examples/deterministic/d31-backwater-reference-volume");
 
-        let system =
-            cobre_io::load_case(&case_dir).expect("d07-fpha-computed must load successfully");
+        let system = cobre_io::load_case(&case_dir)
+            .expect("d31-backwater-reference-volume must load successfully");
 
         // Resolve the FPHA export rows and the per-fit deviations inside a
         // fixed-size rayon pool so the fit loop runs under exactly `n` worker
