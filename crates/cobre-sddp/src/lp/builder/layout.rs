@@ -304,10 +304,12 @@ pub(crate) struct StageLayout {
     /// Number of pumping stations contributing columns at this stage.
     ///
     /// Each station contributes `n_blks` columns. Sourced from `ctx.n_pumping`.
-    /// Per-stage entry/exit gating is bound-driven downstream; the column count
-    /// is the full station count here. Read by `build_single_stage_template` to
-    /// populate `StageTemplates::n_pumping_per_stage`, which the simulation
-    /// extraction pipeline uses to bound the per-(station, block) primal read.
+    /// The column count is the full station count at every stage: pumping
+    /// `entry_stage_id`/`exit_stage_id` are parsed but not applied to the LP, so
+    /// no commissioning gating shrinks or zeroes this block per stage (that gating
+    /// is unimplemented). Read by `build_single_stage_template` to populate
+    /// `StageTemplates::n_pumping_per_stage`, which the simulation extraction
+    /// pipeline uses to bound the per-(station, block) primal read.
     pub(crate) n_pumping: usize,
     pub(crate) num_cols: usize,
     /// Start of minimum-outflow constraint rows (one per hydro per block, after evaporation rows).

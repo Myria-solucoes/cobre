@@ -188,6 +188,158 @@ pub(super) fn check_lifecycle_consistency(data: &ParsedData, ctx: &mut Validatio
     }
 }
 
+/// Extends the `entry < exit` ordering check (Rule 6) to the entity types not
+/// covered by [`check_lifecycle_consistency`]: pumping stations, non-controllable
+/// sources, and energy contracts. Each carries the same
+/// `entry_stage_id`/`exit_stage_id` pair, so an unchecked entity with
+/// `entry >= exit` would pass validation while the other three types reject it —
+/// the parity this function closes.
+///
+/// Infallible — every violation accumulates into `ctx`; the loops run over all
+/// entities regardless of earlier failures.
+pub(super) fn check_lifecycle_consistency_remaining(
+    data: &ParsedData,
+    ctx: &mut ValidationContext,
+) {
+    for station in &data.pumping_stations {
+        if let (Some(entry), Some(exit)) = (station.entry_stage_id, station.exit_stage_id)
+            && entry >= exit
+        {
+            let entity_str = format!("PumpingStation {}", station.id.0);
+            ctx.add_error(
+                    ErrorKind::InvalidValue,
+                    "system/pumping_stations.json",
+                    Some(&entity_str),
+                    format!(
+                        "{entity_str}: entry_stage_id ({entry}) >= exit_stage_id ({exit}); entry must precede exit"
+                    ),
+                );
+        }
+    }
+
+    for source in &data.non_controllable_sources {
+        if let (Some(entry), Some(exit)) = (source.entry_stage_id, source.exit_stage_id)
+            && entry >= exit
+        {
+            let entity_str = format!("NonControllableSource {}", source.id.0);
+            ctx.add_error(
+                    ErrorKind::InvalidValue,
+                    "system/non_controllable_sources.json",
+                    Some(&entity_str),
+                    format!(
+                        "{entity_str}: entry_stage_id ({entry}) >= exit_stage_id ({exit}); entry must precede exit"
+                    ),
+                );
+        }
+    }
+
+    for contract in &data.energy_contracts {
+        if let (Some(entry), Some(exit)) = (contract.entry_stage_id, contract.exit_stage_id)
+            && entry >= exit
+        {
+            let entity_str = format!("EnergyContract {}", contract.id.0);
+            ctx.add_error(
+                    ErrorKind::InvalidValue,
+                    "system/energy_contracts.json",
+                    Some(&entity_str),
+                    format!(
+                        "{entity_str}: entry_stage_id ({entry}) >= exit_stage_id ({exit}); entry must precede exit"
+                    ),
+                );
+        }
+    }
+}
+
+/// Warns whenever any entity sets `entry_stage_id` or `exit_stage_id`.
+///
+/// All six entity types carrying these fields (hydros, lines, thermals, pumping
+/// stations, non-controllable sources, energy contracts) parse commissioning
+/// windows, but the LP does not honor them: an entity that sets either field is
+/// modeled fully active at every stage. The user gets no signal otherwise, so
+/// this emits one `ModelQuality` warning per such entity. The all-`None` case is
+/// the correct inert default and stays silent — emitting there would warn every
+/// shipped case.
+///
+/// Infallible — every warning accumulates into `ctx`.
+pub(super) fn warn_commissioning_parsed_not_applied(
+    data: &ParsedData,
+    ctx: &mut ValidationContext,
+) {
+    fn warn_if_set(
+        ctx: &mut ValidationContext,
+        entry: Option<i32>,
+        exit: Option<i32>,
+        file: &str,
+        entity_str: &str,
+    ) {
+        if entry.is_some() || exit.is_some() {
+            ctx.add_warning(
+                ErrorKind::ModelQuality,
+                file,
+                Some(entity_str),
+                format!(
+                    "{entity_str} sets entry_stage_id/exit_stage_id, but commissioning windows are not applied: the entity is modeled active at every stage"
+                ),
+            );
+        }
+    }
+
+    for hydro in &data.hydros {
+        warn_if_set(
+            ctx,
+            hydro.entry_stage_id,
+            hydro.exit_stage_id,
+            "system/hydros.json",
+            &format!("Hydro {}", hydro.id.0),
+        );
+    }
+    for line in &data.lines {
+        warn_if_set(
+            ctx,
+            line.entry_stage_id,
+            line.exit_stage_id,
+            "system/lines.json",
+            &format!("Line {}", line.id.0),
+        );
+    }
+    for thermal in &data.thermals {
+        warn_if_set(
+            ctx,
+            thermal.entry_stage_id,
+            thermal.exit_stage_id,
+            "system/thermals.json",
+            &format!("Thermal {}", thermal.id.0),
+        );
+    }
+    for station in &data.pumping_stations {
+        warn_if_set(
+            ctx,
+            station.entry_stage_id,
+            station.exit_stage_id,
+            "system/pumping_stations.json",
+            &format!("PumpingStation {}", station.id.0),
+        );
+    }
+    for source in &data.non_controllable_sources {
+        warn_if_set(
+            ctx,
+            source.entry_stage_id,
+            source.exit_stage_id,
+            "system/non_controllable_sources.json",
+            &format!("NonControllableSource {}", source.id.0),
+        );
+    }
+    for contract in &data.energy_contracts {
+        warn_if_set(
+            ctx,
+            contract.entry_stage_id,
+            contract.exit_stage_id,
+            "system/energy_contracts.json",
+            &format!("EnergyContract {}", contract.id.0),
+        );
+    }
+}
+
 pub(super) fn check_filling_config(data: &ParsedData, ctx: &mut ValidationContext) {
     let study_stage_ids: HashSet<i32> = data
         .stages
@@ -634,6 +786,212 @@ mod tests {
         let mut ctx = ValidationContext::new();
         validate_semantic_hydro_thermal(&data, &mut ctx);
         assert!(!ctx.has_errors());
+    }
+
+    // ── Commissioning hygiene: ordering parity + parsed-not-applied warning ────
+
+    use cobre_core::EntityId;
+    use cobre_core::entities::{
+        ContractType, EnergyContract, NonControllableSource, PumpingStation,
+    };
+
+    /// Build a `PumpingStation` with the given entry/exit commissioning window.
+    fn make_pumping_lc(id: i32, entry: Option<i32>, exit: Option<i32>) -> PumpingStation {
+        PumpingStation {
+            id: EntityId::from(id),
+            name: format!("Pump_{id}"),
+            bus_id: EntityId::from(1),
+            source_hydro_id: EntityId::from(1),
+            destination_hydro_id: EntityId::from(2),
+            entry_stage_id: entry,
+            exit_stage_id: exit,
+            consumption_mw_per_m3s: 0.5,
+            min_flow_m3s: 0.0,
+            max_flow_m3s: 100.0,
+        }
+    }
+
+    /// Build a `NonControllableSource` with the given entry/exit window.
+    fn make_ncs_lc(id: i32, entry: Option<i32>, exit: Option<i32>) -> NonControllableSource {
+        NonControllableSource {
+            id: EntityId::from(id),
+            name: format!("NCS_{id}"),
+            bus_id: EntityId::from(1),
+            entry_stage_id: entry,
+            exit_stage_id: exit,
+            max_generation_mw: 300.0,
+            allow_curtailment: true,
+            curtailment_cost: 0.01,
+        }
+    }
+
+    /// Build an `EnergyContract` with the given entry/exit window.
+    fn make_contract_lc(id: i32, entry: Option<i32>, exit: Option<i32>) -> EnergyContract {
+        EnergyContract {
+            id: EntityId::from(id),
+            name: format!("Contract_{id}"),
+            bus_id: EntityId::from(1),
+            contract_type: ContractType::Import,
+            entry_stage_id: entry,
+            exit_stage_id: exit,
+            price_per_mwh: 200.0,
+            min_mw: 0.0,
+            max_mw: 1000.0,
+        }
+    }
+
+    /// A pumping station with entry >= exit produces an InvalidValue error citing
+    /// `system/pumping_stations.json`.
+    #[test]
+    fn test_pumping_lifecycle_entry_gte_exit() {
+        let mut data = make_data(
+            vec![make_hydro(1, None), make_hydro(2, None)],
+            vec![],
+            vec![],
+            make_stages(vec![0]),
+            vec![],
+            vec![],
+        );
+        data.pumping_stations = vec![make_pumping_lc(5, Some(5), Some(3))];
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let errs: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| {
+                e.kind == ErrorKind::InvalidValue
+                    && e.file.to_string_lossy() == "system/pumping_stations.json"
+            })
+            .collect();
+        assert_eq!(
+            errs.len(),
+            1,
+            "expected 1 InvalidValue for pumping ordering, got: {:?}",
+            errs.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        assert!(errs[0].message.contains("PumpingStation 5"));
+    }
+
+    /// An NCS with entry >= exit produces an InvalidValue error citing
+    /// `system/non_controllable_sources.json`.
+    #[test]
+    fn test_ncs_lifecycle_entry_gte_exit() {
+        let mut data = make_data(
+            vec![make_hydro(1, None)],
+            vec![],
+            vec![],
+            make_stages(vec![0]),
+            vec![],
+            vec![],
+        );
+        data.non_controllable_sources = vec![make_ncs_lc(7, Some(8), Some(2))];
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let errs: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| {
+                e.kind == ErrorKind::InvalidValue
+                    && e.file.to_string_lossy() == "system/non_controllable_sources.json"
+            })
+            .collect();
+        assert_eq!(errs.len(), 1, "expected 1 InvalidValue for NCS ordering");
+        assert!(errs[0].message.contains("NonControllableSource 7"));
+    }
+
+    /// An energy contract with entry >= exit produces an InvalidValue error citing
+    /// `system/energy_contracts.json`.
+    #[test]
+    fn test_energy_contract_lifecycle_entry_gte_exit() {
+        let mut data = make_data(
+            vec![make_hydro(1, None)],
+            vec![],
+            vec![],
+            make_stages(vec![0]),
+            vec![],
+            vec![],
+        );
+        data.energy_contracts = vec![make_contract_lc(9, Some(4), Some(4))];
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let errs: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| {
+                e.kind == ErrorKind::InvalidValue
+                    && e.file.to_string_lossy() == "system/energy_contracts.json"
+            })
+            .collect();
+        assert_eq!(
+            errs.len(),
+            1,
+            "expected 1 InvalidValue for contract ordering (entry == exit)"
+        );
+        assert!(errs[0].message.contains("EnergyContract 9"));
+    }
+
+    /// An entity setting only `entry_stage_id` (exit None) emits a ModelQuality
+    /// warning about commissioning being parsed-but-not-applied, and the case
+    /// still loads (`has_errors()` is false).
+    #[test]
+    fn test_commissioning_set_emits_warning_no_error() {
+        let mut hydro = make_hydro(3, None);
+        hydro.entry_stage_id = Some(2);
+        hydro.exit_stage_id = None;
+        let data = make_data(
+            vec![hydro],
+            vec![],
+            vec![],
+            make_stages(vec![0]),
+            vec![],
+            vec![],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        assert!(
+            !ctx.has_errors(),
+            "setting entry/exit must not produce an error, got: {:?}",
+            ctx.errors()
+        );
+        let warnings: Vec<_> = ctx
+            .warnings()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::ModelQuality)
+            .collect();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "expected exactly 1 ModelQuality warning, got: {:?}",
+            warnings.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        assert!(
+            warnings[0].message.contains("Hydro 3") && warnings[0].message.contains("not applied"),
+            "warning should name the entity and state it is not applied, got: {}",
+            warnings[0].message
+        );
+    }
+
+    /// With no entity setting entry/exit (the inert default), no ModelQuality
+    /// commissioning warning is emitted.
+    #[test]
+    fn test_commissioning_unset_no_warning() {
+        let data = make_data(
+            vec![make_hydro(1, None)],
+            vec![make_thermal(1, 0.0, 500.0)],
+            vec![],
+            make_stages(vec![0]),
+            vec![],
+            vec![],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        assert!(
+            !ctx.warnings()
+                .iter()
+                .any(|e| e.kind == ErrorKind::ModelQuality),
+            "no entity sets entry/exit, so no ModelQuality warning is expected, got: {:?}",
+            ctx.warnings()
+        );
     }
 
     // ── Geometry monotonicity tests ───────────────────────────────────────────

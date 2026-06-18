@@ -180,7 +180,7 @@ pub(super) fn build_single_stage_template(
     let stage_base_row = layout.row_water_balance_start;
     let load_balance_row_start = layout.row_load_balance_start;
 
-    let (mut col_lower, mut col_upper, mut objective) =
+    let (col_lower, mut col_upper, mut objective) =
         matrix::fill_stage_columns(ctx, stage, stage_idx, &layout);
     let (mut row_lower, mut row_upper) = matrix::fill_stage_rows(ctx, stage, stage_idx, &layout);
     let mut col_entries = matrix::build_stage_matrix_entries(ctx, stage, stage_idx, &layout);
@@ -189,7 +189,6 @@ pub(super) fn build_single_stage_template(
     {
         let mut buffers = matrix::LpMatrixBuffers {
             col_entries: &mut col_entries,
-            _col_lower: &mut col_lower,
             col_upper: &mut col_upper,
             objective: &mut objective,
             row_lower: &mut row_lower,

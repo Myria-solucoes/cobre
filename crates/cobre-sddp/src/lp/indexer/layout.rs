@@ -286,9 +286,10 @@ pub struct StageIndexer {
     /// Maximum number of deficit segments across all buses (S).
     ///
     /// Used together with `deficit.start` to compute per-segment column indices.
-    /// Set to `0` when built via [`StageIndexer::new`], `1` when built via
-    /// [`StageIndexer::with_equipment`] (backward-compatible single-segment mode),
-    /// and the true maximum when built via [`StageIndexer::with_equipment_and_evaporation`].
+    /// Set to `0` when built via [`StageIndexer::new`]; both equipment
+    /// constructors ([`StageIndexer::with_equipment`] and
+    /// [`StageIndexer::with_equipment_and_evaporation`]) pass the caller-supplied
+    /// `counts.max_deficit_segments` through unchanged.
     pub max_deficit_segments: usize,
 
     /// Column range for bus excess variables, one per (bus, block) pair.
