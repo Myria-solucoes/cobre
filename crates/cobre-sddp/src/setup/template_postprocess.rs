@@ -67,27 +67,23 @@ pub(crate) fn postprocess_templates(
     stage_templates: &mut StageTemplates,
     system: &System,
 ) -> crate::scaling_report::ScalingReport {
-    // Compute per-stage one-step discount factors from the PolicyGraph
-    // and store in StageTemplates. This is done here (not inside
-    // build_stage_templates) to avoid threading PolicyGraph through
-    // the template builder's signature.
+    // Compute per-stage one-step discount factors from the PolicyGraph and
+    // install them via the setter, which derives the cumulative factors
+    // (D_0 = 1.0, D_t = D_{t-1} * d_{t-1}) in the same call so the two slices
+    // cannot drift. This is done here (not inside build_stage_templates) to
+    // avoid threading PolicyGraph through the template builder's signature.
+    //
+    // Cumulative length is n_stages exactly: the strict anticipated-decision
+    // predicate (`stage_idx + K_i < n_stages`) guarantees every delivery lookup
+    // falls within `[0, n_stages)`.
     {
         let pg = system.policy_graph();
         let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
-        stage_templates.discount_factors = compute_per_stage_discount_factors(&study_stages, pg);
-    }
-
-    // D_0 = 1.0, D_t = D_{t-1} * d_{t-1} for t >= 1.
-    // Length is n_stages exactly: the strict anticipated-decision predicate
-    // (`stage_idx + K_i < n_stages`) guarantees every delivery lookup falls
-    // within `[0, n_stages)`.
-    {
-        stage_templates.cumulative_discount_factors =
-            compute_cumulative_discount_factors(&stage_templates.discount_factors);
+        stage_templates.set_discount_factors(compute_per_stage_discount_factors(&study_stages, pg));
     }
 
     debug_assert_eq!(
-        stage_templates.cumulative_discount_factors.len(),
+        stage_templates.cumulative_discount_factors().len(),
         stage_templates.templates.len(),
         "cumulative_discount_factors must have length n_stages after postprocess"
     );
@@ -106,8 +102,12 @@ pub(crate) fn postprocess_templates(
         // for both the base and the augmented (anticipated-state-extended)
         // indexer because `n_state` already absorbs `A*K_max`.
         let theta_col = first.n_state + 2 * stage_templates.n_hydros;
+        // Snapshot the per-stage factors so the discount read does not alias the
+        // `templates.iter_mut()` borrow below (the accessor borrows all of
+        // `stage_templates`). One small allocation on this once-per-run cold path.
+        let discount_factors = stage_templates.discount_factors().to_vec();
         for (s_idx, tmpl) in stage_templates.templates.iter_mut().enumerate() {
-            tmpl.objective[theta_col] *= stage_templates.discount_factors[s_idx];
+            tmpl.objective[theta_col] *= discount_factors[s_idx];
         }
     }
 

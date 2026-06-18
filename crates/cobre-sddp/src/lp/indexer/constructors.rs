@@ -12,6 +12,10 @@ use std::ops::Range;
 
 use cobre_solver::StageTemplate;
 
+use crate::lp_builder::{
+    EVAP_COLS_PER_HYDRO, EVAP_F_MINUS_OFFSET, EVAP_F_PLUS_OFFSET, EVAP_FLOW_OFFSET,
+};
+
 use super::layout::{
     EquipmentCounts, EvapConfig, EvaporationIndices, FphaColumnLayout, FphaRowRange, StageIndexer,
 };
@@ -490,8 +494,10 @@ impl StageIndexer {
             0..0
         };
 
-        // Evaporation columns: 3 per evap hydro (stage-level), after FPHA generation columns.
-        // Layout: evaporation_flow_col = evap_start+i*3, f_evap_plus = +1, f_evap_minus = +2.
+        // Evaporation columns: EVAP_COLS_PER_HYDRO per evap hydro (stage-level),
+        // after FPHA generation columns. Within-hydro layout (see build_evap_indices):
+        // evaporation_flow_col at EVAP_FLOW_OFFSET, f_evap_plus at EVAP_F_PLUS_OFFSET,
+        // f_evap_minus at EVAP_F_MINUS_OFFSET.
         let n_evap_hydros = evap_hydro_indices.len();
         let evap_col_start = generation_end;
 
@@ -506,7 +512,7 @@ impl StageIndexer {
 
         let evap_indices_vec =
             Self::build_evap_indices(n_evap_hydros, evap_col_start, fpha_row_cursor);
-        let evap_col_end = evap_col_start + n_evap_hydros * 3;
+        let evap_col_end = evap_col_start + n_evap_hydros * EVAP_COLS_PER_HYDRO;
         let (withdrawal_slack_neg, withdrawal_slack_pos, has_withdrawal) = if hydro_count > 0 {
             let neg = evap_col_end..evap_col_end + hydro_count;
             let pos = neg.end..neg.end + hydro_count;
@@ -632,9 +638,9 @@ impl StageIndexer {
     ) -> Vec<EvaporationIndices> {
         (0..n_evap_hydros)
             .map(|i| EvaporationIndices {
-                evaporation_flow_col: col_start + i * 3,
-                f_evap_plus_col: col_start + i * 3 + 1,
-                f_evap_minus_col: col_start + i * 3 + 2,
+                evaporation_flow_col: col_start + i * EVAP_COLS_PER_HYDRO + EVAP_FLOW_OFFSET,
+                f_evap_plus_col: col_start + i * EVAP_COLS_PER_HYDRO + EVAP_F_PLUS_OFFSET,
+                f_evap_minus_col: col_start + i * EVAP_COLS_PER_HYDRO + EVAP_F_MINUS_OFFSET,
                 evap_row: row_start + i,
             })
             .collect()

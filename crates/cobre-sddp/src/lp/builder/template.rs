@@ -132,7 +132,14 @@ pub struct StageTemplates {
     ///
     /// Length equals `templates.len()`. Computed at setup time and applied to
     /// the theta objective coefficient in the LP template.
-    pub discount_factors: Vec<f64>,
+    ///
+    /// Private with a getter/setter pair: [`build_stage_templates`] leaves this
+    /// a `1.0`-placeholder; the real factors are written by
+    /// [`StageTemplates::set_discount_factors`] in the postprocess step. A `pub`
+    /// field would let an external caller read the placeholder as if it were the
+    /// discounted value — silently yielding undiscounted NPV. Read via
+    /// [`StageTemplates::discount_factors`].
+    discount_factors: Vec<f64>,
     /// Cumulative discount factor at each stage for reporting.
     ///
     /// `cumulative_discount_factors[0] = 1.0` (present value).
@@ -144,38 +151,125 @@ pub struct StageTemplates {
     /// so every active delivery stage satisfies `delivery_stage in [0, n_stages)`.
     /// The present value of stage `t`'s immediate cost is
     /// `cumulative_discount_factors[t] * immediate_cost_t`.
-    pub cumulative_discount_factors: Vec<f64>,
+    ///
+    /// Private for the same reason as [`StageTemplates::discount_factors`]:
+    /// derived from it by [`StageTemplates::set_discount_factors`], so it shares
+    /// the placeholder window. Read via
+    /// [`StageTemplates::cumulative_discount_factors`].
+    cumulative_discount_factors: Vec<f64>,
+}
+
+impl StageTemplates {
+    /// All-empty [`StageTemplates`] for a study with zero stages.
+    ///
+    /// Every per-stage collection is empty; only `n_hydros` (the stride into
+    /// `noise_scale`) carries through, since it is a system-level count that is
+    /// well-defined even when no stage templates are built. Used by the
+    /// empty-study early return in [`build_stage_templates`].
+    #[must_use]
+    pub(crate) fn empty(n_hydros: usize) -> Self {
+        Self {
+            templates: Vec::new(),
+            base_rows: Vec::new(),
+            noise_scale: Vec::new(),
+            zeta_per_stage: Vec::new(),
+            block_hours_per_stage: Vec::new(),
+            n_hydros,
+            load_balance_row_starts: Vec::new(),
+            n_load_buses: 0,
+            load_bus_indices: Vec::new(),
+            generic_constraint_row_entries: Vec::new(),
+            ncs_col_starts: Vec::new(),
+            n_ncs_per_stage: Vec::new(),
+            pumping_col_starts: Vec::new(),
+            n_pumping_per_stage: Vec::new(),
+            active_ncs_indices: Vec::new(),
+            diversion_upstream: HashMap::new(),
+            hydro_productivities_per_stage: Vec::new(),
+            discount_factors: Vec::new(),
+            cumulative_discount_factors: Vec::new(),
+        }
+    }
+
+    /// Per-stage one-step discount factors (read access).
+    ///
+    /// See the [`discount_factors`](StageTemplates#structfield.discount_factors)
+    /// field: the slice is a `1.0`-placeholder until
+    /// [`StageTemplates::set_discount_factors`] runs in the postprocess step.
+    #[must_use]
+    pub(crate) fn discount_factors(&self) -> &[f64] {
+        &self.discount_factors
+    }
+
+    /// Cumulative discount factors for reporting (read access).
+    ///
+    /// See the
+    /// [`cumulative_discount_factors`](StageTemplates#structfield.cumulative_discount_factors)
+    /// field: the slice is a `1.0`-placeholder until
+    /// [`StageTemplates::set_discount_factors`] runs in the postprocess step.
+    #[must_use]
+    pub(crate) fn cumulative_discount_factors(&self) -> &[f64] {
+        &self.cumulative_discount_factors
+    }
+
+    /// Install the real per-stage discount factors and derive the cumulative
+    /// factors from them in one call.
+    ///
+    /// The cumulative vector is always recomputed here from `per_stage`
+    /// (`D_0 = 1.0`, `D_t = D_{t-1} * d_{t-1}`), so the two slices cannot drift
+    /// out of step: a caller cannot set per-stage factors while leaving a stale
+    /// cumulative vector behind. Called once by the postprocess step
+    /// (`setup::template_postprocess`).
+    pub(crate) fn set_discount_factors(&mut self, per_stage: Vec<f64>) {
+        self.cumulative_discount_factors = compute_cumulative_discount_factors(&per_stage);
+        self.discount_factors = per_stage;
+    }
+}
+
+/// Per-stage outputs of [`build_single_stage_template`].
+///
+/// One field per datum the per-stage build emits; produced by
+/// [`build_single_stage_template`] and consumed by
+/// [`assemble_stage_templates_output`], which transposes a
+/// `Vec<StageBuildOutput>` into the parallel per-stage `Vec`s of
+/// [`StageTemplates`]. Adding a per-stage datum is one field here plus one
+/// transpose line in the assembler — not a new tuple element threaded through
+/// the loop and a parallel argument.
+pub(super) struct StageBuildOutput {
+    /// Structural LP template for the stage.
+    pub template: StageTemplate,
+    /// Row index of the first water-balance constraint (the `PatchBuffer`
+    /// noise-injection `base_row`).
+    pub stage_base_row: usize,
+    /// Row index of the first load-balance constraint (load-noise patches).
+    pub load_balance_row_start: usize,
+    /// Active generic-constraint row metadata for the stage.
+    pub gc_entries: Vec<GenericConstraintRowEntry>,
+    /// Column index of the first NCS generation variable.
+    pub ncs_col_start: usize,
+    /// Number of active NCS entities at the stage.
+    pub ncs_count: usize,
+    /// System-level indices of the active NCS entities, in entity-ID order.
+    pub ncs_active: Vec<usize>,
+    /// Column index of the first pumping-flow variable (sourced from
+    /// `StageLayout::col_pumping_start`).
+    pub pumping_col_start: usize,
+    /// Number of pumping stations contributing columns at the stage.
+    pub pumping_count: usize,
 }
 
 /// Construct a [`StageTemplate`] for a single study stage.
 ///
-/// Returns the template, the row index of the water-balance block
-/// (used as `base_row` by the `PatchBuffer` noise injection), the
-/// row index of the load-balance block (used for load-noise patches),
-/// the generic constraint row entries for this stage, NCS metadata
+/// Returns a [`StageBuildOutput`] bundling the template, the two base-row
+/// offsets (water-balance for `PatchBuffer` noise injection, load-balance for
+/// load-noise patches), the generic constraint row entries, NCS metadata
 /// (column start, count, and active system indices), and pumping metadata
 /// (column start and station count).
-// Rationale: the return tuple exposes nine independently typed outputs — the template,
-// two base-row offsets, generic-constraint metadata, NCS column start/count, active NCS
-// indices, and pumping column start/count — that the caller destructures immediately into
-// named bindings.  A type alias or wrapper struct would hide the concrete types at the
-// call sites and force readers to look up the alias to understand the destructure.
-#[allow(clippy::type_complexity)]
 pub(super) fn build_single_stage_template(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
     stage_idx: usize,
-) -> (
-    StageTemplate,
-    usize,
-    usize,
-    Vec<GenericConstraintRowEntry>,
-    usize,
-    usize,
-    Vec<usize>,
-    usize,
-    usize,
-) {
+) -> StageBuildOutput {
     let layout = StageLayout::new(ctx, stage, stage_idx);
     let stage_base_row = layout.row_water_balance_start;
     let load_balance_row_start = layout.row_load_balance_start;
@@ -252,17 +346,17 @@ pub(super) fn build_single_stage_template(
         row_scale: Vec::new(),
     };
 
-    (
+    StageBuildOutput {
         template,
         stage_base_row,
         load_balance_row_start,
-        layout.generic_constraint_rows,
-        layout.col_ncs_start,
-        layout.n_ncs,
-        layout.active_ncs_indices,
-        layout.col_pumping_start,
-        layout.n_pumping,
-    )
+        gc_entries: layout.generic_constraint_rows,
+        ncs_col_start: layout.col_ncs_start,
+        ncs_count: layout.n_ncs,
+        ncs_active: layout.active_ncs_indices,
+        pumping_col_start: layout.col_pumping_start,
+        pumping_count: layout.n_pumping,
+    }
 }
 
 /// Collect the bus-slice positions of stochastic load buses.
@@ -417,27 +511,7 @@ pub fn build_stage_templates(
     let n_hydros = system.hydros().len();
 
     if study_stages.is_empty() {
-        return Ok(StageTemplates {
-            templates: Vec::new(),
-            base_rows: Vec::new(),
-            noise_scale: Vec::new(),
-            zeta_per_stage: Vec::new(),
-            block_hours_per_stage: Vec::new(),
-            n_hydros,
-            load_balance_row_starts: Vec::new(),
-            n_load_buses: 0,
-            load_bus_indices: Vec::new(),
-            generic_constraint_row_entries: Vec::new(),
-            ncs_col_starts: Vec::new(),
-            n_ncs_per_stage: Vec::new(),
-            pumping_col_starts: Vec::new(),
-            n_pumping_per_stage: Vec::new(),
-            active_ncs_indices: Vec::new(),
-            diversion_upstream: HashMap::new(),
-            hydro_productivities_per_stage: Vec::new(),
-            discount_factors: Vec::new(),
-            cumulative_discount_factors: Vec::new(),
-        });
+        return Ok(StageTemplates::empty(n_hydros));
     }
 
     // Consistency gate: a non-empty PrecomputedNormal must have the same
@@ -459,48 +533,13 @@ pub fn build_stage_templates(
     );
 
     let n_study = study_stages.len();
-    let mut templates = Vec::with_capacity(n_study);
-    let mut base_rows = Vec::with_capacity(n_study);
-    let mut load_balance_row_starts = Vec::with_capacity(n_study);
-    let mut generic_constraint_row_entries = Vec::with_capacity(n_study);
-    let mut ncs_col_starts = Vec::with_capacity(n_study);
-    let mut n_ncs_per_stage = Vec::with_capacity(n_study);
-    let mut pumping_col_starts = Vec::with_capacity(n_study);
-    let mut n_pumping_per_stage = Vec::with_capacity(n_study);
-    let mut active_ncs_indices_per_stage = Vec::with_capacity(n_study);
+    let mut stage_outputs = Vec::with_capacity(n_study);
     for (stage_idx, stage) in study_stages.iter().enumerate() {
-        let (
-            template,
-            stage_base_row,
-            load_balance_row_start,
-            gc_entries,
-            ncs_col_start,
-            ncs_count,
-            ncs_active,
-            pumping_col_start,
-            pumping_count,
-        ) = build_single_stage_template(&ctx, stage, stage_idx);
-        templates.push(template);
-        base_rows.push(stage_base_row);
-        load_balance_row_starts.push(load_balance_row_start);
-        generic_constraint_row_entries.push(gc_entries);
-        ncs_col_starts.push(ncs_col_start);
-        n_ncs_per_stage.push(ncs_count);
-        pumping_col_starts.push(pumping_col_start);
-        n_pumping_per_stage.push(pumping_count);
-        active_ncs_indices_per_stage.push(ncs_active);
+        stage_outputs.push(build_single_stage_template(&ctx, stage, stage_idx));
     }
 
     Ok(assemble_stage_templates_output(
-        templates,
-        base_rows,
-        load_balance_row_starts,
-        generic_constraint_row_entries,
-        ncs_col_starts,
-        n_ncs_per_stage,
-        pumping_col_starts,
-        n_pumping_per_stage,
-        active_ncs_indices_per_stage,
+        stage_outputs,
         load_bus_indices,
         diversion_upstream_output,
         &study_stages,
@@ -696,28 +735,24 @@ fn build_template_build_ctx<'a>(
     (ctx, load_bus_indices, diversion_upstream_output)
 }
 
-/// Assemble the final [`StageTemplates`] from per-stage loop outputs.
+/// Assemble the final [`StageTemplates`] from the per-stage build outputs.
 ///
-/// Computes noise-scale, zeta, block-hour, hydro-productivity, and discount
-/// arrays and packages them alongside the per-stage template vectors into the
-/// `StageTemplates` struct returned by `build_stage_templates`.
+/// Transposes the `Vec<StageBuildOutput>` (one entry per study stage) into the
+/// parallel per-stage `Vec`s of [`StageTemplates`] in a single pass, then
+/// computes the noise-scale, zeta, block-hour, hydro-productivity, and discount
+/// arrays and packages everything into the `StageTemplates` returned by
+/// [`build_stage_templates`].
 ///
 /// Called once, immediately after the per-stage loop completes.
-// RATIONALE: the args are the heterogeneous per-stage accumulator Vecs produced by the
-// per-stage build loop, each of a distinct type (templates, base_rows, ncs_col_starts, etc.).
-// They cannot be grouped into a context struct without either re-allocating them after the
-// loop or wrapping in Option, both of which add cost on this post-loop cold path.
+// Rationale: the remaining args are genuinely separate inputs — the per-stage
+// `Vec<StageBuildOutput>` plus the build context (`study_stages`, `ctx`, `par_lp`),
+// the cross-stage scalar dims, and the two whole-run outputs (`load_bus_indices`,
+// `diversion_upstream_output`). They have distinct lifetimes and ownership (some
+// borrowed, some owned), so bundling them into one struct would buy nothing on this
+// single-call cold path while obscuring the transpose inputs.
 #[allow(clippy::too_many_arguments)]
 fn assemble_stage_templates_output(
-    templates: Vec<cobre_solver::StageTemplate>,
-    base_rows: Vec<usize>,
-    load_balance_row_starts: Vec<usize>,
-    generic_constraint_row_entries: Vec<Vec<GenericConstraintRowEntry>>,
-    ncs_col_starts: Vec<usize>,
-    n_ncs_per_stage: Vec<usize>,
-    pumping_col_starts: Vec<usize>,
-    n_pumping_per_stage: Vec<usize>,
-    active_ncs_indices_per_stage: Vec<Vec<usize>>,
+    stage_outputs: Vec<StageBuildOutput>,
     load_bus_indices: Vec<usize>,
     diversion_upstream_output: HashMap<EntityId, Vec<usize>>,
     study_stages: &[&cobre_core::Stage],
@@ -727,6 +762,30 @@ fn assemble_stage_templates_output(
     n_load_buses: usize,
     n_study: usize,
 ) -> StageTemplates {
+    // Transpose the per-stage outputs into the parallel Vecs in one pass,
+    // preserving the per-stage push order so the assembled StageTemplates is
+    // byte-identical to the prior parallel-accumulator construction.
+    let mut templates = Vec::with_capacity(n_study);
+    let mut base_rows = Vec::with_capacity(n_study);
+    let mut load_balance_row_starts = Vec::with_capacity(n_study);
+    let mut generic_constraint_row_entries = Vec::with_capacity(n_study);
+    let mut ncs_col_starts = Vec::with_capacity(n_study);
+    let mut n_ncs_per_stage = Vec::with_capacity(n_study);
+    let mut pumping_col_starts = Vec::with_capacity(n_study);
+    let mut n_pumping_per_stage = Vec::with_capacity(n_study);
+    let mut active_ncs_indices_per_stage = Vec::with_capacity(n_study);
+    for out in stage_outputs {
+        templates.push(out.template);
+        base_rows.push(out.stage_base_row);
+        load_balance_row_starts.push(out.load_balance_row_start);
+        generic_constraint_row_entries.push(out.gc_entries);
+        ncs_col_starts.push(out.ncs_col_start);
+        n_ncs_per_stage.push(out.ncs_count);
+        pumping_col_starts.push(out.pumping_col_start);
+        n_pumping_per_stage.push(out.pumping_count);
+        active_ncs_indices_per_stage.push(out.ncs_active);
+    }
+
     let (noise_scale, zeta_per_stage, block_hours_per_stage) =
         scaling::compute_noise_scale(study_stages, n_hydros, par_lp);
 
@@ -741,11 +800,6 @@ fn assemble_stage_templates_output(
                 .collect()
         })
         .collect();
-
-    // Default discount factors to 1.0 (no discounting). The actual
-    // per-stage factors are computed from the PolicyGraph in
-    // StudySetup::from_broadcast_params and overwrite this field.
-    let discount_factors = vec![1.0; templates.len()];
 
     StageTemplates {
         templates,
@@ -765,11 +819,13 @@ fn assemble_stage_templates_output(
         active_ncs_indices: active_ncs_indices_per_stage,
         diversion_upstream: diversion_upstream_output,
         hydro_productivities_per_stage,
-        discount_factors,
-        // Cumulative factors default to 1.0; overwritten by setup.rs.
-        // Length is `n_study`: the strict anticipated-decision predicate
-        // (`stage_idx + K_i < n_stages`) guarantees every delivery lookup
-        // falls within `[0, n_stages)`.
+        // Discount factors are 1.0-placeholders here; the real per-stage and
+        // cumulative factors are installed by StageTemplates::set_discount_factors
+        // in the postprocess step (setup::template_postprocess). Lengths match
+        // n_study: the strict anticipated-decision predicate
+        // (`stage_idx + K_i < n_stages`) guarantees every delivery lookup falls
+        // within `[0, n_stages)`.
+        discount_factors: vec![1.0; n_study],
         cumulative_discount_factors: vec![1.0; n_study],
     }
 }
@@ -1939,10 +1995,8 @@ mod tests {
         for stage_idx in [0_usize, 2, 3] {
             let stage = study_stages[stage_idx];
 
-            let (tpl_a, _, _, _, _, _, _, _, _) =
-                super::build_single_stage_template(&ctx_a, stage, stage_idx);
-            let (tpl_b, _, _, _, _, _, _, _, _) =
-                super::build_single_stage_template(&ctx_b, stage, stage_idx);
+            let tpl_a = super::build_single_stage_template(&ctx_a, stage, stage_idx).template;
+            let tpl_b = super::build_single_stage_template(&ctx_b, stage, stage_idx).template;
 
             // Reconstruct the indexer for tpl_a / tpl_b to find the
             // anticipated_decision / anticipated_state / fishing row offsets.
@@ -1990,5 +2044,245 @@ mod tests {
                 stage_idx,
             );
         }
+    }
+
+    // ── StageTemplates::empty ──────────────────────────────────────────────────
+
+    /// `StageTemplates::empty(n)` yields every per-stage collection empty and
+    /// records `n_hydros == n`. This pins the all-empty shape the empty-study
+    /// early return relies on.
+    #[test]
+    fn stage_templates_empty_is_all_empty_with_n_hydros() {
+        let n = 7_usize;
+        let empty = super::StageTemplates::empty(n);
+
+        assert_eq!(empty.n_hydros, n, "empty(n).n_hydros must equal n");
+        assert_eq!(empty.n_load_buses, 0, "n_load_buses must be 0");
+
+        assert!(empty.templates.is_empty(), "templates");
+        assert!(empty.base_rows.is_empty(), "base_rows");
+        assert!(empty.noise_scale.is_empty(), "noise_scale");
+        assert!(empty.zeta_per_stage.is_empty(), "zeta_per_stage");
+        assert!(
+            empty.block_hours_per_stage.is_empty(),
+            "block_hours_per_stage"
+        );
+        assert!(
+            empty.load_balance_row_starts.is_empty(),
+            "load_balance_row_starts"
+        );
+        assert!(empty.load_bus_indices.is_empty(), "load_bus_indices");
+        assert!(
+            empty.generic_constraint_row_entries.is_empty(),
+            "generic_constraint_row_entries"
+        );
+        assert!(empty.ncs_col_starts.is_empty(), "ncs_col_starts");
+        assert!(empty.n_ncs_per_stage.is_empty(), "n_ncs_per_stage");
+        assert!(empty.pumping_col_starts.is_empty(), "pumping_col_starts");
+        assert!(empty.n_pumping_per_stage.is_empty(), "n_pumping_per_stage");
+        assert!(empty.active_ncs_indices.is_empty(), "active_ncs_indices");
+        assert!(empty.diversion_upstream.is_empty(), "diversion_upstream");
+        assert!(
+            empty.hydro_productivities_per_stage.is_empty(),
+            "hydro_productivities_per_stage"
+        );
+        assert!(empty.discount_factors().is_empty(), "discount_factors");
+        assert!(
+            empty.cumulative_discount_factors().is_empty(),
+            "cumulative_discount_factors"
+        );
+    }
+
+    // ── discount-factor placeholder is replaced by the public path ─────────────
+
+    /// Build a 3-stage thermals-only system carrying a non-zero global annual
+    /// discount rate. Empty `transitions` means every stage falls back to the
+    /// global rate, so the postprocessed per-stage factors are all < 1.0 and the
+    /// cumulative vector compounds below the 1.0 placeholder.
+    fn discounted_multi_stage_system() -> cobre_core::System {
+        use cobre_core::{PolicyGraph, PolicyGraphType};
+
+        let n_stages = 3_usize;
+        let thermals = vec![Thermal {
+            id: EntityId(1),
+            name: "T1".to_string(),
+            bus_id: EntityId(1),
+            entry_stage_id: None,
+            exit_stage_id: None,
+            cost_per_mwh: 10.0,
+            min_generation_mw: 0.0,
+            max_generation_mw: 100.0,
+            anticipated_config: None,
+        }];
+        let n_thermals = thermals.len();
+
+        let bus = Bus {
+            id: EntityId(1),
+            name: "B1".to_string(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 500.0,
+            }],
+            excess_cost: 0.0,
+        };
+
+        let stages: Vec<Stage> = (0..n_stages)
+            .map(|i| Stage {
+                index: i,
+                id: i as i32,
+                start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                season_id: Some(0),
+                blocks: vec![Block {
+                    index: 0,
+                    name: "BLK0".to_string(),
+                    duration_hours: 744.0,
+                }],
+                block_mode: BlockMode::Parallel,
+                state_config: StageStateConfig {
+                    storage: false,
+                    inflow_lags: false,
+                },
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::Saa,
+                },
+            })
+            .collect();
+
+        let load_models: Vec<LoadModel> = (0..n_stages)
+            .map(|s| LoadModel {
+                bus_id: EntityId(1),
+                stage_id: s as i32,
+                mean_mw: 100.0,
+                std_mw: 0.0,
+            })
+            .collect();
+
+        let resolved_bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 0,
+                n_thermals,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: default_hydro_bounds(),
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 100.0,
+                    cost_per_mwh: 10.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 0,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages,
+            },
+            &PenaltiesDefaults {
+                hydro: default_hydro_penalties(),
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        // Non-zero global rate with no per-transition overrides: every stage
+        // discounts at the global rate.
+        let policy_graph = PolicyGraph {
+            graph_type: PolicyGraphType::FiniteHorizon,
+            annual_discount_rate: 0.10,
+            transitions: Vec::new(),
+            season_map: None,
+        };
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .thermals(thermals)
+            .stages(stages)
+            .load_models(load_models)
+            .bounds(resolved_bounds)
+            .penalties(penalties)
+            .policy_graph(policy_graph)
+            .build()
+            .expect("discounted_multi_stage_system: valid system")
+    }
+
+    /// Any `StageTemplates` produced by the public build + postprocess path has
+    /// `cumulative_discount_factors().len() == templates.len()` and is no longer
+    /// the all-`1.0` placeholder once a non-zero discount rate is in effect.
+    ///
+    /// The discount fields are private, so an external caller can only ever observe
+    /// the postprocessed (discounted) values, never the placeholder
+    /// `build_stage_templates` leaves behind.
+    #[test]
+    fn postprocessed_stage_templates_carry_discounted_factors() {
+        let system = discounted_multi_stage_system();
+        let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
+        let par_lp = PrecomputedPar::default();
+        let normal_lp = cobre_stochastic::normal::precompute::PrecomputedNormal::default();
+        let resolved_params = empty_resolved_params();
+
+        let mut templates = super::build_stage_templates(
+            &system,
+            InflowNonNegativityMethod::None,
+            &par_lp,
+            &normal_lp,
+            &hydro_result.production,
+            &hydro_result.evaporation,
+            &resolved_params,
+        )
+        .expect("build_stage_templates: valid system");
+
+        // Run the postprocess step that installs the real discount factors —
+        // exactly the public path StudySetup drives.
+        let _report =
+            crate::setup::template_postprocess::postprocess_templates(&mut templates, &system);
+
+        let cumulative = templates.cumulative_discount_factors();
+        assert_eq!(
+            cumulative.len(),
+            templates.templates.len(),
+            "cumulative_discount_factors length must equal templates.len() after postprocess"
+        );
+        assert_eq!(
+            cumulative[0], 1.0,
+            "cumulative_discount_factors[0] is the present value (1.0)"
+        );
+        // With a 10% annual rate the later cumulative factors compound strictly
+        // below the 1.0 placeholder, so the postprocessed vector is provably not
+        // the placeholder the builder hands back.
+        assert!(
+            cumulative.iter().any(|&d| d < 1.0),
+            "postprocessed cumulative factors must drop below the 1.0 placeholder, got {cumulative:?}"
+        );
+        assert!(
+            cumulative[cumulative.len() - 1] < 1.0,
+            "the final cumulative factor must be discounted below 1.0, got {}",
+            cumulative[cumulative.len() - 1]
+        );
     }
 }

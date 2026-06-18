@@ -13,7 +13,10 @@ use crate::hydro_models::{
 };
 use crate::indexer::StageIndexer;
 
-use super::{GenericConstraintRowEntry, M3S_TO_HM3};
+use super::{
+    EVAP_COLS_PER_HYDRO, EVAP_F_MINUS_OFFSET, EVAP_F_PLUS_OFFSET, EVAP_FLOW_OFFSET,
+    GenericConstraintRowEntry, M3S_TO_HM3,
+};
 
 /// System-level context shared across all stages during template construction.
 ///
@@ -248,8 +251,10 @@ pub(crate) struct StageLayout {
     pub(crate) row_evap_start: usize,
     /// Start of evaporation columns (after FPHA generation columns).
     ///
-    /// 3 stage-level columns per evaporation hydro (evaporation outflow, `f_evap_plus`, `f_evap_minus`).
-    /// Layout: `col_evap_start + local_evap_idx * 3 + {0, 1, 2}`.
+    /// [`EVAP_COLS_PER_HYDRO`] stage-level columns per evaporation hydro
+    /// (evaporation outflow, `f_evap_plus`, `f_evap_minus`). Address the three
+    /// via the `evap_flow_col` / `evap_f_plus_col` / `evap_f_minus_col` accessors
+    /// rather than open-coding the stride.
     pub(crate) col_evap_start: usize,
     /// Start of under-withdrawal slack columns (after evaporation columns).
     ///
@@ -887,6 +892,117 @@ impl StageLayout {
             indexer: idx,
         }
     }
+
+    /// Resolve a block-major LP column address: `start + entity * n_blks + blk`.
+    ///
+    /// The block-major contract is fixed: the per-entity column count is
+    /// `n_blks`, the entity index is the OUTER (stride) factor and the block is
+    /// the INNER offset. The transposed form `blk * n_entities + entity` is the
+    /// wrong-but-compiling alternative — it produces the same length region but
+    /// interleaves columns across entities, so a coefficient lands on the wrong
+    /// (entity, block) and the LP is silently misbuilt. Every per-family
+    /// block-major accessor below delegates here so the stride lives in one place.
+    #[inline]
+    pub(crate) fn block_col(&self, start: usize, entity: usize, blk: usize) -> usize {
+        start + entity * self.n_blks + blk
+    }
+
+    /// Turbine-flow column for hydro `h_idx`, block `blk`.
+    #[inline]
+    pub(crate) fn turbine_col(&self, h_idx: usize, blk: usize) -> usize {
+        self.block_col(self.col_turbine_start, h_idx, blk)
+    }
+
+    /// Spillage column for hydro `h_idx`, block `blk`.
+    #[inline]
+    pub(crate) fn spillage_col(&self, h_idx: usize, blk: usize) -> usize {
+        self.block_col(self.col_spillage_start, h_idx, blk)
+    }
+
+    /// Diversion-flow column for hydro `h_idx`, block `blk`.
+    #[inline]
+    pub(crate) fn diversion_col(&self, h_idx: usize, blk: usize) -> usize {
+        self.block_col(self.col_diversion_start, h_idx, blk)
+    }
+
+    /// FPHA generation column for FPHA-local index `local_idx`, block `blk`.
+    #[inline]
+    pub(crate) fn generation_col(&self, local_idx: usize, blk: usize) -> usize {
+        self.block_col(self.col_generation_start, local_idx, blk)
+    }
+
+    /// Forward line-flow column for line `l_idx`, block `blk`.
+    #[inline]
+    pub(crate) fn line_fwd_col(&self, l_idx: usize, blk: usize) -> usize {
+        self.block_col(self.col_line_fwd_start, l_idx, blk)
+    }
+
+    /// Reverse line-flow column for line `l_idx`, block `blk`.
+    #[inline]
+    pub(crate) fn line_rev_col(&self, l_idx: usize, blk: usize) -> usize {
+        self.block_col(self.col_line_rev_start, l_idx, blk)
+    }
+
+    /// Outflow-below-minimum slack column for hydro `h_idx`, block `blk`.
+    #[inline]
+    pub(crate) fn outflow_below_col(&self, h_idx: usize, blk: usize) -> usize {
+        self.block_col(self.col_outflow_below_start, h_idx, blk)
+    }
+
+    /// Outflow-above-maximum slack column for hydro `h_idx`, block `blk`.
+    #[inline]
+    pub(crate) fn outflow_above_col(&self, h_idx: usize, blk: usize) -> usize {
+        self.block_col(self.col_outflow_above_start, h_idx, blk)
+    }
+
+    /// Turbine-below-minimum slack column for hydro `h_idx`, block `blk`.
+    #[inline]
+    pub(crate) fn turbine_below_col(&self, h_idx: usize, blk: usize) -> usize {
+        self.block_col(self.col_turbine_below_start, h_idx, blk)
+    }
+
+    /// Generation-below-minimum slack column for hydro `h_idx`, block `blk`.
+    #[inline]
+    pub(crate) fn generation_below_col(&self, h_idx: usize, blk: usize) -> usize {
+        self.block_col(self.col_generation_below_start, h_idx, blk)
+    }
+
+    /// Evaporation-outflow column for evaporation-local index `local_idx`.
+    ///
+    /// Reserves [`EVAP_COLS_PER_HYDRO`] columns per evaporating hydro; this
+    /// accessor returns the [`EVAP_FLOW_OFFSET`] column. Stage-level (no block).
+    #[inline]
+    pub(crate) fn evap_flow_col(&self, local_idx: usize) -> usize {
+        self.col_evap_start + local_idx * EVAP_COLS_PER_HYDRO + EVAP_FLOW_OFFSET
+    }
+
+    /// `f_evap_plus` (under-evaporation slack) column for evaporation-local
+    /// index `local_idx` (the [`EVAP_F_PLUS_OFFSET`] column). Stage-level.
+    #[inline]
+    pub(crate) fn evap_f_plus_col(&self, local_idx: usize) -> usize {
+        self.col_evap_start + local_idx * EVAP_COLS_PER_HYDRO + EVAP_F_PLUS_OFFSET
+    }
+
+    /// `f_evap_minus` (over-evaporation slack) column for evaporation-local
+    /// index `local_idx` (the [`EVAP_F_MINUS_OFFSET`] column). Stage-level.
+    #[inline]
+    pub(crate) fn evap_f_minus_col(&self, local_idx: usize) -> usize {
+        self.col_evap_start + local_idx * EVAP_COLS_PER_HYDRO + EVAP_F_MINUS_OFFSET
+    }
+
+    /// Deficit column for bus `b_idx`, segment `seg_idx`, block `blk`.
+    ///
+    /// Three-term stride: the deficit region uses a uniform per-bus span of
+    /// `max_deficit_segments * n_blks` columns, then `n_blks` per segment, then
+    /// the block. Returns
+    /// `col_deficit_start + b_idx * max_deficit_segments * n_blks + seg_idx * n_blks + blk`.
+    #[inline]
+    pub(crate) fn deficit_col(&self, b_idx: usize, seg_idx: usize, blk: usize) -> usize {
+        self.col_deficit_start
+            + b_idx * self.max_deficit_segments * self.n_blks
+            + seg_idx * self.n_blks
+            + blk
+    }
 }
 
 #[cfg(test)]
@@ -913,7 +1029,10 @@ mod tests {
     use crate::indexer::StageIndexer;
     use crate::resolved_parameters::ResolvedParameters;
 
-    use super::{StageLayout, TemplateBuildCtx};
+    use super::{
+        EVAP_COLS_PER_HYDRO, EVAP_F_MINUS_OFFSET, EVAP_F_PLUS_OFFSET, EVAP_FLOW_OFFSET,
+        StageLayout, TemplateBuildCtx,
+    };
 
     // ── Fixture helpers ───────────────────────────────────────────────────────
 
@@ -1847,5 +1966,143 @@ mod tests {
             layout.col_pumping_start + n_pumping * n_blks,
             "the 6-column block ends at num_cols (no generic-slack columns here)"
         );
+    }
+
+    // ── block-major column-accessor arithmetic equivalence ─────────────────────
+
+    /// Every `#[inline]` column accessor returns the exact `usize` its open-coded
+    /// formula returned. Built over a `n_blks = 4` layout and probed with
+    /// `entity >= 1`, `blk >= 1`, and `seg >= 1` so a transposed stride
+    /// (`blk * n_entities + entity`) or a swapped evap offset would differ from
+    /// the open-coded expression and fail the assertion.
+    #[test]
+    fn column_accessors_match_open_coded_formulas() {
+        // Multi-block, zero-entity layout: the block-major `col_*_start` fields
+        // and `n_blks` are populated; the accessor reads the same fields the
+        // open-coded formula reads, so this pins each accessor's arithmetic.
+        let fixtures = ZeroEntityFixtures::new();
+        let ctx = fixtures.make_ctx(0, 0, vec![], vec![]);
+        let stage = PumpingFixtures::stage_with_blocks(4);
+        let layout = StageLayout::new(&ctx, &stage, 0);
+        let n_blks = layout.n_blks;
+        assert_eq!(n_blks, 4, "fixture must build a 4-block layout");
+
+        // Generic block_col against its definition, across a grid that makes the
+        // entity (outer) and block (inner) factors distinguishable.
+        for entity in [0_usize, 1, 2, 5] {
+            for blk in 0..n_blks {
+                assert_eq!(
+                    layout.block_col(layout.col_turbine_start, entity, blk),
+                    layout.col_turbine_start + entity * n_blks + blk,
+                    "block_col(entity={entity}, blk={blk})"
+                );
+            }
+        }
+
+        // Per-family block-major accessors, each owning its `col_*_start`.
+        for entity in [0_usize, 1, 3] {
+            for blk in 0..n_blks {
+                assert_eq!(
+                    layout.turbine_col(entity, blk),
+                    layout.col_turbine_start + entity * n_blks + blk,
+                    "turbine_col"
+                );
+                assert_eq!(
+                    layout.spillage_col(entity, blk),
+                    layout.col_spillage_start + entity * n_blks + blk,
+                    "spillage_col"
+                );
+                assert_eq!(
+                    layout.diversion_col(entity, blk),
+                    layout.col_diversion_start + entity * n_blks + blk,
+                    "diversion_col"
+                );
+                assert_eq!(
+                    layout.generation_col(entity, blk),
+                    layout.col_generation_start + entity * n_blks + blk,
+                    "generation_col"
+                );
+                assert_eq!(
+                    layout.line_fwd_col(entity, blk),
+                    layout.col_line_fwd_start + entity * n_blks + blk,
+                    "line_fwd_col"
+                );
+                assert_eq!(
+                    layout.line_rev_col(entity, blk),
+                    layout.col_line_rev_start + entity * n_blks + blk,
+                    "line_rev_col"
+                );
+                assert_eq!(
+                    layout.outflow_below_col(entity, blk),
+                    layout.col_outflow_below_start + entity * n_blks + blk,
+                    "outflow_below_col"
+                );
+                assert_eq!(
+                    layout.outflow_above_col(entity, blk),
+                    layout.col_outflow_above_start + entity * n_blks + blk,
+                    "outflow_above_col"
+                );
+                assert_eq!(
+                    layout.turbine_below_col(entity, blk),
+                    layout.col_turbine_below_start + entity * n_blks + blk,
+                    "turbine_below_col"
+                );
+                assert_eq!(
+                    layout.generation_below_col(entity, blk),
+                    layout.col_generation_below_start + entity * n_blks + blk,
+                    "generation_below_col"
+                );
+            }
+        }
+
+        // Evaporation accessors: stage-level, EVAP_COLS_PER_HYDRO-strided. The
+        // three within-hydro offsets must map flow→0, f_plus→1, f_minus→2.
+        for local_idx in [0_usize, 1, 4] {
+            assert_eq!(
+                layout.evap_flow_col(local_idx),
+                layout.col_evap_start + local_idx * EVAP_COLS_PER_HYDRO + EVAP_FLOW_OFFSET,
+                "evap_flow_col"
+            );
+            assert_eq!(
+                layout.evap_f_plus_col(local_idx),
+                layout.col_evap_start + local_idx * EVAP_COLS_PER_HYDRO + EVAP_F_PLUS_OFFSET,
+                "evap_f_plus_col"
+            );
+            assert_eq!(
+                layout.evap_f_minus_col(local_idx),
+                layout.col_evap_start + local_idx * EVAP_COLS_PER_HYDRO + EVAP_F_MINUS_OFFSET,
+                "evap_f_minus_col"
+            );
+            // The three columns are consecutive and ordered flow < plus < minus.
+            assert_eq!(
+                layout.evap_f_plus_col(local_idx),
+                layout.evap_flow_col(local_idx) + 1
+            );
+            assert_eq!(
+                layout.evap_f_minus_col(local_idx),
+                layout.evap_flow_col(local_idx) + 2
+            );
+        }
+        // The evap offset consts are exactly 0/1/2 in order.
+        assert_eq!(EVAP_FLOW_OFFSET, 0);
+        assert_eq!(EVAP_F_PLUS_OFFSET, 1);
+        assert_eq!(EVAP_F_MINUS_OFFSET, 2);
+        assert_eq!(EVAP_COLS_PER_HYDRO, 3);
+
+        // Deficit three-term stride: per-bus span, per-segment span, then block.
+        for b_idx in [0_usize, 1, 2] {
+            for seg_idx in [0_usize, 1] {
+                for blk in 0..n_blks {
+                    assert_eq!(
+                        layout.deficit_col(b_idx, seg_idx, blk),
+                        layout.col_deficit_start
+                            + b_idx * layout.max_deficit_segments * n_blks
+                            + seg_idx * n_blks
+                            + blk,
+                        "deficit_col(b={b_idx}, seg={seg_idx}, blk={blk})"
+                    );
+                }
+            }
+        }
     }
 }

@@ -210,6 +210,44 @@ pub(crate) const COST_SCALE_FACTOR: f64 = 1_000_000.0;
 /// (inflow) rather than evaporative outflow.
 pub(crate) const EVAPORATION_FLOW_SAFETY_MARGIN: f64 = 2.0;
 
+/// Number of LP columns reserved per evaporating hydro (dimensionless stride).
+///
+/// Each evaporating hydro contributes exactly three stage-level (NOT per-block)
+/// columns in a fixed order: evaporation outflow, `f_evap_plus`, `f_evap_minus`.
+/// The base column for local index `i` is `col_evap_start + i * EVAP_COLS_PER_HYDRO`;
+/// the three within-hydro columns are reached by adding the offset consts below.
+/// The stride MUST be the per-hydro column count and the local index MUST be the
+/// outer factor: writing `blk * n_evap_hydros + i` (a transposed/block-major
+/// stride) compiles and silently aliases one hydro's evaporation columns onto
+/// another's. Owned jointly by [`StageLayout`]'s evaporation accessors and the
+/// indexer's `EvaporationIndices` constructor; both reference this const so the
+/// stride lives in one place.
+///
+/// [`StageLayout`]: layout::StageLayout
+pub(crate) const EVAP_COLS_PER_HYDRO: usize = 3;
+
+/// Offset of the evaporation-outflow column within a hydro's evaporation block.
+///
+/// Relative to `col_evap_start + i * EVAP_COLS_PER_HYDRO`; this is the signed
+/// evaporation-outflow column (a negative value reads as net rainfall input).
+pub(crate) const EVAP_FLOW_OFFSET: usize = 0;
+
+/// Offset of the `f_evap_plus` (under-evaporation) slack column within a hydro's
+/// evaporation block.
+///
+/// Relative to `col_evap_start + i * EVAP_COLS_PER_HYDRO`. Swapping this with
+/// [`EVAP_F_MINUS_OFFSET`] compiles and silently misplaces the directional
+/// evaporation-violation slacks onto each other's columns.
+pub(crate) const EVAP_F_PLUS_OFFSET: usize = 1;
+
+/// Offset of the `f_evap_minus` (over-evaporation) slack column within a hydro's
+/// evaporation block.
+///
+/// Relative to `col_evap_start + i * EVAP_COLS_PER_HYDRO`. Swapping this with
+/// [`EVAP_F_PLUS_OFFSET`] compiles and silently misplaces the directional
+/// evaporation-violation slacks onto each other's columns.
+pub(crate) const EVAP_F_MINUS_OFFSET: usize = 2;
+
 // ---------------------------------------------------------------------------
 // Shared types
 // ---------------------------------------------------------------------------

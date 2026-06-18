@@ -188,7 +188,7 @@ fn fill_turbine_columns(
             _ => hb.max_turbined_m3s,
         };
         for blk in 0..layout.n_blks {
-            let col = layout.col_turbine_start + h_idx * layout.n_blks + blk;
+            let col = layout.turbine_col(h_idx, blk);
             bufs.col_lower[col] = 0.0;
             bufs.col_upper[col] = turb_upper;
             let block_hours = stage.blocks[blk].duration_hours;
@@ -208,7 +208,7 @@ fn fill_spillage_columns(
     for h_idx in 0..layout.n_h {
         let hp = ctx.penalties.hydro_penalties(h_idx, stage_idx);
         for blk in 0..layout.n_blks {
-            let col = layout.col_spillage_start + h_idx * layout.n_blks + blk;
+            let col = layout.spillage_col(h_idx, blk);
             bufs.col_upper[col] = f64::INFINITY;
             let block_hours = stage.blocks[blk].duration_hours;
             bufs.objective[col] = hp.spillage_cost * block_hours;
@@ -240,7 +240,7 @@ fn fill_diversion_columns(
             .max_diversion_m3s
             .unwrap_or(0.0);
         for blk in 0..layout.n_blks {
-            let col = layout.col_diversion_start + h_idx * layout.n_blks + blk;
+            let col = layout.diversion_col(h_idx, blk);
             bufs.col_lower[col] = 0.0;
             bufs.col_upper[col] = max_div;
             if max_div > 0.0 {
@@ -413,8 +413,8 @@ fn fill_line_columns(
         let lp = ctx.penalties.line_penalties(l_idx, stage_idx);
         for blk in 0..layout.n_blks {
             let (df, rf) = ctx.resolved_exchange_factors.factors(l_idx, stage_idx, blk);
-            let col_fwd = layout.col_line_fwd_start + l_idx * layout.n_blks + blk;
-            let col_rev = layout.col_line_rev_start + l_idx * layout.n_blks + blk;
+            let col_fwd = layout.line_fwd_col(l_idx, blk);
+            let col_rev = layout.line_rev_col(l_idx, blk);
             bufs.col_upper[col_fwd] = lb.direct_mw * df;
             bufs.col_upper[col_rev] = lb.reverse_mw * rf;
             let block_hours = stage.blocks[blk].duration_hours;
@@ -444,10 +444,7 @@ fn fill_deficit_and_excess_columns(
         let bp = ctx.penalties.bus_penalties(b_idx, stage_idx);
         for (seg_idx, segment) in bus.deficit_segments.iter().enumerate() {
             for blk in 0..layout.n_blks {
-                let col_def = layout.col_deficit_start
-                    + b_idx * layout.max_deficit_segments * layout.n_blks
-                    + seg_idx * layout.n_blks
-                    + blk;
+                let col_def = layout.deficit_col(b_idx, seg_idx, blk);
                 let block_hours = stage.blocks[blk].duration_hours;
                 bufs.col_upper[col_def] = segment.depth_mw.unwrap_or(f64::INFINITY);
                 bufs.objective[col_def] = segment.cost_per_mwh * block_hours;
@@ -495,7 +492,7 @@ fn fill_fpha_generation_columns(
     for (local_idx, &h_idx) in layout.fpha_hydro_indices.iter().enumerate() {
         let hb = ctx.bounds.hydro_bounds(h_idx, stage_idx);
         for blk in 0..layout.n_blks {
-            let col = layout.col_generation_start + local_idx * layout.n_blks + blk;
+            let col = layout.generation_col(local_idx, blk);
             bufs.col_lower[col] = 0.0;
             bufs.col_upper[col] = hb.max_generation_mw;
         }
@@ -521,9 +518,9 @@ fn fill_evaporation_columns(
     bufs: &mut ColumnBufs<'_>,
 ) {
     for (local_idx, &h_idx) in layout.evap_hydro_indices.iter().enumerate() {
-        let col_evaporation_flow = layout.col_evap_start + local_idx * 3;
-        let col_f_plus = layout.col_evap_start + local_idx * 3 + 1;
-        let col_f_minus = layout.col_evap_start + local_idx * 3 + 2;
+        let col_evaporation_flow = layout.evap_flow_col(local_idx);
+        let col_f_plus = layout.evap_f_plus_col(local_idx);
+        let col_f_minus = layout.evap_f_minus_col(local_idx);
         // Signed flow: a negative evaporation outflow reads as net rainfall input (inflow).
         // Bound: [-q_max, +q_max] where
         // q_max = |intercept_m3s + volume_slope_m3s_per_hm3 * v_max| * margin.
@@ -655,7 +652,7 @@ fn fill_outflow_below_columns(
         let hb = ctx.bounds.hydro_bounds(h_idx, stage_idx);
         let hp = ctx.penalties.hydro_penalties(h_idx, stage_idx);
         for blk in 0..layout.n_blks {
-            let col = layout.col_outflow_below_start + h_idx * layout.n_blks + blk;
+            let col = layout.outflow_below_col(h_idx, blk);
             bufs.col_upper[col] = if hb.min_outflow_m3s > 0.0 {
                 f64::INFINITY
             } else {
@@ -681,7 +678,7 @@ fn fill_outflow_above_columns(
         let hb = ctx.bounds.hydro_bounds(h_idx, stage_idx);
         let hp = ctx.penalties.hydro_penalties(h_idx, stage_idx);
         for blk in 0..layout.n_blks {
-            let col = layout.col_outflow_above_start + h_idx * layout.n_blks + blk;
+            let col = layout.outflow_above_col(h_idx, blk);
             bufs.col_upper[col] = if hb.max_outflow_m3s.is_some() {
                 f64::INFINITY
             } else {
@@ -707,7 +704,7 @@ fn fill_turbine_below_columns(
         let hb = ctx.bounds.hydro_bounds(h_idx, stage_idx);
         let hp = ctx.penalties.hydro_penalties(h_idx, stage_idx);
         for blk in 0..layout.n_blks {
-            let col = layout.col_turbine_below_start + h_idx * layout.n_blks + blk;
+            let col = layout.turbine_below_col(h_idx, blk);
             bufs.col_upper[col] = if hb.min_turbined_m3s > 0.0 {
                 f64::INFINITY
             } else {
@@ -733,7 +730,7 @@ fn fill_generation_below_columns(
         let hb = ctx.bounds.hydro_bounds(h_idx, stage_idx);
         let hp = ctx.penalties.hydro_penalties(h_idx, stage_idx);
         for blk in 0..layout.n_blks {
-            let col = layout.col_generation_below_start + h_idx * layout.n_blks + blk;
+            let col = layout.generation_below_col(h_idx, blk);
             bufs.col_upper[col] = if hb.min_generation_mw > 0.0 {
                 f64::INFINITY
             } else {
@@ -1222,28 +1219,26 @@ pub(super) fn fill_state_and_water_entries(
         col_entries[col_storage_in_start + h_idx].push((row, -1.0));
         for blk in 0..n_blks {
             let tau_h = stage.blocks[blk].duration_hours * M3S_TO_HM3;
-            let col_turbine = layout.col_turbine_start + h_idx * n_blks + blk;
+            let col_turbine = layout.turbine_col(h_idx, blk);
             col_entries[col_turbine].push((row, tau_h));
-            let col_spillage = layout.col_spillage_start + h_idx * n_blks + blk;
+            let col_spillage = layout.spillage_col(h_idx, blk);
             col_entries[col_spillage].push((row, tau_h));
             // Diversion outflow: this hydro's diversion column enters its own
             // water balance with +tau (outflow), same sign as turbine/spillage.
-            let col_diversion = layout.col_diversion_start + h_idx * n_blks + blk;
+            let col_diversion = layout.diversion_col(h_idx, blk);
             col_entries[col_diversion].push((row, tau_h));
             // Cascade inflow: upstream turbine/spillage enter with -tau.
             for &up_id in ctx.cascade.upstream(hydro.id) {
                 if let Some(&u_idx) = ctx.hydro_pos.get(&up_id) {
-                    col_entries[layout.col_turbine_start + u_idx * n_blks + blk]
-                        .push((row, -tau_h));
-                    col_entries[layout.col_spillage_start + u_idx * n_blks + blk]
-                        .push((row, -tau_h));
+                    col_entries[layout.turbine_col(u_idx, blk)].push((row, -tau_h));
+                    col_entries[layout.spillage_col(u_idx, blk)].push((row, -tau_h));
                 }
             }
             // Diversion inflow: for each hydro that diverts TO this hydro, its
             // diversion column enters this hydro's water balance with -tau.
             if let Some(sources) = ctx.diversion_upstream.get(&hydro.id) {
                 for &d_idx in sources {
-                    let col_div = layout.col_diversion_start + d_idx * n_blks + blk;
+                    let col_div = layout.diversion_col(d_idx, blk);
                     col_entries[col_div].push((row, -tau_h));
                 }
             }
@@ -1272,7 +1267,7 @@ pub(super) fn fill_state_and_water_entries(
     // Evaporation is an outflow (water leaving the reservoir), so its
     // coefficient matches the turbine/spillage sign convention (positive).
     for (local_idx, &h_idx) in layout.evap_hydro_indices.iter().enumerate() {
-        let col_evaporation_flow = layout.col_evap_start + local_idx * 3;
+        let col_evaporation_flow = layout.evap_flow_col(local_idx);
         let row = row_water + h_idx;
         col_entries[col_evaporation_flow].push((row, zeta));
     }
@@ -1384,7 +1379,7 @@ pub(super) fn fill_load_balance_entries(
             if let Some(&b_idx) = ctx.bus_pos.get(&hydro.bus_id) {
                 for blk in 0..n_blks {
                     let row = row_load + b_idx * n_blks + blk;
-                    let col = layout.col_generation_start + local_idx * n_blks + blk;
+                    let col = layout.generation_col(local_idx, blk);
                     col_entries[col].push((row, 1.0));
                 }
             }
@@ -1400,7 +1395,7 @@ pub(super) fn fill_load_balance_entries(
             if let Some(&b_idx) = ctx.bus_pos.get(&hydro.bus_id) {
                 for blk in 0..n_blks {
                     let row = row_load + b_idx * n_blks + blk;
-                    let col = layout.col_turbine_start + h_idx * n_blks + blk;
+                    let col = layout.turbine_col(h_idx, blk);
                     col_entries[col].push((row, rho));
                 }
             }
@@ -1421,8 +1416,8 @@ pub(super) fn fill_load_balance_entries(
         let src_idx = ctx.bus_pos.get(&line.source_bus_id).copied();
         let tgt_idx = ctx.bus_pos.get(&line.target_bus_id).copied();
         for blk in 0..n_blks {
-            let col_fwd = layout.col_line_fwd_start + l_idx * n_blks + blk;
-            let col_rev = layout.col_line_rev_start + l_idx * n_blks + blk;
+            let col_fwd = layout.line_fwd_col(l_idx, blk);
+            let col_rev = layout.line_rev_col(l_idx, blk);
             if let Some(tgt) = tgt_idx {
                 let row = row_load + tgt * n_blks + blk;
                 col_entries[col_fwd].push((row, 1.0));
@@ -1454,10 +1449,7 @@ pub(super) fn fill_load_balance_entries(
         for blk in 0..n_blks {
             let row = row_load + b_idx * n_blks + blk;
             for seg_idx in 0..bus.deficit_segments.len() {
-                let col_def = layout.col_deficit_start
-                    + b_idx * layout.max_deficit_segments * n_blks
-                    + seg_idx * n_blks
-                    + blk;
+                let col_def = layout.deficit_col(b_idx, seg_idx, blk);
                 col_entries[col_def].push((row, 1.0));
             }
             let col_exc = layout.col_excess_start + b_idx * n_blks + blk;
@@ -1514,9 +1506,9 @@ pub(super) fn fill_fpha_entries(
             // Column indices for this hydro/block.
             let col_v = h_idx; // outgoing storage column
             let col_v_in = col_storage_in_start + h_idx; // incoming storage column
-            let col_q = layout.col_turbine_start + h_idx * n_blks + blk;
-            let col_s = layout.col_spillage_start + h_idx * n_blks + blk;
-            let col_g = layout.col_generation_start + local_idx * n_blks + blk;
+            let col_q = layout.turbine_col(h_idx, blk);
+            let col_s = layout.spillage_col(h_idx, blk);
+            let col_g = layout.generation_col(local_idx, blk);
 
             for (p_idx, plane) in planes.iter().enumerate() {
                 let row = fpha_block_start + blk * n_planes + p_idx;
@@ -1589,9 +1581,9 @@ pub(super) fn fill_evaporation_entries(
             }
         };
 
-        let col_evaporation_flow = layout.col_evap_start + local_idx * 3;
-        let col_f_plus = layout.col_evap_start + local_idx * 3 + 1;
-        let col_f_minus = layout.col_evap_start + local_idx * 3 + 2;
+        let col_evaporation_flow = layout.evap_flow_col(local_idx);
+        let col_f_plus = layout.evap_f_plus_col(local_idx);
+        let col_f_minus = layout.evap_f_minus_col(local_idx);
         let col_v = h_idx;
         let col_v_in = col_storage_in_start + h_idx;
 
@@ -1875,35 +1867,35 @@ pub(super) fn fill_operational_violation_entries(
         // ── Min outflow (per block): q + s + d + sigma >= min_outflow_m3s ───
         for blk in 0..n_blks {
             let row = layout.row_min_outflow_start + h_idx * n_blks + blk;
-            let col_q = layout.col_turbine_start + h_idx * n_blks + blk;
+            let col_q = layout.turbine_col(h_idx, blk);
             col_entries[col_q].push((row, 1.0));
-            let col_s = layout.col_spillage_start + h_idx * n_blks + blk;
+            let col_s = layout.spillage_col(h_idx, blk);
             col_entries[col_s].push((row, 1.0));
-            let col_d = layout.col_diversion_start + h_idx * n_blks + blk;
+            let col_d = layout.diversion_col(h_idx, blk);
             col_entries[col_d].push((row, 1.0));
-            let col_slack = layout.col_outflow_below_start + h_idx * n_blks + blk;
+            let col_slack = layout.outflow_below_col(h_idx, blk);
             col_entries[col_slack].push((row, 1.0));
         }
 
         // ── Max outflow (per block): q + s + d - sigma <= max_outflow_m3s ───
         for blk in 0..n_blks {
             let row = layout.row_max_outflow_start + h_idx * n_blks + blk;
-            let col_q = layout.col_turbine_start + h_idx * n_blks + blk;
+            let col_q = layout.turbine_col(h_idx, blk);
             col_entries[col_q].push((row, 1.0));
-            let col_s = layout.col_spillage_start + h_idx * n_blks + blk;
+            let col_s = layout.spillage_col(h_idx, blk);
             col_entries[col_s].push((row, 1.0));
-            let col_d = layout.col_diversion_start + h_idx * n_blks + blk;
+            let col_d = layout.diversion_col(h_idx, blk);
             col_entries[col_d].push((row, 1.0));
-            let col_slack = layout.col_outflow_above_start + h_idx * n_blks + blk;
+            let col_slack = layout.outflow_above_col(h_idx, blk);
             col_entries[col_slack].push((row, -1.0));
         }
 
         // ── Min turbine flow (per block): q + sigma >= min_turbined_m3s ─────
         for blk in 0..n_blks {
             let row = layout.row_min_turbine_start + h_idx * n_blks + blk;
-            let col_q = layout.col_turbine_start + h_idx * n_blks + blk;
+            let col_q = layout.turbine_col(h_idx, blk);
             col_entries[col_q].push((row, 1.0));
-            let col_slack = layout.col_turbine_below_start + h_idx * n_blks + blk;
+            let col_slack = layout.turbine_below_col(h_idx, blk);
             col_entries[col_slack].push((row, 1.0));
         }
 
@@ -1912,9 +1904,9 @@ pub(super) fn fill_operational_violation_entries(
             // FPHA: generation variable g_{h,blk} (already in MW).
             for blk in 0..n_blks {
                 let row = layout.row_min_generation_start + h_idx * n_blks + blk;
-                let col_g = layout.col_generation_start + local_fpha_idx * n_blks + blk;
+                let col_g = layout.generation_col(local_fpha_idx, blk);
                 col_entries[col_g].push((row, 1.0));
-                let col_slack = layout.col_generation_below_start + h_idx * n_blks + blk;
+                let col_slack = layout.generation_below_col(h_idx, blk);
                 col_entries[col_slack].push((row, 1.0));
             }
         } else {
@@ -1931,9 +1923,9 @@ pub(super) fn fill_operational_violation_entries(
             };
             for blk in 0..n_blks {
                 let row = layout.row_min_generation_start + h_idx * n_blks + blk;
-                let col_q = layout.col_turbine_start + h_idx * n_blks + blk;
+                let col_q = layout.turbine_col(h_idx, blk);
                 col_entries[col_q].push((row, rho));
-                let col_slack = layout.col_generation_below_start + h_idx * n_blks + blk;
+                let col_slack = layout.generation_below_col(h_idx, blk);
                 col_entries[col_slack].push((row, 1.0));
             }
         }
