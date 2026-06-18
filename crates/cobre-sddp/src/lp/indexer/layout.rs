@@ -559,6 +559,21 @@ pub struct StageIndexer {
     /// Empty when built via [`StageIndexer::new`] or when no NCS entities are active.
     pub ncs_generation: Range<usize>,
 
+    // ── Pumping-flow column range ─────────────────────────────────────────
+    // Permanent `0..0` sentinel here, mirroring `ncs_generation`: every
+    // `StageIndexer` constructor leaves it empty. The live per-stage pumping
+    // column layout is owned by `StageLayout::col_pumping_start` / `n_pumping`;
+    // this field exists so the indexer exposes a per-region range for pumping
+    // the same way it does for NCS. The block-major layout is
+    // `start + station_local_idx * n_blks + blk`.
+    /// Column range for pumping-flow variables, one per (pumping, block) pair.
+    ///
+    /// Index for pumping station at local position `p`, block `b`:
+    /// `pumping_flow.start + p * n_blks + b` (block-major).
+    /// Always `0..0`: every constructor leaves it empty regardless of station
+    /// count — the live column range is owned by `StageLayout::col_pumping_start`.
+    pub pumping_flow: Range<usize>,
+
     // ── Z-inflow column and row ranges ────────────────────────────────────
     // Populated by all constructors.  The z_inflow columns are auxiliary
     // (NOT state variables); their primal values give the realized total
@@ -630,6 +645,15 @@ pub struct EquipmentCounts {
     pub n_anticipated: usize,
     /// Maximum `lead_stages` across the anticipated thermals.
     pub k_max: usize,
+    /// Number of pumping stations.
+    ///
+    /// Accepted for structural symmetry with the other entity counts but **not
+    /// read** by [`StageIndexer::with_equipment_and_evaporation`]: the indexer's
+    /// `pumping_flow` field is a permanent `0..0` sentinel. The real pumping-flow
+    /// column block (`n_pumping * n_blks`, block-major, reserved between the NCS
+    /// region and the generic-slack columns) is owned by [`StageLayout`], which
+    /// reads its station count from `ctx.n_pumping`, not from this field.
+    pub n_pumping: usize,
     /// Per-plant `lead_stages` (`K_i`) for the anticipated thermals.
     ///
     /// Length must equal `n_anticipated`. The maximum entry (when non-empty)

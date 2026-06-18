@@ -234,6 +234,7 @@ mod tests {
             k_max,
             anticipated_lead_stages,
             anticipated_thermal_indices,
+            n_pumping: 0,
         }
     }
 
@@ -259,6 +260,7 @@ mod tests {
                 k_max: 2,
                 anticipated_lead_stages: vec![1, 2],
                 anticipated_thermal_indices: vec![0, 1],
+                n_pumping: 0,
             },
             &fpha(vec![], vec![]),
             &evap(vec![]),
@@ -452,6 +454,7 @@ mod tests {
                 k_max: 3,
                 anticipated_lead_stages: vec![1, 3],
                 anticipated_thermal_indices: vec![0, 1],
+                n_pumping: 0,
             },
             &fpha(vec![], vec![]),
             &evap(vec![]),
@@ -488,6 +491,7 @@ mod tests {
                 k_max: 2,
                 anticipated_lead_stages: vec![2, 2],
                 anticipated_thermal_indices: vec![0, 1],
+                n_pumping: 0,
             },
             &fpha(vec![], vec![]),
             &evap(vec![]),
@@ -526,6 +530,7 @@ mod tests {
             k_max: 1,
             anticipated_lead_stages: vec![1],
             anticipated_thermal_indices: vec![0],
+            n_pumping: 0,
         };
         let fpha_layout = FphaColumnLayout {
             hydro_indices: vec![],
@@ -563,6 +568,7 @@ mod tests {
             k_max: 2,
             anticipated_lead_stages: vec![2],
             anticipated_thermal_indices: vec![0],
+            n_pumping: 0,
         };
         let fpha_layout = FphaColumnLayout {
             hydro_indices: vec![],
@@ -599,6 +605,7 @@ mod tests {
             k_max: 3,
             anticipated_lead_stages: vec![2, 3],
             anticipated_thermal_indices: vec![0, 1],
+            n_pumping: 0,
         };
         let fpha_layout = FphaColumnLayout {
             hydro_indices: vec![],

@@ -2117,6 +2117,7 @@ mod tests {
                 k_max: 0,
                 anticipated_lead_stages: vec![],
                 anticipated_thermal_indices: vec![],
+                n_pumping: 0,
             },
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
@@ -2302,6 +2303,7 @@ mod tests {
                 k_max: 1,
                 anticipated_lead_stages: vec![1],
                 anticipated_thermal_indices: vec![1],
+                n_pumping: 0,
             },
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
@@ -2414,6 +2416,7 @@ mod tests {
                 k_max: 0,
                 anticipated_lead_stages: vec![],
                 anticipated_thermal_indices: vec![],
+                n_pumping: 0,
             },
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
@@ -2507,6 +2510,7 @@ mod tests {
                 k_max: 2,
                 anticipated_lead_stages: vec![2],
                 anticipated_thermal_indices: vec![1],
+                n_pumping: 0,
             },
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
@@ -2737,6 +2741,7 @@ mod tests {
                 k_max: 1,
                 anticipated_lead_stages: vec![1],
                 anticipated_thermal_indices: vec![1],
+                n_pumping: 0,
             },
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
@@ -2823,6 +2828,7 @@ mod tests {
                 k_max: 1,
                 anticipated_lead_stages: vec![1],
                 anticipated_thermal_indices: vec![0],
+                n_pumping: 0,
             },
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
@@ -2922,6 +2928,7 @@ mod tests {
                 k_max: 2,
                 anticipated_lead_stages: vec![2],
                 anticipated_thermal_indices: vec![0],
+                n_pumping: 0,
             },
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
@@ -3223,6 +3230,7 @@ mod tests {
                 k_max: 2,
                 anticipated_lead_stages: vec![2],
                 anticipated_thermal_indices: vec![1],
+                n_pumping: 0,
             },
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
@@ -3321,6 +3329,7 @@ mod tests {
                 k_max: 1,
                 anticipated_lead_stages: vec![1],
                 anticipated_thermal_indices: vec![0],
+                n_pumping: 0,
             },
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
@@ -3457,6 +3466,7 @@ mod tests {
                 k_max: 1,
                 anticipated_lead_stages: vec![1],
                 anticipated_thermal_indices: vec![0],
+                n_pumping: 0,
             },
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
@@ -3542,6 +3552,7 @@ mod tests {
                 k_max: 1,
                 anticipated_lead_stages: vec![1],
                 anticipated_thermal_indices: vec![0],
+                n_pumping: 0,
             },
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
@@ -3891,6 +3902,7 @@ mod tests {
                 k_max: 0,
                 anticipated_lead_stages: vec![],
                 anticipated_thermal_indices: vec![],
+                n_pumping: 0,
             },
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
@@ -4007,6 +4019,7 @@ mod tests {
                 k_max: 0,
                 anticipated_lead_stages: vec![],
                 anticipated_thermal_indices: vec![],
+                n_pumping: 0,
             },
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
@@ -4096,6 +4109,7 @@ mod tests {
                 k_max: 0,
                 anticipated_lead_stages: vec![],
                 anticipated_thermal_indices: vec![],
+                n_pumping: 0,
             },
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
@@ -4214,6 +4228,7 @@ mod tests {
                 k_max: 0,
                 anticipated_lead_stages: vec![],
                 anticipated_thermal_indices: vec![],
+                n_pumping: 0,
             },
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![0],
@@ -4406,6 +4421,7 @@ mod tests {
                 k_max: 0,
                 anticipated_lead_stages: vec![],
                 anticipated_thermal_indices: vec![],
+                n_pumping: 0,
             },
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],

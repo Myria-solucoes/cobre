@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use cobre_core::{
     Bus, CascadeTopology, ConstraintSense, EntityId, GenericConstraint, Hydro, Line, LoadModel,
-    NonControllableSource, ResolvedBounds, ResolvedExchangeFactors,
+    NonControllableSource, PumpingStation, ResolvedBounds, ResolvedExchangeFactors,
     ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
     ResolvedPenalties, Stage, Thermal,
 };
@@ -52,6 +52,30 @@ pub(crate) struct TemplateBuildCtx<'a> {
     pub(crate) resolved_ncs_bounds: &'a ResolvedNcsBounds,
     /// Pre-resolved per-block NCS generation scaling factors.
     pub(crate) resolved_ncs_factors: &'a ResolvedNcsFactors,
+    /// Pumping station entities sorted by ID.
+    ///
+    /// Canonical-order slice from `System::pumping_stations`; iterating it in
+    /// slot order (the per-station local index `p_idx`) upholds the
+    /// declaration-order bit-determinism rule. The matrix-fill helpers
+    /// (`fill_pumping_columns` for bounds, `fill_pumping_water_entries` for the
+    /// source/destination water-balance ±τ coupling) iterate this slice; the
+    /// `PumpingFlow`/`PumpingPower` resolver arm indexes into it via `pumping_pos`.
+    pub(crate) pumping_stations: &'a [PumpingStation],
+    /// Station id → local index into `pumping_stations`.
+    ///
+    /// Built from the ID-sorted `pumping_stations` slice (id → slot), exactly as
+    /// `hydro_pos`/`bus_pos`. The local index is the per-station column-block
+    /// position used by `col_pumping_start + pos * n_blks + blk`. The
+    /// `PumpingFlow`/`PumpingPower` resolver arm indexes `pumping_stations` via
+    /// this map (passed in `PumpingRefs`).
+    pub(crate) pumping_pos: HashMap<EntityId, usize>,
+    /// Number of pumping stations (`pumping_stations.len()`).
+    ///
+    /// The authoritative count threaded into `EquipmentCounts.n_pumping`, so the
+    /// layout reserves `n_pumping * n_blks` pumping-flow columns. Asserted equal
+    /// to `bounds.n_pumping()` at ctx construction — a divergence means the
+    /// resolved-bounds table and the entity slice disagree on station count.
+    pub(crate) n_pumping: usize,
     /// Lookup table for parameter coefficient resolution.
     ///
     /// Maps `(parameter_id, stage_idx)` to a pre-resolved `f64` value.
@@ -265,6 +289,29 @@ pub(crate) struct StageLayout {
     pub(crate) n_ncs: usize,
     /// Indices (into `ctx.non_controllable_sources`) of NCS active at this stage.
     pub(crate) active_ncs_indices: Vec<usize>,
+    /// Start of pumping-flow columns (after the NCS region, before generic-slack columns).
+    ///
+    /// One column per pumping station per block, block-major:
+    /// `col_pumping_start + station_local_idx * n_blks + blk`.
+    /// When `n_pumping == 0` the block is empty and `col_pumping_start` equals
+    /// `col_ncs_end`, leaving every downstream `col_*_start` and `num_cols`
+    /// byte-identical to a station-free system.
+    ///
+    /// Read by `fill_pumping_columns` (column bounds) and
+    /// `fill_pumping_water_entries` (water-balance ±τ coupling), which address the
+    /// per-station per-block column as `col_pumping_start + p_idx * n_blks + blk`.
+    pub(crate) col_pumping_start: usize,
+    /// Number of pumping stations contributing columns at this stage.
+    ///
+    /// Each station contributes `n_blks` columns. Sourced from `ctx.n_pumping`.
+    /// Per-stage entry/exit gating is bound-driven downstream; the column count
+    /// is the full station count here.
+    // Rationale: the matrix-fill helpers iterate `ctx.pumping_stations` directly
+    // (the canonical ID-sorted slice) and the resolver reads `col_pumping_start`
+    // / `n_blks`, so no production path reads this count; it is retained for the
+    // layout unit tests and for structural symmetry with `n_ncs`.
+    #[allow(dead_code)]
+    pub(crate) n_pumping: usize,
     pub(crate) num_cols: usize,
     /// Start of minimum-outflow constraint rows (one per hydro per block, after evaporation rows).
     ///
@@ -603,6 +650,7 @@ impl StageLayout {
                 max_deficit_segments,
                 n_anticipated: ctx.n_anticipated,
                 k_max: ctx.k_max,
+                n_pumping: ctx.n_pumping,
                 anticipated_lead_stages: ctx.anticipated_lead_stages.clone(),
                 anticipated_thermal_indices: ctx.anticipated_thermal_indices.clone(),
             },
@@ -739,8 +787,19 @@ impl StageLayout {
         // Slot-major layout: col for slot s, plant i = anticipated_state.start + s * n_anticipated + i.
         let col_anticipated_state_start = idx.anticipated_state.start;
 
+        // Pumping-flow columns sit between the NCS region and the generic-slack
+        // columns, block-major (`col_pumping_start + p * n_blks + blk`). The
+        // station count is the ctx's authoritative `n_pumping` (the entity-slice
+        // length), asserted equal to `bounds.n_pumping()` at ctx construction.
+        // When `n_pumping == 0` the block is empty, so `col_pumping_end ==
+        // col_ncs_end` and every downstream cursor (generic-slack, z-inflow,
+        // `num_cols`) is unshifted.
+        let n_pumping = ctx.n_pumping;
+        let col_pumping_start = col_ncs_end;
+        let col_pumping_end = col_pumping_start + n_pumping * n_blks;
+
         // Generic constraints: active rows and slack columns.
-        let col_generic_slack_start = col_ncs_end;
+        let col_generic_slack_start = col_pumping_end;
         let generic =
             enumerate_generic_constraint_rows(ctx, stage, n_blks, col_generic_slack_start);
 
@@ -796,6 +855,8 @@ impl StageLayout {
             col_ncs_start,
             n_ncs: n_active_ncs,
             active_ncs_indices,
+            col_pumping_start,
+            n_pumping,
             num_cols,
             row_water_balance_start,
             row_load_balance_start,
@@ -932,6 +993,9 @@ mod tests {
                 non_controllable_sources: &[],
                 resolved_ncs_bounds: &self.resolved_ncs_bounds,
                 resolved_ncs_factors: &self.resolved_ncs_factors,
+                pumping_stations: &[],
+                pumping_pos: HashMap::new(),
+                n_pumping: 0,
                 resolved_parameters: &self.resolved_parameters,
                 diversion_upstream: HashMap::new(),
                 n_hydros: 0,
@@ -1425,6 +1489,9 @@ mod tests {
                 non_controllable_sources: &[],
                 resolved_ncs_bounds: &self.resolved_ncs_bounds,
                 resolved_ncs_factors: &self.resolved_ncs_factors,
+                pumping_stations: &[],
+                pumping_pos: HashMap::new(),
+                n_pumping: 0,
                 resolved_parameters: &self.resolved_parameters,
                 diversion_upstream: HashMap::new(),
                 n_hydros: 0,
@@ -1519,5 +1586,267 @@ mod tests {
             "col_anticipated_state_out_start must equal col_anticipated_decision_start when n_anticipated=0"
         );
         assert_eq!(layout.n_anticipated_state_out_def_rows, 0);
+    }
+
+    // ── Pumping-flow column region ─────────────────────────────────────────────
+
+    /// Build a `ResolvedBounds` with the given pumping-station count and stage
+    /// count (all other entity tables empty). `table.n_pumping()` recovers
+    /// `n_pumping` from the `pumping` Vec length divided by `n_stages`.
+    fn bounds_with_pumping(n_pumping: usize, n_stages: usize) -> ResolvedBounds {
+        ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 0,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping,
+                n_contracts: 0,
+                n_stages,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 0.0,
+                    min_turbined_m3s: 0.0,
+                    max_turbined_m3s: 0.0,
+                    min_outflow_m3s: 0.0,
+                    max_outflow_m3s: None,
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    max_diversion_m3s: None,
+                    filling_inflow_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        )
+    }
+
+    /// Owns the data for a `TemplateBuildCtx` whose `bounds` report a non-zero
+    /// `n_pumping()`. Mirrors `ZeroEntityFixtures` but injects a pumping-aware
+    /// `ResolvedBounds` so `StageLayout::new` reserves the `pumping_flow` block.
+    struct PumpingFixtures {
+        par_lp: PrecomputedPar,
+        cascade: CascadeTopology,
+        bounds: ResolvedBounds,
+        penalties: ResolvedPenalties,
+        resolved_generic_bounds: ResolvedGenericConstraintBounds,
+        resolved_load_factors: ResolvedLoadFactors,
+        resolved_exchange_factors: ResolvedExchangeFactors,
+        resolved_ncs_bounds: ResolvedNcsBounds,
+        resolved_ncs_factors: ResolvedNcsFactors,
+        resolved_parameters: ResolvedParameters,
+        production_models: ProductionModelSet,
+        evaporation_models: EvaporationModelSet,
+    }
+
+    impl PumpingFixtures {
+        fn new(n_pumping: usize, n_stages: usize) -> Self {
+            Self {
+                par_lp: PrecomputedPar::default(),
+                cascade: CascadeTopology::build(&[]),
+                bounds: bounds_with_pumping(n_pumping, n_stages),
+                penalties: ResolvedPenalties::empty(),
+                resolved_generic_bounds: ResolvedGenericConstraintBounds::empty(),
+                resolved_load_factors: ResolvedLoadFactors::empty(),
+                resolved_exchange_factors: ResolvedExchangeFactors::empty(),
+                resolved_ncs_bounds: ResolvedNcsBounds::empty(),
+                resolved_ncs_factors: ResolvedNcsFactors::empty(),
+                resolved_parameters: ResolvedParameters {
+                    per_param: vec![],
+                    id_to_slot: vec![],
+                },
+                production_models: ProductionModelSet::new(vec![], 0, 1),
+                evaporation_models: EvaporationModelSet::new(vec![]),
+            }
+        }
+
+        fn make_ctx(&self) -> TemplateBuildCtx<'_> {
+            let n_stages = self.bounds.n_stages();
+            TemplateBuildCtx {
+                hydros: &[],
+                thermals: &[],
+                lines: &[],
+                buses: &[],
+                load_models: &[],
+                cascade: &self.cascade,
+                bounds: &self.bounds,
+                penalties: &self.penalties,
+                hydro_pos: HashMap::new(),
+                thermal_pos: HashMap::new(),
+                line_pos: HashMap::new(),
+                bus_pos: HashMap::new(),
+                par_lp: &self.par_lp,
+                production_models: &self.production_models,
+                evaporation_models: &self.evaporation_models,
+                generic_constraints: &[],
+                resolved_generic_bounds: &self.resolved_generic_bounds,
+                resolved_load_factors: &self.resolved_load_factors,
+                resolved_exchange_factors: &self.resolved_exchange_factors,
+                non_controllable_sources: &[],
+                resolved_ncs_bounds: &self.resolved_ncs_bounds,
+                resolved_ncs_factors: &self.resolved_ncs_factors,
+                // This fixture probes only the column-reservation arithmetic, which
+                // consumes `n_pumping` (not the entity slice). The station slice is
+                // left empty while `n_pumping` is sourced from the pumping-aware
+                // `ResolvedBounds` so `StageLayout::new` reserves the right block;
+                // the slice/`pumping_pos` threading is covered by the
+                // `build_template_build_ctx` tests in `template.rs`.
+                pumping_stations: &[],
+                pumping_pos: HashMap::new(),
+                n_pumping: self.bounds.n_pumping(),
+                resolved_parameters: &self.resolved_parameters,
+                diversion_upstream: HashMap::new(),
+                n_hydros: 0,
+                n_thermals: 0,
+                n_lines: 0,
+                n_buses: 0,
+                max_par_order: 0,
+                n_anticipated: 0,
+                k_max: 0,
+                anticipated_lead_stages: vec![],
+                anticipated_thermal_indices: vec![],
+                has_penalty: false,
+                cumulative_discount_factors: vec![1.0; n_stages],
+                total_hours_per_stage: vec![744.0; n_stages],
+            }
+        }
+
+        /// Build a stage with `n_blks` equal-duration blocks.
+        fn stage_with_blocks(n_blks: usize) -> Stage {
+            use cobre_core::Block;
+            Stage {
+                index: 0,
+                id: 0,
+                start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                season_id: Some(0),
+                blocks: (0..n_blks)
+                    .map(|b| Block {
+                        index: b,
+                        name: format!("B{b}"),
+                        duration_hours: 248.0,
+                    })
+                    .collect(),
+                block_mode: cobre_core::BlockMode::Parallel,
+                state_config: cobre_core::StageStateConfig {
+                    storage: false,
+                    inflow_lags: false,
+                },
+                risk_config: cobre_core::StageRiskConfig::Expectation,
+                scenario_config: cobre_core::ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: cobre_core::NoiseMethod::Saa,
+                },
+            }
+        }
+    }
+
+    /// Inert-layout invariant: with `n_pumping == 0` the `pumping_flow` block
+    /// collapses, so `col_pumping_start` sits exactly where the generic-slack
+    /// columns begin (`col_ncs_end`, which equals `col_ncs_start` when no NCS are
+    /// active) and `num_cols` is unshifted. For this zero-entity one-block system
+    /// the entire column count is the single theta column.
+    ///
+    /// Pinning `n_pumping == 0`, `col_pumping_start == col_ncs_start`, and the
+    /// exact `num_cols`/equipment starts proves that reserving the pumping region
+    /// does not move any pre-existing column when there are no stations.
+    #[test]
+    fn pumping_layout_inert_when_no_stations() {
+        let fixtures = ZeroEntityFixtures::new();
+        let ctx = fixtures.make_ctx(0, 0, vec![], vec![]);
+        let stage = minimal_stage();
+        let layout = StageLayout::new(&ctx, &stage, 0);
+
+        // No stations: the bounds table reports zero pumping.
+        assert_eq!(ctx.bounds.n_pumping(), 0, "fixture has no pumping stations");
+        assert_eq!(layout.n_pumping, 0, "layout.n_pumping must be 0");
+
+        // The empty pumping block does not advance the cursor: its start equals
+        // the NCS-region end. With zero active NCS, col_ncs_end == col_ncs_start.
+        assert_eq!(
+            layout.col_pumping_start, layout.col_ncs_start,
+            "col_pumping_start must equal col_ncs_start (col_ncs_end) when no stations"
+        );
+
+        // Pre-existing column starts for the zero-entity, single-block layout:
+        // theta == 0, every equipment/slack/NCS region empty starting at theta+1.
+        let idx = StageIndexer::new(ctx.n_hydros, ctx.max_par_order);
+        let expected_start = idx.theta + 1;
+        assert_eq!(layout.col_turbine_start, expected_start);
+        assert_eq!(layout.col_thermal_start, expected_start);
+        assert_eq!(layout.col_line_fwd_start, expected_start);
+        assert_eq!(layout.col_deficit_start, expected_start);
+        assert_eq!(layout.col_excess_start, expected_start);
+        assert_eq!(layout.col_ncs_start, expected_start);
+        assert_eq!(layout.col_pumping_start, expected_start);
+        // num_cols is the single theta column; the empty pumping block adds nothing.
+        assert_eq!(
+            layout.num_cols, expected_start,
+            "num_cols must be unshifted"
+        );
+    }
+
+    /// `n_pumping == 2`, `n_blks == 3` ⇒ a 6-column `pumping_flow` block at
+    /// `col_pumping_start`, block-major, and `num_cols` increased by exactly 6
+    /// relative to the otherwise-identical station-free layout.
+    #[test]
+    fn pumping_layout_reserves_block_major_columns() {
+        let n_pumping = 2_usize;
+        let n_blks = 3_usize;
+
+        // Baseline: identical zero-entity 3-block layout with no stations.
+        let baseline_fixtures = PumpingFixtures::new(0, 3);
+        let baseline_ctx = baseline_fixtures.make_ctx();
+        let stage = PumpingFixtures::stage_with_blocks(n_blks);
+        let baseline = StageLayout::new(&baseline_ctx, &stage, 0);
+        assert_eq!(baseline.n_pumping, 0);
+
+        // Station-bearing layout: 2 pumping stations across 3 stages.
+        let fixtures = PumpingFixtures::new(n_pumping, 3);
+        let ctx = fixtures.make_ctx();
+        assert_eq!(
+            ctx.bounds.n_pumping(),
+            n_pumping,
+            "fixture bounds must report n_pumping() == 2"
+        );
+        let layout = StageLayout::new(&ctx, &stage, 0);
+
+        assert_eq!(layout.n_pumping, n_pumping, "layout.n_pumping == 2");
+        // The pumping block begins exactly where the NCS region ends (no NCS here).
+        assert_eq!(
+            layout.col_pumping_start, layout.col_ncs_start,
+            "col_pumping_start must follow the NCS region"
+        );
+        // Block-major width: n_pumping * n_blks == 2 * 3 == 6.
+        assert_eq!(
+            layout.num_cols - baseline.num_cols,
+            n_pumping * n_blks,
+            "num_cols must grow by exactly n_pumping * n_blks == 6"
+        );
+        // The 6 reserved columns occupy [col_pumping_start, col_pumping_start + 6).
+        assert_eq!(
+            layout.num_cols,
+            layout.col_pumping_start + n_pumping * n_blks,
+            "the 6-column block ends at num_cols (no generic-slack columns here)"
+        );
     }
 }

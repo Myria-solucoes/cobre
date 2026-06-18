@@ -156,6 +156,7 @@ fn bench_cut_application_with_anticipated(c: &mut Criterion) {
         k_max: K_MAX,
         anticipated_lead_stages: anticipated_lead_stages.clone(),
         anticipated_thermal_indices,
+        n_pumping: 0,
     };
     let fpha = FphaColumnLayout {
         hydro_indices: vec![],

@@ -705,6 +705,7 @@ fn build_wired_indexer(
         max_deficit_segments,
         n_anticipated,
         k_max,
+        n_pumping: system.n_pumping_stations(),
         anticipated_lead_stages,
         anticipated_thermal_indices,
     };
@@ -3661,6 +3662,7 @@ mod tests {
                 max_deficit_segments: 1,
                 n_anticipated,
                 k_max,
+                n_pumping: 0,
                 anticipated_lead_stages: k_values.to_vec(),
                 anticipated_thermal_indices: thermal_indices.to_vec(),
             },

@@ -528,6 +528,33 @@ fn build_template_build_ctx<'a>(
     let bus_pos: HashMap<EntityId, usize> =
         buses.iter().enumerate().map(|(i, b)| (b.id, i)).collect();
 
+    // Pumping stations are ID-sorted at `System` build time
+    // (`SystemBuilder::build` sorts every entity Vec by `id.0`), so
+    // `System::pumping_stations` returns them in canonical order. Iterate that
+    // slice in slot order — NOT declaration order — to build `pumping_pos`,
+    // mirroring `hydro_pos`/`bus_pos`; this upholds the declaration-order
+    // bit-determinism rule.
+    let pumping_stations = system.pumping_stations();
+    let pumping_pos: HashMap<EntityId, usize> = pumping_stations
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.id, i))
+        .collect();
+    let n_pumping = pumping_stations.len();
+    // The resolved-bounds table sizes the `pumping` Vec from the same station
+    // count; a divergence means the bounds resolution and the entity slice
+    // disagree on how many stations exist (a resolution bug), not a benign
+    // empty-system case. Fail fast rather than silently reserving the wrong
+    // number of pumping-flow columns.
+    debug_assert_eq!(
+        n_pumping,
+        system.bounds().n_pumping(),
+        "pumping_stations.len() ({}) != bounds.n_pumping() ({}): resolved-bounds \
+         station count disagrees with the entity slice",
+        n_pumping,
+        system.bounds().n_pumping()
+    );
+
     let load_bus_indices = collect_load_bus_indices(system, &bus_pos);
 
     let max_par_order: usize = system
@@ -620,6 +647,9 @@ fn build_template_build_ctx<'a>(
         non_controllable_sources: system.non_controllable_sources(),
         resolved_ncs_bounds: system.resolved_ncs_bounds(),
         resolved_ncs_factors: system.resolved_ncs_factors(),
+        pumping_stations,
+        pumping_pos,
+        n_pumping,
         resolved_parameters,
         diversion_upstream,
         n_hydros,
@@ -730,9 +760,10 @@ mod tests {
     use chrono::NaiveDate;
     use cobre_core::{
         AnticipatedConfig, Block, BlockMode, BoundsCountsSpec, BoundsDefaults, Bus,
-        BusStagePenalties, ContractStageBounds, DeficitSegment, EntityId, HydroStageBounds,
-        HydroStagePenalties, LineStageBounds, LineStagePenalties, LoadModel, NcsStagePenalties,
-        NoiseMethod, PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
+        BusStagePenalties, ContractStageBounds, DeficitSegment, EntityId, Hydro,
+        HydroGenerationModel, HydroPenalties, HydroStageBounds, HydroStagePenalties,
+        LineStageBounds, LineStagePenalties, LoadModel, NcsStagePenalties, NoiseMethod,
+        PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, PumpingStation, ResolvedBounds,
         ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig,
         SystemBuilder, Thermal, ThermalStageBounds,
     };
@@ -903,6 +934,293 @@ mod tests {
             per_param: vec![],
             id_to_slot: vec![],
         }
+    }
+
+    /// All-zero per-plant [`HydroPenalties`] for fixture hydros.
+    fn hydro_penalties_zero() -> HydroPenalties {
+        HydroPenalties {
+            spillage_cost: 0.0,
+            diversion_cost: 0.0,
+            turbined_cost: 0.0,
+            storage_violation_below_cost: 0.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost: 0.0,
+            outflow_violation_below_cost: 0.0,
+            outflow_violation_above_cost: 0.0,
+            generation_violation_below_cost: 0.0,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 0.0,
+        }
+    }
+
+    /// Minimal independent (no-downstream) hydro for pumping-station refs.
+    fn fixture_hydro(id: i32) -> Hydro {
+        Hydro {
+            id: EntityId(id),
+            name: format!("H{id}"),
+            bus_id: EntityId(1),
+            downstream_id: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 100.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 50.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 45.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: hydro_penalties_zero(),
+        }
+    }
+
+    /// Build a one-bus, two-hydro system with the supplied pumping stations.
+    ///
+    /// `SystemBuilder::build` sorts every entity Vec by `id.0`, so passing
+    /// stations out of declaration order exercises the canonical-ordering
+    /// guarantee that `build_template_build_ctx` relies on when threading the
+    /// slice into `ctx.pumping_stations`/`pumping_pos`. The two hydros and bus
+    /// exist solely to satisfy pumping-station reference validation.
+    fn system_with_pumping_stations(stations: Vec<PumpingStation>) -> cobre_core::System {
+        let n_pumping = stations.len();
+        let n_hydros = 2_usize;
+        let n_stages = 1_usize;
+
+        let bus = Bus {
+            id: EntityId(1),
+            name: "B1".to_string(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 500.0,
+            }],
+            excess_cost: 0.0,
+        };
+
+        let hydros = vec![fixture_hydro(1), fixture_hydro(2)];
+
+        let stages: Vec<Stage> = vec![Stage {
+            index: 0,
+            id: 0,
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            season_id: Some(0),
+            blocks: vec![Block {
+                index: 0,
+                name: "BLK0".to_string(),
+                duration_hours: 744.0,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: false,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        }];
+
+        let load_models = vec![LoadModel {
+            bus_id: EntityId(1),
+            stage_id: 0,
+            mean_mw: 100.0,
+            std_mw: 0.0,
+        }];
+
+        let resolved_bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping,
+                n_contracts: 0,
+                n_stages,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: default_hydro_bounds(),
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 100.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 100.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages,
+            },
+            &PenaltiesDefaults {
+                hydro: default_hydro_penalties(),
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(hydros)
+            .pumping_stations(stations)
+            .stages(stages)
+            .load_models(load_models)
+            .bounds(resolved_bounds)
+            .penalties(penalties)
+            .build()
+            .expect("system_with_pumping_stations: valid system")
+    }
+
+    /// Build a pumping station with the given id (bus/hydro refs fixed to the
+    /// fixture entities; flow window and consumption are non-degenerate).
+    fn fixture_pumping_station(id: i32) -> PumpingStation {
+        PumpingStation {
+            id: EntityId(id),
+            name: format!("P{id}"),
+            bus_id: EntityId(1),
+            source_hydro_id: EntityId(1),
+            destination_hydro_id: EntityId(2),
+            entry_stage_id: None,
+            exit_stage_id: None,
+            consumption_mw_per_m3s: 0.5,
+            min_flow_m3s: 0.0,
+            max_flow_m3s: 100.0,
+        }
+    }
+
+    // ── Pumping data threaded into TemplateBuildCtx ────────────────────────────
+
+    /// Stations declared out of ID order are exposed ID-sorted on the ctx, and
+    /// `pumping_pos` maps each station id to its slot in that sorted slice.
+    ///
+    /// Declaration order `[30, 10, 20]` must become `[10, 20, 30]` on the ctx
+    /// (the canonical sort applied by `SystemBuilder::build`), with
+    /// `pumping_pos = {10->0, 20->1, 30->2}`.
+    #[test]
+    fn build_template_build_ctx_pumping_stations_id_sorted_and_pos_mapped() {
+        let stations = vec![
+            fixture_pumping_station(30),
+            fixture_pumping_station(10),
+            fixture_pumping_station(20),
+        ];
+        let system = system_with_pumping_stations(stations);
+        let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
+        let par_lp = PrecomputedPar::default();
+        let resolved_params = empty_resolved_params();
+
+        let (ctx, _, _) = super::build_template_build_ctx(
+            &system,
+            InflowNonNegativityMethod::None,
+            &par_lp,
+            &hydro_result.production,
+            &hydro_result.evaporation,
+            &resolved_params,
+        );
+
+        let ids: Vec<i32> = ctx.pumping_stations.iter().map(|p| p.id.0).collect();
+        assert_eq!(
+            ids,
+            vec![10, 20, 30],
+            "ctx.pumping_stations must be ID-sorted regardless of declaration order"
+        );
+
+        assert_eq!(
+            ctx.pumping_pos.len(),
+            3,
+            "pumping_pos has one entry per station"
+        );
+        assert_eq!(ctx.pumping_pos[&EntityId(10)], 0);
+        assert_eq!(ctx.pumping_pos[&EntityId(20)], 1);
+        assert_eq!(ctx.pumping_pos[&EntityId(30)], 2);
+
+        // The position map must agree with the slot order of the sorted slice.
+        for (slot, station) in ctx.pumping_stations.iter().enumerate() {
+            assert_eq!(
+                ctx.pumping_pos[&station.id], slot,
+                "pumping_pos[{:?}] must equal its slot in the sorted slice",
+                station.id
+            );
+        }
+    }
+
+    /// `ctx.n_pumping` equals `pumping_stations.len()` and the resolved-bounds
+    /// station count, and that count is the source `StageLayout` reserves from.
+    #[test]
+    fn build_template_build_ctx_n_pumping_matches_slice_and_bounds() {
+        let stations = vec![fixture_pumping_station(7), fixture_pumping_station(3)];
+        let system = system_with_pumping_stations(stations);
+        let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
+        let par_lp = PrecomputedPar::default();
+        let resolved_params = empty_resolved_params();
+
+        let (ctx, _, _) = super::build_template_build_ctx(
+            &system,
+            InflowNonNegativityMethod::None,
+            &par_lp,
+            &hydro_result.production,
+            &hydro_result.evaporation,
+            &resolved_params,
+        );
+
+        assert_eq!(
+            ctx.n_pumping,
+            ctx.pumping_stations.len(),
+            "n_pumping == slice len"
+        );
+        assert_eq!(ctx.n_pumping, 2, "two stations were declared");
+        assert_eq!(
+            ctx.n_pumping,
+            ctx.bounds.n_pumping(),
+            "ctx.n_pumping must agree with the resolved-bounds station count"
+        );
+
+        // The re-pointed ctx count flows through to the layout: StageLayout reads
+        // its `n_pumping` from `EquipmentCounts.n_pumping = ctx.n_pumping`. (The
+        // block-major column reservation itself is pinned by the layout-module
+        // test `pumping_layout_reserves_block_major_columns`.)
+        let stage = system
+            .stages()
+            .iter()
+            .find(|s| s.id >= 0)
+            .expect("one study stage");
+        let layout = super::super::layout::StageLayout::new(&ctx, stage, 0);
+        assert_eq!(
+            layout.n_pumping, ctx.n_pumping,
+            "StageLayout.n_pumping must equal the ctx-sourced count"
+        );
     }
 
     // ── AC-1 ─────────────────────────────────────────────────────────────────
@@ -1493,6 +1811,9 @@ mod tests {
             non_controllable_sources: ctx_a.non_controllable_sources,
             resolved_ncs_bounds: ctx_a.resolved_ncs_bounds,
             resolved_ncs_factors: ctx_a.resolved_ncs_factors,
+            pumping_stations: ctx_a.pumping_stations,
+            pumping_pos: ctx_a.pumping_pos.clone(),
+            n_pumping: ctx_a.n_pumping,
             resolved_parameters: ctx_a.resolved_parameters,
             diversion_upstream: ctx_a.diversion_upstream.clone(),
             n_hydros: ctx_a.n_hydros,

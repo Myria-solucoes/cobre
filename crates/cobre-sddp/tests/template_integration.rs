@@ -8046,6 +8046,7 @@ fn operational_violation_row_col_counts() {
             k_max: 0,
             anticipated_lead_stages: vec![],
             anticipated_thermal_indices: vec![],
+            n_pumping: 0,
         },
         &FphaColumnLayout {
             hydro_indices: vec![],
@@ -8096,6 +8097,7 @@ fn min_outflow_active_col_bounds() {
             k_max: 0,
             anticipated_lead_stages: vec![],
             anticipated_thermal_indices: vec![],
+            n_pumping: 0,
         },
         &FphaColumnLayout {
             hydro_indices: vec![],
@@ -8130,6 +8132,7 @@ fn max_outflow_active_col_bounds() {
             k_max: 0,
             anticipated_lead_stages: vec![],
             anticipated_thermal_indices: vec![],
+            n_pumping: 0,
         },
         &FphaColumnLayout {
             hydro_indices: vec![],
@@ -8175,6 +8178,7 @@ fn operational_violation_inactive_pinned() {
             k_max: 0,
             anticipated_lead_stages: vec![],
             anticipated_thermal_indices: vec![],
+            n_pumping: 0,
         },
         &FphaColumnLayout {
             hydro_indices: vec![],
@@ -8217,6 +8221,7 @@ fn operational_violation_objective_costs() {
             k_max: 0,
             anticipated_lead_stages: vec![],
             anticipated_thermal_indices: vec![],
+            n_pumping: 0,
         },
         &FphaColumnLayout {
             hydro_indices: vec![],
@@ -8266,6 +8271,7 @@ fn min_outflow_row_bounds() {
             k_max: 0,
             anticipated_lead_stages: vec![],
             anticipated_thermal_indices: vec![],
+            n_pumping: 0,
         },
         &FphaColumnLayout {
             hydro_indices: vec![],
@@ -8311,6 +8317,7 @@ fn max_outflow_row_bounds() {
             k_max: 0,
             anticipated_lead_stages: vec![],
             anticipated_thermal_indices: vec![],
+            n_pumping: 0,
         },
         &FphaColumnLayout {
             hydro_indices: vec![],
@@ -8355,6 +8362,7 @@ fn min_turbine_row_bounds() {
             k_max: 0,
             anticipated_lead_stages: vec![],
             anticipated_thermal_indices: vec![],
+            n_pumping: 0,
         },
         &FphaColumnLayout {
             hydro_indices: vec![],
@@ -8399,6 +8407,7 @@ fn min_generation_row_bounds() {
             k_max: 0,
             anticipated_lead_stages: vec![],
             anticipated_thermal_indices: vec![],
+            n_pumping: 0,
         },
         &FphaColumnLayout {
             hydro_indices: vec![],
@@ -8443,6 +8452,7 @@ fn min_outflow_matrix_coefficients() {
             k_max: 0,
             anticipated_lead_stages: vec![],
             anticipated_thermal_indices: vec![],
+            n_pumping: 0,
         },
         &FphaColumnLayout {
             hydro_indices: vec![],
@@ -8500,6 +8510,7 @@ fn max_outflow_matrix_slack_is_negative() {
             k_max: 0,
             anticipated_lead_stages: vec![],
             anticipated_thermal_indices: vec![],
+            n_pumping: 0,
         },
         &FphaColumnLayout {
             hydro_indices: vec![],
@@ -8539,6 +8550,7 @@ fn min_turbine_matrix_only_turbine_cols() {
             k_max: 0,
             anticipated_lead_stages: vec![],
             anticipated_thermal_indices: vec![],
+            n_pumping: 0,
         },
         &FphaColumnLayout {
             hydro_indices: vec![],
@@ -8597,6 +8609,7 @@ fn min_generation_constant_productivity_coefficients() {
             k_max: 0,
             anticipated_lead_stages: vec![],
             anticipated_thermal_indices: vec![],
+            n_pumping: 0,
         },
         &FphaColumnLayout {
             hydro_indices: vec![],
@@ -8644,6 +8657,7 @@ fn turbine_column_lower_bound_is_zero() {
             k_max: 0,
             anticipated_lead_stages: vec![],
             anticipated_thermal_indices: vec![],
+            n_pumping: 0,
         },
         &FphaColumnLayout {
             hydro_indices: vec![],
@@ -8690,6 +8704,7 @@ fn operational_violation_rows_outside_dual_relevant() {
             k_max: 0,
             anticipated_lead_stages: vec![],
             anticipated_thermal_indices: vec![],
+            n_pumping: 0,
         },
         &FphaColumnLayout {
             hydro_indices: vec![],
@@ -8747,6 +8762,7 @@ fn diagnostic_template_operational_violation_correctness() {
             k_max: 0,
             anticipated_lead_stages: vec![],
             anticipated_thermal_indices: vec![],
+            n_pumping: 0,
         },
         &FphaColumnLayout {
             hydro_indices: vec![],

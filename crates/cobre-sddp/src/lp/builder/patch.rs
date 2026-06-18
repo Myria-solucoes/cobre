@@ -1001,6 +1001,7 @@ mod tests {
                 k_max: 2,
                 anticipated_lead_stages: vec![2],
                 anticipated_thermal_indices: vec![0],
+                n_pumping: 0,
             },
             &FphaColumnLayout {
                 hydro_indices: vec![],
@@ -1078,6 +1079,7 @@ mod tests {
                 k_max: 0,
                 anticipated_lead_stages: vec![],
                 anticipated_thermal_indices: vec![],
+                n_pumping: 0,
             },
             &FphaColumnLayout {
                 hydro_indices: vec![],
@@ -1173,6 +1175,7 @@ mod tests {
                 k_max: 2,
                 anticipated_lead_stages: vec![2],
                 anticipated_thermal_indices: vec![0],
+                n_pumping: 0,
             },
             &FphaColumnLayout {
                 hydro_indices: vec![],

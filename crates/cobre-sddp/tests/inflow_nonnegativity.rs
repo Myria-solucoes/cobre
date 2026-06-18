@@ -462,6 +462,7 @@ fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixtur
             k_max: 0,
             anticipated_lead_stages: vec![],
             anticipated_thermal_indices: vec![],
+            n_pumping: 0,
         },
         &cobre_sddp::indexer::FphaColumnLayout {
             hydro_indices: vec![],
@@ -965,6 +966,7 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
             k_max: 0,
             anticipated_lead_stages: vec![],
             anticipated_thermal_indices: vec![],
+            n_pumping: 0,
         },
         &cobre_sddp::indexer::FphaColumnLayout {
             hydro_indices: vec![],

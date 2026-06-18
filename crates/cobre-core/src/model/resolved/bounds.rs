@@ -512,6 +512,23 @@ impl ResolvedBounds {
         self.n_stages
     }
 
+    /// Return the number of pumping stations derived from the resolved bounds table.
+    ///
+    /// Recovered from the flat `pumping` Vec length (`n_pumping * n_stages`) and
+    /// `n_stages`, not from a stored count, so it stays consistent with the table
+    /// even though `n_pumping` is never serialized. The `n_stages == 0` guard
+    /// covers [`ResolvedBounds::empty`], where dividing by zero would otherwise
+    /// be undefined; an empty table has zero pumping stations.
+    #[inline]
+    #[must_use]
+    pub fn n_pumping(&self) -> usize {
+        if self.n_stages == 0 {
+            0
+        } else {
+            self.pumping.len() / self.n_stages
+        }
+    }
+
     /// Return the stride used to index the thermal Vec.
     ///
     /// Equals `n_stages() + k_max`, where `k_max` is the maximum lead-stages
@@ -784,6 +801,55 @@ mod tests {
         let empty = ResolvedBounds::empty();
         assert_eq!(empty.thermal_stage_axis_len(), 0);
         assert_eq!(empty.n_stages(), 0);
+    }
+
+    #[test]
+    fn test_n_pumping_recovers_station_count() {
+        let table = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 0,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 2,
+                n_contracts: 0,
+                n_stages: 3,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: zero_hydro_default_for_tests(),
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        assert_eq!(table.n_pumping(), 2);
+    }
+
+    #[test]
+    fn test_n_pumping_zero_when_no_stations() {
+        let table = make_bounds_for_boundary_tests(4, 0);
+        assert_eq!(table.n_pumping(), 0);
+    }
+
+    #[test]
+    fn test_n_pumping_empty_table_is_zero() {
+        // The `n_stages == 0` guard avoids a divide-by-zero on the empty table.
+        assert_eq!(ResolvedBounds::empty().n_pumping(), 0);
     }
 
     // ─── Thermal-bounds padding boundary tests ───────────────────────────────

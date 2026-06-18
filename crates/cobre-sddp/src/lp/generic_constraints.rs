@@ -21,17 +21,26 @@
 //! The caller iterates over blocks and calls this function once per block, so
 //! the per-block expansion happens in the caller loop, not here.
 //!
+//! ## Pumping columns
+//!
+//! `PumpingFlow` resolves to the block-major pumping-flow column
+//! `col_pumping_start + p_idx * n_blks + blk`. `PumpingPower` aliases the SAME
+//! flow column scaled by the station's `consumption_mw_per_m3s` rate — power is
+//! affine in flow, so it has no column of its own (a separate column would be an
+//! unconstrained free variable). The scale matches the bus-balance coupling
+//! coefficient.
+//!
 //! ## Stub entities
 //!
-//! Variables that reference entity types with no LP columns (pumping stations,
-//! contracts, non-controllable sources) return an empty vec. This is consistent
+//! Variables that reference entity types with no LP columns (contracts,
+//! non-controllable sources, withdrawal) return an empty vec. This is consistent
 //! with the convention that the constraint term has no LP effect for those
 //! entity types.
 
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 
-use cobre_core::{CascadeTopology, ConstraintExpression, EntityId, VariableRef};
+use cobre_core::{CascadeTopology, ConstraintExpression, EntityId, PumpingStation, VariableRef};
 
 use crate::hydro_models::{ProductionModelSet, ResolvedProductionModel};
 use crate::indexer::StageIndexer;
@@ -69,6 +78,32 @@ pub(crate) struct CascadeRefs<'a, S: BuildHasher = std::hash::RandomState> {
     pub diversion_upstream: &'a HashMap<EntityId, Vec<usize>, S>,
 }
 
+/// Borrowed pumping context for resolving `PumpingFlow`/`PumpingPower`.
+///
+/// Grouped (rather than passed as more positional arguments) so
+/// [`resolve_variable_ref`] does not trip `clippy::too_many_arguments`,
+/// mirroring the [`CascadeRefs`] grouping idiom. The `PumpingFlow`/`PumpingPower`
+/// arms are the only consumers; every other arm ignores it.
+pub(crate) struct PumpingRefs<'a, S: BuildHasher = std::hash::RandomState> {
+    /// First pumping-flow column. The column for station local index `p_idx`,
+    /// block `blk` is `col_pumping_start + p_idx * n_blks + blk`.
+    ///
+    /// Sourced from `StageLayout::col_pumping_start` (the real reserved range),
+    /// **not** from `StageIndexer::pumping_flow` (a permanent `0..0` sentinel).
+    /// When `pumping_stations` is empty this value is meaningless, so the resolver
+    /// guards on the `pumping_pos` lookup before using it.
+    pub col_pumping_start: usize,
+    /// Number of operating blocks in the stage (the column-block stride).
+    pub n_blks: usize,
+    /// Pumping stations in canonical ID-sorted slot order. Indexed by the local
+    /// index `p_idx` obtained from [`PumpingRefs::pumping_pos`]; the entry's
+    /// `consumption_mw_per_m3s` is the `PumpingPower` coefficient.
+    pub pumping_stations: &'a [PumpingStation],
+    /// Station id → local index (`p_idx`) into [`PumpingRefs::pumping_stations`].
+    /// A lookup miss (unknown station, or no stations at all) yields `vec![]`.
+    pub pumping_pos: &'a HashMap<EntityId, usize, S>,
+}
+
 /// Map a [`VariableRef`] and block index to LP column indices with multipliers.
 ///
 /// Returns a `Vec<(column_index, coefficient_multiplier)>`. The caller scales
@@ -88,14 +123,17 @@ pub(crate) struct CascadeRefs<'a, S: BuildHasher = std::hash::RandomState> {
 /// - `positions` — entity position maps grouped into [`EntityPositionMaps`].
 /// - `cascade_refs` — cascade topology + diversion-into map grouped into
 ///   [`CascadeRefs`]; consulted only by the `HydroInflow` arm.
+/// - `pumping_refs` — pumping column start, block stride, and station data
+///   grouped into [`PumpingRefs`]; consulted only by the `PumpingFlow` /
+///   `PumpingPower` arms.
 ///
 /// # Returns
 ///
 /// An empty vec when:
 /// - The entity ID is not found in the relevant position map (should have been
 ///   caught by referential validation, but this is defense-in-depth).
-/// - The variable type references a stub entity with no LP columns (pumping
-///   stations, contracts, non-controllable sources, diversion, withdrawal).
+/// - The variable type references a stub entity with no LP columns (contracts,
+///   non-controllable sources, withdrawal).
 #[must_use]
 pub(crate) fn resolve_variable_ref<S: BuildHasher>(
     var_ref: &VariableRef,
@@ -106,6 +144,7 @@ pub(crate) fn resolve_variable_ref<S: BuildHasher>(
     production_models: &ProductionModelSet,
     positions: &EntityPositionMaps<'_, S>,
     cascade_refs: &CascadeRefs<'_, S>,
+    pumping_refs: &PumpingRefs<'_, S>,
 ) -> Vec<(usize, f64)> {
     let hydro_pos = positions.hydro;
     let thermal_pos = positions.thermal;
@@ -236,18 +275,31 @@ pub(crate) fn resolve_variable_ref<S: BuildHasher>(
             resolve_anticipated_decision(*thermal_id, indexer, thermal_pos)
         }
 
+        // ── Pumping columns ────────────────────────────────────────────────
+        // PumpingFlow carries +1.0; PumpingPower aliases the SAME flow column
+        // scaled by the station's consumption rate (power is affine in flow),
+        // so the coefficient is computed from `pumping_stations[p_idx]`.
+        VariableRef::PumpingFlow {
+            station_id,
+            block_id,
+        } => resolve_pumping_column(*station_id, *block_id, block_idx, pumping_refs, |_| 1.0),
+
+        VariableRef::PumpingPower {
+            station_id,
+            block_id,
+        } => resolve_pumping_column(*station_id, *block_id, block_idx, pumping_refs, |station| {
+            station.consumption_mw_per_m3s
+        }),
+
         // ── Stub entities with no LP columns ──────────────────────────────
         // The following entity types are registered in the data model but do not
         // contribute LP decision variables in this implementation:
         // - HydroWithdrawal: withdrawal is a schedule fixed by bounds, not a
         //   decision variable.
-        // - PumpingFlow, PumpingPower: pumping stations are NO-OP stubs.
         // - ContractImport, ContractExport: contracts are NO-OP stubs.
         // - NonControllableGeneration, NonControllableCurtailment: non-controllable
         //   sources are NO-OP stubs.
         VariableRef::HydroWithdrawal { .. }
-        | VariableRef::PumpingFlow { .. }
-        | VariableRef::PumpingPower { .. }
         | VariableRef::ContractImport { .. }
         | VariableRef::ContractExport { .. }
         | VariableRef::NonControllableGeneration { .. }
@@ -276,10 +328,14 @@ pub(crate) fn resolve_variable_ref<S: BuildHasher>(
 ///
 /// Every other kind is block-level: it resolves to `col_start + pos * n_blks +
 /// block_idx` (via `resolve_block_variable` / `resolve_hydro_inflow` / FPHA
-/// generation / line / deficit / excess), so distinct block indices yield
-/// distinct columns. The stub kinds (withdrawal, pumping, contracts,
-/// non-controllable) resolve to no columns at all; they are conservatively
-/// treated as block-level here so that only *provably* stock variables enable the
+/// generation / line / deficit / excess / pumping), so distinct block indices
+/// yield distinct columns. [`VariableRef::PumpingFlow`] and
+/// [`VariableRef::PumpingPower`] are block-level (their `resolve_pumping_column`
+/// column is `col_pumping_start + p_idx * n_blks + eff_blk`), so they stay in the
+/// `false` arm — classifying them "stock" would collapse a per-block pumping term
+/// to a single mis-priced row. The remaining stub kinds (withdrawal, contracts,
+/// non-controllable) resolve to no columns at all; they are conservatively treated
+/// as block-level here so that only *provably* stock variables enable the
 /// single-row collapse.
 ///
 /// The match is deliberately exhaustive (no wildcard arm): a future
@@ -602,6 +658,46 @@ fn resolve_anticipated_decision<S: BuildHasher>(
     }
 }
 
+/// Resolve `PumpingFlow`/`PumpingPower` to the block-major pumping-flow column(s).
+///
+/// Both variants resolve to the SAME flow column — `PumpingPower` has no column
+/// of its own; it aliases the flow column scaled by the station's
+/// `consumption_mw_per_m3s` (power is affine in flow). Resolving `PumpingPower`
+/// to a separate column would create an unconstrained free variable. The
+/// coefficient is therefore selected by `coeff_fn`: `PumpingFlow` passes `|_| 1.0`,
+/// `PumpingPower` passes `|s| s.consumption_mw_per_m3s` — the same alias as the
+/// bus-balance coupling coefficient.
+///
+/// Column arithmetic: `col_pumping_start + p_idx * n_blks + eff_blk` where
+/// `eff_blk = block_id.unwrap_or(block_idx)`. For `block_id = None` the caller
+/// loop supplies the effective block via `block_idx` (one resolver call per
+/// block), mirroring [`resolve_block_variable`]; this function returns a single
+/// pair per call regardless of `block_id`.
+///
+/// Returns an empty vec when the station id is unknown (a `pumping_pos` miss) or
+/// when there are no pumping stations (`pumping_pos` is empty), so `n_pumping == 0`
+/// is handled by the same lookup guard. No panic.
+fn resolve_pumping_column<S: BuildHasher>(
+    station_id: EntityId,
+    block_id: Option<usize>,
+    block_idx: usize,
+    pumping_refs: &PumpingRefs<'_, S>,
+    coeff_fn: impl Fn(&PumpingStation) -> f64,
+) -> Vec<(usize, f64)> {
+    let Some(&p_idx) = pumping_refs.pumping_pos.get(&station_id) else {
+        return vec![];
+    };
+    // Defense-in-depth: `pumping_pos` and `pumping_stations` are built from the
+    // same ID-sorted slice, so a present index is always in range; guard rather
+    // than index to uphold the no-panic contract if they ever diverge.
+    let Some(station) = pumping_refs.pumping_stations.get(p_idx) else {
+        return vec![];
+    };
+    let eff_blk = block_id.unwrap_or(block_idx);
+    let col = pumping_refs.col_pumping_start + p_idx * pumping_refs.n_blks + eff_blk;
+    vec![(col, coeff_fn(station))]
+}
+
 /// Resolve a block-level LP variable to a `(column_index, multiplier)` pair.
 ///
 /// Computes `col_start + entity_pos * n_blks + effective_block_idx` where
@@ -637,9 +733,11 @@ mod tests {
     use std::collections::HashMap;
 
     use cobre_core::entities::{HydroGenerationModel, HydroPenalties};
-    use cobre_core::{CascadeTopology, EntityId, Hydro, VariableRef};
+    use cobre_core::{CascadeTopology, EntityId, Hydro, PumpingStation, VariableRef};
 
-    use super::{CascadeRefs, resolve_variable_ref, variable_ref_is_block_independent};
+    use super::{
+        CascadeRefs, PumpingRefs, resolve_variable_ref, variable_ref_is_block_independent,
+    };
     use crate::hydro_models::{FphaPlane, ProductionModelSet, ResolvedProductionModel};
     use crate::indexer::StageIndexer;
 
@@ -742,6 +840,7 @@ mod tests {
                 k_max: 0,
                 anticipated_lead_stages: vec![],
                 anticipated_thermal_indices: vec![],
+                n_pumping: 0,
             },
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![0, 2],
@@ -864,6 +963,16 @@ mod tests {
             cascade,
             diversion_upstream,
         };
+        // Non-pumping paths ignore the pumping context; pass an empty one (no
+        // stations), so the PumpingFlow/PumpingPower lookup misses and yields [].
+        let no_stations: Vec<PumpingStation> = Vec::new();
+        let empty_pumping_pos: HashMap<EntityId, usize> = HashMap::new();
+        let pumping_refs = PumpingRefs {
+            col_pumping_start: 0,
+            n_blks: indexer.n_blks,
+            pumping_stations: &no_stations,
+            pumping_pos: &empty_pumping_pos,
+        };
         resolve_variable_ref(
             &var_ref,
             block_idx,
@@ -873,7 +982,75 @@ mod tests {
             production_models,
             &positions,
             &cascade_refs,
+            &pumping_refs,
         )
+    }
+
+    /// Resolve a `PumpingFlow`/`PumpingPower` ref with an explicit pumping
+    /// context (column start, block stride, station slice, position map).
+    ///
+    /// Threads real pumping data the way the matrix.rs caller does — sourcing
+    /// `col_pumping_start` from a `StageLayout`-style reserved range — so the
+    /// pumping arms exercise their real column arithmetic and consumption-rate
+    /// coefficient instead of the empty fixture used by [`call`].
+    #[allow(clippy::too_many_arguments)]
+    fn call_pumping(
+        var_ref: VariableRef,
+        block_idx: usize,
+        indexer: &StageIndexer,
+        production_models: &ProductionModelSet,
+        col_pumping_start: usize,
+        n_blks: usize,
+        pumping_stations: &[PumpingStation],
+        pumping_pos: &HashMap<EntityId, usize>,
+    ) -> Vec<(usize, f64)> {
+        let empty: HashMap<EntityId, usize> = HashMap::new();
+        let positions = super::EntityPositionMaps {
+            hydro: &empty,
+            thermal: &empty,
+            bus: &empty,
+            line: &empty,
+        };
+        let cascade = empty_cascade();
+        let diversion_upstream: HashMap<EntityId, Vec<usize>> = HashMap::new();
+        let cascade_refs = CascadeRefs {
+            cascade: &cascade,
+            diversion_upstream: &diversion_upstream,
+        };
+        let pumping_refs = PumpingRefs {
+            col_pumping_start,
+            n_blks,
+            pumping_stations,
+            pumping_pos,
+        };
+        resolve_variable_ref(
+            &var_ref,
+            block_idx,
+            n_blks,
+            0, // stage_idx = 0
+            indexer,
+            production_models,
+            &positions,
+            &cascade_refs,
+            &pumping_refs,
+        )
+    }
+
+    /// A pumping station carrying a `consumption_mw_per_m3s` rate; every other
+    /// field is an inert value the resolver does not read.
+    fn make_pumping_station(id: i32, consumption_mw_per_m3s: f64) -> PumpingStation {
+        PumpingStation {
+            id: EntityId(id),
+            name: String::new(),
+            bus_id: EntityId(0),
+            source_hydro_id: EntityId(0),
+            destination_hydro_id: EntityId(0),
+            entry_stage_id: None,
+            exit_stage_id: None,
+            consumption_mw_per_m3s,
+            min_flow_m3s: 0.0,
+            max_flow_m3s: 1.0,
+        }
     }
 
     // ── ThermalGeneration tests ───────────────────────────────────────────────
@@ -1212,6 +1389,7 @@ mod tests {
                 k_max: 0,
                 anticipated_lead_stages: vec![],
                 anticipated_thermal_indices: vec![],
+                n_pumping: 0,
             },
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
@@ -1249,6 +1427,14 @@ mod tests {
             cascade: &cascade,
             diversion_upstream: &diversion_upstream,
         };
+        let no_stations: Vec<PumpingStation> = Vec::new();
+        let empty_pumping_pos: HashMap<EntityId, usize> = HashMap::new();
+        let pumping_refs = PumpingRefs {
+            col_pumping_start: 0,
+            n_blks: 1,
+            pumping_stations: &no_stations,
+            pumping_pos: &empty_pumping_pos,
+        };
         let result = resolve_variable_ref(
             &VariableRef::HydroEvaporation {
                 hydro_id: EntityId(10),
@@ -1260,6 +1446,7 @@ mod tests {
             &prod_models,
             &positions,
             &cascade_refs,
+            &pumping_refs,
         );
 
         assert_eq!(result, vec![(15, 1.0)]);
@@ -1282,6 +1469,7 @@ mod tests {
                 k_max: 0,
                 anticipated_lead_stages: vec![],
                 anticipated_thermal_indices: vec![],
+                n_pumping: 0,
             },
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],
@@ -1320,6 +1508,14 @@ mod tests {
             cascade: &cascade,
             diversion_upstream: &diversion_upstream,
         };
+        let no_stations: Vec<PumpingStation> = Vec::new();
+        let empty_pumping_pos: HashMap<EntityId, usize> = HashMap::new();
+        let pumping_refs = PumpingRefs {
+            col_pumping_start: 0,
+            n_blks: 1,
+            pumping_stations: &no_stations,
+            pumping_pos: &empty_pumping_pos,
+        };
         let result = resolve_variable_ref(
             &VariableRef::HydroEvaporation {
                 hydro_id: EntityId(20),
@@ -1331,66 +1527,272 @@ mod tests {
             &prod_models,
             &positions,
             &cascade_refs,
+            &pumping_refs,
         );
 
         assert!(result.is_empty());
+    }
+
+    // ── Pumping tests ─────────────────────────────────────────────────────────
+    //
+    // Shared layout: two stations id 10 (p_idx 0, consumption 2.5 MW/(m³/s)) and
+    // id 20 (p_idx 1, consumption 0.75), n_blks = 3, col_pumping_start = 100.
+    // Block-major column = col_pumping_start + p_idx * n_blks + blk.
+
+    const PUMP_COL_START: usize = 100;
+    const PUMP_N_BLKS: usize = 3;
+
+    /// Two pumping stations and the matching `pumping_pos`, in ID-sorted slot order.
+    fn make_pumping_fixture() -> (Vec<PumpingStation>, HashMap<EntityId, usize>) {
+        let stations = vec![
+            make_pumping_station(10, 2.5),
+            make_pumping_station(20, 0.75),
+        ];
+        let pumping_pos: HashMap<EntityId, usize> =
+            [(EntityId(10), 0), (EntityId(20), 1)].into_iter().collect();
+        (stations, pumping_pos)
+    }
+
+    /// `PumpingFlow{station, Some(blk)}` → the block-major flow column × 1.0.
+    ///
+    /// Station id 20 at p_idx 1, blk 2: col = 100 + 1*3 + 2 = 105, coeff 1.0.
+    #[test]
+    fn pumping_flow_resolves_to_flow_column_with_unit_coeff() {
+        let indexer = make_indexer();
+        let prod = make_production_models();
+        let (stations, ppos) = make_pumping_fixture();
+
+        let result = call_pumping(
+            VariableRef::PumpingFlow {
+                station_id: EntityId(20),
+                block_id: Some(2),
+            },
+            0, // block_idx — overridden by block_id = Some(2)
+            &indexer,
+            &prod,
+            PUMP_COL_START,
+            PUMP_N_BLKS,
+            &stations,
+            &ppos,
+        );
+
+        assert_eq!(result, vec![(PUMP_COL_START + 1 * PUMP_N_BLKS + 2, 1.0)]);
+    }
+
+    /// `PumpingPower{station, Some(blk)}` → the SAME flow column × consumption.
+    ///
+    /// Station id 10 at p_idx 0, blk 1: col = 100 + 0*3 + 1 = 101, coeff = 2.5.
+    /// The column is identical to `PumpingFlow` for the same (station, blk) — the
+    /// power term aliases the flow column, it is not a separate column.
+    #[test]
+    fn pumping_power_resolves_to_flow_column_with_consumption_coeff() {
+        let indexer = make_indexer();
+        let prod = make_production_models();
+        let (stations, ppos) = make_pumping_fixture();
+
+        let blk = 1;
+        let power = call_pumping(
+            VariableRef::PumpingPower {
+                station_id: EntityId(10),
+                block_id: Some(blk),
+            },
+            0,
+            &indexer,
+            &prod,
+            PUMP_COL_START,
+            PUMP_N_BLKS,
+            &stations,
+            &ppos,
+        );
+        let flow = call_pumping(
+            VariableRef::PumpingFlow {
+                station_id: EntityId(10),
+                block_id: Some(blk),
+            },
+            0,
+            &indexer,
+            &prod,
+            PUMP_COL_START,
+            PUMP_N_BLKS,
+            &stations,
+            &ppos,
+        );
+
+        let expected_col = PUMP_COL_START + 0 * PUMP_N_BLKS + blk;
+        assert_eq!(power, vec![(expected_col, 2.5)]);
+        // Same column as flow — PumpingPower must alias, not allocate a new column.
+        assert_eq!(power[0].0, flow[0].0);
+    }
+
+    /// `PumpingFlow{station, None}` with `block_idx = k` resolves the single
+    /// column for block `k` (`eff_blk = block_id.unwrap_or(block_idx)`), so the
+    /// caller's per-block loop yields one `(col, 1.0)` entry per block in order.
+    #[test]
+    fn pumping_flow_none_resolves_per_block() {
+        let indexer = make_indexer();
+        let prod = make_production_models();
+        let (stations, ppos) = make_pumping_fixture();
+
+        // The caller iterates blocks and calls the resolver once per block; collect
+        // those per-block resolutions to confirm one (col, 1.0) entry per block.
+        let per_block: Vec<(usize, f64)> = (0..PUMP_N_BLKS)
+            .map(|blk| {
+                let r = call_pumping(
+                    VariableRef::PumpingFlow {
+                        station_id: EntityId(10),
+                        block_id: None,
+                    },
+                    blk, // block_idx supplies the effective block
+                    &indexer,
+                    &prod,
+                    PUMP_COL_START,
+                    PUMP_N_BLKS,
+                    &stations,
+                    &ppos,
+                );
+                assert_eq!(r.len(), 1);
+                r[0]
+            })
+            .collect();
+
+        assert_eq!(
+            per_block,
+            vec![
+                (PUMP_COL_START + 0, 1.0),
+                (PUMP_COL_START + 1, 1.0),
+                (PUMP_COL_START + 2, 1.0),
+            ]
+        );
+    }
+
+    /// `PumpingPower{station, None}` resolves to the per-block column × consumption.
+    ///
+    /// Station id 20 at p_idx 1, consumption 0.75: per-block cols 103, 104, 105.
+    #[test]
+    fn pumping_power_none_resolves_per_block_with_consumption() {
+        let indexer = make_indexer();
+        let prod = make_production_models();
+        let (stations, ppos) = make_pumping_fixture();
+
+        let per_block: Vec<(usize, f64)> = (0..PUMP_N_BLKS)
+            .map(|blk| {
+                let r = call_pumping(
+                    VariableRef::PumpingPower {
+                        station_id: EntityId(20),
+                        block_id: None,
+                    },
+                    blk,
+                    &indexer,
+                    &prod,
+                    PUMP_COL_START,
+                    PUMP_N_BLKS,
+                    &stations,
+                    &ppos,
+                );
+                assert_eq!(r.len(), 1);
+                r[0]
+            })
+            .collect();
+
+        assert_eq!(
+            per_block,
+            vec![
+                (PUMP_COL_START + 1 * PUMP_N_BLKS + 0, 0.75),
+                (PUMP_COL_START + 1 * PUMP_N_BLKS + 1, 0.75),
+                (PUMP_COL_START + 1 * PUMP_N_BLKS + 2, 0.75),
+            ]
+        );
+    }
+
+    /// Unknown station id resolves to `vec![]` for both pumping variants.
+    #[test]
+    fn pumping_unknown_station_returns_empty() {
+        let indexer = make_indexer();
+        let prod = make_production_models();
+        let (stations, ppos) = make_pumping_fixture();
+
+        for var_ref in [
+            VariableRef::PumpingFlow {
+                station_id: EntityId(999),
+                block_id: None,
+            },
+            VariableRef::PumpingPower {
+                station_id: EntityId(999),
+                block_id: Some(0),
+            },
+        ] {
+            let result = call_pumping(
+                var_ref,
+                0,
+                &indexer,
+                &prod,
+                PUMP_COL_START,
+                PUMP_N_BLKS,
+                &stations,
+                &ppos,
+            );
+            assert!(
+                result.is_empty(),
+                "unknown station must return empty vec, got: {result:?} for {var_ref:?}"
+            );
+        }
+    }
+
+    /// `n_pumping == 0` (no stations) resolves to `vec![]` — the empty `pumping_pos`
+    /// lookup misses before `col_pumping_start` is ever used.
+    #[test]
+    fn pumping_no_stations_returns_empty() {
+        let indexer = make_indexer();
+        let prod = make_production_models();
+        let no_stations: Vec<PumpingStation> = Vec::new();
+        let empty_pos: HashMap<EntityId, usize> = HashMap::new();
+
+        for var_ref in [
+            VariableRef::PumpingFlow {
+                station_id: EntityId(10),
+                block_id: Some(0),
+            },
+            VariableRef::PumpingPower {
+                station_id: EntityId(10),
+                block_id: None,
+            },
+        ] {
+            let result = call_pumping(
+                var_ref,
+                0,
+                &indexer,
+                &prod,
+                PUMP_COL_START,
+                PUMP_N_BLKS,
+                &no_stations,
+                &empty_pos,
+            );
+            assert!(
+                result.is_empty(),
+                "n_pumping == 0 must return empty vec, got: {result:?} for {var_ref:?}"
+            );
+        }
+    }
+
+    /// `PumpingFlow` and `PumpingPower` are block-DEPENDENT — per-block columns,
+    /// so the single-row collapse must NOT apply (they stay in the `false` arm).
+    #[test]
+    fn pumping_variants_are_block_dependent() {
+        assert!(!variable_ref_is_block_independent(
+            &VariableRef::PumpingFlow {
+                station_id: EntityId(10),
+                block_id: None,
+            }
+        ));
+        assert!(!variable_ref_is_block_independent(
+            &VariableRef::PumpingPower {
+                station_id: EntityId(10),
+                block_id: None,
+            }
+        ));
     }
 
     // ── Stub entity tests ─────────────────────────────────────────────────────
-
-    /// PumpingFlow returns empty vec.
-    #[test]
-    fn pumping_flow_returns_empty() {
-        let indexer = make_indexer();
-        let prod = make_production_models();
-        let hpos = make_hydro_pos();
-        let tpos = make_thermal_pos();
-        let bpos = make_bus_pos();
-        let lpos = make_line_pos();
-
-        let result = call(
-            VariableRef::PumpingFlow {
-                station_id: EntityId(1),
-                block_id: None,
-            },
-            0,
-            &indexer,
-            &prod,
-            &hpos,
-            &tpos,
-            &bpos,
-            &lpos,
-        );
-
-        assert!(result.is_empty());
-    }
-
-    /// PumpingPower returns empty vec.
-    #[test]
-    fn pumping_power_returns_empty() {
-        let indexer = make_indexer();
-        let prod = make_production_models();
-        let hpos = make_hydro_pos();
-        let tpos = make_thermal_pos();
-        let bpos = make_bus_pos();
-        let lpos = make_line_pos();
-
-        let result = call(
-            VariableRef::PumpingPower {
-                station_id: EntityId(1),
-                block_id: None,
-            },
-            0,
-            &indexer,
-            &prod,
-            &hpos,
-            &tpos,
-            &bpos,
-            &lpos,
-        );
-
-        assert!(result.is_empty());
-    }
 
     /// ContractImport returns empty vec.
     #[test]
@@ -1769,6 +2171,7 @@ mod tests {
                 k_max: 2,
                 anticipated_lead_stages: vec![2],
                 anticipated_thermal_indices: vec![1], // sys pos 1 is anticipated
+                n_pumping: 0,
             },
             &crate::indexer::FphaColumnLayout {
                 hydro_indices: vec![],

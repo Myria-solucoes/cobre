@@ -189,6 +189,7 @@ mod tests {
             k_max,
             anticipated_lead_stages,
             anticipated_thermal_indices,
+            n_pumping: 0,
         }
     }
 
@@ -400,6 +401,7 @@ mod tests {
             k_max: 4,
             anticipated_lead_stages: vec![4, 2, 1],
             anticipated_thermal_indices: vec![0, 1, 2],
+            n_pumping: 0,
         };
         let mut idx = StageIndexer::with_equipment_and_evaporation(
             &counts,
@@ -488,6 +490,7 @@ mod tests {
             k_max: 2,
             anticipated_lead_stages: vec![2, 0],
             anticipated_thermal_indices: vec![0, 1],
+            n_pumping: 0,
         };
         let mut idx = StageIndexer::with_equipment_and_evaporation(
             &counts,

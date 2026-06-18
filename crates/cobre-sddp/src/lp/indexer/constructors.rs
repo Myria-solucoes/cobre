@@ -225,6 +225,10 @@ impl StageIndexer {
             generic_constraint_slack: 0..0,
             n_generic_constraints_active: 0,
             ncs_generation: 0..0,
+            // Permanent `0..0` sentinel, mirroring `ncs_generation`: the live
+            // per-stage pumping column layout is owned by `StageLayout`, not the
+            // indexer. Inherited via `..base` by `with_equipment_and_evaporation`.
+            pumping_flow: 0..0,
             z_inflow,
             z_inflow_rows,
             z_inflow_row_start,
@@ -290,7 +294,7 @@ impl StageIndexer {
     /// let counts = cobre_sddp::indexer::EquipmentCounts {
     ///     hydro_count: 1, max_par_order: 0, n_thermals: 2, n_lines: 1,
     ///     n_buses: 2, n_blks: 1, has_inflow_penalty: false, max_deficit_segments: 1,
-    ///     n_anticipated: 0, k_max: 0,
+    ///     n_anticipated: 0, k_max: 0, n_pumping: 0,
     ///     anticipated_lead_stages: vec![], anticipated_thermal_indices: vec![],
     /// };
     /// let fpha = cobre_sddp::indexer::FphaColumnLayout { hydro_indices: vec![], planes_per_hydro: vec![] };
@@ -707,6 +711,7 @@ mod tests {
             k_max: 0,
             anticipated_lead_stages: vec![],
             anticipated_thermal_indices: vec![],
+            n_pumping: 0,
         }
     }
 
@@ -761,6 +766,7 @@ mod tests {
             k_max,
             anticipated_lead_stages,
             anticipated_thermal_indices,
+            n_pumping: 0,
         }
     }
 
@@ -1495,6 +1501,7 @@ mod tests {
                     k_max: 0,
                     anticipated_lead_stages: vec![],
                     anticipated_thermal_indices: vec![],
+                    n_pumping: 0,
                 },
                 &fpha(vec![], vec![]),
                 &evap(vec![]),
@@ -1940,6 +1947,7 @@ mod tests {
                 k_max: 3,
                 anticipated_lead_stages: vec![3, 2],
                 anticipated_thermal_indices: vec![0, 2],
+                n_pumping: 0,
             },
             &fpha(vec![], vec![]),
             &evap(vec![]),
@@ -2017,6 +2025,7 @@ mod tests {
                     k_max,
                     anticipated_lead_stages: lead,
                     anticipated_thermal_indices: thermal_idx,
+                    n_pumping: 0,
                 },
                 &fpha(vec![], vec![]),
                 &evap(vec![]),
@@ -2076,6 +2085,7 @@ mod tests {
                 k_max: 3,
                 anticipated_lead_stages: vec![3, 2],
                 anticipated_thermal_indices: vec![0, 1],
+                n_pumping: 0,
             },
             &fpha(vec![], vec![]),
             &evap(vec![]),
@@ -2101,6 +2111,7 @@ mod tests {
                 k_max: 4,
                 anticipated_lead_stages: vec![4, 2, 1],
                 anticipated_thermal_indices: vec![0, 2, 5],
+                n_pumping: 0,
             },
             &fpha(vec![], vec![]),
             &evap(vec![]),
@@ -2141,6 +2152,7 @@ mod tests {
                 k_max: 3,
                 anticipated_lead_stages: vec![3, 2],
                 anticipated_thermal_indices: vec![0, 1],
+                n_pumping: 0,
             },
             &fpha(vec![], vec![]),
             &evap(vec![]),
@@ -2178,6 +2190,7 @@ mod tests {
                 k_max: 0,
                 anticipated_lead_stages: vec![],
                 anticipated_thermal_indices: vec![],
+                n_pumping: 0,
             },
             &fpha(vec![], vec![]),
             &evap(vec![]),
@@ -2209,6 +2222,7 @@ mod tests {
             k_max: 3,
             anticipated_lead_stages: vec![2, 3],
             anticipated_thermal_indices: vec![0, 1],
+            n_pumping: 0,
         };
         let idx = StageIndexer::with_equipment(&counts, &fpha(vec![], vec![]));
 
@@ -2264,6 +2278,7 @@ mod tests {
             k_max: 0,
             anticipated_lead_stages: vec![],
             anticipated_thermal_indices: vec![],
+            n_pumping: 0,
         };
         let idx_a = StageIndexer::with_equipment(&counts_a, &fpha_empty);
         assert_eq!(idx_a.n_state, 3 * (1 + 2), "n_state without anticipated");
@@ -2287,6 +2302,7 @@ mod tests {
             k_max: 3,
             anticipated_lead_stages: vec![2, 3],
             anticipated_thermal_indices: vec![0, 1],
+            n_pumping: 0,
         };
         let idx_b = StageIndexer::with_equipment(&counts_b, &fpha_empty);
         assert_eq!(

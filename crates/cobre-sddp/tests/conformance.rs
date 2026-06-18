@@ -963,6 +963,7 @@ fn indexer_constraint_inventory() {
             k_max: 0,
             anticipated_lead_stages: vec![],
             anticipated_thermal_indices: vec![],
+            n_pumping: 0,
         },
         &FphaColumnLayout {
             hydro_indices: vec![0],
@@ -1093,6 +1094,7 @@ fn constraint_extraction_regression_guard() {
             k_max: 0,
             anticipated_lead_stages: vec![],
             anticipated_thermal_indices: vec![],
+            n_pumping: 0,
         },
         &FphaColumnLayout {
             hydro_indices: vec![0],
