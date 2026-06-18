@@ -106,6 +106,18 @@ const EXPECTED_HASHES: &[(&str, &str)] = &[
         "D31",
         "29ef7566025ab1938b2d66bfbc2b4139c258ff940d0ed79cce57aedc51bd4086",
     ),
+    // Reversible plant: one pumping station lifts water from the downstream
+    // reservoir back up to the upstream one every block, with `flow.min_m3s > 0`
+    // forcing a non-degenerate transfer (and matching power draw) on every solve.
+    // The pumping column is the first deterministic case to actually participate
+    // in the LP, so this hash captures the transfer's effect on both reservoirs'
+    // storage trajectories and water values. This guard pins only the HiGHS
+    // `D32.sha256`; the CLP `D32.sha256` is verified by the slow-gated CLP
+    // `parity_hash_d32`.
+    (
+        "D32",
+        "84415630349cf19e479f1272164f52722992f11852628e3ac9e7099850e3149d",
+    ),
 ];
 
 // ---------------------------------------------------------------------------

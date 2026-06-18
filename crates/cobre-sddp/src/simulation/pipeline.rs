@@ -98,6 +98,27 @@ pub struct SimulationOutputSpec<'a> {
     /// `n_ncs_per_stage[stage]` is the number of active NCS entities at that stage.
     pub n_ncs_per_stage: &'a [usize],
 
+    /// Per-stage pumping-flow column start indices.
+    ///
+    /// `pumping_col_starts[stage]` is the column index of the first pumping-flow
+    /// variable at that stage, sourced from `StageLayout::col_pumping_start` (via
+    /// `StageTemplates`) — never from `StageIndexer::pumping_flow`, which is a
+    /// permanent `0..0` sentinel.
+    pub pumping_col_starts: &'a [usize],
+
+    /// Per-stage pumping-station counts.
+    ///
+    /// `n_pumping_per_stage[stage]` is the number of pumping stations
+    /// contributing columns at that stage.
+    pub n_pumping_per_stage: &'a [usize],
+
+    /// Per-station pumping power-consumption rate \[MW/(m³/s)\], ID-sorted to
+    /// match `entity_counts.pumping_station_ids`.
+    ///
+    /// Used by the extraction pipeline to compute
+    /// `power_consumption_mw = pumped_flow_m3s * consumption_mw_per_m3s`.
+    pub pumping_consumption_mw_per_m3s: &'a [f64],
+
     /// Per-stage active NCS entity IDs, in ID-sorted order.
     ///
     /// `ncs_entity_ids_per_stage[stage]` lists the entity IDs of NCS sources
@@ -732,6 +753,11 @@ fn extract_sim_stage_result(
     let ncs_n = output.n_ncs_per_stage.get(t).copied().unwrap_or(0);
     let ncs_col_start = output.ncs_col_starts.get(t).copied().unwrap_or(0);
     let stage_n_blks = ctx.block_counts_per_stage.get(t).copied().unwrap_or(0);
+    // Pumping-flow column base for this stage. Sourced from `StageLayout` via
+    // `StageTemplates::pumping_col_starts`, never from `StageIndexer::pumping_flow`
+    // (a permanent `0..0` sentinel).
+    let pumping_col_start = output.pumping_col_starts.get(t).copied().unwrap_or(0);
+    let n_pumping = output.n_pumping_per_stage.get(t).copied().unwrap_or(0);
     let ncs_col_upper: &[f64] =
         if n_stochastic_ncs > 0 && n_stochastic_ncs == ncs_n && !ncs_col_upper_buf.is_empty() {
             // All active NCS entities at this stage are stochastic — use the patched values.
@@ -771,6 +797,9 @@ fn extract_sim_stage_result(
                 .get(t)
                 .map_or(&[], Vec::as_slice),
             ncs_col_upper,
+            pumping_col_start,
+            n_pumping,
+            pumping_consumption_mw_per_m3s: output.pumping_consumption_mw_per_m3s,
             diversion_upstream: output.diversion_upstream,
             hydro_productivities: output
                 .hydro_productivities_per_stage
@@ -1902,6 +1931,9 @@ mod tests {
                 generic_constraint_row_entries: &[],
                 ncs_col_starts: &[],
                 n_ncs_per_stage: &[],
+                pumping_col_starts: &[],
+                n_pumping_per_stage: &[],
+                pumping_consumption_mw_per_m3s: &[],
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
@@ -2059,6 +2091,9 @@ mod tests {
                 generic_constraint_row_entries: &[],
                 ncs_col_starts: &[],
                 n_ncs_per_stage: &[],
+                pumping_col_starts: &[],
+                n_pumping_per_stage: &[],
+                pumping_consumption_mw_per_m3s: &[],
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
@@ -2237,6 +2272,9 @@ mod tests {
                 generic_constraint_row_entries: &[],
                 ncs_col_starts: &[],
                 n_ncs_per_stage: &[],
+                pumping_col_starts: &[],
+                n_pumping_per_stage: &[],
+                pumping_consumption_mw_per_m3s: &[],
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
@@ -2599,6 +2637,9 @@ mod tests {
                 generic_constraint_row_entries: &[],
                 ncs_col_starts: &[],
                 n_ncs_per_stage: &[],
+                pumping_col_starts: &[],
+                n_pumping_per_stage: &[],
+                pumping_consumption_mw_per_m3s: &[],
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
@@ -2721,6 +2762,9 @@ mod tests {
                 generic_constraint_row_entries: &[],
                 ncs_col_starts: &[],
                 n_ncs_per_stage: &[],
+                pumping_col_starts: &[],
+                n_pumping_per_stage: &[],
+                pumping_consumption_mw_per_m3s: &[],
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities_per_stage: &hprod,
@@ -3006,6 +3050,9 @@ mod tests {
                 generic_constraint_row_entries: &[],
                 ncs_col_starts: &[],
                 n_ncs_per_stage: &[],
+                pumping_col_starts: &[],
+                n_pumping_per_stage: &[],
+                pumping_consumption_mw_per_m3s: &[],
                 ncs_entity_ids_per_stage: &[],
                 diversion_upstream: &diversion,
                 hydro_productivities_per_stage: &hprod,

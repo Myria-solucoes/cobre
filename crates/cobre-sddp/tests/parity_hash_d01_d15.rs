@@ -210,6 +210,13 @@ fn case_dir(label: &str) -> std::path::PathBuf {
         // D05/D06/D07 baselines (no `reference_volume` declared there); D31
         // exercises the *declared* path end-to-end.
         "D31" => "d31-backwater-reference-volume",
+        // Reversible plant: a single pumping station lifts water from the
+        // downstream reservoir (H1) back up to the upstream one (H0) every
+        // block. The `flow.min_m3s > 0` lower bound forces a non-degenerate
+        // transfer (and the matching power draw) on every solve, so the pumping
+        // column actually participates in the LP — the storage trajectories and
+        // water values of both reservoirs absorb the coupling.
+        "D32" => "d32-reversible-plant",
         other => panic!("unknown case label: {other}"),
     };
     // Integration tests run from the crate root; fixtures live at
@@ -490,4 +497,13 @@ fn parity_hash_d17() {
 )]
 fn parity_hash_d31() {
     run_case("D31");
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+fn parity_hash_d32() {
+    run_case("D32");
 }

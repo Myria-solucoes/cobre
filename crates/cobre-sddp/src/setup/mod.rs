@@ -376,6 +376,7 @@ impl StudySetup {
             ncs_max_gen,
             ncs_allow_curtailment,
         } = build_ncs_entity_data(system, &stage_templates, &stochastic)?;
+        let pumping_consumption_mw_per_m3s = build_pumping_consumption(system);
 
         let block_counts_per_stage: Vec<usize> = stage_templates
             .block_hours_per_stage
@@ -428,6 +429,7 @@ impl StudySetup {
                 indexer,
                 stages,
                 entity_counts,
+                pumping_consumption_mw_per_m3s,
                 block_counts_per_stage,
                 stage_lag_transitions,
                 noise_group_ids,
@@ -1051,6 +1053,21 @@ fn build_entity_counts(system: &System) -> EntityCounts {
             .map(|n| n.id.0)
             .collect(),
     }
+}
+
+/// Build the per-station pumping power-consumption rates \[MW/(m³/s)\].
+///
+/// ID-sorted parallel to `EntityCounts::pumping_station_ids`: both derive from
+/// the canonical ID-ordered `system.pumping_stations()` slice, so a row's
+/// position in this slice matches its station ID's position in
+/// `pumping_station_ids`. Read by the simulation extraction pipeline to compute
+/// `power_consumption_mw = pumped_flow_m3s * consumption`.
+fn build_pumping_consumption(system: &System) -> Vec<f64> {
+    system
+        .pumping_stations()
+        .iter()
+        .map(|p| p.consumption_mw_per_m3s)
+        .collect()
 }
 
 /// Build the initial state vector from the system's initial conditions.

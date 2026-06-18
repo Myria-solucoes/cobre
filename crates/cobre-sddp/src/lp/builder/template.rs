@@ -95,6 +95,19 @@ pub struct StageTemplates {
     ///
     /// `n_ncs_per_stage[stage_idx]` is the number of active NCS entities at that stage.
     pub n_ncs_per_stage: Vec<usize>,
+    /// Per-stage pumping-flow column start indices.
+    ///
+    /// `pumping_col_starts[stage_idx]` is the column index of the first
+    /// pumping-flow variable for that stage, sourced from
+    /// `StageLayout::col_pumping_start` — never from `StageIndexer::pumping_flow`,
+    /// which is a permanent `0..0` sentinel. Pumping columns are block-major:
+    /// `pumping_col_starts[stage_idx] + p_idx * n_blks + blk`.
+    pub pumping_col_starts: Vec<usize>,
+    /// Per-stage pumping-station counts.
+    ///
+    /// `n_pumping_per_stage[stage_idx]` is the number of pumping stations
+    /// contributing columns at that stage, sourced from `StageLayout::n_pumping`.
+    pub n_pumping_per_stage: Vec<usize>,
     /// Per-stage active NCS system indices.
     ///
     /// `active_ncs_indices[stage_idx]` lists the system-level NCS indices active at
@@ -139,13 +152,14 @@ pub struct StageTemplates {
 /// Returns the template, the row index of the water-balance block
 /// (used as `base_row` by the `PatchBuffer` noise injection), the
 /// row index of the load-balance block (used for load-noise patches),
-/// the generic constraint row entries for this stage, and NCS metadata
-/// (column start, count, and active system indices).
-// Rationale: the return tuple exposes seven independently typed outputs — the template,
-// two base-row offsets, generic-constraint metadata, NCS column start/count, and active
-// NCS indices — that the caller destructures immediately into named bindings.  A type alias
-// or wrapper struct would hide the concrete types at the four call sites and force readers
-// to look up the alias to understand the destructure.
+/// the generic constraint row entries for this stage, NCS metadata
+/// (column start, count, and active system indices), and pumping metadata
+/// (column start and station count).
+// Rationale: the return tuple exposes nine independently typed outputs — the template,
+// two base-row offsets, generic-constraint metadata, NCS column start/count, active NCS
+// indices, and pumping column start/count — that the caller destructures immediately into
+// named bindings.  A type alias or wrapper struct would hide the concrete types at the
+// call sites and force readers to look up the alias to understand the destructure.
 #[allow(clippy::type_complexity)]
 pub(super) fn build_single_stage_template(
     ctx: &TemplateBuildCtx<'_>,
@@ -159,6 +173,8 @@ pub(super) fn build_single_stage_template(
     usize,
     usize,
     Vec<usize>,
+    usize,
+    usize,
 ) {
     let layout = StageLayout::new(ctx, stage, stage_idx);
     let stage_base_row = layout.row_water_balance_start;
@@ -245,6 +261,8 @@ pub(super) fn build_single_stage_template(
         layout.col_ncs_start,
         layout.n_ncs,
         layout.active_ncs_indices,
+        layout.col_pumping_start,
+        layout.n_pumping,
     )
 }
 
@@ -413,6 +431,8 @@ pub fn build_stage_templates(
             generic_constraint_row_entries: Vec::new(),
             ncs_col_starts: Vec::new(),
             n_ncs_per_stage: Vec::new(),
+            pumping_col_starts: Vec::new(),
+            n_pumping_per_stage: Vec::new(),
             active_ncs_indices: Vec::new(),
             diversion_upstream: HashMap::new(),
             hydro_productivities_per_stage: Vec::new(),
@@ -446,6 +466,8 @@ pub fn build_stage_templates(
     let mut generic_constraint_row_entries = Vec::with_capacity(n_study);
     let mut ncs_col_starts = Vec::with_capacity(n_study);
     let mut n_ncs_per_stage = Vec::with_capacity(n_study);
+    let mut pumping_col_starts = Vec::with_capacity(n_study);
+    let mut n_pumping_per_stage = Vec::with_capacity(n_study);
     let mut active_ncs_indices_per_stage = Vec::with_capacity(n_study);
     for (stage_idx, stage) in study_stages.iter().enumerate() {
         let (
@@ -456,6 +478,8 @@ pub fn build_stage_templates(
             ncs_col_start,
             ncs_count,
             ncs_active,
+            pumping_col_start,
+            pumping_count,
         ) = build_single_stage_template(&ctx, stage, stage_idx);
         templates.push(template);
         base_rows.push(stage_base_row);
@@ -463,6 +487,8 @@ pub fn build_stage_templates(
         generic_constraint_row_entries.push(gc_entries);
         ncs_col_starts.push(ncs_col_start);
         n_ncs_per_stage.push(ncs_count);
+        pumping_col_starts.push(pumping_col_start);
+        n_pumping_per_stage.push(pumping_count);
         active_ncs_indices_per_stage.push(ncs_active);
     }
 
@@ -473,6 +499,8 @@ pub fn build_stage_templates(
         generic_constraint_row_entries,
         ncs_col_starts,
         n_ncs_per_stage,
+        pumping_col_starts,
+        n_pumping_per_stage,
         active_ncs_indices_per_stage,
         load_bus_indices,
         diversion_upstream_output,
@@ -676,7 +704,7 @@ fn build_template_build_ctx<'a>(
 /// `StageTemplates` struct returned by `build_stage_templates`.
 ///
 /// Called once, immediately after the per-stage loop completes.
-// RATIONALE: 15 args are the heterogeneous per-stage accumulator Vecs produced by the
+// RATIONALE: the args are the heterogeneous per-stage accumulator Vecs produced by the
 // per-stage build loop, each of a distinct type (templates, base_rows, ncs_col_starts, etc.).
 // They cannot be grouped into a context struct without either re-allocating them after the
 // loop or wrapping in Option, both of which add cost on this post-loop cold path.
@@ -688,6 +716,8 @@ fn assemble_stage_templates_output(
     generic_constraint_row_entries: Vec<Vec<GenericConstraintRowEntry>>,
     ncs_col_starts: Vec<usize>,
     n_ncs_per_stage: Vec<usize>,
+    pumping_col_starts: Vec<usize>,
+    n_pumping_per_stage: Vec<usize>,
     active_ncs_indices_per_stage: Vec<Vec<usize>>,
     load_bus_indices: Vec<usize>,
     diversion_upstream_output: HashMap<EntityId, Vec<usize>>,
@@ -731,6 +761,8 @@ fn assemble_stage_templates_output(
         generic_constraint_row_entries,
         ncs_col_starts,
         n_ncs_per_stage,
+        pumping_col_starts,
+        n_pumping_per_stage,
         active_ncs_indices: active_ncs_indices_per_stage,
         diversion_upstream: diversion_upstream_output,
         hydro_productivities_per_stage,
@@ -1221,6 +1253,65 @@ mod tests {
             layout.n_pumping, ctx.n_pumping,
             "StageLayout.n_pumping must equal the ctx-sourced count"
         );
+    }
+
+    /// `build_stage_templates` records the layout-owned pumping column base for
+    /// every stage: `pumping_col_starts[t]` equals
+    /// `StageLayout::new(..).col_pumping_start`, and `n_pumping_per_stage[t]`
+    /// equals `StageLayout::new(..).n_pumping`.
+    ///
+    /// This pins the threading contract the simulation extraction pipeline reads
+    /// from: the column base is sourced from the layout, never from
+    /// `StageIndexer::pumping_flow` (a permanent `0..0` sentinel).
+    #[test]
+    fn build_stage_templates_records_layout_pumping_col_start_per_stage() {
+        let stations = vec![fixture_pumping_station(5), fixture_pumping_station(2)];
+        let system = system_with_pumping_stations(stations);
+        let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
+        let par_lp = PrecomputedPar::default();
+        let normal_lp = cobre_stochastic::normal::precompute::PrecomputedNormal::default();
+        let resolved_params = empty_resolved_params();
+
+        let templates = super::build_stage_templates(
+            &system,
+            InflowNonNegativityMethod::None,
+            &par_lp,
+            &normal_lp,
+            &hydro_result.production,
+            &hydro_result.evaporation,
+            &resolved_params,
+        )
+        .expect("build_stage_templates: valid system");
+
+        // Rebuild the ctx once so each stage's StageLayout can be reconstructed
+        // and compared against the recorded per-stage value.
+        let (ctx, _, _) = super::build_template_build_ctx(
+            &system,
+            InflowNonNegativityMethod::None,
+            &par_lp,
+            &hydro_result.production,
+            &hydro_result.evaporation,
+            &resolved_params,
+        );
+        let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
+
+        assert_eq!(templates.pumping_col_starts.len(), study_stages.len());
+        assert_eq!(templates.n_pumping_per_stage.len(), study_stages.len());
+        for (t, stage) in study_stages.iter().enumerate() {
+            let layout = super::super::layout::StageLayout::new(&ctx, stage, t);
+            assert_eq!(
+                templates.pumping_col_starts[t], layout.col_pumping_start,
+                "stage {t}: pumping_col_starts must equal layout.col_pumping_start"
+            );
+            assert_eq!(
+                templates.n_pumping_per_stage[t], layout.n_pumping,
+                "stage {t}: n_pumping_per_stage must equal layout.n_pumping"
+            );
+            assert_eq!(
+                templates.n_pumping_per_stage[t], 2,
+                "stage {t}: two stations were declared"
+            );
+        }
     }
 
     // ── AC-1 ─────────────────────────────────────────────────────────────────
@@ -1849,9 +1940,9 @@ mod tests {
         for stage_idx in [0_usize, 2, 3] {
             let stage = study_stages[stage_idx];
 
-            let (tpl_a, _, _, _, _, _, _) =
+            let (tpl_a, _, _, _, _, _, _, _, _) =
                 super::build_single_stage_template(&ctx_a, stage, stage_idx);
-            let (tpl_b, _, _, _, _, _, _) =
+            let (tpl_b, _, _, _, _, _, _, _, _) =
                 super::build_single_stage_template(&ctx_b, stage, stage_idx);
 
             // Reconstruct the indexer for tpl_a / tpl_b to find the

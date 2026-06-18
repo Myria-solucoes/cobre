@@ -651,7 +651,7 @@ pub struct EquipmentCounts {
     /// read** by [`StageIndexer::with_equipment_and_evaporation`]: the indexer's
     /// `pumping_flow` field is a permanent `0..0` sentinel. The real pumping-flow
     /// column block (`n_pumping * n_blks`, block-major, reserved between the NCS
-    /// region and the generic-slack columns) is owned by [`StageLayout`], which
+    /// region and the generic-slack columns) is owned by `StageLayout`, which
     /// reads its station count from `ctx.n_pumping`, not from this field.
     pub n_pumping: usize,
     /// Per-plant `lead_stages` (`K_i`) for the anticipated thermals.

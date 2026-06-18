@@ -415,9 +415,9 @@ fn resolve_hydro_storage<S: BuildHasher>(
 /// **not** the `−τ`-weighted (hm³) storage-balance row. The `−τ` sign and `τ`
 /// weighting are specific to the storage-balance row and must not be copied here.
 /// `h`'s own outflows (turbine/spillage/diversion), evaporation, withdrawal
-/// slacks, AR-lag-`ψ`, and pumped inflow (a NO-OP stub until pumping columns
-/// exist) are **excluded**: they are storage/loss/outflow terms or have no LP
-/// column.
+/// slacks, AR-lag-`ψ`, and pumped transfer are **excluded**: they are
+/// storage-balance (`±τ`-weighted hm³) / loss / outflow terms or have no LP
+/// column, not instantaneous-rate inflow terms.
 ///
 /// Column arithmetic mirrors [`resolve_block_variable`]:
 /// `col_start + pos * n_blks + eff_blk` with `eff_blk = block_id.unwrap_or(block_idx)`.

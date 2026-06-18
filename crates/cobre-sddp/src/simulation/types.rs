@@ -276,7 +276,12 @@ pub struct SimulationPumpingResult {
     pub pumped_flow_m3s: f64,
     /// Active power consumed by pumping in MW.
     pub power_consumption_mw: f64,
-    /// Imputed pumping cost.
+    /// Imputed pumping cost; the default is a fixed `0.0`. There is no
+    /// per-station cost input and no cost parquet, so this is the single
+    /// documented value. The forbidden alternative is recomputing a cost in the
+    /// output writer (`build_pumping_batch` forwards this verbatim into
+    /// `pumping_cost`); a writer-side cost would diverge from this default with
+    /// no authoritative source to reconcile against.
     pub pumping_cost: f64,
     /// Operative state code for this station at this block.
     pub operative_state_code: i8,

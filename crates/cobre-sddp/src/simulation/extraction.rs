@@ -23,10 +23,10 @@
 //! The full column layout — including turbine, spillage, diversion, thermal,
 //! line, deficit, excess, inflow-slack, FPHA generation, evaporation,
 //! withdrawal slacks, operational violation slacks (outflow/turbine/generation
-//! min/max), NCS generation, and generic constraint slacks — is defined by
-//! [`StageIndexer`] and `StageLayout`.
-//! Stub entity types (pumping stations, contracts) that contribute zero LP
-//! variables remain as zero-valued placeholders.
+//! min/max), NCS generation, pumping flow, and generic constraint slacks — is
+//! defined by [`StageIndexer`] and `StageLayout`.
+//! Stub entity types (contracts) that contribute zero LP variables remain as
+//! zero-valued placeholders.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -214,10 +214,10 @@ fn compute_anticipated_committed_mw(
 /// System entity counts needed to populate per-entity result [`Vec`]s.
 ///
 /// All counts are the number of entities that participate in the LP at runtime
-/// (i.e., entities in their active operative state). Stub entity types
-/// (contracts, pumping stations, non-controllables) that contribute zero LP
-/// variables still need counts so the caller can allocate zero-length or
-/// pre-allocated [`Vec`]s as appropriate.
+/// (i.e., entities in their active operative state). Entity types that
+/// contribute no columns at a given stage (e.g. contracts, which remain
+/// zero-valued stubs) still need counts so the caller can allocate zero-length
+/// or pre-allocated [`Vec`]s as appropriate.
 ///
 /// # Entity IDs
 ///
@@ -373,6 +373,24 @@ pub struct StageExtractionSpec<'a> {
     /// representing the maximum generation for that (ncs, block) pair.
     /// Empty when no NCS entities are active.
     pub ncs_col_upper: &'a [f64],
+    /// Column index of the first pumping-flow variable at this stage.
+    ///
+    /// Pumping columns are laid out block-major as
+    /// `pumping_col_start + p_idx * n_blks + blk`. Sourced from
+    /// `StageLayout::col_pumping_start` (via `StageTemplates::pumping_col_starts`)
+    /// — never from `StageIndexer::pumping_flow`, which is a permanent `0..0`
+    /// sentinel and would read garbage from column 0. Zero when no pumping
+    /// stations are active.
+    pub pumping_col_start: usize,
+    /// Number of pumping stations contributing columns at this stage.
+    pub n_pumping: usize,
+    /// Per-station pumping power-consumption rate \[MW/(m³/s)\].
+    ///
+    /// Length equals `n_pumping`, ID-sorted to match
+    /// `entity_counts.pumping_station_ids`. Used to compute
+    /// `power_consumption_mw = pumped_flow_m3s * consumption`. Empty when no
+    /// pumping stations are active.
+    pub pumping_consumption_mw_per_m3s: &'a [f64],
     /// Mapping from target hydro ID to source hydro indices that divert to it.
     ///
     /// Used by the extraction pipeline to compute `diverted_inflow_m3s` for
@@ -1439,11 +1457,80 @@ fn extract_non_controllables(
     (results, total_curtailment_cost)
 }
 
-/// Extract stub (zero-value) result collections for currently-unmodeled entity types.
+/// Extract one [`SimulationPumpingResult`] per (station, block) from the solved
+/// pumping-flow primals.
 ///
-/// Inflow lags are not stubs (they read real primal values), but are grouped
-/// here because they share the per-entity iteration pattern.  Pumping stations
-/// and contracts produce zero-valued placeholders.
+/// Reads `view.primal[pumping_col_start + p_idx * n_blks + blk]` for the pumped
+/// flow — block-major, mirroring [`extract_non_controllables`]' per-block read.
+/// `view.primal` is already unscaled (the extraction boundary unscales upstream),
+/// so the flow is NOT divided by `col_scale` — consistent with the NCS
+/// `generation_mw` read. The per-block power term is
+/// `power_consumption_mw = pumped_flow_m3s * consumption[p_idx]`, using the same
+/// `consumption_mw_per_m3s` coefficient the `PumpingPower` resolver arm applies
+/// on the bus load-balance row.
+///
+/// `pumping_cost` is imputed as `0.0` here (finalized downstream by the output
+/// writer). `block_id` is `Some(blk)` for every row.
+///
+/// Returns an empty `Vec` when `n_pumping == 0 || n_blks == 0` (the loop body
+/// never runs).
+fn extract_pumping_stations(
+    view: &SolutionView<'_>,
+    spec: &StageExtractionSpec<'_>,
+    stage_id: u32,
+) -> Vec<SimulationPumpingResult> {
+    let n_pumping = spec.n_pumping;
+    let n_blks = spec.indexer.n_blks;
+    if n_pumping == 0 || n_blks == 0 {
+        return Vec::new();
+    }
+
+    let col_start = spec.pumping_col_start;
+    debug_assert_eq!(
+        spec.entity_counts.pumping_station_ids.len(),
+        n_pumping,
+        "pumping_station_ids len {} != n_pumping {n_pumping}",
+        spec.entity_counts.pumping_station_ids.len()
+    );
+    debug_assert_eq!(
+        spec.pumping_consumption_mw_per_m3s.len(),
+        n_pumping,
+        "pumping_consumption_mw_per_m3s len {} != n_pumping {n_pumping}",
+        spec.pumping_consumption_mw_per_m3s.len()
+    );
+    debug_assert!(
+        view.primal.len() >= col_start + n_pumping * n_blks,
+        "pumping primal out of bounds: need {}, have {}",
+        col_start + n_pumping * n_blks,
+        view.primal.len()
+    );
+
+    let mut results = Vec::with_capacity(n_pumping * n_blks);
+    for (p_idx, &pumping_station_id) in spec.entity_counts.pumping_station_ids.iter().enumerate() {
+        let consumption = spec.pumping_consumption_mw_per_m3s[p_idx];
+        for blk in 0..n_blks {
+            let col = col_start + p_idx * n_blks + blk;
+            let pumped_flow_m3s = view.primal[col];
+            #[allow(clippy::cast_possible_truncation)]
+            results.push(SimulationPumpingResult {
+                stage_id,
+                block_id: Some(blk as u32),
+                pumping_station_id,
+                pumped_flow_m3s,
+                power_consumption_mw: pumped_flow_m3s * consumption,
+                pumping_cost: 0.0,
+                operative_state_code: 1,
+            });
+        }
+    }
+    results
+}
+
+/// Extract per-entity result collections grouped by their shared iteration pattern.
+///
+/// Inflow lags and pumping stations read real primal values; contracts produce
+/// zero-valued placeholders (an unmodeled entity type). Pumping extraction is
+/// delegated to [`extract_pumping_stations`].
 fn extract_stub_collections(
     view: &SolutionView<'_>,
     spec: &StageExtractionSpec<'_>,
@@ -1472,20 +1559,7 @@ fn extract_stub_collections(
             })
         })
         .collect();
-    let pumping_stations: Vec<SimulationPumpingResult> = spec
-        .entity_counts
-        .pumping_station_ids
-        .iter()
-        .map(|&pumping_station_id| SimulationPumpingResult {
-            stage_id,
-            block_id: None,
-            pumping_station_id,
-            pumped_flow_m3s: 0.0,
-            power_consumption_mw: 0.0,
-            pumping_cost: 0.0,
-            operative_state_code: 1,
-        })
-        .collect();
+    let pumping_stations = extract_pumping_stations(view, spec, stage_id);
     let contracts: Vec<SimulationContractResult> = spec
         .entity_counts
         .contract_ids
@@ -1592,7 +1666,7 @@ mod tests {
 
     use super::{
         EntityCounts, SolutionView, StageExtractionSpec, accumulate_category_costs,
-        assign_scenarios, extract_stage_result,
+        assign_scenarios, extract_pumping_stations, extract_stage_result,
     };
     use crate::indexer::StageIndexer;
     use crate::simulation::types::{ScenarioCategoryCosts, SimulationCostResult};
@@ -1757,6 +1831,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0, 1.0],
                 col_scale: &[],
@@ -1804,6 +1881,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0, 1.0],
                 col_scale: &[],
@@ -1851,6 +1931,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0, 1.0],
                 col_scale: &[],
@@ -1900,6 +1983,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0, 1.0],
                 col_scale: &[],
@@ -1961,6 +2047,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0, 1.0],
                 col_scale: &[],
@@ -2004,6 +2093,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0, 1.0],
                 col_scale: &[],
@@ -2053,6 +2145,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0, 1.0],
                 col_scale: &[],
@@ -2213,6 +2308,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0, 1.0],
                 col_scale: &[],
@@ -2358,6 +2456,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[],
                 col_scale: &[],
@@ -2458,6 +2559,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[],
                 col_scale: &[],
@@ -2571,6 +2675,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[],
                 col_scale: &[],
@@ -2635,6 +2742,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[],
                 col_scale: &[],
@@ -2697,6 +2807,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[],
                 col_scale: &[],
@@ -2784,6 +2897,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[],
                 col_scale: &[],
@@ -2871,6 +2987,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[],
                 col_scale: &[],
@@ -2990,6 +3109,9 @@ mod tests {
             n_ncs: 0,
             ncs_entity_ids: &[],
             ncs_col_upper: &[],
+            pumping_col_start: 0,
+            n_pumping: 0,
+            pumping_consumption_mw_per_m3s: &[],
             diversion_upstream: &HashMap::new(),
             hydro_productivities: &[],
             col_scale: &[],
@@ -3046,6 +3168,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[],
                 col_scale: &[],
@@ -3125,6 +3250,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[],
                 col_scale: &[],
@@ -3189,6 +3317,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[],
                 col_scale: &[],
@@ -3279,6 +3410,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[],
                 col_scale: &[],
@@ -3362,6 +3496,9 @@ mod tests {
             n_ncs: 0,
             ncs_entity_ids: &[],
             ncs_col_upper: &[],
+            pumping_col_start: 0,
+            n_pumping: 0,
+            pumping_consumption_mw_per_m3s: &[],
             diversion_upstream: &HashMap::new(),
             hydro_productivities: &[],
             col_scale: &[],
@@ -3425,6 +3562,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[],
                 col_scale: &[],
@@ -3507,6 +3647,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[],
                 col_scale: &[],
@@ -3605,6 +3748,9 @@ mod tests {
             n_ncs: 0,
             ncs_entity_ids: &[],
             ncs_col_upper: &[],
+            pumping_col_start: 0,
+            n_pumping: 0,
+            pumping_consumption_mw_per_m3s: &[],
             diversion_upstream: &HashMap::new(),
             hydro_productivities: &[],
             col_scale: &[],
@@ -3693,6 +3839,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0],
                 col_scale: &[],
@@ -3970,6 +4119,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0, 1.0],
                 col_scale: &[],
@@ -4067,6 +4219,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0, 1.0],
                 col_scale: &[],
@@ -4175,6 +4330,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0, 1.0],
                 col_scale: &[],
@@ -4296,6 +4454,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[0.0, 1.5],
                 col_scale: &[],
@@ -4371,6 +4532,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[0.0, 1.5],
                 col_scale: &[],
@@ -4488,6 +4652,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0],
                 col_scale: &[],
@@ -4564,6 +4731,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0],
                 col_scale: &[],
@@ -4646,6 +4816,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[0.0, 1.5],
                 col_scale: &[],
@@ -4722,6 +4895,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[0.0, 1.5],
                 col_scale: &[],
@@ -4816,6 +4992,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[0.0, 1.5],
                 col_scale: &col_scale,
@@ -4932,6 +5111,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[0.0, 1.5],
                 col_scale: &[],
@@ -5061,6 +5243,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0],
                 col_scale: &[],
@@ -5122,6 +5307,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0],
                 col_scale: &[],
@@ -5172,6 +5360,9 @@ mod tests {
                 n_ncs: 0,
                 ncs_entity_ids: &[],
                 ncs_col_upper: &[],
+                pumping_col_start: 0,
+                n_pumping: 0,
+                pumping_consumption_mw_per_m3s: &[],
                 diversion_upstream: &HashMap::new(),
                 hydro_productivities: &[1.0],
                 col_scale: &[],
@@ -5192,5 +5383,184 @@ mod tests {
             (rho_acum - 3.5).abs() < 1e-12,
             "stage rho_acum = {rho_acum}"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // extract_pumping_stations
+    // -------------------------------------------------------------------------
+
+    /// `EntityCounts` carrying a single pumping station (id `42`) and no other
+    /// entities, for the pumping-extraction tests.
+    fn entity_counts_one_pumping_station() -> EntityCounts {
+        EntityCounts {
+            hydro_ids: vec![],
+            hydro_productivities: vec![],
+            thermal_ids: vec![],
+            line_ids: vec![],
+            bus_ids: vec![],
+            pumping_station_ids: vec![42],
+            contract_ids: vec![],
+            non_controllable_ids: vec![],
+        }
+    }
+
+    /// Build a `StageExtractionSpec` whose only meaningful fields are the
+    /// pumping inputs; all other fields are inert defaults.  The indexer's
+    /// `n_blks` is set to `n_blks` so the block loop runs.
+    fn pumping_only_spec<'a>(
+        indexer: &'a StageIndexer,
+        entity_counts: &'a EntityCounts,
+        pumping_col_start: usize,
+        n_pumping: usize,
+        consumption: &'a [f64],
+        ec: &'a crate::energy_conversion::EnergyConversionSet,
+        diversion: &'a HashMap<cobre_core::EntityId, Vec<usize>>,
+    ) -> StageExtractionSpec<'a> {
+        StageExtractionSpec {
+            indexer,
+            entity_counts,
+            inflow_m3s_per_hydro: &[],
+            block_hours: &[],
+            generic_constraint_entries: &[],
+            ncs_col_start: 0,
+            n_ncs: 0,
+            ncs_entity_ids: &[],
+            ncs_col_upper: &[],
+            pumping_col_start,
+            n_pumping,
+            pumping_consumption_mw_per_m3s: consumption,
+            diversion_upstream: diversion,
+            hydro_productivities: &[],
+            col_scale: &[],
+            row_scale: &[],
+            cumulative_discount_factor: 1.0,
+            energy_conversion: ec,
+            hydro_min_storage_hm3: &[],
+            stage_index: 0,
+            n_stages: 1,
+        }
+    }
+
+    /// AC-1: one station, two blocks, distinct flow primals
+    /// (`[7.0, 3.0]`) and a non-unit `consumption_mw_per_m3s = 0.5`.
+    ///
+    /// The pumping columns are placed at `pumping_col_start = 4` in the primal,
+    /// block-major (`col + p_idx * n_blks + blk`).  Each row's
+    /// `pumped_flow_m3s` is read directly from `view.primal` (already unscaled —
+    /// no `col_scale` division) and `power_consumption_mw = flow * consumption`.
+    #[test]
+    fn extract_pumping_two_blocks_reads_per_block_flow_and_power() {
+        let mut indexer = StageIndexer::new(0, 0);
+        indexer.n_blks = 2;
+        let entity_counts = entity_counts_one_pumping_station();
+        let ec = zero_energy_conversion(0, 1);
+        let diversion = HashMap::new();
+        let consumption = [0.5_f64];
+
+        // Primal layout: filler columns 0..4, then pumping block at 4..6:
+        //   col 4 = (station 0, block 0) = 7.0
+        //   col 5 = (station 0, block 1) = 3.0
+        let primal = vec![0.0, 0.0, 0.0, 0.0, 7.0, 3.0];
+        let dual = vec![0.0; 1];
+        let view = SolutionView {
+            primal: &primal,
+            dual: &dual,
+            objective: 0.0,
+            objective_coeffs: &[],
+            row_lower: &[],
+        };
+
+        let spec = pumping_only_spec(
+            &indexer,
+            &entity_counts,
+            4,
+            1,
+            &consumption,
+            &ec,
+            &diversion,
+        );
+
+        let rows = extract_pumping_stations(&view, &spec, 9);
+
+        assert_eq!(rows.len(), 2, "one station x two blocks = two rows");
+
+        assert_eq!(rows[0].stage_id, 9);
+        assert_eq!(rows[0].pumping_station_id, 42);
+        assert_eq!(rows[0].block_id, Some(0));
+        assert_eq!(rows[0].pumped_flow_m3s, 7.0);
+        assert_eq!(rows[0].power_consumption_mw, 3.5); // 7.0 * 0.5
+        assert_eq!(rows[0].pumping_cost, 0.0);
+        assert_eq!(rows[0].operative_state_code, 1);
+
+        assert_eq!(rows[1].block_id, Some(1));
+        assert_eq!(rows[1].pumped_flow_m3s, 3.0);
+        assert_eq!(rows[1].power_consumption_mw, 1.5); // 3.0 * 0.5
+        assert_eq!(rows[1].pumping_station_id, 42);
+    }
+
+    /// AC-2: zero pumping stations yields an empty `Vec` (the block loop never
+    /// runs), independent of `n_blks`.
+    #[test]
+    fn extract_pumping_zero_stations_is_empty() {
+        let mut indexer = StageIndexer::new(0, 0);
+        indexer.n_blks = 2;
+        let entity_counts = EntityCounts {
+            hydro_ids: vec![],
+            hydro_productivities: vec![],
+            thermal_ids: vec![],
+            line_ids: vec![],
+            bus_ids: vec![],
+            pumping_station_ids: vec![],
+            contract_ids: vec![],
+            non_controllable_ids: vec![],
+        };
+        let ec = zero_energy_conversion(0, 1);
+        let diversion = HashMap::new();
+        let primal = vec![0.0; 4];
+        let dual = vec![0.0; 1];
+        let view = SolutionView {
+            primal: &primal,
+            dual: &dual,
+            objective: 0.0,
+            objective_coeffs: &[],
+            row_lower: &[],
+        };
+
+        let spec = pumping_only_spec(&indexer, &entity_counts, 0, 0, &[], &ec, &diversion);
+
+        let rows = extract_pumping_stations(&view, &spec, 0);
+        assert!(rows.is_empty(), "no stations => no rows");
+    }
+
+    /// `n_blks == 0` also yields an empty `Vec` even with an active station.
+    #[test]
+    fn extract_pumping_zero_blocks_is_empty() {
+        let indexer = StageIndexer::new(0, 0); // n_blks defaults to 0
+        let entity_counts = entity_counts_one_pumping_station();
+        let ec = zero_energy_conversion(0, 1);
+        let diversion = HashMap::new();
+        let consumption = [0.5_f64];
+        let primal = vec![0.0; 4];
+        let dual = vec![0.0; 1];
+        let view = SolutionView {
+            primal: &primal,
+            dual: &dual,
+            objective: 0.0,
+            objective_coeffs: &[],
+            row_lower: &[],
+        };
+
+        let spec = pumping_only_spec(
+            &indexer,
+            &entity_counts,
+            0,
+            1,
+            &consumption,
+            &ec,
+            &diversion,
+        );
+
+        let rows = extract_pumping_stations(&view, &spec, 0);
+        assert!(rows.is_empty(), "n_blks == 0 => no rows");
     }
 }

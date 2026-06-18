@@ -30,6 +30,16 @@ pub struct StageData {
     /// Entity IDs and productivities for all dispatch entities.
     pub(crate) entity_counts: EntityCounts,
 
+    /// Per-station pumping power-consumption rate \[MW/(m³/s)\], ID-sorted to
+    /// match `entity_counts.pumping_station_ids`.
+    ///
+    /// Threaded into the simulation extraction pipeline to compute
+    /// `power_consumption_mw = pumped_flow_m3s * consumption_mw_per_m3s` for each
+    /// pumping row. Built from `system.pumping_stations()`, which returns the
+    /// stations in canonical ID order — the same order `pumping_station_ids` is
+    /// built in — so the two slices are positionally aligned.
+    pub(crate) pumping_consumption_mw_per_m3s: Vec<f64>,
+
     /// Number of blocks per stage.
     pub(crate) block_counts_per_stage: Vec<usize>,
 

@@ -1510,6 +1510,50 @@ mod tests {
         assert!(inv[0].message.contains("999"));
     }
 
+    /// PumpingStation referencing a non-existent bus produces 1 error.
+    #[test]
+    fn test_pumping_invalid_bus() {
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+        data.hydros = vec![make_hydro(10, 1)];
+        // bus 777 missing; source/destination hydro 10 exists
+        data.pumping_stations = vec![make_pumping(1, 777, 10, 10)];
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+        assert!(ctx.has_errors());
+        let inv: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidReference)
+            .collect();
+        assert_eq!(inv.len(), 1);
+        assert!(inv[0].message.contains("bus_id"));
+        assert!(inv[0].message.contains("777"));
+    }
+
+    /// PumpingStation referencing a non-existent destination hydro produces 1 error.
+    #[test]
+    fn test_pumping_invalid_destination_hydro() {
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+        data.hydros = vec![make_hydro(10, 1)];
+        // source hydro 10 exists; destination hydro 999 missing
+        data.pumping_stations = vec![make_pumping(1, 1, 10, 999)];
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+        assert!(ctx.has_errors());
+        let inv: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidReference)
+            .collect();
+        assert_eq!(inv.len(), 1);
+        assert!(inv[0].message.contains("destination_hydro_id"));
+        assert!(inv[0].message.contains("999"));
+    }
+
     /// `InflowSeasonalStatsRow` referencing non-existent hydro produces 1 error.
     #[test]
     fn test_inflow_seasonal_stats_invalid_hydro_ref() {

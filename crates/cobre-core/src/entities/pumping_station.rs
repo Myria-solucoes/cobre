@@ -1,8 +1,10 @@
 //! Pumping station entity — water transfer consuming electrical power.
 //!
 //! A `PumpingStation` transfers water between hydro reservoirs while consuming
-//! electrical power from the network. This entity is a NO-OP stub:
-//! the type exists in the registry but contributes zero LP variables or constraints.
+//! electrical power from the network. It contributes a per-block pumped-flow
+//! decision variable, a `+τ`/`−τ` coupling on the source and destination
+//! reservoir water-balance rows, and a power-consumption term
+//! (`consumption_mw_per_m3s · flow`) on its bus power-balance row.
 
 use crate::EntityId;
 
@@ -10,8 +12,9 @@ use crate::EntityId;
 ///
 /// A `PumpingStation` withdraws water from a source hydro reservoir and injects
 /// it into a destination hydro reservoir, consuming electrical power from a bus
-/// in the process. In the minimal viable solver this entity is data-complete but
-/// contributes no LP variables or constraints.
+/// in the process. The pumped flow is a per-block decision bounded by
+/// `[min_flow_m3s, max_flow_m3s]`, coupled to both reservoir water-balance rows
+/// and charged on the bus power-balance row at `consumption_mw_per_m3s`.
 ///
 /// Source: `system/pumping_stations.json`. See Input System Entities SS1.9.6.
 #[derive(Debug, Clone, PartialEq)]

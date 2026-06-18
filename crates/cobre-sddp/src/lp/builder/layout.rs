@@ -305,12 +305,9 @@ pub(crate) struct StageLayout {
     ///
     /// Each station contributes `n_blks` columns. Sourced from `ctx.n_pumping`.
     /// Per-stage entry/exit gating is bound-driven downstream; the column count
-    /// is the full station count here.
-    // Rationale: the matrix-fill helpers iterate `ctx.pumping_stations` directly
-    // (the canonical ID-sorted slice) and the resolver reads `col_pumping_start`
-    // / `n_blks`, so no production path reads this count; it is retained for the
-    // layout unit tests and for structural symmetry with `n_ncs`.
-    #[allow(dead_code)]
+    /// is the full station count here. Read by `build_single_stage_template` to
+    /// populate `StageTemplates::n_pumping_per_stage`, which the simulation
+    /// extraction pipeline uses to bound the per-(station, block) primal read.
     pub(crate) n_pumping: usize,
     pub(crate) num_cols: usize,
     /// Start of minimum-outflow constraint rows (one per hydro per block, after evaporation rows).

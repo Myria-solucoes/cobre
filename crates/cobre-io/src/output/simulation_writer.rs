@@ -1269,9 +1269,30 @@ fn build_buses_batch<'a>(
 
 /// Build the `pumping_stations` `RecordBatch`, computing derived columns.
 ///
-/// Derived columns:
+/// # Division of labor (contract)
+///
+/// The 9 [`pumping_stations_schema`] fields are populated by exactly one layer
+/// each. The writer is the **only** layer that holds per-block
+/// `block_duration_hours` (via `block_durations`), so the two duration-scaled
+/// columns are derived here and **must not** be derived at extraction:
+///
+/// - `stage_id`, `block_id`, `pumping_station_id`, `operative_state_code` —
+///   forwarded verbatim from [`PumpingWriteRecord`].
+/// - `pumped_flow_m3s` — forwarded verbatim from [`PumpingWriteRecord`]
+///   (the raw LP primal read at extraction).
+/// - `power_consumption_mw` — forwarded verbatim. It is set at extraction as
+///   `consumption_mw_per_m3s * pumped_flow_m3s` and is **not** a function of
+///   block duration; the writer does **not** recompute it.
 /// - `pumped_volume_hm3 = pumped_flow_m3s * block_duration_hours * 3600.0 / 1e6`
+///   — derived here. The literal `3600.0 / 1e6` is correct because this layer
+///   already has hours in hand; do **not** substitute `M3S_TO_HM3`, which
+///   carries its own duration factor and would double-count it.
 /// - `energy_consumption_mwh = power_consumption_mw * block_duration_hours`
+///   — derived here (same shape as the contracts `energy_mwh` column).
+/// - `pumping_cost` — forwarded verbatim from [`PumpingWriteRecord::pumping_cost`],
+///   whose imputed `0.0` default is owned by `SimulationPumpingResult::pumping_cost`.
+///   The writer does **not** compute a cost; recomputing one here would diverge
+///   from that single documented default.
 #[allow(clippy::cast_possible_wrap)]
 fn build_pumping_batch<'a>(
     records: impl IntoIterator<Item = &'a PumpingWriteRecord>,
@@ -1513,8 +1534,8 @@ mod tests {
     use chrono::NaiveDate;
     use cobre_core::{
         Block, BlockMode, Bus, DeficitSegment, EntityId, Hydro, HydroGenerationModel,
-        HydroPenalties, Line, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
-        StageStateConfig, SystemBuilder, Thermal,
+        HydroPenalties, Line, NoiseMethod, PumpingStation, ScenarioSourceConfig, Stage,
+        StageRiskConfig, StageStateConfig, SystemBuilder, Thermal,
     };
 
     // -----------------------------------------------------------------------
@@ -1649,6 +1670,74 @@ mod tests {
             .stages(vec![stage0, stage1])
             .build()
             .expect("test system must be valid")
+    }
+
+    /// The minimal [`make_test_system`] topology plus one pumping station, so
+    /// `n_pumping_stations() > 0` and the writer's directory gate fires. The
+    /// station references bus 1 and hydros 1/2, all present in the base system.
+    fn make_test_system_with_pumping() -> System {
+        let bus = Bus {
+            id: EntityId(1),
+            name: "B1".to_string(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 1000.0,
+            }],
+            excess_cost: 0.0,
+        };
+
+        let line = Line {
+            id: EntityId(1),
+            name: "L1".to_string(),
+            source_bus_id: EntityId(1),
+            target_bus_id: EntityId(1),
+            entry_stage_id: None,
+            exit_stage_id: None,
+            direct_capacity_mw: 500.0,
+            reverse_capacity_mw: 500.0,
+            losses_percent: 2.5,
+            exchange_cost: 0.0,
+        };
+
+        let pumping_station = PumpingStation {
+            id: EntityId(1),
+            name: "P1".to_string(),
+            bus_id: EntityId(1),
+            source_hydro_id: EntityId(1),
+            destination_hydro_id: EntityId(2),
+            entry_stage_id: None,
+            exit_stage_id: None,
+            consumption_mw_per_m3s: 0.5,
+            min_flow_m3s: 0.0,
+            max_flow_m3s: 150.0,
+        };
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .lines(vec![line])
+            .hydros(vec![make_hydro(1), make_hydro(2)])
+            .pumping_stations(vec![pumping_station])
+            .stages(vec![make_stage(0, 720.0), make_stage(1, 744.0)])
+            .build()
+            .expect("test system with pumping must be valid")
+    }
+
+    fn make_pumping_record(
+        stage_id: u32,
+        block_id: Option<u32>,
+        pumping_station_id: i32,
+        pumped_flow_m3s: f64,
+        power_consumption_mw: f64,
+    ) -> PumpingWriteRecord {
+        PumpingWriteRecord {
+            stage_id,
+            block_id,
+            pumping_station_id,
+            pumped_flow_m3s,
+            power_consumption_mw,
+            pumping_cost: 0.0,
+            operative_state_code: 1,
+        }
     }
 
     fn make_cost_record(stage_id: u32, block_id: Option<u32>) -> CostWriteRecord {
@@ -1840,6 +1929,71 @@ mod tests {
     }
 
     #[test]
+    fn build_pumping_batch_derived_columns_and_schema() {
+        // One stage, one block, 730 hours.
+        let block_durations = vec![vec![730.0_f64]];
+
+        let r = PumpingWriteRecord {
+            stage_id: 0,
+            block_id: Some(0),
+            pumping_station_id: 1,
+            pumped_flow_m3s: 10.0,
+            power_consumption_mw: 5.0,
+            pumping_cost: 0.0, // imputed default owned by SimulationPumpingResult::pumping_cost
+            operative_state_code: 1,
+        };
+        let records = [&r];
+
+        let batch = build_pumping_batch(records.iter().copied(), &block_durations, records.len())
+            .expect("pumping batch must build");
+        assert_eq!(batch.num_rows(), 1);
+
+        // Schema is field-for-field equal to pumping_stations_schema() (9 fields).
+        let expected = pumping_stations_schema();
+        assert_eq!(
+            batch.schema().fields(),
+            expected.fields(),
+            "schema must match pumping_stations_schema()"
+        );
+        assert_eq!(batch.num_columns(), 9, "pumping schema has 9 columns");
+
+        let f64_col = |name: &str| {
+            batch
+                .column_by_name(name)
+                .unwrap_or_else(|| panic!("{name} column must exist"))
+                .as_any()
+                .downcast_ref::<arrow::array::Float64Array>()
+                .unwrap_or_else(|| panic!("{name} must be Float64Array"))
+                .value(0)
+        };
+
+        // pumped_volume_hm3 = pumped_flow_m3s * dur * 3600.0 / 1e6 (writer-derived).
+        assert_eq!(
+            f64_col("pumped_volume_hm3"),
+            10.0 * 730.0 * 3600.0 / 1_000_000.0,
+            "pumped_volume_hm3 must equal pumped_flow_m3s * dur * 3600 / 1e6"
+        );
+        // energy_consumption_mwh = power_consumption_mw * dur (writer-derived).
+        assert_eq!(
+            f64_col("energy_consumption_mwh"),
+            5.0 * 730.0,
+            "energy_consumption_mwh must equal power_consumption_mw * dur"
+        );
+        // power_consumption_mw forwarded verbatim (set at extraction, not recomputed).
+        assert_eq!(
+            f64_col("power_consumption_mw"),
+            5.0,
+            "power_consumption_mw must be forwarded verbatim"
+        );
+        // pumping_cost is the imputed 0.0 default, forwarded verbatim.
+        assert_eq!(
+            f64_col("pumping_cost"),
+            0.0,
+            "pumping_cost must be the imputed 0.0 default"
+        );
+    }
+
+    #[test]
     fn build_exchanges_batch_net_flow_and_losses() {
         // One stage, one block, 720 hours.
         let block_durations = vec![vec![720.0_f64]];
@@ -1985,6 +2139,134 @@ mod tests {
         assert!(
             !tmp.path().join("simulation/non_controllables").exists(),
             "simulation/non_controllables/ must not exist when system has 0 non-controllables"
+        );
+    }
+
+    #[test]
+    fn write_scenario_writes_pumping_partition_for_populated_system() {
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+        let tmp = tempfile::tempdir().expect("tempdir must succeed");
+        std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
+
+        // Directory gate: n_pumping_stations() > 0 (one station in this system).
+        let system = make_test_system_with_pumping();
+        assert!(
+            system.n_pumping_stations() > 0,
+            "fixture must have a pumping station so the directory gate fires"
+        );
+        let config = ParquetWriterConfig::default();
+
+        let mut writer =
+            SimulationParquetWriter::new(tmp.path(), &system, &config).expect("new must succeed");
+
+        // One stage (stage 0, block 0, duration 720h) with two populated pumping
+        // rows. block_id = Some(0) so the writer's block-duration lookup resolves
+        // to 720.0, enabling exact derived-column assertions. Partition-write gate:
+        // this non-empty pumping_stations vector is what triggers the write.
+        let stage0 = StageWritePayload {
+            stage_id: 0,
+            costs: vec![],
+            hydros: vec![],
+            thermals: vec![],
+            exchanges: vec![],
+            buses: vec![],
+            pumping_stations: vec![
+                make_pumping_record(0, Some(0), 1, 10.0, 5.0),
+                make_pumping_record(0, Some(0), 2, 20.0, 8.0),
+            ],
+            contracts: vec![],
+            non_controllables: vec![],
+            inflow_lags: vec![],
+            generic_violations: vec![],
+        };
+        let payload = ScenarioWritePayload {
+            scenario_id: 0,
+            stages: vec![stage0],
+        };
+        writer
+            .write_scenario(payload)
+            .expect("write_scenario must succeed");
+
+        // File exists at the Hive partition path.
+        let path = tmp
+            .path()
+            .join("simulation/pumping_stations/scenario_id=0000/data.parquet");
+        assert!(
+            path.exists(),
+            "simulation/pumping_stations/scenario_id=0000/data.parquet must exist"
+        );
+
+        // Read the written Parquet back with the crate's existing reader helper.
+        let file = std::fs::File::open(&path).expect("pumping parquet must exist");
+        let batch = ParquetRecordBatchReaderBuilder::try_new(file)
+            .expect("reader builder must succeed")
+            .build()
+            .expect("reader must build")
+            .next()
+            .expect("must have rows")
+            .expect("batch must be Ok");
+
+        // Written schema is field-for-field equal to pumping_stations_schema().
+        let expected = pumping_stations_schema();
+        assert_eq!(
+            batch.schema().fields(),
+            expected.fields(),
+            "written schema must match pumping_stations_schema()"
+        );
+        assert_eq!(batch.num_columns(), 9, "pumping schema has 9 columns");
+
+        // Row count == number of (stage, block, station) tuples (2).
+        assert_eq!(
+            batch.num_rows(),
+            2,
+            "row count must equal the number of populated (stage, block, station) tuples"
+        );
+
+        let f64_col = |name: &str, row: usize| {
+            batch
+                .column_by_name(name)
+                .unwrap_or_else(|| panic!("{name} column must exist"))
+                .as_any()
+                .downcast_ref::<arrow::array::Float64Array>()
+                .unwrap_or_else(|| panic!("{name} must be Float64Array"))
+                .value(row)
+        };
+
+        // pumped_flow_m3s / power_consumption_mw forwarded verbatim.
+        assert_eq!(
+            f64_col("pumped_flow_m3s", 0),
+            10.0,
+            "pumped_flow_m3s row 0 must be forwarded verbatim"
+        );
+        assert_eq!(
+            f64_col("pumped_flow_m3s", 1),
+            20.0,
+            "pumped_flow_m3s row 1 must be forwarded verbatim"
+        );
+        assert_eq!(
+            f64_col("power_consumption_mw", 0),
+            5.0,
+            "power_consumption_mw row 0 must be forwarded verbatim"
+        );
+        assert_eq!(
+            f64_col("power_consumption_mw", 1),
+            8.0,
+            "power_consumption_mw row 1 must be forwarded verbatim"
+        );
+
+        // Derived columns for row 0 with block_duration = 720.0:
+        // pumped_volume_hm3 = pumped_flow_m3s * dur * 3600.0 / 1e6
+        assert_eq!(
+            f64_col("pumped_volume_hm3", 0),
+            10.0 * 720.0 * 3600.0 / 1_000_000.0,
+            "pumped_volume_hm3 row 0 must equal pumped_flow_m3s * dur * 3600 / 1e6"
+        );
+        // energy_consumption_mwh = power_consumption_mw * dur
+        assert_eq!(
+            f64_col("energy_consumption_mwh", 0),
+            5.0 * 720.0,
+            "energy_consumption_mwh row 0 must equal power_consumption_mw * dur"
         );
     }
 

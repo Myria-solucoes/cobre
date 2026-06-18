@@ -26,6 +26,7 @@
 //! |16 | Thermal `thermal_bounds.parquet` override `stage_id` within `[0, n_stages)` | `constraints/thermal_bounds.parquet` | `BusinessRuleViolation` |
 //! |17 | `anticipated_decision(N)` in generic constraint targets an anticipated thermal | `constraints/generic_constraints.json` | `BusinessRuleViolation` |
 //! |18 | `thermal_generation(N)` in generic constraint when `N` is anticipated (warn) | `constraints/generic_constraints.json` | `SemanticAmbiguity` (warning) |
+//! |19 | Pumping `source_hydro_id != destination_hydro_id`  | `system/pumping_stations.json`        | `InvalidValue`         |
 //!
 //! ## Layer 5b rules (stages, penalties, and scenario domain) — `validate_semantic_stages_penalties_scenarios`
 //!
@@ -68,6 +69,7 @@ use super::{ValidationContext, schema::ParsedData};
 
 mod correlation;
 mod hydro;
+mod pumping;
 mod scenarios;
 mod season;
 mod sobol;
@@ -90,6 +92,7 @@ pub(crate) fn validate_semantic_hydro_thermal(data: &ParsedData, ctx: &mut Valid
     thermal::check_thermal_bounds_override_stage_range(data, ctx);
     thermal::check_anticipated_decision_target_is_anticipated(data, ctx);
     thermal::warn_thermal_generation_on_anticipated_thermal(data, ctx);
+    pumping::check_pumping_semantics(data, ctx);
 }
 
 // ── validate_semantic_stages_penalties_scenarios ──────────────────────────────
