@@ -652,7 +652,7 @@ impl ForwardPassState {
 /// # Parameters
 ///
 /// - `w`: rayon worker index (0-based), used to derive the local scenario range
-///   via [`partition`].
+///   via [`fn@partition`].
 /// - `ws`: mutable reference to this worker's [`SolverWorkspace`].
 /// - `worker_records`: mutable slice of [`TrajectoryRecord`] for this worker's
 ///   scenarios. Length is `n_local * num_stages`.

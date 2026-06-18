@@ -308,23 +308,25 @@ pub(crate) fn resolve_variable_ref<S: BuildHasher>(
         // `ElementKind::ContractImport`/`ContractExport` families resolve through
         // `block_col_range` (their single owner) to the empty `0..0` range, so a
         // generic-constraint term referencing a contract emits no
-        // `(column, coefficient)` pair. The `is_empty()` lookup keeps both the
-        // `ElementKind` variants and `block_col_range`'s contract arm live as the
-        // seam a future contract-column implementation extends — that
-        // implementation must give `block_col_range` a non-empty range AND replace
-        // the trailing empty return with the resolved column(s); a non-empty range
-        // alone would otherwise fall through to the (currently correct) empty
-        // return.
+        // `(column, coefficient)` pair. The `debug_assert!` is the seam a future
+        // contract-column implementation extends: it both keeps the `ElementKind`
+        // variants and `block_col_range`'s contract arm live and fires loudly if a
+        // non-empty range is ever wired without also emitting the resolved
+        // column(s) here — preventing a silent fall-through to the empty return.
         VariableRef::ContractImport { .. } => {
-            if block_col_range(indexer, ElementKind::ContractImport).is_empty() {
-                return vec![];
-            }
+            debug_assert!(
+                block_col_range(indexer, ElementKind::ContractImport).is_empty(),
+                "ContractImport gained an LP column range but this arm still emits no \
+                 (column, coefficient) pair — wire the contract-column resolution here",
+            );
             vec![]
         }
         VariableRef::ContractExport { .. } => {
-            if block_col_range(indexer, ElementKind::ContractExport).is_empty() {
-                return vec![];
-            }
+            debug_assert!(
+                block_col_range(indexer, ElementKind::ContractExport).is_empty(),
+                "ContractExport gained an LP column range but this arm still emits no \
+                 (column, coefficient) pair — wire the contract-column resolution here",
+            );
             vec![]
         }
 

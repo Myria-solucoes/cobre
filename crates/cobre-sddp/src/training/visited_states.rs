@@ -105,7 +105,7 @@ impl StageStates {
 /// Multi-stage archive of visited forward-pass states.
 ///
 /// One [`StageStates`] per stage. Allocated whenever any
-/// [`CutSelectionStrategy`] variant is enabled, because the unified
+/// [`CutSelectionStrategy`](crate::CutSelectionStrategy) variant is enabled, because the unified
 /// value-evaluation kernel evaluates every populated cut at every
 /// state in this archive. Also allocated when state export is
 /// requested via

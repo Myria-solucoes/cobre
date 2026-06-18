@@ -877,7 +877,7 @@ fn check_std_ratio_divergence(
 /// out-of-window lag statistics, and the precompute silently zeroes them.
 ///
 /// This helper emits, for each lag `k = 1..=min(max_order, cycle_len-1)`, a
-/// pre-study [`Stage`] with:
+/// pre-study [`Stage`](cobre_core::temporal::Stage) with:
 /// - `id = first_study_stage.id - k` (negative, descending),
 /// - `season_id` = the season `k` calendar positions before the first study
 ///   stage's season (modular on `cycle_len`),

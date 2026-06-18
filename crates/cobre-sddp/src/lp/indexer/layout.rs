@@ -754,7 +754,6 @@ impl StageIndexer {
     /// stale `> 0`-branch cursor here would misalign the empty-hydro layout while
     /// still compiling, which this accessor's single ownership prevents.
     #[must_use]
-    #[inline]
     pub(crate) fn post_equipment_col_start(&self) -> usize {
         self.evap_col_start()
     }
@@ -781,7 +780,6 @@ impl StageIndexer {
     /// stale `> 0`-branch row cursor here would misalign the empty-hydro row layout
     /// while still compiling, which this accessor's single ownership prevents.
     #[must_use]
-    #[inline]
     pub(crate) fn post_equipment_row_start(&self) -> usize {
         self.fpha_rows_end() + self.n_evap_hydros
     }

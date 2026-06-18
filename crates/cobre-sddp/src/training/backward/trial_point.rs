@@ -310,7 +310,7 @@ impl StageOpeningSolver {
     /// **Binding-count metadata** (`slot_increments`) IS maintained here, but
     /// slot-correct under the lazy layout: the baked path bumps by baked cut-row
     /// order, whereas [`accumulate_dcs_binding_counts`] maps each resident cut row
-    /// back to its pool slot via the final [`CutRowMap`] and bumps
+    /// back to its pool slot via the final [`CutRowMap`](crate::cut::CutRowMap) and bumps
     /// `slot_increments[slot]` for residents whose cut-row dual exceeds
     /// `cut_activity_tolerance` (the same criterion the baked path uses). This
     /// feeds the existing per-stage `metadata_sync_contribution` allreduce, which

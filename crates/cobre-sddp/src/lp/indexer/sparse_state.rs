@@ -1,7 +1,7 @@
 //! Nonzero-state mask construction for [`StageIndexer`].
 //!
 //! Owns [`StageIndexer::set_nonzero_mask`] (which state-vector indices may carry
-//! nonzero cut coefficients) and the test-only [`StageIndexer::finalize_for_test`]
+//! nonzero cut coefficients) and the test-only `StageIndexer::finalize_for_test`
 //! helper that mirrors the production `build_wired_indexer` finalization step.
 
 use super::layout::StageIndexer;

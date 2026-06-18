@@ -379,8 +379,8 @@ pub(crate) struct StageLayout {
     /// One equality row per (slot, plant) pair in `[0, k_max) × [0, n_anticipated)`.
     /// Slot-major layout: row for slot `s`, plant `i` is at
     /// `row_anticipated_state_fixing_start + s * n_anticipated + i`.
-    /// Equals `idx.anticipated_state_fixing.start` from the augmented indexer
-    /// (which mirrors `anticipated_state.start = N*(1+L)` numerically).
+    /// Equals `idx.sentinels.anticipated_state_fixing.start` from the augmented
+    /// indexer (which mirrors `anticipated_state.start = N*(1+L)` numerically).
     /// Zero when `n_anticipated == 0` (empty row range).
     /// Row bounds are placeholder `0 == 0`; the RHS is patched during setup.
     // Rationale: asserted in layout unit tests to confirm the sentinel is 0 (state pinning

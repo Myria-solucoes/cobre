@@ -5,10 +5,11 @@
 //! during the forward pass. For each trial point, the backward pass iterates
 //! over every opening from the fixed opening tree, extracts LP duals to form
 //! Benders cut coefficients, and aggregates per-opening outcomes via
-//! [`RiskMeasure::aggregate_cut`] to produce one cut per trial point per
-//! stage. Each aggregated cut is inserted into the [`crate::FutureCostFunction`].
+//! [`RiskMeasure::aggregate_cut`](crate::RiskMeasure::aggregate_cut) to produce
+//! one cut per trial point per stage. Each aggregated cut is inserted into the
+//! [`crate::FutureCostFunction`].
 //!
-//! Although [`ExchangeBuffers`] contains trial points from all ranks (after
+//! Although [`ExchangeBuffers`](crate::ExchangeBuffers) contains trial points from all ranks (after
 //! `allgatherv`), each rank only processes its own forward pass assignments
 //! to avoid generating duplicate cuts. Cut synchronization (`allgatherv`)
 //! distributes the generated cuts to all ranks after the backward pass.
@@ -81,7 +82,7 @@
 //!
 //! Within a rank, the outer per-stage loop remains sequential (stage `t`
 //! depends on cuts generated at stage `t+1`). The inner trial-point loop is
-//! parallelised across [`SolverWorkspace`] instances using rayon's
+//! parallelised across [`SolverWorkspace`](crate::workspace::SolverWorkspace) instances using rayon's
 //! `par_iter_mut` with static scenario partitioning (matching the forward pass).
 //! Each worker generates cuts into a thread-local `StagedCut` buffer, sorted
 //! by `trial_point_idx` after the parallel region to ensure deterministic FCF

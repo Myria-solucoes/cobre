@@ -4,7 +4,7 @@
 //! `with_equipment_and_evaporation`), the `from_stage_template` adapter, and the
 //! private helpers that compute each region's column/row range. The permanent
 //! `0..0` / `0` sentinels (the state-pinning sentinel contract, grouped into
-//! [`Sentinels`](super::layout::Sentinels)) are built once in `new` and carried
+//! [`Sentinels`]) are built once in `new` and carried
 //! unchanged into `with_equipment_and_evaporation` via the `..base` spread.
 
 use std::collections::HashMap;

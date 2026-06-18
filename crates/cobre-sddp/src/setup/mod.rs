@@ -191,7 +191,7 @@ pub struct StudySetup {
     /// solver bases (see
     /// [`build_basis_cache_from_checkpoint`](crate::build_basis_cache_from_checkpoint)).
     /// [`StudySetup::train`] takes this out of `self` and seeds the
-    /// [`TrainingSession`](crate::TrainingSession)'s
+    /// [`TrainingSession`](crate::training::session::TrainingSession)'s
     /// [`BasisStore`](crate::workspace::BasisStore) so iteration 1's
     /// (cut-loaded) LPs warm-start instead of cold-start.
     ///

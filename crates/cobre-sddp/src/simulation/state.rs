@@ -411,7 +411,7 @@ fn debug_assert_inputs(
 ///
 /// Called once per worker thread by [`SimulationState::run`] via `par_iter_mut`.
 /// Partitions `local_count` scenarios across `n_workers` workers using
-/// [`partition`], drives per-scenario LP solves, accumulates costs and solver
+/// [`fn@partition`], drives per-scenario LP solves, accumulates costs and solver
 /// statistics, and streams progress events through the output channel.
 ///
 /// Returns `(worker_costs, worker_stats)` for the worker's assigned scenarios,

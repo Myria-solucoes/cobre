@@ -65,7 +65,7 @@ pub(crate) fn accumulate_opening_outcome<S: SolverInterface + Send>(
 /// A non-resident slot did not bind (by exactness it was not violated at the
 /// optimum, else the lazy loop would have added it), so leaving it uncounted is
 /// correct. `dual` must be the FINAL all-satisfied solve's dual vector, read
-/// before the [`SolutionView`] is dropped; `row_map` must be the residency that
+/// before the [`SolutionView`](cobre_solver::SolutionView) is dropped; `row_map` must be the residency that
 /// produced that solve (the persistent `DcsSolveScratch.row_map` after
 /// `lazy_solve_preloaded` returns). The bump is a deterministic function of the
 /// resident map and the cut-row duals only — no worker id, rank, or trace — so

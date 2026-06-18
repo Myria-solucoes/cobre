@@ -36,7 +36,7 @@ pub(crate) fn load_backward_lp<S: SolverInterface + Send>(
 
 /// Transform opening noise and patch LP bounds for one backward opening.
 ///
-/// Called once per opening inside [`process_trial_point_backward`].  The LP
+/// Called once per opening inside [`process_trial_point_backward`](super::process_trial_point_backward).  The LP
 /// structure is already loaded by [`load_backward_lp`]; this function only
 /// updates noise-dependent row and column bounds via `set_row_bounds` /
 /// `set_col_bounds`.

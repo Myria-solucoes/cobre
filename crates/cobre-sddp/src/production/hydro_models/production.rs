@@ -1019,7 +1019,7 @@ fn find_reference_volume_for_stage<'a>(
     }
 }
 
-/// Resolve a [`ReferenceVolume`] to an absolute storage value [hm³] against the
+/// Resolve a [`ReferenceVolume`] to an absolute storage value (`hm³`) against the
 /// plant's `[v_min, v_max]` operating band.
 ///
 /// - `Some(AbsoluteHm3(v))` → `v` unchanged;

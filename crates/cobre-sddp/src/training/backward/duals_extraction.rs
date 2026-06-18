@@ -1,4 +1,4 @@
-//! Benders subgradient extraction from a solved backward LP [SEALED].
+//! Benders subgradient extraction from a solved backward LP (`SEALED`).
 //!
 //! Owns the cut-sign / `col_scale`-division contract from `.claude/rules/sddp.md`
 //! ("Benders cut sign"): the subgradient is `rc_scaled / col_scale[col]` —
