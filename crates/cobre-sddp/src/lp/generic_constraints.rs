@@ -176,7 +176,7 @@ pub(crate) fn resolve_variable_ref<S: BuildHasher>(
             *block_id,
             block_idx,
             n_blks,
-            indexer.turbine.start,
+            block_col_range(indexer, ElementKind::Turbine).start,
             hydro_pos,
             1.0,
         ),
@@ -186,7 +186,7 @@ pub(crate) fn resolve_variable_ref<S: BuildHasher>(
             *block_id,
             block_idx,
             n_blks,
-            indexer.spillage.start,
+            block_col_range(indexer, ElementKind::Spillage).start,
             hydro_pos,
             1.0,
         ),
@@ -215,7 +215,7 @@ pub(crate) fn resolve_variable_ref<S: BuildHasher>(
             *block_id,
             block_idx,
             n_blks,
-            indexer.thermal.start,
+            block_col_range(indexer, ElementKind::Thermal).start,
             thermal_pos,
             1.0,
         ),
@@ -226,7 +226,7 @@ pub(crate) fn resolve_variable_ref<S: BuildHasher>(
             *block_id,
             block_idx,
             n_blks,
-            indexer.line_fwd.start,
+            block_col_range(indexer, ElementKind::LineFwd).start,
             line_pos,
             1.0,
         ),
@@ -236,7 +236,7 @@ pub(crate) fn resolve_variable_ref<S: BuildHasher>(
             *block_id,
             block_idx,
             n_blks,
-            indexer.line_rev.start,
+            block_col_range(indexer, ElementKind::LineRev).start,
             line_pos,
             1.0,
         ),
@@ -255,7 +255,7 @@ pub(crate) fn resolve_variable_ref<S: BuildHasher>(
             *block_id,
             block_idx,
             n_blks,
-            indexer.excess.start,
+            block_col_range(indexer, ElementKind::Excess).start,
             bus_pos,
             1.0,
         ),
@@ -265,7 +265,7 @@ pub(crate) fn resolve_variable_ref<S: BuildHasher>(
             *block_id,
             block_idx,
             n_blks,
-            indexer.diversion.start,
+            block_col_range(indexer, ElementKind::Diversion).start,
             hydro_pos,
             1.0,
         ),
@@ -291,17 +291,34 @@ pub(crate) fn resolve_variable_ref<S: BuildHasher>(
             station.consumption_mw_per_m3s
         }),
 
+        // ── Contracts ──────────────────────────────────────────────────────
+        // Contracts resolve through `block_col_range` to the empty `0..0` range:
+        // they have no LP columns in this implementation (no contract column range
+        // exists), so the routed range is empty and no `(column, coefficient)` pair
+        // is produced. The lookup is the single owner of the contract column range,
+        // so wiring real columns later turns the empty-range branch live without
+        // touching this arm's structure.
+        VariableRef::ContractImport { .. } => {
+            if block_col_range(indexer, ElementKind::ContractImport).is_empty() {
+                return vec![];
+            }
+            vec![]
+        }
+        VariableRef::ContractExport { .. } => {
+            if block_col_range(indexer, ElementKind::ContractExport).is_empty() {
+                return vec![];
+            }
+            vec![]
+        }
+
         // ── Stub entities with no LP columns ──────────────────────────────
-        // The following entity types are registered in the data model but do not
-        // contribute LP decision variables in this implementation:
+        // These entity types are registered in the data model but contribute no LP
+        // decision variable, and have no `ElementKind` block-major column family:
         // - HydroWithdrawal: withdrawal is a schedule fixed by bounds, not a
         //   decision variable.
-        // - ContractImport, ContractExport: contracts are NO-OP stubs.
         // - NonControllableGeneration, NonControllableCurtailment: non-controllable
-        //   sources are NO-OP stubs.
+        //   sources carry no decision column.
         VariableRef::HydroWithdrawal { .. }
-        | VariableRef::ContractImport { .. }
-        | VariableRef::ContractExport { .. }
         | VariableRef::NonControllableGeneration { .. }
         | VariableRef::NonControllableCurtailment { .. } => vec![],
     }
@@ -464,11 +481,13 @@ fn resolve_hydro_inflow<S: BuildHasher>(
     // Upstream cascade releases: turbine + spillage of each immediately-upstream
     // plant at the effective block. Same column set as the storage-balance inflow
     // side, but with +1.0 (rate) instead of −τ (volume).
-    if !indexer.turbine.is_empty() && !indexer.spillage.is_empty() {
+    let turbine = block_col_range(indexer, ElementKind::Turbine);
+    let spillage = block_col_range(indexer, ElementKind::Spillage);
+    if !turbine.is_empty() && !spillage.is_empty() {
         for &up_id in upstream {
             if let Some(&pos_up) = hydro_pos.get(&up_id) {
-                result.push((indexer.turbine.start + pos_up * n_blks + eff_blk, 1.0));
-                result.push((indexer.spillage.start + pos_up * n_blks + eff_blk, 1.0));
+                result.push((turbine.start + pos_up * n_blks + eff_blk, 1.0));
+                result.push((spillage.start + pos_up * n_blks + eff_blk, 1.0));
             }
         }
     }
@@ -476,9 +495,10 @@ fn resolve_hydro_inflow<S: BuildHasher>(
     // Diverted inflow: the diversion column of each plant diverting into `h`.
     // `diversion_upstream[h]` already holds system indices, so no `hydro_pos`
     // lookup is needed (mirrors the matrix.rs diversion-inflow loop).
-    if !indexer.diversion.is_empty() {
+    let diversion = block_col_range(indexer, ElementKind::Diversion);
+    if !diversion.is_empty() {
         for &d_idx in diversion_into {
-            result.push((indexer.diversion.start + d_idx * n_blks + eff_blk, 1.0));
+            result.push((diversion.start + d_idx * n_blks + eff_blk, 1.0));
         }
     }
 
@@ -526,7 +546,7 @@ fn resolve_hydro_outflow<S: BuildHasher>(
         block_id,
         block_idx,
         n_blks,
-        indexer.turbine.start,
+        block_col_range(indexer, ElementKind::Turbine).start,
         hydro_pos,
         1.0,
     ));
@@ -535,7 +555,7 @@ fn resolve_hydro_outflow<S: BuildHasher>(
         block_id,
         block_idx,
         n_blks,
-        indexer.spillage.start,
+        block_col_range(indexer, ElementKind::Spillage).start,
         hydro_pos,
         1.0,
     ));
@@ -581,7 +601,7 @@ fn resolve_hydro_generation<S: BuildHasher>(
                 block_id,
                 block_idx,
                 n_blks,
-                indexer.turbine.start,
+                block_col_range(indexer, ElementKind::Turbine).start,
                 hydro_pos,
                 *productivity,
             )
@@ -600,8 +620,10 @@ fn resolve_line_exchange<S: BuildHasher>(
 ) -> Vec<(usize, f64)> {
     if let Some(&pos) = line_pos.get(&line_id) {
         let effective_blk = block_id.unwrap_or(block_idx);
-        let fwd_col = indexer.line_fwd.start + pos * n_blks + effective_blk;
-        let rev_col = indexer.line_rev.start + pos * n_blks + effective_blk;
+        let fwd_col =
+            block_col_range(indexer, ElementKind::LineFwd).start + pos * n_blks + effective_blk;
+        let rev_col =
+            block_col_range(indexer, ElementKind::LineRev).start + pos * n_blks + effective_blk;
         vec![(fwd_col, 1.0), (rev_col, -1.0)]
     } else {
         vec![]
@@ -722,6 +744,56 @@ fn resolve_block_variable<S: BuildHasher>(
     }
 }
 
+/// A block-major equipment/line/contract column family the resolver addresses by
+/// reading the family's [`StageIndexer`]-owned column range. Each variant maps to
+/// exactly one range in [`block_col_range`].
+///
+/// Closed set, exhaustively matched (no `_` arm) in [`block_col_range`]: a new
+/// block-major family is a compile error there until its range source is named,
+/// rather than silently resolving to whichever field a hand-written `.start` read
+/// happened to pick.
+#[derive(Clone, Copy)]
+enum ElementKind {
+    Turbine,
+    Spillage,
+    Diversion,
+    Thermal,
+    LineFwd,
+    LineRev,
+    Excess,
+    ContractImport,
+    ContractExport,
+}
+
+/// Map an [`ElementKind`] to its block-major column range on `indexer`.
+///
+/// This is the single point that pairs an element family with its [`StageIndexer`]
+/// column range, so a wrong arm mapping (e.g. returning `indexer.spillage` for
+/// `Turbine`) is caught here, once, instead of being open-coded — and silently
+/// wrong — at each `col_start` read across the resolver and its helpers.
+///
+/// `ContractImport`/`ContractExport` return the empty `0..0` range: contracts have
+/// no LP columns in this implementation (the indexer exposes no contract range), so
+/// they resolve to no `(column, coefficient)` pair. This is the single owner of the
+/// contract column range, so wiring real contract columns later is one edit here.
+///
+/// Returns an **owned** `Range<usize>` (a two-`usize` clone, stack-only) so the
+/// `0..0` contract sentinel is returnable without tying the result's lifetime to
+/// `indexer`; do NOT change this to `&Range<usize>`.
+#[must_use]
+fn block_col_range(indexer: &StageIndexer, kind: ElementKind) -> std::ops::Range<usize> {
+    match kind {
+        ElementKind::Turbine => indexer.turbine.clone(),
+        ElementKind::Spillage => indexer.spillage.clone(),
+        ElementKind::Diversion => indexer.diversion.clone(),
+        ElementKind::Thermal => indexer.thermal.clone(),
+        ElementKind::LineFwd => indexer.line_fwd.clone(),
+        ElementKind::LineRev => indexer.line_rev.clone(),
+        ElementKind::Excess => indexer.excess.clone(),
+        ElementKind::ContractImport | ElementKind::ContractExport => 0..0,
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::doc_markdown,
@@ -736,7 +808,8 @@ mod tests {
     use cobre_core::{CascadeTopology, EntityId, Hydro, PumpingStation, VariableRef};
 
     use super::{
-        CascadeRefs, PumpingRefs, resolve_variable_ref, variable_ref_is_block_independent,
+        CascadeRefs, ElementKind, PumpingRefs, block_col_range, resolve_variable_ref,
+        variable_ref_is_block_independent,
     };
     use crate::hydro_models::{FphaPlane, ProductionModelSet, ResolvedProductionModel};
     use crate::indexer::StageIndexer;
@@ -1821,6 +1894,34 @@ mod tests {
         assert!(result.is_empty());
     }
 
+    /// ContractExport returns empty vec (the split-out export arm resolves through
+    /// `block_col_range` to the empty `0..0` range, so no columns).
+    #[test]
+    fn contract_export_returns_empty() {
+        let indexer = make_indexer();
+        let prod = make_production_models();
+        let hpos = make_hydro_pos();
+        let tpos = make_thermal_pos();
+        let bpos = make_bus_pos();
+        let lpos = make_line_pos();
+
+        let result = call(
+            VariableRef::ContractExport {
+                contract_id: EntityId(99),
+                block_id: None,
+            },
+            0,
+            &indexer,
+            &prod,
+            &hpos,
+            &tpos,
+            &bpos,
+            &lpos,
+        );
+
+        assert!(result.is_empty());
+    }
+
     /// NonControllableGeneration returns empty vec.
     #[test]
     fn non_controllable_generation_returns_empty() {
@@ -2321,6 +2422,27 @@ mod tests {
             result.is_empty(),
             "AnticipatedDecision for unknown entity must return empty vec, got: {result:?}"
         );
+    }
+
+    // ── block_col_range tests ─────────────────────────────────────────────────
+
+    /// Each equipment/line family maps to its matching `StageIndexer` range, and
+    /// the two contract families map to the empty `0..0` sentinel. This pins the
+    /// family↔range pairing the resolver's `col_start` reads depend on.
+    #[test]
+    fn block_col_range_maps_each_family_to_its_indexer_range() {
+        let idx = make_indexer();
+
+        assert_eq!(block_col_range(&idx, ElementKind::Turbine), idx.turbine);
+        assert_eq!(block_col_range(&idx, ElementKind::Spillage), idx.spillage);
+        assert_eq!(block_col_range(&idx, ElementKind::Diversion), idx.diversion);
+        assert_eq!(block_col_range(&idx, ElementKind::Thermal), idx.thermal);
+        assert_eq!(block_col_range(&idx, ElementKind::LineFwd), idx.line_fwd);
+        assert_eq!(block_col_range(&idx, ElementKind::LineRev), idx.line_rev);
+        assert_eq!(block_col_range(&idx, ElementKind::Excess), idx.excess);
+
+        assert_eq!(block_col_range(&idx, ElementKind::ContractImport), 0..0);
+        assert_eq!(block_col_range(&idx, ElementKind::ContractExport), 0..0);
     }
 
     // ── HydroTurbined / HydroSpillage tests ───────────────────────────────────

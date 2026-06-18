@@ -674,15 +674,16 @@ impl StageLayout {
         // (`generation_below_slack`), so its start is that family's end. The
         // generation-below slack is non-empty whenever `hydro_count > 0`; when
         // there are no hydros it is the empty `0..0` sentinel, so fall back to
-        // the evaporation-column cursor (`evap_col_start`), which equals the end
-        // of all pre-NCS columns when `n_hydros == 0` because the evaporation and
-        // withdrawal/operational-slack blocks are then both empty.
+        // the post-equipment column cursor (`post_equipment_col_start`), which
+        // single-owns the shared start of the empty withdrawal/operational/NCS
+        // regions so a future family inserted before NCS cannot leave this
+        // `n_hydros == 0` start on a stale cursor.
         let active_ncs_indices = identify_active_ncs(ctx, stage);
         let n_active_ncs = active_ncs_indices.len();
         let col_ncs_start = if ctx.n_hydros > 0 {
             idx.generation_below_slack.end
         } else {
-            idx.evap_col_start()
+            idx.post_equipment_col_start()
         };
         let col_ncs_end = col_ncs_start + n_active_ncs * n_blks;
 
@@ -694,9 +695,11 @@ impl StageLayout {
 
         // Withdrawal and operational-violation slack columns: non-empty whenever
         // `hydro_count > 0` and then carry the canonical cursors; with no hydros
-        // they normalise to `0..0`, so fall back to the evaporation-column cursor
-        // (`evap_col_start`), which is the correct column index for an empty
-        // withdrawal/operational-slack region.
+        // they normalise to `0..0`, so fall back to the post-equipment column
+        // cursor (`post_equipment_col_start`), the single-owned start every empty
+        // withdrawal/operational-slack region shares — sharing that one cursor is
+        // what keeps the empty-hydro layout from drifting onto a stale `> 0`-branch
+        // offset when a future family is inserted.
         let (
             col_withdrawal_neg_start,
             col_withdrawal_pos_start,
@@ -714,7 +717,7 @@ impl StageLayout {
                 idx.generation_below_slack.start,
             )
         } else {
-            let region_start = idx.evap_col_start();
+            let region_start = idx.post_equipment_col_start();
             (
                 region_start,
                 region_start,
@@ -748,9 +751,11 @@ impl StageLayout {
         let n_op_rows = ctx.n_hydros * n_blks;
         // The four operational-violation row blocks are non-empty whenever
         // `hydro_count > 0` and then carry the canonical cursors; with no hydros
-        // they normalise to `0..0`, so fall back to the evaporation-row end
-        // cursor (`row_evap_start + n_evap_hydros`), which is what the empty
-        // region begins at.
+        // they normalise to `0..0`, so fall back to the post-equipment row cursor
+        // (`post_equipment_row_start`), the single-owned start every empty
+        // operational-violation row block shares — sharing that one cursor is what
+        // keeps the empty-hydro row layout from drifting onto a stale `> 0`-branch
+        // offset when a future row family is inserted before these blocks.
         let (
             row_min_outflow_start,
             row_max_outflow_start,
@@ -764,7 +769,7 @@ impl StageLayout {
                 idx.min_generation_rows.start,
             )
         } else {
-            let evap_rows_end = row_evap_start + idx.n_evap_hydros;
+            let evap_rows_end = idx.post_equipment_row_start();
             (evap_rows_end, evap_rows_end, evap_rows_end, evap_rows_end)
         };
 
@@ -2104,5 +2109,91 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ── post-equipment column cursor (no-hydro fork fallback) ───────────────────
+
+    /// With `n_hydros == 0` every withdrawal / operational-violation / NCS column
+    /// region is empty, so all their starts collapse onto the single
+    /// post-equipment column cursor `col_evap_start`. A multi-block stage keeps
+    /// that cursor non-trivial (not the degenerate one-column case), so a stale
+    /// `> 0`-branch cursor leaking into the empty-hydro fallback would shift these
+    /// starts off `col_evap_start` and fail here.
+    #[test]
+    fn post_equipment_col_start_matches_evap_col_start_when_no_hydros() {
+        let fixtures = ZeroEntityFixtures::new();
+        let ctx = fixtures.make_ctx(0, 0, vec![], vec![]);
+        let stage = PumpingFixtures::stage_with_blocks(4);
+        let layout = StageLayout::new(&ctx, &stage, 0);
+
+        assert_eq!(ctx.n_hydros, 0, "fixture must have zero hydros");
+        assert_eq!(layout.n_blks, 4, "fixture must build a 4-block layout");
+
+        let post_equipment = layout.col_evap_start;
+        assert_eq!(
+            layout.col_ncs_start, post_equipment,
+            "col_ncs_start must collapse onto col_evap_start when n_hydros == 0"
+        );
+        assert_eq!(
+            layout.col_withdrawal_neg_start, post_equipment,
+            "col_withdrawal_neg_start"
+        );
+        assert_eq!(
+            layout.col_withdrawal_pos_start, post_equipment,
+            "col_withdrawal_pos_start"
+        );
+        assert_eq!(
+            layout.col_outflow_below_start, post_equipment,
+            "col_outflow_below_start"
+        );
+        assert_eq!(
+            layout.col_outflow_above_start, post_equipment,
+            "col_outflow_above_start"
+        );
+        assert_eq!(
+            layout.col_turbine_below_start, post_equipment,
+            "col_turbine_below_start"
+        );
+        assert_eq!(
+            layout.col_generation_below_start, post_equipment,
+            "col_generation_below_start"
+        );
+    }
+
+    // ── post-equipment row cursor (no-hydro fork fallback) ──────────────────────
+
+    /// With `n_hydros == 0` every operational-violation row block is empty, so all
+    /// four row starts collapse onto the single post-equipment row cursor
+    /// `fpha_rows_end() + n_evap_hydros`. A multi-block stage keeps that cursor
+    /// non-trivial (not the degenerate one-row case), so a stale `> 0`-branch
+    /// cursor leaking into the empty-hydro fallback would shift these starts off
+    /// the shared post-equipment row cursor and fail here.
+    #[test]
+    fn post_equipment_row_start_matches_evap_rows_end_when_no_hydros() {
+        let fixtures = ZeroEntityFixtures::new();
+        let ctx = fixtures.make_ctx(0, 0, vec![], vec![]);
+        let stage = PumpingFixtures::stage_with_blocks(4);
+        let layout = StageLayout::new(&ctx, &stage, 0);
+
+        assert_eq!(ctx.n_hydros, 0, "fixture must have zero hydros");
+        assert_eq!(layout.n_blks, 4, "fixture must build a 4-block layout");
+
+        let post_equipment = layout.indexer.fpha_rows_end() + layout.indexer.n_evap_hydros;
+        assert_eq!(
+            layout.row_min_outflow_start, post_equipment,
+            "row_min_outflow_start must collapse onto fpha_rows_end() + n_evap_hydros when n_hydros == 0"
+        );
+        assert_eq!(
+            layout.row_max_outflow_start, post_equipment,
+            "row_max_outflow_start"
+        );
+        assert_eq!(
+            layout.row_min_turbine_start, post_equipment,
+            "row_min_turbine_start"
+        );
+        assert_eq!(
+            layout.row_min_generation_start, post_equipment,
+            "row_min_generation_start"
+        );
     }
 }

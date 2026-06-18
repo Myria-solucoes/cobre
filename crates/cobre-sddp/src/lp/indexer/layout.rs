@@ -739,6 +739,21 @@ impl StageIndexer {
         self.generation_col_start() + self.n_fpha_hydros * self.n_blks
     }
 
+    /// First column after the operational-violation slack region when no hydros
+    /// are present.
+    ///
+    /// With `hydro_count == 0` the withdrawal and operational-violation slack
+    /// blocks are all empty, so the NCS region and every withdrawal/operational
+    /// column start coincide at the evaporation-column cursor. Returns
+    /// `evap_col_start()`: the single cursor those empty regions share. Reading a
+    /// stale `> 0`-branch cursor here would misalign the empty-hydro layout while
+    /// still compiling, which this accessor's single ownership prevents.
+    #[must_use]
+    #[inline]
+    pub(crate) fn post_equipment_col_start(&self) -> usize {
+        self.evap_col_start()
+    }
+
     /// First row after the FPHA constraint block, even when that block is empty.
     ///
     /// The public [`Self::fpha_rows`] list is empty when no FPHA hydros exist, so
@@ -750,6 +765,20 @@ impl StageIndexer {
     pub(crate) fn fpha_rows_end(&self) -> usize {
         let total_planes: usize = self.fpha_rows.iter().map(|r| r.planes_per_block).sum();
         self.load_balance.end + self.n_blks * total_planes
+    }
+
+    /// First row after the evaporation row block, where the operational-violation
+    /// row blocks begin when no hydros are present.
+    ///
+    /// With `hydro_count == 0` the operational-violation row blocks are all empty,
+    /// so every operational-violation row start coincides at the row immediately
+    /// after the evaporation block: `fpha_rows_end() + n_evap_hydros`. Reading a
+    /// stale `> 0`-branch row cursor here would misalign the empty-hydro row layout
+    /// while still compiling, which this accessor's single ownership prevents.
+    #[must_use]
+    #[inline]
+    pub(crate) fn post_equipment_row_start(&self) -> usize {
+        self.fpha_rows_end() + self.n_evap_hydros
     }
 }
 
