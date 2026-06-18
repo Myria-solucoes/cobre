@@ -115,10 +115,11 @@
 //!
 //! # Submodule layout
 //!
-//! - `layout` — the [`StageIndexer`] struct (with its `0..0` sentinel field
-//!   docs), the satellite types ([`EvaporationIndices`], [`FphaRowRange`],
-//!   [`EquipmentCounts`], [`FphaColumnLayout`], [`EvapConfig`]), the small
-//!   layout accessors, and the compile-time `Send + Sync` assertion.
+//! - `layout` — the [`StageIndexer`] struct, the [`Sentinels`] sub-struct (which
+//!   owns the `0..0` sentinel field docs), the satellite types
+//!   ([`EvaporationIndices`], [`FphaRowRange`], [`EquipmentCounts`],
+//!   [`FphaColumnLayout`], [`EvapConfig`]), the small layout accessors, and the
+//!   compile-time `Send + Sync` assertion.
 //! - `state_mapping` — the state-vector-to-LP-column resolvers
 //!   ([`StageIndexer::state_to_lp_column`], [`StageIndexer::finalize_state_column_map`],
 //!   [`StageIndexer::lp_column_for_state`], and the state-pinning entry point

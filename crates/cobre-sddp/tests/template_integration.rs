@@ -11330,17 +11330,6 @@ fn rt_col_ant_dec_start(k: usize) -> usize {
     12 + k
 }
 
-/// `row_anticipated_state_fixing_start` for the roundtrip geometry (N=1, L=0).
-///
-/// Phase 1: state-fixing rows removed. This function is kept for call-site
-/// compatibility but the row it returned no longer exists.
-///
-/// Dead after Phase 1 — callers must remove their uses of this row.
-#[allow(dead_code)]
-fn rt_row_ant_state_fix_start() -> usize {
-    0 // Phase 1: state-fixing rows gone; this function is dead
-}
-
 /// `row_anticipated_fishing_start` for the roundtrip geometry.
 ///
 /// Phase 1: state-fixing rows (K) removed from the LP.
@@ -11369,7 +11358,6 @@ fn rt_expected_num_rows(k: usize, stage_idx: usize) -> usize {
     // Phase 1: base = 12 (was 13 + k; state-fixing rows removed).
     let fishing = 1_usize; // always-active: 1 fishing row per anticipated plant
     let state_out_def = usize::from(stage_idx + k < 4);
-    let _ = k; // k no longer affects num_rows after Phase 1
     12 + fishing + state_out_def
 }
 

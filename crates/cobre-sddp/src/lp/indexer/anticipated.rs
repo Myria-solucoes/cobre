@@ -54,7 +54,7 @@ impl StageIndexer {
     ///
     /// # Panics (debug builds only)
     ///
-    /// Panics if `local_idx >= self.n_anticipated()`.
+    /// Panics if `local_idx >= self.n_anticipated`.
     #[inline]
     #[must_use]
     pub fn is_anticipated_decision_active(
@@ -107,7 +107,7 @@ impl StageIndexer {
     ///
     /// # Panics (debug builds only)
     ///
-    /// Panics if `stage_idx > n_stages` or `local_idx >= self.n_anticipated()`.
+    /// Panics if `stage_idx > n_stages` or `local_idx >= self.n_anticipated`.
     #[inline]
     #[must_use]
     pub fn is_anticipated_fishing_active(

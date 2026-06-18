@@ -3,10 +3,11 @@
 //!
 //! `StageIndexer` carries the state-pinning contract codified in
 //! `.claude/rules/sddp.md`: the `storage_fixing`, `lag_fixing`, and
-//! `anticipated_state_fixing` row ranges are permanent empty `0..0` sentinels —
-//! state is pinned via column bounds resolved through
+//! `anticipated_state_fixing` row ranges — grouped in the [`Sentinels`]
+//! sub-struct, reached as `indexer.sentinels.*` — are permanent empty `0..0`
+//! sentinels; state is pinned via column bounds resolved through
 //! [`StageIndexer::state_to_lp_incoming_column`], never a fixing-row index. The
-//! `0..0` sentinel field docs below are part of that contract and move verbatim.
+//! `0..0` sentinel field docs on [`Sentinels`] are part of that contract.
 
 use std::collections::HashMap;
 use std::ops::Range;
