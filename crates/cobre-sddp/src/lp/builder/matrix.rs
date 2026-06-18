@@ -74,7 +74,7 @@ fn fill_storage_columns(
     bufs: &mut ColumnBufs<'_>,
 ) {
     for h_idx in 0..layout.n_h {
-        let hb = ctx.bounds.hydro_bounds(h_idx, stage_idx);
+        let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
         bufs.col_lower[h_idx] = hb.min_storage_hm3;
         bufs.col_upper[h_idx] = hb.max_storage_hm3;
         bufs.col_lower[layout.col_storage_in_start + h_idx] = f64::NEG_INFINITY;
@@ -104,7 +104,9 @@ fn fill_ar_lag_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
 fn fill_anticipated_state_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
     for slot in 0..layout.k_max {
         for plant in 0..layout.n_anticipated {
-            let col = layout.col_anticipated_state_start + slot * layout.n_anticipated + plant;
+            let col = layout.anticipated.col_anticipated_state_start
+                + slot * layout.n_anticipated
+                + plant;
             bufs.col_lower[col] = f64::NEG_INFINITY;
             bufs.col_upper[col] = f64::INFINITY;
         }
@@ -132,11 +134,13 @@ fn fill_anticipated_state_out_columns(
     layout: &StageLayout,
     bufs: &mut ColumnBufs<'_>,
 ) {
-    let n_stages = ctx.bounds.n_stages();
+    let n_stages = ctx.resolved.bounds.n_stages();
     for local_idx in 0..ctx.n_anticipated {
-        let k_i = ctx.anticipated_lead_stages[local_idx];
-        let col = layout.col_anticipated_state_out_start + local_idx;
-        if stage_idx.saturating_add(k_i) < n_stages {
+        let col = layout.anticipated.col_anticipated_state_out_start + local_idx;
+        if layout
+            .indexer
+            .is_anticipated_decision_active(local_idx, stage_idx, n_stages)
+        {
             bufs.col_lower[col] = f64::NEG_INFINITY;
             bufs.col_upper[col] = f64::INFINITY;
         } else {
@@ -145,10 +149,14 @@ fn fill_anticipated_state_out_columns(
         }
     }
     let active_count = (0..ctx.n_anticipated)
-        .filter(|&i| stage_idx.saturating_add(ctx.anticipated_lead_stages[i]) < n_stages)
+        .filter(|&i| {
+            layout
+                .indexer
+                .is_anticipated_decision_active(i, stage_idx, n_stages)
+        })
         .count();
     debug_assert_eq!(
-        active_count, layout.n_anticipated_state_out_def_rows,
+        active_count, layout.anticipated.n_anticipated_state_out_def_rows,
         "active state_out column count must match def-row count at stage {stage_idx}"
     );
 }
@@ -176,8 +184,8 @@ fn fill_turbine_columns(
     bufs: &mut ColumnBufs<'_>,
 ) {
     for h_idx in 0..layout.n_h {
-        let hb = ctx.bounds.hydro_bounds(h_idx, stage_idx);
-        let hp = ctx.penalties.hydro_penalties(h_idx, stage_idx);
+        let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
+        let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
         let model = ctx.production_models.model(h_idx, stage_idx);
         let turb_upper = match model {
             ResolvedProductionModel::ConstantProductivity { productivity }
@@ -206,7 +214,7 @@ fn fill_spillage_columns(
     bufs: &mut ColumnBufs<'_>,
 ) {
     for h_idx in 0..layout.n_h {
-        let hp = ctx.penalties.hydro_penalties(h_idx, stage_idx);
+        let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
         for blk in 0..layout.n_blks {
             let col = layout.spillage_col(h_idx, blk);
             bufs.col_upper[col] = f64::INFINITY;
@@ -228,13 +236,14 @@ fn fill_diversion_columns(
     bufs: &mut ColumnBufs<'_>,
 ) {
     for (h_idx, _hydro) in ctx.hydros.iter().enumerate() {
-        let hp = ctx.penalties.hydro_penalties(h_idx, stage_idx);
+        let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
         // Contract: the diversion upper bound is the per-stage RESOLVED value
         // (`hydro_bounds.parquet` override into `HydroStageBounds.max_diversion_m3s`),
         // NOT the declaration-time `hydro.diversion.max_flow_m3s` — reading the entity
         // directly silently drops any wired per-stage override. Mirror every sibling
         // column family (e.g. `fill_thermal_columns`).
         let max_div = ctx
+            .resolved
             .bounds
             .hydro_bounds(h_idx, stage_idx)
             .max_diversion_m3s
@@ -260,7 +269,7 @@ fn fill_thermal_columns(
     bufs: &mut ColumnBufs<'_>,
 ) {
     for (t_idx, _thermal) in ctx.thermals.iter().enumerate() {
-        let tb = ctx.bounds.thermal_bounds(t_idx, stage_idx);
+        let tb = ctx.resolved.bounds.thermal_bounds(t_idx, stage_idx);
         let marginal_cost_per_mwh = tb.cost_per_mwh;
         for blk in 0..layout.n_blks {
             let col = layout.col_thermal_start + t_idx * layout.n_blks + blk;
@@ -291,16 +300,20 @@ fn fill_anticipated_decision_columns(
     layout: &StageLayout,
     bufs: &mut ColumnBufs<'_>,
 ) {
-    let n_stages = ctx.bounds.n_stages();
+    let n_stages = ctx.resolved.bounds.n_stages();
     for local_idx in 0..ctx.n_anticipated {
         let k_i = ctx.anticipated_lead_stages[local_idx];
         let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
-        let col = layout.col_anticipated_decision_start + local_idx;
-        // Horizon gate: active iff t + K_i < n_stages (strict).
-        // saturating_add is safe; n_stages and k_i fit in usize without overflow.
-        if stage_idx.saturating_add(k_i) < n_stages {
+        let col = layout.anticipated.col_anticipated_decision_start + local_idx;
+        if layout
+            .indexer
+            .is_anticipated_decision_active(local_idx, stage_idx, n_stages)
+        {
             let delivery_stage = stage_idx + k_i;
-            let tb = ctx.bounds.thermal_bounds(thermal_idx, delivery_stage);
+            let tb = ctx
+                .resolved
+                .bounds
+                .thermal_bounds(thermal_idx, delivery_stage);
             bufs.col_lower[col] = tb.min_generation_mw;
             bufs.col_upper[col] = tb.max_generation_mw;
         } else {
@@ -339,15 +352,20 @@ fn fill_anticipated_decision_objective(
     layout: &StageLayout,
     bufs: &mut ColumnBufs<'_>,
 ) {
-    let n_stages = ctx.bounds.n_stages();
+    let n_stages = ctx.resolved.bounds.n_stages();
     for local_idx in 0..ctx.n_anticipated {
         let k_i = ctx.anticipated_lead_stages[local_idx];
-        let col = layout.col_anticipated_decision_start + local_idx;
-        // Horizon gate matches fill_anticipated_decision_columns (strict).
-        if stage_idx.saturating_add(k_i) < n_stages {
+        let col = layout.anticipated.col_anticipated_decision_start + local_idx;
+        if layout
+            .indexer
+            .is_anticipated_decision_active(local_idx, stage_idx, n_stages)
+        {
             let delivery_stage = stage_idx + k_i;
             let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
-            let tb = ctx.bounds.thermal_bounds(thermal_idx, delivery_stage);
+            let tb = ctx
+                .resolved
+                .bounds
+                .thermal_bounds(thermal_idx, delivery_stage);
             let delivery_hours = ctx.total_hours_per_stage[delivery_stage];
             let d_factor = ctx.cumulative_discount_factors[delivery_stage];
             bufs.objective[col] = tb.cost_per_mwh * delivery_hours * d_factor;
@@ -381,7 +399,7 @@ fn zero_anticipated_delivery_thermal_cost(
     bufs: &mut ColumnBufs<'_>,
 ) {
     let n_blks = layout.n_blks;
-    let n_stages = ctx.bounds.n_stages();
+    let n_stages = ctx.resolved.bounds.n_stages();
     for local_idx in 0..ctx.n_anticipated {
         if !layout
             .indexer
@@ -409,10 +427,13 @@ fn fill_line_columns(
     bufs: &mut ColumnBufs<'_>,
 ) {
     for (l_idx, _line) in ctx.lines.iter().enumerate() {
-        let lb = ctx.bounds.line_bounds(l_idx, stage_idx);
-        let lp = ctx.penalties.line_penalties(l_idx, stage_idx);
+        let lb = ctx.resolved.bounds.line_bounds(l_idx, stage_idx);
+        let lp = ctx.resolved.penalties.line_penalties(l_idx, stage_idx);
         for blk in 0..layout.n_blks {
-            let (df, rf) = ctx.resolved_exchange_factors.factors(l_idx, stage_idx, blk);
+            let (df, rf) = ctx
+                .resolved
+                .resolved_exchange_factors
+                .factors(l_idx, stage_idx, blk);
             let col_fwd = layout.line_fwd_col(l_idx, blk);
             let col_rev = layout.line_rev_col(l_idx, blk);
             bufs.col_upper[col_fwd] = lb.direct_mw * df;
@@ -441,7 +462,7 @@ fn fill_deficit_and_excess_columns(
     bufs: &mut ColumnBufs<'_>,
 ) {
     for (b_idx, bus) in ctx.buses.iter().enumerate() {
-        let bp = ctx.penalties.bus_penalties(b_idx, stage_idx);
+        let bp = ctx.resolved.penalties.bus_penalties(b_idx, stage_idx);
         for (seg_idx, segment) in bus.deficit_segments.iter().enumerate() {
             for blk in 0..layout.n_blks {
                 let col_def = layout.deficit_col(b_idx, seg_idx, blk);
@@ -473,7 +494,7 @@ fn fill_inflow_slack_columns(
     if ctx.has_penalty {
         for h_idx in 0..layout.n_h {
             let col = layout.col_inflow_slack_start + h_idx;
-            let hp = ctx.penalties.hydro_penalties(h_idx, stage_idx);
+            let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
             bufs.objective[col] = hp.inflow_nonnegativity_cost * total_stage_hours;
         }
     }
@@ -490,7 +511,7 @@ fn fill_fpha_generation_columns(
     bufs: &mut ColumnBufs<'_>,
 ) {
     for (local_idx, &h_idx) in layout.fpha_hydro_indices.iter().enumerate() {
-        let hb = ctx.bounds.hydro_bounds(h_idx, stage_idx);
+        let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
         for blk in 0..layout.n_blks {
             let col = layout.generation_col(local_idx, blk);
             bufs.col_lower[col] = 0.0;
@@ -527,7 +548,7 @@ fn fill_evaporation_columns(
         match ctx.evaporation_models.model(h_idx) {
             EvaporationModel::Linearized { coefficients, .. } => {
                 let coeff = &coefficients[stage_idx];
-                let hb = ctx.bounds.hydro_bounds(h_idx, stage_idx);
+                let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
                 let q_max_abs = (coeff.intercept_m3s
                     + coeff.volume_slope_m3s_per_hm3 * hb.max_storage_hm3)
                     .abs()
@@ -552,7 +573,7 @@ fn fill_evaporation_columns(
         // Evaporation outflow (offset 0) keeps objective = 0.0 (already the vec initialisation default).
         // f_evap_plus = under-evaporation (evaporated less than target).
         // f_evap_minus = over-evaporation (evaporated more than target).
-        let hp = ctx.penalties.hydro_penalties(h_idx, stage_idx);
+        let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
         bufs.objective[col_f_plus] = hp.evaporation_violation_neg_cost * total_stage_hours;
         bufs.objective[col_f_minus] = hp.evaporation_violation_pos_cost * total_stage_hours;
     }
@@ -592,7 +613,7 @@ fn fill_withdrawal_slack_columns(
     // Neg slacks: under-delivery for T>0 (cap at |T|), over-application for T<0 (unbounded).
     for h_idx in 0..layout.n_h {
         let col = layout.col_withdrawal_neg_start + h_idx;
-        let hb = ctx.bounds.hydro_bounds(h_idx, stage_idx);
+        let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
         let t = hb.water_withdrawal_m3s;
         bufs.col_upper[col] = if t > 0.0 {
             t // under-delivery: floor R ≥ 0 by capping neg ≤ |T|
@@ -601,13 +622,13 @@ fn fill_withdrawal_slack_columns(
         } else {
             0.0 // no scheduled withdrawal: presolve-eliminate
         };
-        let hp = ctx.penalties.hydro_penalties(h_idx, stage_idx);
+        let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
         bufs.objective[col] = hp.water_withdrawal_violation_neg_cost * total_stage_hours;
     }
     // Pos slacks: over-delivery for T>0 (unbounded), under-delivery for T<0 (cap at |T|).
     for h_idx in 0..layout.n_h {
         let col = layout.col_withdrawal_pos_start + h_idx;
-        let hb = ctx.bounds.hydro_bounds(h_idx, stage_idx);
+        let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
         let t = hb.water_withdrawal_m3s;
         bufs.col_upper[col] = if t > 0.0 {
             f64::INFINITY // over-withdrawal latitude (R further positive)
@@ -616,7 +637,7 @@ fn fill_withdrawal_slack_columns(
         } else {
             0.0 // no scheduled withdrawal: presolve-eliminate
         };
-        let hp = ctx.penalties.hydro_penalties(h_idx, stage_idx);
+        let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
         bufs.objective[col] = hp.water_withdrawal_violation_pos_cost * total_stage_hours;
     }
 }
@@ -625,7 +646,7 @@ fn fill_withdrawal_slack_columns(
 /// column range. The variant selects, via `match`, all three axes that distinguish
 /// the families: the resolved-bound activation predicate, the `StageLayout` column
 /// accessor, and the `HydroStagePenalties` cost field. Every predicate reads the
-/// **resolved per-stage** bound (`ctx.bounds.hydro_bounds(h_idx, stage_idx)`), never
+/// **resolved per-stage** bound (`ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx)`), never
 /// the entity declaration on `ctx.hydros[h_idx]` — the declaration ignores per-stage
 /// overrides and would silently mis-activate columns while still compiling.
 #[derive(Clone, Copy)]
@@ -705,8 +726,8 @@ fn fill_block_family(
     family: BlockSlackFamily,
 ) {
     for h_idx in 0..layout.n_h {
-        let hb = ctx.bounds.hydro_bounds(h_idx, stage_idx);
-        let hp = ctx.penalties.hydro_penalties(h_idx, stage_idx);
+        let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
+        let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
         let active = match family {
             BlockSlackFamily::OutflowBelow => hb.min_outflow_m3s > 0.0,
             BlockSlackFamily::OutflowAbove => hb.max_outflow_m3s.is_some(),
@@ -758,11 +779,15 @@ fn fill_ncs_columns(
     for (ncs_local, &ncs_sys_idx) in layout.active_ncs_indices.iter().enumerate() {
         let ncs = &ctx.non_controllable_sources[ncs_sys_idx];
         let avail_gen = ctx
+            .resolved
             .resolved_ncs_bounds
             .available_generation(ncs_sys_idx, stage_idx);
         for blk in 0..layout.n_blks {
             let col = layout.col_ncs_start + ncs_local * layout.n_blks + blk;
-            let factor = ctx.resolved_ncs_factors.factor(ncs_sys_idx, stage_idx, blk);
+            let factor = ctx
+                .resolved
+                .resolved_ncs_factors
+                .factor(ncs_sys_idx, stage_idx, blk);
             let upper = avail_gen * factor;
             bufs.col_upper[col] = upper;
             bufs.col_lower[col] = if ncs.allow_curtailment { 0.0 } else { upper };
@@ -782,7 +807,7 @@ fn fill_ncs_columns(
 ///
 /// Iterates `ctx.pumping_stations` in slot order — the canonical ID-sorted slice
 /// from `System::pumping_stations` — so the local index `p_idx` matches both the
-/// column-block position and the `ctx.bounds.pumping_bounds(p_idx, …)` slot. This
+/// column-block position and the `ctx.resolved.bounds.pumping_bounds(p_idx, …)` slot. This
 /// upholds the declaration-order bit-determinism rule without depending on
 /// declaration order.
 fn fill_pumping_columns(
@@ -792,7 +817,7 @@ fn fill_pumping_columns(
     bufs: &mut ColumnBufs<'_>,
 ) {
     for p_idx in 0..ctx.pumping_stations.len() {
-        let pb = ctx.bounds.pumping_bounds(p_idx, stage_idx);
+        let pb = ctx.resolved.bounds.pumping_bounds(p_idx, stage_idx);
         for blk in 0..layout.n_blks {
             let col = layout.col_pumping_start + p_idx * layout.n_blks + blk;
             bufs.col_lower[col] = pb.min_flow_m3s;
@@ -939,6 +964,7 @@ fn fill_water_balance_rows(
             0.0
         };
         let withdrawal = ctx
+            .resolved
             .bounds
             .hydro_bounds(h_idx, stage_idx)
             .water_withdrawal_m3s;
@@ -967,7 +993,10 @@ fn fill_load_balance_rows(
             .find(|lm| lm.bus_id == bus.id && lm.stage_id == stage.id)
             .map_or(0.0, |lm| lm.mean_mw);
         for blk in 0..layout.n_blks {
-            let factor = ctx.resolved_load_factors.factor(b_idx, stage_idx, blk);
+            let factor = ctx
+                .resolved
+                .resolved_load_factors
+                .factor(b_idx, stage_idx, blk);
             let row = layout.row_load_balance_start + b_idx * layout.n_blks + blk;
             let rhs = mean_mw * factor;
             row_lower[row] = rhs;
@@ -1075,39 +1104,31 @@ fn fill_operational_violation_rows(
     row_lower: &mut [f64],
     row_upper: &mut [f64],
 ) {
-    // Min outflow rows (>= constraint): LHS + sigma >= min_outflow_m3s
+    // All four operational-violation row families share the same per-hydro bound
+    // lookup, so the bound is read once per hydro and the four families' bounds are
+    // written from it. Each family targets `row_lower`/`row_upper` by its own
+    // computed row index, so the visit order is irrelevant to the result.
+    //   min-outflow   (>=): LHS + sigma >= min_outflow_m3s
+    //   max-outflow   (<=): LHS - sigma <= max_outflow_m3s
+    //   min-turbine   (>=): LHS + sigma >= min_turbined_m3s
+    //   min-generation(>=): LHS + sigma >= min_generation_mw
     for h_idx in 0..layout.n_h {
-        let hb = ctx.bounds.hydro_bounds(h_idx, stage_idx);
+        let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
         for blk in 0..layout.n_blks {
             let row = layout.row_min_outflow_start + h_idx * layout.n_blks + blk;
             row_lower[row] = hb.min_outflow_m3s;
             row_upper[row] = f64::INFINITY;
         }
-    }
-
-    // Max outflow rows (<= constraint): LHS - sigma <= max_outflow_m3s
-    for h_idx in 0..layout.n_h {
-        let hb = ctx.bounds.hydro_bounds(h_idx, stage_idx);
         for blk in 0..layout.n_blks {
             let row = layout.row_max_outflow_start + h_idx * layout.n_blks + blk;
             row_lower[row] = f64::NEG_INFINITY;
             row_upper[row] = hb.max_outflow_m3s.unwrap_or(f64::INFINITY);
         }
-    }
-
-    // Min turbine flow rows (>= constraint): LHS + sigma >= min_turbined_m3s
-    for h_idx in 0..layout.n_h {
-        let hb = ctx.bounds.hydro_bounds(h_idx, stage_idx);
         for blk in 0..layout.n_blks {
             let row = layout.row_min_turbine_start + h_idx * layout.n_blks + blk;
             row_lower[row] = hb.min_turbined_m3s;
             row_upper[row] = f64::INFINITY;
         }
-    }
-
-    // Min generation rows (>= constraint): LHS + sigma >= min_generation_mw
-    for h_idx in 0..layout.n_h {
-        let hb = ctx.bounds.hydro_bounds(h_idx, stage_idx);
         for blk in 0..layout.n_blks {
             let row = layout.row_min_generation_start + h_idx * layout.n_blks + blk;
             row_lower[row] = hb.min_generation_mw;
@@ -1138,12 +1159,12 @@ pub(super) fn fill_anticipated_fishing_rows(
     // sparse `active_pos` offset — precisely because the fishing constraint is
     // always active for every anticipated plant.
     for local_idx in 0..ctx.n_anticipated {
-        let row = layout.row_anticipated_fishing_start + local_idx;
+        let row = layout.anticipated.row_anticipated_fishing_start + local_idx;
         row_lower[row] = 0.0;
         row_upper[row] = 0.0;
     }
     debug_assert_eq!(
-        ctx.n_anticipated, layout.n_anticipated_fishing_rows,
+        ctx.n_anticipated, layout.anticipated.n_anticipated_fishing_rows,
         "fill_anticipated_fishing_rows: row count must equal n_anticipated"
     );
 }
@@ -1165,19 +1186,22 @@ pub(super) fn fill_anticipated_state_out_def_rows(
     row_lower: &mut [f64],
     row_upper: &mut [f64],
 ) {
-    let n_stages = ctx.bounds.n_stages();
+    let n_stages = ctx.resolved.bounds.n_stages();
     let mut active_pos: usize = 0;
-    for &k_i in &ctx.anticipated_lead_stages {
-        if stage_idx.saturating_add(k_i) >= n_stages {
+    for local_idx in 0..ctx.n_anticipated {
+        if !layout
+            .indexer
+            .is_anticipated_decision_active(local_idx, stage_idx, n_stages)
+        {
             continue;
         }
-        let row = layout.row_anticipated_state_out_def_start + active_pos;
+        let row = layout.anticipated.row_anticipated_state_out_def_start + active_pos;
         row_lower[row] = 0.0;
         row_upper[row] = 0.0;
         active_pos += 1;
     }
     debug_assert_eq!(
-        active_pos, layout.n_anticipated_state_out_def_rows,
+        active_pos, layout.anticipated.n_anticipated_state_out_def_rows,
         "fill_anticipated_state_out_def_rows: active_pos mismatch at stage {stage_idx}"
     );
 }
@@ -1202,7 +1226,7 @@ pub(super) fn fill_anticipated_fishing_entries(
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
     let n_blks = layout.n_blks;
-    let n_stages = ctx.bounds.n_stages();
+    let n_stages = ctx.resolved.bounds.n_stages();
     for local_idx in 0..ctx.n_anticipated {
         if !layout
             .indexer
@@ -1210,7 +1234,7 @@ pub(super) fn fill_anticipated_fishing_entries(
         {
             continue;
         }
-        let row = layout.row_anticipated_fishing_start + local_idx;
+        let row = layout.anticipated.row_anticipated_fishing_start + local_idx;
         let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
         let mut block_hours_total: f64 = 0.0;
         for blk in 0..n_blks {
@@ -1219,11 +1243,11 @@ pub(super) fn fill_anticipated_fishing_entries(
             col_entries[col_gen].push((row, block_hours));
             block_hours_total += block_hours;
         }
-        let col_state = layout.col_anticipated_state_start + local_idx;
+        let col_state = layout.anticipated.col_anticipated_state_start + local_idx;
         col_entries[col_state].push((row, -block_hours_total));
     }
     debug_assert_eq!(
-        ctx.n_anticipated, layout.n_anticipated_fishing_rows,
+        ctx.n_anticipated, layout.anticipated.n_anticipated_fishing_rows,
         "fill_anticipated_fishing_entries: row count must equal n_anticipated"
     );
 }
@@ -1251,22 +1275,24 @@ pub(super) fn fill_anticipated_state_out_def_entries(
     layout: &StageLayout,
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
-    let n_stages = ctx.bounds.n_stages();
+    let n_stages = ctx.resolved.bounds.n_stages();
     let mut active_pos: usize = 0;
     for local_idx in 0..ctx.n_anticipated {
-        let k_i = ctx.anticipated_lead_stages[local_idx];
-        if stage_idx.saturating_add(k_i) >= n_stages {
+        if !layout
+            .indexer
+            .is_anticipated_decision_active(local_idx, stage_idx, n_stages)
+        {
             continue;
         }
-        let row = layout.row_anticipated_state_out_def_start + active_pos;
-        let col_state_out = layout.col_anticipated_state_out_start + local_idx;
-        let col_decision = layout.col_anticipated_decision_start + local_idx;
+        let row = layout.anticipated.row_anticipated_state_out_def_start + active_pos;
+        let col_state_out = layout.anticipated.col_anticipated_state_out_start + local_idx;
+        let col_decision = layout.anticipated.col_anticipated_decision_start + local_idx;
         col_entries[col_state_out].push((row, 1.0));
         col_entries[col_decision].push((row, -1.0));
         active_pos += 1;
     }
     debug_assert_eq!(
-        active_pos, layout.n_anticipated_state_out_def_rows,
+        active_pos, layout.anticipated.n_anticipated_state_out_def_rows,
         "fill_anticipated_state_out_def_entries: active_pos mismatch at stage {stage_idx}"
     );
 }
@@ -1405,6 +1431,13 @@ pub(super) fn fill_pumping_water_entries(
     let n_blks = layout.n_blks;
     let row_water = layout.row_water_balance_start;
     for (p_idx, station) in ctx.pumping_stations.iter().enumerate() {
+        // `validate_pumping_station_refs` (run from `SystemBuilder::build()`)
+        // guarantees both refs resolve on a validated `System`, so on the
+        // production path both `Option`s are `Some`. The per-side `if let
+        // Some(...)` guards below are defense-in-depth for direct-construction
+        // test paths that bypass validation — never a production branch. A
+        // one-sided resolve writes a feasible-but-wrong half water coupling, so
+        // the guards must not be promoted to an unconditional index/expect.
         let source = ctx.hydro_pos.get(&station.source_hydro_id).copied();
         let destination = ctx.hydro_pos.get(&station.destination_hydro_id).copied();
         for blk in 0..n_blks {
@@ -1445,13 +1478,8 @@ pub(super) fn fill_load_balance_entries(
     let n_blks = layout.n_blks;
     let row_load = layout.row_load_balance_start;
 
-    let mut fpha_local: Vec<Option<usize>> = vec![None; ctx.n_hydros];
-    for (local_idx, &h_idx) in layout.fpha_hydro_indices.iter().enumerate() {
-        fpha_local[h_idx] = Some(local_idx);
-    }
-
     for (h_idx, hydro) in ctx.hydros.iter().enumerate() {
-        if let Some(local_idx) = fpha_local[h_idx] {
+        if let Some(local_idx) = layout.fpha_local_index[h_idx] {
             debug_assert!(
                 matches!(
                     ctx.production_models.model(h_idx, stage_idx),
@@ -1793,7 +1821,7 @@ pub(super) fn fill_generic_constraint_entries(
                 let coef = match term.coefficient {
                     CoefficientRef::Literal(v) => v,
                     CoefficientRef::Parameter(param_id) => {
-                        ctx.resolved_parameters.get(param_id, stage_idx)
+                        ctx.resolved.resolved_parameters.get(param_id, stage_idx)
                     }
                 };
                 col_entries[col].push((row, coef * term.scale * multiplier));
@@ -1925,13 +1953,7 @@ pub(super) fn fill_operational_violation_entries(
 ) {
     let n_blks = layout.n_blks;
 
-    // Build FPHA local-index lookup (same pattern as fill_load_balance_entries).
-    let mut fpha_local: Vec<Option<usize>> = vec![None; ctx.n_hydros];
-    for (local_idx, &h_idx) in layout.fpha_hydro_indices.iter().enumerate() {
-        fpha_local[h_idx] = Some(local_idx);
-    }
-
-    for (h_idx, fpha_local_entry) in fpha_local.iter().enumerate() {
+    for (h_idx, fpha_local_entry) in layout.fpha_local_index.iter().enumerate() {
         // ── Min outflow (per block): q + s + d + sigma >= min_outflow_m3s ───
         for blk in 0..n_blks {
             let row = layout.row_min_outflow_start + h_idx * n_blks + blk;
@@ -2618,6 +2640,7 @@ mod zero_cost_tests {
     use crate::hydro_models::{EvaporationModelSet, ProductionModelSet};
     use crate::resolved_parameters::ResolvedParameters;
 
+    use super::super::layout::ResolvedTables;
     use super::{
         ColumnBufs, StageLayout, TemplateBuildCtx, build_stage_matrix_entries,
         fill_anticipated_fishing_entries, fill_anticipated_fishing_rows,
@@ -2677,7 +2700,7 @@ mod zero_cost_tests {
     impl AntFixtures {
         /// Build a minimal `ResolvedBounds` with zero entities and the given `n_stages`.
         ///
-        /// Required so that `ctx.bounds.n_stages()` returns a meaningful value for
+        /// Required so that `ctx.resolved.bounds.n_stages()` returns a meaningful value for
         /// the `is_anticipated_fishing_active` debug guard (`stage_idx < n_stages`).
         fn bounds_with_n_stages(n_stages: usize) -> ResolvedBounds {
             ResolvedBounds::new(
@@ -2761,8 +2784,16 @@ mod zero_cost_tests {
                 buses: &[],
                 load_models: &[],
                 cascade: &self.cascade,
-                bounds: &self.bounds,
-                penalties: &self.penalties,
+                resolved: ResolvedTables {
+                    bounds: &self.bounds,
+                    penalties: &self.penalties,
+                    resolved_generic_bounds: &self.resolved_generic_bounds,
+                    resolved_load_factors: &self.resolved_load_factors,
+                    resolved_exchange_factors: &self.resolved_exchange_factors,
+                    resolved_ncs_bounds: &self.resolved_ncs_bounds,
+                    resolved_ncs_factors: &self.resolved_ncs_factors,
+                    resolved_parameters: &self.resolved_parameters,
+                },
                 hydro_pos: HashMap::new(),
                 thermal_pos: HashMap::new(),
                 line_pos: HashMap::new(),
@@ -2771,16 +2802,10 @@ mod zero_cost_tests {
                 production_models: &self.production_models,
                 evaporation_models: &self.evaporation_models,
                 generic_constraints: &[],
-                resolved_generic_bounds: &self.resolved_generic_bounds,
-                resolved_load_factors: &self.resolved_load_factors,
-                resolved_exchange_factors: &self.resolved_exchange_factors,
                 non_controllable_sources: &[],
-                resolved_ncs_bounds: &self.resolved_ncs_bounds,
-                resolved_ncs_factors: &self.resolved_ncs_factors,
                 pumping_stations: &[],
                 pumping_pos: HashMap::new(),
                 n_pumping: 0,
-                resolved_parameters: &self.resolved_parameters,
                 diversion_upstream: HashMap::new(),
                 n_hydros: 0,
                 n_thermals,
@@ -2803,7 +2828,7 @@ mod zero_cost_tests {
     #[test]
     fn zero_anticipated_delivery_thermal_cost_zeroes_all_plants() {
         let mut fixtures = AntFixtures::new();
-        // Override bounds so ctx.bounds.n_stages() > stage_idx (required by the
+        // Override bounds so ctx.resolved.bounds.n_stages() > stage_idx (required by the
         // is_anticipated_fishing_active debug guard: stage_idx < n_stages).
         fixtures.bounds = AntFixtures::bounds_with_n_stages(10);
         let ctx = fixtures.make_ctx(
@@ -2863,9 +2888,9 @@ mod zero_cost_tests {
 
         // Always-active: both plants active at stage 2 → two fishing rows.
         assert_eq!(
-            layout.n_anticipated_fishing_rows, 2,
+            layout.anticipated.n_anticipated_fishing_rows, 2,
             "expected n_anticipated_fishing_rows == 2, got {}",
-            layout.n_anticipated_fishing_rows
+            layout.anticipated.n_anticipated_fishing_rows
         );
 
         let mut row_lower = vec![f64::NAN; layout.num_rows];
@@ -2874,8 +2899,8 @@ mod zero_cost_tests {
         fill_anticipated_fishing_rows(&ctx, &stage, 2, &layout, &mut row_lower, &mut row_upper);
 
         // Both plants write a row with (0.0, 0.0) bounds.
-        for local_idx in 0..layout.n_anticipated_fishing_rows {
-            let row = layout.row_anticipated_fishing_start + local_idx;
+        for local_idx in 0..layout.anticipated.n_anticipated_fishing_rows {
+            let row = layout.anticipated.row_anticipated_fishing_start + local_idx;
             assert_eq!(
                 row_lower[row], 0.0,
                 "row_lower[{row}] (local_idx={local_idx}) expected 0.0, got {}",
@@ -2891,7 +2916,7 @@ mod zero_cost_tests {
 
     /// Always-active at `stage_idx = 0`: with `K = [1, 5]` and `n_anticipated = 2`,
     /// both plants are active even before their lead time elapses.
-    /// Asserts `layout.n_anticipated_fishing_rows == 2`, that both rows
+    /// Asserts `layout.anticipated.n_anticipated_fishing_rows == 2`, that both rows
     /// are filled with `(0.0, 0.0)` bounds, and that the anticipated-state
     /// slot-0 column carries the `-block_hours_total` coupling for both plants.
     #[test]
@@ -2904,9 +2929,9 @@ mod zero_cost_tests {
 
         // Always-active: both plants are active at stage 0 → two fishing rows.
         assert_eq!(
-            layout.n_anticipated_fishing_rows, 2,
+            layout.anticipated.n_anticipated_fishing_rows, 2,
             "expected n_anticipated_fishing_rows == 2 at stage 0, got {}",
-            layout.n_anticipated_fishing_rows
+            layout.anticipated.n_anticipated_fishing_rows
         );
 
         let mut row_lower = vec![f64::NAN; layout.num_rows];
@@ -2915,8 +2940,8 @@ mod zero_cost_tests {
         fill_anticipated_fishing_rows(&ctx, &stage, 0, &layout, &mut row_lower, &mut row_upper);
 
         // Both plants write equality rows with (0.0, 0.0) bounds.
-        for local_idx in 0..layout.n_anticipated_fishing_rows {
-            let row = layout.row_anticipated_fishing_start + local_idx;
+        for local_idx in 0..layout.anticipated.n_anticipated_fishing_rows {
+            let row = layout.anticipated.row_anticipated_fishing_start + local_idx;
             assert_eq!(
                 row_lower[row], 0.0,
                 "row_lower[{row}] (local_idx={local_idx}) expected 0.0, got {}",
@@ -2936,9 +2961,9 @@ mod zero_cost_tests {
 
         let block_hours_total: f64 = stage.blocks.iter().map(|b| b.duration_hours).sum();
         let expected_neg = -block_hours_total;
-        for local_idx in 0..layout.n_anticipated_fishing_rows {
-            let row = layout.row_anticipated_fishing_start + local_idx;
-            let col_state = layout.col_anticipated_state_start + local_idx;
+        for local_idx in 0..layout.anticipated.n_anticipated_fishing_rows {
+            let row = layout.anticipated.row_anticipated_fishing_start + local_idx;
+            let col_state = layout.anticipated.col_anticipated_state_start + local_idx;
             let state_couplings: Vec<&(usize, f64)> = col_entries[col_state]
                 .iter()
                 .filter(|(r, _)| *r == row)
@@ -2966,7 +2991,7 @@ mod zero_cost_tests {
     /// `n_anticipated = 2`, `K = [2, 3]`, `n_stages = 6`.
     ///
     /// `ResolvedBounds` is constructed with the correct `n_stages` so that
-    /// `ctx.bounds.n_stages()` returns 6, which is required by
+    /// `ctx.resolved.bounds.n_stages()` returns 6, which is required by
     /// `fill_anticipated_state_out_columns`, `fill_anticipated_state_out_def_rows`,
     /// and `fill_anticipated_state_out_def_entries`.
     fn build_anticipated_ctx_n_stages_6() -> (AntFixtures, Stage) {
@@ -3054,7 +3079,7 @@ mod zero_cost_tests {
         };
         fill_anticipated_state_out_columns(&ctx, 0, &layout0, &mut bufs);
         for i in 0..2 {
-            let col = layout0.col_anticipated_state_out_start + i;
+            let col = layout0.anticipated.col_anticipated_state_out_start + i;
             assert_eq!(
                 col_lower[col],
                 f64::NEG_INFINITY,
@@ -3082,12 +3107,12 @@ mod zero_cost_tests {
         };
         fill_anticipated_state_out_columns(&ctx, 5, &layout5, &mut bufs5);
         assert_eq!(
-            layout5.n_anticipated_state_out_def_rows, 0,
+            layout5.anticipated.n_anticipated_state_out_def_rows, 0,
             "stage 5 inactive: expected no def rows, got {}",
-            layout5.n_anticipated_state_out_def_rows,
+            layout5.anticipated.n_anticipated_state_out_def_rows,
         );
         for i in 0..2 {
-            let col = layout5.col_anticipated_state_out_start + i;
+            let col = layout5.anticipated.col_anticipated_state_out_start + i;
             assert_eq!(
                 col_lower5[col], 0.0,
                 "stage 5, plant {i}: col_lower expected 0.0, got {}",
@@ -3115,9 +3140,9 @@ mod zero_cost_tests {
         let layout = StageLayout::new(&ctx, &stage, 0);
 
         assert_eq!(
-            layout.n_anticipated_state_out_def_rows, 2,
+            layout.anticipated.n_anticipated_state_out_def_rows, 2,
             "expected n_anticipated_state_out_def_rows == 2, got {}",
-            layout.n_anticipated_state_out_def_rows
+            layout.anticipated.n_anticipated_state_out_def_rows
         );
 
         let mut row_lower = vec![f64::NEG_INFINITY; layout.num_rows];
@@ -3125,7 +3150,7 @@ mod zero_cost_tests {
         fill_anticipated_state_out_def_rows(&ctx, 0, &layout, &mut row_lower, &mut row_upper);
 
         for k in 0..2 {
-            let row = layout.row_anticipated_state_out_def_start + k;
+            let row = layout.anticipated.row_anticipated_state_out_def_start + k;
             assert_eq!(
                 row_lower[row], 0.0,
                 "def row {k}: row_lower expected 0.0, got {}",
@@ -3157,9 +3182,9 @@ mod zero_cost_tests {
         fill_anticipated_state_out_def_entries(&ctx, 0, &layout, &mut col_entries);
 
         for k in 0..2 {
-            let row = layout.row_anticipated_state_out_def_start + k;
-            let col_state_out = layout.col_anticipated_state_out_start + k;
-            let col_decision = layout.col_anticipated_decision_start + k;
+            let row = layout.anticipated.row_anticipated_state_out_def_start + k;
+            let col_state_out = layout.anticipated.col_anticipated_state_out_start + k;
+            let col_decision = layout.anticipated.col_anticipated_decision_start + k;
 
             assert!(
                 col_entries[col_state_out]
@@ -3219,7 +3244,7 @@ mod zero_cost_tests {
         let k = ctx.k_max;
         for slot in 0..k {
             for plant in 0..a {
-                let col = layout.col_anticipated_state_start + slot * a + plant;
+                let col = layout.anticipated.col_anticipated_state_start + slot * a + plant;
                 let diag_row = slot * a + plant;
                 let has_diag = col_entries[col]
                     .iter()
@@ -3286,6 +3311,7 @@ mod pumping_water_tests {
     use crate::hydro_models::{EvaporationModel, EvaporationModelSet, ProductionModelSet};
     use crate::resolved_parameters::ResolvedParameters;
 
+    use super::super::layout::ResolvedTables;
     use super::{
         ColumnBufs, LpMatrixBuffers, M3S_TO_HM3, StageLayout, TemplateBuildCtx, assemble_csc,
         build_stage_matrix_entries, fill_generic_constraint_entries, fill_load_balance_entries,
@@ -3616,8 +3642,16 @@ mod pumping_water_tests {
                 buses: &self.buses,
                 load_models: &[],
                 cascade: &self.cascade,
-                bounds: &self.bounds,
-                penalties: &self.penalties,
+                resolved: ResolvedTables {
+                    bounds: &self.bounds,
+                    penalties: &self.penalties,
+                    resolved_generic_bounds: &self.resolved_generic_bounds,
+                    resolved_load_factors: &self.resolved_load_factors,
+                    resolved_exchange_factors: &self.resolved_exchange_factors,
+                    resolved_ncs_bounds: &self.resolved_ncs_bounds,
+                    resolved_ncs_factors: &self.resolved_ncs_factors,
+                    resolved_parameters: &self.resolved_parameters,
+                },
                 hydro_pos: self.hydro_pos.clone(),
                 thermal_pos: HashMap::new(),
                 line_pos: HashMap::new(),
@@ -3626,16 +3660,10 @@ mod pumping_water_tests {
                 production_models: &self.production_models,
                 evaporation_models: &self.evaporation_models,
                 generic_constraints: &self.generic_constraints,
-                resolved_generic_bounds: &self.resolved_generic_bounds,
-                resolved_load_factors: &self.resolved_load_factors,
-                resolved_exchange_factors: &self.resolved_exchange_factors,
                 non_controllable_sources: &[],
-                resolved_ncs_bounds: &self.resolved_ncs_bounds,
-                resolved_ncs_factors: &self.resolved_ncs_factors,
                 pumping_stations: &self.stations,
                 pumping_pos: self.pumping_pos.clone(),
                 n_pumping: self.stations.len(),
-                resolved_parameters: &self.resolved_parameters,
                 diversion_upstream: HashMap::new(),
                 n_hydros: self.hydros.len(),
                 n_thermals: 0,
@@ -4071,6 +4099,7 @@ mod diversion_bound_tests {
     };
     use crate::resolved_parameters::ResolvedParameters;
 
+    use super::super::layout::ResolvedTables;
     use super::{ColumnBufs, StageLayout, TemplateBuildCtx, fill_diversion_columns};
 
     // Declaration-time diversion capacity on the entity. The test makes the
@@ -4320,8 +4349,16 @@ mod diversion_bound_tests {
                 buses: &[],
                 load_models: &[],
                 cascade: &self.cascade,
-                bounds: &self.bounds,
-                penalties: &self.penalties,
+                resolved: ResolvedTables {
+                    bounds: &self.bounds,
+                    penalties: &self.penalties,
+                    resolved_generic_bounds: &self.resolved_generic_bounds,
+                    resolved_load_factors: &self.resolved_load_factors,
+                    resolved_exchange_factors: &self.resolved_exchange_factors,
+                    resolved_ncs_bounds: &self.resolved_ncs_bounds,
+                    resolved_ncs_factors: &self.resolved_ncs_factors,
+                    resolved_parameters: &self.resolved_parameters,
+                },
                 hydro_pos,
                 thermal_pos: HashMap::new(),
                 line_pos: HashMap::new(),
@@ -4330,16 +4367,10 @@ mod diversion_bound_tests {
                 production_models: &self.production_models,
                 evaporation_models: &self.evaporation_models,
                 generic_constraints: &[],
-                resolved_generic_bounds: &self.resolved_generic_bounds,
-                resolved_load_factors: &self.resolved_load_factors,
-                resolved_exchange_factors: &self.resolved_exchange_factors,
                 non_controllable_sources: &[],
-                resolved_ncs_bounds: &self.resolved_ncs_bounds,
-                resolved_ncs_factors: &self.resolved_ncs_factors,
                 pumping_stations: &[],
                 pumping_pos: HashMap::new(),
                 n_pumping: 0,
-                resolved_parameters: &self.resolved_parameters,
                 diversion_upstream: HashMap::new(),
                 n_hydros: 1,
                 n_thermals: 0,
@@ -4443,6 +4474,7 @@ mod block_family_slack_tests {
     };
     use crate::resolved_parameters::ResolvedParameters;
 
+    use super::super::layout::ResolvedTables;
     use super::{ColumnBufs, StageLayout, TemplateBuildCtx, fill_operational_slack_columns};
 
     const N_STAGES: usize = 1;
@@ -4795,8 +4827,16 @@ mod block_family_slack_tests {
                 buses: &[],
                 load_models: &[],
                 cascade: &self.cascade,
-                bounds: &self.bounds,
-                penalties: &self.penalties,
+                resolved: ResolvedTables {
+                    bounds: &self.bounds,
+                    penalties: &self.penalties,
+                    resolved_generic_bounds: &self.resolved_generic_bounds,
+                    resolved_load_factors: &self.resolved_load_factors,
+                    resolved_exchange_factors: &self.resolved_exchange_factors,
+                    resolved_ncs_bounds: &self.resolved_ncs_bounds,
+                    resolved_ncs_factors: &self.resolved_ncs_factors,
+                    resolved_parameters: &self.resolved_parameters,
+                },
                 hydro_pos,
                 thermal_pos: HashMap::new(),
                 line_pos: HashMap::new(),
@@ -4805,16 +4845,10 @@ mod block_family_slack_tests {
                 production_models: &self.production_models,
                 evaporation_models: &self.evaporation_models,
                 generic_constraints: &[],
-                resolved_generic_bounds: &self.resolved_generic_bounds,
-                resolved_load_factors: &self.resolved_load_factors,
-                resolved_exchange_factors: &self.resolved_exchange_factors,
                 non_controllable_sources: &[],
-                resolved_ncs_bounds: &self.resolved_ncs_bounds,
-                resolved_ncs_factors: &self.resolved_ncs_factors,
                 pumping_stations: &[],
                 pumping_pos: HashMap::new(),
                 n_pumping: 0,
-                resolved_parameters: &self.resolved_parameters,
                 diversion_upstream: HashMap::new(),
                 n_hydros: N_HYDROS,
                 n_thermals: 0,

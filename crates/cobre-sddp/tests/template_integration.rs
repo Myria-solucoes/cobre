@@ -6871,15 +6871,15 @@ fn generic_constraint_inactive_does_not_contribute_rows() {
 fn stage_indexer_generic_fields_empty_from_new() {
     let idx = StageIndexer::new(3, 2);
     assert!(
-        idx.generic_constraint_rows.is_empty(),
+        idx.sentinels.generic_constraint_rows.is_empty(),
         "generic_constraint_rows must be empty from new()"
     );
     assert!(
-        idx.generic_constraint_slack.is_empty(),
+        idx.sentinels.generic_constraint_slack.is_empty(),
         "generic_constraint_slack must be empty from new()"
     );
     assert_eq!(
-        idx.n_generic_constraints_active, 0,
+        idx.sentinels.n_generic_constraints_active, 0,
         "n_generic_constraints_active must be 0 from new()"
     );
 }

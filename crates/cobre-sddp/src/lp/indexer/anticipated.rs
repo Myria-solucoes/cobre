@@ -31,13 +31,44 @@ impl StageIndexer {
         self.anticipated_lead_stages
             .iter()
             .enumerate()
-            .filter_map(move |(i, &k_i)| {
-                if stage_idx.saturating_add(k_i) < n_stages {
+            .filter_map(move |(i, _)| {
+                if self.is_anticipated_decision_active(i, stage_idx, n_stages) {
                     Some((i, self.anticipated_decision.start + i))
                 } else {
                     None
                 }
             })
+    }
+
+    /// Return `true` when anticipated plant `local_idx` is active at decision
+    /// stage `stage_idx`, i.e. its commitment matures strictly inside the study
+    /// horizon `[0, n_stages)`.
+    ///
+    /// Active iff `stage_idx + anticipated_lead_stages[local_idx] < n_stages`
+    /// (strict `<`, `saturating_add`). The boundary case
+    /// `stage_idx + K_i == n_stages` is **excluded**: the commitment would mature
+    /// at a delivery stage outside the horizon, so no delivery LP is ever built
+    /// for it. The single-plant counterpart of the active-set iterator
+    /// [`Self::anticipated_decision_active_at_stage`], which yields exactly the
+    /// `(local_idx, lp_column)` pairs for which this predicate is `true`.
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Panics if `local_idx >= self.n_anticipated()`.
+    #[inline]
+    #[must_use]
+    pub fn is_anticipated_decision_active(
+        &self,
+        local_idx: usize,
+        stage_idx: usize,
+        n_stages: usize,
+    ) -> bool {
+        debug_assert!(
+            local_idx < self.anticipated_lead_stages.len(),
+            "local_idx {local_idx} out of bounds (n_anticipated = {})",
+            self.anticipated_lead_stages.len(),
+        );
+        stage_idx.saturating_add(self.anticipated_lead_stages[local_idx]) < n_stages
     }
 
     /// Iterator over `(local_idx, lp_row)` for anticipated fishing
@@ -323,6 +354,46 @@ mod tests {
         );
         let active: Vec<_> = idx.anticipated_decision_active_at_stage(6, 6).collect();
         assert!(active.is_empty());
+    }
+
+    /// `is_anticipated_decision_active` pins the strict `<` `saturating_add`
+    /// gate at the interior/boundary/one-past cases for a single plant.
+    /// `K_i = 3`, `n_stages = 6`: `stage = 2` → 2+3=5 < 6 → true (interior);
+    /// `stage = 3` → 3+3=6 NOT < 6 → false (boundary excluded);
+    /// `stage = 4` → 4+3=7 NOT < 6 → false (one-past).
+    #[test]
+    fn decision_predicate_strict_gate_interior_boundary_one_past() {
+        let idx = StageIndexer::with_equipment_and_evaporation(
+            &EquipmentCounts {
+                hydro_count: 1,
+                max_par_order: 0,
+                n_thermals: 1,
+                n_lines: 0,
+                n_buses: 1,
+                n_blks: 1,
+                has_inflow_penalty: false,
+                max_deficit_segments: 1,
+                n_anticipated: 1,
+                k_max: 3,
+                anticipated_lead_stages: vec![3],
+                anticipated_thermal_indices: vec![0],
+                n_pumping: 0,
+            },
+            &fpha(vec![], vec![]),
+            &evap(vec![]),
+        );
+        assert!(
+            idx.is_anticipated_decision_active(0, 2, 6),
+            "interior: 2 + 3 = 5 < 6 must be active"
+        );
+        assert!(
+            !idx.is_anticipated_decision_active(0, 3, 6),
+            "boundary: 3 + 3 = 6 NOT < 6 must be inactive (excluded)"
+        );
+        assert!(
+            !idx.is_anticipated_decision_active(0, 4, 6),
+            "one-past: 4 + 3 = 7 NOT < 6 must be inactive"
+        );
     }
 
     /// At `stage_idx == 0` all anticipated plants are active (always-active
@@ -898,9 +969,9 @@ mod tests {
         /// Collect the non-empty row ranges in canonical layout order.
         fn collect_active_row_ranges(idx: &StageIndexer) -> Vec<Range<usize>> {
             let mut v = Vec::new();
-            push_nonempty(&mut v, idx.storage_fixing.clone());
-            push_nonempty(&mut v, idx.lag_fixing.clone());
-            push_nonempty(&mut v, idx.anticipated_state_fixing.clone());
+            push_nonempty(&mut v, idx.sentinels.storage_fixing.clone());
+            push_nonempty(&mut v, idx.sentinels.lag_fixing.clone());
+            push_nonempty(&mut v, idx.sentinels.anticipated_state_fixing.clone());
             push_nonempty(&mut v, idx.z_inflow_rows.clone());
             push_nonempty(&mut v, idx.water_balance.clone());
             push_nonempty(&mut v, idx.load_balance.clone());
@@ -971,17 +1042,17 @@ mod tests {
             for p in parameter_grid() {
                 let (idx, _) = build_indexer(&p);
                 assert_eq!(
-                    idx.storage_fixing,
+                    idx.sentinels.storage_fixing,
                     0..0,
                     "I4 storage_fixing must be 0..0 (sentinel) at {p:?}"
                 );
                 assert_eq!(
-                    idx.lag_fixing,
+                    idx.sentinels.lag_fixing,
                     0..0,
                     "I4 lag_fixing must be 0..0 (sentinel) at {p:?}"
                 );
                 assert_eq!(
-                    idx.anticipated_state_fixing,
+                    idx.sentinels.anticipated_state_fixing,
                     0..0,
                     "I4 anticipated_state_fixing must be 0..0 (sentinel) at {p:?}"
                 );

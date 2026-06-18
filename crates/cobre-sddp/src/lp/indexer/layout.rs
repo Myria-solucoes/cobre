@@ -40,6 +40,78 @@ pub struct FphaRowRange {
     pub planes_per_block: usize,
 }
 
+/// Permanent `0..0` / `0` state-pinning and generic-constraint sentinels on
+/// [`StageIndexer`].
+///
+/// CONTRACT: every field here is never assigned a non-zero value by any
+/// constructor or wiring step — they are permanent `0..0` / `0` sentinels in
+/// this implementation. State pinning uses column bounds
+/// (`set_col_bounds` on the incoming-state columns), resolved through
+/// [`StageIndexer::state_to_lp_incoming_column`], rather than equality rows, so
+/// the `*_fixing` row ranges carry no rows. The generic-constraint and pumping
+/// fields are likewise inert here: the live per-stage layouts are owned by
+/// `StageLayout` (`StageLayout::generic_constraint_rows`, a
+/// `Vec<GenericConstraintRowEntry>`, and `StageLayout::col_pumping_start` /
+/// `n_pumping`), which the matrix-build and simulation-extraction code consume.
+///
+/// FORBIDDEN: do not "fix" a sentinel by wiring `StageLayout`'s live vec back
+/// into these fields, and do not treat a sentinel as the live generic-row or
+/// pumping-column offset — both break the layout single-owner contract.
+#[derive(Debug, Clone)]
+pub struct Sentinels {
+    /// Row range for storage-fixing constraints.
+    ///
+    /// Always empty (`0..0`): state pinning uses column bounds
+    /// (`set_col_bounds` on the incoming-state columns) rather than equality
+    /// rows. The field is retained as a permanent sentinel for API stability;
+    /// downstream consumers will observe an empty range.
+    /// Use [`StageIndexer::state_to_lp_incoming_column`] to resolve the
+    /// column index for state pinning and cut-subgradient extraction.
+    pub storage_fixing: Range<usize>,
+
+    /// Row range for AR lag-fixing constraints.
+    ///
+    /// Always empty (`0..0`): state pinning uses column bounds rather than
+    /// equality rows. Retained as a permanent sentinel for the same reason
+    /// as `storage_fixing`.
+    pub lag_fixing: Range<usize>,
+
+    /// Row range for anticipated-state-fixing constraints.
+    ///
+    /// Always empty (`0..0`) regardless of `n_anticipated`: state pinning for
+    /// anticipated thermals also uses column bounds. Retained as a permanent
+    /// sentinel for API stability. The column range
+    /// [`StageIndexer::anticipated_state`] carries the state-pinning semantics
+    /// via `set_col_bounds`.
+    pub anticipated_state_fixing: Range<usize>,
+
+    /// Row range a generic-constraint block would occupy (one per active
+    /// `(constraint, block)` pair), placed after evaporation rows.
+    ///
+    /// Always empty (`0..0`) here — see the permanent-sentinel contract above.
+    /// The live per-stage layout is `StageLayout::generic_constraint_rows`.
+    pub generic_constraint_rows: Range<usize>,
+
+    /// Column range a generic-constraint slack block would occupy, placed after
+    /// withdrawal slack columns.
+    ///
+    /// Always empty (`0..0`) here — see the permanent-sentinel contract above.
+    pub generic_constraint_slack: Range<usize>,
+
+    /// Count a generic-constraint block would contribute at this stage.
+    ///
+    /// Always `0` here — see the permanent-sentinel contract above.
+    pub n_generic_constraints_active: usize,
+
+    /// Column range for pumping-flow variables, one per (pumping, block) pair.
+    ///
+    /// Index for pumping station at local position `p`, block `b`:
+    /// `pumping_flow.start + p * n_blks + b` (block-major).
+    /// Always `0..0`: every constructor leaves it empty regardless of station
+    /// count — the live column range is owned by `StageLayout::col_pumping_start`.
+    pub pumping_flow: Range<usize>,
+}
+
 /// Read-only LP layout index map for one SDDP stage subproblem.
 ///
 /// Computed once from `hydro_count` (N) and `max_par_order` (L), then shared
@@ -109,22 +181,10 @@ pub struct StageIndexer {
     /// column index for state-pinning and cut-subgradient extraction.
     pub n_state: usize,
 
-    /// Row range for storage-fixing constraints.
+    /// Permanent `0..0` / `0` state-pinning and generic-constraint sentinels.
     ///
-    /// Always empty (`0..0`): state pinning uses column bounds
-    /// (`set_col_bounds` on the incoming-state columns) rather than equality
-    /// rows. The field is retained as a permanent sentinel for API stability;
-    /// downstream consumers will observe an empty range.
-    /// Use [`StageIndexer::state_to_lp_incoming_column`] to resolve the
-    /// column index for state pinning and cut-subgradient extraction.
-    pub storage_fixing: Range<usize>,
-
-    /// Row range for AR lag-fixing constraints.
-    ///
-    /// Always empty (`0..0`): state pinning uses column bounds rather than
-    /// equality rows. Retained as a permanent sentinel for the same reason
-    /// as `storage_fixing`.
-    pub lag_fixing: Range<usize>,
+    /// Grouped into [`Sentinels`]; see that type for the per-field contract.
+    pub sentinels: Sentinels,
 
     /// Column range `[N*(1+L), N*(1+L) + n_anticipated*K_max)` for
     /// anticipated thermal commitment state slots.
@@ -139,14 +199,6 @@ pub struct StageIndexer {
     /// Empty (`0..0`) when `n_anticipated == 0` or when built via
     /// [`StageIndexer::new`].
     pub anticipated_state: Range<usize>,
-
-    /// Row range for anticipated-state-fixing constraints.
-    ///
-    /// Always empty (`0..0`) regardless of `n_anticipated`: state pinning for
-    /// anticipated thermals also uses column bounds. Retained as a permanent
-    /// sentinel for API stability. The column range [`Self::anticipated_state`]
-    /// carries the state-pinning semantics via `set_col_bounds`.
-    pub anticipated_state_fixing: Range<usize>,
 
     /// Number of anticipated thermals (plants with
     /// `anticipated_config.is_some()`).
@@ -514,39 +566,6 @@ pub struct StageIndexer {
     /// `false` otherwise (including when built via [`StageIndexer::new`]).
     pub has_operational_violations: bool,
 
-    // ── Generic constraint row and column ranges (permanent sentinels) ──────
-    // CONTRACT: these three `StageIndexer` fields are never assigned a non-zero
-    // value by any constructor or wiring step — they are permanent `0..0` / `0`
-    // sentinels in this implementation, the same status as the `storage_fixing`
-    // row range. The live per-stage generic-constraint layout lives on the
-    // separate `StageLayout::generic_constraint_rows` field (a
-    // `Vec<GenericConstraintRowEntry>`), which the matrix-build and simulation
-    // extraction code consume; that vec is never written back into these
-    // indexer fields. The sole read of the indexer field is
-    // `generic_constraint_rows.start` in simulation extraction, where the
-    // always-zero start feeds a discarded `_dual_value`; the offset extraction
-    // actually uses is the per-entry loop counter, so the zero value is inert.
-    // FORBIDDEN: do not "fix" the sentinel by wiring `StageLayout`'s vec back
-    // into the indexer field, and do not treat the indexer field as the live
-    // generic-row offset — both break the layout single-owner contract.
-    /// Row range a generic-constraint block would occupy (one per active
-    /// `(constraint, block)` pair), placed after evaporation rows.
-    ///
-    /// Always empty (`0..0`) here — see the permanent-sentinel contract above.
-    /// The live per-stage layout is `StageLayout::generic_constraint_rows`.
-    pub generic_constraint_rows: Range<usize>,
-
-    /// Column range a generic-constraint slack block would occupy, placed after
-    /// withdrawal slack columns.
-    ///
-    /// Always empty (`0..0`) here — see the permanent-sentinel contract above.
-    pub generic_constraint_slack: Range<usize>,
-
-    /// Count a generic-constraint block would contribute at this stage.
-    ///
-    /// Always `0` here — see the permanent-sentinel contract above.
-    pub n_generic_constraints_active: usize,
-
     // ── NCS column range ──────────────────────────────────────────────────
     // OWNER: populated after construction by the NCS wiring in `setup`
     // (`build_wired_indexer`, which assigns `indexer.ncs_generation` from the LP
@@ -559,21 +578,6 @@ pub struct StageIndexer {
     /// Index for NCS `r`, block `b`: `ncs_generation.start + r * n_blks + b`.
     /// Empty when built via [`StageIndexer::new`] or when no NCS entities are active.
     pub ncs_generation: Range<usize>,
-
-    // ── Pumping-flow column range ─────────────────────────────────────────
-    // Permanent `0..0` sentinel here, mirroring `ncs_generation`: every
-    // `StageIndexer` constructor leaves it empty. The live per-stage pumping
-    // column layout is owned by `StageLayout::col_pumping_start` / `n_pumping`;
-    // this field exists so the indexer exposes a per-region range for pumping
-    // the same way it does for NCS. The block-major layout is
-    // `start + station_local_idx * n_blks + blk`.
-    /// Column range for pumping-flow variables, one per (pumping, block) pair.
-    ///
-    /// Index for pumping station at local position `p`, block `b`:
-    /// `pumping_flow.start + p * n_blks + b` (block-major).
-    /// Always `0..0`: every constructor leaves it empty regardless of station
-    /// count — the live column range is owned by `StageLayout::col_pumping_start`.
-    pub pumping_flow: Range<usize>,
 
     // ── Z-inflow column and row ranges ────────────────────────────────────
     // Populated by all constructors.  The z_inflow columns are auxiliary
@@ -783,9 +787,9 @@ impl StageIndexer {
 }
 
 // StageIndexer contains only Send + Sync types (Range<usize>, usize, Vec<usize>,
-// Vec<FphaRowRange>, Vec<EvaporationIndices>), so Send + Sync are automatically
-// derived. The explicit bounds below serve as a compile-time assertion that the
-// safety invariant holds.
+// Vec<FphaRowRange>, Vec<EvaporationIndices>, Sentinels — itself Range/usize
+// only), so Send + Sync are automatically derived. The explicit bounds below
+// serve as a compile-time assertion that the safety invariant holds.
 const _: () = {
     fn assert_send_sync<T: Send + Sync>() {}
     fn check() {

@@ -142,5 +142,6 @@ mod state_mapping;
 pub mod test_fixtures;
 
 pub use layout::{
-    EquipmentCounts, EvapConfig, EvaporationIndices, FphaColumnLayout, FphaRowRange, StageIndexer,
+    EquipmentCounts, EvapConfig, EvaporationIndices, FphaColumnLayout, FphaRowRange, Sentinels,
+    StageIndexer,
 };

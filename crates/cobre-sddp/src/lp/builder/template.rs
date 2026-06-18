@@ -13,7 +13,7 @@ use crate::setup::template_postprocess::{
     compute_cumulative_discount_factors, compute_per_stage_discount_factors,
 };
 
-use super::layout::{StageLayout, TemplateBuildCtx};
+use super::layout::{ResolvedTables, StageLayout, TemplateBuildCtx};
 use super::{COST_SCALE_FACTOR, GenericConstraintRowEntry, matrix, scaling};
 
 /// Outcome of [`build_stage_templates`]: one [`StageTemplate`] per study stage
@@ -254,8 +254,9 @@ pub(super) struct StageBuildOutput {
     /// Column index of the first pumping-flow variable (sourced from
     /// `StageLayout::col_pumping_start`).
     pub pumping_col_start: usize,
-    /// Number of pumping stations contributing columns at the stage.
-    pub pumping_count: usize,
+    /// Number of pumping stations contributing columns at the stage (sourced
+    /// from [`StageLayout::n_pumping`]).
+    pub n_pumping: usize,
 }
 
 /// Construct a [`StageTemplate`] for a single study stage.
@@ -355,7 +356,7 @@ pub(super) fn build_single_stage_template(
         ncs_count: layout.n_ncs,
         ncs_active: layout.active_ncs_indices,
         pumping_col_start: layout.col_pumping_start,
-        pumping_count: layout.n_pumping,
+        n_pumping: layout.n_pumping,
     }
 }
 
@@ -697,8 +698,16 @@ fn build_template_build_ctx<'a>(
         buses,
         load_models: system.load_models(),
         cascade: system.cascade(),
-        bounds: system.bounds(),
-        penalties: system.penalties(),
+        resolved: ResolvedTables {
+            bounds: system.bounds(),
+            penalties: system.penalties(),
+            resolved_generic_bounds: system.resolved_generic_bounds(),
+            resolved_load_factors: system.resolved_load_factors(),
+            resolved_exchange_factors: system.resolved_exchange_factors(),
+            resolved_ncs_bounds: system.resolved_ncs_bounds(),
+            resolved_ncs_factors: system.resolved_ncs_factors(),
+            resolved_parameters,
+        },
         hydro_pos,
         thermal_pos,
         line_pos,
@@ -707,16 +716,10 @@ fn build_template_build_ctx<'a>(
         production_models,
         evaporation_models,
         generic_constraints: system.generic_constraints(),
-        resolved_generic_bounds: system.resolved_generic_bounds(),
-        resolved_load_factors: system.resolved_load_factors(),
-        resolved_exchange_factors: system.resolved_exchange_factors(),
         non_controllable_sources: system.non_controllable_sources(),
-        resolved_ncs_bounds: system.resolved_ncs_bounds(),
-        resolved_ncs_factors: system.resolved_ncs_factors(),
         pumping_stations,
         pumping_pos,
         n_pumping,
-        resolved_parameters,
         diversion_upstream,
         n_hydros,
         n_thermals: system.thermals().len(),
@@ -782,7 +785,7 @@ fn assemble_stage_templates_output(
         ncs_col_starts.push(out.ncs_col_start);
         n_ncs_per_stage.push(out.ncs_count);
         pumping_col_starts.push(out.pumping_col_start);
-        n_pumping_per_stage.push(out.pumping_count);
+        n_pumping_per_stage.push(out.n_pumping);
         active_ncs_indices_per_stage.push(out.ncs_active);
     }
 
@@ -1290,7 +1293,7 @@ mod tests {
         assert_eq!(ctx.n_pumping, 2, "two stations were declared");
         assert_eq!(
             ctx.n_pumping,
-            ctx.bounds.n_pumping(),
+            ctx.resolved.bounds.n_pumping(),
             "ctx.n_pumping must agree with the resolved-bounds station count"
         );
 
@@ -1941,8 +1944,16 @@ mod tests {
             buses: ctx_a.buses,
             load_models: ctx_a.load_models,
             cascade: ctx_a.cascade,
-            bounds: ctx_a.bounds,
-            penalties: ctx_a.penalties,
+            resolved: super::super::layout::ResolvedTables {
+                bounds: ctx_a.resolved.bounds,
+                penalties: ctx_a.resolved.penalties,
+                resolved_generic_bounds: ctx_a.resolved.resolved_generic_bounds,
+                resolved_load_factors: ctx_a.resolved.resolved_load_factors,
+                resolved_exchange_factors: ctx_a.resolved.resolved_exchange_factors,
+                resolved_ncs_bounds: ctx_a.resolved.resolved_ncs_bounds,
+                resolved_ncs_factors: ctx_a.resolved.resolved_ncs_factors,
+                resolved_parameters: ctx_a.resolved.resolved_parameters,
+            },
             hydro_pos: ctx_a.hydro_pos.clone(),
             thermal_pos: ctx_a.thermal_pos.clone(),
             line_pos: ctx_a.line_pos.clone(),
@@ -1951,16 +1962,10 @@ mod tests {
             production_models: ctx_a.production_models,
             evaporation_models: ctx_a.evaporation_models,
             generic_constraints: ctx_a.generic_constraints,
-            resolved_generic_bounds: ctx_a.resolved_generic_bounds,
-            resolved_load_factors: ctx_a.resolved_load_factors,
-            resolved_exchange_factors: ctx_a.resolved_exchange_factors,
             non_controllable_sources: ctx_a.non_controllable_sources,
-            resolved_ncs_bounds: ctx_a.resolved_ncs_bounds,
-            resolved_ncs_factors: ctx_a.resolved_ncs_factors,
             pumping_stations: ctx_a.pumping_stations,
             pumping_pos: ctx_a.pumping_pos.clone(),
             n_pumping: ctx_a.n_pumping,
-            resolved_parameters: ctx_a.resolved_parameters,
             diversion_upstream: ctx_a.diversion_upstream.clone(),
             n_hydros: ctx_a.n_hydros,
             n_thermals: ctx_a.n_thermals,
@@ -2008,39 +2013,43 @@ mod tests {
             // Layout offsets must be identical (they depend only on counts,
             // not on the contents of the anticipated arrays).
             assert_eq!(
-                layout_a.col_anticipated_decision_start, layout_b.col_anticipated_decision_start,
+                layout_a.anticipated.col_anticipated_decision_start,
+                layout_b.anticipated.col_anticipated_decision_start,
                 "stage {stage_idx}: dec_start"
             );
             assert_eq!(
-                layout_a.col_anticipated_state_start, layout_b.col_anticipated_state_start,
+                layout_a.anticipated.col_anticipated_state_start,
+                layout_b.anticipated.col_anticipated_state_start,
                 "stage {stage_idx}: state_start"
             );
             assert_eq!(
-                layout_a.row_anticipated_fishing_start, layout_b.row_anticipated_fishing_start,
+                layout_a.anticipated.row_anticipated_fishing_start,
+                layout_b.anticipated.row_anticipated_fishing_start,
                 "stage {stage_idx}: fish_start"
             );
             assert_eq!(
-                layout_a.n_anticipated_fishing_rows, layout_b.n_anticipated_fishing_rows,
+                layout_a.anticipated.n_anticipated_fishing_rows,
+                layout_b.anticipated.n_anticipated_fishing_rows,
                 "stage {stage_idx}: n_fish_rows"
             );
 
             assert_lp_equivalence_after_anticipated_swap(
                 &tpl_a,
                 &tpl_b,
-                layout_a.col_anticipated_decision_start,
-                layout_b.col_anticipated_decision_start,
-                layout_a.col_anticipated_state_start,
-                layout_b.col_anticipated_state_start,
-                layout_a.col_anticipated_state_out_start,
-                layout_b.col_anticipated_state_out_start,
+                layout_a.anticipated.col_anticipated_decision_start,
+                layout_b.anticipated.col_anticipated_decision_start,
+                layout_a.anticipated.col_anticipated_state_start,
+                layout_b.anticipated.col_anticipated_state_start,
+                layout_a.anticipated.col_anticipated_state_out_start,
+                layout_b.anticipated.col_anticipated_state_out_start,
                 ctx_a.n_anticipated,
                 ctx_a.k_max,
-                layout_a.row_anticipated_fishing_start,
-                layout_b.row_anticipated_fishing_start,
-                layout_a.n_anticipated_fishing_rows,
-                layout_a.row_anticipated_state_out_def_start,
-                layout_b.row_anticipated_state_out_def_start,
-                layout_a.n_anticipated_state_out_def_rows,
+                layout_a.anticipated.row_anticipated_fishing_start,
+                layout_b.anticipated.row_anticipated_fishing_start,
+                layout_a.anticipated.n_anticipated_fishing_rows,
+                layout_a.anticipated.row_anticipated_state_out_def_start,
+                layout_b.anticipated.row_anticipated_state_out_def_start,
+                layout_a.anticipated.n_anticipated_state_out_def_rows,
                 stage_idx,
             );
         }

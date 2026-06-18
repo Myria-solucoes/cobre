@@ -528,6 +528,12 @@ fn resolve_hydro_evaporation<S: BuildHasher>(
     hydro_pos: &HashMap<EntityId, usize, S>,
 ) -> Vec<(usize, f64)> {
     if let Some(&sys_pos) = hydro_pos.get(&hydro_id) {
+        // Linear scan over the small per-stage evaporation-hydro list. This runs
+        // on the cold per-constraint-term resolver path (template build, not a
+        // solve loop), so the O(n) cost over a handful of evaporation hydros is
+        // not measurable and a pre-built O(1) reverse map is not warranted here —
+        // unlike `resolve_anticipated_decision`, whose larger/hotter set earns
+        // `anticipated_local_by_sys_pos`.
         if let Some(local_idx) = indexer
             .evap_hydro_indices
             .iter()
@@ -544,6 +550,11 @@ fn resolve_hydro_evaporation<S: BuildHasher>(
 }
 
 /// Resolve `HydroOutflow` (turbine + spillage) to two block-level columns.
+///
+/// One `hydro_pos` lookup resolves both columns (mirroring
+/// [`resolve_line_exchange`]); turbine is emitted before spillage. Returns an
+/// empty vec on a `hydro_pos` miss, so the no-result-on-miss contract holds for
+/// the whole pair, never a partial single column.
 fn resolve_hydro_outflow<S: BuildHasher>(
     hydro_id: EntityId,
     block_id: Option<usize>,
@@ -552,26 +563,15 @@ fn resolve_hydro_outflow<S: BuildHasher>(
     indexer: &StageIndexer,
     hydro_pos: &HashMap<EntityId, usize, S>,
 ) -> Vec<(usize, f64)> {
-    let mut result = Vec::with_capacity(2);
-    result.extend(resolve_block_variable(
-        hydro_id,
-        block_id,
-        block_idx,
-        n_blks,
-        block_col_range(indexer, ElementKind::Turbine).start,
-        hydro_pos,
-        1.0,
-    ));
-    result.extend(resolve_block_variable(
-        hydro_id,
-        block_id,
-        block_idx,
-        n_blks,
-        block_col_range(indexer, ElementKind::Spillage).start,
-        hydro_pos,
-        1.0,
-    ));
-    result
+    let Some(&pos) = hydro_pos.get(&hydro_id) else {
+        return vec![];
+    };
+    let effective_blk = block_id.unwrap_or(block_idx);
+    let turbine_col =
+        block_col_range(indexer, ElementKind::Turbine).start + pos * n_blks + effective_blk;
+    let spillage_col =
+        block_col_range(indexer, ElementKind::Spillage).start + pos * n_blks + effective_blk;
+    vec![(turbine_col, 1.0), (spillage_col, 1.0)]
 }
 
 /// Resolve `HydroGeneration` by dispatching on the production model.
@@ -593,6 +593,12 @@ fn resolve_hydro_generation<S: BuildHasher>(
     };
     match production_models.model(sys_pos, stage_idx) {
         ResolvedProductionModel::Fpha { .. } => {
+            // Linear scan over the small per-stage FPHA-hydro list. This runs on
+            // the cold per-constraint-term resolver path (template build, not a
+            // solve loop), so the O(n) cost over a handful of FPHA hydros is not
+            // measurable and a pre-built O(1) reverse map is not warranted here —
+            // unlike `resolve_anticipated_decision`, whose larger/hotter set earns
+            // `anticipated_local_by_sys_pos`.
             if let Some(fpha_local_idx) = indexer
                 .fpha_hydro_indices
                 .iter()

@@ -2,10 +2,10 @@
 //!
 //! Owns the three public constructors (`new`, `with_equipment`,
 //! `with_equipment_and_evaporation`), the `from_stage_template` adapter, and the
-//! private helpers that compute each region's column/row range. The
-//! `storage_fixing: 0..0`, `lag_fixing: 0..0`, and `anticipated_state_fixing:
-//! 0..0` field initialisers (the state-pinning sentinel contract) live in these
-//! constructor bodies and move verbatim.
+//! private helpers that compute each region's column/row range. The permanent
+//! `0..0` / `0` sentinels (the state-pinning sentinel contract, grouped into
+//! [`Sentinels`](super::layout::Sentinels)) are built once in `new` and carried
+//! unchanged into `with_equipment_and_evaporation` via the `..base` spread.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -17,7 +17,8 @@ use crate::lp_builder::{
 };
 
 use super::layout::{
-    EquipmentCounts, EvapConfig, EvaporationIndices, FphaColumnLayout, FphaRowRange, StageIndexer,
+    EquipmentCounts, EvapConfig, EvaporationIndices, FphaColumnLayout, FphaRowRange, Sentinels,
+    StageIndexer,
 };
 
 /// Build the inflow-penalty slack column range.
@@ -65,6 +66,9 @@ fn build_oper_violation_ranges(
     ws_end: usize,
     evap_rows_end: usize,
 ) -> OperViolationRanges {
+    // The four slack/row families exist iff there is at least one hydro, so the
+    // flag is the hydro-count predicate, not an independent degree of freedom.
+    let has_operational_violations = hydro_count != 0;
     if hydro_count == 0 {
         return OperViolationRanges {
             outflow_below_slack: 0..0,
@@ -75,7 +79,7 @@ fn build_oper_violation_ranges(
             max_outflow_rows: 0..0,
             min_turbine_rows: 0..0,
             min_generation_rows: 0..0,
-            has_operational_violations: false,
+            has_operational_violations,
         };
     }
     let n_op = hydro_count * n_blks;
@@ -96,7 +100,7 @@ fn build_oper_violation_ranges(
         max_outflow_rows: r_max_out,
         min_turbine_rows: r_min_turb,
         min_generation_rows: r_min_gen,
-        has_operational_violations: true,
+        has_operational_violations,
     }
 }
 
@@ -126,8 +130,8 @@ impl StageIndexer {
     /// assert_eq!(idx.theta,   15);
     /// assert_eq!(idx.n_state,  9);
     /// // State-fixing row ranges are permanent empty sentinels.
-    /// assert_eq!(idx.storage_fixing, 0..0);
-    /// assert_eq!(idx.lag_fixing, 0..0);
+    /// assert_eq!(idx.sentinels.storage_fixing, 0..0);
+    /// assert_eq!(idx.sentinels.lag_fixing, 0..0);
     /// // Equipment ranges are empty when built via `new`.
     /// assert!(idx.turbine.is_empty());
     /// assert_eq!(idx.n_blks, 0);
@@ -152,12 +156,6 @@ impl StageIndexer {
         let theta = n * (3 + l);
         let n_state = n * (1 + l);
 
-        // State fixing uses column bounds; the row ranges are permanent empty
-        // sentinels. The column ranges (storage, inflow_lags, anticipated_state)
-        // carry the state-pinning semantics via set_col_bounds.
-        let storage_fixing = 0..0;
-        let lag_fixing = 0..0;
-
         // z_inflow rows start at row 0 — the first row block in the LP.
         let z_inflow_start_row = 0_usize;
         let z_inflow_rows = z_inflow_start_row..z_inflow_start_row + n;
@@ -169,12 +167,23 @@ impl StageIndexer {
             storage_in,
             theta,
             n_state,
-            storage_fixing,
-            lag_fixing,
+            // State fixing uses column bounds; the row ranges are permanent
+            // empty sentinels. The column ranges (storage, inflow_lags,
+            // anticipated_state) carry the state-pinning semantics via
+            // set_col_bounds. The generic-constraint and pumping sentinels are
+            // owned live by `StageLayout`, not the indexer.
+            sentinels: Sentinels {
+                storage_fixing: 0..0,
+                lag_fixing: 0..0,
+                anticipated_state_fixing: 0..0,
+                generic_constraint_rows: 0..0,
+                generic_constraint_slack: 0..0,
+                n_generic_constraints_active: 0,
+                pumping_flow: 0..0,
+            },
             // Anticipated state block is empty when built via `new`;
             // callers that need it must use `with_equipment_and_evaporation`.
             anticipated_state: 0..0,
-            anticipated_state_fixing: 0..0,
             n_anticipated: 0,
             k_max: 0,
             hydro_count,
@@ -225,14 +234,7 @@ impl StageIndexer {
             anticipated_fishing: 0..0,
             anticipated_fishing_start: 0,
             has_operational_violations: false,
-            generic_constraint_rows: 0..0,
-            generic_constraint_slack: 0..0,
-            n_generic_constraints_active: 0,
             ncs_generation: 0..0,
-            // Permanent `0..0` sentinel, mirroring `ncs_generation`: the live
-            // per-stage pumping column layout is owned by `StageLayout`, not the
-            // indexer. Inherited via `..base` by `with_equipment_and_evaporation`.
-            pumping_flow: 0..0,
             z_inflow,
             z_inflow_rows,
             z_inflow_row_start,
@@ -440,8 +442,6 @@ impl StageIndexer {
         } else {
             0..0
         };
-        // Anticipated-state fixing uses column bounds; row range is a permanent empty sentinel.
-        let anticipated_state_fixing = 0..0;
         let z_inflow_start = anticipated_state_end;
         let z_inflow = z_inflow_start..z_inflow_start + hydro_count;
         let storage_in_start = z_inflow.end;
@@ -554,8 +554,10 @@ impl StageIndexer {
 
         // z_inflow / storage_in / theta / n_state are computed locally above
         // to absorb the anticipated_state shift; the remaining fields
-        // (storage, inflow_lags, storage_fixing, lag_fixing, hydro_count,
-        // max_par_order, nonzero_state_indices) are inherited from `base`.
+        // (storage, inflow_lags, the permanent `sentinels` group, hydro_count,
+        // max_par_order, nonzero_state_indices) are inherited from `base`. The
+        // `sentinels` value is identical between `base` and this constructor
+        // (every field stays `0..0` / `0`), so `..base` carries it unchanged.
 
         Self {
             turbine: turbine_start..spillage_start,
@@ -609,7 +611,6 @@ impl StageIndexer {
             has_operational_violations: op.has_operational_violations,
             // Shifted state-block fields (recomputed to absorb n_ant_state).
             anticipated_state,
-            anticipated_state_fixing,
             n_anticipated,
             k_max,
             n_state,
@@ -749,21 +750,21 @@ mod tests {
     #[test]
     fn storage_fixing_range_3_2() {
         // storage_fixing is a permanent empty sentinel.
-        assert_eq!(indexer_3_2().storage_fixing, 0..0);
+        assert_eq!(indexer_3_2().sentinels.storage_fixing, 0..0);
     }
 
     #[test]
     fn lag_fixing_range_3_2() {
         // lag_fixing is a permanent empty sentinel.
-        assert_eq!(indexer_3_2().lag_fixing, 0..0);
+        assert_eq!(indexer_3_2().sentinels.lag_fixing, 0..0);
     }
 
     #[test]
     fn row_column_symmetry_3_2() {
         // State-fixing row ranges are permanent empty sentinels; column ranges are unchanged.
         let idx = indexer_3_2();
-        assert_eq!(idx.storage_fixing, 0..0);
-        assert_eq!(idx.lag_fixing, 0..0);
+        assert_eq!(idx.sentinels.storage_fixing, 0..0);
+        assert_eq!(idx.sentinels.lag_fixing, 0..0);
         // Column ranges are unchanged.
         assert_eq!(idx.storage, 0..3);
         assert_eq!(idx.inflow_lags, 3..9);
@@ -789,8 +790,8 @@ mod tests {
     fn row_column_symmetry_production_scale() {
         // State-fixing row ranges are permanent empty sentinels; column ranges are unchanged.
         let idx = indexer_160_12();
-        assert_eq!(idx.storage_fixing, 0..0);
-        assert_eq!(idx.lag_fixing, 0..0);
+        assert_eq!(idx.sentinels.storage_fixing, 0..0);
+        assert_eq!(idx.sentinels.lag_fixing, 0..0);
         // Column ranges are unchanged.
         assert_eq!(idx.storage, 0..160);
         assert_eq!(idx.inflow_lags, 160..160 * 13);
@@ -807,8 +808,8 @@ mod tests {
         assert_eq!(idx.theta, 3);
         assert_eq!(idx.n_state, 1);
         // storage_fixing and lag_fixing are permanent empty sentinels.
-        assert_eq!(idx.storage_fixing, 0..0);
-        assert_eq!(idx.lag_fixing, 0..0);
+        assert_eq!(idx.sentinels.storage_fixing, 0..0);
+        assert_eq!(idx.sentinels.lag_fixing, 0..0);
     }
 
     // Edge case: N = 0, L = 0 (degenerate — all ranges empty)
@@ -823,11 +824,11 @@ mod tests {
         assert_eq!(idx.storage_in, 0..0);
         assert_eq!(idx.theta, 0);
         assert_eq!(idx.n_state, 0);
-        assert_eq!(idx.storage_fixing, 0..0);
-        assert_eq!(idx.lag_fixing, 0..0);
+        assert_eq!(idx.sentinels.storage_fixing, 0..0);
+        assert_eq!(idx.sentinels.lag_fixing, 0..0);
 
-        assert_eq!(idx.storage_fixing, idx.storage);
-        assert_eq!(idx.lag_fixing, idx.inflow_lags);
+        assert_eq!(idx.sentinels.storage_fixing, idx.storage);
+        assert_eq!(idx.sentinels.lag_fixing, idx.inflow_lags);
     }
 
     // from_stage_template: must produce the same result as new()
@@ -869,8 +870,14 @@ mod tests {
         assert_eq!(from_tmpl.storage_in, from_new.storage_in);
         assert_eq!(from_tmpl.theta, from_new.theta);
         assert_eq!(from_tmpl.n_state, from_new.n_state);
-        assert_eq!(from_tmpl.storage_fixing, from_new.storage_fixing);
-        assert_eq!(from_tmpl.lag_fixing, from_new.lag_fixing);
+        assert_eq!(
+            from_tmpl.sentinels.storage_fixing,
+            from_new.sentinels.storage_fixing
+        );
+        assert_eq!(
+            from_tmpl.sentinels.lag_fixing,
+            from_new.sentinels.lag_fixing
+        );
         assert_eq!(from_tmpl.hydro_count, from_new.hydro_count);
         assert_eq!(from_tmpl.max_par_order, from_new.max_par_order);
     }
@@ -1601,7 +1608,7 @@ mod tests {
     fn anticipated_state_empty_for_new() {
         let idx = StageIndexer::new(3, 2);
         assert_eq!(idx.anticipated_state, 0..0);
-        assert_eq!(idx.anticipated_state_fixing, 0..0);
+        assert_eq!(idx.sentinels.anticipated_state_fixing, 0..0);
         assert_eq!(idx.n_anticipated, 0);
         assert_eq!(idx.k_max, 0);
     }
@@ -1619,7 +1626,7 @@ mod tests {
 
         assert_eq!(idx.anticipated_state, 9..15);
         // anticipated_state_fixing is a permanent empty sentinel; state fixing uses column bounds.
-        assert_eq!(idx.anticipated_state_fixing, 0..0);
+        assert_eq!(idx.sentinels.anticipated_state_fixing, 0..0);
         assert_eq!(idx.z_inflow, 15..18);
         assert_eq!(idx.storage_in, 18..21);
         assert_eq!(idx.theta, 21);
@@ -1640,7 +1647,7 @@ mod tests {
 
         assert_eq!(idx.anticipated_state, 0..6);
         // anticipated_state_fixing is a permanent empty sentinel; state fixing uses column bounds.
-        assert_eq!(idx.anticipated_state_fixing, 0..0);
+        assert_eq!(idx.sentinels.anticipated_state_fixing, 0..0);
         assert_eq!(idx.n_state, 6);
         assert_eq!(idx.z_inflow, 6..6);
         assert_eq!(idx.storage_in, 6..6);
@@ -1664,13 +1671,13 @@ mod tests {
         assert_eq!(idx.storage, base.storage);
         assert_eq!(idx.inflow_lags, base.inflow_lags);
         assert_eq!(idx.anticipated_state, 0..0);
-        assert_eq!(idx.anticipated_state_fixing, 0..0);
+        assert_eq!(idx.sentinels.anticipated_state_fixing, 0..0);
         assert_eq!(idx.z_inflow, base.z_inflow);
         assert_eq!(idx.storage_in, base.storage_in);
         assert_eq!(idx.theta, base.theta);
         assert_eq!(idx.n_state, base.n_state);
-        assert_eq!(idx.storage_fixing, base.storage_fixing);
-        assert_eq!(idx.lag_fixing, base.lag_fixing);
+        assert_eq!(idx.sentinels.storage_fixing, base.sentinels.storage_fixing);
+        assert_eq!(idx.sentinels.lag_fixing, base.sentinels.lag_fixing);
         assert_eq!(idx.z_inflow_rows, base.z_inflow_rows);
         assert_eq!(idx.z_inflow_row_start, base.z_inflow_row_start);
         assert_eq!(idx.n_anticipated, 0);
@@ -1688,7 +1695,7 @@ mod tests {
                 &evap(vec![]),
             );
             assert_eq!(
-                idx.anticipated_state_fixing,
+                idx.sentinels.anticipated_state_fixing,
                 0..0,
                 "anticipated_state_fixing must be 0..0 (sentinel) for n_anticipated={n_anticipated} k_max={k_max}"
             );
@@ -1704,13 +1711,17 @@ mod tests {
         // new() constructor
         let idx_new = StageIndexer::new(3, 2);
         assert_eq!(
-            idx_new.storage_fixing,
+            idx_new.sentinels.storage_fixing,
             0..0,
             "new: storage_fixing must be 0..0"
         );
-        assert_eq!(idx_new.lag_fixing, 0..0, "new: lag_fixing must be 0..0");
         assert_eq!(
-            idx_new.anticipated_state_fixing,
+            idx_new.sentinels.lag_fixing,
+            0..0,
+            "new: lag_fixing must be 0..0"
+        );
+        assert_eq!(
+            idx_new.sentinels.anticipated_state_fixing,
             0..0,
             "new: anticipated_state_fixing must be 0..0"
         );
@@ -1719,17 +1730,17 @@ mod tests {
         let idx_eq =
             StageIndexer::with_equipment(&eq(3, 2, 0, 0, 0, 0, false), &fpha(vec![], vec![]));
         assert_eq!(
-            idx_eq.storage_fixing,
+            idx_eq.sentinels.storage_fixing,
             0..0,
             "with_equipment: storage_fixing must be 0..0"
         );
         assert_eq!(
-            idx_eq.lag_fixing,
+            idx_eq.sentinels.lag_fixing,
             0..0,
             "with_equipment: lag_fixing must be 0..0"
         );
         assert_eq!(
-            idx_eq.anticipated_state_fixing,
+            idx_eq.sentinels.anticipated_state_fixing,
             0..0,
             "with_equipment: anticipated_state_fixing must be 0..0"
         );
@@ -1741,17 +1752,17 @@ mod tests {
             &evap(vec![]),
         );
         assert_eq!(
-            idx_ant.storage_fixing,
+            idx_ant.sentinels.storage_fixing,
             0..0,
             "with_equipment_and_evaporation: storage_fixing must be 0..0"
         );
         assert_eq!(
-            idx_ant.lag_fixing,
+            idx_ant.sentinels.lag_fixing,
             0..0,
             "with_equipment_and_evaporation: lag_fixing must be 0..0"
         );
         assert_eq!(
-            idx_ant.anticipated_state_fixing,
+            idx_ant.sentinels.anticipated_state_fixing,
             0..0,
             "with_equipment_and_evaporation: anticipated_state_fixing must be 0..0"
         );
