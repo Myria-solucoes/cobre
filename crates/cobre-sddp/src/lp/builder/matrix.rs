@@ -1,7 +1,7 @@
 use cobre_core::{CoefficientRef, ConstraintSense, Stage};
 
 use crate::generic_constraints::resolve_variable_ref;
-use crate::hydro_models::{EvaporationModel, ResolvedProductionModel};
+use crate::hydro_models::{EvaporationModel, FphaPlane, ResolvedProductionModel};
 
 use super::layout::{StageLayout, TemplateBuildCtx};
 use super::{EVAPORATION_FLOW_SAFETY_MARGIN, M3S_TO_HM3};
@@ -814,6 +814,66 @@ fn fill_z_inflow_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
     }
 }
 
+/// Walk every FPHA hyperplane row of the stage, invoking `visit` once per
+/// `(FPHA hydro, block, plane)` triple with the resolved plane and its LP row.
+///
+/// This is the single owner of the FPHA row-cursor arithmetic. Both the bounds
+/// fill ([`fill_fpha_rows`]) and the coefficient fill ([`fill_fpha_entries`])
+/// drive off this walker, so the cursor advance and the row formula live in one
+/// place: a one-sided edit to either fill is no longer possible, which would
+/// otherwise land the row bounds and the matrix coefficients on different rows.
+///
+/// The per-hydro block start advances by the cumulative `n_blks * n_planes`
+/// prefix sum over preceding FPHA hydros — REQUIRED because plane counts vary
+/// per hydro, so using this hydro's plane count as a uniform stride
+/// (`local_idx * n_blks * n_planes`) overlaps a later, fewer-plane hydro onto an
+/// earlier hydro's rows. Within a hydro the row is
+/// `block_start + blk * n_planes + p_idx`. Matches the indexer's
+/// `FphaRowRange::start` ordering exactly.
+///
+/// The closure receives `&FphaPlane` (not a re-indexable `p_idx` alone) so each
+/// fill reads exactly the coefficients it needs (`intercept` for the bounds,
+/// `gamma_*` for the matrix) without a second `planes[p_idx]` lookup. The
+/// closure is a monomorphised `FnMut` that borrows its target buffer — no
+/// `Box<dyn>`, no intermediate `Vec` — so the build path allocates nothing and
+/// the byte-identical `(row, value)` push order is preserved.
+fn for_each_fpha_plane<F>(
+    ctx: &TemplateBuildCtx<'_>,
+    stage_idx: usize,
+    layout: &StageLayout,
+    mut visit: F,
+) where
+    F: FnMut(usize, usize, usize, usize, &FphaPlane, usize),
+{
+    let n_blks = layout.n_blks;
+    let mut fpha_block_start = layout.row_fpha_start;
+    for (local_idx, &h_idx) in layout.fpha_hydro_indices.iter().enumerate() {
+        let planes = match ctx.production_models.model(h_idx, stage_idx) {
+            ResolvedProductionModel::Fpha { planes, .. } => planes,
+            ResolvedProductionModel::ConstantProductivity { .. } => {
+                // Invariant: fpha_hydro_indices only ever holds FPHA hydros.
+                debug_assert!(
+                    false,
+                    "fpha_hydro_indices contains hydro {h_idx} but model is ConstantProductivity"
+                );
+                continue;
+            }
+        };
+        let n_planes = planes.len();
+        debug_assert_eq!(
+            n_planes, layout.fpha_planes_per_hydro[local_idx],
+            "plane count mismatch for FPHA hydro {h_idx} at stage {stage_idx}"
+        );
+        for blk in 0..n_blks {
+            for (p_idx, plane) in planes.iter().enumerate() {
+                let row = fpha_block_start + blk * n_planes + p_idx;
+                visit(local_idx, h_idx, blk, p_idx, plane, row);
+            }
+        }
+        fpha_block_start += n_blks * n_planes;
+    }
+}
+
 /// Fill row lower/upper bounds for one stage.
 ///
 /// Returns `(row_lower, row_upper)` vectors of length `layout.num_rows`.
@@ -826,10 +886,51 @@ pub(super) fn fill_stage_rows(
     let mut row_lower = vec![0.0_f64; layout.num_rows];
     let mut row_upper = vec![0.0_f64; layout.num_rows];
 
-    // Water balance rows: static RHS = ζ * (deterministic_base_h - water_withdrawal_m3s_h).
-    // The withdrawal is a fixed schedule that reduces the effective inflow available
-    // to the reservoir. Subtracting it from the base keeps the row bound correct for
-    // the stage template; the PAR(p) noise innovation is added at solve time via patches.
+    fill_water_balance_rows(ctx, stage_idx, layout, &mut row_lower, &mut row_upper);
+    fill_load_balance_rows(
+        ctx,
+        stage,
+        stage_idx,
+        layout,
+        &mut row_lower,
+        &mut row_upper,
+    );
+    fill_fpha_rows(ctx, stage_idx, layout, &mut row_lower, &mut row_upper);
+    fill_evaporation_rows(ctx, stage_idx, layout, &mut row_lower, &mut row_upper);
+    fill_operational_violation_rows(
+        ctx,
+        stage,
+        stage_idx,
+        layout,
+        &mut row_lower,
+        &mut row_upper,
+    );
+    fill_anticipated_fishing_rows(
+        ctx,
+        stage,
+        stage_idx,
+        layout,
+        &mut row_lower,
+        &mut row_upper,
+    );
+    fill_anticipated_state_out_def_rows(ctx, stage_idx, layout, &mut row_lower, &mut row_upper);
+    fill_z_inflow_rows(ctx, stage_idx, layout, &mut row_lower, &mut row_upper);
+
+    (row_lower, row_upper)
+}
+
+/// Fill water-balance row bounds: static RHS = ζ · (`deterministic_base_h` − `water_withdrawal_m3s_h`).
+///
+/// The withdrawal is a fixed schedule that reduces the effective inflow available
+/// to the reservoir. Subtracting it from the base keeps the row bound correct for
+/// the stage template; the PAR(p) noise innovation is added at solve time via patches.
+fn fill_water_balance_rows(
+    ctx: &TemplateBuildCtx<'_>,
+    stage_idx: usize,
+    layout: &StageLayout,
+    row_lower: &mut [f64],
+    row_upper: &mut [f64],
+) {
     for h_idx in 0..layout.n_h {
         let row = layout.row_water_balance_start + h_idx;
         let base = if ctx.par_lp.n_stages() > 0 && ctx.par_lp.n_hydros() == layout.n_h {
@@ -845,10 +946,20 @@ pub(super) fn fill_stage_rows(
         row_lower[row] = rhs;
         row_upper[row] = rhs;
     }
+}
 
-    // Load balance rows: static RHS = mean_mw * block_factor.
-    // Block factors from `load_factors.json` scale the mean load per block
-    // (e.g., heavy/medium/light blocks). Default factor is 1.0 (no scaling).
+/// Fill load-balance row bounds: static RHS = `mean_mw` · `block_factor`.
+///
+/// Block factors from `load_factors.json` scale the mean load per block
+/// (e.g., heavy/medium/light blocks). Default factor is 1.0 (no scaling).
+fn fill_load_balance_rows(
+    ctx: &TemplateBuildCtx<'_>,
+    stage: &Stage,
+    stage_idx: usize,
+    layout: &StageLayout,
+    row_lower: &mut [f64],
+    row_upper: &mut [f64],
+) {
     for (b_idx, bus) in ctx.buses.iter().enumerate() {
         let mean_mw = ctx
             .load_models
@@ -863,45 +974,48 @@ pub(super) fn fill_stage_rows(
             row_upper[row] = rhs;
         }
     }
+}
 
-    // FPHA constraint rows: g_{h,k} - gamma_v/2*v - gamma_v/2*v_in
-    //                            - gamma_q*q - gamma_s*s <= gamma_0
-    // Row lower = -INF, row upper = gamma_0 (pre-scaled intercept).
-    // The v_in contribution is encoded in the matrix entry on the v_in column,
-    // so the static upper bound only needs the intercept term.
-    let n_blks = layout.n_blks;
-    // Per-hydro FPHA row block start. The cumulative prefix sum over preceding
-    // FPHA hydros' (n_blks * planes) is REQUIRED: FPHA hydros carry DIFFERENT
-    // plane counts, so `local_idx * n_blks * n_planes` (this hydro's count as the
-    // stride) overlaps a later, fewer-plane hydro onto an earlier hydro's rows.
-    // Matches the indexer's `FphaRowRange::start` ordering exactly.
-    let mut fpha_block_start = layout.row_fpha_start;
-    for (local_idx, &h_idx) in layout.fpha_hydro_indices.iter().enumerate() {
-        if let ResolvedProductionModel::Fpha { planes, .. } =
-            ctx.production_models.model(h_idx, stage_idx)
-        {
-            let n_planes = planes.len();
-            debug_assert_eq!(
-                n_planes, layout.fpha_planes_per_hydro[local_idx],
-                "plane count mismatch for FPHA hydro {h_idx} at stage {stage_idx}"
-            );
-            for blk in 0..n_blks {
-                for (p_idx, plane) in planes.iter().enumerate() {
-                    let row = fpha_block_start + blk * n_planes + p_idx;
-                    row_lower[row] = f64::NEG_INFINITY;
-                    row_upper[row] = plane.intercept;
-                }
-            }
-            fpha_block_start += n_blks * n_planes;
-        }
-    }
+/// Fill FPHA hyperplane row bounds: `row_lower = -INF`, `row_upper = gamma_0`
+/// (the pre-scaled `intercept`).
+///
+/// The constraint is `g_{h,k} - gamma_v/2·v - gamma_v/2·v_in - gamma_q·q - gamma_s·s <= gamma_0`.
+/// The `v`, `v_in`, `q`, `s` contributions live in the CSC matrix entries
+/// ([`fill_fpha_entries`]), so the static upper bound carries only the `intercept`.
+/// Driven by [`for_each_fpha_plane`] so these bounds and the matrix coefficients
+/// share one row cursor.
+fn fill_fpha_rows(
+    ctx: &TemplateBuildCtx<'_>,
+    stage_idx: usize,
+    layout: &StageLayout,
+    row_lower: &mut [f64],
+    row_upper: &mut [f64],
+) {
+    for_each_fpha_plane(
+        ctx,
+        stage_idx,
+        layout,
+        |_local_idx, _h_idx, _blk, _p_idx, plane, row| {
+            row_lower[row] = f64::NEG_INFINITY;
+            row_upper[row] = plane.intercept;
+        },
+    );
+}
 
-    // Evaporation constraint rows:
-    // evaporation_outflow = intercept_m3s + volume_slope_m3s_per_hm3/2*(v + v_in - 2*reference_volume).
-    // The volume-dependent term `volume_slope_m3s_per_hm3/2 * v` is added via the
-    // CSC matrix entry on the outgoing-storage column, so the static row bounds
-    // only encode the constant term `intercept_m3s`.  The constraint is an
-    // equality: row_lower == row_upper == intercept_m3s.
+/// Fill evaporation row bounds: equality `row_lower == row_upper == intercept_m3s`.
+///
+/// The linearised outflow is
+/// `intercept_m3s + volume_slope_m3s_per_hm3/2·(v + v_in - 2·reference_volume)`.
+/// The volume-dependent term `volume_slope_m3s_per_hm3/2 · v` is added via the
+/// CSC matrix entry on the outgoing-storage column, so the static row bounds
+/// encode only the constant `intercept_m3s`.
+fn fill_evaporation_rows(
+    ctx: &TemplateBuildCtx<'_>,
+    stage_idx: usize,
+    layout: &StageLayout,
+    row_lower: &mut [f64],
+    row_upper: &mut [f64],
+) {
     for (local_idx, &h_idx) in layout.evap_hydro_indices.iter().enumerate() {
         if let EvaporationModel::Linearized { coefficients, .. } =
             ctx.evaporation_models.model(h_idx)
@@ -917,39 +1031,20 @@ pub(super) fn fill_stage_rows(
             row_upper[row] = intercept_m3s;
         }
     }
+}
 
-    // Operational violation constraint rows (min/max outflow, min turbine, min generation).
-    fill_operational_violation_rows(
-        ctx,
-        stage,
-        stage_idx,
-        layout,
-        &mut row_lower,
-        &mut row_upper,
-    );
-
-    // Anticipated-fishing equality rows: one per anticipated plant.
-    // The fishing predicate `StageIndexer::is_anticipated_fishing_active`
-    // is always true under the always-active fishing
-    // flip, so this loop emits `n_anticipated` rows at every stage.
-    // Row bounds 0 == 0; actual coefficients are filled in build_stage_matrix_entries.
-    fill_anticipated_fishing_rows(
-        ctx,
-        stage,
-        stage_idx,
-        layout,
-        &mut row_lower,
-        &mut row_upper,
-    );
-
-    // Anticipated-state-out definition rows: one per active anticipated plant.
-    // Equality 0 == 0; entries filled in build_stage_matrix_entries.
-    fill_anticipated_state_out_def_rows(ctx, stage_idx, layout, &mut row_lower, &mut row_upper);
-
-    // Z-inflow definition rows: equality constraints with RHS = base_h (m3/s).
-    // The base is the deterministic PAR base inflow (before noise), NOT multiplied
-    // by zeta and NOT reduced by withdrawal. The noise component (sigma * eta) is
-    // added at solve time via PatchBuffer Category 5.
+/// Fill z-inflow definition row bounds: equality with RHS = `base_h` (m3/s).
+///
+/// The base is the deterministic PAR base inflow (before noise), NOT multiplied
+/// by ζ and NOT reduced by withdrawal. The noise component (sigma · eta) is added
+/// at solve time via `PatchBuffer` Category 5.
+fn fill_z_inflow_rows(
+    ctx: &TemplateBuildCtx<'_>,
+    stage_idx: usize,
+    layout: &StageLayout,
+    row_lower: &mut [f64],
+    row_upper: &mut [f64],
+) {
     for h_idx in 0..layout.n_h {
         let row = layout.row_z_inflow_start + h_idx;
         let base = if ctx.par_lp.n_stages() > 0 && ctx.par_lp.n_hydros() == layout.n_h {
@@ -960,8 +1055,6 @@ pub(super) fn fill_stage_rows(
         row_lower[row] = base;
         row_upper[row] = base;
     }
-
-    (row_lower, row_upper)
 }
 
 /// Fill row bounds for the 4 operational violation constraint families.
@@ -1463,60 +1556,46 @@ pub(super) fn fill_load_balance_entries(
 ///
 /// These entries implement `g - gamma_v/2*v - gamma_v/2*v_in - gamma_q*q - gamma_s*s <= gamma_0`,
 /// where `gamma_0` is already encoded in the row upper bound set by `fill_stage_rows`.
+///
+/// FPHA uses **average** storage `(V_in + V_out)/2`, so `-gamma_v/2` lands on
+/// BOTH the outgoing-storage column (`v = h_idx`) and the incoming-storage column
+/// (`v_in = col_storage_in_start + h_idx`). Putting `-gamma_v/2` on `v` (`V_out`)
+/// alone compiles and passes single-plane single-hydro tests, but understates
+/// generation by the `V_in` head term — the wrong-but-compiling alternative that
+/// deterministic case D06 pins against.
+///
+/// Driven by [`for_each_fpha_plane`] so the matrix coefficients and the row
+/// bounds set by [`fill_fpha_rows`] share one row cursor.
 pub(super) fn fill_fpha_entries(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
     layout: &StageLayout,
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
-    let n_blks = layout.n_blks;
     let col_storage_in_start = layout.col_storage_in_start;
-
-    // Per-hydro FPHA row block start; cumulative prefix sum over preceding FPHA
-    // hydros' (n_blks * planes). REQUIRED because plane counts vary per hydro —
-    // see the indexer's `FphaRowRange::start`. Mirrors the bounds fill exactly so
-    // coefficients and bounds land on the same rows.
-    let mut fpha_block_start = layout.row_fpha_start;
-    for (local_idx, &h_idx) in layout.fpha_hydro_indices.iter().enumerate() {
-        let model = ctx.production_models.model(h_idx, stage_idx);
-        let planes = match model {
-            ResolvedProductionModel::Fpha { planes, .. } => planes,
-            ResolvedProductionModel::ConstantProductivity { .. } => {
-                // Should never happen: fpha_hydro_indices only contains FPHA hydros.
-                debug_assert!(
-                    false,
-                    "fpha_hydro_indices contains hydro {h_idx} but model is ConstantProductivity"
-                );
-                continue;
-            }
-        };
-        let n_planes = planes.len();
-
-        for blk in 0..n_blks {
-            // Column indices for this hydro/block.
+    for_each_fpha_plane(
+        ctx,
+        stage_idx,
+        layout,
+        |local_idx, h_idx, blk, _p_idx, plane, row| {
             let col_v = h_idx; // outgoing storage column
             let col_v_in = col_storage_in_start + h_idx; // incoming storage column
             let col_q = layout.turbine_col(h_idx, blk);
             let col_s = layout.spillage_col(h_idx, blk);
             let col_g = layout.generation_col(local_idx, blk);
 
-            for (p_idx, plane) in planes.iter().enumerate() {
-                let row = fpha_block_start + blk * n_planes + p_idx;
-
-                // g_{h,k} column: +1.0
-                col_entries[col_g].push((row, 1.0));
-                // v (outgoing storage): -gamma_v/2
-                col_entries[col_v].push((row, -plane.gamma_v / 2.0));
-                // v_in (incoming storage, fixed by storage-fixing row): -gamma_v/2
-                col_entries[col_v_in].push((row, -plane.gamma_v / 2.0));
-                // q_{h,k} (turbine): -gamma_q
-                col_entries[col_q].push((row, -plane.gamma_q));
-                // s_{h,k} (spillage): -gamma_s
-                col_entries[col_s].push((row, -plane.gamma_s));
-            }
-        }
-        fpha_block_start += n_blks * n_planes;
-    }
+            // g_{h,k} column: +1.0
+            col_entries[col_g].push((row, 1.0));
+            // v (outgoing storage): -gamma_v/2 — average-storage term, also on v_in below.
+            col_entries[col_v].push((row, -plane.gamma_v / 2.0));
+            // v_in (incoming storage, fixed by storage-fixing row): -gamma_v/2.
+            col_entries[col_v_in].push((row, -plane.gamma_v / 2.0));
+            // q_{h,k} (turbine): -gamma_q
+            col_entries[col_q].push((row, -plane.gamma_q));
+            // s_{h,k} (spillage): -gamma_s
+            col_entries[col_s].push((row, -plane.gamma_s));
+        },
+    );
 }
 
 /// Fill CSC matrix entries for the evaporation constraint rows.
@@ -1664,7 +1743,6 @@ pub(super) fn fill_generic_constraint_entries(
     // built — NOT `StageIndexer::pumping_flow` (a permanent `0..0` sentinel).
     let pumping_refs = crate::generic_constraints::PumpingRefs {
         col_pumping_start: layout.col_pumping_start,
-        n_blks: layout.n_blks,
         pumping_stations: ctx.pumping_stations,
         pumping_pos: &ctx.pumping_pos,
     };

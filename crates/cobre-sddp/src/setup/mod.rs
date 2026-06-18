@@ -655,6 +655,12 @@ fn build_wired_indexer(
     stochastic: &StochasticContext,
 ) -> StageIndexer {
     let stage_templates_ref = &stage_templates.templates;
+    // `n_blks_stage0` is the single global block count for the whole study: it is
+    // read from stage 0 and fed to the one global indexer below, which strides
+    // every block-major column (including `ncs_generation`) by it. The layout
+    // presumes every stage shares this count. `StageLayout` is the per-stage
+    // authority — it reads each stage's own `stage.blocks.len()` — so a stage
+    // whose block count differs from stage 0's diverges from this global stride.
     let n_blks_stage0 = system.stages().first().map_or(1, |s| s.blocks.len().max(1));
     let has_inflow_penalty =
         inflow_method.has_slack_columns() && stage_templates_ref[0].n_hydro > 0;

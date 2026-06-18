@@ -86,15 +86,15 @@ pub(crate) struct CascadeRefs<'a, S: BuildHasher = std::hash::RandomState> {
 /// arms are the only consumers; every other arm ignores it.
 pub(crate) struct PumpingRefs<'a, S: BuildHasher = std::hash::RandomState> {
     /// First pumping-flow column. The column for station local index `p_idx`,
-    /// block `blk` is `col_pumping_start + p_idx * n_blks + blk`.
+    /// block `blk` is `col_pumping_start + p_idx * n_blks + blk`, where `n_blks`
+    /// is the block stride threaded into [`resolve_variable_ref`] (the same stride
+    /// every other block-major resolver helper receives), not a field here.
     ///
     /// Sourced from `StageLayout::col_pumping_start` (the real reserved range),
     /// **not** from `StageIndexer::pumping_flow` (a permanent `0..0` sentinel).
     /// When `pumping_stations` is empty this value is meaningless, so the resolver
     /// guards on the `pumping_pos` lookup before using it.
     pub col_pumping_start: usize,
-    /// Number of operating blocks in the stage (the column-block stride).
-    pub n_blks: usize,
     /// Pumping stations in canonical ID-sorted slot order. Indexed by the local
     /// index `p_idx` obtained from [`PumpingRefs::pumping_pos`]; the entry's
     /// `consumption_mw_per_m3s` is the `PumpingPower` coefficient.
@@ -282,14 +282,26 @@ pub(crate) fn resolve_variable_ref<S: BuildHasher>(
         VariableRef::PumpingFlow {
             station_id,
             block_id,
-        } => resolve_pumping_column(*station_id, *block_id, block_idx, pumping_refs, |_| 1.0),
+        } => resolve_pumping_column(
+            *station_id,
+            *block_id,
+            block_idx,
+            n_blks,
+            pumping_refs,
+            |_| 1.0,
+        ),
 
         VariableRef::PumpingPower {
             station_id,
             block_id,
-        } => resolve_pumping_column(*station_id, *block_id, block_idx, pumping_refs, |station| {
-            station.consumption_mw_per_m3s
-        }),
+        } => resolve_pumping_column(
+            *station_id,
+            *block_id,
+            block_idx,
+            n_blks,
+            pumping_refs,
+            |station| station.consumption_mw_per_m3s,
+        ),
 
         // ── Contracts ──────────────────────────────────────────────────────
         // Contracts resolve through `block_col_range` to the empty `0..0` range:
@@ -703,6 +715,7 @@ fn resolve_pumping_column<S: BuildHasher>(
     station_id: EntityId,
     block_id: Option<usize>,
     block_idx: usize,
+    n_blks: usize,
     pumping_refs: &PumpingRefs<'_, S>,
     coeff_fn: impl Fn(&PumpingStation) -> f64,
 ) -> Vec<(usize, f64)> {
@@ -716,7 +729,7 @@ fn resolve_pumping_column<S: BuildHasher>(
         return vec![];
     };
     let eff_blk = block_id.unwrap_or(block_idx);
-    let col = pumping_refs.col_pumping_start + p_idx * pumping_refs.n_blks + eff_blk;
+    let col = pumping_refs.col_pumping_start + p_idx * n_blks + eff_blk;
     vec![(col, coeff_fn(station))]
 }
 
@@ -1042,7 +1055,6 @@ mod tests {
         let empty_pumping_pos: HashMap<EntityId, usize> = HashMap::new();
         let pumping_refs = PumpingRefs {
             col_pumping_start: 0,
-            n_blks: indexer.n_blks,
             pumping_stations: &no_stations,
             pumping_pos: &empty_pumping_pos,
         };
@@ -1092,7 +1104,6 @@ mod tests {
         };
         let pumping_refs = PumpingRefs {
             col_pumping_start,
-            n_blks,
             pumping_stations,
             pumping_pos,
         };
@@ -1504,7 +1515,6 @@ mod tests {
         let empty_pumping_pos: HashMap<EntityId, usize> = HashMap::new();
         let pumping_refs = PumpingRefs {
             col_pumping_start: 0,
-            n_blks: 1,
             pumping_stations: &no_stations,
             pumping_pos: &empty_pumping_pos,
         };
@@ -1585,7 +1595,6 @@ mod tests {
         let empty_pumping_pos: HashMap<EntityId, usize> = HashMap::new();
         let pumping_refs = PumpingRefs {
             col_pumping_start: 0,
-            n_blks: 1,
             pumping_stations: &no_stations,
             pumping_pos: &empty_pumping_pos,
         };

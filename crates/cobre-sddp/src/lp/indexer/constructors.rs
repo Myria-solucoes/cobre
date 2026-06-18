@@ -274,10 +274,24 @@ impl StageIndexer {
     ///
     /// # Notes
     ///
-    /// This constructor assumes a **uniform block count across all stages**
-    /// (i.e., all stages have the same `n_blks`). For the minimal viable
-    /// solver this assumption holds; stages with heterogeneous block counts
-    /// would require a per-stage indexer.
+    /// This is the single global indexer for the whole study, so its `n_blks` is
+    /// **one block count shared by every stage**: the caller (`build_wired_indexer`)
+    /// sources it from stage 0 and the layout presumes every stage's block count
+    /// equals stage 0's. The per-stage `StageLayout` reads each stage's own
+    /// `stage.blocks.len()`, so the two diverge whenever a stage's block count
+    /// differs from stage 0's.
+    ///
+    /// The wrong-but-compiling consequence if the invariant is violated: the
+    /// backward-pass NCS bound patch indexes columns as
+    /// `ncs_generation.start + ncs_idx * n_blks_stage + blk` with the *per-stage*
+    /// `n_blks_stage`, but `ncs_generation.start` is wired from this stage-0-based
+    /// `n_blks`. A stage with a different block count then strides off a base that
+    /// assumed stage 0's count, so NCS column bounds land on the wrong columns —
+    /// a silent miswrite that still compiles. The cross-stage NCS-start
+    /// `debug_assert_eq!` in `build_wired_indexer` is the runtime guard for this.
+    ///
+    /// TODO(per-stage-block-count): supporting heterogeneous per-stage block
+    /// counts requires a per-stage NCS column base, not this single global one.
     ///
     /// # Examples
     ///
