@@ -138,6 +138,8 @@ mod constructors;
 mod layout;
 mod sparse_state;
 mod state_mapping;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_fixtures;
 
 pub use layout::{
     EquipmentCounts, EvapConfig, EvaporationIndices, FphaColumnLayout, FphaRowRange, StageIndexer,

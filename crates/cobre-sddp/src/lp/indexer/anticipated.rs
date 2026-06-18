@@ -100,44 +100,8 @@ impl StageIndexer {
 
 #[cfg(test)]
 mod tests {
-    use crate::indexer::{EquipmentCounts, EvapConfig, FphaColumnLayout, StageIndexer};
-
-    fn fpha(hydro_indices: Vec<usize>, planes_per_hydro: Vec<usize>) -> FphaColumnLayout {
-        FphaColumnLayout {
-            hydro_indices,
-            planes_per_hydro,
-        }
-    }
-
-    fn evap(hydro_indices: Vec<usize>) -> EvapConfig {
-        EvapConfig { hydro_indices }
-    }
-
-    fn eq(
-        hydro_count: usize,
-        max_par_order: usize,
-        n_thermals: usize,
-        n_lines: usize,
-        n_buses: usize,
-        n_blks: usize,
-        has_inflow_penalty: bool,
-    ) -> EquipmentCounts {
-        EquipmentCounts {
-            hydro_count,
-            max_par_order,
-            n_thermals,
-            n_lines,
-            n_buses,
-            n_blks,
-            has_inflow_penalty,
-            max_deficit_segments: 1,
-            n_anticipated: 0,
-            k_max: 0,
-            anticipated_lead_stages: vec![],
-            anticipated_thermal_indices: vec![],
-            n_pumping: 0,
-        }
-    }
+    use crate::indexer::test_fixtures::{eq, evap, fpha};
+    use crate::indexer::{EquipmentCounts, StageIndexer};
 
     /// Strict-predicate acceptance: `stage_idx + K_i < n_stages` accepts.
     /// `K_i = 3`, `stage_idx = 2`, `n_stages = 6` → `delivery_stage` = 5 < 6 → active.

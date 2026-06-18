@@ -45,6 +45,15 @@ dhat-heap = ["dep:dhat"]
 ## to include them.
 slow-tests = []
 
+## Expose crate-internal test fixtures (EquipmentCounts builders) to other
+## crates' integration tests.
+##
+## The shared `indexer::test_fixtures` builders are gated on
+## `#[cfg(any(test, feature = "test-support"))]`, so plain `cargo test` sees
+## them via `test` and downstream integration tests see them via this feature.
+## Must NOT be enabled in production builds.
+test-support = []
+
 [dependencies]
 cobre-core = { version = "0.8.2", path = "../cobre-core" }
 cobre-solver = { version = "0.8.2", path = "../cobre-solver", default-features = false }

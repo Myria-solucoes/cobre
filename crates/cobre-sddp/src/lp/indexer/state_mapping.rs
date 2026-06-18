@@ -181,62 +181,8 @@ impl StageIndexer {
 
 #[cfg(test)]
 mod tests {
-    use crate::indexer::{EquipmentCounts, EvapConfig, FphaColumnLayout, StageIndexer};
-
-    fn fpha(hydro_indices: Vec<usize>, planes_per_hydro: Vec<usize>) -> FphaColumnLayout {
-        FphaColumnLayout {
-            hydro_indices,
-            planes_per_hydro,
-        }
-    }
-
-    fn evap(hydro_indices: Vec<usize>) -> EvapConfig {
-        EvapConfig { hydro_indices }
-    }
-
-    /// Test helper: build `EquipmentCounts` with explicit anticipated thermal
-    /// fields.
-    fn eq_with_anticipated(
-        hydro_count: usize,
-        max_par_order: usize,
-        n_thermals: usize,
-        n_lines: usize,
-        n_buses: usize,
-        n_blks: usize,
-        has_inflow_penalty: bool,
-        n_anticipated: usize,
-        k_max: usize,
-    ) -> EquipmentCounts {
-        // Default the per-plant K_i array to a uniform `k_max` of length
-        // `n_anticipated` so debug asserts on per-plant lead-stage
-        // bookkeeping hold. Tests that need a mixed K_i array must construct
-        // `EquipmentCounts` directly.
-        let anticipated_lead_stages = if n_anticipated == 0 {
-            vec![]
-        } else {
-            vec![k_max; n_anticipated]
-        };
-        let anticipated_thermal_indices = if n_anticipated == 0 {
-            vec![]
-        } else {
-            (0..n_anticipated).collect()
-        };
-        EquipmentCounts {
-            hydro_count,
-            max_par_order,
-            n_thermals,
-            n_lines,
-            n_buses,
-            n_blks,
-            has_inflow_penalty,
-            max_deficit_segments: 1,
-            n_anticipated,
-            k_max,
-            anticipated_lead_stages,
-            anticipated_thermal_indices,
-            n_pumping: 0,
-        }
-    }
+    use crate::indexer::test_fixtures::{eq_with_anticipated, evap, fpha};
+    use crate::indexer::{EquipmentCounts, FphaColumnLayout, StageIndexer};
 
     // ── state_to_lp_column precompute tests ─────────────────────────────────
 

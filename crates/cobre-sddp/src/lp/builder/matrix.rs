@@ -621,10 +621,34 @@ fn fill_withdrawal_slack_columns(
     }
 }
 
+/// One operational-violation slack family, addressing a disjoint `n_h * n_blks`
+/// column range. The variant selects, via `match`, all three axes that distinguish
+/// the families: the resolved-bound activation predicate, the `StageLayout` column
+/// accessor, and the `HydroStagePenalties` cost field. Every predicate reads the
+/// **resolved per-stage** bound (`ctx.bounds.hydro_bounds(h_idx, stage_idx)`), never
+/// the entity declaration on `ctx.hydros[h_idx]` — the declaration ignores per-stage
+/// overrides and would silently mis-activate columns while still compiling.
+#[derive(Clone, Copy)]
+enum BlockSlackFamily {
+    /// `sigma_outflow_below_{h,k}`: active (unbounded above) iff the resolved
+    /// `min_outflow_m3s > 0.0`; pinned to `[0, 0]` otherwise.
+    OutflowBelow,
+    /// `sigma_outflow_above_{h,k}`: active (unbounded above) iff the resolved
+    /// `max_outflow_m3s` is `Some` (an `Option::is_some()` check, NOT `> 0.0` — a
+    /// `Some(0.0)` cap still activates the column); pinned to `[0, 0]` otherwise.
+    OutflowAbove,
+    /// `sigma_turbine_below_{h,k}`: active (unbounded above) iff the resolved
+    /// `min_turbined_m3s > 0.0`; pinned to `[0, 0]` otherwise.
+    TurbineBelow,
+    /// `sigma_generation_below_{h,k}`: active (unbounded above) iff the resolved
+    /// `min_generation_mw > 0.0`; pinned to `[0, 0]` otherwise.
+    GenerationBelow,
+}
+
 /// Operational violation slack columns: 4 families of `n_h * n_blks` columns.
 ///
-/// Delegates to one sub-helper per family; each sub-helper is independent
-/// and writes to a disjoint column range.
+/// Drives [`fill_block_family`] once per family; each family writes to a disjoint
+/// column range, so the call order does not affect the result.
 fn fill_operational_slack_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -632,112 +656,78 @@ fn fill_operational_slack_columns(
     layout: &StageLayout,
     bufs: &mut ColumnBufs<'_>,
 ) {
-    fill_outflow_below_columns(ctx, stage, stage_idx, layout, bufs);
-    fill_outflow_above_columns(ctx, stage, stage_idx, layout, bufs);
-    fill_turbine_below_columns(ctx, stage, stage_idx, layout, bufs);
-    fill_generation_below_columns(ctx, stage, stage_idx, layout, bufs);
+    fill_block_family(
+        ctx,
+        stage,
+        stage_idx,
+        layout,
+        bufs,
+        BlockSlackFamily::OutflowBelow,
+    );
+    fill_block_family(
+        ctx,
+        stage,
+        stage_idx,
+        layout,
+        bufs,
+        BlockSlackFamily::OutflowAbove,
+    );
+    fill_block_family(
+        ctx,
+        stage,
+        stage_idx,
+        layout,
+        bufs,
+        BlockSlackFamily::TurbineBelow,
+    );
+    fill_block_family(
+        ctx,
+        stage,
+        stage_idx,
+        layout,
+        bufs,
+        BlockSlackFamily::GenerationBelow,
+    );
 }
 
-/// Outflow-below-minimum slack columns (`sigma_outflow_below_{h,k}`).
+/// Fill one operational-violation slack family's `n_h * n_blks` columns.
 ///
-/// Active (unbounded above) when `min_outflow_m3s > 0`; pinned to `[0, 0]` otherwise.
-fn fill_outflow_below_columns(
+/// For each hydro the activation is decided once from the resolved per-stage bound;
+/// for each block the column index comes from the family's `StageLayout` accessor and
+/// the objective coefficient from the family's `HydroStagePenalties` cost field scaled
+/// by the block duration. `col_lower[col]` is left at the vec default `0.0`.
+fn fill_block_family(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
     stage_idx: usize,
     layout: &StageLayout,
     bufs: &mut ColumnBufs<'_>,
+    family: BlockSlackFamily,
 ) {
     for h_idx in 0..layout.n_h {
         let hb = ctx.bounds.hydro_bounds(h_idx, stage_idx);
         let hp = ctx.penalties.hydro_penalties(h_idx, stage_idx);
+        let active = match family {
+            BlockSlackFamily::OutflowBelow => hb.min_outflow_m3s > 0.0,
+            BlockSlackFamily::OutflowAbove => hb.max_outflow_m3s.is_some(),
+            BlockSlackFamily::TurbineBelow => hb.min_turbined_m3s > 0.0,
+            BlockSlackFamily::GenerationBelow => hb.min_generation_mw > 0.0,
+        };
+        let cost = match family {
+            BlockSlackFamily::OutflowBelow => hp.outflow_violation_below_cost,
+            BlockSlackFamily::OutflowAbove => hp.outflow_violation_above_cost,
+            BlockSlackFamily::TurbineBelow => hp.turbined_violation_below_cost,
+            BlockSlackFamily::GenerationBelow => hp.generation_violation_below_cost,
+        };
         for blk in 0..layout.n_blks {
-            let col = layout.outflow_below_col(h_idx, blk);
-            bufs.col_upper[col] = if hb.min_outflow_m3s > 0.0 {
-                f64::INFINITY
-            } else {
-                0.0
+            let col = match family {
+                BlockSlackFamily::OutflowBelow => layout.outflow_below_col(h_idx, blk),
+                BlockSlackFamily::OutflowAbove => layout.outflow_above_col(h_idx, blk),
+                BlockSlackFamily::TurbineBelow => layout.turbine_below_col(h_idx, blk),
+                BlockSlackFamily::GenerationBelow => layout.generation_below_col(h_idx, blk),
             };
-            bufs.objective[col] =
-                hp.outflow_violation_below_cost * stage.blocks[blk].duration_hours;
-        }
-    }
-}
-
-/// Outflow-above-maximum slack columns (`sigma_outflow_above_{h,k}`).
-///
-/// Active (unbounded above) when `max_outflow_m3s` is `Some`; pinned to `[0, 0]` otherwise.
-fn fill_outflow_above_columns(
-    ctx: &TemplateBuildCtx<'_>,
-    stage: &Stage,
-    stage_idx: usize,
-    layout: &StageLayout,
-    bufs: &mut ColumnBufs<'_>,
-) {
-    for h_idx in 0..layout.n_h {
-        let hb = ctx.bounds.hydro_bounds(h_idx, stage_idx);
-        let hp = ctx.penalties.hydro_penalties(h_idx, stage_idx);
-        for blk in 0..layout.n_blks {
-            let col = layout.outflow_above_col(h_idx, blk);
-            bufs.col_upper[col] = if hb.max_outflow_m3s.is_some() {
-                f64::INFINITY
-            } else {
-                0.0
-            };
-            bufs.objective[col] =
-                hp.outflow_violation_above_cost * stage.blocks[blk].duration_hours;
-        }
-    }
-}
-
-/// Turbine-below-minimum slack columns (`sigma_turbine_below_{h,k}`).
-///
-/// Active (unbounded above) when `min_turbined_m3s > 0`; pinned to `[0, 0]` otherwise.
-fn fill_turbine_below_columns(
-    ctx: &TemplateBuildCtx<'_>,
-    stage: &Stage,
-    stage_idx: usize,
-    layout: &StageLayout,
-    bufs: &mut ColumnBufs<'_>,
-) {
-    for h_idx in 0..layout.n_h {
-        let hb = ctx.bounds.hydro_bounds(h_idx, stage_idx);
-        let hp = ctx.penalties.hydro_penalties(h_idx, stage_idx);
-        for blk in 0..layout.n_blks {
-            let col = layout.turbine_below_col(h_idx, blk);
-            bufs.col_upper[col] = if hb.min_turbined_m3s > 0.0 {
-                f64::INFINITY
-            } else {
-                0.0
-            };
-            bufs.objective[col] =
-                hp.turbined_violation_below_cost * stage.blocks[blk].duration_hours;
-        }
-    }
-}
-
-/// Generation-below-minimum slack columns (`sigma_generation_below_{h,k}`).
-///
-/// Active (unbounded above) when `min_generation_mw > 0`; pinned to `[0, 0]` otherwise.
-fn fill_generation_below_columns(
-    ctx: &TemplateBuildCtx<'_>,
-    stage: &Stage,
-    stage_idx: usize,
-    layout: &StageLayout,
-    bufs: &mut ColumnBufs<'_>,
-) {
-    for h_idx in 0..layout.n_h {
-        let hb = ctx.bounds.hydro_bounds(h_idx, stage_idx);
-        let hp = ctx.penalties.hydro_penalties(h_idx, stage_idx);
-        for blk in 0..layout.n_blks {
-            let col = layout.generation_below_col(h_idx, blk);
-            bufs.col_upper[col] = if hb.min_generation_mw > 0.0 {
-                f64::INFINITY
-            } else {
-                0.0
-            };
-            bufs.objective[col] =
-                hp.generation_violation_below_cost * stage.blocks[blk].duration_hours;
+            bufs.col_upper[col] = if active { f64::INFINITY } else { 0.0 };
+            bufs.objective[col] = cost * stage.blocks[blk].duration_hours;
         }
     }
 }
@@ -4349,6 +4339,509 @@ mod diversion_bound_tests {
                 "blk {blk}: col_upper[{col}] must equal the declaration default \
                  {DECLARATION_MAX_FLOW_M3S} when no override tightens it"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
+mod block_family_slack_tests {
+    use std::collections::HashMap;
+
+    use chrono::NaiveDate;
+    use cobre_core::entities::hydro::{HydroGenerationModel, HydroPenalties};
+    use cobre_core::{
+        Block, BlockMode, BoundsCountsSpec, BoundsDefaults, BusStagePenalties, CascadeTopology,
+        ContractStageBounds, EntityId, Hydro, HydroStageBounds, HydroStagePenalties,
+        LineStageBounds, LineStagePenalties, NcsStagePenalties, NoiseMethod, PenaltiesCountsSpec,
+        PenaltiesDefaults, PumpingStageBounds, ResolvedBounds, ResolvedExchangeFactors,
+        ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties,
+        ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig, ThermalStageBounds,
+    };
+    use cobre_stochastic::par::precompute::PrecomputedPar;
+
+    use crate::hydro_models::{
+        EvaporationModel, EvaporationModelSet, ProductionModelSet, ResolvedProductionModel,
+    };
+    use crate::resolved_parameters::ResolvedParameters;
+
+    use super::{ColumnBufs, StageLayout, TemplateBuildCtx, fill_operational_slack_columns};
+
+    const N_STAGES: usize = 1;
+    const STAGE_IDX: usize = 0;
+    const N_HYDROS: usize = 6;
+    const BLOCK_HOURS: [f64; 2] = [300.0, 444.0];
+
+    /// One hydro's intended predicate state and the four distinct objective costs
+    /// it carries. The costs differ per family and per hydro so a cost-field
+    /// cross-wiring in the driver's `match` is observable in the assertions.
+    struct HydroSpec {
+        min_outflow_m3s: f64,
+        max_outflow_m3s: Option<f64>,
+        min_turbined_m3s: f64,
+        min_generation_mw: f64,
+        outflow_below_cost: f64,
+        outflow_above_cost: f64,
+        turbined_below_cost: f64,
+        generation_below_cost: f64,
+    }
+
+    /// Six hydros spanning every predicate state plus an all-inert row. Hydro 2
+    /// carries `max_outflow_m3s = Some(0.0)` to lock the `is_some()` semantics: a
+    /// `> 0.0` comparison would wrongly deactivate its outflow-above column.
+    fn hydro_specs() -> [HydroSpec; N_HYDROS] {
+        [
+            // H0: outflow-below active only.
+            HydroSpec {
+                min_outflow_m3s: 12.0,
+                max_outflow_m3s: None,
+                min_turbined_m3s: 0.0,
+                min_generation_mw: 0.0,
+                outflow_below_cost: 1.0,
+                outflow_above_cost: 2.0,
+                turbined_below_cost: 3.0,
+                generation_below_cost: 4.0,
+            },
+            // H1: outflow-above active via Some(positive).
+            HydroSpec {
+                min_outflow_m3s: 0.0,
+                max_outflow_m3s: Some(50.0),
+                min_turbined_m3s: 0.0,
+                min_generation_mw: 0.0,
+                outflow_below_cost: 5.0,
+                outflow_above_cost: 6.0,
+                turbined_below_cost: 7.0,
+                generation_below_cost: 8.0,
+            },
+            // H2: outflow-above active via Some(0.0) — the is_some() lock.
+            HydroSpec {
+                min_outflow_m3s: 0.0,
+                max_outflow_m3s: Some(0.0),
+                min_turbined_m3s: 0.0,
+                min_generation_mw: 0.0,
+                outflow_below_cost: 9.0,
+                outflow_above_cost: 10.0,
+                turbined_below_cost: 11.0,
+                generation_below_cost: 12.0,
+            },
+            // H3: turbine-below active only.
+            HydroSpec {
+                min_outflow_m3s: 0.0,
+                max_outflow_m3s: None,
+                min_turbined_m3s: 7.0,
+                min_generation_mw: 0.0,
+                outflow_below_cost: 13.0,
+                outflow_above_cost: 14.0,
+                turbined_below_cost: 15.0,
+                generation_below_cost: 16.0,
+            },
+            // H4: generation-below active only.
+            HydroSpec {
+                min_outflow_m3s: 0.0,
+                max_outflow_m3s: None,
+                min_turbined_m3s: 0.0,
+                min_generation_mw: 9.0,
+                outflow_below_cost: 17.0,
+                outflow_above_cost: 18.0,
+                turbined_below_cost: 19.0,
+                generation_below_cost: 20.0,
+            },
+            // H5: all four inert.
+            HydroSpec {
+                min_outflow_m3s: 0.0,
+                max_outflow_m3s: None,
+                min_turbined_m3s: 0.0,
+                min_generation_mw: 0.0,
+                outflow_below_cost: 21.0,
+                outflow_above_cost: 22.0,
+                turbined_below_cost: 23.0,
+                generation_below_cost: 24.0,
+            },
+        ]
+    }
+
+    /// Independent constant-productivity hydro (no FPHA/evaporation columns).
+    fn fixture_hydro(id: i32) -> Hydro {
+        Hydro {
+            id: EntityId(id),
+            name: format!("H{id}"),
+            bus_id: EntityId(1),
+            downstream_id: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 100.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 50.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 45.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: zero_hydro_penalties(),
+        }
+    }
+
+    fn zero_hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
+            spillage_cost: 0.0,
+            diversion_cost: 0.0,
+            turbined_cost: 0.0,
+            storage_violation_below_cost: 0.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost: 0.0,
+            outflow_violation_below_cost: 0.0,
+            outflow_violation_above_cost: 0.0,
+            generation_violation_below_cost: 0.0,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 0.0,
+        }
+    }
+
+    fn zero_hydro_stage_bounds() -> HydroStageBounds {
+        HydroStageBounds {
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 100.0,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 50.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 45.0,
+            max_diversion_m3s: None,
+            filling_inflow_m3s: 0.0,
+            water_withdrawal_m3s: 0.0,
+        }
+    }
+
+    fn zero_hydro_stage_penalties() -> HydroStagePenalties {
+        HydroStagePenalties {
+            spillage_cost: 0.0,
+            diversion_cost: 0.0,
+            turbined_cost: 0.0,
+            storage_violation_below_cost: 0.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost: 0.0,
+            outflow_violation_below_cost: 0.0,
+            outflow_violation_above_cost: 0.0,
+            generation_violation_below_cost: 0.0,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 0.0,
+        }
+    }
+
+    /// Two-block stage with distinct durations so a block-index confusion in the
+    /// objective scaling is observable.
+    fn two_block_stage() -> Stage {
+        Stage {
+            index: STAGE_IDX,
+            id: STAGE_IDX as i32,
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            season_id: Some(0),
+            blocks: vec![
+                Block {
+                    index: 0,
+                    name: "BLK0".to_string(),
+                    duration_hours: BLOCK_HOURS[0],
+                },
+                Block {
+                    index: 1,
+                    name: "BLK1".to_string(),
+                    duration_hours: BLOCK_HOURS[1],
+                },
+            ],
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: false,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        }
+    }
+
+    /// Build the resolved bound and penalty tables, writing each hydro's predicate
+    /// state and four costs into its resolved cell (the driver reads the resolved
+    /// table, so the per-stage cells — not the entity declarations — carry the state).
+    fn resolved_tables(specs: &[HydroSpec; N_HYDROS]) -> (ResolvedBounds, ResolvedPenalties) {
+        let mut bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: N_HYDROS,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: N_STAGES,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: zero_hydro_stage_bounds(),
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        let mut penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: N_HYDROS,
+                n_buses: 0,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: N_STAGES,
+            },
+            &PenaltiesDefaults {
+                hydro: zero_hydro_stage_penalties(),
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+        for (h_idx, spec) in specs.iter().enumerate() {
+            let hb = bounds.hydro_bounds_mut(h_idx, STAGE_IDX);
+            hb.min_outflow_m3s = spec.min_outflow_m3s;
+            hb.max_outflow_m3s = spec.max_outflow_m3s;
+            hb.min_turbined_m3s = spec.min_turbined_m3s;
+            hb.min_generation_mw = spec.min_generation_mw;
+            let hp = penalties.hydro_penalties_mut(h_idx, STAGE_IDX);
+            hp.outflow_violation_below_cost = spec.outflow_below_cost;
+            hp.outflow_violation_above_cost = spec.outflow_above_cost;
+            hp.turbined_violation_below_cost = spec.turbined_below_cost;
+            hp.generation_violation_below_cost = spec.generation_below_cost;
+        }
+        (bounds, penalties)
+    }
+
+    /// Owns the borrow targets for a multi-hydro `TemplateBuildCtx`.
+    struct SlackFixtures {
+        par_lp: PrecomputedPar,
+        hydros: Vec<Hydro>,
+        cascade: CascadeTopology,
+        bounds: ResolvedBounds,
+        penalties: ResolvedPenalties,
+        production_models: ProductionModelSet,
+        evaporation_models: EvaporationModelSet,
+        resolved_generic_bounds: cobre_core::ResolvedGenericConstraintBounds,
+        resolved_load_factors: ResolvedLoadFactors,
+        resolved_exchange_factors: ResolvedExchangeFactors,
+        resolved_ncs_bounds: ResolvedNcsBounds,
+        resolved_ncs_factors: ResolvedNcsFactors,
+        resolved_parameters: ResolvedParameters,
+    }
+
+    impl SlackFixtures {
+        fn new(specs: &[HydroSpec; N_HYDROS]) -> Self {
+            let hydros: Vec<Hydro> = (0..N_HYDROS).map(|i| fixture_hydro(i as i32 + 1)).collect();
+            let cascade = CascadeTopology::build(&hydros);
+            let (bounds, penalties) = resolved_tables(specs);
+            Self {
+                par_lp: PrecomputedPar::default(),
+                hydros,
+                cascade,
+                bounds,
+                penalties,
+                production_models: ProductionModelSet::new(
+                    vec![
+                        vec![
+                            ResolvedProductionModel::ConstantProductivity { productivity: 1.0 };
+                            N_STAGES
+                        ];
+                        N_HYDROS
+                    ],
+                    N_HYDROS,
+                    N_STAGES,
+                ),
+                evaporation_models: EvaporationModelSet::new(vec![
+                    EvaporationModel::None;
+                    N_HYDROS
+                ]),
+                resolved_generic_bounds: cobre_core::ResolvedGenericConstraintBounds::empty(),
+                resolved_load_factors: ResolvedLoadFactors::empty(),
+                resolved_exchange_factors: ResolvedExchangeFactors::empty(),
+                resolved_ncs_bounds: ResolvedNcsBounds::empty(),
+                resolved_ncs_factors: ResolvedNcsFactors::empty(),
+                resolved_parameters: ResolvedParameters {
+                    per_param: vec![],
+                    id_to_slot: vec![],
+                },
+            }
+        }
+
+        fn make_ctx(&self) -> TemplateBuildCtx<'_> {
+            let mut hydro_pos = HashMap::new();
+            for (i, h) in self.hydros.iter().enumerate() {
+                hydro_pos.insert(h.id, i);
+            }
+            TemplateBuildCtx {
+                hydros: &self.hydros,
+                thermals: &[],
+                lines: &[],
+                buses: &[],
+                load_models: &[],
+                cascade: &self.cascade,
+                bounds: &self.bounds,
+                penalties: &self.penalties,
+                hydro_pos,
+                thermal_pos: HashMap::new(),
+                line_pos: HashMap::new(),
+                bus_pos: HashMap::new(),
+                par_lp: &self.par_lp,
+                production_models: &self.production_models,
+                evaporation_models: &self.evaporation_models,
+                generic_constraints: &[],
+                resolved_generic_bounds: &self.resolved_generic_bounds,
+                resolved_load_factors: &self.resolved_load_factors,
+                resolved_exchange_factors: &self.resolved_exchange_factors,
+                non_controllable_sources: &[],
+                resolved_ncs_bounds: &self.resolved_ncs_bounds,
+                resolved_ncs_factors: &self.resolved_ncs_factors,
+                pumping_stations: &[],
+                pumping_pos: HashMap::new(),
+                n_pumping: 0,
+                resolved_parameters: &self.resolved_parameters,
+                diversion_upstream: HashMap::new(),
+                n_hydros: N_HYDROS,
+                n_thermals: 0,
+                n_lines: 0,
+                n_buses: 0,
+                max_par_order: 0,
+                n_anticipated: 0,
+                k_max: 0,
+                anticipated_lead_stages: vec![],
+                anticipated_thermal_indices: vec![],
+                has_penalty: false,
+                cumulative_discount_factors: vec![1.0],
+                total_hours_per_stage: vec![BLOCK_HOURS[0] + BLOCK_HOURS[1]],
+            }
+        }
+    }
+
+    /// One family's expected contract: its name, the activation predicate over a
+    /// `HydroSpec`, the `StageLayout` column accessor, and the expected cost field.
+    struct FamilyCheck {
+        name: &'static str,
+        predicate: fn(&HydroSpec) -> bool,
+        accessor: fn(&StageLayout, usize, usize) -> usize,
+        cost_of: fn(&HydroSpec) -> f64,
+    }
+
+    /// Building the operational-violation slack columns through the enum-dispatched
+    /// driver reproduces the per-family contract for every (hydro, block): `col_upper`
+    /// is `+∞` exactly when the family's resolved predicate holds (else `0.0`),
+    /// `objective` is the family's resolved cost times the block duration, and
+    /// `col_lower` stays at the `0.0` default. Hydro 2's `Some(0.0)` cap locks the
+    /// `is_some()` outflow-above semantics against a `> 0.0` regression.
+    #[test]
+    fn block_family_driver_matches_legacy_slack_fills() {
+        let specs = hydro_specs();
+        let fixtures = SlackFixtures::new(&specs);
+        let stage = two_block_stage();
+        let ctx = fixtures.make_ctx();
+        let layout = StageLayout::new(&ctx, &stage, STAGE_IDX);
+
+        let mut col_lower = vec![0.0_f64; layout.num_cols];
+        let mut col_upper = vec![f64::INFINITY; layout.num_cols];
+        let mut objective = vec![0.0_f64; layout.num_cols];
+        let mut bufs = ColumnBufs {
+            col_lower: &mut col_lower,
+            col_upper: &mut col_upper,
+            objective: &mut objective,
+        };
+        fill_operational_slack_columns(&ctx, &stage, STAGE_IDX, &layout, &mut bufs);
+
+        // Each family's predicate, accessor, and cost — the explicit contract the
+        // deleted helpers encoded.
+        let families = [
+            FamilyCheck {
+                name: "outflow_below",
+                predicate: |s| s.min_outflow_m3s > 0.0,
+                accessor: StageLayout::outflow_below_col,
+                cost_of: |s| s.outflow_below_cost,
+            },
+            FamilyCheck {
+                name: "outflow_above",
+                predicate: |s| s.max_outflow_m3s.is_some(),
+                accessor: StageLayout::outflow_above_col,
+                cost_of: |s| s.outflow_above_cost,
+            },
+            FamilyCheck {
+                name: "turbine_below",
+                predicate: |s| s.min_turbined_m3s > 0.0,
+                accessor: StageLayout::turbine_below_col,
+                cost_of: |s| s.turbined_below_cost,
+            },
+            FamilyCheck {
+                name: "generation_below",
+                predicate: |s| s.min_generation_mw > 0.0,
+                accessor: StageLayout::generation_below_col,
+                cost_of: |s| s.generation_below_cost,
+            },
+        ];
+
+        // The block loop iterates BLOCK_HOURS directly; assert the layout agrees so a
+        // fixture/layout block-count drift cannot silently skip blocks.
+        assert_eq!(layout.n_blks, BLOCK_HOURS.len());
+        for family in &families {
+            let name = family.name;
+            for (h_idx, spec) in specs.iter().enumerate() {
+                let active = (family.predicate)(spec);
+                let cost = (family.cost_of)(spec);
+                for (blk, &hours) in BLOCK_HOURS.iter().enumerate() {
+                    let col = (family.accessor)(&layout, h_idx, blk);
+                    let expected_upper = if active { f64::INFINITY } else { 0.0 };
+                    assert_eq!(
+                        col_upper[col], expected_upper,
+                        "{name} h{h_idx} blk{blk}: col_upper[{col}] expected {expected_upper}"
+                    );
+                    let expected_obj = cost * hours;
+                    assert_eq!(
+                        objective[col], expected_obj,
+                        "{name} h{h_idx} blk{blk}: objective[{col}] expected {expected_obj}"
+                    );
+                    assert_eq!(
+                        col_lower[col], 0.0,
+                        "{name} h{h_idx} blk{blk}: col_lower[{col}] must stay at 0.0"
+                    );
+                }
+            }
         }
     }
 }

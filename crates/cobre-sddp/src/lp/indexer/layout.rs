@@ -625,6 +625,13 @@ pub struct StageIndexer {
 /// Equipment counts for constructing a [`StageIndexer`].
 ///
 /// Groups the entity counts that determine the LP column layout for a single stage.
+///
+/// `Default` yields all-zero / empty-`Vec` counts (every `usize` field `0`,
+/// `has_inflow_penalty == false`, both anticipated vecs empty). It exists for
+/// test-fixture ergonomics: production construction sites populate every field
+/// explicitly. In particular `max_deficit_segments` defaults to `0`, whereas the
+/// named test-fixture builders deliberately use `1`.
+#[derive(Debug, Clone, Default)]
 pub struct EquipmentCounts {
     /// Number of hydro plants.
     pub hydro_count: usize,
@@ -761,10 +768,29 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::{EvaporationIndices, FphaRowRange};
-    use crate::indexer::StageIndexer;
+    use crate::indexer::{EquipmentCounts, StageIndexer};
 
     fn indexer_3_2() -> StageIndexer {
         StageIndexer::new(3, 2)
+    }
+
+    // EquipmentCounts::default() yields all-zero scalars and empty vecs.
+    #[test]
+    fn equipment_counts_default_is_all_zero() {
+        let counts = EquipmentCounts::default();
+        assert_eq!(counts.hydro_count, 0);
+        assert_eq!(counts.max_par_order, 0);
+        assert_eq!(counts.n_thermals, 0);
+        assert_eq!(counts.n_lines, 0);
+        assert_eq!(counts.n_buses, 0);
+        assert_eq!(counts.n_blks, 0);
+        assert!(!counts.has_inflow_penalty);
+        assert_eq!(counts.max_deficit_segments, 0);
+        assert_eq!(counts.n_anticipated, 0);
+        assert_eq!(counts.k_max, 0);
+        assert_eq!(counts.n_pumping, 0);
+        assert_eq!(counts.anticipated_lead_stages, Vec::<usize>::new());
+        assert_eq!(counts.anticipated_thermal_indices, Vec::<usize>::new());
     }
 
     // Clone / Debug — structural sanity
