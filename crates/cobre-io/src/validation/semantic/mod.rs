@@ -103,7 +103,7 @@ pub(crate) fn validate_semantic_hydro_thermal(data: &ParsedData, ctx: &mut Valid
 /// Performs Layer 5b semantic validation: stage structure, penalty ordering,
 /// and scenario model rules.
 ///
-/// All 21 rules are checked regardless of failures in earlier rules — every
+/// All rules are checked regardless of failures in earlier rules — every
 /// violation is collected before returning.  This function is infallible; it
 /// never returns a `Result`.  Errors are pushed to `ctx` as
 /// [`ErrorKind::InvalidValue`] or [`ErrorKind::BusinessRuleViolation`] entries;

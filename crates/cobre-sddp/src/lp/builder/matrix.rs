@@ -4899,8 +4899,7 @@ mod block_family_slack_tests {
         };
         fill_operational_slack_columns(&ctx, &stage, STAGE_IDX, &layout, &mut bufs);
 
-        // Each family's predicate, accessor, and cost — the explicit contract the
-        // deleted helpers encoded.
+        // Each family's predicate, accessor, and cost, spelled out explicitly.
         let families = [
             FamilyCheck {
                 name: "outflow_below",

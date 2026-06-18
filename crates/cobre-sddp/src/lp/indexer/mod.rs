@@ -77,7 +77,8 @@
 //!
 //! State pinning uses column bounds (`set_col_bounds`) on the incoming-state
 //! columns, so the `storage_fixing`, `lag_fixing`, and `anticipated_state_fixing`
-//! row ranges are always empty (`0..0`). z-inflow rows start at row 0.
+//! row ranges (grouped in the [`Sentinels`] sub-struct, reached as
+//! `indexer.sentinels.*`) are always empty (`0..0`). z-inflow rows start at row 0.
 //!
 //! ```text
 //! [0, N)   z_inflow_rows — z-inflow definition rows

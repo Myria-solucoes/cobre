@@ -308,7 +308,7 @@ mod tests {
         );
         // Storage: identity.
         assert_eq!(idx.state_to_lp_column(0), 0);
-        // Lag block: remapped (existing behaviour preserved).
+        // Lag block: remapped.
         // j=1: offset=0, h=0, lag=0 → z_inflow.start + 0 = 4.
         assert_eq!(idx.state_to_lp_column(1), idx.z_inflow.start);
         // Anticipated-state slot 0 (j=2): slot+1=1 < k_p=2 → shift to slot 1.
@@ -320,7 +320,7 @@ mod tests {
     }
 
     /// R4.c: lag-remap branch is preserved when `n_anticipated == 0` and
-    /// `max_par_order > 0`.  The new anticipated-state guard must not fire
+    /// `max_par_order > 0`.  The anticipated-state guard must not fire
     /// when there are no anticipated thermals.
     #[test]
     fn state_to_lp_column_lag_remap_preserved_no_anticipated() {

@@ -329,8 +329,6 @@ impl StudySetup {
             &scalar_parameters,
         )?;
 
-        let stage_templates_ref = &stage_templates.templates;
-
         let indexer = build_wired_indexer(
             system,
             &stage_templates,
@@ -341,7 +339,7 @@ impl StudySetup {
 
         let initial_state = build_initial_state(system, &indexer);
 
-        let n_stages = stage_templates_ref.len();
+        let n_stages = stage_templates.templates.len();
         let max_iterations = max_iterations_from_rules(&stopping_rule_set);
         let fcf_capacity_iterations = max_iterations.saturating_add(1);
         let fcf = FutureCostFunction::new(
@@ -749,7 +747,7 @@ fn build_wired_indexer(
     // (the widened psi stride); otherwise it is the classical AR order.
     // Using `par.order(h)` here would silently truncate the cut row's state
     // coefficients on lag slots that carry the annual `ψ̂/12` term and
-    // produce over-estimating cuts (analogue of d0e4a42).
+    // produce over-estimating cuts.
     // Populate the cut sparse mask unconditionally so every production study —
     // including storage-only (mask = [0, n_state) ascending) and pure-thermal
     // (n_state == 0 → empty mask) — has a mask. The forward-pass cut-row loop is

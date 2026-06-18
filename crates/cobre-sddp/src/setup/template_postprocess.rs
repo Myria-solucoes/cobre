@@ -52,7 +52,6 @@ pub(crate) fn compute_per_stage_discount_factors(
 /// boundary-stage entry is needed.
 pub(crate) fn compute_cumulative_discount_factors(per_stage: &[f64]) -> Vec<f64> {
     let n = per_stage.len();
-    // Length is n: indices [0, n).
     let mut cumulative = vec![1.0; n];
     for t in 1..n {
         cumulative[t] = cumulative[t - 1] * per_stage[t - 1];

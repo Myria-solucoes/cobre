@@ -827,8 +827,6 @@ mod tests {
         assert_eq!(counts.anticipated_thermal_indices, Vec::<usize>::new());
     }
 
-    // Clone / Debug — structural sanity
-
     #[test]
     fn clone_and_debug() {
         let idx = indexer_3_2();
@@ -840,7 +838,6 @@ mod tests {
         assert!(debug_str.contains("StageIndexer"));
     }
 
-    // EvaporationIndices is Debug + Clone + Copy.
     #[test]
     fn evap_indices_debug_clone_copy() {
         let ei = EvaporationIndices {
@@ -856,7 +853,6 @@ mod tests {
         assert!(debug_str.contains("EvaporationIndices"));
     }
 
-    // FphaRowRange is Debug + Clone + Copy.
     #[test]
     fn fpha_row_range_debug_clone_copy() {
         let r = FphaRowRange {

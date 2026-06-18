@@ -766,8 +766,8 @@ fn assemble_stage_templates_output(
     n_study: usize,
 ) -> StageTemplates {
     // Transpose the per-stage outputs into the parallel Vecs in one pass,
-    // preserving the per-stage push order so the assembled StageTemplates is
-    // byte-identical to the prior parallel-accumulator construction.
+    // preserving the per-stage push order: index `s` of every parallel Vec
+    // refers to the same stage, which the assembled StageTemplates relies on.
     let mut templates = Vec::with_capacity(n_study);
     let mut base_rows = Vec::with_capacity(n_study);
     let mut load_balance_row_starts = Vec::with_capacity(n_study);

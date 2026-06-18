@@ -52,9 +52,11 @@ impl StageIndexer {
     /// [`Self::anticipated_decision_active_at_stage`], which yields exactly the
     /// `(local_idx, lp_column)` pairs for which this predicate is `true`.
     ///
-    /// # Panics (debug builds only)
+    /// # Panics
     ///
-    /// Panics if `local_idx >= self.n_anticipated`.
+    /// Panics if `local_idx >= self.n_anticipated`: the `debug_assert!` gives a
+    /// descriptive message in debug builds; in release the
+    /// `anticipated_lead_stages[local_idx]` access panics with a bounds error.
     #[inline]
     #[must_use]
     pub fn is_anticipated_decision_active(

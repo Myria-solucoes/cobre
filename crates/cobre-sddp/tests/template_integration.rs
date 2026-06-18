@@ -10319,7 +10319,7 @@ fn two_anticipated_thermal_system(n_stages: usize) -> cobre_core::System {
 /// Used by AC-6 and AC-7 to exercise the `n_state = N*(1+L) + n_ant_state` formula
 /// with a non-zero hydro term.
 ///
-/// Deviation from the ticket AC spec (n_hydros=3, max_par_order=2, n_anticipated=2,
+/// Deviation from the AC spec (n_hydros=3, max_par_order=2, n_anticipated=2,
 /// k_max=3 → n_state=15): that fixture requires wiring multi-stage PAR parameters
 /// not exposed by existing test helpers. Instead this simpler fixture uses
 /// n_hydros=1, max_par_order=1, n_anticipated=1, k_max=2 → n_state = 1*(1+1) + 2 = 4.
@@ -10759,7 +10759,7 @@ fn test_anticipated_decision_inactive_no_state_write() {
 /// Uses `one_hydro_one_ant_system` so the hydro term N*(1+L) is non-zero,
 /// exercising the full formula in a non-degenerate way.
 ///
-/// Deviation from the ticket AC-6 spec (n_hydros=3, max_par_order=2, k_max=3 →
+/// Deviation from the AC-6 spec (n_hydros=3, max_par_order=2, k_max=3 →
 /// n_state=15): the spec fixture requires wiring multi-hydro multi-stage PAR
 /// parameters not exposed by existing test helpers. This simpler fixture
 /// produces the same non-degenerate formula with value 4 instead of 15.
@@ -10822,7 +10822,7 @@ fn test_n_transfer_unchanged_by_anticipated() {
 
 // ─── Anticipated Thermals K=1/2/3 Roundtrip ────────────────────────────────
 //
-// These integration tests exercise the full LP construction (tickets 020-024)
+// These integration tests exercise the full LP construction
 // for synthetic systems with one hydro + one anticipated thermal at K=1, K=2,
 // and K=3.  They verify all cross-cutting structural invariants simultaneously:
 // column count, row count, n_state, anticipated_decision bounds, NPV objective

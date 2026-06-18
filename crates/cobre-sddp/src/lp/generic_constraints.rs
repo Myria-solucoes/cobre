@@ -304,12 +304,17 @@ pub(crate) fn resolve_variable_ref<S: BuildHasher>(
         ),
 
         // ── Contracts ──────────────────────────────────────────────────────
-        // Contracts resolve through `block_col_range` to the empty `0..0` range:
-        // they have no LP columns in this implementation (no contract column range
-        // exists), so the routed range is empty and no `(column, coefficient)` pair
-        // is produced. The lookup is the single owner of the contract column range,
-        // so wiring real columns later turns the empty-range branch live without
-        // touching this arm's structure.
+        // Contracts carry no LP decision column in this implementation: the
+        // `ElementKind::ContractImport`/`ContractExport` families resolve through
+        // `block_col_range` (their single owner) to the empty `0..0` range, so a
+        // generic-constraint term referencing a contract emits no
+        // `(column, coefficient)` pair. The `is_empty()` lookup keeps both the
+        // `ElementKind` variants and `block_col_range`'s contract arm live as the
+        // seam a future contract-column implementation extends — that
+        // implementation must give `block_col_range` a non-empty range AND replace
+        // the trailing empty return with the resolved column(s); a non-empty range
+        // alone would otherwise fall through to the (currently correct) empty
+        // return.
         VariableRef::ContractImport { .. } => {
             if block_col_range(indexer, ElementKind::ContractImport).is_empty() {
                 return vec![];

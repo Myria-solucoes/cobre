@@ -76,16 +76,8 @@ pub fn eq_with_anticipated(
     // `n_anticipated` so debug asserts on per-plant lead-stage
     // bookkeeping hold. Tests that need a mixed K_i array must construct
     // `EquipmentCounts` directly.
-    let anticipated_lead_stages = if n_anticipated == 0 {
-        vec![]
-    } else {
-        vec![k_max; n_anticipated]
-    };
-    let anticipated_thermal_indices = if n_anticipated == 0 {
-        vec![]
-    } else {
-        (0..n_anticipated).collect()
-    };
+    let anticipated_lead_stages = vec![k_max; n_anticipated];
+    let anticipated_thermal_indices = (0..n_anticipated).collect();
     EquipmentCounts {
         hydro_count,
         max_par_order,
@@ -109,8 +101,8 @@ mod tests {
 
     /// The shared `eq_with_anticipated` builder pins `max_deficit_segments == 1`
     /// (not the `Default` value `0`) and produces empty anticipated vecs when
-    /// `n_anticipated == 0`, reproducing the field set the per-module copies
-    /// previously hard-coded.
+    /// `n_anticipated == 0`, matching the field set the per-module fixtures
+    /// require.
     #[test]
     fn shared_eq_with_anticipated_matches_legacy_fixture_shape() {
         let counts = eq_with_anticipated(0, 0, 0, 0, 0, 0, false, 0, 0);

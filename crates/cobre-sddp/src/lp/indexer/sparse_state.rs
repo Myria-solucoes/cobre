@@ -202,15 +202,15 @@ mod tests {
 
     /// Regression test for the PAR(p)-A cut sparse-mask bug.
     ///
-    /// `lag_counts` (formerly `ar_orders`) is the per-hydro count of lag-state
+    /// `lag_counts` is the per-hydro count of lag-state
     /// slots that may carry non-zero cut coefficients — equal to
     /// `PrecomputedPar::effective_lag_count(h)`. When PAR(p)-A annual is active
     /// on a hydro this is `max_par_order` (= 12) even though the classical AR
     /// order is smaller, because `ψ̂/12` fills the trailing lag slots.
     ///
-    /// Before the fix at setup/mod.rs (which passed `par.order(h)` here), the
-    /// cut row omitted state coefficients on slots `order..max_par_order`,
-    /// producing over-estimating cuts (LB > UB at convergence).
+    /// Passing `par.order(h)` here instead of `effective_lag_count(h)` omits
+    /// state coefficients on slots `order..max_par_order`, producing
+    /// over-estimating cuts (LB > UB at convergence).
     #[test]
     fn nonzero_mask_par_a_includes_full_psi_stride() {
         // Two hydros: hydro 0 has classical AR(4); hydro 1 has PAR(4)-A and
@@ -279,8 +279,8 @@ mod tests {
     }
 
     /// `K_i < k_max` for some plants: padded slots are excluded.
-    /// Uses the configuration from acceptance criterion 2: `n_anticipated = 2`,
-    /// `k_max = 3`, `anticipated_lead_stages = [3, 1]`.
+    /// Configuration: `n_anticipated = 2`, `k_max = 3`,
+    /// `anticipated_lead_stages = [3, 1]`.
     #[test]
     fn nonzero_mask_anticipated_state_partial_padding() {
         // 3 hydros, max_par_order = 2, 2 anticipated plants, k_max = 3.

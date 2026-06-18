@@ -18,19 +18,12 @@ pub(super) fn check_cascade_acyclic(data: &ParsedData, ctx: &mut ValidationConte
 
     let mut adjacency: HashMap<i32, Vec<i32>> =
         all_ids.iter().copied().map(|id| (id, Vec::new())).collect();
-    for hydro in &data.hydros {
-        if let Some(ds) = hydro.downstream_id
-            && downstream_set.contains(&ds.0)
-        {
-            adjacency.entry(hydro.id.0).or_default().push(ds.0);
-        }
-    }
-
     let mut in_degree: HashMap<i32, usize> = all_ids.iter().copied().map(|id| (id, 0)).collect();
     for hydro in &data.hydros {
         if let Some(ds) = hydro.downstream_id
             && downstream_set.contains(&ds.0)
         {
+            adjacency.entry(hydro.id.0).or_default().push(ds.0);
             *in_degree.entry(ds.0).or_insert(0) += 1;
         }
     }
@@ -188,8 +181,8 @@ pub(super) fn check_lifecycle_consistency(data: &ParsedData, ctx: &mut Validatio
     }
 }
 
-/// Extends the `entry < exit` ordering check (Rule 6) to the entity types not
-/// covered by [`check_lifecycle_consistency`]: pumping stations, non-controllable
+/// Extends the `entry < exit` ordering check in [`check_lifecycle_consistency`]
+/// to the entity types it does not cover: pumping stations, non-controllable
 /// sources, and energy contracts. Each carries the same
 /// `entry_stage_id`/`exit_stage_id` pair, so an unchecked entity with
 /// `entry >= exit` would pass validation while the other three types reject it —
