@@ -72,3 +72,4 @@ doc/
 tests/slurm/staging/
 dhat-heap.json
 *.orig
+lp-construction-bloat-analysis.md

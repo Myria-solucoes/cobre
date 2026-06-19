@@ -1,16 +1,14 @@
 //! [`StageIndexer`] constructors and the private column/row range build helpers.
 //!
 //! Owns the three public constructors (`new`, `with_equipment`,
-//! `with_equipment_and_evaporation`), the `from_stage_template` adapter, and the
-//! private helpers that compute each region's column/row range. The permanent
+//! `with_equipment_and_evaporation`) and the private helpers that compute each
+//! region's column/row range. The permanent
 //! `0..0` / `0` sentinels (the state-pinning sentinel contract, grouped into
 //! [`Sentinels`]) are built once in `new` and carried
 //! unchanged into `with_equipment_and_evaporation` via the `..base` spread.
 
 use std::collections::HashMap;
 use std::ops::Range;
-
-use cobre_solver::StageTemplate;
 
 use crate::lp_builder::{
     EVAP_COLS_PER_HYDRO, EVAP_F_MINUS_OFFSET, EVAP_F_PLUS_OFFSET, EVAP_FLOW_OFFSET,
@@ -176,10 +174,6 @@ impl StageIndexer {
                 storage_fixing: 0..0,
                 lag_fixing: 0..0,
                 anticipated_state_fixing: 0..0,
-                generic_constraint_rows: 0..0,
-                generic_constraint_slack: 0..0,
-                n_generic_constraints_active: 0,
-                pumping_flow: 0..0,
             },
             // Anticipated state block is empty when built via `new`;
             // callers that need it must use `with_equipment_and_evaporation`.
@@ -660,54 +654,10 @@ impl StageIndexer {
             })
             .collect()
     }
-
-    /// Construct a [`StageIndexer`] from a [`StageTemplate`].
-    ///
-    /// Extracts `n_hydro` and `max_par_order` from the template and delegates
-    /// to [`StageIndexer::new`]. Produces identical results to calling
-    /// `StageIndexer::new(template.n_hydro, template.max_par_order)`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use cobre_sddp::indexer::StageIndexer;
-    /// use cobre_solver::StageTemplate;
-    ///
-    /// let template = StageTemplate {
-    ///     num_cols: 16,
-    ///     num_rows: 12,
-    ///     num_nz: 0,
-    ///     col_starts: vec![0_i32; 17],
-    ///     row_indices: vec![],
-    ///     values: vec![],
-    ///     col_lower: vec![0.0; 16],
-    ///     col_upper: vec![f64::INFINITY; 16],
-    ///     objective: vec![0.0; 16],
-    ///     row_lower: vec![0.0; 12],
-    ///     row_upper: vec![f64::INFINITY; 12],
-    ///     n_state: 9,
-    ///     n_transfer: 6,
-    ///     n_dual_relevant: 9,
-    ///     n_hydro: 3,
-    ///     max_par_order: 2,
-    ///     col_scale: vec![],
-    ///     row_scale: vec![],
-    /// };
-    ///
-    /// let idx = StageIndexer::from_stage_template(&template);
-    /// assert_eq!(idx.storage, 0..3);
-    /// assert_eq!(idx.theta,  15);
-    /// ```
-    #[must_use]
-    pub fn from_stage_template(template: &StageTemplate) -> Self {
-        Self::new(template.n_hydro, template.max_par_order)
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use cobre_solver::StageTemplate;
-
     use crate::indexer::test_fixtures::{eq, eq_with_anticipated, evap, fpha};
     use crate::indexer::{EquipmentCounts, StageIndexer};
 
@@ -829,83 +779,6 @@ mod tests {
 
         assert_eq!(idx.sentinels.storage_fixing, idx.storage);
         assert_eq!(idx.sentinels.lag_fixing, idx.inflow_lags);
-    }
-
-    // from_stage_template: must produce the same result as new()
-
-    fn make_template(n_hydro: usize, max_par_order: usize) -> StageTemplate {
-        let n_state = n_hydro * (1 + max_par_order);
-        let n_transfer = n_hydro * max_par_order;
-        // Minimal valid template (matrix contents are irrelevant for indexer)
-        StageTemplate {
-            num_cols: 0,
-            num_rows: 0,
-            num_nz: 0,
-            col_starts: vec![0_i32],
-            row_indices: vec![],
-            values: vec![],
-            col_lower: vec![],
-            col_upper: vec![],
-            objective: vec![],
-            row_lower: vec![],
-            row_upper: vec![],
-            n_state,
-            n_transfer,
-            n_dual_relevant: n_state,
-            n_hydro,
-            max_par_order,
-            col_scale: Vec::new(),
-            row_scale: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn from_stage_template_matches_new_3_2() {
-        let tmpl = make_template(3, 2);
-        let from_tmpl = StageIndexer::from_stage_template(&tmpl);
-        let from_new = StageIndexer::new(3, 2);
-
-        assert_eq!(from_tmpl.storage, from_new.storage);
-        assert_eq!(from_tmpl.inflow_lags, from_new.inflow_lags);
-        assert_eq!(from_tmpl.storage_in, from_new.storage_in);
-        assert_eq!(from_tmpl.theta, from_new.theta);
-        assert_eq!(from_tmpl.n_state, from_new.n_state);
-        assert_eq!(
-            from_tmpl.sentinels.storage_fixing,
-            from_new.sentinels.storage_fixing
-        );
-        assert_eq!(
-            from_tmpl.sentinels.lag_fixing,
-            from_new.sentinels.lag_fixing
-        );
-        assert_eq!(from_tmpl.hydro_count, from_new.hydro_count);
-        assert_eq!(from_tmpl.max_par_order, from_new.max_par_order);
-    }
-
-    #[test]
-    fn from_stage_template_matches_new_160_12() {
-        let tmpl = make_template(160, 12);
-        let from_tmpl = StageIndexer::from_stage_template(&tmpl);
-        let from_new = StageIndexer::new(160, 12);
-
-        assert_eq!(from_tmpl.n_state, from_new.n_state);
-        assert_eq!(from_tmpl.theta, from_new.theta);
-        assert_eq!(from_tmpl.hydro_count, from_new.hydro_count);
-        assert_eq!(from_tmpl.max_par_order, from_new.max_par_order);
-    }
-
-    #[test]
-    fn from_stage_template_matches_new_edge_cases() {
-        for (n, l) in [(0, 0), (1, 0), (1, 1)] {
-            let tmpl = make_template(n, l);
-            let from_tmpl = StageIndexer::from_stage_template(&tmpl);
-            let from_new = StageIndexer::new(n, l);
-
-            assert_eq!(from_tmpl.storage, from_new.storage, "N={n} L={l}");
-            assert_eq!(from_tmpl.inflow_lags, from_new.inflow_lags, "N={n} L={l}");
-            assert_eq!(from_tmpl.theta, from_new.theta, "N={n} L={l}");
-            assert_eq!(from_tmpl.n_state, from_new.n_state, "N={n} L={l}");
-        }
     }
 
     // new() produces empty equipment ranges
@@ -1045,12 +918,10 @@ mod tests {
         let idx =
             StageIndexer::with_equipment(&eq(2, 1, 1, 1, 1, n_blks, false), &fpha(vec![], vec![]));
 
-        // turbine[h=0, b=0] = turbine.start (no offset for h=0, b=0)
-        assert_eq!(idx.turbine.start, idx.turbine.start);
+        // turbine is the first decision column, immediately after theta
+        assert_eq!(idx.turbine.start, idx.theta + 1);
         // turbine[h=1, b=2] = turbine.start + 1*3 + 2 = turbine.start + 5
         assert_eq!(idx.turbine.start + n_blks + 2, idx.turbine.start + 5);
-        // deficit[b_idx=0, blk=1] = deficit.start + 1
-        assert_eq!(idx.deficit.start + 1, idx.deficit.start + 1);
         // turbine[h=1, b=0] = turbine.start + n_blks
         assert_eq!(idx.turbine.start + n_blks, idx.turbine.start + 3);
     }

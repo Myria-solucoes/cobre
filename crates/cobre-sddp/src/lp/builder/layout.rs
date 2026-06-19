@@ -374,20 +374,6 @@ pub(crate) struct StageLayout {
     ///
     /// Layout: `row_min_generation_start + h_idx * n_blks + blk`.
     pub(crate) row_min_generation_start: usize,
-    /// Start of anticipated-state-fixing equality rows.
-    ///
-    /// One equality row per (slot, plant) pair in `[0, k_max) × [0, n_anticipated)`.
-    /// Slot-major layout: row for slot `s`, plant `i` is at
-    /// `row_anticipated_state_fixing_start + s * n_anticipated + i`.
-    /// Equals `idx.sentinels.anticipated_state_fixing.start` from the augmented
-    /// indexer (which mirrors `anticipated_state.start = N*(1+L)` numerically).
-    /// Zero when `n_anticipated == 0` (empty row range).
-    /// Row bounds are placeholder `0 == 0`; the RHS is patched during setup.
-    // Rationale: asserted in layout unit tests to confirm the sentinel is 0 (state pinning
-    // uses column bounds, not rows); production code never reads this field because the
-    // `anticipated_state_fixing` row range is a permanent empty sentinel (`0..0`).
-    #[allow(dead_code)]
-    pub(crate) row_anticipated_state_fixing_start: usize,
     /// Start of generic constraint rows (after operational violation rows).
     ///
     /// One row per active `(constraint, block)` pair.
@@ -945,9 +931,6 @@ impl StageLayout {
             row_max_outflow_start,
             row_min_turbine_start,
             row_min_generation_start,
-            // Permanent sentinel: state pinning uses column bounds, not rows.
-            // This field is retained at 0 for API stability.
-            row_anticipated_state_fixing_start: 0,
             row_generic_start,
             num_rows,
             n_generic_rows: generic.n_generic_rows,
@@ -1596,49 +1579,6 @@ mod tests {
                 "n_anticipated_fishing_rows must equal {expected} at stage_idx={stage_idx}"
             );
         }
-    }
-
-    /// `row_anticipated_state_fixing_start` is always the sentinel value 0.
-    ///
-    /// State pinning uses column bounds; the field always equals 0 regardless of
-    /// `n_anticipated` or `k_max`. It is retained as a permanent sentinel for API stability.
-    #[test]
-    fn row_anticipated_state_fixing_start_equals_anticipated_state_column_start_numerically() {
-        let n_anticipated = 2_usize;
-        let k_max = 3_usize;
-
-        let fixtures = ZeroEntityFixtures::new();
-        let ctx = fixtures.make_ctx(
-            n_anticipated,
-            k_max,
-            vec![3, 2], // K_0=3, K_1=2 (k_max=3 comes from K_0=3)
-            vec![0, 1],
-        );
-        let stage = minimal_stage();
-        let layout = StageLayout::new(&ctx, &stage, 0);
-
-        // row_anticipated_state_fixing_start is a permanent sentinel: state pinning
-        // uses column bounds, so no state-fixing rows exist in the LP.
-        assert_eq!(
-            layout.row_anticipated_state_fixing_start, 0,
-            "row_anticipated_state_fixing_start must be 0 (permanent sentinel)"
-        );
-        // col_anticipated_state_start is unchanged: still N*(1+L) = 0 for N=0.
-        assert_eq!(
-            layout.anticipated.col_anticipated_state_start, 0,
-            "col_anticipated_state_start must be 0 for N=0"
-        );
-
-        // num_rows in this fixture: n_state = N*(1+L) + A*K = 0 + 2*3 = 6
-        // (lifted into anticipated_state via the augmented indexer). The
-        // current row layout starts the first non-state block at row
-        // `ctx.n_hydros` (== 0 here). The structural invariant we assert
-        // is `row_water_balance_start == ctx.n_hydros` (no n_state offset;
-        // state pinning is via column bounds, not rows).
-        assert_eq!(
-            layout.row_water_balance_start, ctx.n_hydros,
-            "row_water_balance_start must equal ctx.n_hydros (the n_state offset is gone)"
-        );
     }
 
     /// `num_rows` does not include state-fixing rows; the LP row layout starts

@@ -127,9 +127,8 @@
 //!   [`StageIndexer::state_to_lp_incoming_column`]).
 //! - `anticipated` — the per-stage anticipated-thermal iterators and predicates.
 //! - `sparse_state` — the nonzero-state mask builder `set_nonzero_mask`.
-//! - `constructors` — the three constructors, `from_stage_template`, and the
-//!   private column/row range build helpers (carrying the `0..0` sentinel
-//!   initialisers).
+//! - `constructors` — the three constructors and the private column/row range
+//!   build helpers (carrying the `0..0` sentinel initialisers).
 //!
 //! Every public symbol is re-exported here so both the curated flat surface in
 //! `lib.rs` and the `cobre_sddp::indexer::Symbol` / `crate::indexer::Symbol`

@@ -212,7 +212,7 @@ impl PatchBuffer {
     /// Fill `N` noise patches (Category 3) for a forward-pass solve.
     ///
     /// Writes `N` noise-fixing patches at the start of the row buffer:
-    /// row `ar_dynamics_row_offset(base_row, h)` ← `noise[h]` for `h ∈ [0, N)`.
+    /// row `base_row + h` ← `noise[h]` for `h ∈ [0, N)`.
     ///
     /// Category 3 is NOT prescaled by `row_scale` because `noise[h]` is computed
     /// from `template.row_lower` (already row-scaled) plus an unscaled noise term.
@@ -275,7 +275,10 @@ impl PatchBuffer {
         // so `noise[h]` is already in the correct scaled units and must be
         // written as-is without additional prescaling here.
         for (h, &nv) in noise.iter().enumerate() {
-            self.indices[h] = ar_dynamics_row_offset(base_row, h);
+            // AR dynamics row = base_row + h (hydro-major). This is in the static
+            // non-dual region, NOT the lag-fixing row `N + ℓ·N + h` of Category 2,
+            // despite the shared `+ h` shape.
+            self.indices[h] = base_row + h;
             self.lower[h] = nv;
             self.upper[h] = nv;
         }
@@ -585,36 +588,6 @@ impl PatchBuffer {
     }
 }
 
-/// Compute the row index of hydro `h`'s AR dynamics constraint.
-///
-/// AR dynamics constraints live in the static non-dual region of the LP row
-/// layout ([Solver Abstraction SS2.2]).  Their exact position depends on the
-/// system's bus and block counts, which are not known to this crate.  The
-/// `base_row` parameter is the first row index of the AR dynamics block,
-/// computed during stage template construction and stored alongside the
-/// [`StageIndexer`].
-///
-/// The formula is:
-///
-/// ```text
-/// ar_dynamics_row(base_row, h) = base_row + h
-/// ```
-///
-/// Hydros are laid out sequentially in the AR dynamics block, matching the
-/// hydro-major order used throughout the column and row layout
-/// ([Solver Abstraction SS2.1–SS2.2]).
-///
-/// # Pitfall
-///
-/// This row is in the **static non-dual region**, not in the fixing constraint
-/// region `[0, n_state)`.  Do not confuse with the lag-fixing row
-/// `N + ℓ·N + h` from Category 2.
-#[must_use]
-#[inline]
-pub fn ar_dynamics_row_offset(base_row: usize, hydro_index: usize) -> usize {
-    base_row + hydro_index
-}
-
 #[cfg(test)]
 #[allow(
     clippy::doc_markdown,
@@ -623,7 +596,7 @@ pub fn ar_dynamics_row_offset(base_row: usize, hydro_index: usize) -> usize {
     clippy::cast_possible_truncation
 )]
 mod tests {
-    use super::{PatchBuffer, ar_dynamics_row_offset};
+    use super::PatchBuffer;
     use crate::indexer::StageIndexer;
 
     /// Convenience: make an indexer without repeating N/L everywhere.
@@ -760,18 +733,6 @@ mod tests {
         assert_eq!(buf.forward_patch_count(), 3);
     }
 
-    #[test]
-    fn ar_dynamics_row_offset_adds_base_plus_hydro() {
-        assert_eq!(ar_dynamics_row_offset(100, 0), 100);
-        assert_eq!(ar_dynamics_row_offset(100, 1), 101);
-        assert_eq!(ar_dynamics_row_offset(100, 2), 102);
-    }
-
-    #[test]
-    fn ar_dynamics_row_offset_zero_base() {
-        assert_eq!(ar_dynamics_row_offset(0, 7), 7);
-    }
-
     /// Category 3 (noise) indices start at slot 0.
     ///
     /// `fill_forward_patches` writes only Category 3 (noise) at `[0, N)`.
@@ -782,7 +743,7 @@ mod tests {
         let noise = [0.1, 0.2, 0.3];
         buf.fill_forward_patches(&idx(3, 2), &state, &noise, 50, &[]);
 
-        // Category 3 at slots 0..3: ar_dynamics_row_offset(50, h)
+        // Category 3 at slots 0..3: base_row + h = 50 + h
         assert_eq!(buf.indices[0], 50);
         assert_eq!(buf.indices[1], 51);
         assert_eq!(buf.indices[2], 52);
@@ -826,9 +787,9 @@ mod tests {
         assert_eq!(buf.forward_patch_count(), 2);
 
         // Category 3 at slots 0, 1
-        assert_eq!(buf.indices[0], 10); // ar_dynamics_row_offset(10, 0)
+        assert_eq!(buf.indices[0], 10); // base_row + 0 = 10
         assert_eq!(buf.lower[0], 0.5);
-        assert_eq!(buf.indices[1], 11); // ar_dynamics_row_offset(10, 1)
+        assert_eq!(buf.indices[1], 11); // base_row + 1 = 11
         assert_eq!(buf.lower[1], 0.6);
     }
 
@@ -853,9 +814,9 @@ mod tests {
         buf.fill_forward_patches(&StageIndexer::new(n, l), &state, &noise, 500, &[]);
 
         // Category 3 starts at slot 0 (no Cat 1/2/6 in row buffer).
-        assert_eq!(buf.indices[0], 500); // ar_dynamics_row_offset(500, 0)
+        assert_eq!(buf.indices[0], 500); // base_row + 0 = 500
         assert_eq!(buf.lower[0], 0.0); // noise[0]
-        assert_eq!(buf.indices[159], 659); // ar_dynamics_row_offset(500, 159)
+        assert_eq!(buf.indices[159], 659); // base_row + 159 = 659
         assert_eq!(buf.lower[159], 159.0 * 0.01);
 
         // All patches must be equality constraints
@@ -1049,7 +1010,7 @@ mod tests {
         assert_eq!(buf.forward_patch_count(), 3);
 
         // Category 3 at slots 0..N (no Cat 1/2/6 in row buffer).
-        assert_eq!(buf.indices[0], 50); // ar_dynamics_row_offset(50, 0)
+        assert_eq!(buf.indices[0], 50); // base_row + 0 = 50
         assert_eq!(buf.lower[0], 0.1);
         assert_eq!(buf.indices[1], 51);
         assert_eq!(buf.lower[1], 0.2);

@@ -1696,9 +1696,8 @@ mod tests {
     ///
     /// `dec_start_a` / `dec_start_b`: column index of `col_anticipated_decision_start`
     /// in each template.
-    /// `state_start_a` / `state_start_b`: column AND row index of
-    /// `col_anticipated_state_start` / `row_anticipated_state_fixing_start` (these
-    /// coincide numerically per the indexer convention).
+    /// `state_start_a` / `state_start_b`: column index of
+    /// `col_anticipated_state_start` in each template.
     /// `n_ant`: number of anticipated plants (must be 2 for this swap).
     /// `k_max`: ring-buffer slots per plant.
     /// `fish_start_a` / `fish_start_b`: row index of `row_anticipated_fishing_start`.

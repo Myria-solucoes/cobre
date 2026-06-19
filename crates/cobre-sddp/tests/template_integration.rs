@@ -6866,24 +6866,6 @@ fn generic_constraint_inactive_does_not_contribute_rows() {
     );
 }
 
-/// AC: StageIndexer fields for generic constraints are empty when built via `new`.
-#[test]
-fn stage_indexer_generic_fields_empty_from_new() {
-    let idx = StageIndexer::new(3, 2);
-    assert!(
-        idx.sentinels.generic_constraint_rows.is_empty(),
-        "generic_constraint_rows must be empty from new()"
-    );
-    assert!(
-        idx.sentinels.generic_constraint_slack.is_empty(),
-        "generic_constraint_slack must be empty from new()"
-    );
-    assert_eq!(
-        idx.sentinels.n_generic_constraints_active, 0,
-        "n_generic_constraints_active must be 0 from new()"
-    );
-}
-
 /// Helper: build a one-bus system with `n_blks` operating blocks and
 /// the given generic constraints + resolved bounds.
 #[allow(clippy::cast_possible_wrap)]
@@ -10614,7 +10596,6 @@ fn test_anticipated_fishing_same_count_both_stages() {
 // Geometry for AC-1..3, AC-6..8 (two-anticipated-thermal system):
 //   n_hydros=0, n_anticipated=2 (K_0=1, K_1=2), k_max=2, n_ant_state=4
 //   col_anticipated_state_start = 0   (N*(1+L) = 0)
-//   row_anticipated_state_fixing_start = 0   (same numeric value)
 //   theta = n_ant_state = 4
 //   decision_start = 5
 //   col_thermal_start = 5  (0 turbine/spillage/diversion cols)
@@ -10623,7 +10604,6 @@ fn test_anticipated_fishing_same_count_both_stages() {
 // Geometry for AC-4..5 (one-anticipated-thermal system, K=2):
 //   n_hydros=0, n_anticipated=1, k_max=2, n_ant_state=2
 //   col_anticipated_state_start = 0
-//   row_anticipated_state_fixing_start = 0
 //   col_anticipated_decision_start = anticipated_decision_col(2) = 4
 
 // ── AC-1: anticipated-state columns are unconstrained ─────────────────────
@@ -10700,7 +10680,7 @@ fn test_anticipated_decision_write_to_state_out_def_row() {
     let t = &result.templates[0]; // stage 0: plant active (0+2<4)
     let col_dec = anticipated_decision_col(2);
 
-    // The old Cat 6 slot: row = row_anticipated_state_fixing_start + (K_i-1)*n_anticipated + 0
+    // The old Cat 6 slot: row = state_fixing_base(0) + (K_i-1)*n_anticipated + 0
     //                         = 0 + (2-1)*1 + 0 = 1.
     // Under Alternative A the decision column must have NO entry at this row.
     // The new def-row entries (-1.0 on decision, +1.0 on state_out) are added

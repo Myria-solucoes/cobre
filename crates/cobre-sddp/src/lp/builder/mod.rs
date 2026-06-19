@@ -171,7 +171,7 @@ mod scaling;
 mod template;
 
 // --- Public re-exports (stable API) ---
-pub use patch::{PatchBuffer, ar_dynamics_row_offset};
+pub use patch::PatchBuffer;
 pub use template::{StageTemplates, build_stage_templates};
 
 // --- Crate-internal re-exports ---
