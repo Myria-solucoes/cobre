@@ -2,12 +2,9 @@
 //! accessors, and the compile-time `Send + Sync` assertion.
 //!
 //! `StageIndexer` carries the state-pinning contract codified in
-//! `.claude/rules/sddp.md`: the `storage_fixing`, `lag_fixing`, and
-//! `anticipated_state_fixing` row ranges — grouped in the [`Sentinels`]
-//! sub-struct, reached as `indexer.sentinels.*` — are permanent empty `0..0`
-//! sentinels; state is pinned via column bounds resolved through
-//! [`StageIndexer::state_to_lp_incoming_column`], never a fixing-row index. The
-//! `0..0` sentinel field docs on [`Sentinels`] are part of that contract.
+//! `.claude/rules/sddp.md`: the LP has no state-fixing row range. Incoming state
+//! is pinned via column bounds resolved through
+//! [`StageIndexer::state_to_lp_incoming_column`], never a fixing-row index.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -39,43 +36,6 @@ pub struct FphaRowRange {
     pub start: usize,
     /// Number of hyperplanes per block.
     pub planes_per_block: usize,
-}
-
-/// Permanent `0..0` state-pinning sentinels on [`StageIndexer`].
-///
-/// CONTRACT: every field here is never assigned a non-zero value by any
-/// constructor or wiring step — they are permanent `0..0` sentinels in
-/// this implementation. State pinning uses column bounds
-/// (`set_col_bounds` on the incoming-state columns), resolved through
-/// [`StageIndexer::state_to_lp_incoming_column`], rather than equality rows, so
-/// the `*_fixing` row ranges carry no rows.
-#[derive(Debug, Clone)]
-pub struct Sentinels {
-    /// Row range for storage-fixing constraints.
-    ///
-    /// Always empty (`0..0`): state pinning uses column bounds
-    /// (`set_col_bounds` on the incoming-state columns) rather than equality
-    /// rows. The field is retained as a permanent sentinel for API stability;
-    /// downstream consumers will observe an empty range.
-    /// Use [`StageIndexer::state_to_lp_incoming_column`] to resolve the
-    /// column index for state pinning and cut-subgradient extraction.
-    pub storage_fixing: Range<usize>,
-
-    /// Row range for AR lag-fixing constraints.
-    ///
-    /// Always empty (`0..0`): state pinning uses column bounds rather than
-    /// equality rows. Retained as a permanent sentinel for the same reason
-    /// as `storage_fixing`.
-    pub lag_fixing: Range<usize>,
-
-    /// Row range for anticipated-state-fixing constraints.
-    ///
-    /// Always empty (`0..0`) regardless of `n_anticipated`: state pinning for
-    /// anticipated thermals also uses column bounds. Retained as a permanent
-    /// sentinel for API stability. The column range
-    /// [`StageIndexer::anticipated_state`] carries the state-pinning semantics
-    /// via `set_col_bounds`.
-    pub anticipated_state_fixing: Range<usize>,
 }
 
 /// Read-only LP layout index map for one SDDP stage subproblem.
@@ -117,9 +77,9 @@ pub struct StageIndexer {
     /// Column range `[N*(2+L), N*(3+L))` for incoming storage volumes.
     ///
     /// Pinned to the preceding stage's outgoing `storage` solution values via
-    /// `set_col_bounds` on these columns — not via equality rows (the
-    /// `storage_fixing` row range is a permanent empty sentinel). Resolve the
-    /// column with [`StageIndexer::state_to_lp_incoming_column`].
+    /// `set_col_bounds` on these columns — not via equality rows (the LP has no
+    /// state-fixing row range). Resolve the column with
+    /// [`StageIndexer::state_to_lp_incoming_column`].
     pub storage_in: Range<usize>,
 
     /// Column index `N*(3+L)` for the future cost variable (theta).
@@ -146,11 +106,6 @@ pub struct StageIndexer {
     /// Use [`StageIndexer::state_to_lp_incoming_column`] to resolve the
     /// column index for state-pinning and cut-subgradient extraction.
     pub n_state: usize,
-
-    /// Permanent `0..0` state-pinning sentinels.
-    ///
-    /// Grouped into [`Sentinels`]; see that type for the per-field contract.
-    pub sentinels: Sentinels,
 
     /// Column range `[N*(1+L), N*(1+L) + n_anticipated*K_max)` for
     /// anticipated thermal commitment state slots.
@@ -751,9 +706,9 @@ impl StageIndexer {
 }
 
 // StageIndexer contains only Send + Sync types (Range<usize>, usize, Vec<usize>,
-// Vec<FphaRowRange>, Vec<EvaporationIndices>, Sentinels — itself Range/usize
-// only), so Send + Sync are automatically derived. The explicit bounds below
-// serve as a compile-time assertion that the safety invariant holds.
+// Vec<FphaRowRange>, Vec<EvaporationIndices>), so Send + Sync are automatically
+// derived. The explicit bounds below serve as a compile-time assertion that the
+// safety invariant holds.
 const _: () = {
     fn assert_send_sync<T: Send + Sync>() {}
     fn check() {

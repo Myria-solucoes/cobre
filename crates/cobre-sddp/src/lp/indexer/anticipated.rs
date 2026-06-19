@@ -398,148 +398,6 @@ mod tests {
         );
     }
 
-    /// At `stage_idx == 0` all anticipated plants are active (always-active
-    /// predicate): the iterator yields one entry per plant.
-    #[test]
-    fn anticipated_fishing_active_at_stage_zero() {
-        let idx = StageIndexer::with_equipment_and_evaporation(
-            &EquipmentCounts {
-                hydro_count: 1,
-                max_par_order: 0,
-                n_thermals: 3,
-                n_lines: 0,
-                n_buses: 1,
-                n_blks: 1,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
-                n_anticipated: 3,
-                k_max: 3,
-                anticipated_lead_stages: vec![1, 2, 3],
-                anticipated_thermal_indices: vec![0, 1, 2],
-                n_pumping: 0,
-            },
-            &fpha(vec![], vec![]),
-            &evap(vec![]),
-        );
-        let start = idx.anticipated_fishing_start;
-        let active: Vec<_> = idx.anticipated_fishing_active_at_stage(0, 5).collect();
-        assert_eq!(active, vec![(0, start), (1, start + 1), (2, start + 2)]);
-    }
-
-    /// Always-active: `stage_idx == 0` with `K = [1, 2, 3]` yields the full
-    /// set `[(0, start), (1, start+1), (2, start+2)]`.
-    #[test]
-    fn anticipated_fishing_active_always_active_stage_zero() {
-        let idx = StageIndexer::with_equipment_and_evaporation(
-            &EquipmentCounts {
-                hydro_count: 1,
-                max_par_order: 0,
-                n_thermals: 3,
-                n_lines: 0,
-                n_buses: 1,
-                n_blks: 1,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
-                n_anticipated: 3,
-                k_max: 3,
-                anticipated_lead_stages: vec![1, 2, 3],
-                anticipated_thermal_indices: vec![0, 1, 2],
-                n_pumping: 0,
-            },
-            &fpha(vec![], vec![]),
-            &evap(vec![]),
-        );
-        let start = idx.anticipated_fishing_start;
-        let active: Vec<_> = idx.anticipated_fishing_active_at_stage(0, 5).collect();
-        assert_eq!(active, vec![(0, start), (1, start + 1), (2, start + 2)]);
-    }
-
-    /// Always-active: at any `stage_idx`, all plants are returned regardless of
-    /// their `K_i` value.
-    #[test]
-    fn anticipated_fishing_active_acceptance_boundary() {
-        let idx = StageIndexer::with_equipment_and_evaporation(
-            &EquipmentCounts {
-                hydro_count: 1,
-                max_par_order: 0,
-                n_thermals: 3,
-                n_lines: 0,
-                n_buses: 1,
-                n_blks: 1,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
-                n_anticipated: 3,
-                k_max: 3,
-                anticipated_lead_stages: vec![1, 2, 3],
-                anticipated_thermal_indices: vec![0, 1, 2],
-                n_pumping: 0,
-            },
-            &fpha(vec![], vec![]),
-            &evap(vec![]),
-        );
-        let start = idx.anticipated_fishing_start;
-        let active: Vec<_> = idx.anticipated_fishing_active_at_stage(1, 5).collect();
-        // All three plants are active (always-active predicate).
-        assert_eq!(active, vec![(0, start), (1, start + 1), (2, start + 2)]);
-    }
-
-    /// Always-active: `K_i = 5`, `stage_idx = 4` — plant is still active since
-    /// the always-active predicate ignores `K_i`.
-    #[test]
-    fn anticipated_fishing_active_rejection_boundary() {
-        let idx = StageIndexer::with_equipment_and_evaporation(
-            &EquipmentCounts {
-                hydro_count: 1,
-                max_par_order: 0,
-                n_thermals: 1,
-                n_lines: 0,
-                n_buses: 1,
-                n_blks: 1,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
-                n_anticipated: 1,
-                k_max: 5,
-                anticipated_lead_stages: vec![5],
-                anticipated_thermal_indices: vec![0],
-                n_pumping: 0,
-            },
-            &fpha(vec![], vec![]),
-            &evap(vec![]),
-        );
-        let start = idx.anticipated_fishing_start;
-        let active: Vec<_> = idx.anticipated_fishing_active_at_stage(4, 6).collect();
-        // Always-active predicate: plant is returned regardless of K_i vs stage_idx.
-        assert_eq!(active, vec![(0, start)]);
-    }
-
-    /// All plants active at `stage_idx == 3` when `K_i = [1, 2, 3]`. Rows are
-    /// assigned ascending: `(0, start+0), (1, start+1), (2, start+2)`.
-    #[test]
-    fn anticipated_fishing_active_all_plants() {
-        let idx = StageIndexer::with_equipment_and_evaporation(
-            &EquipmentCounts {
-                hydro_count: 1,
-                max_par_order: 0,
-                n_thermals: 3,
-                n_lines: 0,
-                n_buses: 1,
-                n_blks: 1,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
-                n_anticipated: 3,
-                k_max: 3,
-                anticipated_lead_stages: vec![1, 2, 3],
-                anticipated_thermal_indices: vec![0, 1, 2],
-                n_pumping: 0,
-            },
-            &fpha(vec![], vec![]),
-            &evap(vec![]),
-        );
-        let start = idx.anticipated_fishing_start;
-        let active: Vec<_> = idx.anticipated_fishing_active_at_stage(3, 5).collect();
-        assert_eq!(active, vec![(0, start), (1, start + 1), (2, start + 2)]);
-    }
-
     /// When `n_anticipated == 0`, the iterator yields nothing for any
     /// `(stage_idx, n_stages)` pair.
     #[test]
@@ -622,35 +480,6 @@ mod tests {
         // Row indices are strictly monotonic.
         let rows: Vec<_> = active.iter().map(|(_, row)| *row).collect();
         assert!(rows.windows(2).all(|w| w[0] < w[1]));
-    }
-
-    /// `stage_idx == n_stages` is an acceptance boundary (delivery happens at
-    /// the horizon end and the LP at stage `T` still solves).
-    #[test]
-    fn anticipated_fishing_active_at_n_stages_boundary() {
-        let idx = StageIndexer::with_equipment_and_evaporation(
-            &EquipmentCounts {
-                hydro_count: 1,
-                max_par_order: 0,
-                n_thermals: 2,
-                n_lines: 0,
-                n_buses: 1,
-                n_blks: 1,
-                has_inflow_penalty: false,
-                max_deficit_segments: 1,
-                n_anticipated: 2,
-                k_max: 5,
-                anticipated_lead_stages: vec![3, 5],
-                anticipated_thermal_indices: vec![0, 1],
-                n_pumping: 0,
-            },
-            &fpha(vec![], vec![]),
-            &evap(vec![]),
-        );
-        let start = idx.anticipated_fishing_start;
-        let active: Vec<_> = idx.anticipated_fishing_active_at_stage(5, 5).collect();
-        // Both plants active (always-active predicate; `stage_idx == n_stages` accepted by debug guard).
-        assert_eq!(active, vec![(0, start), (1, start + 1)]);
     }
 
     /// `is_anticipated_fishing_active` returns `true` for every valid
@@ -971,9 +800,6 @@ mod tests {
         /// Collect the non-empty row ranges in canonical layout order.
         fn collect_active_row_ranges(idx: &StageIndexer) -> Vec<Range<usize>> {
             let mut v = Vec::new();
-            push_nonempty(&mut v, idx.sentinels.storage_fixing.clone());
-            push_nonempty(&mut v, idx.sentinels.lag_fixing.clone());
-            push_nonempty(&mut v, idx.sentinels.anticipated_state_fixing.clone());
             push_nonempty(&mut v, idx.z_inflow_rows.clone());
             push_nonempty(&mut v, idx.water_balance.clone());
             push_nonempty(&mut v, idx.load_balance.clone());
@@ -1031,32 +857,6 @@ mod tests {
                     idx.n_state, expected,
                     "I3 failed at {p:?}: n_state {} != expected {}",
                     idx.n_state, expected
-                );
-            }
-        }
-
-        /// I4 (Phase 1): all three state-fixing row ranges are empty sentinel `0..0`.
-        ///
-        /// State fixing has moved to column bounds; the row-side ranges are
-        /// no longer expected to mirror the column ranges.
-        #[test]
-        fn i4_state_row_symmetry() {
-            for p in parameter_grid() {
-                let (idx, _) = build_indexer(&p);
-                assert_eq!(
-                    idx.sentinels.storage_fixing,
-                    0..0,
-                    "I4 storage_fixing must be 0..0 (sentinel) at {p:?}"
-                );
-                assert_eq!(
-                    idx.sentinels.lag_fixing,
-                    0..0,
-                    "I4 lag_fixing must be 0..0 (sentinel) at {p:?}"
-                );
-                assert_eq!(
-                    idx.sentinels.anticipated_state_fixing,
-                    0..0,
-                    "I4 anticipated_state_fixing must be 0..0 (sentinel) at {p:?}"
                 );
             }
         }

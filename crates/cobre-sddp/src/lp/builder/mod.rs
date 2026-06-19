@@ -38,9 +38,7 @@
 //! resolve the column index for state vector entry `j`.  Both forward-pass
 //! state pinning (`set_col_bounds(&[col], &[v], &[v])`) and backward-pass
 //! cut-subgradient extraction (`view.reduced_costs[col] * col_scale[col]`)
-//! use the same column index.  The `storage_fixing`, `lag_fixing`, and
-//! `anticipated_state_fixing` row ranges in [`crate::indexer::StageIndexer`]
-//! are permanent empty sentinels (`0..0`).
+//! use the same column index.  The LP has no state-fixing row range.
 //!
 //! ## Patch sequence (Training Loop SS4.2a)
 //!

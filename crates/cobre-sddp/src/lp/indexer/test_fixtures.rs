@@ -94,31 +94,3 @@ pub fn eq_with_anticipated(
         n_pumping: 0,
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::eq_with_anticipated;
-
-    /// The shared `eq_with_anticipated` builder pins `max_deficit_segments == 1`
-    /// (not the `Default` value `0`) and produces empty anticipated vecs when
-    /// `n_anticipated == 0`, matching the field set the per-module fixtures
-    /// require.
-    #[test]
-    fn shared_eq_with_anticipated_matches_legacy_fixture_shape() {
-        let counts = eq_with_anticipated(0, 0, 0, 0, 0, 0, false, 0, 0);
-        assert_eq!(counts.hydro_count, 0);
-        assert_eq!(counts.max_par_order, 0);
-        assert_eq!(counts.n_thermals, 0);
-        assert_eq!(counts.n_lines, 0);
-        assert_eq!(counts.n_buses, 0);
-        assert_eq!(counts.n_blks, 0);
-        assert!(!counts.has_inflow_penalty);
-        // Named builder uses 1, deliberately diverging from Default's 0.
-        assert_eq!(counts.max_deficit_segments, 1);
-        assert_eq!(counts.n_anticipated, 0);
-        assert_eq!(counts.k_max, 0);
-        assert_eq!(counts.n_pumping, 0);
-        assert_eq!(counts.anticipated_lead_stages, Vec::<usize>::new());
-        assert_eq!(counts.anticipated_thermal_indices, Vec::<usize>::new());
-    }
-}

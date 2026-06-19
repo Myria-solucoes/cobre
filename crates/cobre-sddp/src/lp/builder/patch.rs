@@ -604,76 +604,52 @@ mod tests {
         StageIndexer::new(n, l)
     }
 
-    /// Row buffer capacity: N + N = 6 for N=3, L=2.
-    #[test]
-    fn new_3_2_sizes_to_6() {
-        // Row capacity = N + M*B + N = 3 + 0 + 3 = 6
-        let buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
-        assert_eq!(buf.indices.len(), 6);
-        assert_eq!(buf.lower.len(), 6);
-        assert_eq!(buf.upper.len(), 6);
-    }
-
     // -------------------------------------------------------------------------
-    // Row buffer capacity
+    // Capacity formulas (row + column buffers) across scales
     // -------------------------------------------------------------------------
 
-    /// `PatchBuffer::new(3, 2, 0, 0, 0, 0).indices.len() == 6` (N + N = 6).
+    /// Row capacity is `N + n_load_buses*max_blocks + N` and column capacity is
+    /// `N*(1+L) + A*K`. Both formulas are exercised at zero / unit-anticipated /
+    /// combined / production scales in one table so each scale stays legible via
+    /// the tuple-naming failure message.
     #[test]
-    fn row_buffer_capacity_after_phase1() {
-        let buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
-        assert_eq!(buf.indices.len(), 6);
-        assert_eq!(buf.lower.len(), 6);
-        assert_eq!(buf.upper.len(), 6);
-    }
+    fn patch_buffer_capacity_formulas() {
+        // (n, l, n_load_buses, max_blocks, a, k, expected_row_cap, expected_col_cap)
+        let cases = [
+            (
+                0usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize,
+            ),
+            (3, 2, 0, 0, 0, 0, 6, 9),
+            (0, 0, 0, 0, 1, 2, 0, 2),
+            (3, 2, 0, 0, 2, 3, 6, 15),
+            (160, 12, 0, 0, 0, 0, 320, 2080),
+        ];
 
-    // -------------------------------------------------------------------------
-    // Column-bound region capacity tests
-    // -------------------------------------------------------------------------
+        for (n, l, n_load_buses, max_blocks, a, k, expected_row_cap, expected_col_cap) in cases {
+            let buf = PatchBuffer::new(n, l, n_load_buses, max_blocks, a, k);
 
-    /// N=3, L=2: col capacity = N*(1+L) + A*K = 3*3 + 0 = 9.
-    #[test]
-    fn col_buffer_capacity_3_2_sizes_to_9() {
-        let buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
-        assert_eq!(buf.col_indices.len(), 9);
-        assert_eq!(buf.col_lower.len(), 9);
-        assert_eq!(buf.col_upper.len(), 9);
-    }
+            for (label, len) in [
+                ("col_indices", buf.col_indices.len()),
+                ("col_lower", buf.col_lower.len()),
+                ("col_upper", buf.col_upper.len()),
+            ] {
+                assert_eq!(
+                    len, expected_col_cap,
+                    "{label} col cap mismatch for (n={n}, l={l}, a={a}, k={k})"
+                );
+            }
 
-    /// A=1, K=2, N=0: col capacity = 0 + 1*2 = 2.
-    #[test]
-    fn col_buffer_capacity_with_anticipated() {
-        let buf = PatchBuffer::new(0, 0, 0, 0, 1, 2);
-        assert_eq!(buf.col_indices.len(), 2);
-        assert_eq!(buf.col_lower.len(), 2);
-        assert_eq!(buf.col_upper.len(), 2);
-    }
-
-    /// N=3, L=2, A=2, K=3: col capacity = 3*3 + 2*3 = 9 + 6 = 15.
-    #[test]
-    fn col_buffer_capacity_combined_state_and_anticipated() {
-        let buf = PatchBuffer::new(3, 2, 0, 0, 2, 3);
-        assert_eq!(buf.col_indices.len(), 15);
-        assert_eq!(buf.col_lower.len(), 15);
-        assert_eq!(buf.col_upper.len(), 15);
-    }
-
-    /// All zero counts: col capacity = 0.
-    #[test]
-    fn col_buffer_capacity_zero_hydros() {
-        let buf = PatchBuffer::new(0, 0, 0, 0, 0, 0);
-        assert_eq!(buf.col_indices.len(), 0);
-        assert_eq!(buf.col_lower.len(), 0);
-        assert_eq!(buf.col_upper.len(), 0);
-    }
-
-    /// Production scale: N=160, L=12 → col capacity = 160*13 = 2080.
-    #[test]
-    fn col_buffer_capacity_production_scale() {
-        let buf = PatchBuffer::new(160, 12, 0, 0, 0, 0);
-        assert_eq!(buf.col_indices.len(), 2080);
-        assert_eq!(buf.col_lower.len(), 2080);
-        assert_eq!(buf.col_upper.len(), 2080);
+            for (label, len) in [
+                ("indices", buf.indices.len()),
+                ("lower", buf.lower.len()),
+                ("upper", buf.upper.len()),
+            ] {
+                assert_eq!(
+                    len, expected_row_cap,
+                    "{label} row cap mismatch for (n={n}, l={l}, a={a}, k={k})"
+                );
+            }
+        }
     }
 
     /// `state_col_patch_count` returns N*(1+L) + A*K.
@@ -701,28 +677,6 @@ mod tests {
             buf.col_upper.iter().all(|&v| v == 0.0),
             "col_upper not zero-initialised"
         );
-    }
-
-    /// Production scale: N=160, L=12 → row capacity = N + N = 320.
-    #[test]
-    fn new_160_12_sizes_to_320() {
-        let buf = PatchBuffer::new(160, 12, 0, 0, 0, 0);
-        assert_eq!(buf.indices.len(), 320);
-        assert_eq!(buf.lower.len(), 320);
-        assert_eq!(buf.upper.len(), 320);
-    }
-
-    /// L=0: row capacity = N + N = 2*N = 10.
-    #[test]
-    fn new_zero_lags_sizes_to_2n() {
-        let buf = PatchBuffer::new(5, 0, 0, 0, 0, 0);
-        assert_eq!(buf.indices.len(), 10); // N + N = 10
-    }
-
-    #[test]
-    fn new_zero_hydros_sizes_to_zero() {
-        let buf = PatchBuffer::new(0, 0, 0, 0, 0, 0);
-        assert_eq!(buf.indices.len(), 0);
     }
 
     /// forward_patch_count without fill_z_inflow_patches returns N.

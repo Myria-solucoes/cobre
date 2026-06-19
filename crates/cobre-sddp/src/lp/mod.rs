@@ -6,8 +6,7 @@
 //! kept together because each depends on the column layout the next encodes:
 //!
 //! - [`indexer`] — [`StageIndexer`] maps every entity to its LP column/row
-//!   range. The `storage_fixing` / `lag_fixing` / `anticipated_state_fixing`
-//!   ranges are permanent empty `0..0` sentinels: state is pinned via
+//!   range. The LP has no state-fixing row range: state is pinned via
 //!   [`StageIndexer::state_to_lp_incoming_column`] column bounds, never a fixing
 //!   row.
 //! - `generic_constraints` — lowers user-declared generic constraints onto the

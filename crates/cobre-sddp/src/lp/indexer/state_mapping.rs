@@ -182,7 +182,7 @@ impl StageIndexer {
 #[cfg(test)]
 mod tests {
     use crate::indexer::test_fixtures::{eq_with_anticipated, evap, fpha};
-    use crate::indexer::{EquipmentCounts, FphaColumnLayout, StageIndexer};
+    use crate::indexer::{EquipmentCounts, StageIndexer};
 
     // ── state_to_lp_column precompute tests ─────────────────────────────────
 
@@ -357,6 +357,11 @@ mod tests {
             idx.state_to_lp_column(slot_k_minus_1),
             idx.anticipated_state_out.start,
         );
+        assert_ne!(
+            idx.state_to_lp_column(slot_k_minus_1),
+            idx.anticipated_decision.start,
+            "Equal branch must NOT route to anticipated_decision"
+        );
     }
 
     /// Shift branch: an `anticipated_state` slot `i < K_p - 1` maps to the
@@ -453,120 +458,6 @@ mod tests {
         assert_eq!(idx.state_to_lp_column(s + 1), s + 3);
         assert_eq!(idx.state_to_lp_column(s + 2), so);
         assert_eq!(idx.state_to_lp_column(s + 3), so + 1);
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // state_to_lp_column branch tests
-    // ─────────────────────────────────────────────────────────────────────────
-
-    /// K=1, single plant: slot 0 hits the Equal branch and must route to
-    /// `anticipated_state_out`, NOT to `anticipated_decision`.
-    #[test]
-    fn test_state_to_lp_column_equal_branch_routes_to_state_out() {
-        let counts = EquipmentCounts {
-            hydro_count: 1,
-            max_par_order: 0,
-            n_thermals: 1,
-            n_lines: 0,
-            n_buses: 1,
-            n_blks: 1,
-            has_inflow_penalty: false,
-            max_deficit_segments: 1,
-            n_anticipated: 1,
-            k_max: 1,
-            anticipated_lead_stages: vec![1],
-            anticipated_thermal_indices: vec![0],
-            n_pumping: 0,
-        };
-        let fpha_layout = FphaColumnLayout {
-            hydro_indices: vec![],
-            planes_per_hydro: vec![],
-        };
-        let idx = StageIndexer::with_equipment(&counts, &fpha_layout);
-
-        let j_slot0 = idx.anticipated_state.start; // slot 0, plant 0
-        assert_eq!(
-            idx.state_to_lp_column(j_slot0),
-            idx.anticipated_state_out.start,
-            "Equal branch must route to anticipated_state_out, not anticipated_decision"
-        );
-        assert_ne!(
-            idx.state_to_lp_column(j_slot0),
-            idx.anticipated_decision.start,
-            "Equal branch must NOT route to anticipated_decision (the buggy mapping)"
-        );
-    }
-
-    /// K=2, single plant: slot 0 hits the Less branch.
-    /// Less branch must return `anticipated_state.start + (slot+1)*A + plant`.
-    #[test]
-    fn test_state_to_lp_column_less_branch_unchanged() {
-        let counts = EquipmentCounts {
-            hydro_count: 1,
-            max_par_order: 0,
-            n_thermals: 1,
-            n_lines: 0,
-            n_buses: 1,
-            n_blks: 1,
-            has_inflow_penalty: false,
-            max_deficit_segments: 1,
-            n_anticipated: 1,
-            k_max: 2,
-            anticipated_lead_stages: vec![2],
-            anticipated_thermal_indices: vec![0],
-            n_pumping: 0,
-        };
-        let fpha_layout = FphaColumnLayout {
-            hydro_indices: vec![],
-            planes_per_hydro: vec![],
-        };
-        let idx = StageIndexer::with_equipment(&counts, &fpha_layout);
-
-        let j_slot0 = idx.anticipated_state.start; // slot 0, plant 0
-        assert_eq!(
-            idx.state_to_lp_column(j_slot0),
-            idx.anticipated_state.start + 1,
-            "Less branch must return anticipated_state.start + (slot+1)*A + plant"
-        );
-    }
-
-    /// K=2 plant in a `k_max=3` layout: slot 2 hits the Greater branch (padding).
-    /// Greater branch must return identity (`j` unchanged).
-    ///
-    /// Uses two anticipated plants with `k_p`=[2,3] so that `k_max=max(k_p)=3`
-    /// satisfies the indexer invariant, while plant 0 (`k_p=2`) has a genuine
-    /// padding slot at slot index 2.
-    #[test]
-    fn test_state_to_lp_column_greater_branch_unchanged() {
-        let counts = EquipmentCounts {
-            hydro_count: 1,
-            max_par_order: 0,
-            n_thermals: 2,
-            n_lines: 0,
-            n_buses: 1,
-            n_blks: 1,
-            has_inflow_penalty: false,
-            max_deficit_segments: 1,
-            n_anticipated: 2,
-            k_max: 3,
-            anticipated_lead_stages: vec![2, 3],
-            anticipated_thermal_indices: vec![0, 1],
-            n_pumping: 0,
-        };
-        let fpha_layout = FphaColumnLayout {
-            hydro_indices: vec![],
-            planes_per_hydro: vec![],
-        };
-        let idx = StageIndexer::with_equipment(&counts, &fpha_layout);
-
-        // Slot 2, plant 0: slot+1=3 > k_p=2 → Greater branch (padding).
-        // n_anticipated=2, so j = ant_start + 2*2 + 0.
-        let j_slot2_plant0 = idx.anticipated_state.start + 2 * idx.n_anticipated;
-        assert_eq!(
-            idx.state_to_lp_column(j_slot2_plant0),
-            j_slot2_plant0,
-            "Greater branch must return identity (padding-slot invariant)"
-        );
     }
 
     // ── state_to_lp_incoming_column tests ────────────────────────────────────

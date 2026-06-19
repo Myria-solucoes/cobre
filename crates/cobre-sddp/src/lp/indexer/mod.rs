@@ -76,9 +76,8 @@
 //! ## Row layout (Solver Abstraction SS2.2)
 //!
 //! State pinning uses column bounds (`set_col_bounds`) on the incoming-state
-//! columns, so the `storage_fixing`, `lag_fixing`, and `anticipated_state_fixing`
-//! row ranges (grouped in the [`Sentinels`] sub-struct, reached as
-//! `indexer.sentinels.*`) are always empty (`0..0`). z-inflow rows start at row 0.
+//! columns, so the LP has no state-fixing row range. z-inflow rows start at
+//! row 0.
 //!
 //! ```text
 //! [0, N)   z_inflow_rows — z-inflow definition rows
@@ -119,8 +118,7 @@
 //!
 //! # Submodule layout
 //!
-//! - `layout` — the [`StageIndexer`] struct, the [`Sentinels`] sub-struct (which
-//!   owns the `0..0` sentinel field docs), the satellite types
+//! - `layout` — the [`StageIndexer`] struct, the satellite types
 //!   ([`EvaporationIndices`], [`FphaRowRange`], [`EquipmentCounts`],
 //!   [`FphaColumnLayout`], [`EvapConfig`]), the small layout accessors, and the
 //!   compile-time `Send + Sync` assertion.
@@ -131,7 +129,7 @@
 //! - `anticipated` — the per-stage anticipated-thermal iterators and predicates.
 //! - `sparse_state` — the nonzero-state mask builder `set_nonzero_mask`.
 //! - `constructors` — the three constructors and the private column/row range
-//!   build helpers (carrying the `0..0` sentinel initialisers).
+//!   build helpers.
 //!
 //! Every public symbol is re-exported here so both the curated flat surface in
 //! `lib.rs` and the `cobre_sddp::indexer::Symbol` / `crate::indexer::Symbol`
@@ -146,6 +144,5 @@ mod state_mapping;
 pub mod test_fixtures;
 
 pub use layout::{
-    EquipmentCounts, EvapConfig, EvaporationIndices, FphaColumnLayout, FphaRowRange, Sentinels,
-    StageIndexer,
+    EquipmentCounts, EvapConfig, EvaporationIndices, FphaColumnLayout, FphaRowRange, StageIndexer,
 };
