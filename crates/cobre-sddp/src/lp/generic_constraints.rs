@@ -899,7 +899,7 @@ mod tests {
     /// N=4 hydros (2 FPHA at positions 0, 2), L=0, T=2 thermals, Ln=1 line, B=2 buses, K=3 blocks.
     /// S=2 max deficit segments.
     ///
-    /// Column layout (NEW: z_inflow at [N*(1+L), N*(2+L)) shifts storage_in and theta by +N):
+    /// Column layout:
     ///   storage:   [0, 4)         = 0..4
     ///   lags:      [4, 4*(1+0))   = 4..4   (L=0, empty)
     ///   z_inflow:  [4*(1+0), 4*(2+0)) = 4..8
