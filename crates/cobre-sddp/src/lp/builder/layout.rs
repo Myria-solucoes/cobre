@@ -183,15 +183,6 @@ pub(crate) struct AnticipatedLayout {
     // `layout` module and the lint analyser does not see cross-module field access.
     #[allow(dead_code)]
     pub(crate) n_anticipated_state_out_def_rows: usize,
-    /// Start of anticipated-state columns (ring-buffer slots for committed MW).
-    ///
-    /// Slot-major layout: column for slot `s`, plant `i` is at
-    /// `col_anticipated_state_start + s * n_anticipated + i`.
-    /// Slot 0 (the currently-delivering commitment under the always-active
-    /// fishing predicate) is at `col_anticipated_state_start + i`.
-    /// Zero when `n_anticipated == 0` (empty column range).
-    /// Derived from `idx.anticipated_state.start` in `StageLayout::new`.
-    pub(crate) col_anticipated_state_start: usize,
     /// Start of anticipated-fishing constraint rows (after operational violation rows).
     ///
     /// One equality row per anticipated plant (always-active predicate).
@@ -235,56 +226,18 @@ pub(crate) struct StageLayout {
     // rather than reading this field, so the lint fires on the production side.
     #[allow(dead_code)]
     pub(crate) n_ant_state: usize,
-    /// Column index of the theta (future-cost) variable.
-    ///
-    /// Derived from the augmented indexer: `idx.theta = N*(3+L) + n_ant_state`.
-    /// Used by matrix helpers instead of reconstructing a base indexer locally.
-    pub(crate) col_theta: usize,
-    /// Column index of the first incoming-storage variable (`v_in_0`).
-    ///
-    /// Derived from the augmented indexer: `idx.storage_in.start`.
-    /// Used by matrix helpers instead of reconstructing a base indexer locally.
-    pub(crate) col_storage_in_start: usize,
-    /// Column index of the first AR lag variable.
-    ///
-    /// Derived from the augmented indexer: `idx.inflow_lags.start`.
-    /// Used by matrix helpers instead of reconstructing a base indexer locally.
-    pub(crate) col_inflow_lags_start: usize,
     // Column regions
-    pub(crate) col_turbine_start: usize,
-    pub(crate) col_spillage_start: usize,
-    /// Start of diversion flow columns (one per hydro per block).
-    ///
-    /// Layout within this region: `col_diversion_start + h_idx * n_blks + blk`.
-    /// Hydros without diversion have bounds [0, 0]; presolve eliminates them.
-    pub(crate) col_diversion_start: usize,
-    pub(crate) col_thermal_start: usize,
     /// Anticipated-thermal column/row offsets grouped into one cohesive concern.
     ///
     /// Holds the anticipated-decision / state-out / state / fishing column and
     /// row starts (see [`AnticipatedLayout`]). Read by the `fill_anticipated_*`
     /// matrix helpers through `layout.anticipated.<field>`.
     pub(crate) anticipated: AnticipatedLayout,
-    pub(crate) col_line_fwd_start: usize,
-    pub(crate) col_line_rev_start: usize,
-    pub(crate) col_deficit_start: usize,
-    /// Maximum number of deficit segments across all buses (S).
-    ///
-    /// The deficit region spans `n_buses * max_deficit_segments * n_blks` columns.
-    pub(crate) max_deficit_segments: usize,
-    pub(crate) col_excess_start: usize,
-    pub(crate) col_inflow_slack_start: usize,
     /// Start of FPHA generation columns (one per FPHA hydro per block).
     ///
     /// Layout within this region: `col_generation_start + local_fpha_idx * n_blks + blk`.
     pub(crate) col_generation_start: usize,
     // Row regions
-    pub(crate) row_water_balance_start: usize,
-    pub(crate) row_load_balance_start: usize,
-    /// Start of FPHA constraint rows (after load-balance rows).
-    ///
-    /// Layout: `row_fpha_start + local_fpha_idx * n_blks * n_planes + blk * n_planes + plane_idx`.
-    pub(crate) row_fpha_start: usize,
     /// Start of evaporation constraint rows (after FPHA rows).
     ///
     /// One equality row per evaporation hydro.
@@ -384,16 +337,7 @@ pub(crate) struct StageLayout {
     ///
     /// Zero when no generic constraints are active.
     pub(crate) n_generic_rows: usize,
-    /// Start of z-inflow definition rows (after generic constraint rows).
-    ///
-    /// One equality row per hydro, defining `z_h = base_h + sigma_h * eta_h + sum_l[psi_l * lag_in[h,l]]`.
-    pub(crate) row_z_inflow_start: usize,
-    /// Start of z-inflow columns (after generic constraint slack columns).
-    ///
-    /// One free column per hydro (`z_h`, lower = -inf, upper = +inf, cost = 0.0).
-    pub(crate) col_z_inflow_start: usize,
     // Template metadata
-    pub(crate) n_state: usize,
     pub(crate) n_dual_relevant: usize,
     // Scalar derived quantities used by row-bound and matrix helpers
     pub(crate) zeta: f64,
@@ -778,23 +722,15 @@ impl StageLayout {
 
         // Row offsets: z_inflow, water balance, load balance, FPHA, evap, operational, generic.
         // z_inflow starts at row 0; state pinning is applied via column bounds.
-        // `n_state` from the augmented indexer is the column-side state dimension:
-        // `N*(1+L) + n_anticipated*k_max`.
-        let n_state = idx.n_state;
         // The dual-relevant structural prefix of view.dual is empty because state
         // pinning uses column bounds. Cut-subgradient extraction reads
         // view.reduced_costs; n_dual_relevant on the row side is unused by the cut path.
         let n_dual_relevant = 0_usize;
-        // Leading row regions: read from the augmented indexer (the single owner
-        // of this chain). The FPHA and evap row blocks normalise to empty, so
-        // read their cursors via the indexer accessors rather than the `0..0`
-        // public ranges: `row_fpha_start` is the load-balance row end, and
-        // `row_evap_start` is the row at which evap rows begin (the FPHA-rows
-        // end cursor). The operational-violation row blocks keep their cursor
-        // even when empty, so their `.start` fields are read directly.
-        let row_water_balance_start = idx.water_balance.start;
-        let row_load_balance_start = idx.load_balance.start;
-        let row_fpha_start = idx.load_balance.end;
+        // Evap-row cursor: the FPHA and evap row blocks normalise to empty, so
+        // `row_evap_start` is read via the indexer accessor (`fpha_rows_end()`)
+        // rather than the `0..0` public range. The water-balance, load-balance,
+        // and FPHA-row starts are exposed via the read-through accessors
+        // (`row_water_balance_start`/`row_load_balance_start`/`row_fpha_start`).
         let row_evap_start = idx.fpha_rows_end();
         let n_op_rows = ctx.n_hydros * n_blks;
         // The four operational-violation row blocks are non-empty whenever
@@ -839,10 +775,6 @@ impl StageLayout {
         let row_generic_start =
             row_anticipated_state_out_def_start + n_anticipated_state_out_def_rows;
 
-        // Anticipated-state column start from the augmented indexer.
-        // Slot-major layout: col for slot s, plant i = anticipated_state.start + s * n_anticipated + i.
-        let col_anticipated_state_start = idx.anticipated_state.start;
-
         // Pumping-flow columns sit between the NCS region and the generic-slack
         // columns, block-major (`col_pumping_start + p * n_blks + blk`). The
         // station count is the ctx's authoritative `n_pumping` (the entity-slice
@@ -859,16 +791,6 @@ impl StageLayout {
         let generic =
             enumerate_generic_constraint_rows(ctx, stage, n_blks, col_generic_slack_start);
 
-        // z-inflow columns and rows: positions from the augmented indexer.
-        let col_z_inflow_start = idx.z_inflow.start;
-        let row_z_inflow_start = idx.z_inflow_row_start;
-
-        // Scalar layout offsets needed by matrix helpers — read from the
-        // augmented indexer so they shift correctly when n_anticipated > 0.
-        let col_theta = idx.theta;
-        let col_storage_in_start = idx.storage_in.start;
-        let col_inflow_lags_start = idx.inflow_lags.start;
-
         let num_cols = col_generic_slack_start + generic.n_generic_slack_cols;
         let num_rows = row_generic_start + generic.n_generic_rows;
         let zeta = stage.blocks.iter().map(|b| b.duration_hours).sum::<f64>() * M3S_TO_HM3;
@@ -881,7 +803,6 @@ impl StageLayout {
             col_anticipated_state_out_start: idx.thermal.end + ctx.n_anticipated,
             row_anticipated_state_out_def_start,
             n_anticipated_state_out_def_rows,
-            col_anticipated_state_start,
             row_anticipated_fishing_start,
             n_anticipated_fishing_rows,
         };
@@ -893,22 +814,7 @@ impl StageLayout {
             n_anticipated: ctx.n_anticipated,
             k_max: ctx.k_max,
             n_ant_state,
-            col_theta,
-            col_storage_in_start,
-            col_inflow_lags_start,
-            col_turbine_start: idx.turbine.start,
-            col_spillage_start: idx.spillage.start,
-            col_diversion_start: idx.diversion.start,
-            col_thermal_start: idx.thermal.start,
             anticipated,
-            col_line_fwd_start: idx.line_fwd.start,
-            col_line_rev_start: idx.line_rev.start,
-            col_deficit_start: idx.deficit.start,
-            max_deficit_segments: idx.max_deficit_segments,
-            col_excess_start: idx.excess.start,
-            // `inflow_slack` normalises to `0..0` without the penalty, so the
-            // inflow-slack column start is the excess-block end cursor.
-            col_inflow_slack_start: idx.excess.end,
             col_generation_start,
             col_evap_start,
             col_withdrawal_neg_start,
@@ -923,9 +829,6 @@ impl StageLayout {
             col_pumping_start,
             n_pumping,
             num_cols,
-            row_water_balance_start,
-            row_load_balance_start,
-            row_fpha_start,
             row_evap_start,
             row_min_outflow_start,
             row_max_outflow_start,
@@ -934,9 +837,6 @@ impl StageLayout {
             row_generic_start,
             num_rows,
             n_generic_rows: generic.n_generic_rows,
-            row_z_inflow_start,
-            col_z_inflow_start,
-            n_state,
             n_dual_relevant,
             zeta,
             fpha_hydro_indices,
@@ -965,19 +865,19 @@ impl StageLayout {
     /// Turbine-flow column for hydro `h_idx`, block `blk`.
     #[inline]
     pub(crate) fn turbine_col(&self, h_idx: usize, blk: usize) -> usize {
-        self.block_col(self.col_turbine_start, h_idx, blk)
+        self.block_col(self.col_turbine_start(), h_idx, blk)
     }
 
     /// Spillage column for hydro `h_idx`, block `blk`.
     #[inline]
     pub(crate) fn spillage_col(&self, h_idx: usize, blk: usize) -> usize {
-        self.block_col(self.col_spillage_start, h_idx, blk)
+        self.block_col(self.col_spillage_start(), h_idx, blk)
     }
 
     /// Diversion-flow column for hydro `h_idx`, block `blk`.
     #[inline]
     pub(crate) fn diversion_col(&self, h_idx: usize, blk: usize) -> usize {
-        self.block_col(self.col_diversion_start, h_idx, blk)
+        self.block_col(self.col_diversion_start(), h_idx, blk)
     }
 
     /// FPHA generation column for FPHA-local index `local_idx`, block `blk`.
@@ -989,13 +889,13 @@ impl StageLayout {
     /// Forward line-flow column for line `l_idx`, block `blk`.
     #[inline]
     pub(crate) fn line_fwd_col(&self, l_idx: usize, blk: usize) -> usize {
-        self.block_col(self.col_line_fwd_start, l_idx, blk)
+        self.block_col(self.col_line_fwd_start(), l_idx, blk)
     }
 
     /// Reverse line-flow column for line `l_idx`, block `blk`.
     #[inline]
     pub(crate) fn line_rev_col(&self, l_idx: usize, blk: usize) -> usize {
-        self.block_col(self.col_line_rev_start, l_idx, blk)
+        self.block_col(self.col_line_rev_start(), l_idx, blk)
     }
 
     /// Outflow-below-minimum slack column for hydro `h_idx`, block `blk`.
@@ -1053,10 +953,160 @@ impl StageLayout {
     /// `col_deficit_start + b_idx * max_deficit_segments * n_blks + seg_idx * n_blks + blk`.
     #[inline]
     pub(crate) fn deficit_col(&self, b_idx: usize, seg_idx: usize, blk: usize) -> usize {
-        self.col_deficit_start
-            + b_idx * self.max_deficit_segments * self.n_blks
+        self.col_deficit_start()
+            + b_idx * self.max_deficit_segments() * self.n_blks
             + seg_idx * self.n_blks
             + blk
+    }
+
+    // ── Indexer read-through accessors ──────────────────────────────────────────
+    // Each delegates to the embedded indexer's owning range/scalar, so the offset
+    // lives in one place (`self.indexer`) and cannot drift from a flattened copy.
+
+    /// Theta (future-cost) column; delegates to `self.indexer.theta`.
+    #[inline]
+    #[must_use]
+    pub(crate) fn col_theta(&self) -> usize {
+        self.indexer.theta
+    }
+
+    /// First incoming-storage column; delegates to `self.indexer.storage_in.start`.
+    #[inline]
+    #[must_use]
+    pub(crate) fn col_storage_in_start(&self) -> usize {
+        self.indexer.storage_in.start
+    }
+
+    /// First AR-lag column; delegates to `self.indexer.inflow_lags.start`.
+    #[inline]
+    #[must_use]
+    pub(crate) fn col_inflow_lags_start(&self) -> usize {
+        self.indexer.inflow_lags.start
+    }
+
+    /// First turbine-flow column; delegates to `self.indexer.turbine.start`.
+    #[inline]
+    #[must_use]
+    pub(crate) fn col_turbine_start(&self) -> usize {
+        self.indexer.turbine.start
+    }
+
+    /// First spillage column; delegates to `self.indexer.spillage.start`.
+    #[inline]
+    #[must_use]
+    pub(crate) fn col_spillage_start(&self) -> usize {
+        self.indexer.spillage.start
+    }
+
+    /// First diversion-flow column; delegates to `self.indexer.diversion.start`.
+    #[inline]
+    #[must_use]
+    pub(crate) fn col_diversion_start(&self) -> usize {
+        self.indexer.diversion.start
+    }
+
+    /// First thermal column; delegates to `self.indexer.thermal.start`.
+    #[inline]
+    #[must_use]
+    pub(crate) fn col_thermal_start(&self) -> usize {
+        self.indexer.thermal.start
+    }
+
+    /// First forward line-flow column; delegates to `self.indexer.line_fwd.start`.
+    #[inline]
+    #[must_use]
+    pub(crate) fn col_line_fwd_start(&self) -> usize {
+        self.indexer.line_fwd.start
+    }
+
+    /// First reverse line-flow column; delegates to `self.indexer.line_rev.start`.
+    #[inline]
+    #[must_use]
+    pub(crate) fn col_line_rev_start(&self) -> usize {
+        self.indexer.line_rev.start
+    }
+
+    /// First deficit column; delegates to `self.indexer.deficit.start`.
+    #[inline]
+    #[must_use]
+    pub(crate) fn col_deficit_start(&self) -> usize {
+        self.indexer.deficit.start
+    }
+
+    /// Maximum deficit segments across buses; delegates to
+    /// `self.indexer.max_deficit_segments`.
+    #[inline]
+    #[must_use]
+    pub(crate) fn max_deficit_segments(&self) -> usize {
+        self.indexer.max_deficit_segments
+    }
+
+    /// First excess column; delegates to `self.indexer.excess.start`.
+    #[inline]
+    #[must_use]
+    pub(crate) fn col_excess_start(&self) -> usize {
+        self.indexer.excess.start
+    }
+
+    /// First inflow-slack column; the `inflow_slack` block normalises to `0..0`
+    /// without the penalty, so this is the excess-block end cursor — delegates to
+    /// `self.indexer.excess.end`.
+    #[inline]
+    #[must_use]
+    pub(crate) fn col_inflow_slack_start(&self) -> usize {
+        self.indexer.excess.end
+    }
+
+    /// First z-inflow column; delegates to `self.indexer.z_inflow.start`.
+    #[inline]
+    #[must_use]
+    pub(crate) fn col_z_inflow_start(&self) -> usize {
+        self.indexer.z_inflow.start
+    }
+
+    /// First z-inflow definition row; delegates to
+    /// `self.indexer.z_inflow_row_start`.
+    #[inline]
+    #[must_use]
+    pub(crate) fn row_z_inflow_start(&self) -> usize {
+        self.indexer.z_inflow_row_start
+    }
+
+    /// First anticipated-state column; delegates to
+    /// `self.indexer.anticipated_state.start`.
+    #[inline]
+    #[must_use]
+    pub(crate) fn col_anticipated_state_start(&self) -> usize {
+        self.indexer.anticipated_state.start
+    }
+
+    /// First water-balance row; delegates to `self.indexer.water_balance.start`.
+    #[inline]
+    #[must_use]
+    pub(crate) fn row_water_balance_start(&self) -> usize {
+        self.indexer.water_balance.start
+    }
+
+    /// First load-balance row; delegates to `self.indexer.load_balance.start`.
+    #[inline]
+    #[must_use]
+    pub(crate) fn row_load_balance_start(&self) -> usize {
+        self.indexer.load_balance.start
+    }
+
+    /// First FPHA row; the FPHA block follows the load-balance rows, so this is
+    /// the load-balance end cursor — delegates to `self.indexer.load_balance.end`.
+    #[inline]
+    #[must_use]
+    pub(crate) fn row_fpha_start(&self) -> usize {
+        self.indexer.load_balance.end
+    }
+
+    /// Column-side state dimension; delegates to `self.indexer.n_state`.
+    #[inline]
+    #[must_use]
+    pub(crate) fn n_state(&self) -> usize {
+        self.indexer.n_state
     }
 }
 
@@ -1242,7 +1292,7 @@ mod tests {
         // col_turbine_start must equal the legacy theta + 1.
         let idx = StageIndexer::new(ctx.n_hydros, ctx.max_par_order);
         assert_eq!(
-            layout.col_turbine_start,
+            layout.col_turbine_start(),
             idx.theta + 1,
             "col_turbine_start must equal idx.theta + 1 with zero anticipated"
         );
@@ -1447,7 +1497,8 @@ mod tests {
         // col_line_fwd_start = col_anticipated_state_out_start + n_anticipated
         //                    = col_anticipated_decision_start + 2 * n_anticipated
         assert_eq!(
-            layout.anticipated.col_anticipated_decision_start, layout.col_thermal_start,
+            layout.anticipated.col_anticipated_decision_start,
+            layout.col_thermal_start(),
             "col_anticipated_decision_start must equal col_thermal_start \
              when n_thermals=0 (no thermal per-block cols)"
         );
@@ -1457,14 +1508,14 @@ mod tests {
             "col_anticipated_state_out_start == col_anticipated_decision_start + n_anticipated"
         );
         assert_eq!(
-            layout.col_line_fwd_start,
+            layout.col_line_fwd_start(),
             layout.anticipated.col_anticipated_state_out_start + n_anticipated,
             "col_line_fwd_start == col_anticipated_state_out_start + n_anticipated"
         );
         // Verify the separation between thermal_start and line_fwd_start is exactly 2*n_anticipated
         // (n_anticipated cols for anticipated_decision + n_anticipated cols for anticipated_state_out).
         assert_eq!(
-            layout.col_line_fwd_start - layout.col_thermal_start,
+            layout.col_line_fwd_start() - layout.col_thermal_start(),
             2 * n_anticipated,
             "gap from thermal_start to line_fwd_start must be exactly 2*n_anticipated (two stage-level blocks)"
         );
@@ -1504,7 +1555,8 @@ mod tests {
         // col_turbine_start = theta + 1 = 7
         let expected_col_turbine_start = n_hydros * (3 + max_par_order) + expected_n_ant_state + 1;
         assert_eq!(
-            layout.col_turbine_start, expected_col_turbine_start,
+            layout.col_turbine_start(),
+            expected_col_turbine_start,
             "col_turbine_start == N*(3+L) + n_ant_state + 1"
         );
     }
@@ -1621,7 +1673,8 @@ mod tests {
         // equals ctx.n_hydros (no n_state offset). With state-fixing rows it
         // would be n_state + ctx.n_hydros.
         assert_eq!(
-            layout.row_water_balance_start, ctx.n_hydros,
+            layout.row_water_balance_start(),
+            ctx.n_hydros,
             "row_water_balance_start does not include the n_state offset"
         );
     }
@@ -1795,7 +1848,7 @@ mod tests {
             "state_out columns must be immediately after anticipated_decision"
         );
         assert_eq!(
-            layout.col_line_fwd_start,
+            layout.col_line_fwd_start(),
             layout.anticipated.col_anticipated_state_out_start + 2,
             "line_fwd must be immediately after state_out columns"
         );
@@ -2060,11 +2113,11 @@ mod tests {
         // theta == 0, every equipment/slack/NCS region empty starting at theta+1.
         let idx = StageIndexer::new(ctx.n_hydros, ctx.max_par_order);
         let expected_start = idx.theta + 1;
-        assert_eq!(layout.col_turbine_start, expected_start);
-        assert_eq!(layout.col_thermal_start, expected_start);
-        assert_eq!(layout.col_line_fwd_start, expected_start);
-        assert_eq!(layout.col_deficit_start, expected_start);
-        assert_eq!(layout.col_excess_start, expected_start);
+        assert_eq!(layout.col_turbine_start(), expected_start);
+        assert_eq!(layout.col_thermal_start(), expected_start);
+        assert_eq!(layout.col_line_fwd_start(), expected_start);
+        assert_eq!(layout.col_deficit_start(), expected_start);
+        assert_eq!(layout.col_excess_start(), expected_start);
         assert_eq!(layout.col_ncs_start, expected_start);
         assert_eq!(layout.col_pumping_start, expected_start);
         // num_cols is the single theta column; the empty pumping block adds nothing.
@@ -2143,8 +2196,8 @@ mod tests {
         for entity in [0_usize, 1, 2, 5] {
             for blk in 0..n_blks {
                 assert_eq!(
-                    layout.block_col(layout.col_turbine_start, entity, blk),
-                    layout.col_turbine_start + entity * n_blks + blk,
+                    layout.block_col(layout.col_turbine_start(), entity, blk),
+                    layout.col_turbine_start() + entity * n_blks + blk,
                     "block_col(entity={entity}, blk={blk})"
                 );
             }
@@ -2155,17 +2208,17 @@ mod tests {
             for blk in 0..n_blks {
                 assert_eq!(
                     layout.turbine_col(entity, blk),
-                    layout.col_turbine_start + entity * n_blks + blk,
+                    layout.col_turbine_start() + entity * n_blks + blk,
                     "turbine_col"
                 );
                 assert_eq!(
                     layout.spillage_col(entity, blk),
-                    layout.col_spillage_start + entity * n_blks + blk,
+                    layout.col_spillage_start() + entity * n_blks + blk,
                     "spillage_col"
                 );
                 assert_eq!(
                     layout.diversion_col(entity, blk),
-                    layout.col_diversion_start + entity * n_blks + blk,
+                    layout.col_diversion_start() + entity * n_blks + blk,
                     "diversion_col"
                 );
                 assert_eq!(
@@ -2175,12 +2228,12 @@ mod tests {
                 );
                 assert_eq!(
                     layout.line_fwd_col(entity, blk),
-                    layout.col_line_fwd_start + entity * n_blks + blk,
+                    layout.col_line_fwd_start() + entity * n_blks + blk,
                     "line_fwd_col"
                 );
                 assert_eq!(
                     layout.line_rev_col(entity, blk),
-                    layout.col_line_rev_start + entity * n_blks + blk,
+                    layout.col_line_rev_start() + entity * n_blks + blk,
                     "line_rev_col"
                 );
                 assert_eq!(
@@ -2246,8 +2299,8 @@ mod tests {
                 for blk in 0..n_blks {
                     assert_eq!(
                         layout.deficit_col(b_idx, seg_idx, blk),
-                        layout.col_deficit_start
-                            + b_idx * layout.max_deficit_segments * n_blks
+                        layout.col_deficit_start()
+                            + b_idx * layout.max_deficit_segments() * n_blks
                             + seg_idx * n_blks
                             + blk,
                         "deficit_col(b={b_idx}, seg={seg_idx}, blk={blk})"

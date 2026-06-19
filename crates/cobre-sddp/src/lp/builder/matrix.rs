@@ -77,15 +77,15 @@ fn fill_storage_columns(
         let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
         bufs.col_lower[h_idx] = hb.min_storage_hm3;
         bufs.col_upper[h_idx] = hb.max_storage_hm3;
-        bufs.col_lower[layout.col_storage_in_start + h_idx] = f64::NEG_INFINITY;
-        bufs.col_upper[layout.col_storage_in_start + h_idx] = f64::INFINITY;
+        bufs.col_lower[layout.col_storage_in_start() + h_idx] = f64::NEG_INFINITY;
+        bufs.col_upper[layout.col_storage_in_start() + h_idx] = f64::INFINITY;
     }
 }
 
 /// AR lag columns: unconstrained (signed).
 fn fill_ar_lag_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
     let n_lag_cols = layout.lag_order * layout.n_h;
-    for lag_col in layout.col_inflow_lags_start..layout.col_inflow_lags_start + n_lag_cols {
+    for lag_col in layout.col_inflow_lags_start()..layout.col_inflow_lags_start() + n_lag_cols {
         bufs.col_lower[lag_col] = f64::NEG_INFINITY;
         bufs.col_upper[lag_col] = f64::INFINITY;
     }
@@ -104,9 +104,7 @@ fn fill_ar_lag_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
 fn fill_anticipated_state_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
     for slot in 0..layout.k_max {
         for plant in 0..layout.n_anticipated {
-            let col = layout.anticipated.col_anticipated_state_start
-                + slot * layout.n_anticipated
-                + plant;
+            let col = layout.col_anticipated_state_start() + slot * layout.n_anticipated + plant;
             bufs.col_lower[col] = f64::NEG_INFINITY;
             bufs.col_upper[col] = f64::INFINITY;
         }
@@ -164,9 +162,9 @@ fn fill_anticipated_state_out_columns(
 /// Theta column: bounded below by zero so iteration-1 LPs with empty cut pools
 /// are bounded rather than unbounded.
 fn fill_theta_column(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
-    bufs.col_lower[layout.col_theta] = 0.0;
-    bufs.col_upper[layout.col_theta] = f64::INFINITY;
-    bufs.objective[layout.col_theta] = 1.0;
+    bufs.col_lower[layout.col_theta()] = 0.0;
+    bufs.col_upper[layout.col_theta()] = f64::INFINITY;
+    bufs.objective[layout.col_theta()] = 1.0;
 }
 
 /// Turbine columns per hydro per block.
@@ -272,7 +270,7 @@ fn fill_thermal_columns(
         let tb = ctx.resolved.bounds.thermal_bounds(t_idx, stage_idx);
         let marginal_cost_per_mwh = tb.cost_per_mwh;
         for blk in 0..layout.n_blks {
-            let col = layout.col_thermal_start + t_idx * layout.n_blks + blk;
+            let col = layout.col_thermal_start() + t_idx * layout.n_blks + blk;
             bufs.col_lower[col] = tb.min_generation_mw;
             bufs.col_upper[col] = tb.max_generation_mw;
             let block_hours = stage.blocks[blk].duration_hours;
@@ -402,7 +400,7 @@ fn zero_anticipated_delivery_thermal_cost(
     for local_idx in 0..ctx.n_anticipated {
         let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
         for blk in 0..n_blks {
-            let col = layout.col_thermal_start + thermal_idx * n_blks + blk;
+            let col = layout.col_thermal_start() + thermal_idx * n_blks + blk;
             bufs.objective[col] = 0.0;
         }
     }
@@ -465,7 +463,7 @@ fn fill_deficit_and_excess_columns(
             }
         }
         for blk in 0..layout.n_blks {
-            let col_exc = layout.col_excess_start + b_idx * layout.n_blks + blk;
+            let col_exc = layout.col_excess_start() + b_idx * layout.n_blks + blk;
             let block_hours = stage.blocks[blk].duration_hours;
             bufs.col_upper[col_exc] = f64::INFINITY;
             bufs.objective[col_exc] = bp.excess_cost * block_hours;
@@ -486,7 +484,7 @@ fn fill_inflow_slack_columns(
 ) {
     if ctx.has_penalty {
         for h_idx in 0..layout.n_h {
-            let col = layout.col_inflow_slack_start + h_idx;
+            let col = layout.col_inflow_slack_start() + h_idx;
             let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
             bufs.objective[col] = hp.inflow_nonnegativity_cost * total_stage_hours;
         }
@@ -825,7 +823,7 @@ fn fill_pumping_columns(
 /// `col_lower = -inf`, `col_upper = +inf`, `objective = 0.0` (no direct cost).
 fn fill_z_inflow_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
     for h_idx in 0..layout.n_h {
-        let col = layout.col_z_inflow_start + h_idx;
+        let col = layout.col_z_inflow_start() + h_idx;
         bufs.col_lower[col] = f64::NEG_INFINITY;
         bufs.col_upper[col] = f64::INFINITY;
         // objective[col] = 0.0 — already zero from vec initialisation.
@@ -864,7 +862,7 @@ fn for_each_fpha_plane<F>(
     F: FnMut(usize, usize, usize, usize, &FphaPlane, usize),
 {
     let n_blks = layout.n_blks;
-    let mut fpha_block_start = layout.row_fpha_start;
+    let mut fpha_block_start = layout.row_fpha_start();
     for (local_idx, &h_idx) in layout.fpha_hydro_indices.iter().enumerate() {
         let planes = match ctx.production_models.model(h_idx, stage_idx) {
             ResolvedProductionModel::Fpha { planes, .. } => planes,
@@ -950,7 +948,7 @@ fn fill_water_balance_rows(
     row_upper: &mut [f64],
 ) {
     for h_idx in 0..layout.n_h {
-        let row = layout.row_water_balance_start + h_idx;
+        let row = layout.row_water_balance_start() + h_idx;
         let base = if ctx.par_lp.n_stages() > 0 && ctx.par_lp.n_hydros() == layout.n_h {
             ctx.par_lp.deterministic_base(stage_idx, h_idx)
         } else {
@@ -990,7 +988,7 @@ fn fill_load_balance_rows(
                 .resolved
                 .resolved_load_factors
                 .factor(b_idx, stage_idx, blk);
-            let row = layout.row_load_balance_start + b_idx * layout.n_blks + blk;
+            let row = layout.row_load_balance_start() + b_idx * layout.n_blks + blk;
             let rhs = mean_mw * factor;
             row_lower[row] = rhs;
             row_upper[row] = rhs;
@@ -1068,7 +1066,7 @@ fn fill_z_inflow_rows(
     row_upper: &mut [f64],
 ) {
     for h_idx in 0..layout.n_h {
-        let row = layout.row_z_inflow_start + h_idx;
+        let row = layout.row_z_inflow_start() + h_idx;
         let base = if ctx.par_lp.n_stages() > 0 && ctx.par_lp.n_hydros() == layout.n_h {
             ctx.par_lp.deterministic_base(stage_idx, h_idx)
         } else {
@@ -1224,12 +1222,12 @@ pub(super) fn fill_anticipated_fishing_entries(
         let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
         let mut block_hours_total: f64 = 0.0;
         for blk in 0..n_blks {
-            let col_gen = layout.col_thermal_start + thermal_idx * n_blks + blk;
+            let col_gen = layout.col_thermal_start() + thermal_idx * n_blks + blk;
             let block_hours = stage.blocks[blk].duration_hours;
             col_entries[col_gen].push((row, block_hours));
             block_hours_total += block_hours;
         }
-        let col_state = layout.anticipated.col_anticipated_state_start + local_idx;
+        let col_state = layout.col_anticipated_state_start() + local_idx;
         col_entries[col_state].push((row, -block_hours_total));
     }
     debug_assert_eq!(
@@ -1300,9 +1298,9 @@ pub(super) fn fill_state_and_water_entries(
     let n_blks = layout.n_blks;
     let lag_order = layout.lag_order;
     let zeta = layout.zeta;
-    let row_water = layout.row_water_balance_start;
-    let col_storage_in_start = layout.col_storage_in_start;
-    let col_inflow_lags_start = layout.col_inflow_lags_start;
+    let row_water = layout.row_water_balance_start();
+    let col_storage_in_start = layout.col_storage_in_start();
+    let col_inflow_lags_start = layout.col_inflow_lags_start();
 
     // Water balance: outgoing storage (+1), incoming storage (-1),
     // turbine/spillage (+tau), upstream turbine/spillage (-tau),
@@ -1352,7 +1350,7 @@ pub(super) fn fill_state_and_water_entries(
     // Inflow non-negativity slack: sigma_inf_h enters water balance with -ζ.
     if ctx.has_penalty {
         for h_idx in 0..n_h {
-            let col = layout.col_inflow_slack_start + h_idx;
+            let col = layout.col_inflow_slack_start() + h_idx;
             let row = row_water + h_idx;
             col_entries[col].push((row, -zeta));
         }
@@ -1415,7 +1413,7 @@ pub(super) fn fill_pumping_water_entries(
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
     let n_blks = layout.n_blks;
-    let row_water = layout.row_water_balance_start;
+    let row_water = layout.row_water_balance_start();
     for (p_idx, station) in ctx.pumping_stations.iter().enumerate() {
         // `validate_pumping_station_refs` (run from `SystemBuilder::build()`)
         // guarantees both refs resolve on a validated `System`, so on the
@@ -1462,7 +1460,7 @@ pub(super) fn fill_load_balance_entries(
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
     let n_blks = layout.n_blks;
-    let row_load = layout.row_load_balance_start;
+    let row_load = layout.row_load_balance_start();
 
     for (h_idx, hydro) in ctx.hydros.iter().enumerate() {
         if let Some(local_idx) = layout.fpha_local_index[h_idx] {
@@ -1503,7 +1501,7 @@ pub(super) fn fill_load_balance_entries(
         if let Some(&b_idx) = ctx.bus_pos.get(&thermal.bus_id) {
             for blk in 0..n_blks {
                 let row = row_load + b_idx * n_blks + blk;
-                let col = layout.col_thermal_start + t_idx * n_blks + blk;
+                let col = layout.col_thermal_start() + t_idx * n_blks + blk;
                 col_entries[col].push((row, 1.0));
             }
         }
@@ -1549,7 +1547,7 @@ pub(super) fn fill_load_balance_entries(
                 let col_def = layout.deficit_col(b_idx, seg_idx, blk);
                 col_entries[col_def].push((row, 1.0));
             }
-            let col_exc = layout.col_excess_start + b_idx * n_blks + blk;
+            let col_exc = layout.col_excess_start() + b_idx * n_blks + blk;
             col_entries[col_exc].push((row, -1.0));
         }
     }
@@ -1586,7 +1584,7 @@ pub(super) fn fill_fpha_entries(
     layout: &StageLayout,
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
-    let col_storage_in_start = layout.col_storage_in_start;
+    let col_storage_in_start = layout.col_storage_in_start();
     for_each_fpha_plane(
         ctx,
         stage_idx,
@@ -1637,7 +1635,7 @@ pub(super) fn fill_evaporation_entries(
     layout: &StageLayout,
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
-    let col_storage_in_start = layout.col_storage_in_start;
+    let col_storage_in_start = layout.col_storage_in_start();
 
     for (local_idx, &h_idx) in layout.evap_hydro_indices.iter().enumerate() {
         let coeff = match ctx.evaporation_models.model(h_idx) {
@@ -1869,7 +1867,7 @@ pub(super) fn fill_ncs_load_balance_entries(
         };
         for blk in 0..layout.n_blks {
             let col = layout.col_ncs_start + ncs_local * layout.n_blks + blk;
-            let row = layout.row_load_balance_start + bus_idx * layout.n_blks + blk;
+            let row = layout.row_load_balance_start() + bus_idx * layout.n_blks + blk;
             col_entries[col].push((row, 1.0));
         }
     }
@@ -1895,13 +1893,13 @@ pub(super) fn fill_z_inflow_entries(
 ) {
     let n_h = layout.n_h;
     let lag_order = layout.lag_order;
-    let col_inflow_lags_start = layout.col_inflow_lags_start;
+    let col_inflow_lags_start = layout.col_inflow_lags_start();
 
     for h_idx in 0..n_h {
-        let row = layout.row_z_inflow_start + h_idx;
+        let row = layout.row_z_inflow_start() + h_idx;
 
         // z_h column: coefficient +1.0
-        let col_z = layout.col_z_inflow_start + h_idx;
+        let col_z = layout.col_z_inflow_start() + h_idx;
         col_entries[col_z].push((row, 1.0));
 
         // Lag columns: coefficient -psi_l for each nonzero psi.
@@ -2847,7 +2845,7 @@ mod zero_cost_tests {
         // Plant 0 (K_0=1): zeroed under always-active predicate.
         let thermal_idx_0 = ctx.anticipated_thermal_indices[0];
         for blk in 0..n_blks {
-            let col = layout.col_thermal_start + thermal_idx_0 * n_blks + blk;
+            let col = layout.col_thermal_start() + thermal_idx_0 * n_blks + blk;
             assert_eq!(
                 bufs.objective[col], 0.0,
                 "plant 0 must be zeroed at col {col}",
@@ -2856,7 +2854,7 @@ mod zero_cost_tests {
         // Plant 1 (K_1=5): also zeroed under always-active predicate.
         let thermal_idx_1 = ctx.anticipated_thermal_indices[1];
         for blk in 0..n_blks {
-            let col = layout.col_thermal_start + thermal_idx_1 * n_blks + blk;
+            let col = layout.col_thermal_start() + thermal_idx_1 * n_blks + blk;
             assert_eq!(
                 bufs.objective[col], 0.0,
                 "plant 1 must be zeroed at col {col}",
@@ -2952,7 +2950,7 @@ mod zero_cost_tests {
         let expected_neg = -block_hours_total;
         for local_idx in 0..layout.anticipated.n_anticipated_fishing_rows {
             let row = layout.anticipated.row_anticipated_fishing_start + local_idx;
-            let col_state = layout.anticipated.col_anticipated_state_start + local_idx;
+            let col_state = layout.col_anticipated_state_start() + local_idx;
             let state_couplings: Vec<&(usize, f64)> = col_entries[col_state]
                 .iter()
                 .filter(|(r, _)| *r == row)
@@ -3233,7 +3231,7 @@ mod zero_cost_tests {
         let k = ctx.k_max;
         for slot in 0..k {
             for plant in 0..a {
-                let col = layout.anticipated.col_anticipated_state_start + slot * a + plant;
+                let col = layout.col_anticipated_state_start() + slot * a + plant;
                 let diag_row = slot * a + plant;
                 let has_diag = col_entries[col]
                     .iter()
@@ -3253,7 +3251,7 @@ mod zero_cost_tests {
         let n_h = ctx.n_hydros;
         let lag_order = ctx.max_par_order;
         for h in 0..n_h {
-            let col = layout.col_storage_in_start + h;
+            let col = layout.col_storage_in_start() + h;
             let has_diag = col_entries[col]
                 .iter()
                 .any(|&(r, v)| r == h && (v - 1.0).abs() < 1e-15);
@@ -3264,7 +3262,7 @@ mod zero_cost_tests {
         }
         for lag in 0..lag_order {
             for h in 0..n_h {
-                let col = layout.col_inflow_lags_start + lag * n_h + h;
+                let col = layout.col_inflow_lags_start() + lag * n_h + h;
                 let diag_row = n_h + lag * n_h + h;
                 let has_diag = col_entries[col]
                     .iter()
@@ -3733,8 +3731,8 @@ mod pumping_water_tests {
         let n_blks = layout.n_blks;
         let source_pos = ctx.hydro_pos[&EntityId(1)];
         let dest_pos = ctx.hydro_pos[&EntityId(2)];
-        let row_source = layout.row_water_balance_start + source_pos;
-        let row_dest = layout.row_water_balance_start + dest_pos;
+        let row_source = layout.row_water_balance_start() + source_pos;
+        let row_dest = layout.row_water_balance_start() + dest_pos;
 
         for blk in 0..n_blks {
             let tau_h = stage.blocks[blk].duration_hours * M3S_TO_HM3;
@@ -3765,7 +3763,7 @@ mod pumping_water_tests {
 
         let n_blks = layout.n_blks;
         let dest_pos = ctx.hydro_pos[&EntityId(2)];
-        let row_dest = layout.row_water_balance_start + dest_pos;
+        let row_dest = layout.row_water_balance_start() + dest_pos;
         for blk in 0..n_blks {
             let tau_h = stage.blocks[blk].duration_hours * M3S_TO_HM3;
             let col = layout.col_pumping_start + blk;
@@ -3795,7 +3793,7 @@ mod pumping_water_tests {
 
         let n_blks = layout.n_blks;
         let source_pos = ctx.hydro_pos[&EntityId(1)];
-        let row_source = layout.row_water_balance_start + source_pos;
+        let row_source = layout.row_water_balance_start() + source_pos;
         for blk in 0..n_blks {
             let tau_h = stage.blocks[blk].duration_hours * M3S_TO_HM3;
             let col = layout.col_pumping_start + blk;
@@ -3828,7 +3826,7 @@ mod pumping_water_tests {
         let n_blks = layout.n_blks;
         let b_idx = ctx.bus_pos[&EntityId(1)];
         for blk in 0..n_blks {
-            let row = layout.row_load_balance_start + b_idx * n_blks + blk;
+            let row = layout.row_load_balance_start() + b_idx * n_blks + blk;
             let col = layout.col_pumping_start + blk;
             assert!(
                 col_entries[col].contains(&(row, -0.75)),
@@ -4409,7 +4407,7 @@ mod diversion_bound_tests {
 
         let (col_upper, layout) = run_fill(&fixtures);
         for blk in 0..layout.n_blks {
-            let col = layout.col_diversion_start + blk;
+            let col = layout.col_diversion_start() + blk;
             assert_eq!(
                 col_upper[col], override_value,
                 "blk {blk}: col_upper[{col}] must equal the resolved override {override_value}"
@@ -4431,7 +4429,7 @@ mod diversion_bound_tests {
 
         let (col_upper, layout) = run_fill(&fixtures);
         for blk in 0..layout.n_blks {
-            let col = layout.col_diversion_start + blk;
+            let col = layout.col_diversion_start() + blk;
             assert_eq!(
                 col_upper[col], DECLARATION_MAX_FLOW_M3S,
                 "blk {blk}: col_upper[{col}] must equal the declaration default \

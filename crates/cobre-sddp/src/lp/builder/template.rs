@@ -272,8 +272,8 @@ pub(super) fn build_single_stage_template(
     stage_idx: usize,
 ) -> StageBuildOutput {
     let layout = StageLayout::new(ctx, stage, stage_idx);
-    let stage_base_row = layout.row_water_balance_start;
-    let load_balance_row_start = layout.row_load_balance_start;
+    let stage_base_row = layout.row_water_balance_start();
+    let load_balance_row_start = layout.row_load_balance_start();
 
     let (col_lower, mut col_upper, mut objective) =
         matrix::fill_stage_columns(ctx, stage, stage_idx, &layout);
@@ -307,10 +307,10 @@ pub(super) fn build_single_stage_template(
     // If theta were also divided by K its objective coefficient would become
     // 1/K, making the LP objective `stage_cost/K + (1/K)*theta` which, after
     // multiplication by K, gives `stage_cost + future_cost/K` -- wrong.
-    // Use `layout.col_theta` so the correct index is read from the augmented
+    // Use `layout.col_theta()` so the correct index is read from the augmented
     // indexer even when `n_anticipated > 0` shifts theta past the anticipated
     // state block.
-    let theta_col = layout.col_theta;
+    let theta_col = layout.col_theta();
     for (i, coeff) in objective.iter_mut().enumerate() {
         if i != theta_col {
             *coeff /= COST_SCALE_FACTOR;
@@ -338,7 +338,7 @@ pub(super) fn build_single_stage_template(
         objective,
         row_lower,
         row_upper,
-        n_state: layout.n_state,
+        n_state: layout.n_state(),
         n_transfer,
         n_dual_relevant: layout.n_dual_relevant,
         n_hydro: layout.n_h,
@@ -2017,8 +2017,8 @@ mod tests {
                 "stage {stage_idx}: dec_start"
             );
             assert_eq!(
-                layout_a.anticipated.col_anticipated_state_start,
-                layout_b.anticipated.col_anticipated_state_start,
+                layout_a.col_anticipated_state_start(),
+                layout_b.col_anticipated_state_start(),
                 "stage {stage_idx}: state_start"
             );
             assert_eq!(
@@ -2037,8 +2037,8 @@ mod tests {
                 &tpl_b,
                 layout_a.anticipated.col_anticipated_decision_start,
                 layout_b.anticipated.col_anticipated_decision_start,
-                layout_a.anticipated.col_anticipated_state_start,
-                layout_b.anticipated.col_anticipated_state_start,
+                layout_a.col_anticipated_state_start(),
+                layout_b.col_anticipated_state_start(),
                 layout_a.anticipated.col_anticipated_state_out_start,
                 layout_b.anticipated.col_anticipated_state_out_start,
                 ctx_a.n_anticipated,
