@@ -2484,11 +2484,10 @@ mod tests {
 
     /// With `n_hydros == 0`, every Group-2 accessor must return the post-equipment
     /// cursor — `post_equipment_col_start()` for the eight column accessors,
-    /// `post_equipment_row_start()` for the five row accessors — matching the
-    /// pre-change constructor value. A bare `self.indexer.<range>.start` returns the
-    /// `0` of the normalised `0..0` empty range; the equality assertions here pin the
-    /// accessor to the real cursor instead, which is the silent misbuild this split
-    /// exists to prevent.
+    /// `post_equipment_row_start()` for the five row accessors. A bare
+    /// `self.indexer.<range>.start` returns the `0` of the normalised `0..0` empty
+    /// range; the equality assertions here pin the accessor to the real cursor
+    /// instead, which is the silent misbuild this split exists to prevent.
     ///
     /// The column cursor is additionally asserted `!= 0`: the theta and state columns
     /// always precede the equipment/slack region, so `post_equipment_col_start()` is

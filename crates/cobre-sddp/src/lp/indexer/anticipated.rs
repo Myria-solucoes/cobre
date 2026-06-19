@@ -1,8 +1,9 @@
 //! Per-stage anticipated-thermal iterators and predicates for [`StageIndexer`].
 //!
-//! Owns the stage-level gating of the anticipated-decision columns and the
-//! anticipated-fishing rows: which plants are active at a given stage and what
-//! LP column/row each maps to.
+//! Owns the stage-level gating of the anticipated-decision columns: which plants
+//! are active at a given stage and what LP column each maps to. The
+//! anticipated-fishing row block is always active for every anticipated plant;
+//! its placement lives in the layout module.
 
 use super::layout::StageIndexer;
 
@@ -373,7 +374,7 @@ mod tests {
             pen: bool,
         }
 
-        /// Number of stages used for active-stage queries (I10, I11).
+        /// Number of stages used for active-stage queries (I10).
         ///
         /// Must be `>= k_max` so the `K_i <= T` invariant holds for every
         /// generated `lead_stages` scheme.

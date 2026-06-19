@@ -282,8 +282,7 @@ pub fn assign_scenarios(n_scenarios: u32, rank: usize, world_size: usize) -> Ran
     let fat_size = n / r + 1; // ceil(n / r)
     let lean_size = n / r; // floor(n / r)
 
-    // Compute the start offset for this rank.
-    let start: usize = if rank < fat_count {
+    let start = if rank < fat_count {
         // Rank is in the fat group.
         rank * fat_size
     } else {

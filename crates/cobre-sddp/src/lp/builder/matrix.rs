@@ -1099,9 +1099,9 @@ fn fill_operational_violation_rows(
     // lookup, so the bound is read once per hydro and a `(row_start, lower, upper)`
     // descriptor is built from it. Each family targets `row_lower`/`row_upper` by its
     // own computed row index, so the visit order is irrelevant to the result. The
-    // descriptor order is nonetheless pinned to the canonical row-write order
-    // (min-outflow, max-outflow, min-turbine, min-generation) to keep the source-level
-    // write order canonical (determinism). Per-family sense:
+    // descriptor order is nonetheless pinned to the canonical row-region order
+    // (min-outflow, max-outflow, min-turbine, min-generation) so the source-level
+    // write order stays auditable against the layout. Per-family sense:
     //   min-outflow   (>=): LHS + sigma >= min_outflow_m3s
     //   max-outflow   (<=): LHS - sigma <= max_outflow_m3s
     //   min-turbine   (>=): LHS + sigma >= min_turbined_m3s

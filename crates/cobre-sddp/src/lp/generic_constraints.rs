@@ -533,26 +533,24 @@ fn resolve_hydro_evaporation(
     indexer: &StageIndexer,
     hydro_pos: &HashMap<EntityId, usize>,
 ) -> Vec<(usize, f64)> {
-    if let Some(&sys_pos) = hydro_pos.get(&hydro_id) {
-        // Linear scan over the small per-stage evaporation-hydro list. This runs
-        // on the cold per-constraint-term resolver path (template build, not a
-        // solve loop), so the O(n) cost over a handful of evaporation hydros is
-        // not measurable and a pre-built O(1) reverse map is not warranted here —
-        // unlike `resolve_anticipated_decision`, whose larger/hotter set earns
-        // `anticipated_local_by_sys_pos`.
-        if let Some(local_idx) = indexer
-            .evap_hydro_indices
-            .iter()
-            .position(|&p| p == sys_pos)
-        {
-            let evaporation_flow_col = indexer.evap_indices[local_idx].evaporation_flow_col;
-            vec![(evaporation_flow_col, 1.0)]
-        } else {
-            vec![]
-        }
-    } else {
-        vec![]
-    }
+    let Some(&sys_pos) = hydro_pos.get(&hydro_id) else {
+        return vec![];
+    };
+    // Linear scan over the small per-stage evaporation-hydro list. This runs
+    // on the cold per-constraint-term resolver path (template build, not a
+    // solve loop), so the O(n) cost over a handful of evaporation hydros is
+    // not measurable and a pre-built O(1) reverse map is not warranted here —
+    // unlike `resolve_anticipated_decision`, whose larger/hotter set earns
+    // `anticipated_local_by_sys_pos`.
+    let Some(local_idx) = indexer
+        .evap_hydro_indices
+        .iter()
+        .position(|&p| p == sys_pos)
+    else {
+        return vec![];
+    };
+    let evaporation_flow_col = indexer.evap_indices[local_idx].evaporation_flow_col;
+    vec![(evaporation_flow_col, 1.0)]
 }
 
 /// Resolve `HydroOutflow` (turbine + spillage) to two block-level columns.
