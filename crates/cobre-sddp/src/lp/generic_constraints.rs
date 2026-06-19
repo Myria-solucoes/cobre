@@ -38,7 +38,6 @@
 //! entity types.
 
 use std::collections::HashMap;
-use std::hash::BuildHasher;
 
 use cobre_core::{CascadeTopology, ConstraintExpression, EntityId, PumpingStation, VariableRef};
 
@@ -50,15 +49,15 @@ use crate::indexer::StageIndexer;
 ///
 /// Used by [`resolve_variable_ref`] to translate `VariableRef` entity IDs
 /// into LP column offsets.
-pub(crate) struct EntityPositionMaps<'a, S: BuildHasher = std::hash::RandomState> {
+pub(crate) struct EntityPositionMaps<'a> {
     /// Hydro plant ID to position index.
-    pub hydro: &'a HashMap<EntityId, usize, S>,
+    pub hydro: &'a HashMap<EntityId, usize>,
     /// Thermal unit ID to position index.
-    pub thermal: &'a HashMap<EntityId, usize, S>,
+    pub thermal: &'a HashMap<EntityId, usize>,
     /// Bus ID to position index.
-    pub bus: &'a HashMap<EntityId, usize, S>,
+    pub bus: &'a HashMap<EntityId, usize>,
     /// Line ID to position index.
-    pub line: &'a HashMap<EntityId, usize, S>,
+    pub line: &'a HashMap<EntityId, usize>,
 }
 
 /// Borrowed cascade context for resolving the total-inflow expression.
@@ -67,7 +66,7 @@ pub(crate) struct EntityPositionMaps<'a, S: BuildHasher = std::hash::RandomState
 /// [`resolve_variable_ref`] does not trip `clippy::too_many_arguments`,
 /// mirroring the [`EntityPositionMaps`] grouping idiom. The `HydroInflow` arm is
 /// the only consumer; every other arm ignores it.
-pub(crate) struct CascadeRefs<'a, S: BuildHasher = std::hash::RandomState> {
+pub(crate) struct CascadeRefs<'a> {
     /// Immediately-upstream cascade adjacency. `upstream(h)` returns
     /// `&[EntityId]` sorted by `EntityId.0` at build time, so the resolver
     /// iterates it in a fixed, input-ordering-independent sequence.
@@ -75,7 +74,7 @@ pub(crate) struct CascadeRefs<'a, S: BuildHasher = std::hash::RandomState> {
     /// Target hydro id to the **system indices** of plants diverting into it,
     /// built in canonical hydro order (the same representation `matrix.rs`
     /// iterates for the storage-balance diversion-inflow term).
-    pub diversion_upstream: &'a HashMap<EntityId, Vec<usize>, S>,
+    pub diversion_upstream: &'a HashMap<EntityId, Vec<usize>>,
 }
 
 /// Borrowed pumping context for resolving `PumpingFlow`/`PumpingPower`.
@@ -84,7 +83,7 @@ pub(crate) struct CascadeRefs<'a, S: BuildHasher = std::hash::RandomState> {
 /// [`resolve_variable_ref`] does not trip `clippy::too_many_arguments`,
 /// mirroring the [`CascadeRefs`] grouping idiom. The `PumpingFlow`/`PumpingPower`
 /// arms are the only consumers; every other arm ignores it.
-pub(crate) struct PumpingRefs<'a, S: BuildHasher = std::hash::RandomState> {
+pub(crate) struct PumpingRefs<'a> {
     /// First pumping-flow column. The column for station local index `p_idx`,
     /// block `blk` is `col_pumping_start + p_idx * n_blks + blk`, where `n_blks`
     /// is the block stride threaded into [`resolve_variable_ref`] (the same stride
@@ -101,7 +100,7 @@ pub(crate) struct PumpingRefs<'a, S: BuildHasher = std::hash::RandomState> {
     pub pumping_stations: &'a [PumpingStation],
     /// Station id → local index (`p_idx`) into [`PumpingRefs::pumping_stations`].
     /// A lookup miss (unknown station, or no stations at all) yields `vec![]`.
-    pub pumping_pos: &'a HashMap<EntityId, usize, S>,
+    pub pumping_pos: &'a HashMap<EntityId, usize>,
 }
 
 /// Map a [`VariableRef`] and block index to LP column indices with multipliers.
@@ -135,16 +134,16 @@ pub(crate) struct PumpingRefs<'a, S: BuildHasher = std::hash::RandomState> {
 /// - The variable type references a stub entity with no LP columns (contracts,
 ///   non-controllable sources, withdrawal).
 #[must_use]
-pub(crate) fn resolve_variable_ref<S: BuildHasher>(
+pub(crate) fn resolve_variable_ref(
     var_ref: &VariableRef,
     block_idx: usize,
     n_blks: usize,
     stage_idx: usize,
     indexer: &StageIndexer,
     production_models: &ProductionModelSet,
-    positions: &EntityPositionMaps<'_, S>,
-    cascade_refs: &CascadeRefs<'_, S>,
-    pumping_refs: &PumpingRefs<'_, S>,
+    positions: &EntityPositionMaps<'_>,
+    cascade_refs: &CascadeRefs<'_>,
+    pumping_refs: &PumpingRefs<'_>,
 ) -> Vec<(usize, f64)> {
     let hydro_pos = positions.hydro;
     let thermal_pos = positions.thermal;
@@ -430,10 +429,10 @@ pub(crate) fn expression_is_block_independent(expression: &ConstraintExpression)
 ///
 /// `indexer.storage[h] = storage.start + h`. Returns empty vec when the hydro
 /// ID is not found in `hydro_pos`.
-fn resolve_hydro_storage<S: BuildHasher>(
+fn resolve_hydro_storage(
     hydro_id: EntityId,
     indexer: &StageIndexer,
-    hydro_pos: &HashMap<EntityId, usize, S>,
+    hydro_pos: &HashMap<EntityId, usize>,
 ) -> Vec<(usize, f64)> {
     if let Some(&pos) = hydro_pos.get(&hydro_id) {
         vec![(indexer.storage.start + pos, 1.0)]
@@ -468,14 +467,14 @@ fn resolve_hydro_storage<S: BuildHasher>(
 /// `hydro_count == 0` (unlike `storage`, which is non-empty whenever hydros
 /// exist), so `z_inflow.start` would be a meaningless offset there. Returns an
 /// empty vec when `hydro_count == 0` or `hydro_id` is unknown.
-fn resolve_hydro_inflow<S: BuildHasher>(
+fn resolve_hydro_inflow(
     hydro_id: EntityId,
     block_id: Option<usize>,
     block_idx: usize,
     n_blks: usize,
     indexer: &StageIndexer,
-    hydro_pos: &HashMap<EntityId, usize, S>,
-    cascade_refs: &CascadeRefs<'_, S>,
+    hydro_pos: &HashMap<EntityId, usize>,
+    cascade_refs: &CascadeRefs<'_>,
 ) -> Vec<(usize, f64)> {
     if indexer.z_inflow.is_empty() {
         return vec![];
@@ -529,10 +528,10 @@ fn resolve_hydro_inflow<S: BuildHasher>(
 /// The evaporation list uses a local index; we find it by matching the
 /// system-level hydro position. Returns empty vec when the hydro has no
 /// linearized evaporation at this stage.
-fn resolve_hydro_evaporation<S: BuildHasher>(
+fn resolve_hydro_evaporation(
     hydro_id: EntityId,
     indexer: &StageIndexer,
-    hydro_pos: &HashMap<EntityId, usize, S>,
+    hydro_pos: &HashMap<EntityId, usize>,
 ) -> Vec<(usize, f64)> {
     if let Some(&sys_pos) = hydro_pos.get(&hydro_id) {
         // Linear scan over the small per-stage evaporation-hydro list. This runs
@@ -562,13 +561,13 @@ fn resolve_hydro_evaporation<S: BuildHasher>(
 /// [`resolve_line_exchange`]); turbine is emitted before spillage. Returns an
 /// empty vec on a `hydro_pos` miss, so the no-result-on-miss contract holds for
 /// the whole pair, never a partial single column.
-fn resolve_hydro_outflow<S: BuildHasher>(
+fn resolve_hydro_outflow(
     hydro_id: EntityId,
     block_id: Option<usize>,
     block_idx: usize,
     n_blks: usize,
     indexer: &StageIndexer,
-    hydro_pos: &HashMap<EntityId, usize, S>,
+    hydro_pos: &HashMap<EntityId, usize>,
 ) -> Vec<(usize, f64)> {
     let Some(&pos) = hydro_pos.get(&hydro_id) else {
         return vec![];
@@ -585,7 +584,7 @@ fn resolve_hydro_outflow<S: BuildHasher>(
 ///
 /// - FPHA hydros: maps to the generation column at `fpha_local_idx * n_blks + blk`.
 /// - Constant-productivity hydros: maps to the turbine column scaled by productivity.
-fn resolve_hydro_generation<S: BuildHasher>(
+fn resolve_hydro_generation(
     hydro_id: EntityId,
     block_id: Option<usize>,
     block_idx: usize,
@@ -593,7 +592,7 @@ fn resolve_hydro_generation<S: BuildHasher>(
     stage_idx: usize,
     indexer: &StageIndexer,
     production_models: &ProductionModelSet,
-    hydro_pos: &HashMap<EntityId, usize, S>,
+    hydro_pos: &HashMap<EntityId, usize>,
 ) -> Vec<(usize, f64)> {
     let Some(&sys_pos) = hydro_pos.get(&hydro_id) else {
         return vec![];
@@ -635,13 +634,13 @@ fn resolve_hydro_generation<S: BuildHasher>(
 }
 
 /// Resolve `LineExchange` (net = forward − reverse) to two columns with signs.
-fn resolve_line_exchange<S: BuildHasher>(
+fn resolve_line_exchange(
     line_id: EntityId,
     block_id: Option<usize>,
     block_idx: usize,
     n_blks: usize,
     indexer: &StageIndexer,
-    line_pos: &HashMap<EntityId, usize, S>,
+    line_pos: &HashMap<EntityId, usize>,
 ) -> Vec<(usize, f64)> {
     if let Some(&pos) = line_pos.get(&line_id) {
         let effective_blk = block_id.unwrap_or(block_idx);
@@ -658,13 +657,13 @@ fn resolve_line_exchange<S: BuildHasher>(
 /// Resolve `BusDeficit` to one column per deficit segment.
 ///
 /// Column layout: `deficit.start + b_pos * S * n_blks + seg * n_blks + blk`.
-fn resolve_bus_deficit<S: BuildHasher>(
+fn resolve_bus_deficit(
     bus_id: EntityId,
     block_id: Option<usize>,
     block_idx: usize,
     n_blks: usize,
     indexer: &StageIndexer,
-    bus_pos: &HashMap<EntityId, usize, S>,
+    bus_pos: &HashMap<EntityId, usize>,
 ) -> Vec<(usize, f64)> {
     if let Some(&b_pos) = bus_pos.get(&bus_id) {
         let effective_blk = block_id.unwrap_or(block_idx);
@@ -688,10 +687,10 @@ fn resolve_bus_deficit<S: BuildHasher>(
 /// - The thermal's system position is not in `anticipated_thermal_indices`
 ///   (the thermal is not anticipated; semantic validation should have caught
 ///   this via rule 17 in `check_anticipated_decision_target_is_anticipated`).
-fn resolve_anticipated_decision<S: BuildHasher>(
+fn resolve_anticipated_decision(
     thermal_id: EntityId,
     indexer: &StageIndexer,
-    thermal_pos: &HashMap<EntityId, usize, S>,
+    thermal_pos: &HashMap<EntityId, usize>,
 ) -> Vec<(usize, f64)> {
     let Some(&sys_pos) = thermal_pos.get(&thermal_id) else {
         return vec![];
@@ -724,12 +723,12 @@ fn resolve_anticipated_decision<S: BuildHasher>(
 /// Returns an empty vec when the station id is unknown (a `pumping_pos` miss) or
 /// when there are no pumping stations (`pumping_pos` is empty), so `n_pumping == 0`
 /// is handled by the same lookup guard. No panic.
-fn resolve_pumping_column<S: BuildHasher>(
+fn resolve_pumping_column(
     station_id: EntityId,
     block_id: Option<usize>,
     block_idx: usize,
     n_blks: usize,
-    pumping_refs: &PumpingRefs<'_, S>,
+    pumping_refs: &PumpingRefs<'_>,
     coeff_fn: impl Fn(&PumpingStation) -> f64,
 ) -> Vec<(usize, f64)> {
     let Some(&p_idx) = pumping_refs.pumping_pos.get(&station_id) else {
@@ -753,13 +752,13 @@ fn resolve_pumping_column<S: BuildHasher>(
 /// `b` when `ref_block_id` is `Some(b)`.
 ///
 /// Returns an empty vec if the entity ID is not found in `pos_map`.
-fn resolve_block_variable<S: BuildHasher>(
+fn resolve_block_variable(
     entity_id: EntityId,
     ref_block_id: Option<usize>,
     current_block_idx: usize,
     n_blks: usize,
     col_start: usize,
-    pos_map: &HashMap<EntityId, usize, S>,
+    pos_map: &HashMap<EntityId, usize>,
     multiplier: f64,
 ) -> Vec<(usize, f64)> {
     if let Some(&pos) = pos_map.get(&entity_id) {
