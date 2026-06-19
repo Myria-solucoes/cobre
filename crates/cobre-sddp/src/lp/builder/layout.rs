@@ -233,52 +233,6 @@ pub(crate) struct StageLayout {
     /// row starts (see [`AnticipatedLayout`]). Read by the `fill_anticipated_*`
     /// matrix helpers through `layout.anticipated.<field>`.
     pub(crate) anticipated: AnticipatedLayout,
-    /// Start of FPHA generation columns (one per FPHA hydro per block).
-    ///
-    /// Layout within this region: `col_generation_start + local_fpha_idx * n_blks + blk`.
-    pub(crate) col_generation_start: usize,
-    // Row regions
-    /// Start of evaporation constraint rows (after FPHA rows).
-    ///
-    /// One equality row per evaporation hydro.
-    /// Layout: `row_evap_start + local_evap_idx`.
-    pub(crate) row_evap_start: usize,
-    /// Start of evaporation columns (after FPHA generation columns).
-    ///
-    /// [`EVAP_COLS_PER_HYDRO`] stage-level columns per evaporation hydro
-    /// (evaporation outflow, `f_evap_plus`, `f_evap_minus`). Address the three
-    /// via the `evap_flow_col` / `evap_f_plus_col` / `evap_f_minus_col` accessors
-    /// rather than open-coding the stride.
-    pub(crate) col_evap_start: usize,
-    /// Start of under-withdrawal slack columns (after evaporation columns).
-    ///
-    /// One stage-level column per operating hydro.
-    /// Layout: `col_withdrawal_neg_start + h`.
-    /// Zero when `n_h == 0`.
-    pub(crate) col_withdrawal_neg_start: usize,
-    /// Start of over-withdrawal slack columns (after under-withdrawal slacks).
-    ///
-    /// One stage-level column per operating hydro.
-    /// Layout: `col_withdrawal_pos_start + h`.
-    /// Zero when `n_h == 0`.
-    pub(crate) col_withdrawal_pos_start: usize,
-    /// Start of outflow-below-minimum slack columns (one per hydro per block).
-    ///
-    /// Inserted after withdrawal slack columns.
-    /// Layout: `col_outflow_below_start + h_idx * n_blks + blk`.
-    pub(crate) col_outflow_below_start: usize,
-    /// Start of outflow-above-maximum slack columns (one per hydro per block).
-    ///
-    /// Layout: `col_outflow_above_start + h_idx * n_blks + blk`.
-    pub(crate) col_outflow_above_start: usize,
-    /// Start of turbine-below-minimum slack columns (one per hydro per block).
-    ///
-    /// Layout: `col_turbine_below_start + h_idx * n_blks + blk`.
-    pub(crate) col_turbine_below_start: usize,
-    /// Start of generation-below-minimum slack columns (one per hydro per block).
-    ///
-    /// Layout: `col_generation_below_start + h_idx * n_blks + blk`.
-    pub(crate) col_generation_below_start: usize,
     /// Start of NCS generation columns (after operational violation slack columns).
     ///
     /// One column per active NCS per block.
@@ -311,22 +265,6 @@ pub(crate) struct StageLayout {
     /// pipeline uses to bound the per-(station, block) primal read.
     pub(crate) n_pumping: usize,
     pub(crate) num_cols: usize,
-    /// Start of minimum-outflow constraint rows (one per hydro per block, after evaporation rows).
-    ///
-    /// Layout: `row_min_outflow_start + h_idx * n_blks + blk`.
-    pub(crate) row_min_outflow_start: usize,
-    /// Start of maximum-outflow constraint rows (one per hydro per block).
-    ///
-    /// Layout: `row_max_outflow_start + h_idx * n_blks + blk`.
-    pub(crate) row_max_outflow_start: usize,
-    /// Start of minimum-turbine constraint rows (one per hydro per block).
-    ///
-    /// Layout: `row_min_turbine_start + h_idx * n_blks + blk`.
-    pub(crate) row_min_turbine_start: usize,
-    /// Start of minimum-generation constraint rows (one per hydro per block).
-    ///
-    /// Layout: `row_min_generation_start + h_idx * n_blks + blk`.
-    pub(crate) row_min_generation_start: usize,
     /// Start of generic constraint rows (after operational violation rows).
     ///
     /// One row per active `(constraint, block)` pair.
@@ -679,82 +617,27 @@ impl StageLayout {
         };
         let col_ncs_end = col_ncs_start + n_active_ncs * n_blks;
 
-        // FPHA generation and evaporation column starts: read from the indexer
-        // accessors so the empty-block cursor (not the normalised `0..0`) is
-        // used when no FPHA/evap hydros exist.
-        let col_generation_start = idx.generation_col_start();
-        let col_evap_start = idx.evap_col_start();
-
-        // Withdrawal and operational-violation slack columns: non-empty whenever
-        // `hydro_count > 0` and then carry the canonical cursors; with no hydros
-        // they normalise to `0..0`, so fall back to the post-equipment column
-        // cursor (`post_equipment_col_start`), the single-owned start every empty
-        // withdrawal/operational-slack region shares — sharing that one cursor is
-        // what keeps the empty-hydro layout from drifting onto a stale `> 0`-branch
-        // offset when a future family is inserted.
-        let (
-            col_withdrawal_neg_start,
-            col_withdrawal_pos_start,
-            col_outflow_below_start,
-            col_outflow_above_start,
-            col_turbine_below_start,
-            col_generation_below_start,
-        ) = if ctx.n_hydros > 0 {
-            (
-                idx.withdrawal_slack_neg.start,
-                idx.withdrawal_slack_pos.start,
-                idx.outflow_below_slack.start,
-                idx.outflow_above_slack.start,
-                idx.turbine_below_slack.start,
-                idx.generation_below_slack.start,
-            )
-        } else {
-            let region_start = idx.post_equipment_col_start();
-            (
-                region_start,
-                region_start,
-                region_start,
-                region_start,
-                region_start,
-                region_start,
-            )
-        };
-
         // Row offsets: z_inflow, water balance, load balance, FPHA, evap, operational, generic.
         // z_inflow starts at row 0; state pinning is applied via column bounds.
         // The dual-relevant structural prefix of view.dual is empty because state
         // pinning uses column bounds. Cut-subgradient extraction reads
         // view.reduced_costs; n_dual_relevant on the row side is unused by the cut path.
         let n_dual_relevant = 0_usize;
-        // Evap-row cursor: the FPHA and evap row blocks normalise to empty, so
-        // `row_evap_start` is read via the indexer accessor (`fpha_rows_end()`)
-        // rather than the `0..0` public range. The water-balance, load-balance,
-        // and FPHA-row starts are exposed via the read-through accessors
-        // (`row_water_balance_start`/`row_load_balance_start`/`row_fpha_start`).
-        let row_evap_start = idx.fpha_rows_end();
         let n_op_rows = ctx.n_hydros * n_blks;
-        // The four operational-violation row blocks are non-empty whenever
-        // `hydro_count > 0` and then carry the canonical cursors; with no hydros
-        // they normalise to `0..0`, so fall back to the post-equipment row cursor
-        // (`post_equipment_row_start`), the single-owned start every empty
-        // operational-violation row block shares — sharing that one cursor is what
-        // keeps the empty-hydro row layout from drifting onto a stale `> 0`-branch
-        // offset when a future row family is inserted before these blocks.
-        let (
-            row_min_outflow_start,
-            row_max_outflow_start,
-            row_min_turbine_start,
-            row_min_generation_start,
-        ) = if ctx.n_hydros > 0 {
-            (
-                idx.min_outflow_rows.start,
-                idx.max_outflow_rows.start,
-                idx.min_turbine_rows.start,
-                idx.min_generation_rows.start,
-            )
+        // First operational-violation row: non-empty whenever `hydro_count > 0`
+        // and then the canonical `min_generation_rows.start`; with no hydros the
+        // four operational-violation row blocks normalise to `0..0`, so fall back
+        // to the post-equipment row cursor (`post_equipment_row_start`), the
+        // single-owned start every empty operational-violation row block shares.
+        // Reproduces the `row_min_generation_start()` accessor's selection at
+        // construction time (no `self` yet) so the fishing-row start that follows
+        // is byte-identical. Sharing that one cursor is what keeps the empty-hydro
+        // row layout from drifting onto a stale `> 0`-branch offset when a future
+        // row family is inserted before these blocks.
+        let row_min_generation_start = if ctx.n_hydros > 0 {
+            idx.min_generation_rows.start
         } else {
-            let evap_rows_end = idx.post_equipment_row_start();
-            (evap_rows_end, evap_rows_end, evap_rows_end, evap_rows_end)
+            idx.post_equipment_row_start()
         };
 
         // One fishing row per anticipated plant at every stage (always-active).
@@ -815,25 +698,12 @@ impl StageLayout {
             k_max: ctx.k_max,
             n_ant_state,
             anticipated,
-            col_generation_start,
-            col_evap_start,
-            col_withdrawal_neg_start,
-            col_withdrawal_pos_start,
-            col_outflow_below_start,
-            col_outflow_above_start,
-            col_turbine_below_start,
-            col_generation_below_start,
             col_ncs_start,
             n_ncs: n_active_ncs,
             active_ncs_indices,
             col_pumping_start,
             n_pumping,
             num_cols,
-            row_evap_start,
-            row_min_outflow_start,
-            row_max_outflow_start,
-            row_min_turbine_start,
-            row_min_generation_start,
             row_generic_start,
             num_rows,
             n_generic_rows: generic.n_generic_rows,
@@ -883,7 +753,7 @@ impl StageLayout {
     /// FPHA generation column for FPHA-local index `local_idx`, block `blk`.
     #[inline]
     pub(crate) fn generation_col(&self, local_idx: usize, blk: usize) -> usize {
-        self.block_col(self.col_generation_start, local_idx, blk)
+        self.block_col(self.col_generation_start(), local_idx, blk)
     }
 
     /// Forward line-flow column for line `l_idx`, block `blk`.
@@ -901,25 +771,25 @@ impl StageLayout {
     /// Outflow-below-minimum slack column for hydro `h_idx`, block `blk`.
     #[inline]
     pub(crate) fn outflow_below_col(&self, h_idx: usize, blk: usize) -> usize {
-        self.block_col(self.col_outflow_below_start, h_idx, blk)
+        self.block_col(self.col_outflow_below_start(), h_idx, blk)
     }
 
     /// Outflow-above-maximum slack column for hydro `h_idx`, block `blk`.
     #[inline]
     pub(crate) fn outflow_above_col(&self, h_idx: usize, blk: usize) -> usize {
-        self.block_col(self.col_outflow_above_start, h_idx, blk)
+        self.block_col(self.col_outflow_above_start(), h_idx, blk)
     }
 
     /// Turbine-below-minimum slack column for hydro `h_idx`, block `blk`.
     #[inline]
     pub(crate) fn turbine_below_col(&self, h_idx: usize, blk: usize) -> usize {
-        self.block_col(self.col_turbine_below_start, h_idx, blk)
+        self.block_col(self.col_turbine_below_start(), h_idx, blk)
     }
 
     /// Generation-below-minimum slack column for hydro `h_idx`, block `blk`.
     #[inline]
     pub(crate) fn generation_below_col(&self, h_idx: usize, blk: usize) -> usize {
-        self.block_col(self.col_generation_below_start, h_idx, blk)
+        self.block_col(self.col_generation_below_start(), h_idx, blk)
     }
 
     /// Evaporation-outflow column for evaporation-local index `local_idx`.
@@ -928,21 +798,21 @@ impl StageLayout {
     /// accessor returns the [`EVAP_FLOW_OFFSET`] column. Stage-level (no block).
     #[inline]
     pub(crate) fn evap_flow_col(&self, local_idx: usize) -> usize {
-        self.col_evap_start + local_idx * EVAP_COLS_PER_HYDRO + EVAP_FLOW_OFFSET
+        self.col_evap_start() + local_idx * EVAP_COLS_PER_HYDRO + EVAP_FLOW_OFFSET
     }
 
     /// `f_evap_plus` (under-evaporation slack) column for evaporation-local
     /// index `local_idx` (the [`EVAP_F_PLUS_OFFSET`] column). Stage-level.
     #[inline]
     pub(crate) fn evap_f_plus_col(&self, local_idx: usize) -> usize {
-        self.col_evap_start + local_idx * EVAP_COLS_PER_HYDRO + EVAP_F_PLUS_OFFSET
+        self.col_evap_start() + local_idx * EVAP_COLS_PER_HYDRO + EVAP_F_PLUS_OFFSET
     }
 
     /// `f_evap_minus` (over-evaporation slack) column for evaporation-local
     /// index `local_idx` (the [`EVAP_F_MINUS_OFFSET`] column). Stage-level.
     #[inline]
     pub(crate) fn evap_f_minus_col(&self, local_idx: usize) -> usize {
-        self.col_evap_start + local_idx * EVAP_COLS_PER_HYDRO + EVAP_F_MINUS_OFFSET
+        self.col_evap_start() + local_idx * EVAP_COLS_PER_HYDRO + EVAP_F_MINUS_OFFSET
     }
 
     /// Deficit column for bus `b_idx`, segment `seg_idx`, block `blk`.
@@ -1107,6 +977,210 @@ impl StageLayout {
     #[must_use]
     pub(crate) fn n_state(&self) -> usize {
         self.indexer.n_state
+    }
+
+    // ── Empty-block-cursor read-through accessors ────────────────────────────────
+    // Each delegates to an indexer empty-block-cursor accessor or reproduces the
+    // constructor's `n_hydros > 0` selection, so the offset lives in one place
+    // (`self.indexer`) and cannot drift from a flattened copy. These differ from
+    // the plain read-throughs above: the underlying public range normalises to
+    // `0..0` when its family is empty, so a bare `self.indexer.<range>.start` would
+    // return `0` rather than the real cursor — silently misbuilding the empty-hydro
+    // layout. Each accessor returns the empty-block cursor instead.
+
+    /// Start of FPHA generation columns (one per FPHA hydro per block); delegates
+    /// to `self.indexer.generation_col_start()`.
+    ///
+    /// Layout within this region: `col_generation_start() + local_fpha_idx * n_blks + blk`.
+    /// The public `generation` range normalises to `0..0` with no FPHA hydros, so
+    /// this reads the indexer's empty-block cursor — never `0` for a real LP.
+    #[inline]
+    #[must_use]
+    pub(crate) fn col_generation_start(&self) -> usize {
+        self.indexer.generation_col_start()
+    }
+
+    /// Start of evaporation columns (after FPHA generation columns); delegates to
+    /// `self.indexer.evap_col_start()`.
+    ///
+    /// [`EVAP_COLS_PER_HYDRO`] stage-level columns per evaporation hydro
+    /// (evaporation outflow, `f_evap_plus`, `f_evap_minus`). Address the three via
+    /// the `evap_flow_col` / `evap_f_plus_col` / `evap_f_minus_col` accessors rather
+    /// than open-coding the stride. The indexer's `evap_indices` list is empty with
+    /// no evaporation hydros, so this reads the empty-block cursor — never `0` for a
+    /// real LP.
+    #[inline]
+    #[must_use]
+    pub(crate) fn col_evap_start(&self) -> usize {
+        self.indexer.evap_col_start()
+    }
+
+    /// Start of evaporation constraint rows (after FPHA rows); delegates to
+    /// `self.indexer.fpha_rows_end()`.
+    ///
+    /// One equality row per evaporation hydro. Layout: `row_evap_start() + local_evap_idx`.
+    /// The FPHA and evaporation row blocks both normalise to empty, so this reads the
+    /// indexer's `fpha_rows_end()` cursor rather than the `0..0` public range — never
+    /// `0` for a real LP.
+    #[inline]
+    #[must_use]
+    pub(crate) fn row_evap_start(&self) -> usize {
+        self.indexer.fpha_rows_end()
+    }
+
+    /// Start of under-withdrawal slack columns (after evaporation columns).
+    ///
+    /// One stage-level column per operating hydro. Layout: `col_withdrawal_neg_start() + h`.
+    /// Branches on `self.n_h > 0` — the constructor's `ctx.n_hydros > 0` discriminant.
+    /// With no hydros the `withdrawal_slack_neg` range normalises to `0..0`, so the
+    /// fallback is the post-equipment column cursor `post_equipment_col_start()`, NOT
+    /// the `0` a bare `withdrawal_slack_neg.start` would return.
+    #[inline]
+    #[must_use]
+    pub(crate) fn col_withdrawal_neg_start(&self) -> usize {
+        if self.n_h > 0 {
+            self.indexer.withdrawal_slack_neg.start
+        } else {
+            self.indexer.post_equipment_col_start()
+        }
+    }
+
+    /// Start of over-withdrawal slack columns (after under-withdrawal slacks).
+    ///
+    /// One stage-level column per operating hydro. Layout: `col_withdrawal_pos_start() + h`.
+    /// Branches on `self.n_h > 0`; the no-hydro fallback is `post_equipment_col_start()`,
+    /// NOT `0` (see [`Self::col_withdrawal_neg_start`]).
+    #[inline]
+    #[must_use]
+    pub(crate) fn col_withdrawal_pos_start(&self) -> usize {
+        if self.n_h > 0 {
+            self.indexer.withdrawal_slack_pos.start
+        } else {
+            self.indexer.post_equipment_col_start()
+        }
+    }
+
+    /// Start of outflow-below-minimum slack columns (one per hydro per block).
+    ///
+    /// Inserted after withdrawal slack columns.
+    /// Layout: `col_outflow_below_start() + h_idx * n_blks + blk`.
+    /// Branches on `self.n_h > 0`; the no-hydro fallback is `post_equipment_col_start()`,
+    /// NOT `0` (see [`Self::col_withdrawal_neg_start`]).
+    #[inline]
+    #[must_use]
+    pub(crate) fn col_outflow_below_start(&self) -> usize {
+        if self.n_h > 0 {
+            self.indexer.outflow_below_slack.start
+        } else {
+            self.indexer.post_equipment_col_start()
+        }
+    }
+
+    /// Start of outflow-above-maximum slack columns (one per hydro per block).
+    ///
+    /// Layout: `col_outflow_above_start() + h_idx * n_blks + blk`.
+    /// Branches on `self.n_h > 0`; the no-hydro fallback is `post_equipment_col_start()`,
+    /// NOT `0` (see [`Self::col_withdrawal_neg_start`]).
+    #[inline]
+    #[must_use]
+    pub(crate) fn col_outflow_above_start(&self) -> usize {
+        if self.n_h > 0 {
+            self.indexer.outflow_above_slack.start
+        } else {
+            self.indexer.post_equipment_col_start()
+        }
+    }
+
+    /// Start of turbine-below-minimum slack columns (one per hydro per block).
+    ///
+    /// Layout: `col_turbine_below_start() + h_idx * n_blks + blk`.
+    /// Branches on `self.n_h > 0`; the no-hydro fallback is `post_equipment_col_start()`,
+    /// NOT `0` (see [`Self::col_withdrawal_neg_start`]).
+    #[inline]
+    #[must_use]
+    pub(crate) fn col_turbine_below_start(&self) -> usize {
+        if self.n_h > 0 {
+            self.indexer.turbine_below_slack.start
+        } else {
+            self.indexer.post_equipment_col_start()
+        }
+    }
+
+    /// Start of generation-below-minimum slack columns (one per hydro per block).
+    ///
+    /// Layout: `col_generation_below_start() + h_idx * n_blks + blk`.
+    /// Branches on `self.n_h > 0`; the no-hydro fallback is `post_equipment_col_start()`,
+    /// NOT `0` (see [`Self::col_withdrawal_neg_start`]).
+    #[inline]
+    #[must_use]
+    pub(crate) fn col_generation_below_start(&self) -> usize {
+        if self.n_h > 0 {
+            self.indexer.generation_below_slack.start
+        } else {
+            self.indexer.post_equipment_col_start()
+        }
+    }
+
+    /// Start of minimum-outflow constraint rows (one per hydro per block, after evaporation rows).
+    ///
+    /// Layout: `row_min_outflow_start() + h_idx * n_blks + blk`.
+    /// Branches on `self.n_h > 0` — the constructor's `ctx.n_hydros > 0` discriminant.
+    /// With no hydros the operational-violation row blocks normalise to `0..0`, so the
+    /// fallback is the post-equipment row cursor `post_equipment_row_start()`, NOT the
+    /// `0` a bare `min_outflow_rows.start` would return.
+    #[inline]
+    #[must_use]
+    pub(crate) fn row_min_outflow_start(&self) -> usize {
+        if self.n_h > 0 {
+            self.indexer.min_outflow_rows.start
+        } else {
+            self.indexer.post_equipment_row_start()
+        }
+    }
+
+    /// Start of maximum-outflow constraint rows (one per hydro per block).
+    ///
+    /// Layout: `row_max_outflow_start() + h_idx * n_blks + blk`.
+    /// Branches on `self.n_h > 0`; the no-hydro fallback is `post_equipment_row_start()`,
+    /// NOT `0` (see [`Self::row_min_outflow_start`]).
+    #[inline]
+    #[must_use]
+    pub(crate) fn row_max_outflow_start(&self) -> usize {
+        if self.n_h > 0 {
+            self.indexer.max_outflow_rows.start
+        } else {
+            self.indexer.post_equipment_row_start()
+        }
+    }
+
+    /// Start of minimum-turbine constraint rows (one per hydro per block).
+    ///
+    /// Layout: `row_min_turbine_start() + h_idx * n_blks + blk`.
+    /// Branches on `self.n_h > 0`; the no-hydro fallback is `post_equipment_row_start()`,
+    /// NOT `0` (see [`Self::row_min_outflow_start`]).
+    #[inline]
+    #[must_use]
+    pub(crate) fn row_min_turbine_start(&self) -> usize {
+        if self.n_h > 0 {
+            self.indexer.min_turbine_rows.start
+        } else {
+            self.indexer.post_equipment_row_start()
+        }
+    }
+
+    /// Start of minimum-generation constraint rows (one per hydro per block).
+    ///
+    /// Layout: `row_min_generation_start() + h_idx * n_blks + blk`.
+    /// Branches on `self.n_h > 0`; the no-hydro fallback is `post_equipment_row_start()`,
+    /// NOT `0` (see [`Self::row_min_outflow_start`]).
+    #[inline]
+    #[must_use]
+    pub(crate) fn row_min_generation_start(&self) -> usize {
+        if self.n_h > 0 {
+            self.indexer.min_generation_rows.start
+        } else {
+            self.indexer.post_equipment_row_start()
+        }
     }
 }
 
@@ -1597,7 +1671,7 @@ mod tests {
         let n_op_rows = 0_usize;
         assert_eq!(
             layout.anticipated.row_anticipated_fishing_start,
-            layout.row_min_generation_start + n_op_rows,
+            layout.row_min_generation_start() + n_op_rows,
             "row_anticipated_fishing_start must equal row_min_generation_start + n_op_rows"
         );
         // Always-active: both plants active at every stage → 2 fishing rows.
@@ -2223,7 +2297,7 @@ mod tests {
                 );
                 assert_eq!(
                     layout.generation_col(entity, blk),
-                    layout.col_generation_start + entity * n_blks + blk,
+                    layout.col_generation_start() + entity * n_blks + blk,
                     "generation_col"
                 );
                 assert_eq!(
@@ -2238,22 +2312,22 @@ mod tests {
                 );
                 assert_eq!(
                     layout.outflow_below_col(entity, blk),
-                    layout.col_outflow_below_start + entity * n_blks + blk,
+                    layout.col_outflow_below_start() + entity * n_blks + blk,
                     "outflow_below_col"
                 );
                 assert_eq!(
                     layout.outflow_above_col(entity, blk),
-                    layout.col_outflow_above_start + entity * n_blks + blk,
+                    layout.col_outflow_above_start() + entity * n_blks + blk,
                     "outflow_above_col"
                 );
                 assert_eq!(
                     layout.turbine_below_col(entity, blk),
-                    layout.col_turbine_below_start + entity * n_blks + blk,
+                    layout.col_turbine_below_start() + entity * n_blks + blk,
                     "turbine_below_col"
                 );
                 assert_eq!(
                     layout.generation_below_col(entity, blk),
-                    layout.col_generation_below_start + entity * n_blks + blk,
+                    layout.col_generation_below_start() + entity * n_blks + blk,
                     "generation_below_col"
                 );
             }
@@ -2264,17 +2338,17 @@ mod tests {
         for local_idx in [0_usize, 1, 4] {
             assert_eq!(
                 layout.evap_flow_col(local_idx),
-                layout.col_evap_start + local_idx * EVAP_COLS_PER_HYDRO + EVAP_FLOW_OFFSET,
+                layout.col_evap_start() + local_idx * EVAP_COLS_PER_HYDRO + EVAP_FLOW_OFFSET,
                 "evap_flow_col"
             );
             assert_eq!(
                 layout.evap_f_plus_col(local_idx),
-                layout.col_evap_start + local_idx * EVAP_COLS_PER_HYDRO + EVAP_F_PLUS_OFFSET,
+                layout.col_evap_start() + local_idx * EVAP_COLS_PER_HYDRO + EVAP_F_PLUS_OFFSET,
                 "evap_f_plus_col"
             );
             assert_eq!(
                 layout.evap_f_minus_col(local_idx),
-                layout.col_evap_start + local_idx * EVAP_COLS_PER_HYDRO + EVAP_F_MINUS_OFFSET,
+                layout.col_evap_start() + local_idx * EVAP_COLS_PER_HYDRO + EVAP_F_MINUS_OFFSET,
                 "evap_f_minus_col"
             );
             // The three columns are consecutive and ordered flow < plus < minus.
@@ -2328,33 +2402,39 @@ mod tests {
         assert_eq!(ctx.n_hydros, 0, "fixture must have zero hydros");
         assert_eq!(layout.n_blks, 4, "fixture must build a 4-block layout");
 
-        let post_equipment = layout.col_evap_start;
+        let post_equipment = layout.col_evap_start();
         assert_eq!(
             layout.col_ncs_start, post_equipment,
             "col_ncs_start must collapse onto col_evap_start when n_hydros == 0"
         );
         assert_eq!(
-            layout.col_withdrawal_neg_start, post_equipment,
+            layout.col_withdrawal_neg_start(),
+            post_equipment,
             "col_withdrawal_neg_start"
         );
         assert_eq!(
-            layout.col_withdrawal_pos_start, post_equipment,
+            layout.col_withdrawal_pos_start(),
+            post_equipment,
             "col_withdrawal_pos_start"
         );
         assert_eq!(
-            layout.col_outflow_below_start, post_equipment,
+            layout.col_outflow_below_start(),
+            post_equipment,
             "col_outflow_below_start"
         );
         assert_eq!(
-            layout.col_outflow_above_start, post_equipment,
+            layout.col_outflow_above_start(),
+            post_equipment,
             "col_outflow_above_start"
         );
         assert_eq!(
-            layout.col_turbine_below_start, post_equipment,
+            layout.col_turbine_below_start(),
+            post_equipment,
             "col_turbine_below_start"
         );
         assert_eq!(
-            layout.col_generation_below_start, post_equipment,
+            layout.col_generation_below_start(),
+            post_equipment,
             "col_generation_below_start"
         );
     }
@@ -2379,20 +2459,104 @@ mod tests {
 
         let post_equipment = layout.indexer.fpha_rows_end() + layout.indexer.n_evap_hydros;
         assert_eq!(
-            layout.row_min_outflow_start, post_equipment,
+            layout.row_min_outflow_start(),
+            post_equipment,
             "row_min_outflow_start must collapse onto fpha_rows_end() + n_evap_hydros when n_hydros == 0"
         );
         assert_eq!(
-            layout.row_max_outflow_start, post_equipment,
+            layout.row_max_outflow_start(),
+            post_equipment,
             "row_max_outflow_start"
         );
         assert_eq!(
-            layout.row_min_turbine_start, post_equipment,
+            layout.row_min_turbine_start(),
+            post_equipment,
             "row_min_turbine_start"
         );
         assert_eq!(
-            layout.row_min_generation_start, post_equipment,
+            layout.row_min_generation_start(),
+            post_equipment,
             "row_min_generation_start"
         );
+    }
+
+    // ── Group-2 accessors: hydro-free divergence guard ──────────────────────────
+
+    /// With `n_hydros == 0`, every Group-2 accessor must return the post-equipment
+    /// cursor — `post_equipment_col_start()` for the eight column accessors,
+    /// `post_equipment_row_start()` for the five row accessors — matching the
+    /// pre-change constructor value. A bare `self.indexer.<range>.start` returns the
+    /// `0` of the normalised `0..0` empty range; the equality assertions here pin the
+    /// accessor to the real cursor instead, which is the silent misbuild this split
+    /// exists to prevent.
+    ///
+    /// The column cursor is additionally asserted `!= 0`: the theta and state columns
+    /// always precede the equipment/slack region, so `post_equipment_col_start()` is
+    /// provably positive and a spurious bare-`.start` `0` is directly detectable. The
+    /// row cursor is NOT asserted `!= 0`: with zero hydros AND zero buses no rows
+    /// precede the operational-violation block, so `post_equipment_row_start()` is
+    /// legitimately `0` here (asserting `!= 0` would test a false invariant). The
+    /// non-zero-row divergence is covered end-to-end by the D01 hydro-free parity
+    /// case, whose load-balance rows make the row cursor positive.
+    #[test]
+    fn group2_accessors_return_post_equipment_cursor_when_no_hydros() {
+        let fixtures = ZeroEntityFixtures::new();
+        let ctx = fixtures.make_ctx(0, 0, vec![], vec![]);
+        let stage = PumpingFixtures::stage_with_blocks(4);
+        let layout = StageLayout::new(&ctx, &stage, 0);
+
+        assert_eq!(ctx.n_hydros, 0, "fixture must have zero hydros");
+        assert_eq!(layout.n_blks, 4, "fixture must build a 4-block layout");
+
+        // Column cursor: the eight column accessors collapse onto
+        // `post_equipment_col_start()` (== `col_evap_start()`) with no hydros, and
+        // that cursor is provably positive (theta + state columns precede it).
+        let post_col = layout.indexer.post_equipment_col_start();
+        assert_ne!(post_col, 0, "post-equipment column cursor must not be 0");
+        for (value, name) in [
+            (layout.col_generation_start(), "col_generation_start"),
+            (layout.col_evap_start(), "col_evap_start"),
+            (
+                layout.col_withdrawal_neg_start(),
+                "col_withdrawal_neg_start",
+            ),
+            (
+                layout.col_withdrawal_pos_start(),
+                "col_withdrawal_pos_start",
+            ),
+            (layout.col_outflow_below_start(), "col_outflow_below_start"),
+            (layout.col_outflow_above_start(), "col_outflow_above_start"),
+            (layout.col_turbine_below_start(), "col_turbine_below_start"),
+            (
+                layout.col_generation_below_start(),
+                "col_generation_below_start",
+            ),
+        ] {
+            assert_eq!(
+                value, post_col,
+                "{name} must equal post_equipment_col_start() (not 0) when n_hydros == 0"
+            );
+        }
+
+        // Row cursor: `row_evap_start()` is `fpha_rows_end()`, which equals
+        // `post_equipment_row_start()` (= `fpha_rows_end() + n_evap_hydros`) when
+        // `n_evap_hydros == 0`. The four operational-violation row accessors collapse
+        // onto that same cursor. Each must equal it, never a bare `.start`.
+        let post_row = layout.indexer.post_equipment_row_start();
+        for (value, name) in [
+            (layout.row_evap_start(), "row_evap_start"),
+            (layout.row_min_outflow_start(), "row_min_outflow_start"),
+            (layout.row_max_outflow_start(), "row_max_outflow_start"),
+            (layout.row_min_turbine_start(), "row_min_turbine_start"),
+            (
+                layout.row_min_generation_start(),
+                "row_min_generation_start",
+            ),
+        ] {
+            assert_eq!(
+                value, post_row,
+                "{name} must equal post_equipment_row_start() when n_hydros == 0"
+            );
+        }
     }
 }

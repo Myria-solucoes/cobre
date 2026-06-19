@@ -603,7 +603,7 @@ fn fill_withdrawal_slack_columns(
 ) {
     // Neg slacks: under-delivery for T>0 (cap at |T|), over-application for T<0 (unbounded).
     for h_idx in 0..layout.n_h {
-        let col = layout.col_withdrawal_neg_start + h_idx;
+        let col = layout.col_withdrawal_neg_start() + h_idx;
         let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
         let t = hb.water_withdrawal_m3s;
         bufs.col_upper[col] = if t > 0.0 {
@@ -618,7 +618,7 @@ fn fill_withdrawal_slack_columns(
     }
     // Pos slacks: over-delivery for T>0 (unbounded), under-delivery for T<0 (cap at |T|).
     for h_idx in 0..layout.n_h {
-        let col = layout.col_withdrawal_pos_start + h_idx;
+        let col = layout.col_withdrawal_pos_start() + h_idx;
         let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
         let t = hb.water_withdrawal_m3s;
         bufs.col_upper[col] = if t > 0.0 {
@@ -1046,7 +1046,7 @@ fn fill_evaporation_rows(
                 coefficients.len()
             );
             let intercept_m3s = coefficients[stage_idx].intercept_m3s;
-            let row = layout.row_evap_start + local_idx;
+            let row = layout.row_evap_start() + local_idx;
             row_lower[row] = intercept_m3s;
             row_upper[row] = intercept_m3s;
         }
@@ -1106,22 +1106,22 @@ fn fill_operational_violation_rows(
     for h_idx in 0..layout.n_h {
         let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
         for blk in 0..layout.n_blks {
-            let row = layout.row_min_outflow_start + h_idx * layout.n_blks + blk;
+            let row = layout.row_min_outflow_start() + h_idx * layout.n_blks + blk;
             row_lower[row] = hb.min_outflow_m3s;
             row_upper[row] = f64::INFINITY;
         }
         for blk in 0..layout.n_blks {
-            let row = layout.row_max_outflow_start + h_idx * layout.n_blks + blk;
+            let row = layout.row_max_outflow_start() + h_idx * layout.n_blks + blk;
             row_lower[row] = f64::NEG_INFINITY;
             row_upper[row] = hb.max_outflow_m3s.unwrap_or(f64::INFINITY);
         }
         for blk in 0..layout.n_blks {
-            let row = layout.row_min_turbine_start + h_idx * layout.n_blks + blk;
+            let row = layout.row_min_turbine_start() + h_idx * layout.n_blks + blk;
             row_lower[row] = hb.min_turbined_m3s;
             row_upper[row] = f64::INFINITY;
         }
         for blk in 0..layout.n_blks {
-            let row = layout.row_min_generation_start + h_idx * layout.n_blks + blk;
+            let row = layout.row_min_generation_start() + h_idx * layout.n_blks + blk;
             row_lower[row] = hb.min_generation_mw;
             row_upper[row] = f64::INFINITY;
         }
@@ -1369,7 +1369,7 @@ pub(super) fn fill_state_and_water_entries(
     // When the reservoir cannot sustain the full scheduled withdrawal, the neg slack
     // absorbs the difference, reducing the effective withdrawal in that stage.
     for h_idx in 0..n_h {
-        let col = layout.col_withdrawal_neg_start + h_idx;
+        let col = layout.col_withdrawal_neg_start() + h_idx;
         let row = row_water + h_idx;
         col_entries[col].push((row, -zeta));
     }
@@ -1378,7 +1378,7 @@ pub(super) fn fill_state_and_water_entries(
     // When the solver withdraws more than the target, the pos slack accounts for
     // the excess withdrawal at a penalty cost.
     for h_idx in 0..n_h {
-        let col = layout.col_withdrawal_pos_start + h_idx;
+        let col = layout.col_withdrawal_pos_start() + h_idx;
         let row = row_water + h_idx;
         col_entries[col].push((row, zeta));
     }
@@ -1668,7 +1668,7 @@ pub(super) fn fill_evaporation_entries(
         let col_v = h_idx;
         let col_v_in = col_storage_in_start + h_idx;
 
-        let row = layout.row_evap_start + local_idx;
+        let row = layout.row_evap_start() + local_idx;
 
         col_entries[col_evaporation_flow].push((row, 1.0));
         col_entries[col_v].push((row, -coeff.volume_slope_m3s_per_hm3 / 2.0));
@@ -1940,7 +1940,7 @@ pub(super) fn fill_operational_violation_entries(
     for (h_idx, fpha_local_entry) in layout.fpha_local_index.iter().enumerate() {
         // ── Min outflow (per block): q + s + d + sigma >= min_outflow_m3s ───
         for blk in 0..n_blks {
-            let row = layout.row_min_outflow_start + h_idx * n_blks + blk;
+            let row = layout.row_min_outflow_start() + h_idx * n_blks + blk;
             let col_q = layout.turbine_col(h_idx, blk);
             col_entries[col_q].push((row, 1.0));
             let col_s = layout.spillage_col(h_idx, blk);
@@ -1953,7 +1953,7 @@ pub(super) fn fill_operational_violation_entries(
 
         // ── Max outflow (per block): q + s + d - sigma <= max_outflow_m3s ───
         for blk in 0..n_blks {
-            let row = layout.row_max_outflow_start + h_idx * n_blks + blk;
+            let row = layout.row_max_outflow_start() + h_idx * n_blks + blk;
             let col_q = layout.turbine_col(h_idx, blk);
             col_entries[col_q].push((row, 1.0));
             let col_s = layout.spillage_col(h_idx, blk);
@@ -1966,7 +1966,7 @@ pub(super) fn fill_operational_violation_entries(
 
         // ── Min turbine flow (per block): q + sigma >= min_turbined_m3s ─────
         for blk in 0..n_blks {
-            let row = layout.row_min_turbine_start + h_idx * n_blks + blk;
+            let row = layout.row_min_turbine_start() + h_idx * n_blks + blk;
             let col_q = layout.turbine_col(h_idx, blk);
             col_entries[col_q].push((row, 1.0));
             let col_slack = layout.turbine_below_col(h_idx, blk);
@@ -1977,7 +1977,7 @@ pub(super) fn fill_operational_violation_entries(
         if let Some(&local_fpha_idx) = fpha_local_entry.as_ref() {
             // FPHA: generation variable g_{h,blk} (already in MW).
             for blk in 0..n_blks {
-                let row = layout.row_min_generation_start + h_idx * n_blks + blk;
+                let row = layout.row_min_generation_start() + h_idx * n_blks + blk;
                 let col_g = layout.generation_col(local_fpha_idx, blk);
                 col_entries[col_g].push((row, 1.0));
                 let col_slack = layout.generation_below_col(h_idx, blk);
@@ -1996,7 +1996,7 @@ pub(super) fn fill_operational_violation_entries(
                 }
             };
             for blk in 0..n_blks {
-                let row = layout.row_min_generation_start + h_idx * n_blks + blk;
+                let row = layout.row_min_generation_start() + h_idx * n_blks + blk;
                 let col_q = layout.turbine_col(h_idx, blk);
                 col_entries[col_q].push((row, rho));
                 let col_slack = layout.generation_below_col(h_idx, blk);
