@@ -18,57 +18,12 @@
 //!
 //! ## LP layout (Solver Abstraction SS2)
 //!
-//! ### Column layout (contiguous regions)
-//!
-//! ```text
-//! [0,  N)                               outgoing storage      (N = n_hydros)
-//! [N,  N*(1+L))                         AR lag variables      (N*L lags, hydro-major)
-//! [N*(1+L), N*(1+L) + A*K_max)          anticipated_state     (A*K_max slots, slot-major)
-//! [N*(1+L)+A*K_max, N*(2+L)+A*K_max)   z_inflow              (realized inflow, free)
-//! [N*(2+L)+A*K_max, N*(3+L)+A*K_max)   storage_in            (incoming storage; state-pinning column)
-//! N*(3+L)+A*K_max                       theta                 (future cost, scalar)
-//! N*(3+L)+A*K_max+1 ..                  decision variables:
-//!   hydro turbine:       N*K columns
-//!   hydro spillage:      N*K columns
-//!   hydro diversion:     N*K columns (zero-bounded for non-diverting hydros)
-//!   thermal gen:         T*K columns
-//!   line fwd flow:       Lines*K columns
-//!   line rev flow:       Lines*K columns
-//!   bus deficit:         B*S*K columns  (S = max_deficit_segments across all buses)
-//!   bus excess:          B*K columns
-//!   inflow slack:        N columns (sigma_inf_h, only when penalty method is active)
-//!   FPHA generation:     N_fpha*K columns (one per FPHA hydro per block)
-//!   evaporation:         N_evap*3 columns (evaporation_flow, f_evap_plus, f_evap_minus per evap hydro)
-//!   withdrawal slack:    2*N columns (under-withdrawal neg, over-withdrawal pos; one per hydro each)
-//!   outflow_below slack: N*K columns (min-outflow violation, one per hydro per block)
-//!   outflow_above slack: N*K columns (max-outflow violation, one per hydro per block)
-//!   turbine_below slack: N*K columns (min-turbine violation, one per hydro per block)
-//!   gen_below slack:     N*K columns (min-generation violation, one per hydro per block)
-//!   NCS generation:      n_active_ncs*K columns  (VARIES per stage)
-//!   generic slack:       n_generic_slack columns  (VARIES per stage)
-//! ```
-//!
-//! When `A == 0` (no anticipated thermals), the `anticipated_state` block is
-//! absent and the layout collapses: `z_inflow` starts at `N*(1+L)`, `theta` at
-//! `N*(3+L)`.  Use [`crate::indexer::StageIndexer`] to resolve all column offsets.
-//!
-//! ### Row layout (contiguous regions)
-//!
-//! ```text
-//! [0, N)               z_inflow definition  (equality, RHS = realized inflow)
-//! [N, 2N)              water balance        (equality, RHS = noise innovation)
-//! [2N, 2N + B*K)       load balance         (equality, RHS = scenario load demand)
-//! 2N + B*K ..          structural constraints:
-//!   FPHA:                n_fpha_rows
-//!   evaporation:         n_evap rows
-//!   min-outflow:         N*K rows (one per hydro per block)
-//!   max-outflow:         N*K rows (one per hydro per block)
-//!   min-turbine:         N*K rows (one per hydro per block)
-//!   min-generation:      N*K rows (one per hydro per block)
-//!   anticipated fishing: n_anticipated rows
-//!   anticipated_state_out_def: n_active_anticipated rows (stage-dependent)
-//!   generic:             n_generic_rows  (VARIES per stage)
-//! ```
+//! The column and row geometry — the contiguous regions, their ordering, and
+//! the offset arithmetic — is owned by [`crate::indexer::StageIndexer`]; the
+//! per-stage NCS, generic-constraint, and pumping blocks are owned by its
+//! per-stage companion `StageLayout`.  This module does not restate that
+//! geometry; it documents only the per-solve patch sequence layered on top of
+//! it (below).
 //!
 //! The AR dynamics (noise patch target) rows are the water balance constraints
 //! beginning at row `base_rows[stage]` (= `N` for a stage with N hydros). The

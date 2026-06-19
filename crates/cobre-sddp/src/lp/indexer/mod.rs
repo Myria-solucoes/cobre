@@ -114,6 +114,9 @@
 //! With 2 anticipated thermals (`K_max = 3`): `anticipated_state = 9..15` inserts
 //! before `z_inflow`, shifting it to `15..18` and `theta` to `21`.
 //!
+//! The per-solve patch sequence layered on top of this geometry is documented in
+//! [`crate::lp_builder`].
+//!
 //! # Submodule layout
 //!
 //! - `layout` — the [`StageIndexer`] struct, the [`Sentinels`] sub-struct (which
