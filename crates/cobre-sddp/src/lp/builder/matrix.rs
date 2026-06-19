@@ -394,19 +394,12 @@ fn fill_anticipated_decision_objective(
 /// (the post-loop in `build_single_stage_template`) still gives zero.
 fn zero_anticipated_delivery_thermal_cost(
     ctx: &TemplateBuildCtx<'_>,
-    stage_idx: usize,
+    _stage_idx: usize,
     layout: &StageLayout,
     bufs: &mut ColumnBufs<'_>,
 ) {
     let n_blks = layout.n_blks;
-    let n_stages = ctx.resolved.bounds.n_stages();
     for local_idx in 0..ctx.n_anticipated {
-        if !layout
-            .indexer
-            .is_anticipated_fishing_active(local_idx, stage_idx, n_stages)
-        {
-            continue;
-        }
         let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
         for blk in 0..n_blks {
             let col = layout.col_thermal_start + thermal_idx * n_blks + blk;
@@ -1221,19 +1214,12 @@ pub(super) fn fill_anticipated_state_out_def_rows(
 pub(super) fn fill_anticipated_fishing_entries(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
-    stage_idx: usize,
+    _stage_idx: usize,
     layout: &StageLayout,
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
     let n_blks = layout.n_blks;
-    let n_stages = ctx.resolved.bounds.n_stages();
     for local_idx in 0..ctx.n_anticipated {
-        if !layout
-            .indexer
-            .is_anticipated_fishing_active(local_idx, stage_idx, n_stages)
-        {
-            continue;
-        }
         let row = layout.anticipated.row_anticipated_fishing_start + local_idx;
         let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
         let mut block_hours_total: f64 = 0.0;
@@ -2700,8 +2686,10 @@ mod zero_cost_tests {
     impl AntFixtures {
         /// Build a minimal `ResolvedBounds` with zero entities and the given `n_stages`.
         ///
-        /// Required so that `ctx.resolved.bounds.n_stages()` returns a meaningful value for
-        /// the `is_anticipated_fishing_active` debug guard (`stage_idx < n_stages`).
+        /// `n_stages` must exceed the queried `stage_idx` (and each plant's
+        /// delivery stage `stage_idx + K_i`) so the anticipated layout the
+        /// fixture builds places every plant inside the study horizon
+        /// `[0, n_stages)`.
         fn bounds_with_n_stages(n_stages: usize) -> ResolvedBounds {
             ResolvedBounds::new(
                 &BoundsCountsSpec {
@@ -2823,13 +2811,14 @@ mod zero_cost_tests {
         }
     }
 
-    /// Zeroes cost for all anticipated plants (always-active predicate).
+    /// Zeroes cost for every anticipated plant (the fishing constraint is
+    /// always active, one plant per iteration).
     /// At stage 2 with `K_i=[1, 5]` and `n_anticipated=2`: both plants zeroed.
     #[test]
     fn zero_anticipated_delivery_thermal_cost_zeroes_all_plants() {
         let mut fixtures = AntFixtures::new();
-        // Override bounds so ctx.resolved.bounds.n_stages() > stage_idx (required by the
-        // is_anticipated_fishing_active debug guard: stage_idx < n_stages).
+        // Override bounds so every plant's delivery stage `stage_idx + K_i`
+        // falls inside the horizon `[0, n_stages)` when the layout is built.
         fixtures.bounds = AntFixtures::bounds_with_n_stages(10);
         let ctx = fixtures.make_ctx(
             2,          // n_anticipated

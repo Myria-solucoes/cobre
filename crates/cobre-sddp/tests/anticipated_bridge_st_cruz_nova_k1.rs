@@ -40,8 +40,8 @@
 //! block-fraction weighting of per-block MW values (227.86, 238.37, 173.51)
 //! against September 2024 block fractions (0.2333, 0.2833, 0.4834).
 //!
-//! The always-active fishing predicate is implemented at
-//! `crates/cobre-sddp/src/indexer.rs:1555`. The cost-zeroing predicate for
+//! The fishing constraint is always active for every anticipated plant, so a
+//! fishing row is emitted at every stage. The cost-zeroing predicate for
 //! delivery-stage columns is applied in `fill_anticipated_decision_objective`.
 //!
 //! ## Legacy behaviour (before always-active fishing)
@@ -443,10 +443,10 @@ fn build_system() -> cobre_core::System {
 
     // Seed the anticipated ring buffer with 204.5647 MW at slot 0.
     //
-    // With the always-active fishing predicate (see indexer.rs:1555), stage 0
-    // reads slot 0 (= 204.5647 MW) via the fishing equality and delivers it at
-    // zero LP cost (cost-zeroing predicate). The backup thermal covers the
-    // remaining (250.0 - 204.5647) MW at $5000/MWh.
+    // Because the fishing constraint is always active for every anticipated
+    // plant, stage 0 reads slot 0 (= 204.5647 MW) via the fishing equality and
+    // delivers it at zero LP cost (cost-zeroing predicate). The backup thermal
+    // covers the remaining (250.0 - 204.5647) MW at $5000/MWh.
     //
     // This value mirrors the block-fraction-weighted aggregate for ST.CRUZ NOVA
     // from the bridge findings document at
@@ -672,11 +672,9 @@ fn pre_horizon_seed_delivers_at_stage_zero_st_cruz_nova_k1() {
 
     // ── AC-delivery: committed_at(0) ≈ 204.5647 MW within 1e-3 MW ──────────
     //
-    // The always-active fishing equality (see indexer.rs:1555) pins the
-    // anticipated thermal's generation at stage 0 to slot 0 of the ring buffer
-    // = 204.5647 MW. Before the always-active predicate, the condition
-    // `K_i > stage_idx` was false at stage 0 with K=1, so fishing was inactive
-    // and committed_at(0) returned None.
+    // The fishing equality is always active for every anticipated plant, so it
+    // pins the anticipated thermal's generation at stage 0 to slot 0 of the
+    // ring buffer = 204.5647 MW.
     //
     // Tolerance is 1e-3 MW per the bridge findings doc, which specifies that
     // the aggregated value is accurate to four decimal places.

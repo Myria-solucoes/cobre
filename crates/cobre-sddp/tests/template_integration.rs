@@ -10036,11 +10036,11 @@ fn test_anticipated_delivery_thermal_cost_is_zero() {
 
 /// AC-8: per-block thermal cost of the anticipated thermal is zeroed at all stages.
 ///
-/// Under the always-active fishing predicate, `zero_anticipated_delivery_thermal_cost`
-/// zeroes the anticipated thermal's per-block cost at every stage, including
-/// pre-horizon stages 0 and 1 (before K_i=2 matures). The cost-zeroing and
-/// fishing-row predicates share `StageIndexer::is_anticipated_fishing_active`
-/// as their single source of truth.
+/// Because the fishing constraint is always active for every anticipated
+/// plant, `zero_anticipated_delivery_thermal_cost` zeroes the anticipated
+/// thermal's per-block cost at every stage, including pre-horizon stages 0 and
+/// 1 (before K_i=2 matures). The cost-zeroing loop and the fishing-row loop
+/// both run unconditionally for every plant under this always-active rule.
 /// Expected: `objective[col_thermal_start + 0 * 1 + 0] == 0.0` at every stage.
 #[test]
 fn test_anticipated_pre_delivery_thermal_cost_unchanged() {
@@ -10104,11 +10104,12 @@ fn test_non_anticipated_thermal_cost_unchanged_under_anticipated_zero_out() {
 /// AC-10: predicate parity — the set of stages where per-block thermal cost is zero
 /// equals the set of ALL stages (always-active rule).
 ///
-/// Under the always-active fishing predicate, `zero_anticipated_delivery_thermal_cost`
-/// zeroes the anticipated thermal's per-block cost at every stage. For K_i=2 and
-/// n_stages=4: all stages {0, 1, 2, 3} have zero cost. Both the fishing-row and
-/// cost-zeroing predicates share `StageIndexer::is_anticipated_fishing_active`
-/// as their single source of truth.
+/// Because the fishing constraint is always active for every anticipated
+/// plant, `zero_anticipated_delivery_thermal_cost` zeroes the anticipated
+/// thermal's per-block cost at every stage. For K_i=2 and n_stages=4: all
+/// stages {0, 1, 2, 3} have zero cost. Both the fishing-row loop and the
+/// cost-zeroing loop run unconditionally for every plant under this
+/// always-active rule.
 #[test]
 fn test_zero_out_and_fishing_active_predicate_align() {
     let lead_stages = 2_usize;
@@ -10557,11 +10558,10 @@ fn test_anticipated_fishing_rows_count_by_stage() {
 
 // ── Fishing-row count stage-invariance under always-active predicate ─────────
 
-/// Under the always-active fishing predicate (`indexer.rs:1555`
-/// `is_anticipated_fishing_active`), every anticipated plant emits exactly one
-/// fishing row at every stage in `[0, n_stages)`. This test confirms the row
-/// count is stage-invariant by asserting equality between `num_rows` at two
-/// adjacent stages.
+/// Because the fishing constraint is always active for every anticipated
+/// plant, each plant emits exactly one fishing row at every stage in
+/// `[0, n_stages)`. This test confirms the row count is stage-invariant by
+/// asserting equality between `num_rows` at two adjacent stages.
 ///
 /// System: one anticipated thermal K=2, n_stages=4.
 /// At every stage: `n_anticipated_fishing_rows == n_anticipated == 1`.

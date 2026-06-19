@@ -35,18 +35,9 @@
 //!
 //! ## Closed-form derivation
 //!
-//! ### Legacy behaviour (before always-active fishing)
-//!
-//! Under the pre-flip predicate `is_anticipated_fishing_active` returned TRUE
-//! only when `stage_idx >= K_i` (i.e. `stage_idx >= 1` for K=1). Stage 0 had
-//! no fishing row, the anticipated thermal dispatched freely at cost `c_a`, and
-//! the closed form was `T* = 2 · c_a · D = 1000.0`. That constant is now wrong.
-//!
-//! ### Always-active fishing (current behaviour)
-//!
-//! `StageIndexer::is_anticipated_fishing_active` now
-//! returns TRUE at every stage, including stage 0. The fishing row
-//! `g_a_t − x_state_t = 0` is therefore emitted at stage 0 as well, and
+//! The fishing constraint is always active for every anticipated plant at
+//! every stage, including stage 0. The fishing row `g_a_t − x_state_t = 0` is
+//! therefore emitted at stage 0 as well, and
 //! `zero_anticipated_delivery_thermal_cost` zeros the per-block cost of the
 //! anticipated column at stage 0 (same always-active path). See the K=1
 //! sign-chain table for the cut-coefficient sign convention that applies
@@ -89,7 +80,7 @@
 //! `c_a · total_hours_per_stage[delivery=1] · cumulative_discount_factors[1] =
 //! c_a · 1 · 1 = c_a`.
 //!
-//! Stage 1 (delivery; fishing `is_anticipated_fishing_active` — TRUE; decision
+//! Stage 1 (delivery; fishing always active; decision
 //! `1 + 1 < 2` — FALSE, so `d_ant_1 ∈ [0,0]` and per-block anticipated cost
 //! is zeroed by `zero_anticipated_delivery_thermal_cost`):
 //!
@@ -241,11 +232,10 @@ const C_DEFICIT: f64 = 1000.0;
 /// `T* = (C_A + C_B) · D_LOAD`. See module docs for the full derivation.
 /// Numerical value: `(10 + 100) · 50 = 5500.0` USD.
 ///
-/// Legacy value (pre-flip predicate `K_i ≤ stage_idx`): `2 · C_A · D_LOAD = 1000.0`.
-/// The always-active fishing predicate
-/// (`StageIndexer::is_anticipated_fishing_active`) emits a fishing row at stage 0,
-/// forcing `g_a_0 = 0` and requiring backup to cover stage-0 load. See the K=1
-/// sign-chain table for the cut-coefficient convention.
+/// The fishing constraint is always active for every anticipated plant, so it
+/// emits a fishing row at stage 0, forcing `g_a_0 = 0` and requiring backup to
+/// cover stage-0 load. See the K=1 sign-chain table for the cut-coefficient
+/// convention.
 ///
 /// Held to bit-for-bit equality. Sub-ULP noise from a future libhighs upgrade
 /// should be rare for this trivial fixture; if it occurs, demote to a 1e-12
@@ -573,8 +563,8 @@ fn build_setup(system: cobre_core::System, config: &Config) -> StudySetup {
 // ---------------------------------------------------------------------------
 
 /// Closed-form canary: the LP-derived lower bound for the 2-stage K=1 fixture
-/// must equal the hand-derived value `(C_A + C_B) · D_LOAD = 5500.0` under
-/// always-active fishing (`StageIndexer::is_anticipated_fishing_active`).
+/// must equal the hand-derived value `(C_A + C_B) · D_LOAD = 5500.0`, with the
+/// fishing constraint always active for every anticipated plant.
 ///
 /// Bit-for-bit equality is asserted via `f64::to_bits`. The fixture is fully
 /// deterministic (single opening, no noise, single-thread HiGHS), so any

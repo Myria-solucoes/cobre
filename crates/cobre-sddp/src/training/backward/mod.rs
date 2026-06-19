@@ -53,10 +53,10 @@
 //! at the predecessor stage.
 //!
 //! The dual of the anticipated-state-fixing row at stage `t` reflects
-//! `dQ_t/dx_ant[slot, plant]`. Under the always-active fishing predicate
-//! (`StageIndexer::is_anticipated_fishing_active`), every
-//! slot at every stage participates in the dual chain: the fishing constraint is
-//! emitted at every stage unconditionally. The dual on the Cat 6
+//! `dQ_t/dx_ant[slot, plant]`. Because the fishing constraint is always active
+//! for every anticipated plant, every slot at every stage participates in the
+//! dual chain: the fishing constraint is emitted at every stage
+//! unconditionally. The dual on the Cat 6
 //! state-fixing row at slot `s` flows back to the predecessor's LP column via
 //! `state_to_lp_column`'s branch decision (Less / Equal / Greater), which maps
 //! slot `K_p-1` to the decision column and slot `i < K_p-1` to slot `i+1`.

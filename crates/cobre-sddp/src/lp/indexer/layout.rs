@@ -460,10 +460,11 @@ pub struct StageIndexer {
 
     /// Row range for anticipated-thermal fishing constraints.
     ///
-    /// Empty (`0..0`) in the canonical layout placeholder; per-stage active
-    /// row indices are always `n_anticipated` under the always-active
-    /// predicate and are accessed via
-    /// [`anticipated_fishing_active_at_stage`](Self::anticipated_fishing_active_at_stage).
+    /// Empty (`0..0`) in the canonical layout placeholder. The fishing
+    /// constraint is always active for every anticipated plant, so a stage
+    /// emits exactly `n_anticipated` rows at dense offsets
+    /// `anticipated_fishing_start + local_idx` (see
+    /// [`anticipated_fishing_start`](Self::anticipated_fishing_start)).
     ///
     /// The fishing constraint reads:
     /// `gt_i^(t) - anticipated_state[slot=0, plant=i] = 0`

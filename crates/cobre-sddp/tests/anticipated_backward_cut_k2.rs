@@ -40,8 +40,8 @@
 //!
 //! Both state-fixing-row duals at stage 1 are `-c_reg/COST_SCALE * BLOCK_HOURS`:
 //!  - slot 0: dual of the **same-stage** fishing equality at stage 1 (active
-//!    under always-active fishing; see `indexer.rs:1555`
-//!    `is_anticipated_fishing_active`).
+//!    because the fishing constraint is always active for every anticipated
+//!    plant).
 //!  - slot 1: dual flowing through the baked stage-1 FCF cut, which carries
 //!    coefficient `+c_reg/COST_SCALE * BLOCK_HOURS` on `x_state[slot=1]_1`
 //!    (originating from stage 2's slot-0 fishing dual, routed via the
@@ -130,8 +130,8 @@ const COST_SCALE_FACTOR: f64 = 1_000_000.0;
 
 // Closed-form expected coefficients at stage 0 FCF, in scaled cost units.
 // Both slots carry the same magnitude: -c_reg / COST_SCALE * BLOCK_HOURS = -0.1.
-// Slot 0: dual of the same-stage fishing equality at stage 1 (always-active
-//   fishing predicate; see indexer.rs:1555 `is_anticipated_fishing_active`).
+// Slot 0: dual of the same-stage fishing equality at stage 1 (the fishing
+//   constraint is always active for every anticipated plant).
 // Slot 1: dual flowing through the baked stage-1 FCF cut (originating from
 //   stage 2's slot-0 fishing dual routed via the Less-branch ring-buffer shift;
 //   see indexer.rs:state_to_lp_column).
@@ -587,10 +587,10 @@ fn three_stage_k2_anticipated_cut_coefficient_propagates_correctly() {
     // ── AC-4: coefficient at slot 0 ─────────────────────────────────────────
     // Expected: -C_REG / COST_SCALE_FACTOR * BLOCK_HOURS = -0.1.
     // Source: dual of the same-stage fishing equality at stage 1, which is
-    // active under the always-active fishing predicate
-    // (indexer.rs:1555 `is_anticipated_fishing_active`). Both slots carry
-    // identical magnitude via different propagation paths; see module docstring
-    // "Both state-fixing-row duals" section.
+    // active because the fishing constraint is always active for every
+    // anticipated plant. Both slots carry identical magnitude via different
+    // propagation paths; see module docstring "Both state-fixing-row duals"
+    // section.
     let actual_coeff_slot0 = coefficients[slot0_idx];
     assert!(
         (actual_coeff_slot0 - EXPECTED_COEFF_SLOT0).abs() < TOL,
@@ -599,8 +599,8 @@ fn three_stage_k2_anticipated_cut_coefficient_propagates_correctly() {
          actual = {actual_coeff_slot0}, expected = {EXPECTED_COEFF_SLOT0} \
          (= -C_REG / COST_SCALE_FACTOR * BLOCK_HOURS = \
          -{C_REG}/{COST_SCALE_FACTOR}*{BLOCK_HOURS}). \
-         Source: same-stage fishing equality dual at stage 1 under always-active \
-         fishing predicate (indexer.rs:1555 `is_anticipated_fishing_active`). \
+         Source: same-stage fishing equality dual at stage 1; the fishing \
+         constraint is always active for every anticipated plant. \
          Cut metadata: slot={slot}, n_state={n_state}, slot0_idx={slot0_idx}, \
          slot1_idx={slot1_idx}, iterations={N_ITERATIONS}",
         n_state = coefficients.len(),

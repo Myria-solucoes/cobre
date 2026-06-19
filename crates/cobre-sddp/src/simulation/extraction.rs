@@ -178,11 +178,11 @@ fn compute_anticipated_decision_mw(
 ///
 /// In both paths the correct read is the slot-0 column.
 ///
-/// Returns `Some(v)` when thermal `thermal_local` is anticipated and the
-/// fishing predicate is active for its plant
-/// (`StageIndexer::is_anticipated_fishing_active`). At
-/// pre-horizon stages, the value read is the seeded `values_mw[slot 0]`
-/// injected by the setup pipeline and advanced via the per-stage ring-buffer shift.
+/// Returns `Some(v)` when thermal `thermal_local` is anticipated: the
+/// fishing constraint is always active for every anticipated plant, so the
+/// slot-0 read applies unconditionally. At pre-horizon stages, the value read
+/// is the seeded `values_mw[slot 0]` injected by the setup pipeline and
+/// advanced via the per-stage ring-buffer shift.
 ///
 /// Returns `None` silently when the thermal is not anticipated.
 #[inline]
@@ -193,12 +193,6 @@ fn compute_anticipated_committed_mw(
     thermal_local: usize,
 ) -> Option<f64> {
     let local_idx = lookup.thermal_is_anticipated[thermal_local]?;
-    if !spec
-        .indexer
-        .is_anticipated_fishing_active(local_idx, spec.stage_index, spec.n_stages)
-    {
-        return None;
-    }
     // Slot-major, plant-minor layout (see `StageIndexer::anticipated_state`):
     //   col = anticipated_state.start + slot * n_anticipated + plant
     // Slot 0 = anticipated_state.start + local_idx (the `0 * n_anticipated` term).

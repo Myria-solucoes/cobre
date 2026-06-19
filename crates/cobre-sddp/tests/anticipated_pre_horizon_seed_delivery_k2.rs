@@ -620,7 +620,7 @@ fn pre_horizon_seed_delivers_pre_horizon_stages_k2() {
     // (K=2-specific: tests ring-buffer shift between pre-horizon stages 0→1)
     let c1 = committed_at(1).expect(
         "AC2 FAIL: committed_at(1) is None. \
-         The always-active fishing predicate must be active at stage 1 (indexer.rs:1556 is_anticipated_fishing_active). \
+         The fishing constraint is always active for every anticipated plant, so it must be active at stage 1. \
          If committed_at(1) is None, the fishing constraint is absent for stage 1.",
     );
     assert!(

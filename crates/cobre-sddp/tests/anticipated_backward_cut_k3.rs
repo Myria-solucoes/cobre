@@ -111,7 +111,7 @@ const COST_SCALE_FACTOR: f64 = 1_000_000.0;
 //   see indexer.rs:state_to_lp_column). Analogous to the K=2 slot-1 result.
 //
 // Slot 0: dual of the same-stage fishing equality at stage 1, which is active
-//   under the always-active fishing predicate (indexer.rs `is_anticipated_fishing_active`).
+//   because the fishing constraint is always active for every anticipated plant.
 //   Analogous to the K=2 slot-0 result.
 const EXPECTED_COEFF_SLOT2: f64 = -C_REG / COST_SCALE_FACTOR * BLOCK_HOURS; // = -0.0001
 const EXPECTED_COEFF_SLOT1: f64 = -C_REG / COST_SCALE_FACTOR * BLOCK_HOURS; // = -0.0001
