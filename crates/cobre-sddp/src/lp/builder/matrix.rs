@@ -1096,34 +1096,46 @@ fn fill_operational_violation_rows(
     row_upper: &mut [f64],
 ) {
     // All four operational-violation row families share the same per-hydro bound
-    // lookup, so the bound is read once per hydro and the four families' bounds are
-    // written from it. Each family targets `row_lower`/`row_upper` by its own
-    // computed row index, so the visit order is irrelevant to the result.
+    // lookup, so the bound is read once per hydro and a `(row_start, lower, upper)`
+    // descriptor is built from it. Each family targets `row_lower`/`row_upper` by its
+    // own computed row index, so the visit order is irrelevant to the result. The
+    // descriptor order is nonetheless pinned to the canonical row-write order
+    // (min-outflow, max-outflow, min-turbine, min-generation) to keep the source-level
+    // write order canonical (determinism). Per-family sense:
     //   min-outflow   (>=): LHS + sigma >= min_outflow_m3s
     //   max-outflow   (<=): LHS - sigma <= max_outflow_m3s
     //   min-turbine   (>=): LHS + sigma >= min_turbined_m3s
     //   min-generation(>=): LHS + sigma >= min_generation_mw
     for h_idx in 0..layout.n_h {
         let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
-        for blk in 0..layout.n_blks {
-            let row = layout.row_min_outflow_start() + h_idx * layout.n_blks + blk;
-            row_lower[row] = hb.min_outflow_m3s;
-            row_upper[row] = f64::INFINITY;
-        }
-        for blk in 0..layout.n_blks {
-            let row = layout.row_max_outflow_start() + h_idx * layout.n_blks + blk;
-            row_lower[row] = f64::NEG_INFINITY;
-            row_upper[row] = hb.max_outflow_m3s.unwrap_or(f64::INFINITY);
-        }
-        for blk in 0..layout.n_blks {
-            let row = layout.row_min_turbine_start() + h_idx * layout.n_blks + blk;
-            row_lower[row] = hb.min_turbined_m3s;
-            row_upper[row] = f64::INFINITY;
-        }
-        for blk in 0..layout.n_blks {
-            let row = layout.row_min_generation_start() + h_idx * layout.n_blks + blk;
-            row_lower[row] = hb.min_generation_mw;
-            row_upper[row] = f64::INFINITY;
+        let families = [
+            (
+                layout.row_min_outflow_start(),
+                hb.min_outflow_m3s,
+                f64::INFINITY,
+            ),
+            (
+                layout.row_max_outflow_start(),
+                f64::NEG_INFINITY,
+                hb.max_outflow_m3s.unwrap_or(f64::INFINITY),
+            ),
+            (
+                layout.row_min_turbine_start(),
+                hb.min_turbined_m3s,
+                f64::INFINITY,
+            ),
+            (
+                layout.row_min_generation_start(),
+                hb.min_generation_mw,
+                f64::INFINITY,
+            ),
+        ];
+        for (row_start, lower, upper) in families {
+            for blk in 0..layout.n_blks {
+                let row = row_start + h_idx * layout.n_blks + blk;
+                row_lower[row] = lower;
+                row_upper[row] = upper;
+            }
         }
     }
 }
