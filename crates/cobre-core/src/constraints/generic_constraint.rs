@@ -85,21 +85,21 @@ pub enum VariableRef {
     HydroTurbined {
         /// Hydro plant identifier.
         hydro_id: EntityId,
-        /// Block index. `None` resolves to the current row's block (`block_idx`); `Some(i)` = block `i`.
+        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
         block_id: Option<usize>,
     },
     /// Spillage flow for a hydro plant (m³/s).
     HydroSpillage {
         /// Hydro plant identifier.
         hydro_id: EntityId,
-        /// Block index. `None` resolves to the current row's block (`block_idx`); `Some(i)` = block `i`.
+        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
         block_id: Option<usize>,
     },
     /// Diversion flow for a hydro plant (m³/s). Only valid for hydros with diversion.
     HydroDiversion {
         /// Hydro plant identifier.
         hydro_id: EntityId,
-        /// Block index. `None` resolves to the current row's block (`block_idx`); `Some(i)` = block `i`.
+        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
         block_id: Option<usize>,
     },
     /// Total outflow (turbined + spillage) for a hydro plant (m³/s).
@@ -109,14 +109,14 @@ pub enum VariableRef {
     HydroOutflow {
         /// Hydro plant identifier.
         hydro_id: EntityId,
-        /// Block index. `None` resolves to the current row's block (`block_idx`); `Some(i)` = block `i`.
+        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
         block_id: Option<usize>,
     },
     /// Electrical generation from a hydro plant (MW).
     HydroGeneration {
         /// Hydro plant identifier.
         hydro_id: EntityId,
-        /// Block index. `None` resolves to the current row's block (`block_idx`); `Some(i)` = block `i`.
+        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
         block_id: Option<usize>,
     },
     /// Signed evaporation flow from a hydro reservoir (m³/s). Stage-level, not
@@ -135,21 +135,21 @@ pub enum VariableRef {
     ThermalGeneration {
         /// Thermal unit identifier.
         thermal_id: EntityId,
-        /// Block index. `None` resolves to the current row's block (`block_idx`); `Some(i)` = block `i`.
+        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
         block_id: Option<usize>,
     },
     /// Direct (forward) power flow on a transmission line (MW).
     LineDirect {
         /// Transmission line identifier.
         line_id: EntityId,
-        /// Block index. `None` resolves to the current row's block (`block_idx`); `Some(i)` = block `i`.
+        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
         block_id: Option<usize>,
     },
     /// Reverse power flow on a transmission line (MW).
     LineReverse {
         /// Transmission line identifier.
         line_id: EntityId,
-        /// Block index. `None` resolves to the current row's block (`block_idx`); `Some(i)` = block `i`.
+        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
         block_id: Option<usize>,
     },
     /// Net exchange flow on a transmission line (direct - reverse) (MW).
@@ -160,63 +160,63 @@ pub enum VariableRef {
     LineExchange {
         /// Transmission line identifier.
         line_id: EntityId,
-        /// Block index. `None` resolves to the current row's block (`block_idx`); `Some(i)` = block `i`.
+        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
         block_id: Option<usize>,
     },
     /// Load deficit (unserved energy) at a bus (MW).
     BusDeficit {
         /// Bus identifier.
         bus_id: EntityId,
-        /// Block index. `None` resolves to the current row's block (`block_idx`); `Some(i)` = block `i`.
+        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
         block_id: Option<usize>,
     },
     /// Load excess (over-generation) at a bus (MW).
     BusExcess {
         /// Bus identifier.
         bus_id: EntityId,
-        /// Block index. `None` resolves to the current row's block (`block_idx`); `Some(i)` = block `i`.
+        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
         block_id: Option<usize>,
     },
     /// Pumped water flow at a pumping station (m³/s).
     PumpingFlow {
         /// Pumping station identifier.
         station_id: EntityId,
-        /// Block index. `None` resolves to the current row's block (`block_idx`); `Some(i)` = block `i`.
+        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
         block_id: Option<usize>,
     },
     /// Electrical power consumed by a pumping station (MW).
     PumpingPower {
         /// Pumping station identifier.
         station_id: EntityId,
-        /// Block index. `None` resolves to the current row's block (`block_idx`); `Some(i)` = block `i`.
+        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
         block_id: Option<usize>,
     },
     /// Energy imported via a contract (MW).
     ContractImport {
         /// Energy contract identifier.
         contract_id: EntityId,
-        /// Block index. `None` resolves to the current row's block (`block_idx`); `Some(i)` = block `i`.
+        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
         block_id: Option<usize>,
     },
     /// Energy exported via a contract (MW).
     ContractExport {
         /// Energy contract identifier.
         contract_id: EntityId,
-        /// Block index. `None` resolves to the current row's block (`block_idx`); `Some(i)` = block `i`.
+        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
         block_id: Option<usize>,
     },
     /// Generation from a non-controllable source (wind, solar, etc.) (MW).
     NonControllableGeneration {
         /// Non-controllable source identifier.
         source_id: EntityId,
-        /// Block index. `None` resolves to the current row's block (`block_idx`); `Some(i)` = block `i`.
+        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
         block_id: Option<usize>,
     },
     /// Curtailment of a non-controllable source (MW).
     NonControllableCurtailment {
         /// Non-controllable source identifier.
         source_id: EntityId,
-        /// Block index. `None` resolves to the current row's block (`block_idx`); `Some(i)` = block `i`.
+        /// Block selector. `None` binds to the constraint row's own block; `Some(i)` pins block `i`.
         block_id: Option<usize>,
     },
     /// Forward-commitment decision MW for an anticipated thermal unit (MW).

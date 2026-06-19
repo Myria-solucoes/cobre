@@ -642,9 +642,8 @@ impl HydroStageContext {
             .unwrap_or(0.0)
             * COST_SCALE_FACTOR;
         let fpha_local = lookup.fpha[h];
-        let local_evap = lookup.evap[h];
         let (evaporation_m3s, evaporation_violation_neg_m3s, evaporation_violation_pos_m3s) =
-            if let Some(lei) = local_evap {
+            if let Some(lei) = lookup.evap[h] {
                 let ei = &indexer.evap_indices[lei];
                 let evaporation_flow = view.primal[ei.evaporation_flow_col];
                 let neg = view.primal[ei.f_evap_plus_col];

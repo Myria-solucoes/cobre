@@ -364,6 +364,38 @@ mod tests {
         );
     }
 
+    /// Equal-branch boundary at `k_max == 1`: with a single ring-buffer slot,
+    /// slot 0 is the only slot and `slot + 1 == k_p == 1`, so the Equal branch
+    /// fires immediately on slot 0 — there is no Less (shift) or Greater
+    /// (padding) slot to reach first. The slot must route to the
+    /// `anticipated_state_out` column (the Equal-branch target), not back to
+    /// `anticipated_decision`. The other anticipated tests use `k_max >= 2`,
+    /// where slot 0 takes the Less branch, so this is the only coverage of the
+    /// `k_max == 1` Equal path.
+    #[test]
+    fn state_to_lp_column_equal_branch_k_max_one() {
+        // N=0, L=0, n_anticipated=1, k_max=1, anticipated_lead_stages=[1].
+        // n_state = 0*(1+0) + 1*1 = 1.
+        // anticipated_state = [0, 1); the lone slot 0 is at j=0.
+        let idx = StageIndexer::with_equipment_and_evaporation(
+            &eq_with_anticipated(0, 0, 0, 0, 1, 1, false, 1, 1),
+            &fpha(vec![], vec![]),
+            &evap(vec![]),
+        );
+        // Slot 0 of plant 0: slot+1 = 1 == k_p = 1 → Equal branch → state-out.
+        let slot_0 = idx.anticipated_state.start;
+        assert_eq!(
+            idx.state_to_lp_column(slot_0),
+            idx.anticipated_state_out.start,
+            "k_max==1 slot 0 must route to anticipated_state_out via the Equal branch",
+        );
+        assert_ne!(
+            idx.state_to_lp_column(slot_0),
+            idx.anticipated_decision.start,
+            "Equal branch must NOT route to anticipated_decision",
+        );
+    }
+
     /// Shift branch: an `anticipated_state` slot `i < K_p - 1` maps to the
     /// predecessor stage's `anticipated_state` column at slot `i + 1` (the
     /// shift). Successor's slot `i` comes from predecessor's incoming slot

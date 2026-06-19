@@ -276,7 +276,7 @@ impl PatchBuffer {
         // written as-is without additional prescaling here.
         for (h, &nv) in noise.iter().enumerate() {
             // AR dynamics row = base_row + h (hydro-major). This is in the static
-            // non-dual region, NOT the lag-fixing row `N + ℓ·N + h` of Category 2,
+            // non-dual region, NOT the inflow-lag column `N + ℓ·N + h` of Category 2,
             // despite the shared `+ h` shape.
             self.indices[h] = base_row + h;
             self.lower[h] = nv;
@@ -646,7 +646,7 @@ mod tests {
             ] {
                 assert_eq!(
                     len, expected_row_cap,
-                    "{label} row cap mismatch for (n={n}, l={l}, a={a}, k={k})"
+                    "{label} row cap mismatch for (n={n}, l={l}, n_load_buses={n_load_buses}, max_blocks={max_blocks}, a={a}, k={k})"
                 );
             }
         }

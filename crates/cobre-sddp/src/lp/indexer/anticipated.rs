@@ -347,7 +347,8 @@ mod tests {
     ///
     /// Each test in this sub-module iterates the same hand-written parameter
     /// grid (see [`parameter_grid`]) and asserts a single structural invariant
-    /// (I1-I13) on every grid point. The grid is finite (~1900 configurations
+    /// on every grid point (the invariant indices are sparse where an invariant
+    /// was retired). The grid is finite (~1900 configurations
     /// after pruning) and each iteration performs only range arithmetic, so
     /// the full sweep completes in well under 1 second on a standard laptop.
     ///

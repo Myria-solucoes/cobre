@@ -1,9 +1,8 @@
 //! The [`StageIndexer`] struct, its satellite layout types, the small layout
 //! accessors, and the compile-time `Send + Sync` assertion.
 //!
-//! `StageIndexer` carries the state-pinning contract codified in
-//! `.claude/rules/sddp.md`: the LP has no state-fixing row range. Incoming state
-//! is pinned via column bounds resolved through
+//! `StageIndexer` carries the state-pinning contract: the LP has no state-fixing
+//! row range; incoming state is pinned via column bounds resolved through
 //! [`StageIndexer::state_to_lp_incoming_column`], never a fixing-row index.
 
 use std::collections::HashMap;

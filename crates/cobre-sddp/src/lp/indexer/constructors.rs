@@ -844,12 +844,16 @@ mod tests {
         let idx =
             StageIndexer::with_equipment(&eq(2, 1, 1, 1, 1, n_blks, false), &fpha(vec![], vec![]));
 
-        // turbine is the first decision column, immediately after theta
+        // turbine is the first decision column, immediately after theta.
+        // For this fixture (N=2, L=1, no anticipated): theta = N*(3+L) = 8,
+        // so turbine.start = theta + 1 = 9.
         assert_eq!(idx.turbine.start, idx.theta + 1);
-        // turbine[h=1, b=2] = turbine.start + 1*3 + 2 = turbine.start + 5
-        assert_eq!(idx.turbine.start + n_blks + 2, idx.turbine.start + 5);
-        // turbine[h=1, b=0] = turbine.start + n_blks
-        assert_eq!(idx.turbine.start + n_blks, idx.turbine.start + 3);
+        assert_eq!(idx.turbine.start, 9);
+        // Block-stride formula turbine[h, b] = turbine.start + h*n_blks + b
+        // resolves to absolute columns: turbine[h=1, b=2] = 9 + 3 + 2 = 14.
+        assert_eq!(idx.turbine.start + n_blks + 2, 14);
+        // turbine[h=1, b=0] = 9 + 3 + 0 = 12.
+        assert_eq!(idx.turbine.start + n_blks, 12);
     }
 
     // with_equipment: has_inflow_penalty=true appends N slack columns after excess

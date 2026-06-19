@@ -47,7 +47,7 @@ pub(super) fn fill_stage_columns(
     fill_anticipated_decision_columns(ctx, stage_idx, layout, b);
     fill_anticipated_state_out_columns(ctx, stage_idx, layout, b);
     fill_anticipated_decision_objective(ctx, stage_idx, layout, b);
-    zero_anticipated_delivery_thermal_cost(ctx, stage_idx, layout, b);
+    zero_anticipated_delivery_thermal_cost(ctx, layout, b);
     fill_line_columns(ctx, stage, stage_idx, layout, b);
     fill_deficit_and_excess_columns(ctx, stage, stage_idx, layout, b);
     fill_inflow_slack_columns(ctx, stage_idx, layout, total_stage_hours, b);
@@ -392,7 +392,6 @@ fn fill_anticipated_decision_objective(
 /// (the post-loop in `build_single_stage_template`) still gives zero.
 fn zero_anticipated_delivery_thermal_cost(
     ctx: &TemplateBuildCtx<'_>,
-    _stage_idx: usize,
     layout: &StageLayout,
     bufs: &mut ColumnBufs<'_>,
 ) {
@@ -921,14 +920,7 @@ pub(super) fn fill_stage_rows(
         &mut row_lower,
         &mut row_upper,
     );
-    fill_anticipated_fishing_rows(
-        ctx,
-        stage,
-        stage_idx,
-        layout,
-        &mut row_lower,
-        &mut row_upper,
-    );
+    fill_anticipated_fishing_rows(ctx, layout, &mut row_lower, &mut row_upper);
     fill_anticipated_state_out_def_rows(ctx, stage_idx, layout, &mut row_lower, &mut row_upper);
     fill_z_inflow_rows(ctx, stage_idx, layout, &mut row_lower, &mut row_upper);
 
@@ -1151,8 +1143,6 @@ fn fill_operational_violation_rows(
 /// When `n_anticipated == 0`, this function is a no-op.
 pub(super) fn fill_anticipated_fishing_rows(
     ctx: &TemplateBuildCtx<'_>,
-    _stage: &Stage,
-    _stage_idx: usize,
     layout: &StageLayout,
     row_lower: &mut [f64],
     row_upper: &mut [f64],
@@ -1224,7 +1214,6 @@ pub(super) fn fill_anticipated_state_out_def_rows(
 pub(super) fn fill_anticipated_fishing_entries(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
-    _stage_idx: usize,
     layout: &StageLayout,
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
@@ -2040,7 +2029,7 @@ pub(super) fn build_stage_matrix_entries(
     fill_evaporation_entries(ctx, stage_idx, layout, &mut col_entries);
     fill_z_inflow_entries(ctx, stage_idx, layout, &mut col_entries);
     fill_operational_violation_entries(ctx, stage, stage_idx, layout, &mut col_entries);
-    fill_anticipated_fishing_entries(ctx, stage, stage_idx, layout, &mut col_entries);
+    fill_anticipated_fishing_entries(ctx, stage, layout, &mut col_entries);
 
     col_entries
 }
@@ -2851,7 +2840,7 @@ mod zero_cost_tests {
             objective: &mut objective,
         };
 
-        zero_anticipated_delivery_thermal_cost(&ctx, 2, &layout, &mut bufs);
+        zero_anticipated_delivery_thermal_cost(&ctx, &layout, &mut bufs);
 
         let n_blks = layout.n_blks;
         // Plant 0 (K_0=1): zeroed under always-active predicate.
@@ -2895,7 +2884,7 @@ mod zero_cost_tests {
         let mut row_lower = vec![f64::NAN; layout.num_rows];
         let mut row_upper = vec![f64::NAN; layout.num_rows];
 
-        fill_anticipated_fishing_rows(&ctx, &stage, 2, &layout, &mut row_lower, &mut row_upper);
+        fill_anticipated_fishing_rows(&ctx, &layout, &mut row_lower, &mut row_upper);
 
         // Both plants write a row with (0.0, 0.0) bounds.
         for local_idx in 0..layout.anticipated.n_anticipated_fishing_rows {
@@ -2936,7 +2925,7 @@ mod zero_cost_tests {
         let mut row_lower = vec![f64::NAN; layout.num_rows];
         let mut row_upper = vec![f64::NAN; layout.num_rows];
 
-        fill_anticipated_fishing_rows(&ctx, &stage, 0, &layout, &mut row_lower, &mut row_upper);
+        fill_anticipated_fishing_rows(&ctx, &layout, &mut row_lower, &mut row_upper);
 
         // Both plants write equality rows with (0.0, 0.0) bounds.
         for local_idx in 0..layout.anticipated.n_anticipated_fishing_rows {
@@ -2956,7 +2945,7 @@ mod zero_cost_tests {
         // CSC coupling: anticipated_state slot-0 column carries (row, -block_hours_total)
         // for each plant under the always-active predicate.
         let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
-        fill_anticipated_fishing_entries(&ctx, &stage, 0, &layout, &mut col_entries);
+        fill_anticipated_fishing_entries(&ctx, &stage, &layout, &mut col_entries);
 
         let block_hours_total: f64 = stage.blocks.iter().map(|b| b.duration_hours).sum();
         let expected_neg = -block_hours_total;
