@@ -1149,12 +1149,12 @@ mod tests {
 
     // ── ThermalGeneration tests ───────────────────────────────────────────────
 
-    /// ThermalGeneration block_id=None at block 1 of 3.
-    ///
-    /// thermal.start = 49, thermal_pos[5] = 0, n_blks = 3, block_idx = 1
-    /// Expected column = 49 + 0 * 3 + 1 = 50
+    /// `ThermalGeneration` column arithmetic across the `block_id`/position axes
+    /// the per-arm coverage requires: one `block_id = None`, one `block_id = Some`,
+    /// and one `position != 0`. All resolve through `resolve_block_variable` with
+    /// `block_col_range(indexer, ElementKind::Thermal).start = 49`, `n_blks = 3`.
     #[test]
-    fn thermal_generation_block_id_none_at_block_1() {
+    fn thermal_generation_column_arithmetic() {
         let indexer = make_indexer();
         let prod = make_production_models();
         let hpos = make_hydro_pos();
@@ -1162,82 +1162,33 @@ mod tests {
         let bpos = make_bus_pos();
         let lpos = make_line_pos();
 
-        let result = call(
-            VariableRef::ThermalGeneration {
-                thermal_id: EntityId(5),
-                block_id: None,
-            },
-            1, // block_idx
-            &indexer,
-            &prod,
-            &hpos,
-            &tpos,
-            &bpos,
-            &lpos,
-        );
+        // (case_name, thermal_id, block_id, block_idx, expected_col)
+        let cases: [(&str, EntityId, Option<usize>, usize, usize); 3] = [
+            ("none_block_1", EntityId(5), None, 1, 49 + 0 * 3 + 1),
+            ("some_block_2", EntityId(5), Some(2), 2, 49 + 0 * 3 + 2),
+            ("second_thermal", EntityId(6), None, 0, 49 + 1 * 3 + 0),
+        ];
 
-        // thermal.start = 49, pos_5 = 0, n_blks = 3, block = 1
-        assert_eq!(result, vec![(49 + 0 * 3 + 1, 1.0)]);
-    }
-
-    /// ThermalGeneration with block_id=Some(2) at block 2: should use the explicit block.
-    ///
-    /// thermal.start = 49, thermal_pos[5] = 0, n_blks = 3, block_id = Some(2)
-    /// Expected column = 49 + 0 * 3 + 2 = 51
-    #[test]
-    fn thermal_generation_block_id_some_at_block_2() {
-        let indexer = make_indexer();
-        let prod = make_production_models();
-        let hpos = make_hydro_pos();
-        let tpos = make_thermal_pos();
-        let bpos = make_bus_pos();
-        let lpos = make_line_pos();
-
-        let result = call(
-            VariableRef::ThermalGeneration {
-                thermal_id: EntityId(5),
-                block_id: Some(2),
-            },
-            2,
-            &indexer,
-            &prod,
-            &hpos,
-            &tpos,
-            &bpos,
-            &lpos,
-        );
-
-        assert_eq!(result, vec![(49 + 0 * 3 + 2, 1.0)]);
-    }
-
-    /// ThermalGeneration for thermal at position 1.
-    ///
-    /// thermal.start = 49, thermal_pos[6] = 1, n_blks = 3, block = 0
-    /// Expected column = 49 + 1 * 3 + 0 = 52
-    #[test]
-    fn thermal_generation_second_thermal() {
-        let indexer = make_indexer();
-        let prod = make_production_models();
-        let hpos = make_hydro_pos();
-        let tpos = make_thermal_pos();
-        let bpos = make_bus_pos();
-        let lpos = make_line_pos();
-
-        let result = call(
-            VariableRef::ThermalGeneration {
-                thermal_id: EntityId(6),
-                block_id: None,
-            },
-            0,
-            &indexer,
-            &prod,
-            &hpos,
-            &tpos,
-            &bpos,
-            &lpos,
-        );
-
-        assert_eq!(result, vec![(49 + 1 * 3 + 0, 1.0)]);
+        for (case_name, thermal_id, block_id, block_idx, expected_col) in cases {
+            let result = call(
+                VariableRef::ThermalGeneration {
+                    thermal_id,
+                    block_id,
+                },
+                block_idx,
+                &indexer,
+                &prod,
+                &hpos,
+                &tpos,
+                &bpos,
+                &lpos,
+            );
+            assert_eq!(
+                result,
+                vec![(expected_col, 1.0)],
+                "thermal_generation case `{case_name}`",
+            );
+        }
     }
 
     // ── HydroStorage tests ────────────────────────────────────────────────────
