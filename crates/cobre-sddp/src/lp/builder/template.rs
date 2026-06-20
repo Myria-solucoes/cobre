@@ -318,8 +318,8 @@ pub(super) fn build_single_stage_template(
     }
 
     // Sort each column's entries by row index (CSC invariant).
-    for entries in &mut col_entries {
-        entries.sort_unstable_by_key(|&(row, _)| row);
+    for col_entry_vec in &mut col_entries {
+        col_entry_vec.sort_unstable_by_key(|&(row, _)| row);
     }
 
     let (col_starts, row_indices, values) = entries::assemble_csc(&col_entries);

@@ -139,18 +139,26 @@ fn fill_evaporation_rows(
     row_upper: &mut [f64],
 ) {
     for (local_idx, &h_idx) in layout.evap_hydro_indices.iter().enumerate() {
-        if let EvaporationModel::Linearized { coefficients, .. } =
-            ctx.evaporation_models.model(h_idx)
-        {
-            debug_assert!(
-                stage_idx < coefficients.len(),
-                "stage index {stage_idx} out of bounds for evaporation coefficients (len = {})",
-                coefficients.len()
-            );
-            let intercept_m3s = coefficients[stage_idx].intercept_m3s;
-            let row = layout.row_evap_start() + local_idx;
-            row_lower[row] = intercept_m3s;
-            row_upper[row] = intercept_m3s;
+        match ctx.evaporation_models.model(h_idx) {
+            EvaporationModel::Linearized { coefficients, .. } => {
+                debug_assert!(
+                    stage_idx < coefficients.len(),
+                    "stage index {stage_idx} out of bounds for evaporation coefficients (len = {})",
+                    coefficients.len()
+                );
+                let intercept_m3s = coefficients[stage_idx].intercept_m3s;
+                let row = layout.row_evap_start() + local_idx;
+                row_lower[row] = intercept_m3s;
+                row_upper[row] = intercept_m3s;
+            }
+            EvaporationModel::None => {
+                // Should never happen: evap_hydro_indices only contains linearized hydros.
+                // No row is written; release builds skip this hydro.
+                debug_assert!(
+                    false,
+                    "evap_hydro_indices contains hydro {h_idx} but model is None"
+                );
+            }
         }
     }
 }

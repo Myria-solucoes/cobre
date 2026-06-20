@@ -376,18 +376,18 @@ fn fill_anticipated_decision_objective(
     }
 }
 
-/// Zero out per-block thermal objective coefficients for anticipated thermals
-/// at their delivery stages.
+/// Zero out per-block thermal objective coefficients for every anticipated plant
+/// at every stage where its column exists.
 ///
-/// At every stage where the fishing equality is active for anticipated plant `i`,
-/// the thermal's per-block generation cost is zeroed. This prevents double-counting:
-/// the generation is already priced at the decision stage via
-/// `fill_anticipated_decision_objective`; the delivery-stage LP must consume it at
-/// zero marginal cost.
+/// The anticipated-fishing constraint is always active, so the per-block
+/// generation cost is zeroed unconditionally for every anticipated plant `i` at
+/// every stage. This prevents double-counting: the generation is already priced
+/// at the decision stage via `fill_anticipated_decision_objective`; the LP must
+/// consume it at zero marginal cost.
 ///
 /// Must be called AFTER `fill_thermal_columns`, which writes the standard
 /// non-zero cost for all thermals at all stages. This function overwrites that
-/// cost for anticipated thermals at their delivery stages only.
+/// cost for every anticipated thermal at every stage.
 ///
 /// The assignment `= 0.0` (not `*= 0.0`) is deliberate: a clean write that
 /// survives floating-point anomalies. Dividing zero by `COST_SCALE_FACTOR`

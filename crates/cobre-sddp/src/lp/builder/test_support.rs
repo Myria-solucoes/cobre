@@ -1,10 +1,8 @@
 //! Shared `#[cfg(test)]` fixtures for the split builder representation modules.
 //!
-//! `columns`, `pumping_water_tests`, and `zero_cost_tests` each previously
-//! carried their own copy of these two fixtures. The bodies were byte-identical
-//! (`zero_hydro_penalties`) or differed only in stage index and block durations
-//! (`two_block_stage`), so they live here once and every former owner imports
-//! them by explicit name (`use super::test_support::…`) — never `use super::*`.
+//! `zero_hydro_penalties` and `two_block_stage` live here once; every user
+//! imports them by explicit name via `use super::super::test_support::…` (the
+//! test modules nest one level below this module) — never `use super::*`.
 
 use chrono::NaiveDate;
 use cobre_core::{

@@ -477,8 +477,8 @@ pub(super) fn fill_evaporation_entries(
         let col_evaporation_flow = layout.evap_flow_col(local_idx);
         let col_f_plus = layout.evap_f_plus_col(local_idx);
         let col_f_minus = layout.evap_f_minus_col(local_idx);
-        let col_v = h_idx;
-        let col_v_in = col_storage_in_start + h_idx;
+        let col_v = h_idx; // outgoing storage column
+        let col_v_in = col_storage_in_start + h_idx; // incoming storage column
 
         let row = layout.row_evap_start() + local_idx;
 
@@ -750,7 +750,7 @@ pub(super) fn fill_operational_violation_entries(
     let grid = layout.indexer.block_grid();
 
     for (h_idx, fpha_local_entry) in layout.fpha_local_index.iter().enumerate() {
-        // ── Min outflow (per block): q + s + d + sigma >= min_outflow_m3s ───
+        // Min outflow (per block): q + s + d + sigma >= min_outflow_m3s
         for blk in 0..n_blks {
             let row = grid.flat(layout.row_min_outflow_start(), h_idx, blk);
             let col_q = layout.turbine_col(h_idx, blk);
@@ -763,7 +763,7 @@ pub(super) fn fill_operational_violation_entries(
             col_entries[col_slack].push((row, 1.0));
         }
 
-        // ── Max outflow (per block): q + s + d - sigma <= max_outflow_m3s ───
+        // Max outflow (per block): q + s + d - sigma <= max_outflow_m3s
         for blk in 0..n_blks {
             let row = grid.flat(layout.row_max_outflow_start(), h_idx, blk);
             let col_q = layout.turbine_col(h_idx, blk);
@@ -776,7 +776,7 @@ pub(super) fn fill_operational_violation_entries(
             col_entries[col_slack].push((row, -1.0));
         }
 
-        // ── Min turbine flow (per block): q + sigma >= min_turbined_m3s ─────
+        // Min turbine flow (per block): q + sigma >= min_turbined_m3s
         for blk in 0..n_blks {
             let row = grid.flat(layout.row_min_turbine_start(), h_idx, blk);
             let col_q = layout.turbine_col(h_idx, blk);
@@ -785,7 +785,7 @@ pub(super) fn fill_operational_violation_entries(
             col_entries[col_slack].push((row, 1.0));
         }
 
-        // ── Min generation (per block): g + sigma >= min_generation_mw ──────
+        // Min generation (per block): g + sigma >= min_generation_mw
         if let Some(&local_fpha_idx) = fpha_local_entry.as_ref() {
             // FPHA: generation variable g_{h,blk} (already in MW).
             for blk in 0..n_blks {
@@ -874,10 +874,17 @@ pub(super) fn assemble_csc(col_entries: &[Vec<(usize, f64)>]) -> (Vec<i32>, Vec<
     for entries in col_entries {
         col_starts.push(offset);
         for &(row, val) in entries {
+            // Rationale: the HiGHS/CLP C API requires i32 row indices and column
+            // offsets. The stage LP row count is bounded by O(entities^2 * blocks);
+            // for any realistic SDDP problem this is far below i32::MAX, so the
+            // usize -> i32 cast cannot truncate or wrap.
             #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
             row_indices.push(row as i32);
             values.push(val);
         }
+        // Rationale: the running CSC offset (total nonzeros so far) is bounded by
+        // the stage LP nonzero count, far below i32::MAX for any realistic SDDP
+        // problem; the i32 offset the solver C API demands cannot overflow.
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         {
             offset += entries.len() as i32;
