@@ -136,6 +136,7 @@
 //! module path resolve to the same item regardless of which submodule owns it.
 
 mod anticipated;
+mod block_grid;
 mod constructors;
 mod layout;
 mod sparse_state;
@@ -143,6 +144,7 @@ mod state_mapping;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_fixtures;
 
+pub(crate) use block_grid::BlockGrid;
 pub use layout::{
     EquipmentCounts, EvapConfig, EvaporationIndices, FphaColumnLayout, FphaRowRange, StageIndexer,
 };

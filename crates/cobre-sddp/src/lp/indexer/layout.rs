@@ -8,6 +8,8 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
+use super::BlockGrid;
+
 /// Column and row indices for the evaporation constraint of one hydro.
 ///
 /// Locates the three evaporation columns and one evaporation row assigned to
@@ -632,6 +634,27 @@ pub struct EvapConfig {
 }
 
 impl StageIndexer {
+    /// Return the [`BlockGrid`] address primitive for this stage's LP.
+    ///
+    /// The grid carries this indexer's `n_blks` and `max_deficit_segments` — the
+    /// two stride constants the three block-stride shapes (flat block-major,
+    /// FPHA-plane, deficit 3-term) need beyond their per-call args. It is a cheap
+    /// `Copy` value, so both `StageLayout` consumers (which embed a
+    /// `StageIndexer`) and the `&StageIndexer` consumers (resolvers, extraction)
+    /// can obtain it without sharing a reference. Sourcing both constants from
+    /// this single owning indexer is what keeps the grid from disagreeing with
+    /// the LP it addresses; see [`BlockGrid`] for the per-shape contracts.
+    // Intent/Seam: the resolvers and extraction sites that hold `&StageIndexer`
+    // obtain the grid through here once they migrate off their hand-rolled
+    // strides; until then this accessor has no production caller and the dead_code
+    // lint fires. The `BlockGrid` shape #[test]s cover it via this entry point.
+    #[allow(dead_code)]
+    #[inline]
+    #[must_use]
+    pub(crate) fn block_grid(&self) -> BlockGrid {
+        BlockGrid::new(self.n_blks, self.max_deficit_segments)
+    }
+
     /// Return the [`EvaporationIndices`] for the evaporation hydro at local position `local_idx`.
     ///
     /// `local_idx` is the position within the evaporation hydro list (0-indexed).
