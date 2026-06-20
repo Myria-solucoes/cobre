@@ -873,6 +873,7 @@ fn for_each_fpha_plane<F>(
     F: FnMut(usize, usize, usize, usize, &FphaPlane, usize),
 {
     let n_blks = layout.n_blks;
+    let grid = layout.indexer.block_grid();
     let mut fpha_block_start = layout.row_fpha_start();
     for (local_idx, &h_idx) in layout.fpha_hydro_indices.iter().enumerate() {
         let planes = match ctx.production_models.model(h_idx, stage_idx) {
@@ -893,11 +894,15 @@ fn for_each_fpha_plane<F>(
         );
         for blk in 0..n_blks {
             for (p_idx, plane) in planes.iter().enumerate() {
-                let row = fpha_block_start + blk * n_planes + p_idx;
+                // FPHA-plane shape: block OUTER (stride n_planes), plane INNER —
+                // the opposite nesting of the flat shape. Routed through the
+                // distinct `fpha_plane` method so the flat `(start, entity, blk)`
+                // order cannot silently transpose the two.
+                let row = grid.fpha_plane(fpha_block_start, blk, p_idx, n_planes);
                 visit(local_idx, h_idx, blk, p_idx, plane, row);
             }
         }
-        fpha_block_start += n_blks * n_planes;
+        fpha_block_start = grid.advance_fpha_base(fpha_block_start, n_planes);
     }
 }
 
@@ -981,6 +986,7 @@ fn fill_load_balance_rows(
     row_lower: &mut [f64],
     row_upper: &mut [f64],
 ) {
+    let grid = layout.indexer.block_grid();
     for (b_idx, bus) in ctx.buses.iter().enumerate() {
         let mean_mw = ctx
             .load_models
@@ -992,7 +998,7 @@ fn fill_load_balance_rows(
                 .resolved
                 .resolved_load_factors
                 .factor(b_idx, stage_idx, blk);
-            let row = layout.row_load_balance_start() + b_idx * layout.n_blks + blk;
+            let row = grid.flat(layout.row_load_balance_start(), b_idx, blk);
             let rhs = mean_mw * factor;
             row_lower[row] = rhs;
             row_upper[row] = rhs;
@@ -1110,6 +1116,7 @@ fn fill_operational_violation_rows(
     //   max-outflow   (<=): LHS - sigma <= max_outflow_m3s
     //   min-turbine   (>=): LHS + sigma >= min_turbined_m3s
     //   min-generation(>=): LHS + sigma >= min_generation_mw
+    let grid = layout.indexer.block_grid();
     for h_idx in 0..layout.n_h {
         let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
         let families = [
@@ -1136,7 +1143,7 @@ fn fill_operational_violation_rows(
         ];
         for (row_start, lower, upper) in families {
             for blk in 0..layout.n_blks {
-                let row = row_start + h_idx * layout.n_blks + blk;
+                let row = grid.flat(row_start, h_idx, blk);
                 row_lower[row] = lower;
                 row_upper[row] = upper;
             }
@@ -1230,12 +1237,13 @@ pub(super) fn fill_anticipated_fishing_entries(
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
     let n_blks = layout.n_blks;
+    let grid = layout.indexer.block_grid();
     for local_idx in 0..ctx.n_anticipated {
         let row = layout.anticipated.row_anticipated_fishing_start + local_idx;
         let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
         let mut block_hours_total: f64 = 0.0;
         for blk in 0..n_blks {
-            let col_gen = layout.col_thermal_start() + thermal_idx * n_blks + blk;
+            let col_gen = grid.flat(layout.col_thermal_start(), thermal_idx, blk);
             let block_hours = stage.blocks[blk].duration_hours;
             col_entries[col_gen].push((row, block_hours));
             block_hours_total += block_hours;
@@ -1426,6 +1434,7 @@ pub(super) fn fill_pumping_water_entries(
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
     let n_blks = layout.n_blks;
+    let grid = layout.indexer.block_grid();
     let row_water = layout.row_water_balance_start();
     for (p_idx, station) in ctx.pumping_stations.iter().enumerate() {
         // `validate_pumping_station_refs` (run from `SystemBuilder::build()`)
@@ -1439,7 +1448,7 @@ pub(super) fn fill_pumping_water_entries(
         let destination = ctx.hydro_pos.get(&station.destination_hydro_id).copied();
         for blk in 0..n_blks {
             let tau_h = stage.blocks[blk].duration_hours * M3S_TO_HM3;
-            let col = layout.col_pumping_start + p_idx * n_blks + blk;
+            let col = grid.flat(layout.col_pumping_start, p_idx, blk);
             if let Some(s_idx) = source {
                 col_entries[col].push((row_water + s_idx, tau_h));
             }
@@ -1473,6 +1482,7 @@ pub(super) fn fill_load_balance_entries(
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
     let n_blks = layout.n_blks;
+    let grid = layout.indexer.block_grid();
     let row_load = layout.row_load_balance_start();
 
     for (h_idx, hydro) in ctx.hydros.iter().enumerate() {
@@ -1486,7 +1496,7 @@ pub(super) fn fill_load_balance_entries(
             );
             if let Some(&b_idx) = ctx.bus_pos.get(&hydro.bus_id) {
                 for blk in 0..n_blks {
-                    let row = row_load + b_idx * n_blks + blk;
+                    let row = grid.flat(row_load, b_idx, blk);
                     let col = layout.generation_col(local_idx, blk);
                     col_entries[col].push((row, 1.0));
                 }
@@ -1502,7 +1512,7 @@ pub(super) fn fill_load_balance_entries(
             };
             if let Some(&b_idx) = ctx.bus_pos.get(&hydro.bus_id) {
                 for blk in 0..n_blks {
-                    let row = row_load + b_idx * n_blks + blk;
+                    let row = grid.flat(row_load, b_idx, blk);
                     let col = layout.turbine_col(h_idx, blk);
                     col_entries[col].push((row, rho));
                 }
@@ -1513,8 +1523,8 @@ pub(super) fn fill_load_balance_entries(
     for (t_idx, thermal) in ctx.thermals.iter().enumerate() {
         if let Some(&b_idx) = ctx.bus_pos.get(&thermal.bus_id) {
             for blk in 0..n_blks {
-                let row = row_load + b_idx * n_blks + blk;
-                let col = layout.col_thermal_start() + t_idx * n_blks + blk;
+                let row = grid.flat(row_load, b_idx, blk);
+                let col = grid.flat(layout.col_thermal_start(), t_idx, blk);
                 col_entries[col].push((row, 1.0));
             }
         }
@@ -1527,12 +1537,12 @@ pub(super) fn fill_load_balance_entries(
             let col_fwd = layout.line_fwd_col(l_idx, blk);
             let col_rev = layout.line_rev_col(l_idx, blk);
             if let Some(tgt) = tgt_idx {
-                let row = row_load + tgt * n_blks + blk;
+                let row = grid.flat(row_load, tgt, blk);
                 col_entries[col_fwd].push((row, 1.0));
                 col_entries[col_rev].push((row, -1.0));
             }
             if let Some(src) = src_idx {
-                let row = row_load + src * n_blks + blk;
+                let row = grid.flat(row_load, src, blk);
                 col_entries[col_fwd].push((row, -1.0));
                 col_entries[col_rev].push((row, 1.0));
             }
@@ -1546,8 +1556,8 @@ pub(super) fn fill_load_balance_entries(
     for (p_idx, station) in ctx.pumping_stations.iter().enumerate() {
         if let Some(&b_idx) = ctx.bus_pos.get(&station.bus_id) {
             for blk in 0..n_blks {
-                let row = row_load + b_idx * n_blks + blk;
-                let col = layout.col_pumping_start + p_idx * n_blks + blk;
+                let row = grid.flat(row_load, b_idx, blk);
+                let col = grid.flat(layout.col_pumping_start, p_idx, blk);
                 col_entries[col].push((row, -station.consumption_mw_per_m3s));
             }
         }
@@ -1555,12 +1565,12 @@ pub(super) fn fill_load_balance_entries(
 
     for (b_idx, bus) in ctx.buses.iter().enumerate() {
         for blk in 0..n_blks {
-            let row = row_load + b_idx * n_blks + blk;
+            let row = grid.flat(row_load, b_idx, blk);
             for seg_idx in 0..bus.deficit_segments.len() {
                 let col_def = layout.deficit_col(b_idx, seg_idx, blk);
                 col_entries[col_def].push((row, 1.0));
             }
-            let col_exc = layout.col_excess_start() + b_idx * n_blks + blk;
+            let col_exc = grid.flat(layout.col_excess_start(), b_idx, blk);
             col_entries[col_exc].push((row, -1.0));
         }
     }
@@ -1872,6 +1882,7 @@ pub(super) fn fill_ncs_load_balance_entries(
     layout: &StageLayout,
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
+    let grid = layout.indexer.block_grid();
     for (ncs_local, &ncs_sys_idx) in layout.active_ncs_indices.iter().enumerate() {
         let ncs = &ctx.non_controllable_sources[ncs_sys_idx];
         let Some(&bus_idx) = ctx.bus_pos.get(&ncs.bus_id) else {
@@ -1879,8 +1890,8 @@ pub(super) fn fill_ncs_load_balance_entries(
             continue;
         };
         for blk in 0..layout.n_blks {
-            let col = layout.col_ncs_start + ncs_local * layout.n_blks + blk;
-            let row = layout.row_load_balance_start() + bus_idx * layout.n_blks + blk;
+            let col = grid.flat(layout.col_ncs_start, ncs_local, blk);
+            let row = grid.flat(layout.row_load_balance_start(), bus_idx, blk);
             col_entries[col].push((row, 1.0));
         }
     }
@@ -1949,11 +1960,12 @@ pub(super) fn fill_operational_violation_entries(
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
     let n_blks = layout.n_blks;
+    let grid = layout.indexer.block_grid();
 
     for (h_idx, fpha_local_entry) in layout.fpha_local_index.iter().enumerate() {
         // ── Min outflow (per block): q + s + d + sigma >= min_outflow_m3s ───
         for blk in 0..n_blks {
-            let row = layout.row_min_outflow_start() + h_idx * n_blks + blk;
+            let row = grid.flat(layout.row_min_outflow_start(), h_idx, blk);
             let col_q = layout.turbine_col(h_idx, blk);
             col_entries[col_q].push((row, 1.0));
             let col_s = layout.spillage_col(h_idx, blk);
@@ -1966,7 +1978,7 @@ pub(super) fn fill_operational_violation_entries(
 
         // ── Max outflow (per block): q + s + d - sigma <= max_outflow_m3s ───
         for blk in 0..n_blks {
-            let row = layout.row_max_outflow_start() + h_idx * n_blks + blk;
+            let row = grid.flat(layout.row_max_outflow_start(), h_idx, blk);
             let col_q = layout.turbine_col(h_idx, blk);
             col_entries[col_q].push((row, 1.0));
             let col_s = layout.spillage_col(h_idx, blk);
@@ -1979,7 +1991,7 @@ pub(super) fn fill_operational_violation_entries(
 
         // ── Min turbine flow (per block): q + sigma >= min_turbined_m3s ─────
         for blk in 0..n_blks {
-            let row = layout.row_min_turbine_start() + h_idx * n_blks + blk;
+            let row = grid.flat(layout.row_min_turbine_start(), h_idx, blk);
             let col_q = layout.turbine_col(h_idx, blk);
             col_entries[col_q].push((row, 1.0));
             let col_slack = layout.turbine_below_col(h_idx, blk);
@@ -1990,7 +2002,7 @@ pub(super) fn fill_operational_violation_entries(
         if let Some(&local_fpha_idx) = fpha_local_entry.as_ref() {
             // FPHA: generation variable g_{h,blk} (already in MW).
             for blk in 0..n_blks {
-                let row = layout.row_min_generation_start() + h_idx * n_blks + blk;
+                let row = grid.flat(layout.row_min_generation_start(), h_idx, blk);
                 let col_g = layout.generation_col(local_fpha_idx, blk);
                 col_entries[col_g].push((row, 1.0));
                 let col_slack = layout.generation_below_col(h_idx, blk);
@@ -2009,7 +2021,7 @@ pub(super) fn fill_operational_violation_entries(
                 }
             };
             for blk in 0..n_blks {
-                let row = layout.row_min_generation_start() + h_idx * n_blks + blk;
+                let row = grid.flat(layout.row_min_generation_start(), h_idx, blk);
                 let col_q = layout.turbine_col(h_idx, blk);
                 col_entries[col_q].push((row, rho));
                 let col_slack = layout.generation_below_col(h_idx, blk);
