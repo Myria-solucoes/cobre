@@ -644,14 +644,14 @@ impl StageIndexer {
     /// can obtain it without sharing a reference. Sourcing both constants from
     /// this single owning indexer is what keeps the grid from disagreeing with
     /// the LP it addresses; see [`BlockGrid`] for the per-shape contracts.
-    // Intent/Seam: the resolvers and extraction sites that hold `&StageIndexer`
-    // obtain the grid through here once they migrate off their hand-rolled
-    // strides; until then this accessor has no production caller and the dead_code
-    // lint fires. The `BlockGrid` shape #[test]s cover it via this entry point.
-    #[allow(dead_code)]
+    ///
+    /// This grid carries the indexer's own `n_blks` (the global count wired once
+    /// from stage 0). For a per-stage fill whose block count differs from stage 0
+    /// — the load-balance RHS patch — construct the grid from the per-stage count
+    /// with [`BlockGrid::new`] instead, or the row stride addresses the wrong row.
     #[inline]
     #[must_use]
-    pub(crate) fn block_grid(&self) -> BlockGrid {
+    pub fn block_grid(&self) -> BlockGrid {
         BlockGrid::new(self.n_blks, self.max_deficit_segments)
     }
 

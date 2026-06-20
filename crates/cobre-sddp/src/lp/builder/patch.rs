@@ -1,4 +1,4 @@
-use crate::indexer::StageIndexer;
+use crate::indexer::{BlockGrid, StageIndexer};
 
 /// Pre-allocated row-bound and column-bound patch arrays for one SDDP stage LP solve.
 ///
@@ -428,6 +428,10 @@ impl PatchBuffer {
     /// row = load_row_start + bus_positions[i] * n_blocks + blk
     /// ```
     ///
+    /// where `n_blocks` is the per-stage block count carried by `grid`. The row
+    /// address is computed through [`BlockGrid::flat`] (bus-outer / block-inner),
+    /// the single owner of block-major address strides.
+    ///
     /// The `load_rhs` slice is laid out as `[bus0_blk0, bus0_blk1, …, bus1_blk0, …]`
     /// (bus-major, block-minor), matching `bus_positions` order.
     ///
@@ -442,9 +446,12 @@ impl PatchBuffer {
     /// # Arguments
     ///
     /// - `load_row_start` — first row index of the load-balance block in the LP.
-    /// - `n_blocks` — number of time blocks for this stage.
+    /// - `grid` — the per-stage [`BlockGrid`]; it must carry this stage's block
+    ///   count (the value the LP template was built with), NOT a global grid.
+    ///   A global grid would stride by the wrong block count at any stage whose
+    ///   count differs.
     /// - `load_rhs` — patched RHS values; length must equal
-    ///   `self.load_bus_count * n_blocks`.
+    ///   `self.load_bus_count * grid.n_blks()`.
     /// - `bus_positions` — LP bus position for each stochastic load bus;
     ///   length must equal `self.load_bus_count`.
     /// - `row_scale` — per-row scaling factors from the stage template.
@@ -453,19 +460,23 @@ impl PatchBuffer {
     /// # Panics
     ///
     /// Panics in debug builds if:
-    /// - `load_rhs.len() != self.load_bus_count * n_blocks`
+    /// - `load_rhs.len() != self.load_bus_count * grid.n_blks()`
     /// - `bus_positions.len() != self.load_bus_count`
-    /// - `n_blocks > self.max_blocks`
+    /// - `grid.n_blks() > self.max_blocks`
     ///
     /// [`forward_patch_count`]: PatchBuffer::forward_patch_count
     pub fn fill_load_patches(
         &mut self,
         load_row_start: usize,
-        n_blocks: usize,
+        grid: BlockGrid,
         load_rhs: &[f64],
         bus_positions: &[usize],
         row_scale: &[f64],
     ) {
+        // `n_blocks` here is a buffer-size count (no `+ blk` address term), so it
+        // reads the scalar via `grid.n_blks()` rather than routing through `flat`;
+        // the LP row address below routes through `grid.flat` instead.
+        let n_blocks = grid.n_blks();
         debug_assert_eq!(
             load_rhs.len(),
             self.load_bus_count * n_blocks,
@@ -492,8 +503,11 @@ impl PatchBuffer {
 
         for (i, &bus_pos) in bus_positions.iter().enumerate() {
             for blk in 0..n_blocks {
-                let row = load_row_start + bus_pos * n_blocks + blk;
-                let rhs = load_rhs[i * n_blocks + blk];
+                let row = grid.flat(load_row_start, bus_pos, blk);
+                // The host-array index shares the flat layout `i * n_blks + blk`,
+                // so it routes through `grid.flat(0, i, blk)` (start = 0) — the
+                // same primitive, keeping a single owner for the strided arithmetic.
+                let rhs = load_rhs[grid.flat(0, i, blk)];
                 let scaled = if row_scale.is_empty() {
                     rhs
                 } else {
@@ -597,7 +611,7 @@ impl PatchBuffer {
 )]
 mod tests {
     use super::PatchBuffer;
-    use crate::indexer::StageIndexer;
+    use crate::indexer::{BlockGrid, StageIndexer};
 
     /// Convenience: make an indexer without repeating N/L everywhere.
     fn idx(n: usize, l: usize) -> StageIndexer {
@@ -813,7 +827,7 @@ mod tests {
         let mut buf = PatchBuffer::new(0, 0, 2, 2, 0, 0);
         let load_rhs = [300.0_f64, 280.0, 500.0, 450.0];
         let bus_positions = [0_usize, 1];
-        buf.fill_load_patches(100, 2, &load_rhs, &bus_positions, &[]);
+        buf.fill_load_patches(100, BlockGrid::new(2, 1), &load_rhs, &bus_positions, &[]);
 
         assert_eq!(buf.indices[0], 100); // bus 0, blk 0
         assert_eq!(buf.indices[1], 101); // bus 0, blk 1
@@ -827,7 +841,7 @@ mod tests {
         let mut buf = PatchBuffer::new(0, 0, 2, 2, 0, 0);
         let load_rhs = [300.0_f64, 280.0, 500.0, 450.0];
         let bus_positions = [0_usize, 1];
-        buf.fill_load_patches(100, 2, &load_rhs, &bus_positions, &[]);
+        buf.fill_load_patches(100, BlockGrid::new(2, 1), &load_rhs, &bus_positions, &[]);
 
         assert_eq!(buf.lower[0], 300.0);
         assert_eq!(buf.upper[0], 300.0);
@@ -849,7 +863,7 @@ mod tests {
 
         let load_rhs = [100.0_f64, 90.0, 80.0, 200.0, 190.0, 180.0];
         let bus_positions = [0_usize, 1];
-        buf.fill_load_patches(20, 3, &load_rhs, &bus_positions, &[]);
+        buf.fill_load_patches(20, BlockGrid::new(3, 1), &load_rhs, &bus_positions, &[]);
 
         let count = buf.forward_patch_count();
         for i in 0..count {
@@ -875,7 +889,7 @@ mod tests {
 
         let load_rhs = [100.0_f64, 90.0, 80.0, 200.0, 190.0, 180.0];
         let bus_positions = [0_usize, 1];
-        buf.fill_load_patches(20, 3, &load_rhs, &bus_positions, &[]);
+        buf.fill_load_patches(20, BlockGrid::new(3, 1), &load_rhs, &bus_positions, &[]);
 
         assert_eq!(buf.forward_patch_count(), 9); // N=3 + M*n_blocks=6
     }

@@ -10,28 +10,26 @@
 //!
 //! ## Single owner of the three block-index shapes
 //!
-//! [`BlockGrid`] is the single owner of the block-major address arithmetic for the
-//! three shapes ([`flat`](BlockGrid::flat), [`fpha_plane`](BlockGrid::fpha_plane),
-//! [`deficit`](BlockGrid::deficit)). Every production fill, resolver, and
-//! extraction site that has a stage [`BlockGrid`] in scope — i.e. that strides by
-//! the stage grid's `n_blks` — computes its address through one of these methods,
-//! never by open-coding `start + entity * n_blks + blk`. The wrong-but-compiling
-//! alternative is a hand-rolled stride that drifts from the grid (a transposed
-//! nesting, or a stride read from a different `n_blks` than the LP was built with);
-//! routing through the grid forecloses both.
+//! [`BlockGrid`] is the unconditional single owner of every production block-major
+//! address stride for the three shapes ([`flat`](BlockGrid::flat),
+//! [`fpha_plane`](BlockGrid::fpha_plane), [`deficit`](BlockGrid::deficit)). Every
+//! production fill, patch, resolver, and extraction site computes its block-major
+//! address through one of these methods, never by open-coding
+//! `start + entity * n_blks + blk`. The wrong-but-compiling alternative is a
+//! hand-rolled stride that drifts from the grid (a transposed nesting, or a stride
+//! read from a different `n_blks` than the LP was built with); routing through the
+//! grid forecloses both. Sites that hold only the per-stage block count as a scalar
+//! (the load-balance RHS patch in
+//! [`PatchBuffer::fill_load_patches`](super::super::builder::PatchBuffer)) construct
+//! a per-stage [`BlockGrid`] carrying that count and address through it — they do
+//! not open-code the stride.
 //!
 //! Two site classes legitimately retain the open-coded form and are NOT
 //! violations: (1) the `#[cfg(test)]` differential-oracle tests
 //! (`column_accessors_match_open_coded_formulas` and the per-fill assertion tests)
 //! that compute the address by hand to verify a `BlockGrid`-routed accessor against
 //! the formula — routing those through the grid would compare the primitive to
-//! itself; (2) doc comments mirroring the documented layout formula. One block-major
-//! *row* address remains hand-rolled outside the grid by necessity: the load-balance
-//! RHS patch in [`PatchBuffer::fill_load_patches`](super::super::builder::PatchBuffer)
-//! strides by the *per-stage* block count passed as a scalar, with no stage
-//! [`BlockGrid`] in scope (the reusable patch buffer is sized for the global
-//! `max_blocks`, not one stage's grid), so it cannot route through this type without
-//! a signature change.
+//! itself; (2) doc comments mirroring the documented layout formula.
 //!
 //! ## Why three methods, not one generic `(a, b, c)` method
 //!
@@ -49,10 +47,11 @@
 //! No method here produces the transposed form `blk * n_entities + entity`. That
 //! form yields a same-length region but interleaves columns across entities, so a
 //! coefficient lands on the wrong `(entity, block)` and the LP is silently
-//! misbuilt. Because [`BlockGrid`] exposes no field accessors and no generic
-//! stride method, a caller cannot reconstruct the transposed stride by hand
-//! without deliberately bypassing the type and re-deriving the arithmetic from
-//! [`StageIndexer`](super::StageIndexer) fields directly. The
+//! misbuilt. The only field accessor is the read-only count [`n_blks`](BlockGrid::n_blks);
+//! the entity count `n_entities` the transpose needs is not carried, and there is
+//! no generic stride method, so a caller cannot reconstruct the transposed stride
+//! by hand without deliberately bypassing the type and re-deriving the arithmetic
+//! from [`StageIndexer`](super::StageIndexer) fields directly. The
 //! `block_grid_forbids_transposed_shape` test in this module pins that there is
 //! no `(blk, n_entities, entity)`-ordered method.
 
@@ -65,19 +64,17 @@
 /// fill closures costs nothing.
 ///
 /// The three shapes — [`flat`](Self::flat), [`fpha_plane`](Self::fpha_plane), and
-/// [`deficit`](Self::deficit) — have opposite block-nesting orders; see the
-/// [module docs](self) for why each gets its own method instead of one shared
-/// `(a, b, c)` calculator.
-// Intent/Seam: defined here as the single owner of the block-stride arithmetic so
-// the hand-rolled stride sites in matrix.rs, generic_constraints.rs,
-// builder/layout.rs, builder/patch.rs, and simulation/extraction.rs can migrate
-// onto these typed shapes. Until those call sites are converted, the type and its
-// methods have no production caller, so the dead_code lint fires on the lib pass;
-// each migration removes a hand-rolled stride and adds a use, at which point the
-// lint is satisfied without this allow. The shape #[test]s exercise every method.
-#[allow(dead_code)]
+/// [`deficit`](Self::deficit) — have opposite block-nesting orders, so each gets
+/// its own method instead of one shared `(a, b, c)` calculator: a single generic
+/// method would let a caller pass one shape's arguments in another shape's order
+/// and silently address the wrong cell.
+///
+/// It is `pub` because the public [`PatchBuffer::fill_load_patches`](super::super::builder::PatchBuffer)
+/// API accepts it by value (mirroring how that API also accepts the public
+/// [`StageIndexer`](super::StageIndexer)); callers outside the crate construct a
+/// per-stage grid with [`new`](Self::new).
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct BlockGrid {
+pub struct BlockGrid {
     /// Number of operating blocks per stage (K), the per-entity stride of the
     /// flat shape and the inner stride of the deficit shape.
     n_blks: usize,
@@ -86,11 +83,6 @@ pub(crate) struct BlockGrid {
     max_deficit_segments: usize,
 }
 
-// Intent/Seam: the constructor and three shape methods have no production caller
-// until the hand-rolled stride sites migrate onto them (see the type doc above);
-// the dead_code lint fires on the lib pass meanwhile. The shape #[test]s in this
-// module exercise every method, and each migrated call site adds a production use.
-#[allow(dead_code)]
 impl BlockGrid {
     /// Construct a [`BlockGrid`] from its two stride constants.
     ///
@@ -98,11 +90,29 @@ impl BlockGrid {
     /// call sites — it sources both constants from the single owning indexer so
     /// the grid cannot disagree with the LP it addresses.
     #[inline]
-    pub(crate) fn new(n_blks: usize, max_deficit_segments: usize) -> Self {
+    #[must_use]
+    pub fn new(n_blks: usize, max_deficit_segments: usize) -> Self {
         Self {
             n_blks,
             max_deficit_segments,
         }
+    }
+
+    /// The per-stage block count `n_blks` this grid strides by.
+    ///
+    /// For callers that need the block count itself — a host-buffer size or a
+    /// buffer-length assertion — rather than an address. A buffer-size *count*
+    /// (`n_entities * n_blks`, no `+ blk` term) is not an address: routing it
+    /// through [`flat`](Self::flat) would mean passing a zero block offset, which
+    /// reads as an address calculation it is not. Reading `n_blks` directly keeps
+    /// the count a count while production *addresses* still route through the
+    /// typed shape methods. This single read-only accessor does not re-open the
+    /// transposed-stride trap: that trap requires the wrong *multiply order*,
+    /// which only the typed shape methods can express; a scalar read cannot.
+    #[inline]
+    #[must_use]
+    pub fn n_blks(&self) -> usize {
+        self.n_blks
     }
 
     /// Flat block-major address: `start + entity * n_blks + blk`.
@@ -120,7 +130,8 @@ impl BlockGrid {
     /// diversion, thermal, line-fwd/rev, FPHA generation, operational-violation
     /// slacks).
     #[inline]
-    pub(crate) fn flat(&self, start: usize, entity: usize, blk: usize) -> usize {
+    #[must_use]
+    pub fn flat(&self, start: usize, entity: usize, blk: usize) -> usize {
         start + entity * self.n_blks + blk
     }
 
@@ -145,7 +156,8 @@ impl BlockGrid {
     // re-derive the stride inline rather than route through the typed primitive.
     #[allow(clippy::unused_self)]
     #[inline]
-    pub(crate) fn fpha_plane(
+    #[must_use]
+    pub fn fpha_plane(
         &self,
         fpha_block_start: usize,
         blk: usize,
@@ -164,7 +176,8 @@ impl BlockGrid {
     /// counts vary per hydro), matching the stride [`fpha_plane`](Self::fpha_plane)
     /// addresses within a single hydro.
     #[inline]
-    pub(crate) fn advance_fpha_base(&self, fpha_block_start: usize, n_planes: usize) -> usize {
+    #[must_use]
+    pub fn advance_fpha_base(&self, fpha_block_start: usize, n_planes: usize) -> usize {
         fpha_block_start + self.n_blks * n_planes
     }
 
@@ -180,13 +193,8 @@ impl BlockGrid {
     /// same-length but wrong-cell alternative. Passing `S` and `n_blks` as named
     /// parameters in this fixed order fixes the nesting against that trap.
     #[inline]
-    pub(crate) fn deficit(
-        &self,
-        deficit_start: usize,
-        b_pos: usize,
-        seg: usize,
-        blk: usize,
-    ) -> usize {
+    #[must_use]
+    pub fn deficit(&self, deficit_start: usize, b_pos: usize, seg: usize, blk: usize) -> usize {
         deficit_start + b_pos * self.max_deficit_segments * self.n_blks + seg * self.n_blks + blk
     }
 }

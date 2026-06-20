@@ -11,6 +11,7 @@ use cobre_solver::SolverInterface;
 
 use crate::{
     context::{StageContext, TrainingContext},
+    indexer::BlockGrid,
     noise::{NcsNoiseOffsets, transform_inflow_noise, transform_load_noise, transform_ncs_noise},
     workspace::{BasisStoreSliceMut, CapturedBasis, SolverWorkspace},
 };
@@ -94,9 +95,12 @@ pub(crate) fn patch_opening_bounds<S: SolverInterface + Send>(
         &ctx.templates[s].row_scale,
     );
     if ctx.n_load_buses > 0 {
+        // Per-stage grid: it must carry this stage's block count, not the global
+        // `indexer.n_blks`, so the load-balance row stride matches the per-stage LP.
+        let grid = BlockGrid::new(n_blks, training_ctx.indexer.max_deficit_segments);
         ws.patch_buf.fill_load_patches(
             ctx.load_balance_row_starts[s],
-            n_blks,
+            grid,
             &ws.scratch.load_rhs_buf,
             ctx.load_bus_indices,
             &ctx.templates[s].row_scale,

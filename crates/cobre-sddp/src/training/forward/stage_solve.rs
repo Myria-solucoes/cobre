@@ -14,6 +14,7 @@ use crate::{
     context::{StageContext, TrainingContext},
     dcs::{DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
     error::SddpError,
+    indexer::BlockGrid,
     lp_builder::COST_SCALE_FACTOR,
     noise::{NcsNoiseOffsets, transform_inflow_noise, transform_load_noise, transform_ncs_noise},
     trajectory::TrajectoryRecord,
@@ -120,9 +121,12 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         &ctx.templates[t].row_scale,
     );
     if n_load_buses > 0 {
+        // Per-stage grid: it must carry this stage's block count, not the global
+        // `indexer.n_blks`, so the load-balance row stride matches the per-stage LP.
+        let grid = BlockGrid::new(ctx.block_counts_per_stage[t], indexer.max_deficit_segments);
         ws.patch_buf.fill_load_patches(
             ctx.load_balance_row_starts[t],
-            ctx.block_counts_per_stage[t],
+            grid,
             &ws.scratch.load_rhs_buf,
             ctx.load_bus_indices,
             &ctx.templates[t].row_scale,

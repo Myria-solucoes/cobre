@@ -34,7 +34,7 @@ use cobre_sddp::{
         EvaporationModel, EvaporationModelSet, FphaPlane, LinearizedEvaporation,
         PrepareHydroModelsResult, ProductionModelSet, ResolvedProductionModel,
     },
-    indexer::{EquipmentCounts, FphaColumnLayout, StageIndexer},
+    indexer::{BlockGrid, EquipmentCounts, FphaColumnLayout, StageIndexer},
     inflow_method::InflowNonNegativityMethod,
     lp_builder::PatchBuffer,
     resolved_parameters::ResolvedParameters,
@@ -9255,12 +9255,20 @@ fn parameter_coefficient_persists_across_stage_template_uses() {
     // Category 3 — AR dynamics / noise.
     buf.fill_forward_patches(&StageIndexer::new(n, l), &state, &noise, base_row, &[]);
 
-    // Category 4 — 2 load buses, 2 active blocks (< max 3).
+    // Category 4 — 2 load buses, 2 active blocks (< max 3). The per-stage grid
+    // carries `b_active`, NOT `b_max`, so the load-balance row stride matches the
+    // per-stage LP (a global grid striding by `b_max` would address the wrong row).
     let b_active: usize = 2;
     let load_rhs: Vec<f64> = (0..m * b_active).map(|i| 100.0 + i as f64).collect();
     let bus_positions: Vec<usize> = (0..m).collect();
     let load_row_start: usize = 200; // arbitrary LP row offset
-    buf.fill_load_patches(load_row_start, b_active, &load_rhs, &bus_positions, &[]);
+    buf.fill_load_patches(
+        load_row_start,
+        BlockGrid::new(b_active, 1),
+        &load_rhs,
+        &bus_positions,
+        &[],
+    );
 
     // Category 5 — z-inflow rows.
     let z_inflow_rhs: Vec<f64> = (0..n).map(|h| 80.0 + h as f64).collect();

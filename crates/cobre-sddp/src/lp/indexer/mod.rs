@@ -144,7 +144,7 @@ mod state_mapping;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_fixtures;
 
-pub(crate) use block_grid::BlockGrid;
+pub use block_grid::BlockGrid;
 pub use layout::{
     EquipmentCounts, EvapConfig, EvaporationIndices, FphaColumnLayout, FphaRowRange, StageIndexer,
 };
