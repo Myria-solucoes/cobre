@@ -270,7 +270,10 @@ fn fill_thermal_columns(
         let tb = ctx.resolved.bounds.thermal_bounds(t_idx, stage_idx);
         let marginal_cost_per_mwh = tb.cost_per_mwh;
         for blk in 0..layout.n_blks {
-            let col = layout.col_thermal_start() + t_idx * layout.n_blks + blk;
+            let col = layout
+                .indexer
+                .block_grid()
+                .flat(layout.col_thermal_start(), t_idx, blk);
             bufs.col_lower[col] = tb.min_generation_mw;
             bufs.col_upper[col] = tb.max_generation_mw;
             let block_hours = stage.blocks[blk].duration_hours;
@@ -462,7 +465,10 @@ fn fill_deficit_and_excess_columns(
             }
         }
         for blk in 0..layout.n_blks {
-            let col_exc = layout.col_excess_start() + b_idx * layout.n_blks + blk;
+            let col_exc = layout
+                .indexer
+                .block_grid()
+                .flat(layout.col_excess_start(), b_idx, blk);
             let block_hours = stage.blocks[blk].duration_hours;
             bufs.col_upper[col_exc] = f64::INFINITY;
             bufs.objective[col_exc] = bp.excess_cost * block_hours;
@@ -773,7 +779,10 @@ fn fill_ncs_columns(
             .resolved_ncs_bounds
             .available_generation(ncs_sys_idx, stage_idx);
         for blk in 0..layout.n_blks {
-            let col = layout.col_ncs_start + ncs_local * layout.n_blks + blk;
+            let col = layout
+                .indexer
+                .block_grid()
+                .flat(layout.col_ncs_start, ncs_local, blk);
             let factor = ctx
                 .resolved
                 .resolved_ncs_factors
@@ -809,7 +818,10 @@ fn fill_pumping_columns(
     for p_idx in 0..ctx.pumping_stations.len() {
         let pb = ctx.resolved.bounds.pumping_bounds(p_idx, stage_idx);
         for blk in 0..layout.n_blks {
-            let col = layout.col_pumping_start + p_idx * layout.n_blks + blk;
+            let col = layout
+                .indexer
+                .block_grid()
+                .flat(layout.col_pumping_start, p_idx, blk);
             bufs.col_lower[col] = pb.min_flow_m3s;
             bufs.col_upper[col] = pb.max_flow_m3s;
             // objective[col] = 0.0 — already zero from vec initialisation.
