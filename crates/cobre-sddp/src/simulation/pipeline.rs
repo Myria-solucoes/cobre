@@ -320,8 +320,9 @@ impl SimLookups {
 /// allocates only `(active stochastic NCS) * n_blks` columns and a full
 /// `n_stochastic_ncs` block would overrun. The bounds are gathered to the active
 /// slots so the set-bounds call gets index/lower/upper buffers of equal length.
-/// The index buffer is rebuilt lazily (only when the active length changes, i.e.
-/// on a stage transition); the bounds are gathered every solve.
+/// The index buffer is rebuilt lazily on a stage transition (when the per-stage
+/// NCS column start or the active length changes); the bounds are gathered every
+/// solve.
 fn apply_ncs_col_bounds<S: SolverInterface>(
     solver: &mut S,
     scratch: &mut crate::workspace::ScratchBuffers,
@@ -330,13 +331,21 @@ fn apply_ncs_col_bounds<S: SolverInterface>(
     n_blks: usize,
 ) {
     let expected_len = crate::noise::active_ncs_slot_count(slot_to_local) * n_blks;
-    if scratch.ncs_col_indices_buf.len() != expected_len {
+    // The index buffer must be rebuilt when the per-stage NCS column **start**
+    // changes, not only when its length changes: `ncs_col_start` varies per stage,
+    // so two stages can share `active_count * n_blks` yet address different
+    // columns. Keying on length alone (the forbidden alternative) would retain the
+    // previous stage's indices and set bounds on the wrong columns.
+    if scratch.last_ncs_col_start != ncs_col_start
+        || scratch.ncs_col_indices_buf.len() != expected_len
+    {
         crate::noise::build_active_ncs_col_indices(
             slot_to_local,
             ncs_col_start,
             n_blks,
             &mut scratch.ncs_col_indices_buf,
         );
+        scratch.last_ncs_col_start = ncs_col_start;
     }
     crate::noise::gather_active_ncs_bounds(
         slot_to_local,
@@ -1647,6 +1656,7 @@ mod tests {
                 ncs_col_indices_buf: Vec::new(),
                 ncs_col_lower_active_buf: Vec::new(),
                 ncs_col_upper_active_buf: Vec::new(),
+                last_ncs_col_start: usize::MAX,
                 ncs_col_upper_extract_buf: Vec::new(),
                 load_rhs_buf: Vec::new(),
                 row_lower_buf: Vec::new(),
@@ -1896,6 +1906,7 @@ mod tests {
                 ncs_col_indices_buf: Vec::new(),
                 ncs_col_lower_active_buf: Vec::new(),
                 ncs_col_upper_active_buf: Vec::new(),
+                last_ncs_col_start: usize::MAX,
                 ncs_col_upper_extract_buf: Vec::new(),
                 load_rhs_buf: Vec::with_capacity(n_load_buses),
                 row_lower_buf: Vec::new(),
@@ -2246,6 +2257,7 @@ mod tests {
                 ncs_col_indices_buf: Vec::new(),
                 ncs_col_lower_active_buf: Vec::new(),
                 ncs_col_upper_active_buf: Vec::new(),
+                last_ncs_col_start: usize::MAX,
                 ncs_col_upper_extract_buf: Vec::new(),
                 load_rhs_buf: Vec::with_capacity(n_load_buses),
                 row_lower_buf: Vec::new(),
@@ -2569,6 +2581,7 @@ mod tests {
                 ncs_col_indices_buf: Vec::new(),
                 ncs_col_lower_active_buf: Vec::new(),
                 ncs_col_upper_active_buf: Vec::new(),
+                last_ncs_col_start: usize::MAX,
                 ncs_col_upper_extract_buf: Vec::new(),
                 load_rhs_buf: Vec::new(),
                 row_lower_buf: Vec::new(),

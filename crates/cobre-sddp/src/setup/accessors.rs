@@ -162,8 +162,6 @@ impl StudySetup {
         let tr = &self.scenario_libraries.training;
         let sim = &self.scenario_libraries.simulation;
 
-        // For each class, prefer the simulation-specific library when present;
-        // fall back to the training library when schemes are identical.
         let historical_library =
             sim.historical
                 .as_ref()

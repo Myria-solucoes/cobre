@@ -56,7 +56,7 @@ pub struct StageContext<'a> {
     /// `active_ncs_indices[stage].len()` NCS columns, so addressing all
     /// `n_stochastic_ncs` slots would overrun the block. Empty when the study has
     /// no stochastic NCS columns (the patch is guarded off in that case).
-    /// Built once at setup as [`crate::setup::StudySetup::ncs_active_slot_to_local`].
+    /// Built once at setup in `StudySetup` (the per-stage active-slot map).
     pub ncs_active_slot_to_local: &'a [Vec<Option<usize>>],
     /// Maximum generation (MW) per stochastic NCS entity, sorted by entity ID.
     /// Length equals the number of stochastic NCS entities. Empty when none exist.

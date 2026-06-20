@@ -495,8 +495,9 @@ pub struct StageIndexer {
 
     // ── NCS presence flag ─────────────────────────────────────────────────
     // OWNER: set after construction by the NCS wiring in `setup`
-    // (`build_wired_indexer`) — NOT by `StageLayout::new`. `false` for every
-    // `StageIndexer` constructor (`new`, `with_equipment`); the wiring sets it.
+    // (`build_wired_indexer`) — NOT by `StageLayout::new`, which only reads
+    // indexer cursors. `false` for every `StageIndexer` constructor (`new`,
+    // `with_equipment`); the wiring sets it.
     //
     // This is a presence flag, never a column base: NCS columns are addressed
     // per-stage from `StageContext::ncs_col_starts[stage]` (and

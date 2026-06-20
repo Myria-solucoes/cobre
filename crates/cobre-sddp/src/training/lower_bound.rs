@@ -1899,14 +1899,18 @@ mod tests {
             inflow_method: &InflowNonNegativityMethod::None,
         };
 
-        // Pre-populate LbEvalScratch as lb_init_rank0 would.
+        // Pre-populate the stage-0 active NCS column indices, exactly the buffer
+        // `lb_init_rank0` builds before the opening loop (this test calls
+        // `lb_evaluate_stage_0` directly, so it must seed that buffer itself). The
+        // lower/upper bound buffers are NOT seeded here: `lb_evaluate_stage_0`
+        // clears and refills them every opening via `transform_ncs_noise`, so any
+        // value pushed now would be immediately overwritten.
         let mut lb_scratch = LbEvalScratch::new();
         for ncs_idx in 0..n_ncs {
             for blk in 0..block_count {
                 lb_scratch
                     .ncs_col_indices_buf
                     .push(spec.ncs_generation.start + ncs_idx * block_count + blk);
-                lb_scratch.ncs_col_lower_buf.push(0.0);
             }
         }
 

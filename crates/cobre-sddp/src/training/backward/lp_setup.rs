@@ -126,19 +126,30 @@ pub(crate) fn patch_opening_bounds<S: SolverInterface + Send>(
     // the bound buffers in full stochastic-slot order; the gather copies only the
     // active slots' bounds, because a subset stage allocates only `(active
     // stochastic NCS) * n_blks` columns and a full `n_stochastic_ncs` block would
-    // overrun. Index buffer rebuilt lazily on active-subset length change; bounds
+    // overrun. Index buffer rebuilt lazily on a stage transition (when the
+    // per-stage NCS column start or the active-subset length changes); bounds
     // gathered every opening.
     if n_stochastic_ncs > 0 && training_ctx.indexer.has_ncs {
         let n_blks_stage = ctx.block_counts_per_stage[s];
         let slot_to_local = &ctx.ncs_active_slot_to_local[s];
+        let ncs_col_start = ctx.ncs_col_starts[s];
         let expected_len = crate::noise::active_ncs_slot_count(slot_to_local) * n_blks_stage;
-        if ws.scratch.ncs_col_indices_buf.len() != expected_len {
+        // The index buffer must be rebuilt when the per-stage NCS column **start**
+        // changes, not only when its length changes: `ncs_col_starts[s]` varies per
+        // stage, so two stages can share `active_count * n_blks` yet address
+        // different columns. Keying on length alone (the forbidden alternative)
+        // would retain the previous stage's indices and set bounds on the wrong
+        // columns.
+        if ws.scratch.last_ncs_col_start != ncs_col_start
+            || ws.scratch.ncs_col_indices_buf.len() != expected_len
+        {
             crate::noise::build_active_ncs_col_indices(
                 slot_to_local,
-                ctx.ncs_col_starts[s],
+                ncs_col_start,
                 n_blks_stage,
                 &mut ws.scratch.ncs_col_indices_buf,
             );
+            ws.scratch.last_ncs_col_start = ncs_col_start;
         }
         crate::noise::gather_active_ncs_bounds(
             slot_to_local,

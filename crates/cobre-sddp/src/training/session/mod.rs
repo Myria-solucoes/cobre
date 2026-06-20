@@ -451,7 +451,7 @@ where
                 iteration,
                 lower_bound: self.results.final_lb,
                 upper_bound: self.results.final_ub,
-                upper_bound_std: self.convergence_monitor.upper_bound_std(),
+                upper_bound_std: self.results.final_ub_std,
                 gap: self.results.final_gap,
                 rules_evaluated: rule_results.clone(),
             },

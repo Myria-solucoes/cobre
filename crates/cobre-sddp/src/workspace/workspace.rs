@@ -537,6 +537,20 @@ pub(crate) struct ScratchBuffers {
     // buffers verbatim would over-feed the call at a strict-subset stage.
     pub(crate) ncs_col_lower_active_buf: Vec<f64>,
     pub(crate) ncs_col_upper_active_buf: Vec<f64>,
+    /// Per-stage NCS column start that `ncs_col_indices_buf` was last built for.
+    ///
+    /// The lazy index-buffer rebuild must fire when the per-stage NCS column
+    /// **start** changes, not only when its length changes: `ncs_col_starts[t]`
+    /// varies per stage (mid-horizon commissioning / differing block counts), so
+    /// two stages can share the same `active_count * n_blks` length yet address
+    /// different columns. Keying the rebuild on length alone (the forbidden
+    /// alternative) would retain the previous stage's indices and write
+    /// `set_col_bounds` onto the wrong LP columns. Initialised to `usize::MAX` so
+    /// the first patch always rebuilds; updated to the built start after each
+    /// rebuild. Comparing `ncs_col_indices_buf[0]` instead is insufficient — a
+    /// simultaneous change of start and first-active-local can collide on the
+    /// same first index while the rest of the buffer is stale.
+    pub(crate) last_ncs_col_start: usize,
     // Per-active-local-column NCS upper bounds for simulation extraction, length
     // `n_ncs * n_blks` in active-local column order (NOT slot order). Defaults to
     // the template `col_upper` (deterministic active columns) then overwrites each
@@ -767,6 +781,7 @@ impl ScratchBuffers {
             ncs_col_indices_buf: Vec::new(),
             ncs_col_lower_active_buf: Vec::new(),
             ncs_col_upper_active_buf: Vec::new(),
+            last_ncs_col_start: usize::MAX,
             ncs_col_upper_extract_buf: Vec::new(),
             load_rhs_buf: Vec::with_capacity(n_load_buses * max_blocks),
             row_lower_buf: Vec::new(),

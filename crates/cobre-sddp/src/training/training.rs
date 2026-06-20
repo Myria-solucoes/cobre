@@ -122,13 +122,6 @@ impl TrainingResult {
     ///
     /// Prefer this constructor over struct-literal syntax for compiler-enforced
     /// parity when adding new fields.
-    ///
-    /// Structurally independent parameters: each of the 11 fields is the output
-    /// of a distinct training-loop stage (convergence metrics, timing, basis
-    /// cache, solver stats, visited archive, baked templates). Absorbing them
-    /// into a context struct would not reduce the argument count at the call
-    /// sites, because each call site constructs the full `TrainingResult` as
-    /// the terminal value — there is no shared upstream context to forward.
     #[must_use]
     // Rationale: the 11 arguments are independently sourced outputs of distinct training-loop
     // phases (convergence metrics, timing, basis cache, solver stats, visited archive, baked

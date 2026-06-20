@@ -545,32 +545,35 @@ fn build_ncs_entity_data(
     // declaration-order-canonical `active_ncs_indices` and id-sorted slot order,
     // so it preserves declaration-order invariance.
     let stoch_ncs_ids = stochastic.ncs_entity_ids();
+
+    // A stochastic slot must resolve to a known system NCS; otherwise the
+    // throughput buffers from `transform_ncs_noise` would have no column to land
+    // on. The check is stage-independent (a slot's system membership does not
+    // vary by stage), so it runs once here over the slot list rather than
+    // O(n_stages) times inside the per-stage active-set loop below.
+    for slot_id in stoch_ncs_ids {
+        if !system
+            .non_controllable_sources()
+            .iter()
+            .any(|n| n.id == *slot_id)
+        {
+            return Err(SddpError::Validation(format!(
+                "stochastic NCS entity {slot_id:?} not found in system non_controllable_sources"
+            )));
+        }
+    }
+
     let mut ncs_active_slot_to_local: Vec<Vec<Option<usize>>> =
         Vec::with_capacity(ncs_entity_ids_per_stage.len());
     for stage_active_ids in &ncs_entity_ids_per_stage {
         let mut stage_map = Vec::with_capacity(stoch_ncs_ids.len());
         for slot_id in stoch_ncs_ids {
-            // A stochastic slot must resolve to a known system NCS; otherwise the
-            // throughput buffers from `transform_ncs_noise` would have no column
-            // to land on. (`ncs_max_gen`/`ncs_allow_curtailment` below already
-            // reject a slot with no system match; this guards the parallel
-            // active-set lookup against the same condition.)
-            if !system
-                .non_controllable_sources()
-                .iter()
-                .any(|n| n.id == *slot_id)
-            {
-                return Err(SddpError::Validation(format!(
-                    "stochastic NCS entity {slot_id:?} not found in system non_controllable_sources"
-                )));
-            }
             stage_map.push(stage_active_ids.iter().position(|&id| id == slot_id.0));
         }
         ncs_active_slot_to_local.push(stage_map);
     }
 
     let (ncs_max_gen, ncs_allow_curtailment): (Vec<f64>, Vec<bool>) = {
-        let stoch_ncs_ids = stochastic.ncs_entity_ids();
         let mut max_v = Vec::with_capacity(stoch_ncs_ids.len());
         let mut allow_v = Vec::with_capacity(stoch_ncs_ids.len());
         for ncs_id in stoch_ncs_ids {
@@ -1444,16 +1447,11 @@ mod tests {
         let bounds = ResolvedBounds::new(
             &BoundsCountsSpec {
                 n_hydros: 1,
-                n_thermals: // n_hydros
-            1,
-                n_lines: // n_thermals
-            0,
-                n_pumping: // n_lines
-            0,
-                n_contracts: // n_pumping
-            0,
-                n_stages: // n_contracts
-            n_st,
+                n_thermals: 1,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: n_st,
                 k_max: 0,
             },
             &BoundsDefaults {
@@ -1482,14 +1480,10 @@ mod tests {
         let penalties = ResolvedPenalties::new(
             &PenaltiesCountsSpec {
                 n_hydros: 1,
-                n_buses: // n_hydros
-            1,
-                n_lines: // n_buses
-            0,
-                n_ncs: // n_lines
-            0,
-                n_stages: // n_ncs
-            n_st,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: n_st,
             },
             &PenaltiesDefaults {
                 hydro: default_hydro_penalties(),

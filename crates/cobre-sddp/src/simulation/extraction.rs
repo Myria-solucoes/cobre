@@ -342,10 +342,11 @@ pub struct StageExtractionSpec<'a> {
     /// Every equipment-column family at this stage is striped by *this* stage's
     /// block count (the LP template is built per-stage from `stage.blocks.len()`),
     /// so all column-stride arithmetic during extraction must use `n_blks`, NOT
-    /// the global `indexer.n_blks` (wired once from stage 0). Reading the global
-    /// strides every equipment column off stage-0's width and misreads any stage
-    /// whose block count differs — silently wrong reported outputs. For
-    /// uniform-block studies `n_blks == indexer.n_blks` and the reads coincide.
+    /// the global `indexer.n_blks` (wired once from stage 0). Using the global
+    /// `indexer.n_blks` would stride every equipment column off stage-0's block
+    /// width, misreading any stage whose block count differs — silently producing
+    /// wrong reported outputs. For uniform-block studies `n_blks == indexer.n_blks`
+    /// and the reads coincide.
     pub n_blks: usize,
     /// Entity ID lists and productivities needed to build result records.
     pub entity_counts: &'a EntityCounts,

@@ -1264,6 +1264,7 @@ mod tests {
                 ncs_col_indices_buf: Vec::new(),
                 ncs_col_lower_active_buf: Vec::new(),
                 ncs_col_upper_active_buf: Vec::new(),
+                last_ncs_col_start: usize::MAX,
                 ncs_col_upper_extract_buf: Vec::new(),
                 load_rhs_buf: Vec::new(),
                 row_lower_buf: Vec::new(),

@@ -171,7 +171,7 @@ pub(crate) fn shift_lag_state(
     let n_h = indexer.hydro_count;
     let l_max = indexer.max_par_order;
     if l_max == 0 || n_h == 0 {
-        return; // No lags to shift
+        return;
     }
     let lag_start = indexer.inflow_lags.start;
     for h in 0..n_h {
@@ -634,9 +634,10 @@ pub(crate) fn transform_ncs_noise(
 /// overruns the NCS column block and the solver rejects the set-bounds call. An
 /// inactive slot (`None`) contributes no index.
 ///
-/// The buffer is cleared then refilled; callers rebuild it lazily (only when the
-/// expected active length changes — see the patch sites). No heap allocation
-/// beyond the initial capacity growth.
+/// The buffer is cleared then refilled; callers rebuild it lazily on a stage
+/// transition — when the per-stage NCS column start or the expected active length
+/// changes (see the patch sites). No heap allocation beyond the initial capacity
+/// growth.
 pub(crate) fn build_active_ncs_col_indices(
     slot_to_local: &[Option<usize>],
     ncs_col_start: usize,
@@ -690,7 +691,6 @@ pub(crate) fn gather_active_ncs_bounds(
 /// The active-subset column/bound buffers have length `count * block_count`; the
 /// patch sites key their lazy index-buffer rebuild on this length, not on
 /// `n_stochastic_ncs`.
-#[inline]
 pub(crate) fn active_ncs_slot_count(slot_to_local: &[Option<usize>]) -> usize {
     slot_to_local.iter().filter(|s| s.is_some()).count()
 }
@@ -781,6 +781,7 @@ mod tests {
             ncs_col_indices_buf: Vec::new(),
             ncs_col_lower_active_buf: Vec::new(),
             ncs_col_upper_active_buf: Vec::new(),
+            last_ncs_col_start: usize::MAX,
             ncs_col_upper_extract_buf: Vec::new(),
             load_rhs_buf: Vec::new(),
             row_lower_buf: Vec::new(),
@@ -2748,7 +2749,7 @@ mod tests {
     /// Strict-subset stage: slot 0 inactive (`None`), slots 1,2 active at local
     /// columns 0,1. The emitted index/bound buffers have length
     /// `active_stochastic_ncs * n_blks = 2 * 2 = 4`, NOT `n_stochastic_ncs *
-    /// n_blks = 3 * 2 = 6` — the inactive slot contributes zero entries (AC #2).
+    /// n_blks = 3 * 2 = 6` — the inactive slot contributes zero entries.
     /// Indices stride by `ncs_local` from the per-stage base, and the gathered
     /// bounds copy only the active slots' blocks from the full slot-order buffers.
     #[test]
@@ -2816,5 +2817,51 @@ mod tests {
         // Verbatim copy of the full slot-order buffers.
         assert_eq!(lower_out, lower_src);
         assert_eq!(upper_out, upper_src);
+    }
+
+    /// Two stages with **equal** `active_count * n_blks` but **different**
+    /// `ncs_col_start` must rebuild the index buffer on the second stage. This
+    /// pins the FINDING-5 invariant: the patch-site guard keys the lazy rebuild on
+    /// `(last_ncs_col_start, len)`, not on `len` alone. A length-only guard (the
+    /// forbidden alternative) would not fire here — both stages have length
+    /// `2 * 2 = 4` — and would leave the previous stage's indices in place, writing
+    /// `set_col_bounds` onto the wrong LP columns.
+    #[test]
+    fn index_buffer_rebuilds_on_ncs_col_start_change_at_equal_length() {
+        let n_blks = 2_usize;
+        // Same active set / same length at both stages: 2 active slots × 2 blocks.
+        let slot_to_local = vec![Some(0_usize), Some(1_usize)];
+        let expected_len = active_ncs_slot_count(&slot_to_local) * n_blks;
+        assert_eq!(expected_len, 4);
+
+        // Reproduce the patch-site guard verbatim: rebuild iff the stored start
+        // differs OR the buffer length differs.
+        let mut indices_buf: Vec<usize> = Vec::new();
+        let mut last_ncs_col_start = usize::MAX;
+        let rebuild = |start: usize, buf: &mut Vec<usize>, last: &mut usize| {
+            if *last != start || buf.len() != expected_len {
+                build_active_ncs_col_indices(&slot_to_local, start, n_blks, buf);
+                *last = start;
+                true
+            } else {
+                false
+            }
+        };
+
+        // Stage A at start 100: first call always rebuilds (last == usize::MAX).
+        assert!(rebuild(100, &mut indices_buf, &mut last_ncs_col_start));
+        assert_eq!(indices_buf, vec![100, 101, 102, 103]);
+        assert_eq!(last_ncs_col_start, 100);
+
+        // Stage B at start 200, SAME length (4): the start-tracking guard fires and
+        // the buffer tracks the new base. A length-only guard would have skipped
+        // this rebuild and left [100,101,102,103] — the latent bug.
+        assert!(rebuild(200, &mut indices_buf, &mut last_ncs_col_start));
+        assert_eq!(indices_buf, vec![200, 201, 202, 203]);
+        assert_eq!(last_ncs_col_start, 200);
+
+        // Re-entering stage B (same start, same length): no rebuild.
+        assert!(!rebuild(200, &mut indices_buf, &mut last_ncs_col_start));
+        assert_eq!(indices_buf, vec![200, 201, 202, 203]);
     }
 }

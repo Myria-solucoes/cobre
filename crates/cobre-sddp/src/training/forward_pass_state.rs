@@ -165,9 +165,6 @@ pub(crate) struct ForwardWorkerParams<'a> {
 }
 
 /// Return bundle from [`run_forward_worker`].
-///
-/// Replaces the anonymous 3-tuple `(Vec<f64>, u64, Vec<SolverStatsDelta>)`
-/// that previously required a `#[allow(clippy::type_complexity)]` annotation.
 pub(crate) struct ForwardWorkerResult {
     /// Per-scenario trajectory costs for the local worker partition.
     pub trajectory_costs: Vec<f64>,
@@ -644,10 +641,9 @@ impl ForwardPassState {
 
 /// Execute the forward pass for one rayon worker's scenario partition.
 ///
-/// This function is the extracted body of the anonymous closure that previously
-/// lived inside [`ForwardPassState::run`]. It processes `n_local` scenarios
-/// (the worker's slice of the global forward-pass batch) through every stage,
-/// accumulating trajectory costs and per-stage solver statistics.
+/// Processes `n_local` scenarios (the worker's slice of the global forward-pass
+/// batch) through every stage, accumulating trajectory costs and per-stage
+/// solver statistics.
 ///
 /// # Parameters
 ///
@@ -686,7 +682,7 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
     let (start_m, end_m) = partition(params.forward_passes, params.n_workers, w);
     let n_local = end_m - start_m;
 
-    // ── Pre-allocated scratch from ws (R3, R4) ────────────────────────────
+    // ── Pre-allocated scratch from ws ─────────────────────────────────────
     // trajectory_costs_buf: reused across iterations; clear + resize avoids
     // re-allocation when n_local is stable.
     ws.scratch.trajectory_costs_buf.clear();
@@ -839,7 +835,7 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
     ws.worker_timing_buf.scoring_ms +=
         (ws.backward_accum.dcs_solve.scoring_time_seconds - scoring_seconds_before) * 1_000.0;
     Ok(ForwardWorkerResult {
-        // R5: take the pre-allocated buffer out of ws; ForwardResult reassembles
+        // Take the pre-allocated buffer out of ws; ForwardResult reassembles
         // the pieces, and post_process_worker_results later returns it via
         // mem::take so the allocation survives across training iterations.
         trajectory_costs: std::mem::take(&mut ws.scratch.trajectory_costs_buf),
@@ -1014,6 +1010,7 @@ mod tests {
                 ncs_col_indices_buf: Vec::new(),
                 ncs_col_lower_active_buf: Vec::new(),
                 ncs_col_upper_active_buf: Vec::new(),
+                last_ncs_col_start: usize::MAX,
                 ncs_col_upper_extract_buf: Vec::new(),
                 load_rhs_buf: Vec::new(),
                 row_lower_buf: Vec::new(),
@@ -1479,7 +1476,7 @@ mod tests {
 
     /// After two calls to `ForwardPassState::run` with the same dimensions,
     /// the outer `worker_stage_stats` Vec must not have been reallocated
-    /// (AC3: in-place reset preserves the heap buffer across iterations).
+    /// (in-place reset preserves the heap buffer across iterations).
     #[test]
     fn forward_pass_state_run_preserves_worker_stage_stats_shape() {
         let mut fx = ForwardFixture::new();

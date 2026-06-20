@@ -95,7 +95,7 @@ pub fn run_stage_solve<'ws, S: SolverInterface>(
         };
 
         // Reconstruction counters are accumulated on the workspace solver via
-        // `record_reconstruction_stats()` below; the returned value is unused.
+        // `record_reconstruction_stats()` below.
         let _ = reconstruct_basis(
             captured,
             target,

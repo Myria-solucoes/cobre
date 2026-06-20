@@ -153,19 +153,30 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
     // only the active slots' bounds (parallel to the index buffer), since a subset
     // stage allocates only `(active stochastic NCS) * n_blks` columns and a full
     // `n_stochastic_ncs` block would overrun. The index buffer is constant across
-    // openings, so it is rebuilt lazily on the active-subset length change; the
-    // bounds change every scenario, so they are gathered every solve.
+    // openings, so it is rebuilt lazily on a stage transition (when the per-stage
+    // NCS column start or the active-subset length changes); the bounds change
+    // every scenario, so they are gathered every solve.
     if n_stochastic_ncs > 0 && indexer.has_ncs {
         let n_blks = ctx.block_counts_per_stage[t];
         let slot_to_local = &ctx.ncs_active_slot_to_local[t];
+        let ncs_col_start = ctx.ncs_col_starts[t];
         let expected_len = crate::noise::active_ncs_slot_count(slot_to_local) * n_blks;
-        if ws.scratch.ncs_col_indices_buf.len() != expected_len {
+        // The index buffer must be rebuilt when the per-stage NCS column **start**
+        // changes, not only when its length changes: `ncs_col_starts[t]` varies per
+        // stage, so two stages can share `active_count * n_blks` yet address
+        // different columns. Keying on length alone (the forbidden alternative)
+        // would retain the previous stage's indices and set bounds on the wrong
+        // columns.
+        if ws.scratch.last_ncs_col_start != ncs_col_start
+            || ws.scratch.ncs_col_indices_buf.len() != expected_len
+        {
             crate::noise::build_active_ncs_col_indices(
                 slot_to_local,
-                ctx.ncs_col_starts[t],
+                ncs_col_start,
                 n_blks,
                 &mut ws.scratch.ncs_col_indices_buf,
             );
+            ws.scratch.last_ncs_col_start = ncs_col_start;
         }
         crate::noise::gather_active_ncs_bounds(
             slot_to_local,
@@ -358,9 +369,6 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
     // capture (it passes `stored_basis = None`) — a DCS-solve basis describes
     // the lazy resident-subset row layout, not the baked layout the warm-start
     // reconstruction expects, so the DCS path leaves the (m, t) slot untouched.
-    // A DCS solve never captures a basis at all: every `lazy_solve_preloaded`
-    // call passes `stored_basis = None`, so no DCS solve — forward or
-    // backward — carries a per-opening basis across iterations.
     if dcs.is_none() {
         let cut_row_count = basis_row_capacity.saturating_sub(ctx.templates[t].num_rows);
         if let Some(captured) = basis_slice.get_mut(m, t) {

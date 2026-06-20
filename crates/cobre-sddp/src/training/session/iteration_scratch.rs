@@ -58,10 +58,8 @@ pub(crate) struct IterationScratch {
 impl IterationScratch {
     /// Allocate and initialise all iteration scratch buffers.
     ///
-    /// Performs the exact seven allocations previously inlined in
-    /// `TrainingSession::new` and applies the pre-bake loop so that
-    /// `baked_templates[t]` is a structural copy of
-    /// `stage_ctx.templates[t]` with an empty cut batch applied before
+    /// Applies the pre-bake loop so that `baked_templates[t]` is a structural
+    /// copy of `stage_ctx.templates[t]` with an empty cut batch applied before
     /// the first iteration begins.
     ///
     /// # Arguments
