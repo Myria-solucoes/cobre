@@ -118,11 +118,22 @@
 use cobre_core::ConstraintSense;
 
 mod columns;
+mod entries;
+mod fpha_cursor;
 mod layout;
-mod matrix;
 mod patch;
+mod rows;
 mod scaling;
 mod template;
+
+// Cross-representation builder tests reach items in `columns`, `rows`, and
+// `entries` simultaneously, so they live as direct children of `builder` (their
+// single-`super::` imports resolve each sibling module) rather than nested inside
+// any one representation file.
+#[cfg(test)]
+mod pumping_water_tests;
+#[cfg(test)]
+mod zero_cost_tests;
 
 // --- Public re-exports (stable API) ---
 pub use patch::PatchBuffer;
