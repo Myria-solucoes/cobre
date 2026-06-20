@@ -845,14 +845,12 @@ fn fill_z_inflow_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
 mod diversion_bound_tests {
     use std::collections::HashMap;
 
-    use chrono::NaiveDate;
-    use cobre_core::entities::hydro::{DiversionChannel, HydroGenerationModel, HydroPenalties};
+    use cobre_core::entities::hydro::{DiversionChannel, HydroGenerationModel};
     use cobre_core::{
-        Block, BlockMode, BoundsCountsSpec, BoundsDefaults, CascadeTopology, ContractStageBounds,
-        EntityId, Hydro, HydroStageBounds, HydroStagePenalties, LineStageBounds, NoiseMethod,
-        PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
-        ResolvedExchangeFactors, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
-        ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig,
+        BoundsCountsSpec, BoundsDefaults, CascadeTopology, ContractStageBounds, EntityId, Hydro,
+        HydroStageBounds, HydroStagePenalties, LineStageBounds, PenaltiesCountsSpec,
+        PenaltiesDefaults, PumpingStageBounds, ResolvedBounds, ResolvedExchangeFactors,
+        ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties,
         ThermalStageBounds,
     };
     use cobre_core::{BusStagePenalties, LineStagePenalties, NcsStagePenalties};
@@ -864,6 +862,7 @@ mod diversion_bound_tests {
     use crate::resolved_parameters::ResolvedParameters;
 
     use super::super::layout::ResolvedTables;
+    use super::super::test_support::{two_block_stage, zero_hydro_penalties};
     use super::{ColumnBufs, StageLayout, TemplateBuildCtx, fill_diversion_columns};
 
     // Declaration-time diversion capacity on the entity. The test makes the
@@ -872,59 +871,6 @@ mod diversion_bound_tests {
     const DECLARATION_MAX_FLOW_M3S: f64 = 200.0;
     const N_STAGES: usize = 1;
     const STAGE_IDX: usize = 0;
-
-    fn two_block_stage() -> Stage {
-        Stage {
-            index: STAGE_IDX,
-            id: STAGE_IDX as i32,
-            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-            season_id: Some(0),
-            blocks: vec![
-                Block {
-                    index: 0,
-                    name: "BLK0".to_string(),
-                    duration_hours: 372.0,
-                },
-                Block {
-                    index: 1,
-                    name: "BLK1".to_string(),
-                    duration_hours: 372.0,
-                },
-            ],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: false,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
-        }
-    }
-
-    fn zero_hydro_penalties() -> HydroPenalties {
-        HydroPenalties {
-            spillage_cost: 0.0,
-            diversion_cost: 0.0,
-            turbined_cost: 0.0,
-            storage_violation_below_cost: 0.0,
-            filling_target_violation_cost: 0.0,
-            turbined_violation_below_cost: 0.0,
-            outflow_violation_below_cost: 0.0,
-            outflow_violation_above_cost: 0.0,
-            generation_violation_below_cost: 0.0,
-            evaporation_violation_cost: 0.0,
-            water_withdrawal_violation_cost: 0.0,
-            water_withdrawal_violation_pos_cost: 0.0,
-            water_withdrawal_violation_neg_cost: 0.0,
-            evaporation_violation_pos_cost: 0.0,
-            evaporation_violation_neg_cost: 0.0,
-            inflow_nonnegativity_cost: 0.0,
-        }
-    }
 
     /// One run-of-river hydro carrying a declaration-time diversion channel with
     /// `DECLARATION_MAX_FLOW_M3S` capacity and a `ConstantProductivity` generation
@@ -1154,7 +1100,7 @@ mod diversion_bound_tests {
 
     /// Run `fill_diversion_columns` against the fixture and return `col_upper`.
     fn run_fill(fixtures: &DivFixtures) -> (Vec<f64>, StageLayout) {
-        let stage = two_block_stage();
+        let stage = two_block_stage(STAGE_IDX, [372.0, 372.0]);
         let ctx = fixtures.make_ctx();
         let layout = StageLayout::new(&ctx, &stage, STAGE_IDX);
         let mut col_lower = vec![0.0_f64; layout.num_cols];
@@ -1221,15 +1167,13 @@ mod diversion_bound_tests {
 mod block_family_slack_tests {
     use std::collections::HashMap;
 
-    use chrono::NaiveDate;
-    use cobre_core::entities::hydro::{HydroGenerationModel, HydroPenalties};
+    use cobre_core::entities::hydro::HydroGenerationModel;
     use cobre_core::{
-        Block, BlockMode, BoundsCountsSpec, BoundsDefaults, BusStagePenalties, CascadeTopology,
-        ContractStageBounds, EntityId, Hydro, HydroStageBounds, HydroStagePenalties,
-        LineStageBounds, LineStagePenalties, NcsStagePenalties, NoiseMethod, PenaltiesCountsSpec,
-        PenaltiesDefaults, PumpingStageBounds, ResolvedBounds, ResolvedExchangeFactors,
-        ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties,
-        ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig, ThermalStageBounds,
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, CascadeTopology, ContractStageBounds,
+        EntityId, Hydro, HydroStageBounds, HydroStagePenalties, LineStageBounds,
+        LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
+        PumpingStageBounds, ResolvedBounds, ResolvedExchangeFactors, ResolvedLoadFactors,
+        ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, ThermalStageBounds,
     };
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -1239,6 +1183,7 @@ mod block_family_slack_tests {
     use crate::resolved_parameters::ResolvedParameters;
 
     use super::super::layout::ResolvedTables;
+    use super::super::test_support::{two_block_stage, zero_hydro_penalties};
     use super::{ColumnBufs, StageLayout, TemplateBuildCtx, fill_operational_slack_columns};
 
     const N_STAGES: usize = 1;
@@ -1364,27 +1309,6 @@ mod block_family_slack_tests {
         }
     }
 
-    fn zero_hydro_penalties() -> HydroPenalties {
-        HydroPenalties {
-            spillage_cost: 0.0,
-            diversion_cost: 0.0,
-            turbined_cost: 0.0,
-            storage_violation_below_cost: 0.0,
-            filling_target_violation_cost: 0.0,
-            turbined_violation_below_cost: 0.0,
-            outflow_violation_below_cost: 0.0,
-            outflow_violation_above_cost: 0.0,
-            generation_violation_below_cost: 0.0,
-            evaporation_violation_cost: 0.0,
-            water_withdrawal_violation_cost: 0.0,
-            water_withdrawal_violation_pos_cost: 0.0,
-            water_withdrawal_violation_neg_cost: 0.0,
-            evaporation_violation_pos_cost: 0.0,
-            evaporation_violation_neg_cost: 0.0,
-            inflow_nonnegativity_cost: 0.0,
-        }
-    }
-
     fn zero_hydro_stage_bounds() -> HydroStageBounds {
         HydroStageBounds {
             min_storage_hm3: 0.0,
@@ -1419,40 +1343,6 @@ mod block_family_slack_tests {
             evaporation_violation_pos_cost: 0.0,
             evaporation_violation_neg_cost: 0.0,
             inflow_nonnegativity_cost: 0.0,
-        }
-    }
-
-    /// Two-block stage with distinct durations so a block-index confusion in the
-    /// objective scaling is observable.
-    fn two_block_stage() -> Stage {
-        Stage {
-            index: STAGE_IDX,
-            id: STAGE_IDX as i32,
-            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-            season_id: Some(0),
-            blocks: vec![
-                Block {
-                    index: 0,
-                    name: "BLK0".to_string(),
-                    duration_hours: BLOCK_HOURS[0],
-                },
-                Block {
-                    index: 1,
-                    name: "BLK1".to_string(),
-                    duration_hours: BLOCK_HOURS[1],
-                },
-            ],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: false,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
         }
     }
 
@@ -1649,7 +1539,7 @@ mod block_family_slack_tests {
     fn block_family_driver_matches_legacy_slack_fills() {
         let specs = hydro_specs();
         let fixtures = SlackFixtures::new(&specs);
-        let stage = two_block_stage();
+        let stage = two_block_stage(STAGE_IDX, [BLOCK_HOURS[0], BLOCK_HOURS[1]]);
         let ctx = fixtures.make_ctx();
         let layout = StageLayout::new(&ctx, &stage, STAGE_IDX);
 
