@@ -928,15 +928,9 @@ fn reset_scenario_state<S: SolverInterface>(
         ws.scratch.lag_weight_accum = *recent_weight_seed;
     }
     // Reset downstream accumulator at trajectory start.
-    ws.scratch
-        .downstream_accumulator
-        .iter_mut()
-        .for_each(|v| *v = 0.0);
+    ws.scratch.downstream_accumulator.fill(0.0);
     ws.scratch.downstream_weight_accum = 0.0;
-    ws.scratch
-        .downstream_completed_lags
-        .iter_mut()
-        .for_each(|v| *v = 0.0);
+    ws.scratch.downstream_completed_lags.fill(0.0);
     ws.scratch.downstream_n_completed = 0;
 }
 

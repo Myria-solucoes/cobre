@@ -1701,6 +1701,22 @@ pub(super) fn fill_evaporation_entries(
     }
 }
 
+/// Mutable LP matrix buffers for stage template construction.
+///
+/// Groups the column and row arrays that are filled during template building.
+pub(super) struct LpMatrixBuffers<'a> {
+    /// CSC column entries (column index -> list of (row, coefficient)).
+    pub(super) col_entries: &'a mut [Vec<(usize, f64)>],
+    /// Column upper bounds.
+    pub(super) col_upper: &'a mut [f64],
+    /// Objective function coefficients.
+    pub(super) objective: &'a mut [f64],
+    /// Row lower bounds.
+    pub(super) row_lower: &'a mut [f64],
+    /// Row upper bounds.
+    pub(super) row_upper: &'a mut [f64],
+}
+
 /// Fill CSC matrix entries, row bounds, and slack column data for all active
 /// generic constraint rows at this stage.
 ///
@@ -1727,22 +1743,6 @@ pub(super) fn fill_evaporation_entries(
 /// Unknown entity IDs in variable refs produce zero contributions (the empty
 /// vec returned by `resolve_variable_ref` is skipped), which is the
 /// defense-in-depth fallback for referential validation gaps.
-/// Mutable LP matrix buffers for stage template construction.
-///
-/// Groups the column and row arrays that are filled during template building.
-pub(super) struct LpMatrixBuffers<'a> {
-    /// CSC column entries (column index -> list of (row, coefficient)).
-    pub(super) col_entries: &'a mut [Vec<(usize, f64)>],
-    /// Column upper bounds.
-    pub(super) col_upper: &'a mut [f64],
-    /// Objective function coefficients.
-    pub(super) objective: &'a mut [f64],
-    /// Row lower bounds.
-    pub(super) row_lower: &'a mut [f64],
-    /// Row upper bounds.
-    pub(super) row_upper: &'a mut [f64],
-}
-
 pub(super) fn fill_generic_constraint_entries(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,

@@ -727,8 +727,9 @@ impl StageLayout {
     /// interleaves columns across entities, so a coefficient lands on the wrong
     /// (entity, block) and the LP is silently misbuilt. The stride arithmetic
     /// lives one level down in [`BlockGrid::flat`](crate::indexer::BlockGrid::flat),
-    /// the single owner; this method delegates there, and every per-family
-    /// block-major accessor below delegates here.
+    /// the single owner; this method delegates there, and every flat-shape
+    /// per-family accessor below delegates here (the deficit accessor uses the
+    /// 3-term [`BlockGrid::deficit`](crate::indexer::BlockGrid::deficit) instead).
     #[inline]
     pub(crate) fn block_col(&self, start: usize, entity: usize, blk: usize) -> usize {
         self.indexer.block_grid().flat(start, entity, blk)

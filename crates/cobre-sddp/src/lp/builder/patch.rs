@@ -189,8 +189,7 @@ impl PatchBuffer {
         let capacity = hydro_count + n_load_buses * max_blocks + hydro_count;
         // Column-bound region covers state-fixing slots for Categories 1, 2, and 6:
         // N*(1+L) + A*K entries.
-        let n_ant_state = n_anticipated * k_max;
-        let col_capacity = hydro_count * (1 + max_par_order) + n_ant_state;
+        let col_capacity = hydro_count * (1 + max_par_order) + n_anticipated * k_max;
         Self {
             indices: vec![0; capacity],
             lower: vec![0.0; capacity],

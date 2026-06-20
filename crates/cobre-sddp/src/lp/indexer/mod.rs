@@ -126,6 +126,9 @@
 //!   ([`StageIndexer::state_to_lp_column`], [`StageIndexer::finalize_state_column_map`],
 //!   [`StageIndexer::lp_column_for_state`], and the state-pinning entry point
 //!   [`StageIndexer::state_to_lp_incoming_column`]).
+//! - `block_grid` — the [`BlockGrid`] typed block-stride address primitive and
+//!   its three shape methods ([`BlockGrid::flat`], [`BlockGrid::fpha_plane`],
+//!   [`BlockGrid::deficit`]).
 //! - `anticipated` — the per-stage anticipated-thermal iterators and predicates.
 //! - `sparse_state` — the nonzero-state mask builder `set_nonzero_mask`.
 //! - `constructors` — the three constructors and the private column/row range

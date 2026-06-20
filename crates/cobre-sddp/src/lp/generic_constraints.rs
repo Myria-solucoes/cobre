@@ -28,7 +28,8 @@
 //! ## Pumping columns
 //!
 //! `PumpingFlow` resolves to the block-major pumping-flow column
-//! `col_pumping_start + p_idx * n_blks + blk`. `PumpingPower` aliases the SAME
+//! `grid.flat(col_pumping_start, p_idx, blk)` (via [`BlockGrid::flat`]).
+//! `PumpingPower` aliases the SAME
 //! flow column scaled by the station's `consumption_mw_per_m3s` rate — power is
 //! affine in flow, so it has no column of its own (a separate column would be an
 //! unconstrained free variable). The scale matches the bus-balance coupling
@@ -89,9 +90,10 @@ pub(crate) struct CascadeRefs<'a> {
 /// arms are the only consumers; every other arm ignores it.
 pub(crate) struct PumpingRefs<'a> {
     /// First pumping-flow column. The column for station local index `p_idx`,
-    /// block `blk` is `col_pumping_start + p_idx * n_blks + blk`, where `n_blks`
-    /// is the block stride threaded into [`resolve_variable_ref`] (the same stride
-    /// every other block-major resolver helper receives), not a field here.
+    /// block `blk` is `grid.flat(col_pumping_start, p_idx, blk)`, where `grid` is
+    /// the [`BlockGrid`](crate::indexer::BlockGrid) sourced from the `StageIndexer`
+    /// inside [`resolve_variable_ref`] (the single stride owner every block-major
+    /// resolver helper addresses through), not a field here.
     ///
     /// Sourced from `StageLayout::col_pumping_start` (the real reserved range),
     /// **not** from `StageIndexer::pumping_flow` (a permanent `0..0` sentinel).
@@ -595,7 +597,8 @@ fn resolve_hydro_outflow(
 
 /// Resolve `HydroGeneration` by dispatching on the production model.
 ///
-/// - FPHA hydros: maps to the generation column at `fpha_local_idx * n_blks + blk`.
+/// - FPHA hydros: maps to the generation column at
+///   `grid.flat(generation.start, fpha_local_idx, blk)` (via [`BlockGrid::flat`]).
 /// - Constant-productivity hydros: maps to the turbine column scaled by productivity.
 fn resolve_hydro_generation(
     hydro_id: EntityId,
