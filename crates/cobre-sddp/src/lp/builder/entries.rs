@@ -2096,11 +2096,18 @@ mod pumping_water_tests {
 
     /// Minimal independent (no-downstream) constant-productivity hydro.
     fn fixture_hydro(id: i32) -> Hydro {
+        fixture_hydro_ds(id, None)
+    }
+
+    /// `fixture_hydro` with a caller-chosen `downstream_id`, so a two-reservoir
+    /// cascade can be built from the fixture hydros. `fixture_hydro` delegates
+    /// here with `None`, keeping every existing caller's cascade empty.
+    fn fixture_hydro_ds(id: i32, downstream_id: Option<i32>) -> Hydro {
         Hydro {
             id: EntityId(id),
             name: format!("H{id}"),
             bus_id: EntityId(1),
-            downstream_id: None,
+            downstream_id: downstream_id.map(EntityId),
             entry_stage_id: None,
             exit_stage_id: None,
             min_storage_hm3: 0.0,
@@ -2285,6 +2292,10 @@ mod pumping_water_tests {
         thermal_pos: BTreeMap<EntityId, usize>,
         line_pos: BTreeMap<EntityId, usize>,
         par_lp: PrecomputedPar,
+        /// AR order the ctx exposes as `max_par_order`. Zero by default (no
+        /// inflow-lag columns reserved); raised by [`PumpFixtures::with_par_lp`]
+        /// to match the injected `par_lp` so the AR-lag water term can fire.
+        max_par_order: usize,
         cascade: CascadeTopology,
         bounds: ResolvedBounds,
         penalties: ResolvedPenalties,
@@ -2420,6 +2431,12 @@ mod pumping_water_tests {
             let evaporation_models =
                 EvaporationModelSet::new(vec![EvaporationModel::None; hydros.len()]);
 
+            // Built from the sorted hydros so a fixture carrying `downstream_id`
+            // produces a real cascade; output-neutral for the `fixture_hydro`
+            // callers, whose `downstream_id: None` yields the same empty cascade
+            // `CascadeTopology::build(&[])` did.
+            let cascade = CascadeTopology::build(&hydros);
+
             Self {
                 hydros,
                 stations,
@@ -2432,7 +2449,8 @@ mod pumping_water_tests {
                 thermal_pos,
                 line_pos,
                 par_lp: PrecomputedPar::default(),
-                cascade: CascadeTopology::build(&[]),
+                cascade,
+                max_par_order: 0,
                 bounds,
                 penalties: ResolvedPenalties::empty(),
                 resolved_generic_bounds: ResolvedGenericConstraintBounds::empty(),
@@ -2463,6 +2481,16 @@ mod pumping_water_tests {
             self.resolved_generic_bounds =
                 ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
             self.generic_constraints = vec![constraint];
+            self
+        }
+
+        /// Inject a `PrecomputedPar` and align `max_par_order` to its order, so
+        /// the inflow-lag columns are reserved and the `−ζ·ψ` AR-lag water term
+        /// fires. The default fixture carries `PrecomputedPar::default()` (no
+        /// `psi`, `max_par_order: 0`), under which the AR-lag term is dormant.
+        fn with_par_lp(mut self, par_lp: PrecomputedPar) -> Self {
+            self.max_par_order = par_lp.max_order();
+            self.par_lp = par_lp;
             self
         }
 
@@ -2501,7 +2529,7 @@ mod pumping_water_tests {
                 n_thermals: self.thermals.len(),
                 n_lines: self.lines.len(),
                 n_buses: self.buses.len(),
-                max_par_order: 0,
+                max_par_order: self.max_par_order,
                 n_anticipated: 0,
                 k_max: 0,
                 anticipated_lead_stages: vec![],
@@ -3003,6 +3031,184 @@ mod pumping_water_tests {
                 );
             }
         }
+    }
+
+    /// Pin the two structural water-row coefficients `fill_state_and_water_entries`
+    /// writes for a two-reservoir cascade: the cascade-upstream `−tau_h` and the
+    /// AR-lag `−ζ·ψ`. Both are the weakest-backstopped coefficients in the water
+    /// row — a sign flip on either silently mis-routes water and produces wrong
+    /// bounds, yet outside this test they are exercised only by a slow parity
+    /// D-case whose hash-mismatch failure mode does not localize to the water row.
+    ///
+    /// Cascade `H_up`(id 1) → `H_down`(id 2), both constant-productivity. On the
+    /// downstream hydro's water-balance row, per block, the upstream turbine and
+    /// spillage columns carry `−tau_h` (the upstream release arriving as inflow)
+    /// while the downstream's own turbine carries `+tau_h` (its own outflow). The
+    /// `+τ`/`−τ` sign *contrast* is asserted, not just one magnitude: a global
+    /// flip negating both would otherwise pass. `tau_h` is computed from
+    /// `M3S_TO_HM3` (never a literal) so the assertion cannot drift from the
+    /// production constant.
+    #[test]
+    fn cascade_upstream_tau_and_ar_lag_land_on_downstream_water_row() {
+        use cobre_core::scenario::InflowModel;
+
+        // Assemble the production water-row fill into a CSC. The generic-constraint
+        // fill is omitted (no generic constraints here); the water row is reached
+        // through `build_stage_matrix_entries` alone.
+        let assemble = |fixtures: &PumpFixtures| {
+            let ctx = fixtures.make_ctx();
+            let stage = two_block_stage(0, [300.0, 444.0]);
+            let layout = StageLayout::new(&ctx, &stage, 0);
+            let mut entries = build_stage_matrix_entries(&ctx, &stage, 0, &layout);
+            // Mirror the production per-column row-sort (see
+            // build_single_stage_template) before assembling the CSC.
+            for col in &mut entries {
+                col.sort_unstable_by_key(|&(row, _)| row);
+            }
+            let csc = assemble_csc(&entries);
+            (csc, layout)
+        };
+
+        // H_up id 1 sorts to position 0, H_down id 2 to position 1.
+        let up = 1;
+        let down = 2;
+        let cascade_fixtures = PumpFixtures::new_full(
+            vec![
+                fixture_hydro_ds(up, Some(down)),
+                fixture_hydro_ds(down, None),
+            ],
+            Vec::new(),
+            vec![fixture_bus(1)],
+            Vec::new(),
+            Vec::new(),
+        );
+        let (csc, layout) = assemble(&cascade_fixtures);
+
+        // Sum the CSC values landing on `(col, row)` — mirrors the permutation
+        // test's probe; multiple per-block pushes to one cell would otherwise hide.
+        let coeff_at = |col: usize, row: i32| -> f64 {
+            let start = usize::try_from(csc.0[col]).unwrap();
+            let end = usize::try_from(csc.0[col + 1]).unwrap();
+            csc.1[start..end]
+                .iter()
+                .zip(&csc.2[start..end])
+                .filter(|&(&r, _)| r == row)
+                .map(|(_, &v)| v)
+                .sum()
+        };
+
+        let up_idx = 0; // H_up id 1.
+        let down_idx = 1; // H_down id 2.
+        let down_row = i32::try_from(layout.row_water_balance_start() + down_idx).unwrap();
+        for blk in 0..layout.n_blks {
+            // tau_h is the identical expression the production fill uses; the two
+            // blocks carry distinct durations (300 vs 444), so a per-block divisor
+            // confusion is observable.
+            let tau_h = two_block_stage(0, [300.0, 444.0]).blocks[blk].duration_hours * M3S_TO_HM3;
+
+            assert_eq!(
+                coeff_at(layout.turbine_col(up_idx, blk), down_row),
+                -tau_h,
+                "blk {blk}: upstream turbine column must carry -tau_h on the \
+                 downstream water row (cascade-upstream inflow)"
+            );
+            assert_eq!(
+                coeff_at(layout.spillage_col(up_idx, blk), down_row),
+                -tau_h,
+                "blk {blk}: upstream spillage column must carry -tau_h on the \
+                 downstream water row (cascade-upstream inflow)"
+            );
+            assert_eq!(
+                coeff_at(layout.turbine_col(down_idx, blk), down_row),
+                tau_h,
+                "blk {blk}: downstream's OWN turbine column must carry +tau_h on \
+                 its water row (self-outflow) — the +τ/−τ sign contrast"
+            );
+        }
+
+        // AR-lag −ζ·ψ: self-contained block. An AR(1) PrecomputedPar carrying a
+        // nonzero psi for the downstream hydro makes the AR-lag water term fire
+        // (the default fixture has psi == 0, so the term is otherwise dormant).
+        // psi[0] for the downstream hydro is constructed to equal phi exactly:
+        // the classical conversion psi = phi * s_m / s_lag collapses to phi when
+        // both the study stage and its pre-study lag stage carry the same std.
+        let phi = 0.6_f64;
+        let inflow_models = vec![
+            // Upstream (id 1): white noise — psi stays 0 at every lag.
+            InflowModel {
+                hydro_id: EntityId(up),
+                stage_id: 0,
+                mean_m3s: 50.0,
+                std_m3s: 1.0,
+                ar_coefficients: vec![],
+                residual_std_ratio: 1.0,
+                annual: None,
+            },
+            // Downstream (id 2) study stage: AR(1) with coefficient phi; std == 1.0
+            // so the lag-stage ratio is exactly 1.0.
+            InflowModel {
+                hydro_id: EntityId(down),
+                stage_id: 0,
+                mean_m3s: 80.0,
+                std_m3s: 1.0,
+                ar_coefficients: vec![phi],
+                residual_std_ratio: 1.0,
+                annual: None,
+            },
+            // Downstream pre-study lag stage (stage_id -1) with the same std, so
+            // the Tier-1 exact-match lag lookup yields s_lag == s_m and the
+            // conversion collapses to psi[0] == phi bit-exactly.
+            InflowModel {
+                hydro_id: EntityId(down),
+                stage_id: -1,
+                mean_m3s: 80.0,
+                std_m3s: 1.0,
+                ar_coefficients: vec![phi],
+                residual_std_ratio: 1.0,
+                annual: None,
+            },
+        ];
+        let par_stage = two_block_stage(0, [300.0, 444.0]);
+        let par_lp = PrecomputedPar::build(
+            &inflow_models,
+            std::slice::from_ref(&par_stage),
+            &[EntityId(up), EntityId(down)],
+            None,
+        )
+        .expect("AR(1) PrecomputedPar build must succeed");
+        let psi_val = par_lp.psi_slice(0, down_idx)[0];
+        assert_eq!(psi_val, phi, "downstream psi[0] must equal phi exactly");
+
+        let ar_fixtures = PumpFixtures::new_full(
+            vec![
+                fixture_hydro_ds(up, Some(down)),
+                fixture_hydro_ds(down, None),
+            ],
+            Vec::new(),
+            vec![fixture_bus(1)],
+            Vec::new(),
+            Vec::new(),
+        )
+        .with_par_lp(par_lp);
+        let (ar_csc, ar_layout) = assemble(&ar_fixtures);
+        let ar_coeff_at = |col: usize, row: i32| -> f64 {
+            let start = usize::try_from(ar_csc.0[col]).unwrap();
+            let end = usize::try_from(ar_csc.0[col + 1]).unwrap();
+            ar_csc.1[start..end]
+                .iter()
+                .zip(&ar_csc.2[start..end])
+                .filter(|&(&r, _)| r == row)
+                .map(|(_, &v)| v)
+                .sum()
+        };
+        // Lag column for (lag 0, downstream hydro): col_inflow_lags_start + 0*n_h + h.
+        let lag_col = ar_layout.col_inflow_lags_start() + down_idx;
+        let ar_row = i32::try_from(ar_layout.row_water_balance_start() + down_idx).unwrap();
+        assert_eq!(
+            ar_coeff_at(lag_col, ar_row),
+            -(ar_layout.zeta * psi_val),
+            "downstream inflow-lag column must carry -(zeta * psi) on its water row"
+        );
     }
 
     /// End-to-end: a generic constraint referencing `pumping_flow` and
