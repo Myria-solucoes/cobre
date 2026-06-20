@@ -35,7 +35,7 @@ use cobre_core::ConstraintSense;
 use cobre_core::EntityId;
 
 use crate::energy_conversion::EnergyConversionSet;
-use crate::indexer::StageIndexer;
+use crate::indexer::{BlockGrid, StageIndexer};
 use crate::lp_builder::{COST_SCALE_FACTOR, GenericConstraintRowEntry};
 use crate::simulation::types::{
     ScenarioCategoryCosts, SimulationBusResult, SimulationContractResult, SimulationCostResult,
@@ -448,6 +448,24 @@ pub struct StageExtractionSpec<'a> {
 }
 
 impl StageExtractionSpec<'_> {
+    /// Return the [`BlockGrid`] address primitive striding by *this stage's*
+    /// block count.
+    ///
+    /// The grid carries `self.n_blks` (the per-stage block count) — NOT
+    /// `self.indexer.n_blks` (the global count wired once from stage 0). Every
+    /// equipment-column family at this stage is striped by the per-stage block
+    /// width (the LP template is built per-stage from `stage.blocks.len()`), so
+    /// the extraction decoders must address columns through a grid carrying
+    /// `self.n_blks`; sourcing the stride from `self.indexer.n_blks` instead would
+    /// misread any stage whose block count differs from stage 0's. The deficit
+    /// shape's second constant `max_deficit_segments` is study-invariant and is
+    /// taken from the indexer. For uniform-block studies `n_blks ==
+    /// indexer.n_blks` and the two coincide.
+    #[inline]
+    fn block_grid(&self) -> BlockGrid {
+        BlockGrid::new(self.n_blks, self.indexer.max_deficit_segments)
+    }
+
     /// Column scaling factor for a given column index.
     ///
     /// Returns `col_scale[col]` when the column is within the scale vector and
@@ -506,11 +524,8 @@ fn extract_hydro_no_turbine(
     // Stage-level: hours-weighted average across blocks.
     let (turbined_slack, outflow_slack_below, outflow_slack_above, generation_slack) =
         if indexer.has_operational_violations {
+            let grid = spec.block_grid();
             let n_blks = spec.n_blks;
-            let base_turbine_below = indexer.turbine_below_slack.start + h * n_blks;
-            let base_outflow_below = indexer.outflow_below_slack.start + h * n_blks;
-            let base_outflow_above = indexer.outflow_above_slack.start + h * n_blks;
-            let base_gen_below = indexer.generation_below_slack.start + h * n_blks;
             let mut tb = 0.0_f64;
             let mut ob = 0.0_f64;
             let mut oa = 0.0_f64;
@@ -518,10 +533,10 @@ fn extract_hydro_no_turbine(
             let total_hours: f64 = spec.block_hours.iter().sum();
             for blk in 0..n_blks {
                 let w = spec.block_hours[blk] / total_hours;
-                tb += view.primal[base_turbine_below + blk] * w;
-                ob += view.primal[base_outflow_below + blk] * w;
-                oa += view.primal[base_outflow_above + blk] * w;
-                gb += view.primal[base_gen_below + blk] * w;
+                tb += view.primal[grid.flat(indexer.turbine_below_slack.start, h, blk)] * w;
+                ob += view.primal[grid.flat(indexer.outflow_below_slack.start, h, blk)] * w;
+                oa += view.primal[grid.flat(indexer.outflow_above_slack.start, h, blk)] * w;
+                gb += view.primal[grid.flat(indexer.generation_below_slack.start, h, blk)] * w;
             }
             (tb, ob, oa, gb)
         } else {
@@ -705,6 +720,7 @@ fn extract_hydro_per_block<'a>(
 ) -> impl Iterator<Item = SimulationHydroResult> + 'a {
     let indexer = spec.indexer;
     let n_blks = spec.n_blks;
+    let grid = spec.block_grid();
 
     // Extract stage-level scalars once; the per-block closure captures them.
     let ctx = HydroStageContext::new(view, spec, lookup, h);
@@ -714,8 +730,8 @@ fn extract_hydro_per_block<'a>(
     let div_sources = spec.diversion_upstream.get(&hydro_entity_id);
 
     (0..n_blks).map(move |b| {
-        let t_col = indexer.turbine.start + h * n_blks + b;
-        let s_col = indexer.spillage.start + h * n_blks + b;
+        let t_col = grid.flat(indexer.turbine.start, h, b);
+        let s_col = grid.flat(indexer.spillage.start, h, b);
         let turbined = view.primal[t_col];
         let spillage = view.primal[s_col];
 
@@ -723,14 +739,17 @@ fn extract_hydro_per_block<'a>(
         let diverted_outflow = if indexer.diversion.is_empty() {
             0.0
         } else {
-            view.primal[indexer.diversion.start + h * n_blks + b]
+            view.primal[grid.flat(indexer.diversion.start, h, b)]
         };
 
-        // Diversion inflow: sum diversion primals from all hydros that divert to this hydro.
+        // Diversion inflow: sum diversion primals from all hydros that divert to
+        // this hydro. The diversion columns are flat block-major over the source
+        // hydro index `d_idx` (entity-outer, block-inner), so this addresses the
+        // diversion family with `flat`, not the deficit shape.
         let diverted_inflow = if let Some(sources) = div_sources {
             let mut total = 0.0;
             for &d_idx in sources {
-                total += view.primal[indexer.diversion.start + d_idx * n_blks + b];
+                total += view.primal[grid.flat(indexer.diversion.start, d_idx, b)];
             }
             total
         } else {
@@ -740,7 +759,7 @@ fn extract_hydro_per_block<'a>(
         // For FPHA hydros, read generation from the LP `g_{h,k}` column.
         // For constant-productivity hydros, compute generation as turbined * productivity.
         let generation_mw = if let Some(local_fpha_idx) = ctx.fpha_local {
-            view.primal[indexer.generation.start + local_fpha_idx * n_blks + b]
+            view.primal[grid.flat(indexer.generation.start, local_fpha_idx, b)]
         } else {
             turbined * spec.hydro_productivities[h]
         };
@@ -748,12 +767,11 @@ fn extract_hydro_per_block<'a>(
         // Operational violation slacks: read per-block value directly (m3/s or MW).
         let (turbined_slack, outflow_slack_below, outflow_slack_above, generation_slack) =
             if indexer.has_operational_violations {
-                let n = spec.n_blks;
                 (
-                    view.primal[indexer.turbine_below_slack.start + h * n + b],
-                    view.primal[indexer.outflow_below_slack.start + h * n + b],
-                    view.primal[indexer.outflow_above_slack.start + h * n + b],
-                    view.primal[indexer.generation_below_slack.start + h * n + b],
+                    view.primal[grid.flat(indexer.turbine_below_slack.start, h, b)],
+                    view.primal[grid.flat(indexer.outflow_below_slack.start, h, b)],
+                    view.primal[grid.flat(indexer.outflow_above_slack.start, h, b)],
+                    view.primal[grid.flat(indexer.generation_below_slack.start, h, b)],
                 )
             } else {
                 (0.0, 0.0, 0.0, 0.0)
@@ -854,6 +872,7 @@ fn extract_thermals(
             })
             .collect()
     } else {
+        let grid = spec.block_grid();
         let mut results = Vec::with_capacity(spec.entity_counts.thermal_ids.len() * n_blks);
         for (t, &thermal_id) in spec.entity_counts.thermal_ids.iter().enumerate() {
             let is_anticipated = lookup.thermal_is_anticipated[t].is_some();
@@ -863,7 +882,7 @@ fn extract_thermals(
             // Hoisted out of the inner loop to compute once per thermal.
             let anticipated_committed_mw = compute_anticipated_committed_mw(view, spec, lookup, t);
             for b in 0..n_blks {
-                let col = indexer.thermal.start + t * n_blks + b;
+                let col = grid.flat(indexer.thermal.start, t, b);
                 let gen_mw = view.primal[col];
                 #[allow(clippy::cast_possible_truncation)]
                 results.push(SimulationThermalResult {
@@ -908,14 +927,15 @@ fn extract_exchanges(
             })
             .collect()
     } else {
+        let grid = spec.block_grid();
         spec.entity_counts
             .line_ids
             .iter()
             .enumerate()
-            .flat_map(|(l, &line_id)| {
+            .flat_map(move |(l, &line_id)| {
                 (0..n_blks).map(move |b| {
-                    let fwd_col = indexer.line_fwd.start + l * n_blks + b;
-                    let rev_col = indexer.line_rev.start + l * n_blks + b;
+                    let fwd_col = grid.flat(indexer.line_fwd.start, l, b);
+                    let rev_col = grid.flat(indexer.line_rev.start, l, b);
                     let fwd = view.primal[fwd_col];
                     let rev = view.primal[rev_col];
                     #[allow(clippy::cast_possible_truncation)]
@@ -961,6 +981,7 @@ fn extract_buses(
             })
             .collect()
     } else {
+        let grid = spec.block_grid();
         let max_segs = indexer.max_deficit_segments;
         spec.entity_counts
             .bus_ids
@@ -968,18 +989,18 @@ fn extract_buses(
             .enumerate()
             .flat_map(move |(bus_idx, &bus_id)| {
                 (0..n_blks).map(move |b| {
-                    // Sum all deficit segment columns for this bus/block.
+                    // Sum all deficit segment columns for this bus/block. The
+                    // deficit family is the 3-term bus-outer / segment-middle /
+                    // block-inner shape, so this addresses it with `deficit`, not
+                    // `flat`.
                     let deficit_mw: f64 = (0..max_segs)
                         .map(|s| {
-                            let col = indexer.deficit.start
-                                + bus_idx * max_segs * n_blks
-                                + s * n_blks
-                                + b;
+                            let col = grid.deficit(indexer.deficit.start, bus_idx, s, b);
                             view.primal[col]
                         })
                         .sum();
-                    let excess_col = indexer.excess.start + bus_idx * n_blks + b;
-                    let load_row = indexer.load_balance.start + bus_idx * n_blks + b;
+                    let excess_col = grid.flat(indexer.excess.start, bus_idx, b);
+                    let load_row = grid.flat(indexer.load_balance.start, bus_idx, b);
                     let raw_dual = view.dual.get(load_row).copied().unwrap_or(0.0);
                     let hrs = spec.block_hours.get(b).copied().unwrap_or(0.0);
                     #[allow(clippy::cast_possible_truncation)]
@@ -1418,16 +1439,19 @@ fn extract_non_controllables(
     }
 
     let n_blks = spec.n_blks;
+    let grid = spec.block_grid();
     let col_start = spec.ncs_col_start;
     let mut results = Vec::with_capacity(n_ncs * n_blks);
     let mut total_curtailment_cost = 0.0;
 
     for (local_idx, &ncs_id) in spec.ncs_entity_ids.iter().enumerate() {
         for blk in 0..n_blks {
-            let col = col_start + local_idx * n_blks + blk;
+            let col = grid.flat(col_start, local_idx, blk);
             let generation_mw = view.primal[col];
-            // Column upper bound encodes available_gen * block_factor.
-            let col_upper_offset = local_idx * n_blks + blk;
+            // Column upper bound encodes available_gen * block_factor. The
+            // `ncs_col_upper` slice is the same flat block-major (entity-outer /
+            // block-inner) layout zero-based, so the offset is `flat` from 0.
+            let col_upper_offset = grid.flat(0, local_idx, blk);
             debug_assert!(
                 col_upper_offset < spec.ncs_col_upper.len(),
                 "NCS col_upper out of bounds: offset {col_upper_offset}, len {}",
@@ -1509,11 +1533,12 @@ fn extract_pumping_stations(
         view.primal.len()
     );
 
+    let grid = spec.block_grid();
     let mut results = Vec::with_capacity(n_pumping * n_blks);
     for (p_idx, &pumping_station_id) in spec.entity_counts.pumping_station_ids.iter().enumerate() {
         let consumption = spec.pumping_consumption_mw_per_m3s[p_idx];
         for blk in 0..n_blks {
-            let col = col_start + p_idx * n_blks + blk;
+            let col = grid.flat(col_start, p_idx, blk);
             let pumped_flow_m3s = view.primal[col];
             #[allow(clippy::cast_possible_truncation)]
             results.push(SimulationPumpingResult {
