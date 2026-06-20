@@ -167,13 +167,10 @@ impl StageIndexer {
         let n = self.hydro_count;
         let lag_end = n * (1 + self.max_par_order);
         if j < n {
-            // Storage range: incoming storage column.
             self.storage_in.start + j
         } else if j < lag_end {
-            // AR lag range: incoming lag column.
             self.inflow_lags.start + (j - n)
         } else {
-            // Anticipated-state range: anticipated state column.
             self.anticipated_state.start + (j - lag_end)
         }
     }
