@@ -398,11 +398,11 @@ fn zero_anticipated_delivery_thermal_cost(
     layout: &StageLayout,
     bufs: &mut ColumnBufs<'_>,
 ) {
-    let n_blks = layout.n_blks;
+    let grid = layout.indexer.block_grid();
     for local_idx in 0..ctx.n_anticipated {
         let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
-        for blk in 0..n_blks {
-            let col = layout.col_thermal_start() + thermal_idx * n_blks + blk;
+        for blk in 0..layout.n_blks {
+            let col = grid.flat(layout.col_thermal_start(), thermal_idx, blk);
             bufs.objective[col] = 0.0;
         }
     }

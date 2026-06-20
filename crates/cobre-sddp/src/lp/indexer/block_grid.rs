@@ -8,6 +8,31 @@
 //! need beyond their per-call args (`n_blks` and `max_deficit_segments`); obtain
 //! it from [`StageIndexer::block_grid`](super::StageIndexer::block_grid).
 //!
+//! ## Single owner of the three block-index shapes
+//!
+//! [`BlockGrid`] is the single owner of the block-major address arithmetic for the
+//! three shapes ([`flat`](BlockGrid::flat), [`fpha_plane`](BlockGrid::fpha_plane),
+//! [`deficit`](BlockGrid::deficit)). Every production fill, resolver, and
+//! extraction site that has a stage [`BlockGrid`] in scope — i.e. that strides by
+//! the stage grid's `n_blks` — computes its address through one of these methods,
+//! never by open-coding `start + entity * n_blks + blk`. The wrong-but-compiling
+//! alternative is a hand-rolled stride that drifts from the grid (a transposed
+//! nesting, or a stride read from a different `n_blks` than the LP was built with);
+//! routing through the grid forecloses both.
+//!
+//! Two site classes legitimately retain the open-coded form and are NOT
+//! violations: (1) the `#[cfg(test)]` differential-oracle tests
+//! (`column_accessors_match_open_coded_formulas` and the per-fill assertion tests)
+//! that compute the address by hand to verify a `BlockGrid`-routed accessor against
+//! the formula — routing those through the grid would compare the primitive to
+//! itself; (2) doc comments mirroring the documented layout formula. One block-major
+//! *row* address remains hand-rolled outside the grid by necessity: the load-balance
+//! RHS patch in [`PatchBuffer::fill_load_patches`](super::super::builder::PatchBuffer)
+//! strides by the *per-stage* block count passed as a scalar, with no stage
+//! [`BlockGrid`] in scope (the reusable patch buffer is sized for the global
+//! `max_blocks`, not one stage's grid), so it cannot route through this type without
+//! a signature change.
+//!
 //! ## Why three methods, not one generic `(a, b, c)` method
 //!
 //! A single `fn addr(&self, a, b, c) -> a + b * stride + c` would re-open the
