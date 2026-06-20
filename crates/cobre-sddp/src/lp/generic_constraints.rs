@@ -1873,6 +1873,32 @@ mod tests {
         ));
     }
 
+    /// `HydroStorage`, `HydroEvaporation`, and `AnticipatedDecision` are
+    /// block-INDEPENDENT — stage-level stock variables whose resolver ignores
+    /// `block_idx`, so the single-row collapse is sound. This is the `true`-arm
+    /// counterpart to `pumping_variants_are_block_dependent` /
+    /// `hydro_inflow_is_block_dependent`: dropping any of these three from the
+    /// `true` branch of `variable_ref_is_block_independent` would silently expand
+    /// a per-stage stock variable into per-block rows.
+    #[test]
+    fn block_independent_kinds_classify_true() {
+        assert!(variable_ref_is_block_independent(
+            &VariableRef::HydroStorage {
+                hydro_id: EntityId(10),
+            }
+        ));
+        assert!(variable_ref_is_block_independent(
+            &VariableRef::HydroEvaporation {
+                hydro_id: EntityId(10),
+            }
+        ));
+        assert!(variable_ref_is_block_independent(
+            &VariableRef::AnticipatedDecision {
+                thermal_id: EntityId(6),
+            }
+        ));
+    }
+
     // ── Stub entity tests ─────────────────────────────────────────────────────
 
     /// ContractImport returns empty vec.
@@ -1955,6 +1981,78 @@ mod tests {
         );
 
         assert!(result.is_empty());
+    }
+
+    /// `HydroWithdrawal` resolves to an empty vec: withdrawal carries no LP
+    /// decision column (a schedule fixed by bounds, not a decision variable), so
+    /// a generic-constraint term referencing it contributes no `(column,
+    /// coefficient)` pair — the deliberate stub contract documented above the
+    /// `resolve_variable_ref` stub arm. `EntityId(999)` is in no `hydro_pos`
+    /// entry, confirming the empty return is unconditional, not a missing-id
+    /// fall-through.
+    #[test]
+    fn hydro_withdrawal_returns_empty() {
+        let indexer = make_indexer();
+        let prod = make_production_models();
+        let hpos = make_hydro_pos();
+        let tpos = make_thermal_pos();
+        let bpos = make_bus_pos();
+        let lpos = make_line_pos();
+
+        let result = call(
+            VariableRef::HydroWithdrawal {
+                hydro_id: EntityId(999),
+            },
+            0,
+            &indexer,
+            &prod,
+            &hpos,
+            &tpos,
+            &bpos,
+            &lpos,
+        );
+
+        assert_eq!(
+            result,
+            Vec::<(usize, f64)>::new(),
+            "HydroWithdrawal must resolve to no column (no-LP-column stub contract)"
+        );
+    }
+
+    /// `NonControllableCurtailment` resolves to an empty vec: non-controllable
+    /// sources carry no decision column, so a generic-constraint term referencing
+    /// curtailment contributes no `(column, coefficient)` pair — the same
+    /// deliberate stub contract as `NonControllableGeneration`. `EntityId(999)` is
+    /// in no position map, confirming the empty return is unconditional, not a
+    /// missing-id fall-through.
+    #[test]
+    fn non_controllable_curtailment_returns_empty() {
+        let indexer = make_indexer();
+        let prod = make_production_models();
+        let hpos = make_hydro_pos();
+        let tpos = make_thermal_pos();
+        let bpos = make_bus_pos();
+        let lpos = make_line_pos();
+
+        let result = call(
+            VariableRef::NonControllableCurtailment {
+                source_id: EntityId(999),
+                block_id: None,
+            },
+            0,
+            &indexer,
+            &prod,
+            &hpos,
+            &tpos,
+            &bpos,
+            &lpos,
+        );
+
+        assert_eq!(
+            result,
+            Vec::<(usize, f64)>::new(),
+            "NonControllableCurtailment must resolve to no column (no-LP-column stub contract)"
+        );
     }
 
     // ── Missing entity ID test ─────────────────────────────────────────────────
@@ -2509,6 +2607,38 @@ mod tests {
         );
 
         assert_eq!(result, vec![(25 + 3 * 3 + 1, 1.0)]);
+    }
+
+    /// HydroDiversion maps to the diversion column.
+    ///
+    /// Routes through `resolve_block_variable` with
+    /// `block_col_range(indexer, ElementKind::Diversion).start = 37`. For hydro
+    /// pos=1 (EntityId 20), n_blks=3, block=2 the flat block-major address is
+    /// `37 + 1*3 + 2 = 42` with the unit coefficient.
+    #[test]
+    fn diversion_maps_to_diversion_column() {
+        let indexer = make_indexer();
+        let prod = make_production_models();
+        let hpos = make_hydro_pos();
+        let tpos = make_thermal_pos();
+        let bpos = make_bus_pos();
+        let lpos = make_line_pos();
+
+        let result = call(
+            VariableRef::HydroDiversion {
+                hydro_id: EntityId(20),
+                block_id: None,
+            },
+            2,
+            &indexer,
+            &prod,
+            &hpos,
+            &tpos,
+            &bpos,
+            &lpos,
+        );
+
+        assert_eq!(result, vec![(37 + 1 * 3 + 2, 1.0)]);
     }
 
     // ── HydroInflow tests ──────────────────────────────────────────────────────
