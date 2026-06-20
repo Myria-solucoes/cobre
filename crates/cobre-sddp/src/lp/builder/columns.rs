@@ -322,7 +322,6 @@ fn fill_anticipated_decision_columns(
             bufs.col_upper[col] = 0.0;
         }
         // Objective coefficient left at default 0.0; set by fill_anticipated_decision_objective.
-        // (already the vec initialization default).
     }
 }
 

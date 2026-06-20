@@ -62,6 +62,12 @@ pub(crate) struct TemplateBuildCtx<'a> {
     pub(crate) cascade: &'a CascadeTopology,
     /// Pre-resolved bound, penalty, and factor tables (see [`ResolvedTables`]).
     pub(crate) resolved: ResolvedTables<'a>,
+    /// Entity-id → canonical slot index. `BTreeMap`, not `HashMap`: the maps are
+    /// read by keyed `.get()` today, but the ordered-iteration guarantee makes
+    /// declaration-order bit-determinism structural — an accidental iterating
+    /// fill emits entries in `EntityId` order (the canonical `id.0` slot order)
+    /// instead of nondeterministic `HashMap` order. Certified by
+    /// `csc_byte_identical_under_permuted_multi_entity_order`.
     pub(crate) hydro_pos: BTreeMap<EntityId, usize>,
     pub(crate) thermal_pos: BTreeMap<EntityId, usize>,
     pub(crate) line_pos: BTreeMap<EntityId, usize>,

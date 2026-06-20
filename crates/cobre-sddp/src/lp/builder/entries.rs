@@ -95,8 +95,8 @@ pub(super) fn fill_anticipated_state_out_def_entries(
 ///
 /// Writes entries for the water-balance rows (outgoing/incoming
 /// storage, turbine, spillage, upstream cascade, and AR lag
-/// dynamics). State pinning has moved to column bounds (Phase 1); the
-/// row-equality diagonals previously written here are gone.
+/// dynamics). Incoming state is pinned via column bounds, so no
+/// row-equality state-fixing diagonals are written here.
 pub(super) fn fill_state_and_water_entries(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
