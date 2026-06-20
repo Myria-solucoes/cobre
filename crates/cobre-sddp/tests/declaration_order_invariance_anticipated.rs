@@ -14,14 +14,13 @@
 //! regression in `SystemBuilder`'s canonical sort but does NOT exercise the
 //! LP-builder code paths that consume `anticipated_thermal_indices` directly.
 //!
-//! The genuine LP-level order-invariance probe lives at
-//! `crates/cobre-sddp/src/lp_builder/template.rs` (the test
+//! The genuine LP-level order-invariance probe is the test
 //! `lp_template_invariant_under_anticipated_index_permutation` in the
-//! internal `mod tests` block). That probe constructs two `TemplateBuildCtx`s
-//! with permuted `anticipated_thermal_indices`/`anticipated_lead_stages` arrays
-//! and asserts LP equivalence under the canonical column/row swap permutation.
-//! See the LP-construction-layer invariance probe in `lp_builder/template.rs`
-//! for the direct structural check.
+//! `#[cfg(test)]` block of the `lp::builder::template` module. That probe
+//! constructs two `TemplateBuildCtx`s with permuted
+//! `anticipated_thermal_indices`/`anticipated_lead_stages` arrays and asserts LP
+//! equivalence under the canonical column/row swap permutation — the direct
+//! structural check this test does not perform.
 //!
 //! ## Fixture description
 //!

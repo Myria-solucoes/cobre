@@ -204,7 +204,8 @@ impl DcsScoringScratch {
 /// # Sign & scale contract
 ///
 /// Cut coefficients are stored **raw** (`∂Q/∂x`); the LP solves in **scaled**
-/// space. The cut row is `−∇·x + θ ≥ intercept` (see `.claude/rules/sddp.md`),
+/// space. The cut row is `−∇·x + θ ≥ intercept` (the negation is applied by
+/// `push_scaled_coefficient` in `cut::row`),
 /// so the cut's `θ`-floor at the raw optimum `x*_raw` is
 /// `alpha = intercept + ∇·x*_raw`. A candidate is **violated** when the current
 /// LP `θ*_raw` falls below that floor by more than `epsilon_viol`, i.e.

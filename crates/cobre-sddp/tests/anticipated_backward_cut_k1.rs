@@ -10,8 +10,8 @@
 //!   index inside the state vector equals `indexer.anticipated_state.start = 0`.
 //!
 //! The LP-builder divides every non-theta objective coefficient by
-//! `COST_SCALE_FACTOR = K = 1_000` (see `crates/cobre-sddp/src/lp_builder/mod.rs`
-//! and `template.rs`). Duals therefore live in scaled units, and the cut
+//! `COST_SCALE_FACTOR = K = 1_000` (the `lp::builder` `COST_SCALE_FACTOR`
+//! constant). Duals therefore live in scaled units, and the cut
 //! storage at `backward.rs::accumulate_opening_outcome` preserves that scaling
 //! end-to-end (forward.rs consumes the coefficients unrescaled).
 //!
@@ -101,10 +101,10 @@ const MAX_GEN_ANT: f64 = 30.0;
 const X0_SEED: f64 = 10.0;
 
 // Cuts are stored in scaled cost units; the LP-builder divides every non-theta
-// objective coefficient by `COST_SCALE_FACTOR` (see lp_builder/mod.rs and
-// template.rs). Duals therefore live in scaled units too, and the cut storage
-// at backward.rs preserves that scaling end-to-end (forward.rs consumes them
-// unrescaled).
+// objective coefficient by `COST_SCALE_FACTOR` (the `lp::builder`
+// `COST_SCALE_FACTOR` constant). Duals therefore live in scaled units too, and
+// the cut storage at backward.rs preserves that scaling end-to-end (forward.rs
+// consumes them unrescaled).
 const COST_SCALE_FACTOR: f64 = 1_000_000.0;
 
 // Closed-form expected values for stage-0 FCF cut at the anticipated_state

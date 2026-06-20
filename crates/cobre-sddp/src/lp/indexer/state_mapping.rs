@@ -1,7 +1,7 @@
 //! State-vector-to-LP-column resolvers for [`StageIndexer`].
 //!
-//! Owns the state-pinning contract codified in `.claude/rules/sddp.md` ("State
-//! pinning uses column bounds, not equality rows"):
+//! Owns the state-pinning contract (state pinning uses column bounds, not
+//! equality rows):
 //! [`StageIndexer::state_to_lp_incoming_column`] is the single authoritative
 //! incoming-state column resolver; the LP column for both pinning and dual
 //! extraction is always resolved through it, never by assuming a fixing-row

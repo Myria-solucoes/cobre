@@ -91,10 +91,10 @@ const MAX_GEN_REG: f64 = 100.0;
 const MAX_GEN_ANT: f64 = 50.0;
 
 // Cuts are stored in scaled cost units; the LP-builder divides every non-theta
-// objective coefficient by `COST_SCALE_FACTOR` (see lp_builder/mod.rs and
-// template.rs). Duals therefore live in scaled units too, and the cut storage
-// at backward.rs preserves that scaling end-to-end (forward.rs consumes them
-// unrescaled).
+// objective coefficient by `COST_SCALE_FACTOR` (the `lp::builder`
+// `COST_SCALE_FACTOR` constant). Duals therefore live in scaled units too, and
+// the cut storage at backward.rs preserves that scaling end-to-end (forward.rs
+// consumes them unrescaled).
 const COST_SCALE_FACTOR: f64 = 1_000_000.0;
 
 // Closed-form expected coefficients at stage 0 FCF, in scaled cost units.

@@ -138,7 +138,8 @@ fn compute_anticipated_decision_mw(
     let local_idx = lookup.thermal_is_anticipated[thermal_local]?;
     let k_i = spec.indexer.anticipated_lead_stages[local_idx];
     // Canonical predicate: matches `StageIndexer::anticipated_decision_active_at_stage`
-    // and the LP-builder horizon gates (`stage_idx + K_i < n_stages`) in `lp_builder::matrix`.
+    // and the LP-builder horizon gates (`stage_idx + K_i < n_stages`) in the
+    // `lp::builder` column/row fill paths.
     if spec.stage_index.saturating_add(k_i) >= spec.n_stages {
         return None;
     }

@@ -2192,12 +2192,12 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Layout-invariance tests (indexer-layout-impact.md Q4, Q5)
+    // Layout-invariance tests
     // ---------------------------------------------------------------------------
 
-    /// Locks `state_at_capture.len() == n_state` across the layout change.
-    /// Per `indexer-layout-impact.md` Q4, the new `anticipated_state_out`
-    /// column does not contribute to `state_at_capture`.
+    /// Locks `state_at_capture.len() == n_state` across the layout change:
+    /// the new `anticipated_state_out` column does not contribute to
+    /// `state_at_capture`.
     #[test]
     fn test_state_at_capture_length_equals_n_state_after_layout_change() {
         // Layout: N=2 hydros, L=1 PAR lag, n_anticipated=1, k_max=2.
@@ -2255,9 +2255,9 @@ mod tests {
         );
     }
 
-    /// Locks `BASIS_BROADCAST_WIRE_VERSION` at 1 across the layout change.
-    /// Per `indexer-layout-impact.md` Q5, adding the new `anticipated_state_out`
-    /// column does not bump the wire version.
+    /// Locks `BASIS_BROADCAST_WIRE_VERSION` at 1 across the layout change:
+    /// adding the new `anticipated_state_out` column does not bump the wire
+    /// version.
     #[test]
     fn test_basis_broadcast_wire_version_stays_one_with_state_out_column() {
         use super::BASIS_BROADCAST_WIRE_VERSION;

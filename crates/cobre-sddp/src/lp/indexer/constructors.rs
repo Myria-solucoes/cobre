@@ -228,7 +228,9 @@ impl StageIndexer {
     /// Computes both the state-variable ranges (identical to [`StageIndexer::new`])
     /// and the equipment decision-variable ranges that follow `theta` in the LP.
     ///
-    /// The equipment column layout matches `lp_builder.rs` exactly:
+    /// The equipment column layout matches the `build_single_stage_template`
+    /// column layout in the [`lp::builder`](crate::lp::builder) `template` module
+    /// exactly:
     ///
     /// ```text
     /// decision_start      = theta + 1
@@ -438,9 +440,9 @@ impl StageIndexer {
         let thermal_start = diversion_start + hydro_count * n_blks;
         let thermal_end = thermal_start + n_thermals * n_blks;
         // Anticipated-decision and anticipated-state-out columns sit between
-        // `thermal` and `line_fwd`.  Per Decision 3, every anticipated plant
-        // has K_i <= T, so at stage 0 (the canonical stage) all `n_anticipated`
-        // columns are active.  Per-stage gating is bound-driven downstream via
+        // `thermal` and `line_fwd`.  Every anticipated plant has K_i <= T, so at
+        // stage 0 (the canonical stage) all `n_anticipated` columns are active.
+        // Per-stage gating is bound-driven downstream via
         // `anticipated_decision_active_at_stage`; the column count is constant.
         //
         // Control-region layout (equipment side):
@@ -1899,13 +1901,12 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Layout-invariance tests (indexer-layout-impact.md Q1)
+    // Layout-invariance tests
     // ---------------------------------------------------------------------------
 
     /// Locks the `n_state` formula against the addition of the
-    /// `anticipated_state_out` control-region column. Per
-    /// `indexer-layout-impact.md` Q1, `anticipated_state_out` is not a state
-    /// index and must not contribute to `n_state`.
+    /// `anticipated_state_out` control-region column: `anticipated_state_out` is
+    /// not a state index and must not contribute to `n_state`.
     #[test]
     fn test_n_state_unchanged_with_anticipated_state_out_addition() {
         let fpha_empty = fpha(vec![], vec![]);

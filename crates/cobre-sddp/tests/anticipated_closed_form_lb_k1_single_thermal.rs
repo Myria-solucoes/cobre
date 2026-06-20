@@ -2,7 +2,8 @@
 //!
 //! Two-stage, K=1, no hydro, no stochastic noise, single deterministic opening
 //! per stage. The lower bound returned by `train` is hand-derivable in five
-//! minutes from the LP coefficients written by `lp_builder::matrix`. Any
+//! minutes from the LP coefficients written by the `lp::builder` column/row
+//! fill paths. Any
 //! deviation from `EXPECTED_LB` flags a regression in the value-correctness
 //! class (cost-shift, sign flip, missing scaling, broken fishing, etc.).
 //!

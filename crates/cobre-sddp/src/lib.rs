@@ -110,7 +110,7 @@ pub use cut::{basis_reconstruct, cut_selection, cut_sync, dcs};
 //   `crate::lp_builder::Symbol` references across 11 files resolving to the
 //   moved subtree without editing those files.
 // - `generic_constraints` — keeps `pub(crate)` visibility; covers the internal
-//   `crate::generic_constraints::` references in `lp/builder/matrix.rs` and
+//   `crate::generic_constraints::` references in `lp/builder/entries.rs` and
 //   `lp/builder/layout.rs`, which moved into the cluster and still reach the
 //   constraint-lowering module by its pre-move crate-root path.
 pub use lp::builder as lp_builder;
@@ -128,7 +128,7 @@ pub use lp::indexer;
 //   - `policy_export` — `tests/{boundary_cuts,decomp_integration,warm_start}.rs`
 //     plus the intra-crate `crate::policy_export::` use in `orchestration`.
 //   - `resolved_parameters` — `crate::resolved_parameters::` paths in
-//     `lp_builder/{layout,patch,matrix,template}.rs` and `setup`.
+//     `lp/builder/{layout,patch,columns,template,entries}.rs` and `setup`.
 //   - `scaling_report` — `crate::scaling_report::` paths in
 //     `setup/{template_postprocess,mod}.rs`.
 pub use policy::{orchestration, policy_export, resolved_parameters, scaling_report};
@@ -159,7 +159,7 @@ pub use production::{energy_conversion, hydro_models};
 //     `policy/{orchestration,provenance}.rs`, and
 //     `setup/stochastic_pipeline.rs`.
 //   - `inflow_method` — `crate::inflow_method::` in `indexer.rs`, `training/forward/`,
-//     and `lp_builder/{template,matrix}.rs`, `simulation/pipeline.rs`.
+//     and `lp/builder/{template,entries}.rs`, `simulation/pipeline.rs`.
 //   - `lag_transition` — `cobre_sddp::lag_transition::precompute_stage_lag_transitions`
 //     in `cobre-cli/src/commands/run/setup.rs` (this symbol is intentionally NOT
 //     in the curated re-export; the shim is its sole resolution path), plus

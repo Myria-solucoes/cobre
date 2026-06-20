@@ -1,7 +1,7 @@
 //! Benders subgradient extraction from a solved backward LP (`SEALED`).
 //!
-//! Owns the cut-sign / `col_scale`-division contract from `.claude/rules/sddp.md`
-//! ("Benders cut sign"): the subgradient is `rc_scaled / col_scale[col]` —
+//! Owns the cut-sign / `col_scale`-division contract via
+//! [`extract_duals_from_view`]: the subgradient is `rc_scaled / col_scale[col]` —
 //! divided, not multiplied — because the incoming-state column pin sets
 //! `v_scaled = v_orig / col_scale`. Both functions are `pub(crate)` so the
 //! per-opening solve dispatch in [`super::StageOpeningSolver`] (`trial_point`)

@@ -332,7 +332,7 @@ fn write_energy_productivity_override(
 ///
 /// Analytical thermal cost is `23_635_000 / 9 ≈ 2_626_111.11 $`. With
 /// `turbined_cost = 0.01 $/MWh` applied to every hydro's turbine column
-/// (see `lp_builder/matrix.rs::fill_turbine_columns`), the
+/// (see `fill_turbine_columns` in `lp::builder::columns`), the
 /// deterministic LB adds a fixed regularization contribution of
 /// `5_785 / 9 ≈ 642.78 $` (= 0.01 · 730 · (25_000/657 + 50) summed across the
 /// two stages' turbined flows). Total = `23_640_785 / 9 ≈ 2_626_753.89 $`.
@@ -1107,9 +1107,9 @@ fn d09_multi_deficit() {
 /// Inflows: stage 0 = 40 m3/s (positive), stage 1 = -5 m3/s (negative).
 /// Config: `inflow_non_negativity: {method: "penalty", penalty_cost: 500.0}`.
 ///
-/// ## Penalty cost unit (verified from lp_builder.rs)
+/// ## Penalty cost unit (verified from `lp::builder::template`)
 ///
-/// From `lp_builder.rs` (`build_stage_templates`):
+/// From `build_stage_templates` in `lp::builder::template`:
 /// ```text
 /// let obj_coeff = penalty_cost * total_stage_hours;
 /// objective[col] = obj_coeff;
