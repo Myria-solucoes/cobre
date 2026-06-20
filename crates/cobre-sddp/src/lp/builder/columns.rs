@@ -843,7 +843,7 @@ fn fill_z_inflow_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
 mod diversion_bound_tests {
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
 
     use cobre_core::entities::hydro::{DiversionChannel, HydroGenerationModel};
     use cobre_core::{
@@ -1050,7 +1050,7 @@ mod diversion_bound_tests {
         }
 
         fn make_ctx(&self) -> TemplateBuildCtx<'_> {
-            let mut hydro_pos = HashMap::new();
+            let mut hydro_pos = BTreeMap::new();
             hydro_pos.insert(self.hydros[0].id, 0_usize);
             TemplateBuildCtx {
                 hydros: &self.hydros,
@@ -1070,16 +1070,16 @@ mod diversion_bound_tests {
                     resolved_parameters: &self.resolved_parameters,
                 },
                 hydro_pos,
-                thermal_pos: HashMap::new(),
-                line_pos: HashMap::new(),
-                bus_pos: HashMap::new(),
+                thermal_pos: BTreeMap::new(),
+                line_pos: BTreeMap::new(),
+                bus_pos: BTreeMap::new(),
                 par_lp: &self.par_lp,
                 production_models: &self.production_models,
                 evaporation_models: &self.evaporation_models,
                 generic_constraints: &[],
                 non_controllable_sources: &[],
                 pumping_stations: &[],
-                pumping_pos: HashMap::new(),
+                pumping_pos: BTreeMap::new(),
                 n_pumping: 0,
                 diversion_upstream: HashMap::new(),
                 n_hydros: 1,
@@ -1165,7 +1165,7 @@ mod diversion_bound_tests {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
 mod block_family_slack_tests {
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
 
     use cobre_core::entities::hydro::HydroGenerationModel;
     use cobre_core::{
@@ -1470,7 +1470,7 @@ mod block_family_slack_tests {
         }
 
         fn make_ctx(&self) -> TemplateBuildCtx<'_> {
-            let mut hydro_pos = HashMap::new();
+            let mut hydro_pos = BTreeMap::new();
             for (i, h) in self.hydros.iter().enumerate() {
                 hydro_pos.insert(h.id, i);
             }
@@ -1492,16 +1492,16 @@ mod block_family_slack_tests {
                     resolved_parameters: &self.resolved_parameters,
                 },
                 hydro_pos,
-                thermal_pos: HashMap::new(),
-                line_pos: HashMap::new(),
-                bus_pos: HashMap::new(),
+                thermal_pos: BTreeMap::new(),
+                line_pos: BTreeMap::new(),
+                bus_pos: BTreeMap::new(),
                 par_lp: &self.par_lp,
                 production_models: &self.production_models,
                 evaporation_models: &self.evaporation_models,
                 generic_constraints: &[],
                 non_controllable_sources: &[],
                 pumping_stations: &[],
-                pumping_pos: HashMap::new(),
+                pumping_pos: BTreeMap::new(),
                 n_pumping: 0,
                 diversion_upstream: HashMap::new(),
                 n_hydros: N_HYDROS,

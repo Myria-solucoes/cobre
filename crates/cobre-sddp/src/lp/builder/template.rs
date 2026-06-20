@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use cobre_core::{EntityId, Stage, System};
 use cobre_solver::StageTemplate;
@@ -365,7 +365,7 @@ pub(super) fn build_single_stage_template(
 /// Returns bus-position indices (into the buses slice) for every bus that has
 /// `std_mw > 0` in any load model, sorted by `EntityId` for declaration-order
 /// invariance.  Buses with duplicate IDs across stages are deduplicated.
-fn collect_load_bus_indices(system: &System, bus_pos: &HashMap<EntityId, usize>) -> Vec<usize> {
+fn collect_load_bus_indices(system: &System, bus_pos: &BTreeMap<EntityId, usize>) -> Vec<usize> {
     // `n_load_buses` must equal `normal_lp.n_entities()` in a consistent
     // system; both are derived from buses with std_mw > 0 in the load models.
     let mut ids: Vec<EntityId> = system
@@ -578,21 +578,21 @@ fn build_template_build_ctx<'a>(
     let buses = system.buses();
     let n_hydros = hydros.len();
 
-    let hydro_pos: HashMap<EntityId, usize> =
+    let hydro_pos: BTreeMap<EntityId, usize> =
         hydros.iter().enumerate().map(|(i, h)| (h.id, i)).collect();
-    let thermal_pos: HashMap<EntityId, usize> = system
+    let thermal_pos: BTreeMap<EntityId, usize> = system
         .thermals()
         .iter()
         .enumerate()
         .map(|(i, t)| (t.id, i))
         .collect();
-    let line_pos: HashMap<EntityId, usize> = system
+    let line_pos: BTreeMap<EntityId, usize> = system
         .lines()
         .iter()
         .enumerate()
         .map(|(i, l)| (l.id, i))
         .collect();
-    let bus_pos: HashMap<EntityId, usize> =
+    let bus_pos: BTreeMap<EntityId, usize> =
         buses.iter().enumerate().map(|(i, b)| (b.id, i)).collect();
 
     // Pumping stations are ID-sorted at `System` build time
@@ -602,7 +602,7 @@ fn build_template_build_ctx<'a>(
     // mirroring `hydro_pos`/`bus_pos`; this upholds the declaration-order
     // bit-determinism rule.
     let pumping_stations = system.pumping_stations();
-    let pumping_pos: HashMap<EntityId, usize> = pumping_stations
+    let pumping_pos: BTreeMap<EntityId, usize> = pumping_stations
         .iter()
         .enumerate()
         .map(|(i, p)| (p.id, i))

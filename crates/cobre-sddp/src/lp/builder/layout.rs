@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use cobre_core::{
     Bus, CascadeTopology, ConstraintSense, EntityId, GenericConstraint, Hydro, Line, LoadModel,
@@ -62,10 +62,10 @@ pub(crate) struct TemplateBuildCtx<'a> {
     pub(crate) cascade: &'a CascadeTopology,
     /// Pre-resolved bound, penalty, and factor tables (see [`ResolvedTables`]).
     pub(crate) resolved: ResolvedTables<'a>,
-    pub(crate) hydro_pos: HashMap<EntityId, usize>,
-    pub(crate) thermal_pos: HashMap<EntityId, usize>,
-    pub(crate) line_pos: HashMap<EntityId, usize>,
-    pub(crate) bus_pos: HashMap<EntityId, usize>,
+    pub(crate) hydro_pos: BTreeMap<EntityId, usize>,
+    pub(crate) thermal_pos: BTreeMap<EntityId, usize>,
+    pub(crate) line_pos: BTreeMap<EntityId, usize>,
+    pub(crate) bus_pos: BTreeMap<EntityId, usize>,
     pub(crate) par_lp: &'a PrecomputedPar,
     /// Resolved production models for all (hydro, stage) pairs.
     pub(crate) production_models: &'a ProductionModelSet,
@@ -91,7 +91,7 @@ pub(crate) struct TemplateBuildCtx<'a> {
     /// position used by `col_pumping_start + pos * n_blks + blk`. The
     /// `PumpingFlow`/`PumpingPower` resolver arm indexes `pumping_stations` via
     /// this map (passed in `PumpingRefs`).
-    pub(crate) pumping_pos: HashMap<EntityId, usize>,
+    pub(crate) pumping_pos: BTreeMap<EntityId, usize>,
     /// Number of pumping stations (`pumping_stations.len()`).
     ///
     /// The authoritative count threaded into `EquipmentCounts.n_pumping`, so the
@@ -1195,7 +1195,7 @@ impl StageLayout {
     clippy::too_many_lines
 )]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
 
     use chrono::NaiveDate;
     use cobre_core::{
@@ -1287,17 +1287,17 @@ mod tests {
                     resolved_ncs_factors: &self.resolved_ncs_factors,
                     resolved_parameters: &self.resolved_parameters,
                 },
-                hydro_pos: HashMap::new(),
-                thermal_pos: HashMap::new(),
-                line_pos: HashMap::new(),
-                bus_pos: HashMap::new(),
+                hydro_pos: BTreeMap::new(),
+                thermal_pos: BTreeMap::new(),
+                line_pos: BTreeMap::new(),
+                bus_pos: BTreeMap::new(),
                 par_lp: &self.par_lp,
                 production_models: &self.production_models,
                 evaporation_models: &self.evaporation_models,
                 generic_constraints: &[],
                 non_controllable_sources: &[],
                 pumping_stations: &[],
-                pumping_pos: HashMap::new(),
+                pumping_pos: BTreeMap::new(),
                 n_pumping: 0,
                 diversion_upstream: HashMap::new(),
                 n_hydros: 0,
@@ -1451,17 +1451,17 @@ mod tests {
                     resolved_ncs_factors: &self.resolved_ncs_factors,
                     resolved_parameters: &self.resolved_parameters,
                 },
-                hydro_pos: HashMap::new(),
-                thermal_pos: HashMap::new(),
-                line_pos: HashMap::new(),
-                bus_pos: HashMap::new(),
+                hydro_pos: BTreeMap::new(),
+                thermal_pos: BTreeMap::new(),
+                line_pos: BTreeMap::new(),
+                bus_pos: BTreeMap::new(),
                 par_lp: &self.par_lp,
                 production_models: &self.production_models,
                 evaporation_models: &self.evaporation_models,
                 generic_constraints: &[],
                 non_controllable_sources: &[],
                 pumping_stations: &[],
-                pumping_pos: HashMap::new(),
+                pumping_pos: BTreeMap::new(),
                 n_pumping: 0,
                 diversion_upstream: HashMap::new(),
                 n_hydros: 3,
@@ -1872,17 +1872,17 @@ mod tests {
                     resolved_ncs_factors: &self.resolved_ncs_factors,
                     resolved_parameters: &self.resolved_parameters,
                 },
-                hydro_pos: HashMap::new(),
-                thermal_pos: HashMap::new(),
-                line_pos: HashMap::new(),
-                bus_pos: HashMap::new(),
+                hydro_pos: BTreeMap::new(),
+                thermal_pos: BTreeMap::new(),
+                line_pos: BTreeMap::new(),
+                bus_pos: BTreeMap::new(),
                 par_lp: &self.par_lp,
                 production_models: &self.production_models,
                 evaporation_models: &self.evaporation_models,
                 generic_constraints: &[],
                 non_controllable_sources: &[],
                 pumping_stations: &[],
-                pumping_pos: HashMap::new(),
+                pumping_pos: BTreeMap::new(),
                 n_pumping: 0,
                 diversion_upstream: HashMap::new(),
                 n_hydros: 0,
@@ -2091,10 +2091,10 @@ mod tests {
                     resolved_ncs_factors: &self.resolved_ncs_factors,
                     resolved_parameters: &self.resolved_parameters,
                 },
-                hydro_pos: HashMap::new(),
-                thermal_pos: HashMap::new(),
-                line_pos: HashMap::new(),
-                bus_pos: HashMap::new(),
+                hydro_pos: BTreeMap::new(),
+                thermal_pos: BTreeMap::new(),
+                line_pos: BTreeMap::new(),
+                bus_pos: BTreeMap::new(),
                 par_lp: &self.par_lp,
                 production_models: &self.production_models,
                 evaporation_models: &self.evaporation_models,
@@ -2107,7 +2107,7 @@ mod tests {
                 // the slice/`pumping_pos` threading is covered by the
                 // `build_template_build_ctx` tests in `template.rs`.
                 pumping_stations: &[],
-                pumping_pos: HashMap::new(),
+                pumping_pos: BTreeMap::new(),
                 n_pumping: self.bounds.n_pumping(),
                 diversion_upstream: HashMap::new(),
                 n_hydros: 0,

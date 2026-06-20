@@ -1428,7 +1428,7 @@ mod parameter_resolution_tests {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
 mod zero_cost_tests {
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
 
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, CascadeTopology, ContractStageBounds, HydroStageBounds,
@@ -1567,17 +1567,17 @@ mod zero_cost_tests {
                     resolved_ncs_factors: &self.resolved_ncs_factors,
                     resolved_parameters: &self.resolved_parameters,
                 },
-                hydro_pos: HashMap::new(),
-                thermal_pos: HashMap::new(),
-                line_pos: HashMap::new(),
-                bus_pos: HashMap::new(),
+                hydro_pos: BTreeMap::new(),
+                thermal_pos: BTreeMap::new(),
+                line_pos: BTreeMap::new(),
+                bus_pos: BTreeMap::new(),
                 par_lp: &self.par_lp,
                 production_models: &self.production_models,
                 evaporation_models: &self.evaporation_models,
                 generic_constraints: &[],
                 non_controllable_sources: &[],
                 pumping_stations: &[],
-                pumping_pos: HashMap::new(),
+                pumping_pos: BTreeMap::new(),
                 n_pumping: 0,
                 diversion_upstream: HashMap::new(),
                 n_hydros: 0,
@@ -2067,7 +2067,7 @@ mod zero_cost_tests {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
 mod pumping_water_tests {
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
 
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, Bus, CascadeTopology, CoefficientRef,
@@ -2219,9 +2219,9 @@ mod pumping_water_tests {
         hydros: Vec<Hydro>,
         stations: Vec<PumpingStation>,
         buses: Vec<Bus>,
-        hydro_pos: HashMap<EntityId, usize>,
-        pumping_pos: HashMap<EntityId, usize>,
-        bus_pos: HashMap<EntityId, usize>,
+        hydro_pos: BTreeMap<EntityId, usize>,
+        pumping_pos: BTreeMap<EntityId, usize>,
+        bus_pos: BTreeMap<EntityId, usize>,
         par_lp: PrecomputedPar,
         cascade: CascadeTopology,
         bounds: ResolvedBounds,
@@ -2262,14 +2262,14 @@ mod pumping_water_tests {
             stations.sort_by_key(|s| s.id.0);
             buses.sort_by_key(|b| b.id.0);
 
-            let hydro_pos: HashMap<EntityId, usize> =
+            let hydro_pos: BTreeMap<EntityId, usize> =
                 hydros.iter().enumerate().map(|(i, h)| (h.id, i)).collect();
-            let pumping_pos: HashMap<EntityId, usize> = stations
+            let pumping_pos: BTreeMap<EntityId, usize> = stations
                 .iter()
                 .enumerate()
                 .map(|(i, s)| (s.id, i))
                 .collect();
-            let bus_pos: HashMap<EntityId, usize> =
+            let bus_pos: BTreeMap<EntityId, usize> =
                 buses.iter().enumerate().map(|(i, b)| (b.id, i)).collect();
 
             let mut bounds = ResolvedBounds::new(
@@ -2371,8 +2371,8 @@ mod pumping_water_tests {
                     resolved_parameters: &self.resolved_parameters,
                 },
                 hydro_pos: self.hydro_pos.clone(),
-                thermal_pos: HashMap::new(),
-                line_pos: HashMap::new(),
+                thermal_pos: BTreeMap::new(),
+                line_pos: BTreeMap::new(),
                 bus_pos: self.bus_pos.clone(),
                 par_lp: &self.par_lp,
                 production_models: &self.production_models,

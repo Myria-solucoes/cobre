@@ -42,7 +42,7 @@
 //! with the convention that the constraint term has no LP effect for those
 //! entity types.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use cobre_core::{CascadeTopology, ConstraintExpression, EntityId, PumpingStation, VariableRef};
 
@@ -56,13 +56,13 @@ use crate::indexer::{BlockGrid, StageIndexer};
 /// into LP column offsets.
 pub(crate) struct EntityPositionMaps<'a> {
     /// Hydro plant ID to position index.
-    pub hydro: &'a HashMap<EntityId, usize>,
+    pub hydro: &'a BTreeMap<EntityId, usize>,
     /// Thermal unit ID to position index.
-    pub thermal: &'a HashMap<EntityId, usize>,
+    pub thermal: &'a BTreeMap<EntityId, usize>,
     /// Bus ID to position index.
-    pub bus: &'a HashMap<EntityId, usize>,
+    pub bus: &'a BTreeMap<EntityId, usize>,
     /// Line ID to position index.
-    pub line: &'a HashMap<EntityId, usize>,
+    pub line: &'a BTreeMap<EntityId, usize>,
 }
 
 /// Borrowed cascade context for resolving the total-inflow expression.
@@ -106,7 +106,7 @@ pub(crate) struct PumpingRefs<'a> {
     pub pumping_stations: &'a [PumpingStation],
     /// Station id → local index (`p_idx`) into [`PumpingRefs::pumping_stations`].
     /// A lookup miss (unknown station, or no stations at all) yields `vec![]`.
-    pub pumping_pos: &'a HashMap<EntityId, usize>,
+    pub pumping_pos: &'a BTreeMap<EntityId, usize>,
 }
 
 /// Map a [`VariableRef`] and block index to LP column indices with multipliers.
@@ -442,7 +442,7 @@ pub(crate) fn expression_is_block_independent(expression: &ConstraintExpression)
 fn resolve_hydro_storage(
     hydro_id: EntityId,
     indexer: &StageIndexer,
-    hydro_pos: &HashMap<EntityId, usize>,
+    hydro_pos: &BTreeMap<EntityId, usize>,
 ) -> Vec<(usize, f64)> {
     if let Some(&pos) = hydro_pos.get(&hydro_id) {
         vec![(indexer.storage.start + pos, 1.0)]
@@ -484,7 +484,7 @@ fn resolve_hydro_inflow(
     block_idx: usize,
     grid: BlockGrid,
     indexer: &StageIndexer,
-    hydro_pos: &HashMap<EntityId, usize>,
+    hydro_pos: &BTreeMap<EntityId, usize>,
     cascade_refs: &CascadeRefs<'_>,
 ) -> Vec<(usize, f64)> {
     if indexer.z_inflow.is_empty() {
@@ -542,7 +542,7 @@ fn resolve_hydro_inflow(
 fn resolve_hydro_evaporation(
     hydro_id: EntityId,
     indexer: &StageIndexer,
-    hydro_pos: &HashMap<EntityId, usize>,
+    hydro_pos: &BTreeMap<EntityId, usize>,
 ) -> Vec<(usize, f64)> {
     let Some(&sys_pos) = hydro_pos.get(&hydro_id) else {
         return vec![];
@@ -576,7 +576,7 @@ fn resolve_hydro_outflow(
     block_idx: usize,
     grid: BlockGrid,
     indexer: &StageIndexer,
-    hydro_pos: &HashMap<EntityId, usize>,
+    hydro_pos: &BTreeMap<EntityId, usize>,
 ) -> Vec<(usize, f64)> {
     let Some(&pos) = hydro_pos.get(&hydro_id) else {
         return vec![];
@@ -608,7 +608,7 @@ fn resolve_hydro_generation(
     stage_idx: usize,
     indexer: &StageIndexer,
     production_models: &ProductionModelSet,
-    hydro_pos: &HashMap<EntityId, usize>,
+    hydro_pos: &BTreeMap<EntityId, usize>,
 ) -> Vec<(usize, f64)> {
     let Some(&sys_pos) = hydro_pos.get(&hydro_id) else {
         return vec![];
@@ -656,7 +656,7 @@ fn resolve_line_exchange(
     block_idx: usize,
     grid: BlockGrid,
     indexer: &StageIndexer,
-    line_pos: &HashMap<EntityId, usize>,
+    line_pos: &BTreeMap<EntityId, usize>,
 ) -> Vec<(usize, f64)> {
     if let Some(&pos) = line_pos.get(&line_id) {
         let effective_blk = block_id.unwrap_or(block_idx);
@@ -688,7 +688,7 @@ fn resolve_bus_deficit(
     block_idx: usize,
     grid: BlockGrid,
     indexer: &StageIndexer,
-    bus_pos: &HashMap<EntityId, usize>,
+    bus_pos: &BTreeMap<EntityId, usize>,
 ) -> Vec<(usize, f64)> {
     if let Some(&b_pos) = bus_pos.get(&bus_id) {
         let effective_blk = block_id.unwrap_or(block_idx);
@@ -721,7 +721,7 @@ fn resolve_bus_deficit(
 fn resolve_anticipated_decision(
     thermal_id: EntityId,
     indexer: &StageIndexer,
-    thermal_pos: &HashMap<EntityId, usize>,
+    thermal_pos: &BTreeMap<EntityId, usize>,
 ) -> Vec<(usize, f64)> {
     let Some(&sys_pos) = thermal_pos.get(&thermal_id) else {
         return vec![];
@@ -793,7 +793,7 @@ fn resolve_block_variable(
     current_block_idx: usize,
     grid: BlockGrid,
     col_start: usize,
-    pos_map: &HashMap<EntityId, usize>,
+    pos_map: &BTreeMap<EntityId, usize>,
     multiplier: f64,
 ) -> Vec<(usize, f64)> {
     if let Some(&pos) = pos_map.get(&entity_id) {
@@ -862,7 +862,7 @@ fn block_col_range(indexer: &StageIndexer, kind: ElementKind) -> std::ops::Range
     clippy::erasing_op
 )]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
 
     use cobre_core::entities::{HydroGenerationModel, HydroPenalties};
     use cobre_core::{CascadeTopology, EntityId, Hydro, PumpingStation, VariableRef};
@@ -1016,7 +1016,7 @@ mod tests {
         ProductionModelSet::new(models, 4, 2)
     }
 
-    fn make_hydro_pos() -> HashMap<EntityId, usize> {
+    fn make_hydro_pos() -> BTreeMap<EntityId, usize> {
         // Hydros with EntityId 10, 20, 30, 40 at system positions 0, 1, 2, 3
         [
             (EntityId(10), 0),
@@ -1028,19 +1028,19 @@ mod tests {
         .collect()
     }
 
-    fn make_thermal_pos() -> HashMap<EntityId, usize> {
+    fn make_thermal_pos() -> BTreeMap<EntityId, usize> {
         // Thermals with EntityId 5 and 6 at positions 0 and 1
         [(EntityId(5), 0), (EntityId(6), 1)].into_iter().collect()
     }
 
-    fn make_bus_pos() -> HashMap<EntityId, usize> {
+    fn make_bus_pos() -> BTreeMap<EntityId, usize> {
         // Buses with EntityId 100, 200 at positions 0, 1
         [(EntityId(100), 0), (EntityId(200), 1)]
             .into_iter()
             .collect()
     }
 
-    fn make_line_pos() -> HashMap<EntityId, usize> {
+    fn make_line_pos() -> BTreeMap<EntityId, usize> {
         // Line with EntityId 50 at position 0
         [(EntityId(50), 0)].into_iter().collect()
     }
@@ -1050,10 +1050,10 @@ mod tests {
         block_idx: usize,
         indexer: &StageIndexer,
         production_models: &ProductionModelSet,
-        hydro_pos: &HashMap<EntityId, usize>,
-        thermal_pos: &HashMap<EntityId, usize>,
-        bus_pos: &HashMap<EntityId, usize>,
-        line_pos: &HashMap<EntityId, usize>,
+        hydro_pos: &BTreeMap<EntityId, usize>,
+        thermal_pos: &BTreeMap<EntityId, usize>,
+        bus_pos: &BTreeMap<EntityId, usize>,
+        line_pos: &BTreeMap<EntityId, usize>,
     ) -> Vec<(usize, f64)> {
         // Paths under test here ignore the cascade context; pass an empty one.
         let cascade = empty_cascade();
@@ -1079,10 +1079,10 @@ mod tests {
         block_idx: usize,
         indexer: &StageIndexer,
         production_models: &ProductionModelSet,
-        hydro_pos: &HashMap<EntityId, usize>,
-        thermal_pos: &HashMap<EntityId, usize>,
-        bus_pos: &HashMap<EntityId, usize>,
-        line_pos: &HashMap<EntityId, usize>,
+        hydro_pos: &BTreeMap<EntityId, usize>,
+        thermal_pos: &BTreeMap<EntityId, usize>,
+        bus_pos: &BTreeMap<EntityId, usize>,
+        line_pos: &BTreeMap<EntityId, usize>,
         cascade: &CascadeTopology,
         diversion_upstream: &HashMap<EntityId, Vec<usize>>,
     ) -> Vec<(usize, f64)> {
@@ -1099,7 +1099,7 @@ mod tests {
         // Non-pumping paths ignore the pumping context; pass an empty one (no
         // stations), so the PumpingFlow/PumpingPower lookup misses and yields [].
         let no_stations: Vec<PumpingStation> = Vec::new();
-        let empty_pumping_pos: HashMap<EntityId, usize> = HashMap::new();
+        let empty_pumping_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
         let pumping_refs = PumpingRefs {
             col_pumping_start: 0,
             pumping_stations: &no_stations,
@@ -1133,9 +1133,9 @@ mod tests {
         col_pumping_start: usize,
         n_blks: usize,
         pumping_stations: &[PumpingStation],
-        pumping_pos: &HashMap<EntityId, usize>,
+        pumping_pos: &BTreeMap<EntityId, usize>,
     ) -> Vec<(usize, f64)> {
-        let empty: HashMap<EntityId, usize> = HashMap::new();
+        let empty: BTreeMap<EntityId, usize> = BTreeMap::new();
         let positions = super::EntityPositionMaps {
             hydro: &empty,
             thermal: &empty,
@@ -1494,11 +1494,11 @@ mod tests {
             1,
         );
 
-        let hpos: HashMap<EntityId, usize> =
+        let hpos: BTreeMap<EntityId, usize> =
             [(EntityId(10), 0), (EntityId(20), 1)].into_iter().collect();
-        let tpos: HashMap<EntityId, usize> = HashMap::new();
-        let bpos: HashMap<EntityId, usize> = [(EntityId(100), 0)].into_iter().collect();
-        let lpos: HashMap<EntityId, usize> = HashMap::new();
+        let tpos: BTreeMap<EntityId, usize> = BTreeMap::new();
+        let bpos: BTreeMap<EntityId, usize> = [(EntityId(100), 0)].into_iter().collect();
+        let lpos: BTreeMap<EntityId, usize> = BTreeMap::new();
 
         let positions = super::EntityPositionMaps {
             hydro: &hpos,
@@ -1513,7 +1513,7 @@ mod tests {
             diversion_upstream: &diversion_upstream,
         };
         let no_stations: Vec<PumpingStation> = Vec::new();
-        let empty_pumping_pos: HashMap<EntityId, usize> = HashMap::new();
+        let empty_pumping_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
         let pumping_refs = PumpingRefs {
             col_pumping_start: 0,
             pumping_stations: &no_stations,
@@ -1572,11 +1572,11 @@ mod tests {
             1,
         );
 
-        let hpos: HashMap<EntityId, usize> =
+        let hpos: BTreeMap<EntityId, usize> =
             [(EntityId(10), 0), (EntityId(20), 1)].into_iter().collect();
-        let tpos: HashMap<EntityId, usize> = HashMap::new();
-        let bpos: HashMap<EntityId, usize> = [(EntityId(100), 0)].into_iter().collect();
-        let lpos: HashMap<EntityId, usize> = HashMap::new();
+        let tpos: BTreeMap<EntityId, usize> = BTreeMap::new();
+        let bpos: BTreeMap<EntityId, usize> = [(EntityId(100), 0)].into_iter().collect();
+        let lpos: BTreeMap<EntityId, usize> = BTreeMap::new();
 
         // Hydro 20 (pos=1) has no evaporation in evap_hydro_indices=[0]
         let positions = super::EntityPositionMaps {
@@ -1592,7 +1592,7 @@ mod tests {
             diversion_upstream: &diversion_upstream,
         };
         let no_stations: Vec<PumpingStation> = Vec::new();
-        let empty_pumping_pos: HashMap<EntityId, usize> = HashMap::new();
+        let empty_pumping_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
         let pumping_refs = PumpingRefs {
             col_pumping_start: 0,
             pumping_stations: &no_stations,
@@ -1624,12 +1624,12 @@ mod tests {
     const PUMP_N_BLKS: usize = 3;
 
     /// Two pumping stations and the matching `pumping_pos`, in ID-sorted slot order.
-    fn make_pumping_fixture() -> (Vec<PumpingStation>, HashMap<EntityId, usize>) {
+    fn make_pumping_fixture() -> (Vec<PumpingStation>, BTreeMap<EntityId, usize>) {
         let stations = vec![
             make_pumping_station(10, 2.5),
             make_pumping_station(20, 0.75),
         ];
-        let pumping_pos: HashMap<EntityId, usize> =
+        let pumping_pos: BTreeMap<EntityId, usize> =
             [(EntityId(10), 0), (EntityId(20), 1)].into_iter().collect();
         (stations, pumping_pos)
     }
@@ -1826,7 +1826,7 @@ mod tests {
         let indexer = make_indexer();
         let prod = make_production_models();
         let no_stations: Vec<PumpingStation> = Vec::new();
-        let empty_pos: HashMap<EntityId, usize> = HashMap::new();
+        let empty_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
 
         for var_ref in [
             VariableRef::PumpingFlow {
@@ -2303,11 +2303,11 @@ mod tests {
     fn anticipated_decision_maps_to_correct_column() {
         let indexer = make_indexer_with_anticipated();
         let prod = ProductionModelSet::new(vec![], 0, 1);
-        let hpos: HashMap<EntityId, usize> = HashMap::new();
-        let tpos: HashMap<EntityId, usize> =
+        let hpos: BTreeMap<EntityId, usize> = BTreeMap::new();
+        let tpos: BTreeMap<EntityId, usize> =
             [(EntityId(5), 0), (EntityId(6), 1)].into_iter().collect();
-        let bpos: HashMap<EntityId, usize> = [(EntityId(100), 0)].into_iter().collect();
-        let lpos: HashMap<EntityId, usize> = HashMap::new();
+        let bpos: BTreeMap<EntityId, usize> = [(EntityId(100), 0)].into_iter().collect();
+        let lpos: BTreeMap<EntityId, usize> = BTreeMap::new();
 
         // Verify anticipated_decision.start is as expected.
         assert_eq!(
@@ -2342,11 +2342,11 @@ mod tests {
     fn anticipated_decision_ignores_block_idx() {
         let indexer = make_indexer_with_anticipated();
         let prod = ProductionModelSet::new(vec![], 0, 1);
-        let hpos: HashMap<EntityId, usize> = HashMap::new();
-        let tpos: HashMap<EntityId, usize> =
+        let hpos: BTreeMap<EntityId, usize> = BTreeMap::new();
+        let tpos: BTreeMap<EntityId, usize> =
             [(EntityId(5), 0), (EntityId(6), 1)].into_iter().collect();
-        let bpos: HashMap<EntityId, usize> = [(EntityId(100), 0)].into_iter().collect();
-        let lpos: HashMap<EntityId, usize> = HashMap::new();
+        let bpos: BTreeMap<EntityId, usize> = [(EntityId(100), 0)].into_iter().collect();
+        let lpos: BTreeMap<EntityId, usize> = BTreeMap::new();
 
         for block_idx in [0, 1] {
             let result = call(
@@ -2377,11 +2377,11 @@ mod tests {
     fn anticipated_decision_non_anticipated_thermal_returns_empty() {
         let indexer = make_indexer_with_anticipated();
         let prod = ProductionModelSet::new(vec![], 0, 1);
-        let hpos: HashMap<EntityId, usize> = HashMap::new();
-        let tpos: HashMap<EntityId, usize> =
+        let hpos: BTreeMap<EntityId, usize> = BTreeMap::new();
+        let tpos: BTreeMap<EntityId, usize> =
             [(EntityId(5), 0), (EntityId(6), 1)].into_iter().collect();
-        let bpos: HashMap<EntityId, usize> = [(EntityId(100), 0)].into_iter().collect();
-        let lpos: HashMap<EntityId, usize> = HashMap::new();
+        let bpos: BTreeMap<EntityId, usize> = [(EntityId(100), 0)].into_iter().collect();
+        let lpos: BTreeMap<EntityId, usize> = BTreeMap::new();
 
         let result = call(
             VariableRef::AnticipatedDecision {
@@ -2407,11 +2407,11 @@ mod tests {
     fn anticipated_decision_unknown_entity_returns_empty() {
         let indexer = make_indexer_with_anticipated();
         let prod = ProductionModelSet::new(vec![], 0, 1);
-        let hpos: HashMap<EntityId, usize> = HashMap::new();
-        let tpos: HashMap<EntityId, usize> =
+        let hpos: BTreeMap<EntityId, usize> = BTreeMap::new();
+        let tpos: BTreeMap<EntityId, usize> =
             [(EntityId(5), 0), (EntityId(6), 1)].into_iter().collect();
-        let bpos: HashMap<EntityId, usize> = [(EntityId(100), 0)].into_iter().collect();
-        let lpos: HashMap<EntityId, usize> = HashMap::new();
+        let bpos: BTreeMap<EntityId, usize> = [(EntityId(100), 0)].into_iter().collect();
+        let lpos: BTreeMap<EntityId, usize> = BTreeMap::new();
 
         let result = call(
             VariableRef::AnticipatedDecision {
@@ -2719,10 +2719,10 @@ mod tests {
     fn hydro_inflow_empty_when_no_hydros() {
         let indexer = make_indexer_with_anticipated();
         let prod = ProductionModelSet::new(vec![], 0, 1);
-        let hpos: HashMap<EntityId, usize> = HashMap::new();
-        let tpos: HashMap<EntityId, usize> = HashMap::new();
-        let bpos: HashMap<EntityId, usize> = HashMap::new();
-        let lpos: HashMap<EntityId, usize> = HashMap::new();
+        let hpos: BTreeMap<EntityId, usize> = BTreeMap::new();
+        let tpos: BTreeMap<EntityId, usize> = BTreeMap::new();
+        let bpos: BTreeMap<EntityId, usize> = BTreeMap::new();
+        let lpos: BTreeMap<EntityId, usize> = BTreeMap::new();
 
         assert!(
             indexer.z_inflow.is_empty(),
