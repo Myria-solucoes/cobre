@@ -336,6 +336,17 @@ pub const ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S: f64 = 1.0e6 / 3600.0;
 pub struct StageExtractionSpec<'a> {
     /// Stage indexer providing column/row layout.
     pub indexer: &'a StageIndexer,
+    /// Per-stage dispatch block count for this stage, sourced from
+    /// `block_counts_per_stage[t]`.
+    ///
+    /// Every equipment-column family at this stage is striped by *this* stage's
+    /// block count (the LP template is built per-stage from `stage.blocks.len()`),
+    /// so all column-stride arithmetic during extraction must use `n_blks`, NOT
+    /// the global `indexer.n_blks` (wired once from stage 0). Reading the global
+    /// strides every equipment column off stage-0's width and misreads any stage
+    /// whose block count differs — silently wrong reported outputs. For
+    /// uniform-block studies `n_blks == indexer.n_blks` and the reads coincide.
+    pub n_blks: usize,
     /// Entity ID lists and productivities needed to build result records.
     pub entity_counts: &'a EntityCounts,
     /// Volumetric inflow per hydro (m³/s), one entry per hydro plant.
@@ -494,7 +505,7 @@ fn extract_hydro_no_turbine(
     // Stage-level: hours-weighted average across blocks.
     let (turbined_slack, outflow_slack_below, outflow_slack_above, generation_slack) =
         if indexer.has_operational_violations {
-            let n_blks = indexer.n_blks;
+            let n_blks = spec.n_blks;
             let base_turbine_below = indexer.turbine_below_slack.start + h * n_blks;
             let base_outflow_below = indexer.outflow_below_slack.start + h * n_blks;
             let base_outflow_above = indexer.outflow_above_slack.start + h * n_blks;
@@ -692,7 +703,7 @@ fn extract_hydro_per_block<'a>(
     stage_id: u32,
 ) -> impl Iterator<Item = SimulationHydroResult> + 'a {
     let indexer = spec.indexer;
-    let n_blks = indexer.n_blks;
+    let n_blks = spec.n_blks;
 
     // Extract stage-level scalars once; the per-block closure captures them.
     let ctx = HydroStageContext::new(view, spec, lookup, h);
@@ -736,7 +747,7 @@ fn extract_hydro_per_block<'a>(
         // Operational violation slacks: read per-block value directly (m3/s or MW).
         let (turbined_slack, outflow_slack_below, outflow_slack_above, generation_slack) =
             if indexer.has_operational_violations {
-                let n = indexer.n_blks;
+                let n = spec.n_blks;
                 (
                     view.primal[indexer.turbine_below_slack.start + h * n + b],
                     view.primal[indexer.outflow_below_slack.start + h * n + b],
@@ -794,7 +805,7 @@ fn extract_hydros(
     lookup: &HydroReverseLookup,
 ) -> Vec<SimulationHydroResult> {
     let indexer = spec.indexer;
-    if indexer.turbine.is_empty() || indexer.n_blks == 0 {
+    if indexer.turbine.is_empty() || spec.n_blks == 0 {
         spec.entity_counts
             .hydro_ids
             .iter()
@@ -823,7 +834,7 @@ fn extract_thermals(
     lookup: &ThermalReverseLookup,
 ) -> Vec<SimulationThermalResult> {
     let indexer = spec.indexer;
-    let n_blks = indexer.n_blks;
+    let n_blks = spec.n_blks;
     if indexer.thermal.is_empty() || n_blks == 0 {
         spec.entity_counts
             .thermal_ids
@@ -880,7 +891,7 @@ fn extract_exchanges(
     stage_id: u32,
 ) -> Vec<SimulationExchangeResult> {
     let indexer = spec.indexer;
-    let n_blks = indexer.n_blks;
+    let n_blks = spec.n_blks;
     if indexer.line_fwd.is_empty() || n_blks == 0 {
         spec.entity_counts
             .line_ids
@@ -933,7 +944,7 @@ fn extract_buses(
     stage_id: u32,
 ) -> Vec<SimulationBusResult> {
     let indexer = spec.indexer;
-    let n_blks = indexer.n_blks;
+    let n_blks = spec.n_blks;
     if indexer.deficit.is_empty() || n_blks == 0 {
         spec.entity_counts
             .bus_ids
@@ -1405,7 +1416,7 @@ fn extract_non_controllables(
         return (Vec::new(), 0.0);
     }
 
-    let n_blks = spec.indexer.n_blks;
+    let n_blks = spec.n_blks;
     let col_start = spec.ncs_col_start;
     let mut results = Vec::with_capacity(n_ncs * n_blks);
     let mut total_curtailment_cost = 0.0;
@@ -1472,7 +1483,7 @@ fn extract_pumping_stations(
     stage_id: u32,
 ) -> Vec<SimulationPumpingResult> {
     let n_pumping = spec.n_pumping;
-    let n_blks = spec.indexer.n_blks;
+    let n_blks = spec.n_blks;
     if n_pumping == 0 || n_blks == 0 {
         return Vec::new();
     }
@@ -1815,6 +1826,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &make_entity_counts_2_hydros(),
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[],
@@ -1865,6 +1877,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &make_entity_counts_2_hydros(),
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[],
@@ -1915,6 +1928,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &make_entity_counts_2_hydros(),
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[],
@@ -1967,6 +1981,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &make_entity_counts_2_hydros(),
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[],
@@ -2031,6 +2046,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[],
@@ -2077,6 +2093,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &make_entity_counts_2_hydros(),
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[],
@@ -2129,6 +2146,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &make_entity_counts_2_hydros(),
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[],
@@ -2292,6 +2310,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
                 block_hours: &block_hours,
@@ -2440,6 +2459,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[1.0],
@@ -2543,6 +2563,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[1.0],
@@ -2659,6 +2680,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[1.0],
@@ -2726,6 +2748,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[1.0],
@@ -2791,6 +2814,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[1.0],
@@ -2881,6 +2905,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[1.0],
@@ -2971,6 +2996,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[1.0, 1.0, 1.0, 1.0],
@@ -3084,6 +3110,7 @@ mod tests {
         let lookup = super::ThermalReverseLookup::build(&indexer, 1);
         let spec = StageExtractionSpec {
             indexer: &indexer,
+            n_blks: indexer.n_blks,
             entity_counts: &EntityCounts {
                 hydro_ids: vec![],
                 hydro_productivities: vec![],
@@ -3152,6 +3179,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[1.0, 1.0, 1.0],
@@ -3234,6 +3262,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[1.0, 1.0, 1.0],
@@ -3301,6 +3330,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[1.0, 1.0, 1.0],
@@ -3394,6 +3424,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[1.0, 1.0, 1.0],
@@ -3471,6 +3502,7 @@ mod tests {
         let lookup = super::ThermalReverseLookup::build(&indexer, 1);
         let spec_delivery = StageExtractionSpec {
             indexer: &indexer,
+            n_blks: indexer.n_blks,
             entity_counts: &EntityCounts {
                 hydro_ids: vec![],
                 hydro_productivities: vec![],
@@ -3546,6 +3578,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[],
@@ -3631,6 +3664,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[],
@@ -3732,6 +3766,7 @@ mod tests {
         };
         let spec = StageExtractionSpec {
             indexer: &indexer,
+            n_blks: indexer.n_blks,
             entity_counts: &counts,
             inflow_m3s_per_hydro: &[],
             block_hours: &[1.0, 1.0],
@@ -3823,6 +3858,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[],
@@ -4103,6 +4139,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[],
@@ -4203,6 +4240,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[],
@@ -4314,6 +4352,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[],
@@ -4438,6 +4477,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[],
@@ -4516,6 +4556,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[],
@@ -4636,6 +4677,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[],
@@ -4715,6 +4757,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[],
@@ -4800,6 +4843,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[],
@@ -4879,6 +4923,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[],
@@ -4976,6 +5021,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[],
@@ -5095,6 +5141,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &counts,
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[],
@@ -5227,6 +5274,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &make_entity_counts_1_hydro(),
                 inflow_m3s_per_hydro: &[],
                 block_hours: &[],
@@ -5291,6 +5339,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &make_entity_counts_1_hydro(),
                 inflow_m3s_per_hydro: &[50.0],
                 block_hours: &[],
@@ -5344,6 +5393,7 @@ mod tests {
             },
             &StageExtractionSpec {
                 indexer: &indexer,
+                n_blks: indexer.n_blks,
                 entity_counts: &make_entity_counts_1_hydro(),
                 inflow_m3s_per_hydro: &[10.0],
                 block_hours: &[],
@@ -5410,6 +5460,7 @@ mod tests {
     ) -> StageExtractionSpec<'a> {
         StageExtractionSpec {
             indexer,
+            n_blks: indexer.n_blks,
             entity_counts,
             inflow_m3s_per_hydro: &[],
             block_hours: &[],

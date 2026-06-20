@@ -218,6 +218,12 @@ fn case_dir(label: &str) -> std::path::PathBuf {
         "D14" => "d14-block-factors",
         "D15" => "d15-non-controllable-source",
         "D17" => "d17-evaporation-mixed-sign",
+        // NCS commissioning window: NCS0 enters service at stage 1
+        // (`entry_stage_id`) and NCS1 leaves at stage 2 (`exit_stage_id`), so the
+        // active NCS set — and therefore the per-stage NCS column base — differs
+        // across stages 0/1/2 instead of collapsing to a uniform set. Exercises
+        // the per-stage `identify_active_ncs` path that a uniform-NCS case cannot.
+        "D18" => "d18-ncs-commissioning-window",
         // Cascade case whose downstream plant declares a `reference_volume`,
         // shifting the upstream computed-FPHA plant's backwater family.
         "D31" => "d31-backwater-reference-volume",
@@ -227,6 +233,15 @@ fn case_dir(label: &str) -> std::path::PathBuf {
         // transfer (and the matching power draw) on every solve, so the pumping
         // column actually participates in the LP.
         "D32" => "d32-reversible-plant",
+        // Per-stage varying block counts: stages declare `blocks` arrays of
+        // different length (1 / 3 / 2), so each stage's per-block equipment
+        // column stride (turbine/spillage/thermal/bus) diverges from stage 0's.
+        // A uniform-block case (every stage shares one block count, as in D14)
+        // cannot detect equipment columns read off the wrong stage's block
+        // width, because all stages share the same stride. The `load_factors`
+        // block-factor array is sized to each stage's own count, exercising the
+        // per-stage block-indexed input path.
+        "D33" => "d33-per-stage-block-counts",
         other => panic!("unknown case label: {other}"),
     };
     // Integration tests run from the crate root; fixtures live at
@@ -498,6 +513,15 @@ fn parity_hash_d17() {
     not(feature = "slow-tests"),
     ignore = "slow: run with --features slow-tests"
 )]
+fn parity_hash_d18() {
+    run_case("D18");
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
 fn parity_hash_d31() {
     run_case("D31");
 }
@@ -509,4 +533,13 @@ fn parity_hash_d31() {
 )]
 fn parity_hash_d32() {
     run_case("D32");
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+fn parity_hash_d33() {
+    run_case("D33");
 }

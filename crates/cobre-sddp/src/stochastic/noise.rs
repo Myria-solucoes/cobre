@@ -622,6 +622,79 @@ pub(crate) fn transform_ncs_noise(
     }
 }
 
+/// Rebuild the NCS column-index buffer for one stage's **active** NCS columns.
+///
+/// `slot_to_local[slot]` is `Some(ncs_local)` when the stochastic NCS at `slot`
+/// (id-sorted `StochasticContext::ncs_entity_ids` order) is active at this stage,
+/// `None` otherwise. The pushed column index strides by `ncs_local` — the slot's
+/// position within `active_ncs_indices[stage]`, the order the LP allocated NCS
+/// columns — never by the raw stochastic slot. Striding by the slot would address
+/// `n_stochastic_ncs` columns; at a strict-subset stage the LP allocates only
+/// `(active stochastic NCS) * block_count` NCS columns, so a slot-strided index
+/// overruns the NCS column block and the solver rejects the set-bounds call. An
+/// inactive slot (`None`) contributes no index.
+///
+/// The buffer is cleared then refilled; callers rebuild it lazily (only when the
+/// expected active length changes — see the patch sites). No heap allocation
+/// beyond the initial capacity growth.
+pub(crate) fn build_active_ncs_col_indices(
+    slot_to_local: &[Option<usize>],
+    ncs_col_start: usize,
+    block_count: usize,
+    indices_out: &mut Vec<usize>,
+) {
+    indices_out.clear();
+    for &maybe_local in slot_to_local {
+        if let Some(ncs_local) = maybe_local {
+            for blk in 0..block_count {
+                indices_out.push(ncs_col_start + ncs_local * block_count + blk);
+            }
+        }
+    }
+}
+
+/// Gather the **active** slots' NCS column bounds from the full slot-order buffers.
+///
+/// `lower_src` / `upper_src` are the verbatim `transform_ncs_noise` outputs — one
+/// `block_count`-wide block per stochastic slot, in slot order, **including
+/// inactive slots**. This copies only the active slots' blocks (those with
+/// `Some(ncs_local)` in `slot_to_local`) into `lower_out` / `upper_out`, in slot
+/// order, so the gathered buffers run parallel to the index buffer built by
+/// [`build_active_ncs_col_indices`] and the set-bounds call receives index/lower/
+/// upper buffers of equal length. Passing `lower_src` / `upper_src` verbatim on a
+/// subset stage would feed inactive slots' bounds into the call and over-length
+/// it. When every slot is active the gather reproduces the source buffers exactly
+/// (hash-neutral for the all-active case). Cleared then refilled each call; the
+/// bounds change every opening, so unlike the index buffer this cannot be cached.
+pub(crate) fn gather_active_ncs_bounds(
+    slot_to_local: &[Option<usize>],
+    block_count: usize,
+    lower_src: &[f64],
+    upper_src: &[f64],
+    lower_out: &mut Vec<f64>,
+    upper_out: &mut Vec<f64>,
+) {
+    lower_out.clear();
+    upper_out.clear();
+    for (slot, &maybe_local) in slot_to_local.iter().enumerate() {
+        if maybe_local.is_some() {
+            let base = slot * block_count;
+            lower_out.extend_from_slice(&lower_src[base..base + block_count]);
+            upper_out.extend_from_slice(&upper_src[base..base + block_count]);
+        }
+    }
+}
+
+/// Count the active stochastic NCS slots at one stage.
+///
+/// The active-subset column/bound buffers have length `count * block_count`; the
+/// patch sites key their lazy index-buffer rebuild on this length, not on
+/// `n_stochastic_ncs`.
+#[inline]
+pub(crate) fn active_ncs_slot_count(slot_to_local: &[Option<usize>]) -> usize {
+    slot_to_local.iter().filter(|s| s.is_some()).count()
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -657,7 +730,8 @@ mod tests {
         indexer::StageIndexer,
         inflow_method::InflowNonNegativityMethod,
         noise::{
-            compute_effective_eta, shift_anticipated_state, shift_lag_state,
+            active_ncs_slot_count, build_active_ncs_col_indices, compute_effective_eta,
+            gather_active_ncs_bounds, shift_anticipated_state, shift_lag_state,
             transform_inflow_noise, transform_load_noise,
         },
         workspace::ScratchBuffers,
@@ -705,6 +779,9 @@ mod tests {
             ncs_col_upper_buf: Vec::new(),
             ncs_col_lower_buf: Vec::new(),
             ncs_col_indices_buf: Vec::new(),
+            ncs_col_lower_active_buf: Vec::new(),
+            ncs_col_upper_active_buf: Vec::new(),
+            ncs_col_upper_extract_buf: Vec::new(),
             load_rhs_buf: Vec::new(),
             row_lower_buf: Vec::new(),
             z_inflow_rhs_buf: Vec::new(),
@@ -1045,6 +1122,8 @@ mod tests {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[1],
+            ncs_col_starts: &[],
+            ncs_active_slot_to_local: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -1118,6 +1197,8 @@ mod tests {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[1],
+            ncs_col_starts: &[],
+            ncs_active_slot_to_local: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -1191,6 +1272,8 @@ mod tests {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[1],
+            ncs_col_starts: &[],
+            ncs_active_slot_to_local: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],
@@ -2658,5 +2741,80 @@ mod tests {
         shift_anticipated_state(&mut state, &incoming, &primal, &indexer);
         assert_eq!(state[ant_start], 40.0);
         assert_eq!(state[ant_start + 1], 50.0);
+    }
+
+    // ── active-subset NCS column/bound mapping ───────────────────────────────
+
+    /// Strict-subset stage: slot 0 inactive (`None`), slots 1,2 active at local
+    /// columns 0,1. The emitted index/bound buffers have length
+    /// `active_stochastic_ncs * n_blks = 2 * 2 = 4`, NOT `n_stochastic_ncs *
+    /// n_blks = 3 * 2 = 6` — the inactive slot contributes zero entries (AC #2).
+    /// Indices stride by `ncs_local` from the per-stage base, and the gathered
+    /// bounds copy only the active slots' blocks from the full slot-order buffers.
+    #[test]
+    fn active_ncs_subset_buffers_have_active_length() {
+        let n_blks = 2_usize;
+        let ncs_col_start = 100_usize;
+        // slot 0: inactive; slot 1 → local 0; slot 2 → local 1.
+        let slot_to_local = vec![None, Some(0_usize), Some(1_usize)];
+        assert_eq!(active_ncs_slot_count(&slot_to_local), 2);
+
+        let mut indices = Vec::new();
+        build_active_ncs_col_indices(&slot_to_local, ncs_col_start, n_blks, &mut indices);
+        // local 0 → cols 100,101; local 1 → cols 102,103. Inactive slot 0: nothing.
+        assert_eq!(indices, vec![100, 101, 102, 103]);
+        assert_eq!(indices.len(), 2 * n_blks, "index buffer is active*n_blks");
+
+        // Full slot-order bounds: one 2-block stride per stochastic slot (3 slots).
+        let lower_src = vec![0.0, 0.0, 10.0, 11.0, 20.0, 21.0];
+        let upper_src = vec![1.0, 2.0, 13.0, 14.0, 23.0, 24.0];
+        let mut lower_out = Vec::new();
+        let mut upper_out = Vec::new();
+        gather_active_ncs_bounds(
+            &slot_to_local,
+            n_blks,
+            &lower_src,
+            &upper_src,
+            &mut lower_out,
+            &mut upper_out,
+        );
+        // Only slots 1,2 are gathered (slot 0 skipped): blocks [10,11,20,21] /
+        // [13,14,23,24].
+        assert_eq!(lower_out, vec![10.0, 11.0, 20.0, 21.0]);
+        assert_eq!(upper_out, vec![13.0, 14.0, 23.0, 24.0]);
+        assert_eq!(lower_out.len(), 2 * n_blks);
+        assert_eq!(upper_out.len(), indices.len(), "bounds parallel to indices");
+    }
+
+    /// All-active, slot order == active order: the gathered bounds and built
+    /// indices are bit-identical to a verbatim full `n_stochastic_ncs` block —
+    /// the hash-neutrality contract for every existing case.
+    #[test]
+    fn active_ncs_full_set_is_slot_order_identical() {
+        let n_blks = 2_usize;
+        let ncs_col_start = 0_usize;
+        let slot_to_local = vec![Some(0_usize), Some(1_usize), Some(2_usize)];
+        assert_eq!(active_ncs_slot_count(&slot_to_local), 3);
+
+        let mut indices = Vec::new();
+        build_active_ncs_col_indices(&slot_to_local, ncs_col_start, n_blks, &mut indices);
+        // Identical to the old `for slot { for blk { start + slot*n_blks + blk }}`.
+        assert_eq!(indices, vec![0, 1, 2, 3, 4, 5]);
+
+        let lower_src = vec![0.0, 0.0, 1.0, 1.0, 2.0, 2.0];
+        let upper_src = vec![5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let mut lower_out = Vec::new();
+        let mut upper_out = Vec::new();
+        gather_active_ncs_bounds(
+            &slot_to_local,
+            n_blks,
+            &lower_src,
+            &upper_src,
+            &mut lower_out,
+            &mut upper_out,
+        );
+        // Verbatim copy of the full slot-order buffers.
+        assert_eq!(lower_out, lower_src);
+        assert_eq!(upper_out, upper_src);
     }
 }

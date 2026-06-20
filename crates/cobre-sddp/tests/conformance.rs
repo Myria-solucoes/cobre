@@ -858,6 +858,7 @@ mod lb_conformance {
             n_load_buses: 0,
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
+            ncs_active_slot_to_local: &[],
             block_count: 1,
             ncs_generation: 0..0,
             inflow_method: &InflowNonNegativityMethod::None,

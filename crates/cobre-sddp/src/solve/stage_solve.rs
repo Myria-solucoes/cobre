@@ -330,6 +330,8 @@ mod tests {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            ncs_active_slot_to_local: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],

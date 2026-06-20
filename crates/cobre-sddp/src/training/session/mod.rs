@@ -1183,6 +1183,29 @@ where
         let lb_wall_start = Instant::now();
         let lb_stats_before = self.solver.statistics();
 
+        // The lower bound evaluates stage 0 only, so its NCS column base is the
+        // per-stage `StageContext::ncs_col_starts[0]` — never a single global
+        // stage-0 NCS base (the `StageIndexer` carries only `has_ncs`, no column
+        // base). The range spans only the stage-0 **active** NCS columns
+        // (`active_ncs_indices[0].len() * block_count[0]`), not a full
+        // `n_stochastic_ncs` block — at a strict-subset stage 0 (an NCS that
+        // commissions later) the LP has fewer columns. The range is empty when the
+        // study has no stage-0 NCS columns, which guards the patch off via
+        // `LbEvalSpec::ncs_generation` emptiness in `lb_init_rank0`. The active
+        // slot map (`ncs_active_slot_to_local[0]`) drives the actual column
+        // strides; only `.start` and emptiness of this range are consumed.
+        let block_count_stage0 = self.stage_ctx.block_counts_per_stage[0];
+        let slot_to_local_stage0 = self
+            .stage_ctx
+            .ncs_active_slot_to_local
+            .first()
+            .map_or(&[][..], Vec::as_slice);
+        let active_ncs_stage0 = crate::noise::active_ncs_slot_count(slot_to_local_stage0);
+        let ncs_generation = match self.stage_ctx.ncs_col_starts.first() {
+            Some(&start) => start..(start + active_ncs_stage0 * block_count_stage0),
+            None => 0..0,
+        };
+
         let lb_spec = LbEvalSpec {
             template: &self.stage_ctx.templates[0],
             base_row: self.stage_ctx.base_rows[0],
@@ -1194,8 +1217,9 @@ where
             n_load_buses: self.stage_ctx.n_load_buses,
             ncs_max_gen: self.stage_ctx.ncs_max_gen,
             ncs_allow_curtailment: self.stage_ctx.ncs_allow_curtailment,
-            block_count: self.stage_ctx.block_counts_per_stage[0],
-            ncs_generation: self.training_ctx.indexer.ncs_generation.clone(),
+            ncs_active_slot_to_local: slot_to_local_stage0,
+            block_count: block_count_stage0,
+            ncs_generation,
             inflow_method: self.training_ctx.inflow_method,
         };
         let mut lb_bundle = LbEvalScratchBundle::from_scratch_fields(
@@ -1652,6 +1676,8 @@ mod tests {
             load_balance_row_starts: &[],
             load_bus_indices: &[],
             block_counts_per_stage: block_counts,
+            ncs_col_starts: &[],
+            ncs_active_slot_to_local: &[],
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
             discount_factors: &[],

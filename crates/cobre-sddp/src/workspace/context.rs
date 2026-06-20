@@ -31,6 +31,33 @@ pub struct StageContext<'a> {
     pub load_bus_indices: &'a [usize],
     /// Number of blocks per stage.
     pub block_counts_per_stage: &'a [usize],
+    /// Per-stage NCS column start indices.
+    ///
+    /// `ncs_col_starts[stage]` is the column index of the first NCS generation
+    /// column at that stage. The NCS column base shifts per stage when a source
+    /// commissions/decommissions mid-horizon or block counts vary, so the
+    /// forward/backward bound patch strides from this per-stage base — never a
+    /// single global stage-0 NCS base, which would address the wrong columns for
+    /// non-uniform geometries. The `StageIndexer` carries only `has_ncs` (a
+    /// presence flag), not a column base. Empty when the study has no NCS columns
+    /// (the patch is guarded off in that case).
+    pub ncs_col_starts: &'a [usize],
+    /// Per-stage stochastic-slot → active-local-column map for NCS bound patching.
+    ///
+    /// `ncs_active_slot_to_local[stage][slot]` is `Some(ncs_local)` when the
+    /// stochastic NCS at `slot` (id-sorted `StochasticContext::ncs_entity_ids`
+    /// order, the order `transform_ncs_noise` emits its bound buffers) is active
+    /// at that stage; `ncs_local` is its column position within
+    /// `active_ncs_indices[stage]`, so its LP column block is
+    /// `ncs_col_starts[stage] + ncs_local * n_blks + blk`. `None` means the slot
+    /// is inactive at that stage and contributes no column and no bound entry.
+    /// The forward/backward NCS bound patch strides by `ncs_local`, never by the
+    /// raw stochastic slot — a strict-subset stage allocates only
+    /// `active_ncs_indices[stage].len()` NCS columns, so addressing all
+    /// `n_stochastic_ncs` slots would overrun the block. Empty when the study has
+    /// no stochastic NCS columns (the patch is guarded off in that case).
+    /// Built once at setup as [`crate::setup::StudySetup::ncs_active_slot_to_local`].
+    pub ncs_active_slot_to_local: &'a [Vec<Option<usize>>],
     /// Maximum generation (MW) per stochastic NCS entity, sorted by entity ID.
     /// Length equals the number of stochastic NCS entities. Empty when none exist.
     pub ncs_max_gen: &'a [f64],

@@ -57,6 +57,12 @@ pub struct FphaRowRange {
 /// populated only by [`StageIndexer::with_equipment`] when FPHA hydros are
 /// present. They are empty when built via [`StageIndexer::new`] or when no FPHA
 /// hydros exist.
+// Rationale: the bool fields (`has_inflow_penalty`, `has_withdrawal`,
+// `has_operational_violations`, `has_ncs`) are independent presence flags for
+// optional column groups, not states of one machine; folding them into a
+// two-variant enum or state machine — the lint's suggested refactor — would
+// obscure that they vary independently. This is a plain LP-layout descriptor.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 pub struct StageIndexer {
     /// Column range `[0, N)` for outgoing storage volumes.
@@ -487,18 +493,24 @@ pub struct StageIndexer {
     /// `false` otherwise (including when built via [`StageIndexer::new`]).
     pub has_operational_violations: bool,
 
-    // ── NCS column range ──────────────────────────────────────────────────
-    // OWNER: populated after construction by the NCS wiring in `setup`
-    // (`build_wired_indexer`, which assigns `indexer.ncs_generation` from the LP
-    // builder's stage-0 NCS column starts) — NOT by `StageLayout::new`, which
-    // only reads indexer cursors. Left empty by every `StageIndexer` constructor
-    // (`new`, `with_equipment`); the wiring fills it in,
-    // and the hot paths (forward, backward, simulation, lower-bound spec) read it.
-    /// Column range for NCS generation variables, one per (ncs, block) pair.
+    // ── NCS presence flag ─────────────────────────────────────────────────
+    // OWNER: set after construction by the NCS wiring in `setup`
+    // (`build_wired_indexer`) — NOT by `StageLayout::new`. `false` for every
+    // `StageIndexer` constructor (`new`, `with_equipment`); the wiring sets it.
+    //
+    // This is a presence flag, never a column base: NCS columns are addressed
+    // per-stage from `StageContext::ncs_col_starts[stage]` (and
+    // `LbEvalSpec::ncs_generation` for the stage-0 lower bound), because a source
+    // that commissions mid-horizon or a stage with a differing block count shifts
+    // the NCS column base per stage. A single global base would address the wrong
+    // columns for such non-uniform geometries, so the indexer stores only whether
+    // NCS columns exist, not where they start.
+    /// Whether the study has NCS generation columns.
     ///
-    /// Index for NCS `r`, block `b`: `ncs_generation.start + r * n_blks + b`.
-    /// Empty when built via [`StageIndexer::new`] or when no NCS entities are active.
-    pub ncs_generation: Range<usize>,
+    /// `true` when NCS entities are active. `false` when built via
+    /// [`StageIndexer::new`] or when no NCS entities are present, in which case
+    /// the forward, backward, and simulation NCS bound patches are guarded off.
+    pub has_ncs: bool,
 
     // ── Z-inflow column and row ranges ────────────────────────────────────
     // Populated by all constructors.  The z_inflow columns are auxiliary

@@ -305,35 +305,51 @@ impl SimLookups {
     }
 }
 
-/// Patch NCS column bounds in the LP solver with per-scenario availability.
+/// Patch NCS availability bounds onto this stage's **active** NCS columns.
 ///
-/// Called after `set_row_bounds` and before `solve`. The `ncs_col_lower_buf`
-/// and `ncs_col_upper_buf` in the workspace scratch must already be
-/// populated by `transform_ncs_noise` (both bounds scale with the realized
-/// per-scenario availability ratio). The indices buffer is rebuilt lazily:
-/// only when the expected size changes (i.e., on a stage transition).
+/// Called after `set_row_bounds` and before `solve`. The `ncs_col_lower_buf` and
+/// `ncs_col_upper_buf` in the workspace scratch must already be populated by
+/// `transform_ncs_noise` (both bounds scale with the realized per-scenario
+/// availability ratio), in full stochastic-slot order. `ncs_col_start` is the
+/// per-stage base column of the first NCS generation variable at this stage
+/// (sourced from `SimulationOutputSpec::ncs_col_starts[t]`), never a single
+/// global stage-0 NCS base — per-stage block counts and mid-horizon commissioning
+/// make the stage bases diverge. `slot_to_local[slot]` is `Some(ncs_local)` when
+/// the stochastic NCS at `slot` is active at this stage; the index strides by
+/// `ncs_local` within `active_ncs_indices[t]`, never the raw slot — a subset stage
+/// allocates only `(active stochastic NCS) * n_blks` columns and a full
+/// `n_stochastic_ncs` block would overrun. The bounds are gathered to the active
+/// slots so the set-bounds call gets index/lower/upper buffers of equal length.
+/// The index buffer is rebuilt lazily (only when the active length changes, i.e.
+/// on a stage transition); the bounds are gathered every solve.
 fn apply_ncs_col_bounds<S: SolverInterface>(
     solver: &mut S,
     scratch: &mut crate::workspace::ScratchBuffers,
-    ncs_generation_start: usize,
-    n_stochastic_ncs: usize,
+    ncs_col_start: usize,
+    slot_to_local: &[Option<usize>],
     n_blks: usize,
 ) {
-    let expected_len = n_stochastic_ncs * n_blks;
+    let expected_len = crate::noise::active_ncs_slot_count(slot_to_local) * n_blks;
     if scratch.ncs_col_indices_buf.len() != expected_len {
-        scratch.ncs_col_indices_buf.clear();
-        for ncs_idx in 0..n_stochastic_ncs {
-            for blk in 0..n_blks {
-                scratch
-                    .ncs_col_indices_buf
-                    .push(ncs_generation_start + ncs_idx * n_blks + blk);
-            }
-        }
+        crate::noise::build_active_ncs_col_indices(
+            slot_to_local,
+            ncs_col_start,
+            n_blks,
+            &mut scratch.ncs_col_indices_buf,
+        );
     }
-    solver.set_col_bounds(
-        &scratch.ncs_col_indices_buf,
+    crate::noise::gather_active_ncs_bounds(
+        slot_to_local,
+        n_blks,
         &scratch.ncs_col_lower_buf,
         &scratch.ncs_col_upper_buf,
+        &mut scratch.ncs_col_lower_active_buf,
+        &mut scratch.ncs_col_upper_active_buf,
+    );
+    solver.set_col_bounds(
+        &scratch.ncs_col_indices_buf,
+        &scratch.ncs_col_lower_active_buf,
+        &scratch.ncs_col_upper_active_buf,
     );
 }
 
@@ -474,12 +490,12 @@ fn solve_simulation_stage<S: SolverInterface>(
     // Patch NCS column upper bounds with per-scenario stochastic availability.
     // ncs_col_upper_buf was populated by transform_ncs_noise in the caller.
     let n_stochastic_ncs = stochastic.n_stochastic_ncs();
-    if n_stochastic_ncs > 0 && !indexer.ncs_generation.is_empty() {
+    if n_stochastic_ncs > 0 && indexer.has_ncs {
         apply_ncs_col_bounds(
             &mut ws.solver,
             &mut ws.scratch,
-            indexer.ncs_generation.start,
-            n_stochastic_ncs,
+            output.ncs_col_starts.get(t).copied().unwrap_or(0),
+            &ctx.ncs_active_slot_to_local[t],
             ctx.block_counts_per_stage[t],
         );
     }
@@ -586,6 +602,7 @@ fn solve_simulation_stage<S: SolverInterface>(
         &mut ws.scratch.row_lower_buf,
         &ws.scratch.load_rhs_buf,
         &ws.scratch.ncs_col_upper_buf,
+        &mut ws.scratch.ncs_col_upper_extract_buf,
         &ws.scratch.unscaled_primal,
         &ws.scratch.unscaled_dual,
         view_objective,
@@ -697,6 +714,7 @@ fn extract_sim_stage_result(
     row_lower_buf: &mut Vec<f64>,
     load_rhs_buf: &[f64],
     ncs_col_upper_buf: &[f64],
+    ncs_col_upper_extract_buf: &mut Vec<f64>,
     unscaled_primal: &[f64],
     unscaled_dual: &[f64],
     view_objective: f64,
@@ -747,9 +765,8 @@ fn extract_sim_stage_result(
         load_n_blks,
         ctx.load_bus_indices,
     );
-    // NCS column upper bounds for extraction. Use the per-scenario scratch buffer
-    // when stochastic NCS patching is active and covers all active NCS entities;
-    // fall back to the template values otherwise.
+    // NCS column upper bounds for extraction, in **active-local column** order
+    // (`ncs_local * stage_n_blks + blk`), length `ncs_n * stage_n_blks`.
     let ncs_n = output.n_ncs_per_stage.get(t).copied().unwrap_or(0);
     let ncs_col_start = output.ncs_col_starts.get(t).copied().unwrap_or(0);
     let stage_n_blks = ctx.block_counts_per_stage.get(t).copied().unwrap_or(0);
@@ -758,21 +775,43 @@ fn extract_sim_stage_result(
     // (a permanent `0..0` sentinel).
     let pumping_col_start = output.pumping_col_starts.get(t).copied().unwrap_or(0);
     let n_pumping = output.n_pumping_per_stage.get(t).copied().unwrap_or(0);
-    let ncs_col_upper: &[f64] =
-        if n_stochastic_ncs > 0 && n_stochastic_ncs == ncs_n && !ncs_col_upper_buf.is_empty() {
-            // All active NCS entities at this stage are stochastic — use the patched values.
-            ncs_col_upper_buf
-        } else if ncs_n > 0 && stage_n_blks > 0 {
-            let start = ncs_col_start;
-            let end = start + ncs_n * stage_n_blks;
-            if end <= ctx.templates[t].col_upper.len() {
-                &ctx.templates[t].col_upper[start..end]
-            } else {
-                &[]
-            }
+    // Build the per-active-local-column upper bounds: start from the template
+    // `col_upper` (covers any deterministic NCS active column), then overwrite each
+    // stochastic active column's block with the per-scenario realized availability
+    // from `ncs_col_upper_buf` (full stochastic-slot order). At a strict-subset
+    // stage `n_stochastic_ncs != ncs_n`, so the patched buffer in slot order does
+    // not align with active-local columns — gathering by `ncs_local` is what lets
+    // extraction report the realized availability instead of the unscaled template
+    // value. When every active NCS is stochastic and slot order equals active
+    // order, this reproduces today's patched buffer exactly.
+    let ncs_col_upper: &[f64] = if ncs_n > 0 && stage_n_blks > 0 {
+        let start = ncs_col_start;
+        let end = start + ncs_n * stage_n_blks;
+        ncs_col_upper_extract_buf.clear();
+        if end <= ctx.templates[t].col_upper.len() {
+            ncs_col_upper_extract_buf.extend_from_slice(&ctx.templates[t].col_upper[start..end]);
         } else {
-            &[]
-        };
+            ncs_col_upper_extract_buf.resize(ncs_n * stage_n_blks, 0.0);
+        }
+        if n_stochastic_ncs > 0 && !ncs_col_upper_buf.is_empty() {
+            let slot_to_local = &ctx.ncs_active_slot_to_local[t];
+            for (slot, &maybe_local) in slot_to_local.iter().enumerate() {
+                if let Some(ncs_local) = maybe_local {
+                    let dst = ncs_local * stage_n_blks;
+                    let src = slot * stage_n_blks;
+                    if dst + stage_n_blks <= ncs_col_upper_extract_buf.len()
+                        && src + stage_n_blks <= ncs_col_upper_buf.len()
+                    {
+                        ncs_col_upper_extract_buf[dst..dst + stage_n_blks]
+                            .copy_from_slice(&ncs_col_upper_buf[src..src + stage_n_blks]);
+                    }
+                }
+            }
+        }
+        ncs_col_upper_extract_buf.as_slice()
+    } else {
+        &[]
+    };
     let result = extract_stage_result_with_lookups(
         &SolutionView {
             primal: unscaled_primal,
@@ -783,6 +822,7 @@ fn extract_sim_stage_result(
         },
         &StageExtractionSpec {
             indexer,
+            n_blks: stage_n_blks,
             entity_counts: output.entity_counts,
             inflow_m3s_per_hydro: inflow_m3s_buf,
             block_hours: blk_hrs,
@@ -1605,6 +1645,9 @@ mod tests {
                 ncs_col_upper_buf: Vec::new(),
                 ncs_col_lower_buf: Vec::new(),
                 ncs_col_indices_buf: Vec::new(),
+                ncs_col_lower_active_buf: Vec::new(),
+                ncs_col_upper_active_buf: Vec::new(),
+                ncs_col_upper_extract_buf: Vec::new(),
                 load_rhs_buf: Vec::new(),
                 row_lower_buf: Vec::new(),
                 z_inflow_rhs_buf: Vec::new(),
@@ -1851,6 +1894,9 @@ mod tests {
                 ncs_col_upper_buf: Vec::new(),
                 ncs_col_lower_buf: Vec::new(),
                 ncs_col_indices_buf: Vec::new(),
+                ncs_col_lower_active_buf: Vec::new(),
+                ncs_col_upper_active_buf: Vec::new(),
+                ncs_col_upper_extract_buf: Vec::new(),
                 load_rhs_buf: Vec::with_capacity(n_load_buses),
                 row_lower_buf: Vec::new(),
                 z_inflow_rhs_buf: Vec::new(),
@@ -1894,6 +1940,8 @@ mod tests {
                 load_balance_row_starts: &load_balance_row_starts,
                 load_bus_indices: &load_bus_indices,
                 block_counts_per_stage: &block_counts_per_stage,
+                ncs_col_starts: &[],
+                ncs_active_slot_to_local: &[],
                 ncs_max_gen: &[],
                 ncs_allow_curtailment: &[],
                 discount_factors: &[],
@@ -2054,6 +2102,8 @@ mod tests {
                 load_balance_row_starts: &[],
                 load_bus_indices: &[],
                 block_counts_per_stage: &[1],
+                ncs_col_starts: &[],
+                ncs_active_slot_to_local: &[],
                 ncs_max_gen: &[],
                 ncs_allow_curtailment: &[],
                 discount_factors: &[],
@@ -2194,6 +2244,9 @@ mod tests {
                 ncs_col_upper_buf: Vec::new(),
                 ncs_col_lower_buf: Vec::new(),
                 ncs_col_indices_buf: Vec::new(),
+                ncs_col_lower_active_buf: Vec::new(),
+                ncs_col_upper_active_buf: Vec::new(),
+                ncs_col_upper_extract_buf: Vec::new(),
                 load_rhs_buf: Vec::with_capacity(n_load_buses),
                 row_lower_buf: Vec::new(),
                 z_inflow_rhs_buf: Vec::new(),
@@ -2235,6 +2288,8 @@ mod tests {
                 load_balance_row_starts: &load_balance_row_starts,
                 load_bus_indices: &load_bus_indices,
                 block_counts_per_stage: &block_counts_per_stage,
+                ncs_col_starts: &[],
+                ncs_active_slot_to_local: &[],
                 ncs_max_gen: &[],
                 ncs_allow_curtailment: &[],
                 discount_factors: &[],
@@ -2512,6 +2567,9 @@ mod tests {
                 ncs_col_upper_buf: Vec::new(),
                 ncs_col_lower_buf: Vec::new(),
                 ncs_col_indices_buf: Vec::new(),
+                ncs_col_lower_active_buf: Vec::new(),
+                ncs_col_upper_active_buf: Vec::new(),
+                ncs_col_upper_extract_buf: Vec::new(),
                 load_rhs_buf: Vec::new(),
                 row_lower_buf: Vec::new(),
                 z_inflow_rhs_buf: Vec::new(),
@@ -2600,6 +2658,8 @@ mod tests {
                 load_balance_row_starts: &[],
                 load_bus_indices: &[],
                 block_counts_per_stage: &[n_stages],
+                ncs_col_starts: &[],
+                ncs_active_slot_to_local: &[],
                 ncs_max_gen: &[],
                 ncs_allow_curtailment: &[],
                 discount_factors: &[],
@@ -2725,6 +2785,8 @@ mod tests {
                 load_balance_row_starts: &[],
                 load_bus_indices: &[],
                 block_counts_per_stage: &[n_stages],
+                ncs_col_starts: &[],
+                ncs_active_slot_to_local: &[],
                 ncs_max_gen: &[],
                 ncs_allow_curtailment: &[],
                 discount_factors: &[],
@@ -3012,6 +3074,8 @@ mod tests {
                 load_balance_row_starts: &[],
                 load_bus_indices: &[],
                 block_counts_per_stage: &[1usize],
+                ncs_col_starts: &[],
+                ncs_active_slot_to_local: &[],
                 ncs_max_gen: &[],
                 ncs_allow_curtailment: &[],
                 discount_factors: &[],

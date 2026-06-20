@@ -1860,6 +1860,175 @@ fn d15_non_controllable_source() {
     );
 }
 
+/// D18 per-stage active-NCS set varies across the commissioning window.
+///
+/// The fixture declares two NCS sources on a 3-stage horizon: NCS0 with
+/// `entry_stage_id = 1` (commissions at stage 1) and NCS1 with
+/// `exit_stage_id = 2` (decommissions at stage 2). `identify_active_ncs`
+/// therefore yields a different active set per stage:
+///
+/// - stage 0 → `[1]`     (only NCS1; NCS0 not yet commissioned)
+/// - stage 1 → `[0, 1]`  (both active)
+/// - stage 2 → `[0]`     (only NCS0; NCS1 decommissioned)
+///
+/// This guards the per-stage NCS column-base path: a uniform-NCS case (every
+/// stage shares one active set, as in D15) cannot detect an NCS availability
+/// bound written onto the wrong stage's columns, because all stages share the
+/// same NCS column base. Asserting the active set genuinely differs across
+/// stages confirms the fixture exercises that path rather than collapsing to a
+/// uniform set.
+///
+/// This assertion only builds the stage templates — it does not train — so it
+/// runs under the default `cargo test` profile, unconditionally.
+#[test]
+fn d18_ncs_commissioning_active_set_varies() {
+    let case_dir = Path::new("../../examples/deterministic/d18-ncs-commissioning-window");
+    let config = cobre_io::parse_config(&case_dir.join("config.json")).expect("config must parse");
+    let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
+    let prepare_result =
+        prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
+            .expect("prepare_stochastic must succeed");
+    let system = prepare_result.system;
+    let hydro_models =
+        prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
+    let setup = build_setup_for_case(
+        case_dir,
+        &config,
+        &system,
+        prepare_result.stochastic,
+        hydro_models,
+    );
+
+    let active = &setup.stage_data.stage_templates.active_ncs_indices;
+    assert_eq!(active.len(), 3, "D18: expected 3 study stages");
+    assert_eq!(active[0], vec![1], "D18 stage 0: only NCS1 active");
+    assert_eq!(active[1], vec![0, 1], "D18 stage 1: both NCS active");
+    assert_eq!(active[2], vec![0], "D18 stage 2: only NCS0 active");
+
+    // The load-bearing per-stage property: the active set is not uniform across
+    // the horizon — stage 0 differs from the commissioned stage, and stage 1
+    // differs from stage 2 (the shrinking direction).
+    assert_ne!(
+        active[0], active[1],
+        "D18: active NCS set must differ between stage 0 and the commissioned stage"
+    );
+    assert_ne!(
+        active[1], active[2],
+        "D18: active NCS set must shrink between stage 1 and stage 2"
+    );
+}
+
+/// D33 per-stage block count varies across the horizon.
+///
+/// The fixture declares three study stages whose `blocks` arrays have different
+/// length — 1 / 3 / 2 — so each stage's per-block equipment column stride
+/// (turbine/spillage/thermal/bus) diverges from stage 0's. `block_hours_per_stage[t]`
+/// carries one entry per block of stage `t`, so its length equals that stage's
+/// `blocks.len()` — the per-stage block count threaded through the pipeline.
+///
+/// This guards the per-stage block-count path: a uniform-block case (every stage
+/// shares one block count, as in D14) cannot detect equipment columns read off
+/// the wrong stage's block width, because all stages share the same stride.
+/// Asserting the block count genuinely differs across stages confirms the
+/// fixture exercises that path rather than collapsing to a uniform width.
+///
+/// This assertion only builds the stage templates — it does not train — so it
+/// runs under the default `cargo test` profile, unconditionally.
+#[test]
+fn d33_per_stage_block_count_varies() {
+    let case_dir = Path::new("../../examples/deterministic/d33-per-stage-block-counts");
+    let config = cobre_io::parse_config(&case_dir.join("config.json")).expect("config must parse");
+    let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
+    let prepare_result =
+        prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
+            .expect("prepare_stochastic must succeed");
+    let system = prepare_result.system;
+    let hydro_models =
+        prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
+    let setup = build_setup_for_case(
+        case_dir,
+        &config,
+        &system,
+        prepare_result.stochastic,
+        hydro_models,
+    );
+
+    // `block_hours_per_stage[t].len()` is the block count of stage `t`
+    // (`compute_noise_scale` collects one `duration_hours` per block of the
+    // stage), which equals `block_counts_per_stage[t]` threaded through the
+    // pipeline.
+    let block_counts: Vec<usize> = setup
+        .stage_data
+        .stage_templates
+        .block_hours_per_stage
+        .iter()
+        .map(Vec::len)
+        .collect();
+    assert_eq!(block_counts, vec![1, 3, 2], "D33: per-stage block counts");
+
+    // The load-bearing per-stage property: the block count is not uniform across
+    // the horizon, so the per-block equipment stride genuinely differs per stage.
+    let distinct: std::collections::BTreeSet<usize> = block_counts.iter().copied().collect();
+    assert!(
+        distinct.len() >= 2,
+        "D33: per-stage block count must take at least two distinct values, got {block_counts:?}"
+    );
+    assert_ne!(
+        block_counts[0], block_counts[1],
+        "D33: block count must differ between stage 0 and stage 1"
+    );
+}
+
+/// D18: NCS commissioning window — three-stage thermal + NCS dispatch.
+///
+/// ## Case setup
+///
+/// - 1 bus, 1 thermal (T0 at $10/MWh, cap 100 MW), deterministic load 80 MW,
+///   3 stages each with 1 block of 730 hours, finite horizon, no discount.
+/// - Two NCS sources (bus 0, max 100 MW, curtailment_cost $0.001/MWh),
+///   availability factor 0.5 (= 50 MW each, std 0 deterministic). NCS0
+///   `entry_stage_id = 1`, NCS1 `exit_stage_id = 2`.
+///
+/// ## Expected cost derivation
+///
+/// Stages are fully decoupled (no storage, no discount, finite horizon), so the
+/// converged lower bound is the sum of per-stage optima. The NCS objective term
+/// is `-curtailment_cost × block_hours × g_ncs = -0.73 × g_ncs` (per MW
+/// dispatched); thermal is `+7300 × g_thermal`; excess is `+7.3 × g_excess`.
+///
+/// - Stage 0 (NCS1 active, 50 MW): NCS 50 + thermal 30.
+///   `50 × (-0.73) + 30 × 7300 = -36.5 + 219_000 = 218_963.5`.
+/// - Stage 1 (NCS0 + NCS1, 100 MW available, load 80): dispatching NCS beyond
+///   the 80 MW load would force excess (`+7.3/MW`) against only `-0.73/MW` of
+///   NCS incentive, so the optimum dispatches exactly 80 MW of NCS and zero
+///   thermal: `80 × (-0.73) = -58.4`.
+/// - Stage 2 (NCS0 active, 50 MW): NCS 50 + thermal 30 = `218_963.5`.
+///
+/// Total = `218_963.5 - 58.4 + 218_963.5 = 437_868.6`.
+///
+/// The case must stay feasible at stage 0, where NCS0 is not yet commissioned —
+/// the unlimited deficit segment plus the 100 MW thermal cap guarantee it.
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+#[test]
+fn d18_ncs_commissioning_window() {
+    let case_dir = Path::new("../../examples/deterministic/d18-ncs-commissioning-window");
+    let result = run_deterministic(case_dir);
+    assert_cost(result.final_lb, 437_868.6, 1e-2, "D18");
+    assert!(
+        result.iterations <= 10,
+        "D18: iterations={}",
+        result.iterations
+    );
+    assert!(
+        result.final_gap.abs() < 1e-4,
+        "D18: gap={:.2e}",
+        result.final_gap
+    );
+}
+
 /// D16: PAR(1) lag-shift deterministic test.
 ///
 /// ## System

@@ -145,27 +145,40 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         &ws.patch_buf.lower[..pc],
         &ws.patch_buf.upper[..pc],
     );
-    // Patch NCS column bounds with per-scenario availability. Both lower
-    // and upper buffers were rebuilt by `transform_ncs_noise` above; only
-    // the indices buffer is lazy-built when the size changes (i.e., on a
-    // stage transition).
-    if n_stochastic_ncs > 0 && !indexer.ncs_generation.is_empty() {
+    // Patch NCS availability bounds onto this stage's **active** NCS columns,
+    // indexed by `ncs_local` within `active_ncs_indices[t]` via the per-stage
+    // `ctx.ncs_active_slot_to_local[t]` map — a stochastic NCS inactive at this
+    // stage contributes no column and no bound. `transform_ncs_noise` above wrote
+    // `ncs_col_{lower,upper}_buf` in full stochastic-slot order; the gather copies
+    // only the active slots' bounds (parallel to the index buffer), since a subset
+    // stage allocates only `(active stochastic NCS) * n_blks` columns and a full
+    // `n_stochastic_ncs` block would overrun. The index buffer is constant across
+    // openings, so it is rebuilt lazily on the active-subset length change; the
+    // bounds change every scenario, so they are gathered every solve.
+    if n_stochastic_ncs > 0 && indexer.has_ncs {
         let n_blks = ctx.block_counts_per_stage[t];
-        let expected_len = n_stochastic_ncs * n_blks;
+        let slot_to_local = &ctx.ncs_active_slot_to_local[t];
+        let expected_len = crate::noise::active_ncs_slot_count(slot_to_local) * n_blks;
         if ws.scratch.ncs_col_indices_buf.len() != expected_len {
-            ws.scratch.ncs_col_indices_buf.clear();
-            for ncs_idx in 0..n_stochastic_ncs {
-                for blk in 0..n_blks {
-                    ws.scratch
-                        .ncs_col_indices_buf
-                        .push(indexer.ncs_generation.start + ncs_idx * n_blks + blk);
-                }
-            }
+            crate::noise::build_active_ncs_col_indices(
+                slot_to_local,
+                ctx.ncs_col_starts[t],
+                n_blks,
+                &mut ws.scratch.ncs_col_indices_buf,
+            );
         }
-        ws.solver.set_col_bounds(
-            &ws.scratch.ncs_col_indices_buf,
+        crate::noise::gather_active_ncs_bounds(
+            slot_to_local,
+            n_blks,
             &ws.scratch.ncs_col_lower_buf,
             &ws.scratch.ncs_col_upper_buf,
+            &mut ws.scratch.ncs_col_lower_active_buf,
+            &mut ws.scratch.ncs_col_upper_active_buf,
+        );
+        ws.solver.set_col_bounds(
+            &ws.scratch.ncs_col_indices_buf,
+            &ws.scratch.ncs_col_lower_active_buf,
+            &ws.scratch.ncs_col_upper_active_buf,
         );
     }
     // Zero out the theta column at the terminal stage (the last study stage,

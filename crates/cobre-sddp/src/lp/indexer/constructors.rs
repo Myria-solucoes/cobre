@@ -214,7 +214,7 @@ impl StageIndexer {
             anticipated_fishing: 0..0,
             anticipated_fishing_start: 0,
             has_operational_violations: false,
-            ncs_generation: 0..0,
+            has_ncs: false,
             z_inflow,
             z_inflow_rows,
             z_inflow_row_start,
@@ -256,24 +256,22 @@ impl StageIndexer {
     ///
     /// # Notes
     ///
-    /// This is the single global indexer for the whole study, so its `n_blks` is
-    /// **one block count shared by every stage**: the caller (`build_wired_indexer`)
-    /// sources it from stage 0 and the layout presumes every stage's block count
-    /// equals stage 0's. The per-stage `StageLayout` reads each stage's own
-    /// `stage.blocks.len()`, so the two diverge whenever a stage's block count
-    /// differs from stage 0's.
+    /// This single global indexer strides its equipment column ranges by a
+    /// stage-0-derived `n_blks`, so those ranges are valid only at stages whose
+    /// block count equals stage 0's; the per-stage `StageLayout` reads each
+    /// stage's own `stage.blocks.len()` and is the authority where block counts
+    /// vary.
     ///
-    /// The wrong-but-compiling consequence if the invariant is violated: the
-    /// backward-pass NCS bound patch indexes columns as
-    /// `ncs_generation.start + ncs_idx * n_blks_stage + blk` with the *per-stage*
-    /// `n_blks_stage`, but `ncs_generation.start` is wired from this stage-0-based
-    /// `n_blks`. A stage with a different block count then strides off a base that
-    /// assumed stage 0's count, so NCS column bounds land on the wrong columns —
-    /// a silent miswrite that still compiles. The cross-stage NCS-start
-    /// `debug_assert_eq!` in `build_wired_indexer` is the runtime guard for this.
-    ///
-    /// TODO(per-stage-block-count): supporting heterogeneous per-stage block
-    /// counts requires a per-stage NCS column base, not this single global one.
+    /// NCS generation columns are **not** addressed from this indexer. The
+    /// indexer carries only the [`has_ncs`](crate::indexer::StageIndexer::has_ncs)
+    /// presence flag; the per-(ncs, block) column base is read per stage from
+    /// `StageContext::ncs_col_starts[stage]` (and `LbEvalSpec::ncs_generation`
+    /// for the stage-0 lower bound). Anchoring NCS columns at a single global
+    /// stage-0 base would stride off a base that assumed stage 0's block count,
+    /// landing the bound patch on the wrong columns for any stage whose NCS base
+    /// shifts — a source commissioning mid-horizon, or a stage with a differing
+    /// block count. The per-stage base is what keeps such non-uniform geometries
+    /// correct.
     ///
     /// # Examples
     ///

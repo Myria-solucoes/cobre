@@ -101,6 +101,21 @@ pub struct StudySetup {
     pub hydro_models: PrepareHydroModelsResult,
 
     pub(crate) ncs_entity_ids_per_stage: Vec<Vec<i32>>,
+    /// Per-stage stochastic-slot → active-local-column map for NCS bound patching.
+    ///
+    /// `ncs_active_slot_to_local[s][slot]` is `Some(ncs_local)` when stochastic
+    /// NCS `slot` (in `StochasticContext::ncs_entity_ids` id-sorted order) is
+    /// active at stage `s`, where `ncs_local` is its position within
+    /// `active_ncs_indices[s]` — so its LP column block is
+    /// `ncs_col_starts[s] + ncs_local * n_blks_s + blk`. `None` means the slot's
+    /// NCS is **not active** at stage `s` (it has no column there; its
+    /// `transform_ncs_noise` buffer entries are skipped). The three NCS bound
+    /// patch sites stride from `ncs_local`, never from the raw stochastic slot:
+    /// at a strict-subset stage the LP allocates only `active_ncs_indices[s].len()`
+    /// NCS columns, so addressing all `n_stochastic_ncs` slots would overrun the
+    /// NCS column block. Inner length equals `n_stochastic_ncs`; outer length
+    /// equals the study stage count. Empty when the study has no stochastic NCS.
+    pub(crate) ncs_active_slot_to_local: Vec<Vec<Option<usize>>>,
     /// Max generation \[MW\] per stochastic NCS entity, sorted by entity ID.
     pub(crate) ncs_max_gen: Vec<f64>,
     /// Whether each stochastic NCS entity may be curtailed, sorted by entity
@@ -361,16 +376,12 @@ impl StudySetup {
         // rejected above.
         horizon.validate()?;
 
-        let risk_measures: Vec<RiskMeasure> = system
-            .stages()
-            .iter()
-            .filter(|s| s.id >= 0)
-            .map(|s| RiskMeasure::from(s.risk_config))
-            .collect();
+        let risk_measures = build_risk_measures(system);
 
         let NcsEntityData {
             entity_counts,
             ncs_entity_ids_per_stage,
+            ncs_active_slot_to_local,
             ncs_max_gen,
             ncs_allow_curtailment,
         } = build_ncs_entity_data(system, &stage_templates, &stochastic)?;
@@ -438,6 +449,7 @@ impl StudySetup {
             initial_state,
             hydro_models,
             ncs_entity_ids_per_stage,
+            ncs_active_slot_to_local,
             ncs_max_gen,
             ncs_allow_curtailment,
             scenario_libraries,
@@ -484,6 +496,7 @@ impl StudySetup {
 struct NcsEntityData {
     entity_counts: EntityCounts,
     ncs_entity_ids_per_stage: Vec<Vec<i32>>,
+    ncs_active_slot_to_local: Vec<Vec<Option<usize>>>,
     ncs_max_gen: Vec<f64>,
     ncs_allow_curtailment: Vec<bool>,
 }
@@ -493,7 +506,10 @@ struct NcsEntityData {
 ///
 /// `ncs_entity_ids_per_stage` maps each active NCS column to its system entity
 /// id; `ncs_max_gen` and `ncs_allow_curtailment` are aligned 1:1 in stochastic
-/// NCS-entity order.
+/// NCS-entity order. `ncs_active_slot_to_local` bridges the stochastic-slot
+/// order (the order `transform_ncs_noise` emits its bound buffers) to the
+/// per-stage active-local column position — see
+/// [`StudySetup::ncs_active_slot_to_local`].
 ///
 /// # Errors
 ///
@@ -516,6 +532,42 @@ fn build_ncs_entity_data(
                 .collect()
         })
         .collect();
+
+    // Per-stage stochastic-slot → active-local-column map. For each stage the
+    // map is derived by entity-id matching: stochastic slot → its entity id
+    // (`ncs_entity_ids()[slot]`) → its position in the stage's active NCS column
+    // list (`ncs_entity_ids_per_stage[s]`, which is `active_ncs_indices[s]`
+    // mapped to entity ids). The position IS the active-local column index, so
+    // the patch sites stride by it; a slot whose NCS is inactive at the stage
+    // maps to `None`. Bridging via entity id (not assuming `ncs_local == slot`)
+    // is what makes the map correct when the active set is a strict subset or
+    // its order diverges from the id-sorted slot order. Derived from the already
+    // declaration-order-canonical `active_ncs_indices` and id-sorted slot order,
+    // so it preserves declaration-order invariance.
+    let stoch_ncs_ids = stochastic.ncs_entity_ids();
+    let mut ncs_active_slot_to_local: Vec<Vec<Option<usize>>> =
+        Vec::with_capacity(ncs_entity_ids_per_stage.len());
+    for stage_active_ids in &ncs_entity_ids_per_stage {
+        let mut stage_map = Vec::with_capacity(stoch_ncs_ids.len());
+        for slot_id in stoch_ncs_ids {
+            // A stochastic slot must resolve to a known system NCS; otherwise the
+            // throughput buffers from `transform_ncs_noise` would have no column
+            // to land on. (`ncs_max_gen`/`ncs_allow_curtailment` below already
+            // reject a slot with no system match; this guards the parallel
+            // active-set lookup against the same condition.)
+            if !system
+                .non_controllable_sources()
+                .iter()
+                .any(|n| n.id == *slot_id)
+            {
+                return Err(SddpError::Validation(format!(
+                    "stochastic NCS entity {slot_id:?} not found in system non_controllable_sources"
+                )));
+            }
+            stage_map.push(stage_active_ids.iter().position(|&id| id == slot_id.0));
+        }
+        ncs_active_slot_to_local.push(stage_map);
+    }
 
     let (ncs_max_gen, ncs_allow_curtailment): (Vec<f64>, Vec<bool>) = {
         let stoch_ncs_ids = stochastic.ncs_entity_ids();
@@ -540,6 +592,7 @@ fn build_ncs_entity_data(
     Ok(NcsEntityData {
         entity_counts,
         ncs_entity_ids_per_stage,
+        ncs_active_slot_to_local,
         ncs_max_gen,
         ncs_allow_curtailment,
     })
@@ -654,11 +707,12 @@ fn build_wired_indexer(
 ) -> StageIndexer {
     let stage_templates_ref = &stage_templates.templates;
     // `n_blks_stage0` is the single global block count for the whole study: it is
-    // read from stage 0 and fed to the one global indexer below, which strides
-    // every block-major column (including `ncs_generation`) by it. The layout
-    // presumes every stage shares this count. `StageLayout` is the per-stage
-    // authority — it reads each stage's own `stage.blocks.len()` — so a stage
-    // whose block count differs from stage 0's diverges from this global stride.
+    // read from stage 0 and fed to the one global indexer below, which strides its
+    // equipment column ranges by it. The layout presumes every stage shares this
+    // count. `StageLayout` is the per-stage authority — it reads each stage's own
+    // `stage.blocks.len()` — so a stage whose block count differs from stage 0's
+    // diverges from this global stride. NCS columns are exempt: they are addressed
+    // per-stage via `StageContext::ncs_col_starts`, not strided from here.
     let n_blks_stage0 = system.stages().first().map_or(1, |s| s.blocks.len().max(1));
     let has_inflow_penalty =
         inflow_method.has_slack_columns() && stage_templates_ref[0].n_hydro > 0;
@@ -725,19 +779,9 @@ fn build_wired_indexer(
     let mut indexer =
         StageIndexer::with_equipment_and_evaporation(&eq_counts, &fpha_cfg, &evap_cfg);
 
-    // Wire NCS column range from the LP builder's stage-0 layout.
-    if !stage_templates.ncs_col_starts.is_empty() {
-        let ncs_start = stage_templates.ncs_col_starts[0];
-        let n_ncs_stage0 = stage_templates.n_ncs_per_stage[0];
-        indexer.ncs_generation = ncs_start..(ncs_start + n_ncs_stage0 * n_blks_stage0);
-
-        for (s, &start) in stage_templates.ncs_col_starts.iter().enumerate() {
-            debug_assert_eq!(
-                start, ncs_start,
-                "NCS column start differs at stage {s}: expected {ncs_start}, got {start}"
-            );
-        }
-    }
+    // Flag NCS presence; the per-(ncs, block) column base is read per stage from
+    // `StageContext::ncs_col_starts`, never from this global indexer.
+    indexer.has_ncs = !stage_templates.ncs_col_starts.is_empty();
 
     // z-inflow column and row ranges are set by StageIndexer::new at
     // fixed offset N*(1+L), no per-stage wiring needed.
@@ -1036,6 +1080,20 @@ fn max_iterations_from_rules(rules: &StoppingRuleSet) -> u64 {
         })
         .max()
         .unwrap_or(DEFAULT_MAX_ITERATIONS)
+}
+
+/// Build the per-study-stage risk measures from the system's stage risk configs.
+///
+/// One entry per study stage (`id >= 0`), in stage-index order, matching the
+/// `block_counts_per_stage` / template ordering the cut-management pipeline
+/// indexes by stage.
+fn build_risk_measures(system: &System) -> Vec<RiskMeasure> {
+    system
+        .stages()
+        .iter()
+        .filter(|s| s.id >= 0)
+        .map(|s| RiskMeasure::from(s.risk_config))
+        .collect()
 }
 
 /// Build [`EntityCounts`] from the loaded system.

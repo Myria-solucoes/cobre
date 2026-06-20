@@ -528,6 +528,24 @@ pub(crate) struct ScratchBuffers {
     pub(crate) ncs_col_upper_buf: Vec<f64>,
     pub(crate) ncs_col_lower_buf: Vec<f64>,
     pub(crate) ncs_col_indices_buf: Vec<usize>,
+    // Active-subset gather targets: `transform_ncs_noise` writes
+    // `ncs_col_{lower,upper}_buf` in full stochastic-slot order (one entry per
+    // slot, including slots inactive at this stage). The patch sites gather only
+    // the active slots' bounds here, parallel to `ncs_col_indices_buf`, so the
+    // set-bounds call receives index/lower/upper buffers of equal length =
+    // `(active stochastic NCS at this stage) * n_blks`. Passing the slot-order
+    // buffers verbatim would over-feed the call at a strict-subset stage.
+    pub(crate) ncs_col_lower_active_buf: Vec<f64>,
+    pub(crate) ncs_col_upper_active_buf: Vec<f64>,
+    // Per-active-local-column NCS upper bounds for simulation extraction, length
+    // `n_ncs * n_blks` in active-local column order (NOT slot order). Defaults to
+    // the template `col_upper` (deterministic active columns) then overwrites each
+    // stochastic active column's block with the per-scenario realized availability
+    // from `ncs_col_upper_buf`. At a strict-subset stage this is what lets
+    // extraction report the realized availability instead of the unscaled template
+    // value; `ncs_col_upper_buf` (slot order) cannot be consumed directly because
+    // extraction indexes by active-local column.
+    pub(crate) ncs_col_upper_extract_buf: Vec<f64>,
     pub(crate) load_rhs_buf: Vec<f64>,
     pub(crate) row_lower_buf: Vec<f64>,
     pub(crate) z_inflow_rhs_buf: Vec<f64>,
@@ -747,6 +765,9 @@ impl ScratchBuffers {
             ncs_col_upper_buf: Vec::new(),
             ncs_col_lower_buf: Vec::new(),
             ncs_col_indices_buf: Vec::new(),
+            ncs_col_lower_active_buf: Vec::new(),
+            ncs_col_upper_active_buf: Vec::new(),
+            ncs_col_upper_extract_buf: Vec::new(),
             load_rhs_buf: Vec::with_capacity(n_load_buses * max_blocks),
             row_lower_buf: Vec::new(),
             z_inflow_rhs_buf: Vec::with_capacity(hydro_count),

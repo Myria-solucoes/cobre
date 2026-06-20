@@ -108,6 +108,8 @@ impl StudySetup {
             load_balance_row_starts: &self.stage_data.stage_templates.load_balance_row_starts,
             load_bus_indices: &self.stage_data.stage_templates.load_bus_indices,
             block_counts_per_stage: &self.stage_data.block_counts_per_stage,
+            ncs_col_starts: &self.stage_data.stage_templates.ncs_col_starts,
+            ncs_active_slot_to_local: &self.ncs_active_slot_to_local,
             ncs_max_gen: &self.ncs_max_gen,
             ncs_allow_curtailment: &self.ncs_allow_curtailment,
             discount_factors: self.stage_data.stage_templates.discount_factors(),

@@ -76,10 +76,29 @@ pub struct LbEvalSpec<'a> {
     /// Per-stochastic-NCS curtailment policy, aligned 1:1 with
     /// [`Self::ncs_max_gen`]. `false` pins the column to availability.
     pub ncs_allow_curtailment: &'a [bool],
+    /// Stage-0 stochastic-slot → active-local-column map for NCS bound patching.
+    ///
+    /// `ncs_active_slot_to_local[slot]` is `Some(ncs_local)` when the stochastic
+    /// NCS at `slot` (id-sorted order, the order `transform_ncs_noise` emits its
+    /// bound buffers) is active at stage 0; `ncs_local` is its column position
+    /// within `active_ncs_indices[0]`, so its LP column block is
+    /// `ncs_generation.start + ncs_local * block_count + blk`. `None` means the
+    /// slot is inactive at stage 0 and contributes no column and no bound — the
+    /// lower bound is evaluated at the first study stage, so an NCS that
+    /// commissions after it makes the lb stage itself a strict subset. The patch
+    /// strides by `ncs_local`, never the raw slot, which would overrun the stage-0
+    /// NCS column block. Sourced from
+    /// [`crate::context::StageContext::ncs_active_slot_to_local`]`[0]`. Empty when
+    /// stage 0 has no NCS columns (patching is then skipped).
+    pub ncs_active_slot_to_local: &'a [Option<usize>],
     /// Number of blocks at stage 0.
     pub block_count: usize,
     /// Column range for NCS generation variables in the stage-0 LP.
-    /// Empty when no NCS entities are present; NCS patching is skipped.
+    ///
+    /// Sourced from the per-stage `StageContext::ncs_col_starts[0]`, the stage-0
+    /// NCS column base — never a single global indexer base, since the lower bound
+    /// evaluates stage 0 only. Empty when no NCS entities are present; NCS
+    /// patching is then skipped.
     pub ncs_generation: Range<usize>,
     /// Inflow non-negativity treatment method.
     ///
@@ -104,12 +123,24 @@ pub struct LbEvalScratch {
     pub noise_buf: Vec<f64>,
     /// Z-inflow RHS values per hydro for PAR(p) rows.
     pub z_inflow_rhs_buf: Vec<f64>,
-    /// NCS column upper bounds, written by `transform_ncs_noise` per opening.
+    /// NCS column upper bounds in full stochastic-slot order, written by
+    /// `transform_ncs_noise` per opening.
     pub ncs_col_upper_buf: Vec<f64>,
-    /// NCS column indices (constant across openings for a given stage).
+    /// NCS column indices for the stage-0 **active** NCS columns (constant across
+    /// openings for a given stage; built once before the opening loop).
     pub ncs_col_indices_buf: Vec<usize>,
-    /// NCS column lower bounds (constant zeros, parallel to `ncs_col_indices_buf`).
+    /// NCS column lower bounds in full stochastic-slot order, parallel to
+    /// `ncs_col_upper_buf`, written by `transform_ncs_noise` per opening.
     pub ncs_col_lower_buf: Vec<f64>,
+    /// Active-subset gather target (lower) for the stage-0 NCS bound patch. The
+    /// per-opening `transform_ncs_noise` outputs in `ncs_col_{lower,upper}_buf`
+    /// run in full slot order (including slots inactive at stage 0); the patch
+    /// gathers only the active slots' bounds here so the set-bounds call receives
+    /// index/lower/upper buffers of equal length. Passing the slot-order buffers
+    /// verbatim would over-feed the call at a strict-subset stage-0.
+    pub ncs_col_lower_active_buf: Vec<f64>,
+    /// Active-subset gather target (upper), parallel to `ncs_col_lower_active_buf`.
+    pub ncs_col_upper_active_buf: Vec<f64>,
     /// PAR lag matrix (constant across openings for a given call).
     pub lag_matrix_buf: Vec<f64>,
     /// Per-hydro eta floor computed from lags (constant across openings).
@@ -144,6 +175,8 @@ impl LbEvalScratch {
             ncs_col_upper_buf: Vec::new(),
             ncs_col_indices_buf: Vec::new(),
             ncs_col_lower_buf: Vec::new(),
+            ncs_col_lower_active_buf: Vec::new(),
+            ncs_col_upper_active_buf: Vec::new(),
             lag_matrix_buf: Vec::new(),
             eta_floor_buf: Vec::new(),
             par_inflow_buf: Vec::new(),
@@ -231,21 +264,24 @@ fn lb_init_rank0<S: SolverInterface>(
     scratch.ncs_col_indices_buf.clear();
     scratch.ncs_col_lower_buf.clear();
 
-    // Pre-populate the indices buffer for NCS column bound patching. Indices
-    // are constant across openings (same stage, same block count) so we build
-    // them once before the opening loop. The lower/upper buffers are rebuilt
-    // per opening by `transform_ncs_noise` because both bounds scale with the
-    // per-scenario availability realization.
+    // Pre-populate the indices buffer for the stage-0 **active** NCS columns.
+    // Indices are constant across openings (same stage, same active set, same
+    // block count) so we build them once here. They stride by `ncs_local` within
+    // `active_ncs_indices[0]` via `spec.ncs_active_slot_to_local` — an NCS
+    // inactive at stage 0 (it commissions later) contributes no index; striding
+    // by the raw slot would overrun the stage-0 NCS column block. The per-opening
+    // bound buffers (`transform_ncs_noise` output) are gathered to the active
+    // slots inside the opening loop, since both bounds scale with the per-scenario
+    // availability realization.
     if let Some(stoch) = spec.stochastic {
         let n_stochastic_ncs = stoch.n_stochastic_ncs();
         if n_stochastic_ncs > 0 && !spec.ncs_generation.is_empty() {
-            for ncs_idx in 0..n_stochastic_ncs {
-                for blk in 0..spec.block_count {
-                    scratch
-                        .ncs_col_indices_buf
-                        .push(spec.ncs_generation.start + ncs_idx * spec.block_count + blk);
-                }
-            }
+            crate::noise::build_active_ncs_col_indices(
+                spec.ncs_active_slot_to_local,
+                spec.ncs_generation.start,
+                spec.block_count,
+                &mut scratch.ncs_col_indices_buf,
+            );
         }
     }
 
@@ -459,13 +495,23 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
                     &mut scratch.ncs_col_upper_buf,
                 );
                 // `ncs_col_indices_buf` was pre-populated in `lb_init_rank0`
-                // (constant across openings). Both lower and upper bounds are
-                // rebuilt above by `transform_ncs_noise` because both scale
-                // with the per-scenario availability realization.
-                solver.set_col_bounds(
-                    &scratch.ncs_col_indices_buf,
+                // (constant across openings, stage-0 active columns only). The
+                // bounds above are in full stochastic-slot order; gather only the
+                // active slots' bounds so they run parallel to the active index
+                // buffer — passing the slot-order buffers verbatim would over-feed
+                // the call when stage 0 is a strict subset.
+                crate::noise::gather_active_ncs_bounds(
+                    spec.ncs_active_slot_to_local,
+                    spec.block_count,
                     &scratch.ncs_col_lower_buf,
                     &scratch.ncs_col_upper_buf,
+                    &mut scratch.ncs_col_lower_active_buf,
+                    &mut scratch.ncs_col_upper_active_buf,
+                );
+                solver.set_col_bounds(
+                    &scratch.ncs_col_indices_buf,
+                    &scratch.ncs_col_lower_active_buf,
+                    &scratch.ncs_col_upper_active_buf,
                 );
             }
         }
@@ -982,6 +1028,7 @@ mod tests {
             n_load_buses: 0,
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
+            ncs_active_slot_to_local: &[],
             block_count: 1,
             ncs_generation: 0..0,
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1041,6 +1088,7 @@ mod tests {
             n_load_buses: 0,
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
+            ncs_active_slot_to_local: &[],
             block_count: 1,
             ncs_generation: 0..0,
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1107,6 +1155,7 @@ mod tests {
             n_load_buses: 0,
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
+            ncs_active_slot_to_local: &[],
             block_count: 1,
             ncs_generation: 0..0,
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1170,6 +1219,7 @@ mod tests {
             n_load_buses: 0,
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
+            ncs_active_slot_to_local: &[],
             block_count: 1,
             ncs_generation: 0..0,
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1229,6 +1279,7 @@ mod tests {
             n_load_buses: 0,
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
+            ncs_active_slot_to_local: &[],
             block_count: 1,
             ncs_generation: 0..0,
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1286,6 +1337,7 @@ mod tests {
             n_load_buses: 0,
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
+            ncs_active_slot_to_local: &[],
             block_count: 1,
             ncs_generation: 0..0,
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1350,6 +1402,7 @@ mod tests {
             n_load_buses: 0,
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
+            ncs_active_slot_to_local: &[],
             block_count: 1,
             ncs_generation: 0..0,
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1411,6 +1464,7 @@ mod tests {
             n_load_buses: 0,
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
+            ncs_active_slot_to_local: &[],
             block_count: 1,
             ncs_generation: 0..0,
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1498,6 +1552,7 @@ mod tests {
             n_load_buses: 0,
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
+            ncs_active_slot_to_local: &[],
             block_count: 1,
             ncs_generation: 0..0,
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1561,6 +1616,7 @@ mod tests {
             n_load_buses: 0,
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
+            ncs_active_slot_to_local: &[],
             block_count: 1,
             ncs_generation: 0..0,
             inflow_method: &InflowNonNegativityMethod::Truncation,
@@ -1618,6 +1674,7 @@ mod tests {
             n_load_buses: 0,
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
+            ncs_active_slot_to_local: &[],
             block_count: 1,
             ncs_generation: 0..0,
             inflow_method: &InflowNonNegativityMethod::TruncationWithPenalty,
@@ -1822,6 +1879,8 @@ mod tests {
         };
         let ncs_max_gen = vec![100.0_f64; n_ncs];
         let ncs_allow_curtailment = vec![true; n_ncs];
+        // All n_ncs stochastic NCS are active at stage 0, in slot order.
+        let ncs_active_slot_to_local: Vec<Option<usize>> = (0..n_ncs).map(Some).collect();
 
         let spec = LbEvalSpec {
             template: &template,
@@ -1834,6 +1893,7 @@ mod tests {
             n_load_buses: 0,
             ncs_max_gen: &ncs_max_gen,
             ncs_allow_curtailment: &ncs_allow_curtailment,
+            ncs_active_slot_to_local: &ncs_active_slot_to_local,
             block_count,
             ncs_generation: 0..block_count,
             inflow_method: &InflowNonNegativityMethod::None,
@@ -1920,6 +1980,7 @@ mod tests {
             n_load_buses: 0,
             ncs_max_gen: &[],
             ncs_allow_curtailment: &[],
+            ncs_active_slot_to_local: &[],
             block_count: 1,
             ncs_generation: 0..0,
             inflow_method: &InflowNonNegativityMethod::None,

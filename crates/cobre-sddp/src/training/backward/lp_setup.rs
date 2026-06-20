@@ -119,23 +119,39 @@ pub(crate) fn patch_opening_bounds<S: SolverInterface + Send>(
         &ws.patch_buf.lower[..pc],
         &ws.patch_buf.upper[..pc],
     );
-    if n_stochastic_ncs > 0 && !training_ctx.indexer.ncs_generation.is_empty() {
+    // Patch NCS availability bounds onto this stage's **active** NCS columns,
+    // indexed by `ncs_local` within `active_ncs_indices[s]` via the per-stage
+    // `ctx.ncs_active_slot_to_local[s]` map — a stochastic NCS inactive at this
+    // stage contributes no column and no bound. `transform_ncs_noise` above wrote
+    // the bound buffers in full stochastic-slot order; the gather copies only the
+    // active slots' bounds, because a subset stage allocates only `(active
+    // stochastic NCS) * n_blks` columns and a full `n_stochastic_ncs` block would
+    // overrun. Index buffer rebuilt lazily on active-subset length change; bounds
+    // gathered every opening.
+    if n_stochastic_ncs > 0 && training_ctx.indexer.has_ncs {
         let n_blks_stage = ctx.block_counts_per_stage[s];
-        let expected_len = n_stochastic_ncs * n_blks_stage;
+        let slot_to_local = &ctx.ncs_active_slot_to_local[s];
+        let expected_len = crate::noise::active_ncs_slot_count(slot_to_local) * n_blks_stage;
         if ws.scratch.ncs_col_indices_buf.len() != expected_len {
-            ws.scratch.ncs_col_indices_buf.clear();
-            for ncs_idx in 0..n_stochastic_ncs {
-                for blk in 0..n_blks_stage {
-                    ws.scratch.ncs_col_indices_buf.push(
-                        training_ctx.indexer.ncs_generation.start + ncs_idx * n_blks_stage + blk,
-                    );
-                }
-            }
+            crate::noise::build_active_ncs_col_indices(
+                slot_to_local,
+                ctx.ncs_col_starts[s],
+                n_blks_stage,
+                &mut ws.scratch.ncs_col_indices_buf,
+            );
         }
-        ws.solver.set_col_bounds(
-            &ws.scratch.ncs_col_indices_buf,
+        crate::noise::gather_active_ncs_bounds(
+            slot_to_local,
+            n_blks_stage,
             &ws.scratch.ncs_col_lower_buf,
             &ws.scratch.ncs_col_upper_buf,
+            &mut ws.scratch.ncs_col_lower_active_buf,
+            &mut ws.scratch.ncs_col_upper_active_buf,
+        );
+        ws.solver.set_col_bounds(
+            &ws.scratch.ncs_col_indices_buf,
+            &ws.scratch.ncs_col_lower_active_buf,
+            &ws.scratch.ncs_col_upper_active_buf,
         );
     }
 }
