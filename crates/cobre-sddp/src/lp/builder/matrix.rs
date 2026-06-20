@@ -1816,7 +1816,6 @@ pub(super) fn fill_generic_constraint_entries(
             let pairs = resolve_variable_ref(
                 &term.variable,
                 entry.block_idx,
-                layout.n_blks,
                 stage_idx,
                 &layout.indexer,
                 ctx.production_models,

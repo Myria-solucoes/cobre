@@ -7,12 +7,16 @@
 //!
 //! ## Column index arithmetic
 //!
-//! All column offsets follow the layout defined in [`StageIndexer`]:
+//! All column offsets follow the layout defined in [`StageIndexer`]; the
+//! block-stride arithmetic routes through the [`BlockGrid`] primitive obtained
+//! from [`StageIndexer::block_grid`] so the stride expression is single-owned:
 //!
-//! - Block-level variables (turbine, spillage, thermal, line, deficit, excess)
-//!   use `col_start + entity_pos * n_blks + block_idx`.
+//! - Block-level variables (turbine, spillage, thermal, line, excess) use the
+//!   flat block-major address [`BlockGrid::flat`] (`start + entity * n_blks + blk`).
+//! - Deficit uses the 3-term [`BlockGrid::deficit`] (bus-outer, segment-middle,
+//!   block-inner).
 //! - Stage-level variables (storage, evaporation, withdrawal) use `col_start + entity_pos`.
-//! - FPHA generation uses `generation.start + fpha_local_idx * n_blks + block_idx`.
+//! - FPHA generation uses [`BlockGrid::flat`] on `generation.start`.
 //!
 //! ## Block expansion
 //!
@@ -42,7 +46,7 @@ use std::collections::HashMap;
 use cobre_core::{CascadeTopology, ConstraintExpression, EntityId, PumpingStation, VariableRef};
 
 use crate::hydro_models::{ProductionModelSet, ResolvedProductionModel};
-use crate::indexer::StageIndexer;
+use crate::indexer::{BlockGrid, StageIndexer};
 
 /// Position maps for entity types, mapping entity IDs to their index in
 /// the system's entity arrays.
@@ -114,7 +118,6 @@ pub(crate) struct PumpingRefs<'a> {
 /// - `block_idx` — the block being built (0-indexed). For stage-level variables
 ///   this is ignored; for block-level variables with `block_id = Some(b)` the
 ///   function returns the column for block `b` regardless of `block_idx`.
-/// - `n_blks` — number of operating blocks in this stage.
 /// - `stage_idx` — stage index used to look up per-stage production models.
 /// - `indexer` — column layout for the current stage LP.
 /// - `production_models` — resolved production model set, used to distinguish
@@ -134,10 +137,14 @@ pub(crate) struct PumpingRefs<'a> {
 /// - The variable type references a stub entity with no LP columns (contracts,
 ///   non-controllable sources, withdrawal).
 #[must_use]
+// Rationale: one exhaustive arm per `VariableRef` variant — the match is the
+// dispatch, and its exhaustiveness is the contract that a new variant forces a
+// compile error here. Splitting it into sub-dispatchers to satisfy the
+// line-count heuristic would fragment that closed-set guarantee for no gain.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn resolve_variable_ref(
     var_ref: &VariableRef,
     block_idx: usize,
-    n_blks: usize,
     stage_idx: usize,
     indexer: &StageIndexer,
     production_models: &ProductionModelSet,
@@ -149,6 +156,7 @@ pub(crate) fn resolve_variable_ref(
     let thermal_pos = positions.thermal;
     let bus_pos = positions.bus;
     let line_pos = positions.line;
+    let grid = indexer.block_grid();
     match var_ref {
         // ── Stage-level hydro variables ────────────────────────────────────
         VariableRef::HydroStorage { hydro_id } => {
@@ -164,7 +172,7 @@ pub(crate) fn resolve_variable_ref(
             *hydro_id,
             *block_id,
             block_idx,
-            n_blks,
+            grid,
             indexer,
             hydro_pos,
             cascade_refs,
@@ -174,7 +182,7 @@ pub(crate) fn resolve_variable_ref(
             *hydro_id,
             *block_id,
             block_idx,
-            n_blks,
+            grid,
             block_col_range(indexer, ElementKind::Turbine).start,
             hydro_pos,
             1.0,
@@ -184,21 +192,21 @@ pub(crate) fn resolve_variable_ref(
             *hydro_id,
             *block_id,
             block_idx,
-            n_blks,
+            grid,
             block_col_range(indexer, ElementKind::Spillage).start,
             hydro_pos,
             1.0,
         ),
 
         VariableRef::HydroOutflow { hydro_id, block_id } => {
-            resolve_hydro_outflow(*hydro_id, *block_id, block_idx, n_blks, indexer, hydro_pos)
+            resolve_hydro_outflow(*hydro_id, *block_id, block_idx, grid, indexer, hydro_pos)
         }
 
         VariableRef::HydroGeneration { hydro_id, block_id } => resolve_hydro_generation(
             *hydro_id,
             *block_id,
             block_idx,
-            n_blks,
+            grid,
             stage_idx,
             indexer,
             production_models,
@@ -213,7 +221,7 @@ pub(crate) fn resolve_variable_ref(
             *thermal_id,
             *block_id,
             block_idx,
-            n_blks,
+            grid,
             block_col_range(indexer, ElementKind::Thermal).start,
             thermal_pos,
             1.0,
@@ -224,7 +232,7 @@ pub(crate) fn resolve_variable_ref(
             *line_id,
             *block_id,
             block_idx,
-            n_blks,
+            grid,
             block_col_range(indexer, ElementKind::LineFwd).start,
             line_pos,
             1.0,
@@ -234,26 +242,26 @@ pub(crate) fn resolve_variable_ref(
             *line_id,
             *block_id,
             block_idx,
-            n_blks,
+            grid,
             block_col_range(indexer, ElementKind::LineRev).start,
             line_pos,
             1.0,
         ),
 
         VariableRef::LineExchange { line_id, block_id } => {
-            resolve_line_exchange(*line_id, *block_id, block_idx, n_blks, indexer, line_pos)
+            resolve_line_exchange(*line_id, *block_id, block_idx, grid, indexer, line_pos)
         }
 
         // ── Bus deficit / excess ───────────────────────────────────────────
         VariableRef::BusDeficit { bus_id, block_id } => {
-            resolve_bus_deficit(*bus_id, *block_id, block_idx, n_blks, indexer, bus_pos)
+            resolve_bus_deficit(*bus_id, *block_id, block_idx, grid, indexer, bus_pos)
         }
 
         VariableRef::BusExcess { bus_id, block_id } => resolve_block_variable(
             *bus_id,
             *block_id,
             block_idx,
-            n_blks,
+            grid,
             block_col_range(indexer, ElementKind::Excess).start,
             bus_pos,
             1.0,
@@ -263,7 +271,7 @@ pub(crate) fn resolve_variable_ref(
             *hydro_id,
             *block_id,
             block_idx,
-            n_blks,
+            grid,
             block_col_range(indexer, ElementKind::Diversion).start,
             hydro_pos,
             1.0,
@@ -285,7 +293,7 @@ pub(crate) fn resolve_variable_ref(
             *station_id,
             *block_id,
             block_idx,
-            n_blks,
+            grid,
             pumping_refs,
             |_| 1.0,
         ),
@@ -297,7 +305,7 @@ pub(crate) fn resolve_variable_ref(
             *station_id,
             *block_id,
             block_idx,
-            n_blks,
+            grid,
             pumping_refs,
             |station| station.consumption_mw_per_m3s,
         ),
@@ -361,14 +369,14 @@ pub(crate) fn resolve_variable_ref(
 /// expression to one mis-priced stage-level row that reads upstream columns at a
 /// single arbitrary block, silently dropping the other blocks' contributions.
 ///
-/// Every other kind is block-level: it resolves to `col_start + pos * n_blks +
-/// block_idx` (via `resolve_block_variable` / `resolve_hydro_inflow` / FPHA
-/// generation / line / deficit / excess / pumping), so distinct block indices
-/// yield distinct columns. [`VariableRef::PumpingFlow`] and
+/// Every other kind is block-level: it resolves through the block-stride
+/// [`BlockGrid`] primitive (via `resolve_block_variable` / `resolve_hydro_inflow`
+/// / FPHA generation / line / deficit / excess / pumping), so distinct block
+/// indices yield distinct columns. [`VariableRef::PumpingFlow`] and
 /// [`VariableRef::PumpingPower`] are block-level (their `resolve_pumping_column`
-/// column is `col_pumping_start + p_idx * n_blks + eff_blk`), so they stay in the
-/// `false` arm — classifying them "stock" would collapse a per-block pumping term
-/// to a single mis-priced row. The remaining stub kinds (withdrawal, contracts,
+/// column is a [`BlockGrid::flat`] address on `col_pumping_start`), so they stay
+/// in the `false` arm — classifying them "stock" would collapse a per-block
+/// pumping term to a single mis-priced row. The remaining stub kinds (withdrawal, contracts,
 /// non-controllable) resolve to no columns at all; they are conservatively treated
 /// as block-level here so that only *provably* stock variables enable the
 /// single-row collapse.
@@ -454,8 +462,9 @@ fn resolve_hydro_storage(
 /// storage-balance (`±τ`-weighted hm³) / loss / outflow terms or have no LP
 /// column, not instantaneous-rate inflow terms.
 ///
-/// Column arithmetic mirrors [`resolve_block_variable`]:
-/// `col_start + pos * n_blks + eff_blk` with `eff_blk = block_id.unwrap_or(block_idx)`.
+/// Column arithmetic mirrors [`resolve_block_variable`]: the flat block-major
+/// address `grid.flat(col_start, pos, eff_blk)` with
+/// `eff_blk = block_id.unwrap_or(block_idx)`.
 /// The column set mirrors the cascade/diversion loops of
 /// `matrix.rs::fill_state_and_water_entries`: upstream releases iterate
 /// `cascade.upstream(h)` resolved via `hydro_pos`; diverted inflow iterates
@@ -471,7 +480,7 @@ fn resolve_hydro_inflow(
     hydro_id: EntityId,
     block_id: Option<usize>,
     block_idx: usize,
-    n_blks: usize,
+    grid: BlockGrid,
     indexer: &StageIndexer,
     hydro_pos: &HashMap<EntityId, usize>,
     cascade_refs: &CascadeRefs<'_>,
@@ -504,8 +513,8 @@ fn resolve_hydro_inflow(
     if !turbine.is_empty() && !spillage.is_empty() {
         for &up_id in upstream {
             if let Some(&pos_up) = hydro_pos.get(&up_id) {
-                result.push((turbine.start + pos_up * n_blks + eff_blk, 1.0));
-                result.push((spillage.start + pos_up * n_blks + eff_blk, 1.0));
+                result.push((grid.flat(turbine.start, pos_up, eff_blk), 1.0));
+                result.push((grid.flat(spillage.start, pos_up, eff_blk), 1.0));
             }
         }
     }
@@ -516,7 +525,7 @@ fn resolve_hydro_inflow(
     let diversion = block_col_range(indexer, ElementKind::Diversion);
     if !diversion.is_empty() {
         for &d_idx in diversion_into {
-            result.push((diversion.start + d_idx * n_blks + eff_blk, 1.0));
+            result.push((grid.flat(diversion.start, d_idx, eff_blk), 1.0));
         }
     }
 
@@ -563,7 +572,7 @@ fn resolve_hydro_outflow(
     hydro_id: EntityId,
     block_id: Option<usize>,
     block_idx: usize,
-    n_blks: usize,
+    grid: BlockGrid,
     indexer: &StageIndexer,
     hydro_pos: &HashMap<EntityId, usize>,
 ) -> Vec<(usize, f64)> {
@@ -571,10 +580,16 @@ fn resolve_hydro_outflow(
         return vec![];
     };
     let effective_blk = block_id.unwrap_or(block_idx);
-    let turbine_col =
-        block_col_range(indexer, ElementKind::Turbine).start + pos * n_blks + effective_blk;
-    let spillage_col =
-        block_col_range(indexer, ElementKind::Spillage).start + pos * n_blks + effective_blk;
+    let turbine_col = grid.flat(
+        block_col_range(indexer, ElementKind::Turbine).start,
+        pos,
+        effective_blk,
+    );
+    let spillage_col = grid.flat(
+        block_col_range(indexer, ElementKind::Spillage).start,
+        pos,
+        effective_blk,
+    );
     vec![(turbine_col, 1.0), (spillage_col, 1.0)]
 }
 
@@ -586,7 +601,7 @@ fn resolve_hydro_generation(
     hydro_id: EntityId,
     block_id: Option<usize>,
     block_idx: usize,
-    n_blks: usize,
+    grid: BlockGrid,
     stage_idx: usize,
     indexer: &StageIndexer,
     production_models: &ProductionModelSet,
@@ -609,7 +624,7 @@ fn resolve_hydro_generation(
                 .position(|&p| p == sys_pos)
             {
                 let effective_blk = block_id.unwrap_or(block_idx);
-                let col = indexer.generation.start + fpha_local_idx * n_blks + effective_blk;
+                let col = grid.flat(indexer.generation.start, fpha_local_idx, effective_blk);
                 vec![(col, 1.0)]
             } else {
                 // Should not happen if indexer and production_models are consistent.
@@ -622,7 +637,7 @@ fn resolve_hydro_generation(
                 hydro_id,
                 block_id,
                 block_idx,
-                n_blks,
+                grid,
                 block_col_range(indexer, ElementKind::Turbine).start,
                 hydro_pos,
                 *productivity,
@@ -636,16 +651,22 @@ fn resolve_line_exchange(
     line_id: EntityId,
     block_id: Option<usize>,
     block_idx: usize,
-    n_blks: usize,
+    grid: BlockGrid,
     indexer: &StageIndexer,
     line_pos: &HashMap<EntityId, usize>,
 ) -> Vec<(usize, f64)> {
     if let Some(&pos) = line_pos.get(&line_id) {
         let effective_blk = block_id.unwrap_or(block_idx);
-        let fwd_col =
-            block_col_range(indexer, ElementKind::LineFwd).start + pos * n_blks + effective_blk;
-        let rev_col =
-            block_col_range(indexer, ElementKind::LineRev).start + pos * n_blks + effective_blk;
+        let fwd_col = grid.flat(
+            block_col_range(indexer, ElementKind::LineFwd).start,
+            pos,
+            effective_blk,
+        );
+        let rev_col = grid.flat(
+            block_col_range(indexer, ElementKind::LineRev).start,
+            pos,
+            effective_blk,
+        );
         vec![(fwd_col, 1.0), (rev_col, -1.0)]
     } else {
         vec![]
@@ -654,20 +675,29 @@ fn resolve_line_exchange(
 
 /// Resolve `BusDeficit` to one column per deficit segment.
 ///
-/// Column layout: `deficit.start + b_pos * S * n_blks + seg * n_blks + blk`.
+/// Each segment's column is the deficit 3-term address
+/// `grid.deficit(deficit.start, b_pos, seg, blk)` (bus-outer, segment-middle,
+/// block-inner); see [`BlockGrid::deficit`]. The segment count `S` comes from
+/// `indexer.max_deficit_segments` because the grid exposes no accessor for it.
 fn resolve_bus_deficit(
     bus_id: EntityId,
     block_id: Option<usize>,
     block_idx: usize,
-    n_blks: usize,
+    grid: BlockGrid,
     indexer: &StageIndexer,
     bus_pos: &HashMap<EntityId, usize>,
 ) -> Vec<(usize, f64)> {
     if let Some(&b_pos) = bus_pos.get(&bus_id) {
         let effective_blk = block_id.unwrap_or(block_idx);
         let s = indexer.max_deficit_segments;
-        let base = indexer.deficit.start + b_pos * s * n_blks + effective_blk;
-        (0..s).map(|seg| (base + seg * n_blks, 1.0)).collect()
+        (0..s)
+            .map(|seg| {
+                (
+                    grid.deficit(indexer.deficit.start, b_pos, seg, effective_blk),
+                    1.0,
+                )
+            })
+            .collect()
     } else {
         vec![]
     }
@@ -712,7 +742,8 @@ fn resolve_anticipated_decision(
 /// `PumpingPower` passes `|s| s.consumption_mw_per_m3s` — the same alias as the
 /// bus-balance coupling coefficient.
 ///
-/// Column arithmetic: `col_pumping_start + p_idx * n_blks + eff_blk` where
+/// Column arithmetic: the flat block-major address
+/// `grid.flat(col_pumping_start, p_idx, eff_blk)` where
 /// `eff_blk = block_id.unwrap_or(block_idx)`. For `block_id = None` the caller
 /// loop supplies the effective block via `block_idx` (one resolver call per
 /// block), mirroring [`resolve_block_variable`]; this function returns a single
@@ -725,7 +756,7 @@ fn resolve_pumping_column(
     station_id: EntityId,
     block_id: Option<usize>,
     block_idx: usize,
-    n_blks: usize,
+    grid: BlockGrid,
     pumping_refs: &PumpingRefs<'_>,
     coeff_fn: impl Fn(&PumpingStation) -> f64,
 ) -> Vec<(usize, f64)> {
@@ -739,29 +770,32 @@ fn resolve_pumping_column(
         return vec![];
     };
     let eff_blk = block_id.unwrap_or(block_idx);
-    let col = pumping_refs.col_pumping_start + p_idx * n_blks + eff_blk;
+    let col = grid.flat(pumping_refs.col_pumping_start, p_idx, eff_blk);
     vec![(col, coeff_fn(station))]
 }
 
 /// Resolve a block-level LP variable to a `(column_index, multiplier)` pair.
 ///
-/// Computes `col_start + entity_pos * n_blks + effective_block_idx` where
-/// `effective_block_idx` is `block_idx` when `ref_block_id` is `None`, or
-/// `b` when `ref_block_id` is `Some(b)`.
+/// Computes the flat block-major address `grid.flat(col_start, entity_pos,
+/// effective_block_idx)` where `effective_block_idx` is `block_idx` when
+/// `ref_block_id` is `None`, or `b` when `ref_block_id` is `Some(b)`. Routing
+/// through [`BlockGrid::flat`] keeps the flat stride expression single-owned —
+/// this resolver and `StageLayout::block_col` no longer open-code it
+/// independently.
 ///
 /// Returns an empty vec if the entity ID is not found in `pos_map`.
 fn resolve_block_variable(
     entity_id: EntityId,
     ref_block_id: Option<usize>,
     current_block_idx: usize,
-    n_blks: usize,
+    grid: BlockGrid,
     col_start: usize,
     pos_map: &HashMap<EntityId, usize>,
     multiplier: f64,
 ) -> Vec<(usize, f64)> {
     if let Some(&pos) = pos_map.get(&entity_id) {
         let effective_blk = ref_block_id.unwrap_or(current_block_idx);
-        vec![(col_start + pos * n_blks + effective_blk, multiplier)]
+        vec![(grid.flat(col_start, pos, effective_blk), multiplier)]
     } else {
         vec![]
     }
@@ -1071,7 +1105,6 @@ mod tests {
         resolve_variable_ref(
             &var_ref,
             block_idx,
-            indexer.n_blks,
             0, // stage_idx = 0
             indexer,
             production_models,
@@ -1117,10 +1150,14 @@ mod tests {
             pumping_stations,
             pumping_pos,
         };
+        // The pumping column stride is now sourced from the indexer's `BlockGrid`,
+        // so the fixture's declared `n_blks` must match `indexer.n_blks` for the
+        // asserted columns to hold; pin that invariant rather than silently
+        // diverging if a future fixture sets a mismatched stride.
+        assert_eq!(n_blks, indexer.n_blks);
         resolve_variable_ref(
             &var_ref,
             block_idx,
-            n_blks,
             0, // stage_idx = 0
             indexer,
             production_models,
@@ -1484,7 +1521,6 @@ mod tests {
                 hydro_id: EntityId(10),
             },
             0,
-            1, // n_blks
             0, // stage_idx
             &evap_indexer,
             &prod_models,
@@ -1564,7 +1600,6 @@ mod tests {
                 hydro_id: EntityId(20),
             },
             0,
-            1,
             0,
             &evap_indexer,
             &prod_models,
