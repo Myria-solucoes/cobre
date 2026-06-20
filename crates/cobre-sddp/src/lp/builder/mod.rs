@@ -117,6 +117,7 @@
 
 use cobre_core::ConstraintSense;
 
+mod columns;
 mod layout;
 mod matrix;
 mod patch;

@@ -14,7 +14,7 @@ use crate::setup::template_postprocess::{
 };
 
 use super::layout::{ResolvedTables, StageLayout, TemplateBuildCtx};
-use super::{COST_SCALE_FACTOR, GenericConstraintRowEntry, matrix, scaling};
+use super::{COST_SCALE_FACTOR, GenericConstraintRowEntry, columns, matrix, scaling};
 
 /// Outcome of [`build_stage_templates`]: one [`StageTemplate`] per study stage
 /// plus the per-stage `base_rows` offsets needed by `PatchBuffer`.
@@ -276,7 +276,7 @@ pub(super) fn build_single_stage_template(
     let load_balance_row_start = layout.row_load_balance_start();
 
     let (col_lower, mut col_upper, mut objective) =
-        matrix::fill_stage_columns(ctx, stage, stage_idx, &layout);
+        columns::fill_stage_columns(ctx, stage, stage_idx, &layout);
     let (mut row_lower, mut row_upper) = matrix::fill_stage_rows(ctx, stage, stage_idx, &layout);
     let mut col_entries = matrix::build_stage_matrix_entries(ctx, stage, stage_idx, &layout);
 
