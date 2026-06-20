@@ -929,14 +929,7 @@ pub(super) fn fill_stage_rows(
     );
     fill_fpha_rows(ctx, stage_idx, layout, &mut row_lower, &mut row_upper);
     fill_evaporation_rows(ctx, stage_idx, layout, &mut row_lower, &mut row_upper);
-    fill_operational_violation_rows(
-        ctx,
-        stage,
-        stage_idx,
-        layout,
-        &mut row_lower,
-        &mut row_upper,
-    );
+    fill_operational_violation_rows(ctx, stage_idx, layout, &mut row_lower, &mut row_upper);
     fill_anticipated_fishing_rows(ctx, layout, &mut row_lower, &mut row_upper);
     fill_anticipated_state_out_def_rows(ctx, stage_idx, layout, &mut row_lower, &mut row_upper);
     fill_z_inflow_rows(ctx, stage_idx, layout, &mut row_lower, &mut row_upper);
@@ -1099,7 +1092,6 @@ fn fill_z_inflow_rows(
 /// - **Min generation** (`>=`): `row_lower = min_generation_mw`, `row_upper = +INF`.
 fn fill_operational_violation_rows(
     ctx: &TemplateBuildCtx<'_>,
-    _stage: &Stage,
     stage_idx: usize,
     layout: &StageLayout,
     row_lower: &mut [f64],
@@ -1953,7 +1945,6 @@ pub(super) fn fill_z_inflow_entries(
 ///   where `coeff * var` is `rho * q` for constant-productivity hydros or `g` for FPHA.
 pub(super) fn fill_operational_violation_entries(
     ctx: &TemplateBuildCtx<'_>,
-    _stage: &Stage,
     stage_idx: usize,
     layout: &StageLayout,
     col_entries: &mut [Vec<(usize, f64)>],
@@ -2051,7 +2042,7 @@ pub(super) fn build_stage_matrix_entries(
     fill_fpha_entries(ctx, stage_idx, layout, &mut col_entries);
     fill_evaporation_entries(ctx, stage_idx, layout, &mut col_entries);
     fill_z_inflow_entries(ctx, stage_idx, layout, &mut col_entries);
-    fill_operational_violation_entries(ctx, stage, stage_idx, layout, &mut col_entries);
+    fill_operational_violation_entries(ctx, stage_idx, layout, &mut col_entries);
     fill_anticipated_fishing_entries(ctx, stage, layout, &mut col_entries);
 
     col_entries
