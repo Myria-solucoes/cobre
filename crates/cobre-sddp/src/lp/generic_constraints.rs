@@ -127,7 +127,7 @@ pub(crate) struct PumpingRefs<'a> {
 /// - `positions` — entity position maps grouped into [`EntityPositionMaps`].
 /// - `cascade_refs` — cascade topology + diversion-into map grouped into
 ///   [`CascadeRefs`]; consulted only by the `HydroInflow` arm.
-/// - `pumping_refs` — pumping column start, block stride, and station data
+/// - `pumping_refs` — pumping column start, station slice, and position map
 ///   grouped into [`PumpingRefs`]; consulted only by the `PumpingFlow` /
 ///   `PumpingPower` arms.
 ///

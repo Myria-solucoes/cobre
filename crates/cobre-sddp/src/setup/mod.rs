@@ -127,7 +127,6 @@ pub struct StudySetup {
 
     /// Sampling schemes and pre-built libraries for training and simulation phases.
     ///
-    /// Replaces the 14 flat `inflow_scheme` / `sim_inflow_scheme` / … fields.
     /// Access via `scenario_libraries.training.<field>` or
     /// `scenario_libraries.simulation.<field>`.
     pub scenario_libraries: ScenarioLibraries,
@@ -148,8 +147,7 @@ pub struct StudySetup {
     /// Two-stage cut management pipeline configuration.
     ///
     /// Holds cut selection, budget cap, activity tolerance, and per-stage risk
-    /// measures. Replaces the former flat fields (`cut_selection`,
-    /// `cut_activity_tolerance`, `budget`, `risk_measures`).
+    /// measures.
     pub(crate) cut_management: CutManagementConfig,
 
     /// Pure-data event parameters (output-side flags).
@@ -545,23 +543,6 @@ fn build_ncs_entity_data(
     // declaration-order-canonical `active_ncs_indices` and id-sorted slot order,
     // so it preserves declaration-order invariance.
     let stoch_ncs_ids = stochastic.ncs_entity_ids();
-
-    // A stochastic slot must resolve to a known system NCS; otherwise the
-    // throughput buffers from `transform_ncs_noise` would have no column to land
-    // on. The check is stage-independent (a slot's system membership does not
-    // vary by stage), so it runs once here over the slot list rather than
-    // O(n_stages) times inside the per-stage active-set loop below.
-    for slot_id in stoch_ncs_ids {
-        if !system
-            .non_controllable_sources()
-            .iter()
-            .any(|n| n.id == *slot_id)
-        {
-            return Err(SddpError::Validation(format!(
-                "stochastic NCS entity {slot_id:?} not found in system non_controllable_sources"
-            )));
-        }
-    }
 
     let mut ncs_active_slot_to_local: Vec<Vec<Option<usize>>> =
         Vec::with_capacity(ncs_entity_ids_per_stage.len());

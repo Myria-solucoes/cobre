@@ -667,6 +667,13 @@ pub(crate) fn build_active_ncs_col_indices(
 /// it. When every slot is active the gather reproduces the source buffers exactly
 /// (hash-neutral for the all-active case). Cleared then refilled each call; the
 /// bounds change every opening, so unlike the index buffer this cannot be cached.
+///
+/// # Panics
+///
+/// Panics in debug builds when `lower_src` or `upper_src` is shorter than
+/// `slot_to_local.len() * block_count` — the highest slot's block at
+/// `slot * block_count..slot * block_count + block_count` would otherwise read
+/// out of range.
 pub(crate) fn gather_active_ncs_bounds(
     slot_to_local: &[Option<usize>],
     block_count: usize,
@@ -677,6 +684,14 @@ pub(crate) fn gather_active_ncs_bounds(
 ) {
     lower_out.clear();
     upper_out.clear();
+    debug_assert!(
+        lower_src.len() >= slot_to_local.len() * block_count,
+        "lower_src too short for slot_to_local: every slot strides by block_count",
+    );
+    debug_assert!(
+        upper_src.len() >= slot_to_local.len() * block_count,
+        "upper_src too short for slot_to_local: every slot strides by block_count",
+    );
     for (slot, &maybe_local) in slot_to_local.iter().enumerate() {
         if maybe_local.is_some() {
             let base = slot * block_count;
@@ -2821,7 +2836,7 @@ mod tests {
 
     /// Two stages with **equal** `active_count * n_blks` but **different**
     /// `ncs_col_start` must rebuild the index buffer on the second stage. This
-    /// pins the FINDING-5 invariant: the patch-site guard keys the lazy rebuild on
+    /// pins the invariant: the patch-site guard keys the lazy rebuild on
     /// `(last_ncs_col_start, len)`, not on `len` alone. A length-only guard (the
     /// forbidden alternative) would not fire here — both stages have length
     /// `2 * 2 = 4` — and would leave the previous stage's indices in place, writing

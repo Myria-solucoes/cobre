@@ -190,8 +190,10 @@ impl BlockGrid {
     /// block is `B * S * n_blks` columns laid out bus-outer, segment-middle,
     /// block-inner; any reordering of the three factors (e.g. striding `seg` by
     /// `S` instead of `n_blks`, or swapping the bus and segment strides) is a
-    /// same-length but wrong-cell alternative. Passing `S` and `n_blks` as named
-    /// parameters in this fixed order fixes the nesting against that trap.
+    /// same-length but wrong-cell alternative. Both `S` (`max_deficit_segments`)
+    /// and `n_blks` are grid constants baked in at construction — callers never
+    /// supply them per-call and cannot accidentally source them from a different
+    /// origin or swap their order.
     #[inline]
     #[must_use]
     pub fn deficit(&self, deficit_start: usize, b_pos: usize, seg: usize, blk: usize) -> usize {

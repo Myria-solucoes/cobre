@@ -812,12 +812,16 @@ fn extract_sim_stage_result(
                 if let Some(ncs_local) = maybe_local {
                     let dst = ncs_local * stage_n_blks;
                     let src = slot * stage_n_blks;
-                    if dst + stage_n_blks <= ncs_col_upper_extract_buf.len()
-                        && src + stage_n_blks <= ncs_col_upper_buf.len()
-                    {
-                        ncs_col_upper_extract_buf[dst..dst + stage_n_blks]
-                            .copy_from_slice(&ncs_col_upper_buf[src..src + stage_n_blks]);
-                    }
+                    debug_assert!(
+                        dst + stage_n_blks <= ncs_col_upper_extract_buf.len(),
+                        "ncs extract dst out of range: ncs_local < ncs_n by construction",
+                    );
+                    debug_assert!(
+                        src + stage_n_blks <= ncs_col_upper_buf.len(),
+                        "ncs extract src out of range: slot < n_stochastic_ncs by construction",
+                    );
+                    ncs_col_upper_extract_buf[dst..dst + stage_n_blks]
+                        .copy_from_slice(&ncs_col_upper_buf[src..src + stage_n_blks]);
                 }
             }
         }

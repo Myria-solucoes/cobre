@@ -828,14 +828,16 @@ impl StageLayout {
     ///
     /// Three-term stride: the deficit region uses a uniform per-bus span of
     /// `max_deficit_segments * n_blks` columns, then `n_blks` per segment, then
-    /// the block. Returns
+    /// the block, yielding
     /// `col_deficit_start + b_idx * max_deficit_segments * n_blks + seg_idx * n_blks + blk`.
+    /// The stride arithmetic lives one level down in
+    /// [`BlockGrid::deficit`](crate::indexer::BlockGrid::deficit), the single
+    /// owner; this method delegates there.
     #[inline]
     pub(crate) fn deficit_col(&self, b_idx: usize, seg_idx: usize, blk: usize) -> usize {
-        self.col_deficit_start()
-            + b_idx * self.max_deficit_segments() * self.n_blks
-            + seg_idx * self.n_blks
-            + blk
+        self.indexer
+            .block_grid()
+            .deficit(self.col_deficit_start(), b_idx, seg_idx, blk)
     }
 
     // ── Indexer read-through accessors ──────────────────────────────────────────
@@ -914,6 +916,13 @@ impl StageLayout {
 
     /// Maximum deficit segments across buses; delegates to
     /// `self.indexer.max_deficit_segments`.
+    ///
+    /// Test-only: production `deficit_col` routes through
+    /// [`BlockGrid::deficit`](crate::indexer::BlockGrid::deficit), which reads
+    /// `max_deficit_segments` internally, so the sole live caller is the
+    /// deficit-stride regression test that reconstructs the open-coded 3-term
+    /// form to prove `deficit_col` still equals it.
+    #[cfg(test)]
     #[inline]
     #[must_use]
     pub(crate) fn max_deficit_segments(&self) -> usize {

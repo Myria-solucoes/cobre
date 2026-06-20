@@ -429,18 +429,15 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
             scratch
                 .noise_buf
                 .push(spec.template.row_lower[base_row + h] + spec.noise_scale[h] * eta_eff);
-            if let Some(stoch) = spec.stochastic {
+            let z_rhs = spec.stochastic.map_or(0.0, |stoch| {
                 let par_lp = stoch.par();
                 if par_lp.n_stages() > 0 && par_lp.n_hydros() == n_hydros {
-                    let base = par_lp.deterministic_base(0, h);
-                    let sigma = par_lp.sigma(0, h);
-                    scratch.z_inflow_rhs_buf.push(base + sigma * eta_eff);
+                    par_lp.deterministic_base(0, h) + par_lp.sigma(0, h) * eta_eff
                 } else {
-                    scratch.z_inflow_rhs_buf.push(0.0);
+                    0.0
                 }
-            } else {
-                scratch.z_inflow_rhs_buf.push(0.0);
-            }
+            });
+            scratch.z_inflow_rhs_buf.push(z_rhs);
         }
 
         // No shift_anticipated_state call here: the lower-bound evaluator
