@@ -2072,10 +2072,11 @@ mod pumping_water_tests {
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, Bus, CascadeTopology, CoefficientRef,
         ConstraintExpression, ConstraintSense, ContractStageBounds, DeficitSegment, EntityId,
-        GenericConstraint, Hydro, HydroGenerationModel, HydroStageBounds, LineStageBounds,
+        GenericConstraint, Hydro, HydroGenerationModel, HydroStageBounds, Line, LineStageBounds,
         LinearTerm, PumpingStageBounds, PumpingStation, ResolvedBounds, ResolvedExchangeFactors,
         ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds,
-        ResolvedNcsFactors, ResolvedPenalties, SlackConfig, ThermalStageBounds, VariableRef,
+        ResolvedNcsFactors, ResolvedPenalties, SlackConfig, Thermal, ThermalStageBounds,
+        VariableRef,
     };
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -2211,17 +2212,78 @@ mod pumping_water_tests {
         }
     }
 
+    /// A bus with a caller-chosen deficit-segment count and excess cost so the
+    /// multi-entity permutation test can give each bus a distinct CSC footprint:
+    /// `fill_load_balance_entries` emits one deficit column per
+    /// `deficit_segments.len()`, so distinct segment counts make the deficit
+    /// column block bus-position-dependent — a bus permutation that escaped the
+    /// ID-sort would land the wrong segment count in the wrong column block.
+    fn fixture_bus_with(id: i32, n_segments: usize, excess_cost: f64) -> Bus {
+        Bus {
+            id: EntityId(id),
+            name: format!("B{id}"),
+            deficit_segments: (0..n_segments)
+                .map(|_| DeficitSegment {
+                    depth_mw: None,
+                    cost_per_mwh: 1000.0,
+                })
+                .collect(),
+            excess_cost,
+        }
+    }
+
+    /// A thermal plant on `bus_id` with distinct generation bounds and cost so a
+    /// permutation that mislabelled which thermal owns which column is observable.
+    fn fixture_thermal(id: i32, bus_id: i32, min_gen: f64, max_gen: f64, cost: f64) -> Thermal {
+        Thermal {
+            id: EntityId(id),
+            name: format!("T{id}"),
+            bus_id: EntityId(bus_id),
+            entry_stage_id: None,
+            exit_stage_id: None,
+            cost_per_mwh: cost,
+            min_generation_mw: min_gen,
+            max_generation_mw: max_gen,
+            anticipated_config: None,
+        }
+    }
+
+    /// A transmission line between `source_bus`/`target_bus` with distinct
+    /// capacities. Distinct bus pairs across lines make the load-balance fill
+    /// (±1.0 into source/target bus rows) line-position- and bus-position-
+    /// dependent, so a permutation that escaped either ID-sort changes the CSC.
+    fn fixture_line(id: i32, source_bus: i32, target_bus: i32, direct: f64, reverse: f64) -> Line {
+        Line {
+            id: EntityId(id),
+            name: format!("L{id}"),
+            source_bus_id: EntityId(source_bus),
+            target_bus_id: EntityId(target_bus),
+            entry_stage_id: None,
+            exit_stage_id: None,
+            direct_capacity_mw: direct,
+            reverse_capacity_mw: reverse,
+            losses_percent: 0.0,
+            exchange_cost: 0.0,
+        }
+    }
+
     /// Owns the data backing a two-hydro `TemplateBuildCtx` carrying pumping
-    /// stations. Hydros and stations are stored in canonical (ID-sorted) order;
-    /// `hydro_pos`/`pumping_pos` are derived from those sorted slices, exactly as
-    /// `SystemBuilder::build` produces them in production.
+    /// stations, thermals, and lines. Every entity slice is stored in canonical
+    /// (ID-sorted) order; the position maps are derived from those sorted slices,
+    /// exactly as `SystemBuilder::build` produces them in production. The ID-sort
+    /// is what makes two declaration orders of the same entities converge to one
+    /// ctx — the property the permutation tests assert.
     struct PumpFixtures {
         hydros: Vec<Hydro>,
         stations: Vec<PumpingStation>,
         buses: Vec<Bus>,
+        thermals: Vec<Thermal>,
+        lines: Vec<Line>,
         hydro_pos: BTreeMap<EntityId, usize>,
         pumping_pos: BTreeMap<EntityId, usize>,
         bus_pos: BTreeMap<EntityId, usize>,
+        thermal_pos: BTreeMap<EntityId, usize>,
+        line_pos: BTreeMap<EntityId, usize>,
         par_lp: PrecomputedPar,
         cascade: CascadeTopology,
         bounds: ResolvedBounds,
@@ -2249,18 +2311,38 @@ mod pumping_water_tests {
         }
 
         /// Build a fixture from hydros, stations, and buses supplied in arbitrary
-        /// declaration order. All three are sorted by `id.0` (the canonical
-        /// operation `SystemBuilder::build` performs) before deriving position maps
-        /// and the pumping bounds table, so the resulting ctx is
-        /// declaration-order-invariant.
+        /// declaration order, with no thermals or lines. Delegates to
+        /// [`PumpFixtures::new_full`], which sorts every slice by `id.0` (the
+        /// canonical operation `SystemBuilder::build` performs) before deriving
+        /// position maps, so the resulting ctx is declaration-order-invariant.
         fn new_with_buses(
+            hydros: Vec<Hydro>,
+            stations: Vec<PumpingStation>,
+            buses: Vec<Bus>,
+        ) -> Self {
+            Self::new_full(hydros, stations, buses, Vec::new(), Vec::new())
+        }
+
+        /// Build a fixture carrying hydros, stations, buses, thermals, and lines in
+        /// arbitrary declaration order. Every slice is sorted by `id.0` before
+        /// deriving its position map and bounds table, mirroring
+        /// `SystemBuilder::build`; this canonicalisation is what makes two
+        /// declaration orders of the same entities converge to one ctx (the
+        /// invariant the permutation tests assert). Thermal and line bounds are
+        /// written per-entity from the sorted slices so a column/bound mislabel
+        /// under permutation is observable.
+        fn new_full(
             mut hydros: Vec<Hydro>,
             mut stations: Vec<PumpingStation>,
             mut buses: Vec<Bus>,
+            mut thermals: Vec<Thermal>,
+            mut lines: Vec<Line>,
         ) -> Self {
             hydros.sort_by_key(|h| h.id.0);
             stations.sort_by_key(|s| s.id.0);
             buses.sort_by_key(|b| b.id.0);
+            thermals.sort_by_key(|t| t.id.0);
+            lines.sort_by_key(|l| l.id.0);
 
             let hydro_pos: BTreeMap<EntityId, usize> =
                 hydros.iter().enumerate().map(|(i, h)| (h.id, i)).collect();
@@ -2271,12 +2353,19 @@ mod pumping_water_tests {
                 .collect();
             let bus_pos: BTreeMap<EntityId, usize> =
                 buses.iter().enumerate().map(|(i, b)| (b.id, i)).collect();
+            let thermal_pos: BTreeMap<EntityId, usize> = thermals
+                .iter()
+                .enumerate()
+                .map(|(i, t)| (t.id, i))
+                .collect();
+            let line_pos: BTreeMap<EntityId, usize> =
+                lines.iter().enumerate().map(|(i, l)| (l.id, i)).collect();
 
             let mut bounds = ResolvedBounds::new(
                 &BoundsCountsSpec {
                     n_hydros: hydros.len(),
-                    n_thermals: 0,
-                    n_lines: 0,
+                    n_thermals: thermals.len(),
+                    n_lines: lines.len(),
                     n_pumping: stations.len(),
                     n_contracts: 0,
                     n_stages: N_STAGES,
@@ -2290,6 +2379,27 @@ mod pumping_water_tests {
                     *bounds.pumping_bounds_mut(p_idx, stage_idx) = PumpingStageBounds {
                         min_flow_m3s: s.min_flow_m3s,
                         max_flow_m3s: s.max_flow_m3s,
+                    };
+                }
+            }
+            // Distinct per-thermal generation bounds and cost, taken from the
+            // sorted slice, so a permutation that mislabelled which thermal owns
+            // which column would change the resolved bounds.
+            for (t_idx, t) in thermals.iter().enumerate() {
+                for stage_idx in 0..N_STAGES {
+                    *bounds.thermal_bounds_mut(t_idx, stage_idx) = ThermalStageBounds {
+                        min_generation_mw: t.min_generation_mw,
+                        max_generation_mw: t.max_generation_mw,
+                        cost_per_mwh: t.cost_per_mwh,
+                    };
+                }
+            }
+            // Distinct per-line capacities from the sorted slice, same rationale.
+            for (l_idx, l) in lines.iter().enumerate() {
+                for stage_idx in 0..N_STAGES {
+                    *bounds.line_bounds_mut(l_idx, stage_idx) = LineStageBounds {
+                        direct_mw: l.direct_capacity_mw,
+                        reverse_mw: l.reverse_capacity_mw,
                     };
                 }
             }
@@ -2314,9 +2424,13 @@ mod pumping_water_tests {
                 hydros,
                 stations,
                 buses,
+                thermals,
+                lines,
                 hydro_pos,
                 pumping_pos,
                 bus_pos,
+                thermal_pos,
+                line_pos,
                 par_lp: PrecomputedPar::default(),
                 cascade: CascadeTopology::build(&[]),
                 bounds,
@@ -2355,8 +2469,8 @@ mod pumping_water_tests {
         fn make_ctx(&self) -> TemplateBuildCtx<'_> {
             TemplateBuildCtx {
                 hydros: &self.hydros,
-                thermals: &[],
-                lines: &[],
+                thermals: &self.thermals,
+                lines: &self.lines,
                 buses: &self.buses,
                 load_models: &[],
                 cascade: &self.cascade,
@@ -2371,8 +2485,8 @@ mod pumping_water_tests {
                     resolved_parameters: &self.resolved_parameters,
                 },
                 hydro_pos: self.hydro_pos.clone(),
-                thermal_pos: BTreeMap::new(),
-                line_pos: BTreeMap::new(),
+                thermal_pos: self.thermal_pos.clone(),
+                line_pos: self.line_pos.clone(),
                 bus_pos: self.bus_pos.clone(),
                 par_lp: &self.par_lp,
                 production_models: &self.production_models,
@@ -2384,8 +2498,8 @@ mod pumping_water_tests {
                 n_pumping: self.stations.len(),
                 diversion_upstream: HashMap::new(),
                 n_hydros: self.hydros.len(),
-                n_thermals: 0,
-                n_lines: 0,
+                n_thermals: self.thermals.len(),
+                n_lines: self.lines.len(),
                 n_buses: self.buses.len(),
                 max_par_order: 0,
                 n_anticipated: 0,
@@ -2691,6 +2805,204 @@ mod pumping_water_tests {
         assert_eq!(csc_a.0, csc_b.0, "col_starts must be byte-identical");
         assert_eq!(csc_a.1, csc_b.1, "row_indices must be byte-identical");
         assert_eq!(csc_a.2, csc_b.2, "values must be byte-identical");
+    }
+
+    /// Build the full stage CSC for a multi-entity system (2 hydros, 3 buses, 2
+    /// thermals on different buses, 2 lines on different bus pairs, 1 generic
+    /// constraint over a thermal/line/bus triple) twice with EVERY entity family's
+    /// declaration order reversed between the two builds, and assert the assembled
+    /// CSC arrays are byte-identical. This is the determinism backstop for the
+    /// bus/line/thermal/generic-constraint families the single-bus
+    /// `csc_byte_identical_under_permuted_declaration_order` cannot scramble: a
+    /// map-iterating fill that reintroduced declaration-order dependence on any of
+    /// these families would diverge here.
+    ///
+    /// The constraint references a `ThermalGeneration`, a `LineExchange`, and a
+    /// `BusDeficit` term so the resolver path through
+    /// `thermal_pos`/`line_pos`/`bus_pos` participates in the asserted CSC, not
+    /// only the load-balance fill. Distinct per-entity attributes (thermals on
+    /// different buses with distinct bounds, lines on different bus pairs with
+    /// distinct capacities, buses with distinct deficit-segment counts) make the
+    /// assertion load-bearing: a permutation that mislabelled which entity owns
+    /// which slot would change the CSC.
+    #[test]
+    fn csc_byte_identical_under_permuted_multi_entity_order() {
+        // Generic constraint id 7:
+        //   thermal_gen(10) + line_exchange(100) + bus_deficit(2) <= 100
+        // All referenced ids ARE present in the position maps, so the resolver
+        // contributes real entries rather than silently returning an empty vec.
+        let make_constraint = || GenericConstraint {
+            id: EntityId(7),
+            name: "gc_multi".to_string(),
+            description: None,
+            expression: ConstraintExpression {
+                terms: vec![
+                    LinearTerm {
+                        coefficient: CoefficientRef::Literal(1.0),
+                        scale: 1.0,
+                        variable: VariableRef::ThermalGeneration {
+                            thermal_id: EntityId(10),
+                            block_id: None,
+                        },
+                    },
+                    LinearTerm {
+                        coefficient: CoefficientRef::Literal(1.0),
+                        scale: 1.0,
+                        variable: VariableRef::LineExchange {
+                            line_id: EntityId(100),
+                            block_id: None,
+                        },
+                    },
+                    LinearTerm {
+                        coefficient: CoefficientRef::Literal(1.0),
+                        scale: 1.0,
+                        variable: VariableRef::BusDeficit {
+                            bus_id: EntityId(2),
+                            block_id: None,
+                        },
+                    },
+                ],
+            },
+            sense: ConstraintSense::LessEqual,
+            slack: SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+        };
+
+        // Build the fixture, run the PRODUCTION assemble sequence
+        // (build_stage_matrix_entries -> fill_generic_constraint_entries via
+        // LpMatrixBuffers -> per-column row-sort -> assemble_csc, matching
+        // build_single_stage_template), and return the CSC triple plus the layout
+        // so the caller can probe the generic-constraint row.
+        let assemble =
+            |hydros: Vec<Hydro>, buses: Vec<Bus>, thermals: Vec<Thermal>, lines: Vec<Line>| {
+                let fixtures = PumpFixtures::new_full(hydros, Vec::new(), buses, thermals, lines)
+                    .with_generic_constraint(make_constraint(), 100.0);
+                let ctx = fixtures.make_ctx();
+                let stage = two_block_stage(0, [300.0, 444.0]);
+                let layout = StageLayout::new(&ctx, &stage, 0);
+
+                let mut entries = build_stage_matrix_entries(&ctx, &stage, 0, &layout);
+                let mut col_upper = vec![f64::INFINITY; layout.num_cols];
+                let mut objective = vec![0.0_f64; layout.num_cols];
+                let mut row_lower = vec![f64::NEG_INFINITY; layout.num_rows];
+                let mut row_upper = vec![f64::INFINITY; layout.num_rows];
+                let mut buffers = LpMatrixBuffers {
+                    col_entries: &mut entries,
+                    col_upper: &mut col_upper,
+                    objective: &mut objective,
+                    row_lower: &mut row_lower,
+                    row_upper: &mut row_upper,
+                };
+                fill_generic_constraint_entries(&ctx, &stage, 0, &layout, &mut buffers);
+
+                // Mirror the production per-column row-sort (see
+                // build_single_stage_template) before assembling the CSC.
+                for col in &mut entries {
+                    col.sort_unstable_by_key(|&(row, _)| row);
+                }
+                let csc = assemble_csc(&entries);
+                (csc, layout)
+            };
+
+        // Order A: every family declared ascending.
+        let (csc_a, layout_a) = assemble(
+            vec![fixture_hydro(1), fixture_hydro(2)],
+            vec![
+                fixture_bus_with(1, 1, 1.0),
+                fixture_bus_with(2, 2, 3.0),
+                fixture_bus_with(3, 1, 5.0),
+            ],
+            vec![
+                fixture_thermal(10, 1, 0.0, 30.0, 12.0),
+                fixture_thermal(20, 3, 5.0, 45.0, 27.0),
+            ],
+            vec![
+                fixture_line(100, 1, 2, 50.0, 40.0),
+                fixture_line(200, 2, 3, 70.0, 60.0),
+            ],
+        );
+
+        // Order B: the identical entities, every family declared in reverse.
+        let (csc_b, _layout_b) = assemble(
+            vec![fixture_hydro(2), fixture_hydro(1)],
+            vec![
+                fixture_bus_with(3, 1, 5.0),
+                fixture_bus_with(2, 2, 3.0),
+                fixture_bus_with(1, 1, 1.0),
+            ],
+            vec![
+                fixture_thermal(20, 3, 5.0, 45.0, 27.0),
+                fixture_thermal(10, 1, 0.0, 30.0, 12.0),
+            ],
+            vec![
+                fixture_line(200, 2, 3, 70.0, 60.0),
+                fixture_line(100, 1, 2, 50.0, 40.0),
+            ],
+        );
+
+        assert_eq!(csc_a.0, csc_b.0, "col_starts must be byte-identical");
+        assert_eq!(csc_a.1, csc_b.1, "row_indices must be byte-identical");
+        assert_eq!(csc_a.2, csc_b.2, "values must be byte-identical");
+
+        // Criterion 3: prove the generic-constraint resolver path ran (not just
+        // the load-balance fill) by reading the generic row's coefficients on the
+        // resolved thermal/line/deficit columns from order A's CSC. The expression
+        // is block-dependent (ThermalGeneration/LineExchange/BusDeficit), so it
+        // expands to one generic row per block; probe every block.
+        let n_blks = layout_a.n_blks;
+        assert_eq!(
+            layout_a.n_generic_rows, n_blks,
+            "block-dependent generic constraint must expand to one row per block"
+        );
+        let grid = layout_a.indexer.block_grid();
+        let t_pos = 0; // thermal id 10 sorts to position 0.
+        let l_pos = 0; // line id 100 sorts to position 0.
+        let b_pos = 1; // bus id 2 sorts to position 1 (buses 1,2,3).
+        for blk in 0..n_blks {
+            let row = i32::try_from(layout_a.row_generic_start + blk).unwrap();
+            let coeff_at = |col: usize| -> f64 {
+                let start = usize::try_from(csc_a.0[col]).unwrap();
+                let end = usize::try_from(csc_a.0[col + 1]).unwrap();
+                csc_a.1[start..end]
+                    .iter()
+                    .zip(&csc_a.2[start..end])
+                    .filter(|&(&r, _)| r == row)
+                    .map(|(_, &v)| v)
+                    .sum()
+            };
+
+            // ThermalGeneration(10): +1.0 on thermal 10's column.
+            let thermal_col = grid.flat(layout_a.col_thermal_start(), t_pos, blk);
+            assert_eq!(
+                coeff_at(thermal_col),
+                1.0,
+                "blk {blk}: generic row must carry +1.0 on thermal 10's column \
+                 (resolver path through thermal_pos)"
+            );
+            // LineExchange(100): +1.0 on the forward column, -1.0 on the reverse.
+            assert_eq!(
+                coeff_at(layout_a.line_fwd_col(l_pos, blk)),
+                1.0,
+                "blk {blk}: generic row must carry +1.0 on line 100's forward column \
+                 (resolver path through line_pos)"
+            );
+            assert_eq!(
+                coeff_at(layout_a.line_rev_col(l_pos, blk)),
+                -1.0,
+                "blk {blk}: generic row must carry -1.0 on line 100's reverse column"
+            );
+            // BusDeficit(2): +1.0 on each of bus 2's two deficit-segment columns.
+            for seg in 0..2 {
+                assert_eq!(
+                    coeff_at(layout_a.deficit_col(b_pos, seg, blk)),
+                    1.0,
+                    "blk {blk}: generic row must carry +1.0 on bus 2 deficit segment {seg} \
+                     (resolver path through bus_pos)"
+                );
+            }
+        }
     }
 
     /// End-to-end: a generic constraint referencing `pumping_flow` and
