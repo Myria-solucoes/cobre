@@ -725,11 +725,13 @@ impl StageLayout {
     /// the INNER offset. The transposed form `blk * n_entities + entity` is the
     /// wrong-but-compiling alternative — it produces the same length region but
     /// interleaves columns across entities, so a coefficient lands on the wrong
-    /// (entity, block) and the LP is silently misbuilt. Every per-family
-    /// block-major accessor below delegates here so the stride lives in one place.
+    /// (entity, block) and the LP is silently misbuilt. The stride arithmetic
+    /// lives one level down in [`BlockGrid::flat`](crate::indexer::BlockGrid::flat),
+    /// the single owner; this method delegates there, and every per-family
+    /// block-major accessor below delegates here.
     #[inline]
     pub(crate) fn block_col(&self, start: usize, entity: usize, blk: usize) -> usize {
-        start + entity * self.n_blks + blk
+        self.indexer.block_grid().flat(start, entity, blk)
     }
 
     /// Turbine-flow column for hydro `h_idx`, block `blk`.
