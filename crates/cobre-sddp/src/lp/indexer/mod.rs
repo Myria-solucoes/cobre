@@ -9,10 +9,11 @@
 //! ```text
 //! [0, N)                                    storage           — outgoing storage volumes  (N = hydro_count)
 //! [N, N*(1+L))                              inflow_lags       — AR lag variables (L lags per hydro)
-//! [N*(1+L), N*(1+L) + A*K_max)              anticipated_state — anticipated thermal commitment state slots
-//! [N*(1+L) + A*K_max, N*(2+L) + A*K_max)    z_inflow          — realized inflow (auxiliary, not state)
-//! [N*(2+L) + A*K_max, N*(3+L) + A*K_max)    storage_in        — incoming storage volumes
-//! N*(3+L) + A*K_max                         theta             — future cost variable (scalar)
+//! [N*(1+L), N*(1+L) + A*K_max)              anticipated_state     — anticipated thermal commitment state slots (ring buffer)
+//! [N*(1+L) + A*K_max, N*(1+L) + A*K_max + A) anticipated_state_out — relocated cut-target column; state region, stage-invariant (owned by `StateLayout`)
+//! [N*(1+L) + A*K_max + A, N*(2+L) + A*K_max + A) z_inflow          — realized inflow (auxiliary, not state)
+//! [N*(2+L) + A*K_max + A, N*(3+L) + A*K_max + A) storage_in        — incoming storage volumes
+//! N*(3+L) + A*K_max + A                      theta                 — future cost variable (scalar)
 //! ```
 //!
 //! where `A = n_anticipated` is the number of thermals with
@@ -29,21 +30,21 @@
 //! [theta+1+2*H*K,                            theta+1+3*H*K)              diversion              — diverted flow (m³/s)
 //! [theta+1+3*H*K,                            theta+1+3*H*K+T*K)          thermal                — thermal generation (MW)
 //! [theta+1+3*H*K+T*K,                        theta+1+3*H*K+T*K+A)        anticipated_decision   — A = n_anticipated columns
-//! [theta+1+3*H*K+T*K+A,                      theta+1+3*H*K+T*K+2*A)      anticipated_state_out  — A = n_anticipated columns
-//! [theta+1+3*H*K+T*K+2*A,                    …+2*A+2*L_n*K)              line_fwd/rev           — line flows
-//! [theta+1+3*H*K+T*K+2*A+2*L_n*K,           …+2*A+2*L_n*K+B*S*K)        deficit
-//! [theta+1+3*H*K+T*K+2*A+2*L_n*K+B*S*K,     …+2*A+2*L_n*K+B*S*K+B*K)    excess
+//! [theta+1+3*H*K+T*K+A,                      …+A+2*L_n*K)                line_fwd/rev           — line flows
+//! [theta+1+3*H*K+T*K+A+2*L_n*K,             …+A+2*L_n*K+B*S*K)          deficit
+//! [theta+1+3*H*K+T*K+A+2*L_n*K+B*S*K,       …+A+2*L_n*K+B*S*K+B*K)      excess
 //! ```
 //!
 //! The `anticipated_decision` block is stage-level (one column per anticipated
 //! plant, NOT per-block) and has length `A = n_anticipated`. The block collapses
 //! to length 0 when `n_anticipated == 0`, leaving the rest of the layout
-//! byte-identical to the pre-anticipated form.
-//!
-//! The `anticipated_state_out` block immediately follows `anticipated_decision`
-//! and has the same length `A`. It holds the outgoing state variable for the
-//! cut-mapping definition row. Both blocks collapse to length 0
-//! together when `n_anticipated == 0`.
+//! byte-identical to the pre-anticipated form. The control region runs
+//! `anticipated_decision` then `line_fwd` directly — the cut-target
+//! `anticipated_state_out` column does NOT live here: it was relocated into the
+//! stage-invariant state region above (`[N*(1+L)+A*K_max, …+A)`, owned by
+//! [`StateLayout`]), so its address never depends on `n_blks`. The
+//! `anticipated_state_out_def` equality row still pins it to its
+//! `anticipated_decision` column.
 //!
 //! When the inflow non-negativity penalty method is active (`has_inflow_penalty == true`),
 //! `N` additional slack columns are appended after `excess`:
@@ -110,8 +111,9 @@
 //! theta = 15, n_state = 9
 //! ```
 //!
-//! With 2 anticipated thermals (`K_max = 3`): `anticipated_state = 9..15` inserts
-//! before `z_inflow`, shifting it to `15..18` and `theta` to `21`.
+//! With 2 anticipated thermals (`K_max = 3`): `anticipated_state = 9..15` and the
+//! relocated `anticipated_state_out = 15..17` insert before `z_inflow`, shifting
+//! `z_inflow` to `17..20`, `storage_in` to `20..23`, and `theta` to `23`.
 //!
 //! The per-solve patch sequence layered on top of this geometry is documented in
 //! [`crate::lp_builder`].

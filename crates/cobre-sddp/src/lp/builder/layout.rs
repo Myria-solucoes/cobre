@@ -167,9 +167,9 @@ pub(crate) struct AnticipatedLayout {
     /// the column range is empty and `col_line_fwd_start` is unshifted).
     pub(crate) col_anticipated_decision_start: usize,
     /// Start of the `anticipated_state_out` column block (one column per
-    /// anticipated plant; stage-level, NOT per-block). Sourced from the
-    /// indexer's relocated **state-region** position
-    /// (`StageIndexer::anticipated_state_out.start`, immediately after the
+    /// anticipated plant; stage-level, NOT per-block). Sourced from
+    /// `StateLayout`'s relocated **state-region** position
+    /// (`StateLayout::anticipated_state_out.start`, immediately after the
     /// `anticipated_state` ring buffer), so the offset is stage-invariant and
     /// independent of this stage's block count — the property that keeps the
     /// global stage-0 cut map landing on the correct column at every stage.
