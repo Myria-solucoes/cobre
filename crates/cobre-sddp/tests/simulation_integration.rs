@@ -899,7 +899,7 @@ fn train_simulate_write_cycle() {
             n_ncs_per_stage: &[],
             pumping_col_starts: &[],
             n_pumping_per_stage: &[],
-            equipment_geometry_per_stage: &[],
+            geometry_per_stage: &[],
             pumping_consumption_mw_per_m3s: &[],
             ncs_entity_ids_per_stage: &[],
             diversion_upstream: &HashMap::new(),
@@ -1431,8 +1431,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
     // Every stage clones `t0`, so every stage shares stage 0's equipment
     // geometry; replicate the build's stage-0 geometry across all stages so
     // extraction reads the stage-correct slack columns.
-    let equipment_geometry =
-        vec![templates_result.equipment_geometry_per_stage[0].clone(); n_stages];
+    let equipment_geometry = vec![templates_result.geometry_per_stage[0].clone(); n_stages];
     let initial_state = vec![100.0_f64; state.n_state];
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -1608,7 +1607,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
             n_ncs_per_stage: &[],
             pumping_col_starts: &[],
             n_pumping_per_stage: &[],
-            equipment_geometry_per_stage: &equipment_geometry,
+            geometry_per_stage: &equipment_geometry,
             pumping_consumption_mw_per_m3s: &[],
             ncs_entity_ids_per_stage: &[],
             diversion_upstream: &HashMap::new(),

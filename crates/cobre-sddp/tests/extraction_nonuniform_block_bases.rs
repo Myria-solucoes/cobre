@@ -7,7 +7,7 @@
 //! family read with the global stage-0 base/length misreads the interior stages.
 //!
 //! Two assertions, each FAILS against the pre-fix stage-0-base/length read and
-//! PASSES once extraction resolves the per-stage `StageEquipmentGeometry`:
+//! PASSES once extraction resolves the per-stage `StageGeometry`:
 //!
 //! 1. **Per-block equipment shape** — at every stage the simulation must emit one
 //!    hydro record per (block, hydro) pair, i.e. exactly `n_blks(stage)` records

@@ -152,7 +152,7 @@ fn compute_anticipated_decision_mw(
     // per-stage `equipment` geometry — never the global stage-0
     // `indexer.anticipated_decision.start`, which addresses the wrong column at
     // any stage whose block count differs from stage 0's.
-    let col = spec.equipment.anticipated_decision.start + local_idx;
+    let col = spec.geometry.anticipated_decision.start + local_idx;
     debug_assert!(
         col < view.primal.len(),
         "anticipated_decision col {col} out of primal bounds {}",
@@ -370,7 +370,7 @@ pub struct StageExtractionSpec<'a> {
     /// wrong reported outputs. For uniform-block studies `n_blks == indexer.n_blks`
     /// and the reads coincide.
     pub n_blks: usize,
-    /// Stage-correct equipment column ranges for the stage being extracted.
+    /// Stage-correct equipment geometry for the stage being extracted.
     ///
     /// Every block-major equipment family's base AND length must come from
     /// **this stage's** geometry, NOT from the global stage-0 `indexer`. The
@@ -380,13 +380,13 @@ pub struct StageExtractionSpec<'a> {
     /// `[1, 3, 2]`), reading the per-block `grid.flat(indexer.<family>.start, …)`
     /// base or summing `range_sum(indexer.<family>.clone())` over the stage-0
     /// range addresses the WRONG primal columns — silently misreporting per-block
-    /// equipment and the cost breakdown. `equipment.<family>` is resolved per
-    /// stage from `StageLayout` (via `StageTemplates::equipment_geometry_per_stage`),
+    /// equipment and the cost breakdown. `geometry.<family>` is resolved per
+    /// stage from `StageLayout` (via `StageTemplates::geometry_per_stage`),
     /// so it addresses the columns the solved primal actually occupies at this
     /// stage. The per-stage `n_blks` *stride* was already correct; this field
     /// closes the matching *base/length* gap. For uniform-block studies every
     /// stage's geometry equals stage 0's and the reads coincide.
-    pub equipment: &'a crate::lp_builder::StageEquipmentGeometry,
+    pub geometry: &'a crate::lp_builder::StageGeometry,
     /// Entity ID lists and productivities needed to build result records.
     pub entity_counts: &'a EntityCounts,
     /// Volumetric inflow per hydro (m³/s), one entry per hydro plant.
@@ -544,17 +544,17 @@ fn extract_hydro_no_turbine(
     // families, so it shifts under a non-uniform schedule; read it from the
     // per-stage `equipment` geometry, not the global stage-0 `indexer`.
     let inflow_slack = if study_dims.has_inflow_penalty {
-        view.primal[spec.equipment.inflow_slack.start + h]
+        view.primal[spec.geometry.inflow_slack.start + h]
     } else {
         0.0
     };
     let withdrawal_neg = if study_dims.has_withdrawal {
-        view.primal[spec.equipment.withdrawal_slack_neg.start + h]
+        view.primal[spec.geometry.withdrawal_slack_neg.start + h]
     } else {
         0.0
     };
     let withdrawal_pos = if study_dims.has_withdrawal {
-        view.primal[spec.equipment.withdrawal_slack_pos.start + h]
+        view.primal[spec.geometry.withdrawal_slack_pos.start + h]
     } else {
         0.0
     };
@@ -579,10 +579,10 @@ fn extract_hydro_no_turbine(
         let total_hours: f64 = spec.block_hours.iter().sum();
         for blk in 0..n_blks {
             let w = spec.block_hours[blk] / total_hours;
-            tb += view.primal[grid.flat(spec.equipment.turbine_below_slack.start, h, blk)] * w;
-            ob += view.primal[grid.flat(spec.equipment.outflow_below_slack.start, h, blk)] * w;
-            oa += view.primal[grid.flat(spec.equipment.outflow_above_slack.start, h, blk)] * w;
-            gb += view.primal[grid.flat(spec.equipment.generation_below_slack.start, h, blk)] * w;
+            tb += view.primal[grid.flat(spec.geometry.turbine_below_slack.start, h, blk)] * w;
+            ob += view.primal[grid.flat(spec.geometry.outflow_below_slack.start, h, blk)] * w;
+            oa += view.primal[grid.flat(spec.geometry.outflow_above_slack.start, h, blk)] * w;
+            gb += view.primal[grid.flat(spec.geometry.generation_below_slack.start, h, blk)] * w;
         }
         (tb, ob, oa, gb)
     } else {
@@ -595,7 +595,7 @@ fn extract_hydro_no_turbine(
     // global stage-0 `indexer.evap_indices`.
     let (evaporation_m3s, evaporation_violation_neg_m3s, evaporation_violation_pos_m3s) =
         if let Some(local_evap_idx) = lookup.evap[h] {
-            let ei = &spec.equipment.evap_indices[local_evap_idx];
+            let ei = &spec.geometry.evap_indices[local_evap_idx];
             let evaporation_flow = view.primal[ei.evaporation_flow_col];
             let neg = view.primal[ei.f_evap_plus_col]; // f_evap_plus = under-evaporation
             let pos = view.primal[ei.f_evap_minus_col]; // f_evap_minus = over-evaporation
@@ -703,17 +703,17 @@ impl HydroStageContext {
         // the base comes from the per-stage `equipment` geometry, not the global
         // stage-0 `indexer`.
         let inflow_slack = if study_dims.has_inflow_penalty {
-            view.primal[spec.equipment.inflow_slack.start + h]
+            view.primal[spec.geometry.inflow_slack.start + h]
         } else {
             0.0
         };
         let withdrawal_neg = if study_dims.has_withdrawal {
-            view.primal[spec.equipment.withdrawal_slack_neg.start + h]
+            view.primal[spec.geometry.withdrawal_slack_neg.start + h]
         } else {
             0.0
         };
         let withdrawal_pos = if study_dims.has_withdrawal {
-            view.primal[spec.equipment.withdrawal_slack_pos.start + h]
+            view.primal[spec.geometry.withdrawal_slack_pos.start + h]
         } else {
             0.0
         };
@@ -728,7 +728,7 @@ impl HydroStageContext {
         // generation end, so they come from the per-stage `equipment.evap_indices`.
         let (evaporation_m3s, evaporation_violation_neg_m3s, evaporation_violation_pos_m3s) =
             if let Some(lei) = lookup.evap[h] {
-                let ei = &spec.equipment.evap_indices[lei];
+                let ei = &spec.geometry.evap_indices[lei];
                 let evaporation_flow = view.primal[ei.evaporation_flow_col];
                 let neg = view.primal[ei.f_evap_plus_col];
                 let pos = view.primal[ei.f_evap_minus_col];
@@ -792,15 +792,15 @@ fn extract_hydro_per_block<'a>(
         // so it reads correctly off the indexer at every stage; the families after
         // it ride on the per-stage equipment geometry.
         let t_col = grid.flat(indexer.turbine.start, h, b);
-        let s_col = grid.flat(spec.equipment.spillage.start, h, b);
+        let s_col = grid.flat(spec.geometry.spillage.start, h, b);
         let turbined = view.primal[t_col];
         let spillage = view.primal[s_col];
 
         // Diversion outflow: read directly from the diversion column.
-        let diverted_outflow = if spec.equipment.diversion.is_empty() {
+        let diverted_outflow = if spec.geometry.diversion.is_empty() {
             0.0
         } else {
-            view.primal[grid.flat(spec.equipment.diversion.start, h, b)]
+            view.primal[grid.flat(spec.geometry.diversion.start, h, b)]
         };
 
         // Diversion inflow: sum diversion primals from all hydros that divert to
@@ -810,7 +810,7 @@ fn extract_hydro_per_block<'a>(
         let diverted_inflow = if let Some(sources) = div_sources {
             let mut total = 0.0;
             for &d_idx in sources {
-                total += view.primal[grid.flat(spec.equipment.diversion.start, d_idx, b)];
+                total += view.primal[grid.flat(spec.geometry.diversion.start, d_idx, b)];
             }
             total
         } else {
@@ -820,7 +820,7 @@ fn extract_hydro_per_block<'a>(
         // For FPHA hydros, read generation from the LP `g_{h,k}` column.
         // For constant-productivity hydros, compute generation as turbined * productivity.
         let generation_mw = if let Some(local_fpha_idx) = ctx.fpha_local {
-            view.primal[grid.flat(spec.equipment.generation.start, local_fpha_idx, b)]
+            view.primal[grid.flat(spec.geometry.generation.start, local_fpha_idx, b)]
         } else {
             turbined * spec.hydro_productivities[h]
         };
@@ -829,10 +829,10 @@ fn extract_hydro_per_block<'a>(
         let (turbined_slack, outflow_slack_below, outflow_slack_above, generation_slack) =
             if study_dims.has_operational_violations {
                 (
-                    view.primal[grid.flat(spec.equipment.turbine_below_slack.start, h, b)],
-                    view.primal[grid.flat(spec.equipment.outflow_below_slack.start, h, b)],
-                    view.primal[grid.flat(spec.equipment.outflow_above_slack.start, h, b)],
-                    view.primal[grid.flat(spec.equipment.generation_below_slack.start, h, b)],
+                    view.primal[grid.flat(spec.geometry.turbine_below_slack.start, h, b)],
+                    view.primal[grid.flat(spec.geometry.outflow_below_slack.start, h, b)],
+                    view.primal[grid.flat(spec.geometry.outflow_above_slack.start, h, b)],
+                    view.primal[grid.flat(spec.geometry.generation_below_slack.start, h, b)],
                 )
             } else {
                 (0.0, 0.0, 0.0, 0.0)
@@ -943,7 +943,7 @@ fn extract_thermals(
             // Hoisted out of the inner loop to compute once per thermal.
             let anticipated_committed_mw = compute_anticipated_committed_mw(view, spec, lookup, t);
             for b in 0..n_blks {
-                let col = grid.flat(spec.equipment.thermal.start, t, b);
+                let col = grid.flat(spec.geometry.thermal.start, t, b);
                 let gen_mw = view.primal[col];
                 #[allow(clippy::cast_possible_truncation)]
                 results.push(SimulationThermalResult {
@@ -995,8 +995,8 @@ fn extract_exchanges(
             .enumerate()
             .flat_map(move |(l, &line_id)| {
                 (0..n_blks).map(move |b| {
-                    let fwd_col = grid.flat(spec.equipment.line_fwd.start, l, b);
-                    let rev_col = grid.flat(spec.equipment.line_rev.start, l, b);
+                    let fwd_col = grid.flat(spec.geometry.line_fwd.start, l, b);
+                    let rev_col = grid.flat(spec.geometry.line_rev.start, l, b);
                     let fwd = view.primal[fwd_col];
                     let rev = view.primal[rev_col];
                     #[allow(clippy::cast_possible_truncation)]
@@ -1056,11 +1056,11 @@ fn extract_buses(
                     // `flat`.
                     let deficit_mw: f64 = (0..max_segs)
                         .map(|s| {
-                            let col = grid.deficit(spec.equipment.deficit.start, bus_idx, s, b);
+                            let col = grid.deficit(spec.geometry.deficit.start, bus_idx, s, b);
                             view.primal[col]
                         })
                         .sum();
-                    let excess_col = grid.flat(spec.equipment.excess.start, bus_idx, b);
+                    let excess_col = grid.flat(spec.geometry.excess.start, bus_idx, b);
                     // load_balance is a row base, not an equipment column, and is
                     // stage-invariant in its leading offset; it stays on the indexer.
                     let load_row = grid.flat(indexer.load_balance.start, bus_idx, b);
@@ -1168,11 +1168,10 @@ pub(crate) fn extract_stage_result_with_lookups(
     // stage-0 `indexer.excess.end` (n_blks-dependent), so a non-uniform stage with
     // fewer blocks than stage 0 cannot spuriously trip this on a stale stage-0 end.
     debug_assert!(
-        spec.equipment.excess.is_empty()
-            || view.objective_coeffs.len() >= spec.equipment.excess.end,
+        spec.geometry.excess.is_empty() || view.objective_coeffs.len() >= spec.geometry.excess.end,
         "objective_coeffs too short: len={}, need >= excess.end={}",
         view.objective_coeffs.len(),
-        spec.equipment.excess.end
+        spec.geometry.excess.end
     );
     debug_assert!(
         spec.entity_counts.hydro_productivities.len() == state.hydro_count,
@@ -1201,7 +1200,7 @@ pub(crate) fn extract_stage_result_with_lookups(
     let costs = vec![compute_cost_result(
         view,
         spec.study_dims,
-        spec.equipment,
+        spec.geometry,
         spec.state,
         spec.col_scale,
         generic_violation_cost,
@@ -1256,7 +1255,7 @@ impl HydroViolationCosts {
 /// wrong columns. `equipment.<family>` addresses the stage-correct columns.
 fn compute_hydro_violation_costs(
     study_dims: &StudyDimensions,
-    equipment: &crate::lp_builder::StageEquipmentGeometry,
+    equipment: &crate::lp_builder::StageGeometry,
     col_cost: impl Fn(usize) -> f64,
     range_sum: impl Fn(std::ops::Range<usize>) -> f64,
 ) -> HydroViolationCosts {
@@ -1309,7 +1308,7 @@ fn compute_hydro_violation_costs(
 fn compute_cost_result(
     view: &SolutionView<'_>,
     study_dims: &StudyDimensions,
-    equipment: &crate::lp_builder::StageEquipmentGeometry,
+    equipment: &crate::lp_builder::StageGeometry,
     state: &StateLayout,
     col_scale: &[f64],
     generic_violation_cost: f64,
@@ -1795,7 +1794,7 @@ mod tests {
         assign_scenarios, extract_pumping_stations, extract_stage_result,
     };
     use crate::indexer::{StageIndexer, StudyDimensions};
-    use crate::lp_builder::StageEquipmentGeometry;
+    use crate::lp_builder::StageGeometry;
     use crate::simulation::types::{ScenarioCategoryCosts, SimulationCostResult};
 
     // -------------------------------------------------------------------------
@@ -1953,7 +1952,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &make_entity_counts_2_hydros(),
@@ -2009,7 +2008,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &make_entity_counts_2_hydros(),
@@ -2065,7 +2064,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &make_entity_counts_2_hydros(),
@@ -2123,7 +2122,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &make_entity_counts_2_hydros(),
@@ -2193,7 +2192,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
@@ -2245,7 +2244,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &make_entity_counts_2_hydros(),
@@ -2303,7 +2302,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &make_entity_counts_2_hydros(),
@@ -2474,7 +2473,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
@@ -2632,7 +2631,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
@@ -2743,7 +2742,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
@@ -2874,7 +2873,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
@@ -2948,7 +2947,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
@@ -3020,7 +3019,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
@@ -3118,7 +3117,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
@@ -3216,7 +3215,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
@@ -3347,7 +3346,7 @@ mod tests {
         let spec = StageExtractionSpec {
             indexer: &indexer,
             study_dims: &study_dims,
-            equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+            geometry: &StageGeometry::from_indexer(&indexer),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &EntityCounts {
@@ -3419,7 +3418,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
@@ -3508,7 +3507,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
@@ -3582,7 +3581,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
@@ -3683,7 +3682,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
@@ -3768,7 +3767,7 @@ mod tests {
         let spec_delivery = StageExtractionSpec {
             indexer: &indexer,
             study_dims: &study_dims,
-            equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+            geometry: &StageGeometry::from_indexer(&indexer),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &EntityCounts {
@@ -3847,7 +3846,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
@@ -3940,7 +3939,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
@@ -4049,7 +4048,7 @@ mod tests {
         let spec = StageExtractionSpec {
             indexer: &indexer,
             study_dims: &study_dims,
-            equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+            geometry: &StageGeometry::from_indexer(&indexer),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &counts,
@@ -4146,7 +4145,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
@@ -4434,7 +4433,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
@@ -4542,7 +4541,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
@@ -4661,7 +4660,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
@@ -4799,7 +4798,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
@@ -4883,7 +4882,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
@@ -5016,7 +5015,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
@@ -5101,7 +5100,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
@@ -5192,7 +5191,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
@@ -5277,7 +5276,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
@@ -5380,7 +5379,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
@@ -5505,7 +5504,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &counts,
@@ -5643,7 +5642,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &make_entity_counts_1_hydro(),
@@ -5713,7 +5712,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &make_entity_counts_1_hydro(),
@@ -5772,7 +5771,7 @@ mod tests {
             &StageExtractionSpec {
                 indexer: &indexer,
                 study_dims: &study_dims,
-                equipment: &StageEquipmentGeometry::from_indexer(&indexer),
+                geometry: &StageGeometry::from_indexer(&indexer),
                 state: &state,
                 n_blks: indexer.n_blks,
                 entity_counts: &make_entity_counts_1_hydro(),
@@ -5832,13 +5831,13 @@ mod tests {
     /// `n_blks` is set to `n_blks` so the block loop runs.
     // Rationale: this helper assembles a single inert-default StageExtractionSpec
     // for the pumping tests, which exercise only `extract_pumping_stations` (a
-    // path that never reads `equipment`); its parameter list mirrors the spec's
+    // path that never reads `geometry`); its parameter list mirrors the spec's
     // borrowed inputs, so bundling them would obscure rather than clarify.
     #[allow(clippy::too_many_arguments)]
     fn pumping_only_spec<'a>(
         indexer: &'a StageIndexer,
         study_dims: &'a StudyDimensions,
-        equipment: &'a StageEquipmentGeometry,
+        geometry: &'a StageGeometry,
         state: &'a crate::indexer::StateLayout,
         entity_counts: &'a EntityCounts,
         pumping_col_start: usize,
@@ -5850,7 +5849,7 @@ mod tests {
         StageExtractionSpec {
             indexer,
             study_dims,
-            equipment,
+            geometry,
             state,
             n_blks: indexer.n_blks,
             entity_counts,
@@ -5906,7 +5905,7 @@ mod tests {
             row_lower: &[],
         };
 
-        let equipment = StageEquipmentGeometry::default();
+        let equipment = StageGeometry::default();
         let study_dims = crate::indexer::test_fixtures::study_dims();
         let spec = pumping_only_spec(
             &indexer,
@@ -5968,7 +5967,7 @@ mod tests {
             row_lower: &[],
         };
 
-        let equipment = StageEquipmentGeometry::default();
+        let equipment = StageGeometry::default();
         let study_dims = crate::indexer::test_fixtures::study_dims();
         let spec = pumping_only_spec(
             &indexer,
@@ -6006,7 +6005,7 @@ mod tests {
             row_lower: &[],
         };
 
-        let equipment = StageEquipmentGeometry::default();
+        let equipment = StageGeometry::default();
         let study_dims = crate::indexer::test_fixtures::study_dims();
         let spec = pumping_only_spec(
             &indexer,

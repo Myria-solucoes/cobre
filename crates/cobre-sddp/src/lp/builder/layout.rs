@@ -364,7 +364,7 @@ pub(crate) struct StageLayout<'a> {
     ///
     /// `excess.end .. excess.end + n_h` when the penalty method is active and
     /// `n_h > 0`, else `0..0`. Stored first-class so the per-stage simulation
-    /// geometry ([`StageEquipmentGeometry`](super::template::StageEquipmentGeometry))
+    /// geometry ([`StageGeometry`](super::template::StageGeometry))
     /// reads the stage-correct inflow-slack range rather than the global stage-0
     /// `StageIndexer::inflow_slack`, whose `excess.end`-anchored base shifts under
     /// a non-uniform block schedule.

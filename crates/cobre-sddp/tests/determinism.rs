@@ -819,7 +819,7 @@ fn run_simulation(
                     n_ncs_per_stage: &[],
                     pumping_col_starts: &[],
                     n_pumping_per_stage: &[],
-                    equipment_geometry_per_stage: &[],
+                    geometry_per_stage: &[],
                     pumping_consumption_mw_per_m3s: &[],
                     ncs_entity_ids_per_stage: &[],
                     diversion_upstream: &HashMap::new(),

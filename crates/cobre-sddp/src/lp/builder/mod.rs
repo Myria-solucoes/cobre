@@ -131,7 +131,7 @@ mod test_support;
 
 // --- Public re-exports (stable API) ---
 pub use patch::PatchBuffer;
-pub use template::{StageEquipmentGeometry, StageTemplates, build_stage_templates};
+pub use template::{StageGeometry, StageTemplates, build_stage_templates};
 
 // --- Crate-internal re-exports ---
 pub(crate) use scaling::{apply_col_scale, apply_row_scale, compute_col_scale, compute_row_scale};
